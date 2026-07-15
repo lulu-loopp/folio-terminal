@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "bt-spike-ime-cjk"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+
+[dependencies]
+anyhow = "1"
+cosmic-text = "0.19.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+softbuffer = { version = "0.4.8", default-features = false }
+unicode-segmentation = "1"
+unicode-width = "0.2"
+winit = "0.30.13"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

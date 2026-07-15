@@ -1,0 +1,764 @@
+{
+  "schema": "bt-cjk-shape-audit/v1",
+  "cosmic_text_version": "0.19.0",
+  "font_initialization_micros": 51246,
+  "cell_width_px": 14.0,
+  "font_size_px": 20.0,
+  "line_height_px": 28.0,
+  "cases": [
+    {
+      "id": "ascii",
+      "text": "A",
+      "class": "ascii",
+      "expected_cells": 1,
+      "policy_cells": 1,
+      "natural_line_width_px": 12.900391,
+      "authoritative_width_px": 14.0,
+      "shape_micros": 15998,
+      "clusters": [
+        {
+          "text": "A",
+          "byte_start": 0,
+          "byte_end": 1,
+          "terminal_cells": 1,
+          "slot_start_px": 0.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 12.900391,
+          "constrained_offset_px": 0.5498047,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "cjk-han",
+      "text": "汉",
+      "class": "cjk",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 20.0,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 326,
+      "clusters": [
+        {
+          "text": "汉",
+          "byte_start": 0,
+          "byte_end": 3,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 4.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "cjk-pair",
+      "text": "中文",
+      "class": "cjk",
+      "expected_cells": 4,
+      "policy_cells": 4,
+      "natural_line_width_px": 40.0,
+      "authoritative_width_px": 56.0,
+      "shape_micros": 36,
+      "clusters": [
+        {
+          "text": "中",
+          "byte_start": 0,
+          "byte_end": 3,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 4.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "文",
+          "byte_start": 3,
+          "byte_end": 6,
+          "terminal_cells": 2,
+          "slot_start_px": 28.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 20.0,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 12.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "fullwidth-latin",
+      "text": "Ａ",
+      "class": "fullwidth",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 20.0,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 10129,
+      "clusters": [
+        {
+          "text": "Ａ",
+          "byte_start": 0,
+          "byte_end": 3,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 4.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "ambiguous-middle-dot",
+      "text": "·",
+      "class": "ambiguous-narrow-policy",
+      "expected_cells": 1,
+      "policy_cells": 1,
+      "natural_line_width_px": 4.3359375,
+      "authoritative_width_px": 14.0,
+      "shape_micros": 39,
+      "clusters": [
+        {
+          "text": "·",
+          "byte_start": 0,
+          "byte_end": 2,
+          "terminal_cells": 1,
+          "slot_start_px": 0.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 4.3359375,
+          "constrained_offset_px": 4.8320312,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "box-drawing",
+      "text": "│─┼",
+      "class": "terminal-drawing",
+      "expected_cells": 3,
+      "policy_cells": 3,
+      "natural_line_width_px": 30.0,
+      "authoritative_width_px": 42.0,
+      "shape_micros": 65,
+      "clusters": [
+        {
+          "text": "│",
+          "byte_start": 0,
+          "byte_end": 3,
+          "terminal_cells": 1,
+          "slot_start_px": 0.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 10.0,
+          "constrained_offset_px": 2.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "─",
+          "byte_start": 3,
+          "byte_end": 6,
+          "terminal_cells": 1,
+          "slot_start_px": 14.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 10.0,
+          "natural_advance_px": 10.0,
+          "constrained_offset_px": 6.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "┼",
+          "byte_start": 6,
+          "byte_end": 9,
+          "terminal_cells": 1,
+          "slot_start_px": 28.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 20.0,
+          "natural_advance_px": 10.0,
+          "constrained_offset_px": 10.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "combining-acute",
+      "text": "é",
+      "class": "combining",
+      "expected_cells": 1,
+      "policy_cells": 1,
+      "natural_line_width_px": 10.458984,
+      "authoritative_width_px": 14.0,
+      "shape_micros": 40,
+      "clusters": [
+        {
+          "text": "é",
+          "byte_start": 0,
+          "byte_end": 3,
+          "terminal_cells": 1,
+          "slot_start_px": 0.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 10.458984,
+          "constrained_offset_px": 1.7705078,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "hangul",
+      "text": "한",
+      "class": "cjk",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 20.0,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 281,
+      "clusters": [
+        {
+          "text": "한",
+          "byte_start": 0,
+          "byte_end": 3,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 4.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "hiragana",
+      "text": "あ",
+      "class": "cjk",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 20.0,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 286,
+      "clusters": [
+        {
+          "text": "あ",
+          "byte_start": 0,
+          "byte_end": 3,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 4.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "emoji-face",
+      "text": "😀",
+      "class": "emoji",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 27.460938,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 33,
+      "clusters": [
+        {
+          "text": "😀",
+          "byte_start": 0,
+          "byte_end": 4,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 0.26953125,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "heart-text-vs15",
+      "text": "❤︎",
+      "class": "variation-selector",
+      "expected_cells": 1,
+      "policy_cells": 1,
+      "natural_line_width_px": 27.460938,
+      "authoritative_width_px": 14.0,
+      "shape_micros": 46,
+      "clusters": [
+        {
+          "text": "❤︎",
+          "byte_start": 0,
+          "byte_end": 6,
+          "terminal_cells": 1,
+          "slot_start_px": 0.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 0.0,
+          "clipped": true,
+          "glyph_count": 2,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "heart-emoji-vs16",
+      "text": "❤️",
+      "class": "variation-selector",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 27.460938,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 16,
+      "clusters": [
+        {
+          "text": "❤️",
+          "byte_start": 0,
+          "byte_end": 6,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 0.26953125,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "keycap",
+      "text": "1️⃣",
+      "class": "emoji-sequence",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 19.541016,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 31,
+      "clusters": [
+        {
+          "text": "1️⃣",
+          "byte_start": 0,
+          "byte_end": 7,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 19.541016,
+          "constrained_offset_px": 4.229492,
+          "clipped": false,
+          "glyph_count": 2,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "skin-tone",
+      "text": "👍🏽",
+      "class": "emoji-sequence",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 27.460938,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 20,
+      "clusters": [
+        {
+          "text": "👍🏽",
+          "byte_start": 0,
+          "byte_end": 8,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 0.26953125,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "flag-cn",
+      "text": "🇨🇳",
+      "class": "emoji-sequence",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 20.957031,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 15,
+      "clusters": [
+        {
+          "text": "🇨🇳",
+          "byte_start": 0,
+          "byte_end": 8,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 20.957031,
+          "constrained_offset_px": 3.5214844,
+          "clipped": false,
+          "glyph_count": 2,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "woman-technologist",
+      "text": "👩‍💻",
+      "class": "zwj",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 27.460938,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 29,
+      "clusters": [
+        {
+          "text": "👩‍💻",
+          "byte_start": 0,
+          "byte_end": 11,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 0.26953125,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "family-zwj",
+      "text": "👨‍👩‍👧‍👦",
+      "class": "zwj",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 25.058594,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 74,
+      "clusters": [
+        {
+          "text": "👨‍👩‍👧‍👦",
+          "byte_start": 0,
+          "byte_end": 25,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 25.058594,
+          "constrained_offset_px": 1.4707031,
+          "clipped": false,
+          "glyph_count": 4,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "rainbow-flag",
+      "text": "🏳️‍🌈",
+      "class": "zwj",
+      "expected_cells": 2,
+      "policy_cells": 2,
+      "natural_line_width_px": 27.460938,
+      "authoritative_width_px": 28.0,
+      "shape_micros": 19,
+      "clusters": [
+        {
+          "text": "🏳️‍🌈",
+          "byte_start": 0,
+          "byte_end": 14,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 0.26953125,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "mixed-cjk-emoji",
+      "text": "中😀A",
+      "class": "mixed",
+      "expected_cells": 5,
+      "policy_cells": 5,
+      "natural_line_width_px": 60.36133,
+      "authoritative_width_px": 70.0,
+      "shape_micros": 58,
+      "clusters": [
+        {
+          "text": "中",
+          "byte_start": 0,
+          "byte_end": 3,
+          "terminal_cells": 2,
+          "slot_start_px": 0.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 4.0,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "😀",
+          "byte_start": 3,
+          "byte_end": 7,
+          "terminal_cells": 2,
+          "slot_start_px": 28.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 20.0,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 8.269531,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "A",
+          "byte_start": 7,
+          "byte_end": 8,
+          "terminal_cells": 1,
+          "slot_start_px": 56.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 47.460938,
+          "natural_advance_px": 12.900391,
+          "constrained_offset_px": 9.088867,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "wt-370-ambiguous-star",
+      "text": "A☆中│Ｂ",
+      "class": "wt-370",
+      "expected_cells": 7,
+      "policy_cells": 7,
+      "natural_line_width_px": 79.56055,
+      "authoritative_width_px": 98.0,
+      "shape_micros": 349,
+      "clusters": [
+        {
+          "text": "A",
+          "byte_start": 0,
+          "byte_end": 1,
+          "terminal_cells": 1,
+          "slot_start_px": 0.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 12.900391,
+          "constrained_offset_px": 0.5498047,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "☆",
+          "byte_start": 1,
+          "byte_end": 4,
+          "terminal_cells": 1,
+          "slot_start_px": 14.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 12.900391,
+          "natural_advance_px": 16.660156,
+          "constrained_offset_px": 1.0996094,
+          "clipped": true,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "中",
+          "byte_start": 4,
+          "byte_end": 7,
+          "terminal_cells": 2,
+          "slot_start_px": 28.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 29.560547,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 2.4394531,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "│",
+          "byte_start": 7,
+          "byte_end": 10,
+          "terminal_cells": 1,
+          "slot_start_px": 56.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 49.560547,
+          "natural_advance_px": 10.0,
+          "constrained_offset_px": 8.439453,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "Ｂ",
+          "byte_start": 10,
+          "byte_end": 13,
+          "terminal_cells": 2,
+          "slot_start_px": 70.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 59.560547,
+          "natural_advance_px": 20.0,
+          "constrained_offset_px": 14.439453,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "wt-900-pencil-text",
+      "text": "A✏B",
+      "class": "wt-900",
+      "expected_cells": 3,
+      "policy_cells": 3,
+      "natural_line_width_px": 51.82617,
+      "authoritative_width_px": 42.0,
+      "shape_micros": 34,
+      "clusters": [
+        {
+          "text": "A",
+          "byte_start": 0,
+          "byte_end": 1,
+          "terminal_cells": 1,
+          "slot_start_px": 0.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 12.900391,
+          "constrained_offset_px": 0.5498047,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "✏",
+          "byte_start": 1,
+          "byte_end": 4,
+          "terminal_cells": 1,
+          "slot_start_px": 14.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 12.900391,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 1.0996094,
+          "clipped": true,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "B",
+          "byte_start": 4,
+          "byte_end": 5,
+          "terminal_cells": 1,
+          "slot_start_px": 28.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 40.36133,
+          "natural_advance_px": 11.464844,
+          "constrained_offset_px": -11.09375,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    },
+    {
+      "id": "wt-900-pencil-emoji",
+      "text": "A✏️B",
+      "class": "wt-900",
+      "expected_cells": 4,
+      "policy_cells": 4,
+      "natural_line_width_px": 51.82617,
+      "authoritative_width_px": 56.0,
+      "shape_micros": 19,
+      "clusters": [
+        {
+          "text": "A",
+          "byte_start": 0,
+          "byte_end": 1,
+          "terminal_cells": 1,
+          "slot_start_px": 0.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 0.0,
+          "natural_advance_px": 12.900391,
+          "constrained_offset_px": 0.5498047,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "✏️",
+          "byte_start": 1,
+          "byte_end": 7,
+          "terminal_cells": 2,
+          "slot_start_px": 14.0,
+          "slot_width_px": 28.0,
+          "natural_start_px": 12.900391,
+          "natural_advance_px": 27.460938,
+          "constrained_offset_px": 1.3691406,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        },
+        {
+          "text": "B",
+          "byte_start": 7,
+          "byte_end": 8,
+          "terminal_cells": 1,
+          "slot_start_px": 42.0,
+          "slot_width_px": 14.0,
+          "natural_start_px": 40.36133,
+          "natural_advance_px": 11.464844,
+          "constrained_offset_px": 2.90625,
+          "clipped": false,
+          "glyph_count": 1,
+          "missing_glyphs": 0
+        }
+      ]
+    }
+  ]
+}
