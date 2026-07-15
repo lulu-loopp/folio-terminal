@@ -1843,39 +1843,48 @@
     return { ...node, a: withoutLeaf(node.a, id), b: withoutLeaf(node.b, id) };
   };
 
-  /* Where everyone else ends up, computed from the layout that WILL exist rather
-     than sketched from the one that does.
-     Reading the live panes and squeezing them by half was an approximation, and
-     it broke the moment the thing being dragged was already in the layout: it
-     drew a destination for the very pane that is leaving, and it missed that
-     detaching a pane promotes its sibling into the space — so the survivors were
-     drawn where they used to be, not where they are going. The tree ops are pure
-     functions and the layout is arithmetic, so there is no reason to guess: build
-     the tree that the drop would produce and measure that. */
-  const SHIFT_INSET = 1;
-  function showRootShift(zone, host, movingLeafId) {
-    const sh = $("dock-shift");
-    if (!sh) return;
+  const cloneTree = (n) => n.type === "leaf" ? n : { ...n, a: cloneTree(n.a), b: cloneTree(n.b) };
+  const PLAN_ID = -1, PLAN_SPLIT = -2;
+  /* The layout a drop would make — arriving pane included — worked out on the
+     real tree ops rather than estimated.
+     This exists because "a pane dock displaces nothing outside the pane" stopped
+     being true the day runs began dividing equally, and it stopped being true
+     without anything noticing: the preview promised a 269px column and the drop
+     delivered 359, while a column nobody had aimed at shrank from 539 and slid
+     across. Estimating the answer meant the estimate had to be maintained in step
+     with the rules; computing it means it cannot drift. */
+  function planDrop(zone, targetLeafId, host, movingLeafId) {
     const w = activeTab();
-    const rest = movingLeafId == null ? w.tree : withoutLeaf(w.tree, movingLeafId);
+    const arriving = { type: "leaf", id: PLAN_ID };
+    let tree = cloneTree(w.tree);
+    if (movingLeafId != null) tree = withoutLeaf(tree, movingLeafId);
     const dir = (zone === "left" || zone === "right") ? "row" : "col";
     const first = (zone === "left" || zone === "top");
-    const ARRIVING = -1;
-    const after = { type: "split", dir, ratio: 0.5,
-                    a: first ? { type: "leaf", id: ARRIVING } : rest,
-                    b: first ? rest : { type: "leaf", id: ARRIVING } };
-    /* The inset earns its pixel: a split halves one axis and the divider gaps go
-       with it, so on that axis a 1px seam becomes 0.5px and two neighbouring
-       dashed borders fuse into one muddled stripe, while the other axis keeps a
-       clean 1px. That asymmetry is why one direction looked joined and the other
-       spaced. A pixel is far below what this drawing is trying to tell you. */
-    sh.innerHTML = rectsOf(after, 0, 0, host.width, host.height)
-      .filter(r => r.id !== ARRIVING)
-      .map(r => `<i style="left:${r.x + SHIFT_INSET}px;top:${r.y + SHIFT_INSET}px;` +
-                `width:${Math.max(0, r.w - SHIFT_INSET * 2)}px;` +
-                `height:${Math.max(0, r.h - SHIFT_INSET * 2)}px"></i>`).join("");
-    sh.classList.add("show");
+    const mk = (node) => ({ type: "split", id: PLAN_SPLIT, dir, ratio: 0.5,
+                            a: first ? arriving : node, b: first ? node : arriving });
+    if (targetLeafId == null) tree = mk(tree);
+    else {
+      const walk = (n) => n.type === "leaf" ? (n.id === targetLeafId ? mk(n) : n)
+                                            : { ...n, a: walk(n.a), b: walk(n.b) };
+      tree = walk(tree);
+    }
+    balanceRunAt(tree, PLAN_SPLIT, dir);
+    return rectsOf(tree, 0, 0, host.width, host.height);
   }
+  /* Too small is a fact about the layout that WOULD exist, not a guess from the
+     target's current size. Halving the target was the guess, and it was wrong in
+     the direction that hurts: it refused a fourth column on the grounds that
+     359/2 = 179, when rebalancing would have given every column 269 and 269 is
+     fine. It was turning down drops that would have worked. */
+  const planFits = (rects) =>
+    rects.every(r => r.w >= MIN_PANE_W - 0.5 && r.h >= MIN_PANE_H - 0.5);
+
+  /* The inset earns its pixel: a split halves one axis and the divider gaps go
+     with it, so on that axis a 1px seam becomes 0.5px and two neighbouring dashed
+     borders fuse into one muddled stripe, while the untouched axis keeps a clean
+     1px. That asymmetry is why one direction looked joined and the other spaced.
+     A pixel is far below what this drawing is trying to tell you. */
+  const SHIFT_INSET = 1;
   function startDrag(e, src) {
     if (e.button !== 0 || e.target.closest(".close")) return;
     hidePeek();
@@ -2172,6 +2181,34 @@
         pv.dataset.promise = what;
       }
     };
+    /* One drawing for every dock: build the layout the drop would make, put the
+       accent on the pane that is arriving, and dash in everyone it displaces.
+       Root docks and pane docks were two code paths with two ideas of the truth;
+       they are the same question. */
+    const drawPlan = (zone, targetLeafId, key) => {
+      const moving = drag.kind === "pane" ? drag.leafId : null;
+      const rects = planDrop(zone, targetLeafId, host, moving);
+      const fits = planFits(rects);
+      const me = rects.find(r => r.id === PLAN_ID);
+      promise(`${key}:${fits}`);
+      pv.classList.toggle("refused", !fits);
+      drag.target = fits ? { leafId: targetLeafId, zone } : null;
+      const box = fits ? me : (targetLeafId == null
+        ? { x: 0, y: 0, w: host.width, h: host.height }
+        : (() => { const r = document.querySelector(`#termhost .pane[data-leaf="${targetLeafId}"]`)
+                     .getBoundingClientRect();
+                   return { x: r.left - host.left, y: r.top - host.top, w: r.width, h: r.height }; })());
+      pv.style.left = box.x + "px"; pv.style.top = box.y + "px";
+      pv.style.width = box.w + "px"; pv.style.height = box.h + "px";
+      pv.classList.add("show");
+      const sh = $("dock-shift");
+      if (!fits) { sh?.classList.remove("show"); return; }
+      sh.innerHTML = rects.filter(r => r.id !== PLAN_ID)
+        .map(r => `<i style="left:${r.x + SHIFT_INSET}px;top:${r.y + SHIFT_INSET}px;` +
+                  `width:${Math.max(0, r.w - SHIFT_INSET * 2)}px;` +
+                  `height:${Math.max(0, r.h - SHIFT_INSET * 2)}px"></i>`).join("");
+      sh.classList.add("show");
+    };
 
     /* The outer rim of the whole layout docks against the whole layout, not
        against whichever pane happens to be under it. Without this there is no
@@ -2196,30 +2233,9 @@
                   top: cy - host.top, bottom: host.bottom - cy };
     const nearRim = Object.keys(rim).reduce((a, b) => rim[a] <= rim[b] ? a : b);
     if (rim[nearRim] < OUTER_RIM && paneCount(activeTab()) > 1) {
-      const wouldSplit = (nearRim === "left" || nearRim === "right")
-        ? host.width / 2 >= MIN_PANE_W : host.height / 2 >= MIN_PANE_H;
-      drag.target = wouldSplit ? { leafId: null, zone: nearRim } : null;
-      promise(`root:${nearRim}:${wouldSplit}`);
-      pv.classList.toggle("refused", !wouldSplit);
-      let x = 0, y = 0, w = host.width, h = host.height;
-      if (wouldSplit) {
-        if (nearRim === "left") w /= 2;
-        if (nearRim === "right") { x = w / 2; w /= 2; }
-        if (nearRim === "top") h /= 2;
-        if (nearRim === "bottom") { y = h / 2; h /= 2; }
-      }
-      pv.style.left = x + "px"; pv.style.top = y + "px";
-      pv.style.width = w + "px"; pv.style.height = h + "px";
-      pv.classList.add("show");
-      /* a refusal squeezes nobody, so there is nothing to show going anywhere */
-      /* a pane already in the layout is the one arriving, so it is not among the
-         ones being squeezed — and its leaving reshapes them before the split does */
-      if (wouldSplit) showRootShift(nearRim, host, drag.kind === "pane" ? drag.leafId : null);
-      else $("dock-shift")?.classList.remove("show");
+      drawPlan(nearRim, null, `root:${nearRim}`);
       return;
     }
-    $("dock-shift")?.classList.remove("show");   /* pane docks displace nothing outside the pane */
-    pv.classList.remove("refused");
 
     /* inside the rim now: which pane is under the pointer? */
     let hit = null;
@@ -2237,32 +2253,10 @@
     const d4 = { left: rx, right: 1 - rx, top: ry, bottom: 1 - ry };
     const near = Object.keys(d4).reduce((a, b) => d4[a] <= d4[b] ? a : b);
     let zone = d4[near] < 0.35 ? near : "center";
-    /* Refuse splits that would leave either half unusable — but say so. Folding
-       this into "center" made a refusal identical to aiming at nothing, which is
-       how a rule the user cannot see becomes an app that seems broken. */
-    const tooNarrow = (zone === "left" || zone === "right") && hit.r.width / 2 < MIN_PANE_W;
-    const tooShort = (zone === "top" || zone === "bottom") && hit.r.height / 2 < MIN_PANE_H;
     if (zone === "center" || (drag.kind === "pane" && drag.leafId === leafId)) {
       hidePreview(); return;
     }
-    promise(`${leafId}:${zone}:${!(tooNarrow || tooShort)}`);
-    pv.classList.toggle("refused", tooNarrow || tooShort);
-    drag.target = (tooNarrow || tooShort) ? null : { leafId, zone };
-
-    let x = hit.r.left - host.left, y = hit.r.top - host.top, w = hit.r.width, h = hit.r.height;
-    if (tooNarrow || tooShort) {          /* outline the whole pane it will not cut */
-      pv.style.left = x + "px"; pv.style.top = y + "px";
-      pv.style.width = w + "px"; pv.style.height = h + "px";
-      pv.classList.add("show");
-      return;
-    }
-    if (zone === "left") w /= 2;
-    if (zone === "right") { x += w / 2; w /= 2; }
-    if (zone === "top") h /= 2;
-    if (zone === "bottom") { y += h / 2; h /= 2; }
-    pv.style.left = x + "px"; pv.style.top = y + "px";
-    pv.style.width = w + "px"; pv.style.height = h + "px";
-    pv.classList.add("show");
+    drawPlan(zone, leafId, `${leafId}:${zone}`);
   });
 
   document.addEventListener("pointerup", () => {
