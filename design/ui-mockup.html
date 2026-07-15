@@ -1747,22 +1747,28 @@
       el.style.transform = "";
     });
   }
-  /* hold the grabbed tab under the pointer, wherever its slot has moved to */
+  /* Hold the grabbed tab under the pointer, wherever its slot has moved to, and
+     return how far it now sits from that slot — the reorder decides from this,
+     not from the pointer. */
   function trackGrabbed(e) {
     const el = stripEl().querySelector(`[data-ws="${drag.wsId}"]`);
-    if (!el) return;
+    if (!el) return null;
     el.classList.add("grabbed");
     el.style.transition = "none";
     el.style.transform = "";
-    const nat = el.getBoundingClientRect();
+    const nat = el.getBoundingClientRect();       /* its slot, transform cleared */
     const sr = stripEl().getBoundingClientRect();
+    let d;
     if (state.layoutMode === "horizontal") {
       const want = Math.max(sr.left, Math.min(e.clientX - drag.grabDx, sr.right - nat.width));
-      el.style.transform = `translateX(${want - nat.left}px)`;
+      d = want - nat.left;
+      el.style.transform = `translateX(${d}px)`;
     } else {
       const want = Math.max(sr.top, Math.min(e.clientY - drag.grabDy, sr.bottom - nat.height));
-      el.style.transform = `translateY(${want - nat.top}px)`;
+      d = want - nat.top;
+      el.style.transform = `translateY(${d}px)`;
     }
+    return d;
   }
   function releaseGrabbed(settle) {
     const el = stripEl().querySelector(`[data-ws="${drag ? drag.wsId : ""}"]`) ||
@@ -1782,35 +1788,54 @@
   /* Swap with a neighbour the moment the pointer crosses its middle. Swapping on
      the crossed neighbour's midpoint (rather than recomputing an insertion index)
      is what keeps it from flip-flopping once the tabs have moved under it. */
+  /* Tab against tab, never the pointer against a tab.
+     The pointer is the wrong thing to ask, for two independent reasons. It sits
+     wherever you happened to grab the tab, so the same drag swaps at different
+     moments depending on whether you picked the tab up by its left edge or its
+     right one — the threshold moves with your grip. And it made the decision
+     depend on where the pointer was rather than where the TAB was, so a tab could
+     be sent past a neighbour it had not visually reached yet.
+     Comparing centres is stable by construction, which is why it needs no
+     fudge factor: the instant the dragged tab's centre passes its neighbour's,
+     they swap, and afterwards its centre is by definition on the far side of that
+     neighbour's new centre — so the reverse test cannot fire without you actually
+     dragging back. The hysteresis is the geometry, not a tuned percentage.
+     offsetLeft, not getBoundingClientRect: rects include transforms, and the
+     neighbours are mid-FLIP for 160ms after every swap, so rects would report
+     where a tab is flying rather than where its slot is. offsetLeft is layout —
+     the animation cannot lie to it. */
   function reorderWhileDragging(e) {
     const horizontal = state.layoutMode === "horizontal";
-    const pos = horizontal ? e.clientX : e.clientY;
-    const entries = stripEntries();
-    const cur = state.tabs.findIndex(w => w.id === drag.wsId);
+    const slotMid = (el) => horizontal ? el.offsetLeft + el.offsetWidth / 2
+                                       : el.offsetTop + el.offsetHeight / 2;
+    let cur = state.tabs.findIndex(w => w.id === drag.wsId);
     if (cur < 0) return;
-    /* skip the tab in hand: it rides under the pointer, so the pointer is always
-       inside it — what we want to know is which neighbour's slot it is over */
-    const over = entries.findIndex((el, i) => {
-      if (i === cur) return false;
-      const r = el.getBoundingClientRect();
-      return horizontal ? pos >= r.left && pos <= r.right : pos >= r.top && pos <= r.bottom;
-    });
-    if (over >= 0) {
-      /* swap once a third of the way into the neighbour rather than at its middle:
-         earlier to trigger, still with enough hysteresis that it cannot flip-flop */
-      const r = entries[over].getBoundingClientRect();
-      const reach = horizontal ? r.width * 0.35 : r.height * 0.35;
-      const enter = over > cur ? (horizontal ? r.left : r.top) + reach
-                               : (horizontal ? r.right : r.bottom) - reach;
-      if ((over > cur && pos > enter) || (over < cur && pos < enter)) {
-        const before = snapshotStrip();
-        const [w] = state.tabs.splice(cur, 1);
-        state.tabs.splice(over, 0, w);
-        render();
-        playStripFlip(before, String(drag.wsId));
-      }
+    let offset = trackGrabbed(e);
+    if (offset === null) return;
+
+    /* loop, so flinging a tab across several slots at once still lands right;
+       bounded by the strip's length because each pass moves it exactly one slot */
+    for (let guard = state.tabs.length; guard > 0; guard--) {
+      const els = stripEntries();
+      const me = els[cur];
+      if (!me) return;
+      const myMid = slotMid(me) + offset;      /* where it visually is */
+      const next = els[cur + 1], prev = els[cur - 1];
+      let to = -1;
+      if (next && myMid > slotMid(next)) to = cur + 1;
+      else if (prev && myMid < slotMid(prev)) to = cur - 1;
+      if (to < 0) return;
+
+      const before = snapshotStrip();
+      const [w] = state.tabs.splice(cur, 1);
+      state.tabs.splice(to, 0, w);
+      render();
+      playStripFlip(before, String(drag.wsId));
+      /* its slot just moved, so the distance from it to the pointer changed */
+      offset = trackGrabbed(e);
+      if (offset === null) return;
+      cur = to;
     }
-    trackGrabbed(e);
   }
   function dragLabel(d) {
     const s = d.kind === "tab"
