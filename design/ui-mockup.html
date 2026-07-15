@@ -90,10 +90,10 @@
   .window[data-tabs="horizontal"] .apptitle { display: none; }
 
   /* Tabs in title bar (horizontal) — WT style: active tab connects with content */
-  /* The active tab's concave corners live in the gap beside it. The gap plus the
-     neighbour's inset fill has to equal the corner, or the corner paints over
-     the neighbour's hover fill. --tabr ties the three together. */
-  :root { --tabr: 7px; --tabgap: 2px; }
+  /* The active tab paints above its neighbours, so its concave corners simply
+     cover their hover fill. The earlier problem was the opposite: neighbours come
+     later in the DOM, so their fill was painting over the corner and slicing it. */
+  :root { --tabr: 7px; --tabgap: 1px; }
   .tabs-inline {
     display: none; align-items: flex-end; gap: var(--tabgap);
     min-width: 0; flex: 1; height: 100%;
@@ -109,27 +109,22 @@
     font-size: 13px; color: var(--ink2);
     cursor: pointer; white-space: nowrap;
   }
-  /* inactive tabs fill an inset rounded rect, clear of the active tab's corners */
-  .tab:not(.active)::before {
-    content: ""; position: absolute; top: 3px; bottom: 0;
-    left: calc(var(--tabr) - var(--tabgap)); right: calc(var(--tabr) - var(--tabgap));
-    border-radius: 6px 6px 0 0;
-    background: transparent;
-    transition: background .12s ease;
-  }
-  .tab:not(.active):hover { color: var(--ink); }
-  .tab:not(.active):hover::before { background: var(--hover); }
+  /* every tab is the same shape and the same height — only the fill differs */
+  .tab { border-radius: var(--tabr) var(--tabr) 0 0; }
+  .tab:not(.active):hover { background: var(--hover); color: var(--ink); }
   .tab.active {
     background: var(--termbg); color: var(--ink);
-    border-radius: var(--tabr) var(--tabr) 0 0;
+    z-index: 1;                       /* so its corners sit over the neighbours */
   }
   .tab.active::before, .tab.active::after {
     content: ""; position: absolute; bottom: 0;
     width: var(--tabr); height: var(--tabr);
     pointer-events: none;
   }
-  .tab.active::before { left: calc(-1 * var(--tabr));  background: radial-gradient(circle at 0 0,   transparent 98%, var(--termbg) 100%); }
-  .tab.active::after  { right: calc(-1 * var(--tabr)); background: radial-gradient(circle at 100% 0, transparent 98%, var(--termbg) 100%); }
+  /* the circle needs its radius spelled out: without it the gradient sizes to the
+     farthest corner, whose radius is larger than the box, and eats the whole curve */
+  .tab.active::before { left: calc(-1 * var(--tabr));  background: radial-gradient(circle var(--tabr) at 0 0,   transparent 98%, var(--termbg) 100%); }
+  .tab.active::after  { right: calc(-1 * var(--tabr)); background: radial-gradient(circle var(--tabr) at 100% 0, transparent 98%, var(--termbg) 100%); }
   .ticon {
     font-family: var(--mono); font-size: 11px; font-weight: 700;
     color: var(--ink3); flex: none; width: 13px; text-align: center;
@@ -210,20 +205,22 @@
      corners, a real shadow. Without that it reads as the terminal being sliced
      in half, because it cuts straight through the text behind it. */
   .window.rail-icons .rail { width: 46px; }
-  /* Opened, it must COVER the parked strip exactly — flush left, same top and
-     bottom. Inset it and the pointer sitting in the inset is no longer on the
-     rail: it closes, which puts the strip back under the pointer, which opens
-     it again. That loop is what the gap on the left was. */
-  .window.rail-icons .rail:hover {
-    width: 220px;
-    position: absolute; top: 40px; bottom: 0; left: 0; z-index: 15;
+  /* Opened, it's a card that floated out — inset on every side, fully rounded.
+     Open/close is driven from JS (see railZone), not :hover: an inset card slides
+     out from under a pointer resting in the inset, which closes it, which puts the
+     parked strip back under the pointer, which opens it. CSS :hover has no way to
+     express "stay open while the pointer is anywhere near"; a zone with hysteresis
+     does. */
+  .window.rail-icons.rail-open .rail {
+    width: 220px; padding: 6px 8px 8px;
+    position: absolute; top: 46px; bottom: 8px; left: 6px; z-index: 15;
     background: var(--panel);          /* never the terminal's white, or it reads
                                           as the text being sliced, not covered */
-    border-right: 1px solid var(--border);
-    border-radius: 0 12px 12px 0;
-    box-shadow: 8px 0 30px rgba(0, 0, 0, .16);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 10px 34px rgba(0, 0, 0, .17);
   }
-  body.dark .window.rail-icons .rail:hover { box-shadow: 8px 0 30px rgba(0, 0, 0, .5); }
+  body.dark .window.rail-icons.rail-open .rail { box-shadow: 0 10px 34px rgba(0, 0, 0, .55); }
   /* Fade the labels rather than display:none them. Layout stays identical in both
      states — the icons never jump — and the rail's own overflow does the clipping
      while the width animates. */
@@ -233,12 +230,12 @@
   .window.rail-icons .rail .vtab .close,
   .window.rail-icons .rail .nt-main span,
   .window.rail-icons .rail .nt-chev { opacity: 0; transition: opacity .1s ease; }
-  .window.rail-icons .rail:hover .label,
-  .window.rail-icons .rail:hover .vtab .title,
-  .window.rail-icons .rail:hover .panecount,
-  .window.rail-icons .rail:hover .nt-main span,
-  .window.rail-icons .rail:hover .nt-chev,
-  .window.rail-icons .rail:hover .vtab .close { opacity: 1; transition-delay: .06s; }
+  .window.rail-icons.rail-open .rail .label,
+  .window.rail-icons.rail-open .rail .vtab .title,
+  .window.rail-icons.rail-open .rail .panecount,
+  .window.rail-icons.rail-open .rail .nt-main span,
+  .window.rail-icons.rail-open .rail .nt-chev,
+  .window.rail-icons.rail-open .rail .vtab .close { opacity: 1; transition-delay: .06s; }
   .window.rail-icons .rail .vtab .close { visibility: visible; }
 
   .panel-toggle {
@@ -1506,6 +1503,31 @@
   $("btn-rail").addEventListener("click", () => {
     state.railCollapsed = !state.railCollapsed;
     render();
+  });
+
+  /* ── icon rail: open on approach, close on leave ──
+     Deliberately not CSS :hover. The open card is inset, so a pointer resting in
+     that inset is not on the rail — it would close, which puts the parked strip
+     back under the pointer, which opens it again, forever. (A transparent skirt
+     doesn't rescue it either: behind the window's own background it never gets
+     the pointer.) A zone with hysteresis has no such hole: reaching the narrow
+     strip opens it, and it stays open until you leave the whole card. */
+  const RAIL_REACH = 54, RAIL_KEEP = 244;
+  let railOpen = false;
+  const setRailOpen = (v) => {
+    if (railOpen === v) return;
+    railOpen = v;
+    $("win").classList.toggle("rail-open", v);
+  };
+  document.addEventListener("pointermove", (e) => {
+    if (state.railMode !== "icons" || state.layoutMode !== "vertical" || state.railCollapsed) {
+      setRailOpen(false);
+      return;
+    }
+    const body = document.querySelector(".body").getBoundingClientRect();
+    const reach = railOpen ? RAIL_KEEP : RAIL_REACH;
+    setRailOpen(e.clientX >= body.left && e.clientX <= body.left + reach &&
+                e.clientY >= body.top && e.clientY <= body.bottom);
   });
 
   /* demo: claude is working; it finishes in 6s → unread dot if you're elsewhere */
