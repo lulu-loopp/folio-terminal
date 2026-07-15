@@ -468,6 +468,22 @@
      gets — the one case where clipping is not a surprise, because it was asked
      for. */
   .math .scroller { padding: 8px 10px; overflow-x: auto; }
+  /* Wrapping off is a terminal setting, not a formula setting, and the block
+     follows it rather than owning a switch of its own. With wrapping on, text
+     folds at the pane's edge, so the pane never scrolls sideways and a formula
+     that does not fit has nobody but itself to scroll it. With wrapping off, long
+     lines do not fold and the pane is already scrolling sideways — a scroller
+     inside it would then be a horizontal scroller nested in a horizontal one,
+     which is the collision I wrongly feared for the vertical wheel and which is
+     real here, because this time the axes match. So the formula simply joins the
+     scroll the pane already has. */
+  .window[data-wrap="off"] .term { white-space: nowrap; }
+  .window[data-wrap="off"] .math { max-width: none; }
+  .window[data-wrap="off"] .math .scroller { overflow-x: visible; }
+  /* A height ceiling makes the block a scroll box by definition, so with wrapping
+     off it does end up scrolling both ways — overflow-y: auto forces the other
+     axis to auto whatever we say. That is the ceiling the user asked for, so it
+     is allowed to cost this. */
   .window.block-capped .math .scroller {
     max-height: var(--blockmax); overflow-y: auto; overscroll-behavior: contain;
   }
@@ -637,16 +653,19 @@
      pane header sitting directly under the title bar and the two merge into one
      grey mass, which also severs the active tab from the terminal it is shaped
      to join. Below --panel is off the ladder and reads as a dirty band.
-     No cursor change on hover either. The hand is a Maps-era idiom; Chrome, Edge
-     and VS Code all drag their tabs under a plain arrow, because the thing that
-     says "you are dragging" is the thing moving with your pointer. */
+     The cursor is `pointer`, the same hand a tab uses — these are two different
+     hands and only one of them is old. `grab`/`grabbing` are the open palm and
+     the closed fist, and those are the Maps-and-Photoshop idiom. The pointing
+     finger is not: it is what every tab strip in every browser uses, and it is
+     worth keeping, because a header that can be picked up should say so before
+     you try. */
   .panehead {
     flex: none; position: relative;
     display: flex; align-items: center; gap: 7px;
     height: 28px; padding: 0 6px 0 12px;
     font-size: 11.5px; color: var(--ink3);
     border-bottom: 1px solid var(--border-soft);
-    user-select: none;
+    cursor: pointer; user-select: none;
     transition: color .12s ease;
   }
   /* Focus is a step in contrast, not a hue — and the reason is a collision, not
@@ -695,15 +714,15 @@
     font-family: inherit;
   }
   .drag-ghost .ticon { width: auto; }
-  /* A plain arrow for the whole drag. The closed fist is the other half of the
-     Maps-era idiom, and it is worse than useless here: without pinning it, the
-     cursor would flip to an I-beam every time the drag crossed a terminal and to
-     a hand over every button, so the pointer would flicker through three shapes
-     on its way. It is pinned to `default` rather than to a fist for the same
-     reason Chrome and VS Code do: the tab riding under your pointer is already
-     telling you what is happening. */
+  /* The hand you started the drag with, held for the whole drag. Not the closed
+     fist — that is the other half of the Maps-era idiom — and not a plain arrow
+     either: you grabbed this with the pointing finger, and the cursor changing
+     shape mid-drag would say something happened when nothing did.
+     Pinning is what makes it hold: unpinned, the cursor flips to an I-beam every
+     time the drag crosses a terminal and back to a hand over each button, so the
+     pointer flickers through three shapes on the way to the drop. */
   body.dragging { user-select: none; }
-  body.dragging, body.dragging * { cursor: default !important; }
+  body.dragging, body.dragging * { cursor: pointer !important; }
 
   /* hover a tab that holds a layout → see the layout and what's in it */
   .layout-peek {
@@ -986,6 +1005,21 @@
           </div>
         </div>
 
+        <div class="group-label" style="margin-top:16px">Terminal</div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Line wrapping</div>
+            <div class="desc" id="wrap-desc">Long lines fold at the pane's edge; a formula too wide to fit scrolls inside its own block</div>
+          </div>
+          <div class="combo" data-combo="wrap">
+            <button aria-haspopup="listbox"><span class="value">On</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item" data-v="off" role="option"><span class="tick">✓</span>Off</div>
+            </div>
+          </div>
+        </div>
+
         <div class="group-label" style="margin-top:16px">Rendered blocks</div>
         <div class="row">
           <div class="text">
@@ -1170,6 +1204,7 @@
     railCollapsed: false,
     defaultProfile: 0,       // index into PROFILES: new tabs, and startup
     blockMax: 0,             // px ceiling on a rendered block; 0 means none
+    wrap: true,              // fold long lines (P2-9); rendered blocks follow it
   };
   state.tabs = [
     mkWs(mkSession("PowerShell", mark("pwsh"), powershell())),
@@ -1388,6 +1423,7 @@
     $("row-railmode").style.display = state.layoutMode === "vertical" ? "" : "none";
     $("win").classList.toggle("block-capped", state.blockMax > 0);
     $("win").style.setProperty("--blockmax", state.blockMax + "px");
+    $("win").dataset.wrap = state.wrap ? "on" : "off";
     const aw = activeTab();
 
     $("tabstrip").innerHTML = state.tabs.map(w => `
@@ -1943,6 +1979,14 @@
           state.railCollapsed = false;
           combo.querySelector(".value").textContent =
             item.dataset.v === "icons" ? "Icons, expand on hover" : "Expanded";
+          render();
+        }
+        if (kind === "wrap") {
+          state.wrap = item.dataset.v === "on";
+          combo.querySelector(".value").textContent = state.wrap ? "On" : "Off";
+          $("wrap-desc").textContent = state.wrap
+            ? "Long lines fold at the pane's edge; a formula too wide to fit scrolls inside its own block"
+            : "Long lines run on and the pane scrolls sideways; a formula rides that same scroll";
           render();
         }
         if (kind === "blockmax") {
