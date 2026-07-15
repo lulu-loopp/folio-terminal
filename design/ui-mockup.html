@@ -1318,12 +1318,26 @@
   const isVisible = (uid) => leavesOf(activeTab().tree).some(l => l.uid === uid);
 
   /* ── tree ops ── */
-  /* How many panes a run of same-direction splits holds. A differently-oriented
-     split counts as ONE member — from the row's point of view, a stack of two is
-     a single column that happens to be divided. */
-  const runLeaves = (node, dir) =>
-    node.type === "split" && node.dir === dir
-      ? runLeaves(node.a, dir) + runLeaves(node.b, dir) : 1;
+  /* How many columns' worth of width (or rows' worth of height) a subtree needs.
+     Side by side they add up; stacked, the widest one decides — a column of two
+     needs the width of the wider, not of both.
+     This used to count members instead of demand, and treated any
+     differently-oriented split as ONE, on the reasoning that "a stack of two is a
+     single column". True of a plain stack, and false the moment that stack has a
+     ROW inside it: a group holding two columns was handed one column's share,
+     its inner columns were squeezed to 179px, and the drop was refused — for a
+     violation in a group the user never aimed at, caused by dividing a pane that
+     was perfectly divisible on its own.
+     Demand also says what "equal" should have meant all along: not that every
+     node in the tree gets the same width, but that every COLUMN does. Splitting
+     the pane you aimed at now leaves a neighbouring group exactly where it was,
+     because its share was never a headcount — it was what it needs. */
+  const runDemand = (node, dir) => {
+    if (node.type === "leaf") return 1;
+    return node.dir === dir
+      ? runDemand(node.a, dir) + runDemand(node.b, dir)
+      : Math.max(runDemand(node.a, dir), runDemand(node.b, dir));
+  };
 
   /* Re-divide the run a new split just joined, so panes in a row are a row of
      equals.
@@ -1340,11 +1354,14 @@
      called even-horizontal for you to run afterwards.) */
   function balanceRunAt(root, target, dir) {
     const walk = (node) => {
-      if (node === target) return true;
-      if (node.type === "leaf") return false;
-      const found = walk(node.a) || walk(node.b);
+      if (node.type === "leaf") return node === target;
+      /* the target itself still has to be re-divided, so finding it must not
+         return before the rebalance below — an early return here left a root
+         split at its birth ratio of 0.5, which handed a group of three columns
+         the same width as one pane and squeezed them to 179px each */
+      const found = node === target || walk(node.a) || walk(node.b);
       if (found && node.dir === dir) {
-        const na = runLeaves(node.a, dir), nb = runLeaves(node.b, dir);
+        const na = runDemand(node.a, dir), nb = runDemand(node.b, dir);
         node.ratio = na / (na + nb);
       }
       return found;
