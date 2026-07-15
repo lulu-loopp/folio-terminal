@@ -231,6 +231,11 @@
   .drop-preview .ticon { color: var(--accent); }
   .rail .drop-preview { border-radius: 6px; }
 
+  /* the tab you are holding rides above the ones getting out of its way */
+  .tab.grabbed, .vtab.grabbed { z-index: 20; }
+  .vtab.grabbed { box-shadow: 0 5px 16px rgba(0, 0, 0, .14); }
+  body.dark .vtab.grabbed { box-shadow: 0 5px 16px rgba(0, 0, 0, .4); }
+
   /* Profile picker menu */
   .profile-menu {
     position: absolute;
@@ -885,7 +890,7 @@
         if (c) { closeTab(+c.dataset.close); e.stopPropagation(); return; }
         selectTab(+el.dataset.ws);
       });
-      el.addEventListener("pointerdown", (e) => startDrag(e, { kind: "tab", wsId: +el.dataset.ws }));
+      el.addEventListener("pointerdown", (e) => startDrag(e, { kind: "tab", wsId: +el.dataset.ws, el }));
       el.addEventListener("pointerenter", () => schedulePeek(el, +el.dataset.ws));
       el.addEventListener("pointerleave", hidePeek);
     });
@@ -1036,6 +1041,11 @@
     if (e.button !== 0 || e.target.closest(".close")) return;
     hidePeek();
     drag = { ...src, x0: e.clientX, y0: e.clientY, started: false, ghost: null, target: null };
+    if (src.el) {                       /* where in the tab you took hold of it */
+      const r = src.el.getBoundingClientRect();
+      drag.grabDx = e.clientX - r.left;
+      drag.grabDy = e.clientY - r.top;
+    }
   }
   const stripEl = () => state.layoutMode === "horizontal" ? $("tabstrip") : $("rail");
 
@@ -1073,28 +1083,93 @@
     document.querySelectorAll(".drop-preview").forEach(el => el.remove());
   }
 
-  /* Reorder as you drag, the way a browser does: swap with a neighbour the moment
-     the pointer crosses its middle. Swapping on the crossed neighbour's midpoint
-     (rather than recomputing an insertion index) is what keeps it from flip-flopping
-     once the tabs have moved under the pointer. */
+  /* ── reordering, animated ──
+     The tab you grabbed tracks the pointer; the ones it displaces slide out of
+     the way. Sliding is FLIP: let the DOM jump to its new layout, then invert
+     that jump with a transform and release it — the browser animates the rest. */
+  const GRAB_EASE = "transform .16s cubic-bezier(.2, 0, 0, 1)";
+  const stripEls = () => [...stripEl().querySelectorAll(".tab, .vtab")];
+
+  function snapshotStrip() {
+    const m = new Map();
+    stripEls().forEach(el => m.set(el.dataset.ws, el.getBoundingClientRect()));
+    return m;
+  }
+  function playStripFlip(before, skipWs) {
+    stripEls().forEach(el => {
+      if (el.dataset.ws === skipWs) return;
+      const b = before.get(el.dataset.ws);
+      if (!b) return;
+      const now = el.getBoundingClientRect();
+      const dx = b.left - now.left, dy = b.top - now.top;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+      el.style.transition = "none";
+      el.style.transform = `translate(${dx}px, ${dy}px)`;
+      el.getBoundingClientRect();            /* commit the inverted position */
+      el.style.transition = GRAB_EASE;
+      el.style.transform = "";
+    });
+  }
+  /* hold the grabbed tab under the pointer, wherever its slot has moved to */
+  function trackGrabbed(e) {
+    const el = stripEl().querySelector(`[data-ws="${drag.wsId}"]`);
+    if (!el) return;
+    el.classList.add("grabbed");
+    el.style.transition = "none";
+    el.style.transform = "";
+    const nat = el.getBoundingClientRect();
+    const sr = stripEl().getBoundingClientRect();
+    if (state.layoutMode === "horizontal") {
+      const want = Math.max(sr.left, Math.min(e.clientX - drag.grabDx, sr.right - nat.width));
+      el.style.transform = `translateX(${want - nat.left}px)`;
+    } else {
+      const want = Math.max(sr.top, Math.min(e.clientY - drag.grabDy, sr.bottom - nat.height));
+      el.style.transform = `translateY(${want - nat.top}px)`;
+    }
+  }
+  function releaseGrabbed(settle) {
+    const el = stripEl().querySelector(`[data-ws="${drag ? drag.wsId : ""}"]`) ||
+               document.querySelector(".grabbed");
+    if (!el) return;
+    el.classList.remove("grabbed");
+    if (settle) {
+      el.style.transition = GRAB_EASE;      /* let it fall into its slot */
+      el.style.transform = "";
+      setTimeout(() => { el.style.transition = ""; }, 200);
+    } else {
+      el.style.transition = "";
+      el.style.transform = "";
+    }
+  }
+
+  /* Swap with a neighbour the moment the pointer crosses its middle. Swapping on
+     the crossed neighbour's midpoint (rather than recomputing an insertion index)
+     is what keeps it from flip-flopping once the tabs have moved under it. */
   function reorderWhileDragging(e) {
     const horizontal = state.layoutMode === "horizontal";
     const pos = horizontal ? e.clientX : e.clientY;
     const entries = stripEntries();
     const cur = state.tabs.findIndex(w => w.id === drag.wsId);
     if (cur < 0) return;
-    const over = entries.findIndex(el => {
+    /* skip the tab in hand: it rides under the pointer, so the pointer is always
+       inside it — what we want to know is which neighbour's slot it is over */
+    const over = entries.findIndex((el, i) => {
+      if (i === cur) return false;
       const r = el.getBoundingClientRect();
       return horizontal ? pos >= r.left && pos <= r.right : pos >= r.top && pos <= r.bottom;
     });
-    if (over < 0 || over === cur) return;
-    const r = entries[over].getBoundingClientRect();
-    const mid = horizontal ? r.left + r.width / 2 : r.top + r.height / 2;
-    if ((over > cur && pos > mid) || (over < cur && pos < mid)) {
-      const [w] = state.tabs.splice(cur, 1);
-      state.tabs.splice(over, 0, w);
-      render();
+    if (over >= 0) {
+      const r = entries[over].getBoundingClientRect();
+      const mid = horizontal ? r.left + r.width / 2 : r.top + r.height / 2;
+      if ((over > cur && pos > mid) || (over < cur && pos < mid)) {
+        const before = snapshotStrip();
+        const [w] = state.tabs.splice(cur, 1);
+        state.tabs.splice(over, 0, w);
+        render();
+        playStripFlip(before, String(drag.wsId));
+      }
     }
+    trackGrabbed(e);
   }
   function dragLabel(d) {
     const s = d.kind === "tab"
@@ -1140,6 +1215,8 @@
       pv.classList.remove("show");
       return;
     }
+    /* left the strip: the tab drops back into its slot, the ghost takes over */
+    if (drag.kind === "tab") releaseGrabbed(true);
 
     /* over a pane? zones are relative to THAT pane */
     const host = $("termhost").getBoundingClientRect();
@@ -1179,6 +1256,7 @@
   document.addEventListener("pointerup", () => {
     if (!drag) return;
     const d = drag;
+    if (d.kind === "tab" && d.started) releaseGrabbed(true);   /* settle into the slot */
     drag = null;
     if (d.ghost) d.ghost.remove();
     document.body.classList.remove("dragging");
