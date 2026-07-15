@@ -748,8 +748,8 @@
   #dock-shift.show { display: block; }
   #dock-shift i {
     position: absolute; border-radius: 6px;
-    border: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent);
-    background: color-mix(in srgb, var(--accent) 4%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--accent) 62%, transparent);
+    background: color-mix(in srgb, var(--accent) 11%, transparent);
   }
   /* Aimed at an edge that cannot split, because the halves would be narrower than
      a terminal has any business being. Refusing silently was the bug: nothing
@@ -1774,25 +1774,61 @@
     }
     $("dock-shift")?.classList.remove("show");
   }
-  /* A root split maps every existing pane through one linear squeeze — half the
-     space, pushed to the far side — so each pane's destination is exact, not a
-     sketch. Showing them is what turns "a rectangle over your windows" into "a
-     new one lands here and you all move there". */
-  function showRootShift(zone, host) {
+  /* Lay a tree out on paper, exactly as the flexbox will lay it out for real:
+     every split spends 1px on its divider and shares what is left by ratio. */
+  const DIVIDER_PX = 1;
+  function rectsOf(node, x, y, w, h, out = []) {
+    if (node.type === "leaf") { out.push({ id: node.id, x, y, w, h }); return out; }
+    if (node.dir === "row") {
+      const avail = w - DIVIDER_PX, a = avail * node.ratio;
+      rectsOf(node.a, x, y, a, h, out);
+      rectsOf(node.b, x + a + DIVIDER_PX, y, avail - a, h, out);
+    } else {
+      const avail = h - DIVIDER_PX, a = avail * node.ratio;
+      rectsOf(node.a, x, y, w, a, out);
+      rectsOf(node.b, x, y + a + DIVIDER_PX, w, avail - a, out);
+    }
+    return out;
+  }
+  /* detachLeaf's walk without the mutation, for asking "what would it look like" */
+  const withoutLeaf = (node, id) => {
+    if (node.type === "leaf") return node;
+    if (node.a.type === "leaf" && node.a.id === id) return node.b;
+    if (node.b.type === "leaf" && node.b.id === id) return node.a;
+    return { ...node, a: withoutLeaf(node.a, id), b: withoutLeaf(node.b, id) };
+  };
+
+  /* Where everyone else ends up, computed from the layout that WILL exist rather
+     than sketched from the one that does.
+     Reading the live panes and squeezing them by half was an approximation, and
+     it broke the moment the thing being dragged was already in the layout: it
+     drew a destination for the very pane that is leaving, and it missed that
+     detaching a pane promotes its sibling into the space — so the survivors were
+     drawn where they used to be, not where they are going. The tree ops are pure
+     functions and the layout is arithmetic, so there is no reason to guess: build
+     the tree that the drop would produce and measure that. */
+  const SHIFT_INSET = 1;
+  function showRootShift(zone, host, movingLeafId) {
     const sh = $("dock-shift");
     if (!sh) return;
-    const panes = [...document.querySelectorAll("#termhost .pane")];
-    const place = (r) => {
-      const x = r.left - host.left, y = r.top - host.top, w = r.width, h = r.height;
-      if (zone === "top")    return [x, host.height / 2 + y / 2, w, h / 2];
-      if (zone === "bottom") return [x, y / 2, w, h / 2];
-      if (zone === "left")   return [host.width / 2 + x / 2, y, w / 2, h];
-      return [x / 2, y, w / 2, h];                                  /* right */
-    };
-    sh.innerHTML = panes.map(p => {
-      const [x, y, w, h] = place(p.getBoundingClientRect());
-      return `<i style="left:${x}px;top:${y}px;width:${w}px;height:${h}px"></i>`;
-    }).join("");
+    const w = activeTab();
+    const rest = movingLeafId == null ? w.tree : withoutLeaf(w.tree, movingLeafId);
+    const dir = (zone === "left" || zone === "right") ? "row" : "col";
+    const first = (zone === "left" || zone === "top");
+    const ARRIVING = -1;
+    const after = { type: "split", dir, ratio: 0.5,
+                    a: first ? { type: "leaf", id: ARRIVING } : rest,
+                    b: first ? rest : { type: "leaf", id: ARRIVING } };
+    /* The inset earns its pixel: a split halves one axis and the divider gaps go
+       with it, so on that axis a 1px seam becomes 0.5px and two neighbouring
+       dashed borders fuse into one muddled stripe, while the other axis keeps a
+       clean 1px. That asymmetry is why one direction looked joined and the other
+       spaced. A pixel is far below what this drawing is trying to tell you. */
+    sh.innerHTML = rectsOf(after, 0, 0, host.width, host.height)
+      .filter(r => r.id !== ARRIVING)
+      .map(r => `<i style="left:${r.x + SHIFT_INSET}px;top:${r.y + SHIFT_INSET}px;` +
+                `width:${Math.max(0, r.w - SHIFT_INSET * 2)}px;` +
+                `height:${Math.max(0, r.h - SHIFT_INSET * 2)}px"></i>`).join("");
     sh.classList.add("show");
   }
   function startDrag(e, src) {
@@ -2131,7 +2167,10 @@
       pv.style.width = w + "px"; pv.style.height = h + "px";
       pv.classList.add("show");
       /* a refusal squeezes nobody, so there is nothing to show going anywhere */
-      if (wouldSplit) showRootShift(nearRim, host); else $("dock-shift")?.classList.remove("show");
+      /* a pane already in the layout is the one arriving, so it is not among the
+         ones being squeezed — and its leaving reshapes them before the split does */
+      if (wouldSplit) showRootShift(nearRim, host, drag.kind === "pane" ? drag.leafId : null);
+      else $("dock-shift")?.classList.remove("show");
       return;
     }
     $("dock-shift")?.classList.remove("show");   /* pane docks displace nothing outside the pane */
