@@ -27,17 +27,6 @@
     --prompt: #5E6AD2;
     --thumb: rgba(55,53,47,.24);
     --thumb-hover: rgba(55,53,47,.42);
-    /* The focused pane's header. Not --active: that is a generic pressed tint,
-       and on this theme it composites to 237 — darker than --panel, which is the
-       darkest surface this design owns. A tone below the floor belongs to no
-       ladder and reads as a dirty grey band across white content.
-       Light and dark are not mirrors here, and the token says so rather than
-       hiding it in a number: light runs 247→255, so --panel IS the floor and
-       there is nothing below it to step to; dark runs 27→37 with headroom above,
-       where a lift past the chrome tone is what elevation has always looked
-       like. Either way the fill is the quiet half of the signal — the title
-       going from --ink3 to --ink is what the eye actually catches. */
-    --pane-focus: var(--panel);
     --termbg: #FFFFFF;
     --cursor: #37352F;
     --shadow: 0 16px 48px rgba(0,0,0,.13), 0 2px 8px rgba(0,0,0,.06);
@@ -59,7 +48,6 @@
     --prompt: #828FFF;
     --thumb: rgba(255,255,255,.22);
     --thumb-hover: rgba(255,255,255,.4);
-    --pane-focus: rgba(255,255,255,.09);   /* a lift, not a tint — see the light note */
     --termbg: #1B1B1B;
     --cursor: #D4D4D4;
     --shadow: 0 16px 48px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
@@ -432,13 +420,21 @@
      reaches into the gutter. */
   .math {
     display: flex; align-items: center; gap: 6px;
+    /* as wide as the formula, but never wider than the pane: past that the
+       scroller takes over. max-content alone sizes to content and ignores the
+       parent entirely, so the cap has to be stated. */
     width: max-content;
+    max-width: 100%;
     margin: 4px 0 4px -10px;
     cursor: default;
   }
-  /* The fill is the formula's region alone — the tools sit beside it, not in it */
+  /* The fill is the formula's region alone — the tools sit beside it, not in it.
+     Shrink-wrapped, so a block never claims more width than its formula, but
+     never more than the pane either: past that it scrolls (see .scroller). */
   .math .mbox {
-    padding: 8px 10px;
+    /* a flex item will not shrink below its own content unless told it may, and
+       "may shrink" is exactly what lets the scroller inside it start scrolling */
+    min-width: 0;
     border-radius: 7px;
     transition: background 100ms cubic-bezier(.2, 0, 0, 1);   /* M3 standard */
   }
@@ -448,20 +444,30 @@
      the 1px border landing 0px from a 2px accent rule is what made that left edge
      read as a 3px striped seam. */
   .math:hover .mbox { background: var(--panel); }
-  /* A block shows all of itself. It gets no scroll of its own, because the
-     terminal is already a scroll container and a second one nested inside it
-     eats the wheel whenever the pointer happens to rest on a formula. A block
-     too wide for the pane makes the pane scroll sideways, exactly as an
-     over-long line of text does — one scroll container, not two.
-     Left-aligned like every other line; centring is a document's habit.
-     Scroll appears only where the user asked for a ceiling and the content
-     reached it, which is the one case where clipping is not a surprise. The
-     inner box exists to carry that: overflow makes a clipping context, and
-     the tools live outside the block, so on .math it would cut them in half.
-     The rule carries no overflow until a ceiling exists: setting overflow on
-     one axis makes CSS compute the other to auto, so an unconditional
-     overflow-y would quietly bring back both the clipping and the sideways
-     scrollbar this is trying to be rid of. */
+  /* A formula wider than the pane scrolls HERE, in its own block.
+     This replaces "the pane scrolls sideways instead", which was wrong twice
+     over. The objection to a nested scroller was that it eats the wheel — true
+     of a vertical one, but a box that can only scroll sideways has no vertical
+     overflow to consume, so the browser chains a vertical wheel straight to the
+     terminal behind it. And handing the scroll to the pane costs something real:
+     terminal text wraps, so the pane is never wide because of TEXT — the bar
+     would exist solely because of one formula, and dragging it would haul every
+     wrapped line of prose off to the left into whitespace.
+     Every tool that renders block maths scrolls the block, not the page: Typora
+     (.md-math-container), Notion (.notion-equation-block), Obsidian
+     (.math-block > mjx-container). All three agree because there is no
+     alternative — KaTeX sets white-space: nowrap and TeX will not break a
+     display formula on its own.
+     The vertical padding lives in here rather than on .mbox for a reason:
+     overflow-x: auto makes CSS compute overflow-y to hidden, and KaTeX's h/d are
+     typographic metrics, not an ink bbox — an integral's lower limit paints
+     ~2.7px past the depth it declares. Inside the padding box that ink is safe;
+     on .mbox it would be shaved off. (Typora carries the same padding for the
+     same reason.)
+     A ceiling, when the user sets one, is the only vertical scroll a block ever
+     gets — the one case where clipping is not a surprise, because it was asked
+     for. */
+  .math .scroller { padding: 8px 10px; overflow-x: auto; }
   .window.block-capped .math .scroller {
     max-height: var(--blockmax); overflow-y: auto; overscroll-behavior: contain;
   }
@@ -557,6 +563,24 @@
 
   .split { flex: 1; min-width: 0; min-height: 0; display: flex; }
   .split-row { flex-direction: row; }
+  /* Ours, because `title=` is the OS's: the browser draws that box, and it obeys
+     nothing here — not the theme, not the type, not the corner radius, and it
+     appears on its own schedule wherever the platform feels like putting it.
+     Same material as the other popups so the vocabulary stays small.
+     A fixed singleton on <body> rather than a ::after on each host: a pseudo is
+     clipped by any ancestor with overflow, and the things that most need a tip
+     (the formula tools, a tab's close button) live inside exactly those. */
+  .tip {
+    position: fixed; z-index: 60; pointer-events: none;
+    background: var(--menu); color: var(--ink2);
+    border: 1px solid var(--border); border-radius: 5px;
+    padding: 3px 7px; font-size: 11px; white-space: nowrap;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .1);
+    opacity: 0; transition: opacity .09s ease;
+  }
+  body.dark .tip { box-shadow: 0 4px 14px rgba(0, 0, 0, .45); }
+  .tip.show { opacity: 1; }
+
   .split-col { flex-direction: column; }
   .slot { display: flex; flex-basis: 0; min-width: 0; min-height: 0; }
   .pane {
@@ -606,16 +630,24 @@
   .divider:hover::after, .divider.dragging::after { opacity: 1; }
   body.resizing { user-select: none; }
   body.resizing * { cursor: inherit !important; }
-  /* Every pane header is identical. Focus is shown by a tint, not by a rule:
-     a hard line here would compete with the divider hairlines around it. */
+  /* Every pane header is identical, and focus is carried by the title, not by a
+     fill. Two things ruled the fill out. A rule would fight the divider
+     hairlines around it. And on the light theme there is nowhere for a fill to
+     go: --panel is the floor, and --panel already means chrome — give it to a
+     pane header sitting directly under the title bar and the two merge into one
+     grey mass, which also severs the active tab from the terminal it is shaped
+     to join. Below --panel is off the ladder and reads as a dirty band.
+     No cursor change on hover either. The hand is a Maps-era idiom; Chrome, Edge
+     and VS Code all drag their tabs under a plain arrow, because the thing that
+     says "you are dragging" is the thing moving with your pointer. */
   .panehead {
     flex: none; position: relative;
     display: flex; align-items: center; gap: 7px;
     height: 28px; padding: 0 6px 0 12px;
     font-size: 11.5px; color: var(--ink3);
     border-bottom: 1px solid var(--border-soft);
-    cursor: grab; user-select: none;
-    transition: background .12s ease, color .12s ease;
+    user-select: none;
+    transition: color .12s ease;
   }
   /* Focus is a step in contrast, not a hue — and the reason is a collision, not
      taste. The accent already means "something over there wants you": it is the
@@ -626,11 +658,16 @@
      Dark made it obvious first because the dark accent is light and saturated,
      so tinting a dark surface with it moves lightness AND hue at once, landing
      on the OS selection-highlight this design is not written in. But the
-     collision was there in both themes; only its loudness differed. */
-  .pane.focused .panehead {
-    color: var(--ink);
-    background: var(--pane-focus);
-  }
+     collision was there in both themes; only its loudness differed.
+     What is left is the half that was doing the work all along: in a four-way
+     comparison the treatments were tellable apart even where the fills were not,
+     because a title at --ink beside titles at --ink3 is already a hierarchy, and
+     a hierarchy IS the signal. The weight follows the vocabulary the active
+     sidebar tab already uses. */
+  .pane.focused .panehead { color: var(--ink); font-weight: 500; }
+  /* the mark recedes on panes you are not in — opacity, a channel of its own,
+     so it cannot collide with what the accent or the breathing already say */
+  .pane:not(.focused) .panehead .ticon { opacity: .5; transition: opacity .12s ease; }
   .panehead .ticon { width: auto; }
   .panehead .ptitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .panehead .pane-close {
@@ -658,7 +695,15 @@
     font-family: inherit;
   }
   .drag-ghost .ticon { width: auto; }
-  body.dragging { user-select: none; cursor: grabbing; }
+  /* A plain arrow for the whole drag. The closed fist is the other half of the
+     Maps-era idiom, and it is worse than useless here: without pinning it, the
+     cursor would flip to an I-beam every time the drag crossed a terminal and to
+     a hand over every button, so the pointer would flicker through three shapes
+     on its way. It is pinned to `default` rather than to a fist for the same
+     reason Chrome and VS Code do: the tab riding under your pointer is already
+     telling you what is happening. */
+  body.dragging { user-select: none; }
+  body.dragging, body.dragging * { cursor: default !important; }
 
   /* hover a tab that holds a layout → see the layout and what's in it */
   .layout-peek {
@@ -1966,6 +2011,63 @@
       render();
     }
   }, 6000);
+
+  /* ── Tooltips ──
+     The native `title` is stripped on first hover rather than in a pass at
+     startup: render() rebuilds innerHTML constantly, so a one-shot pass would
+     quietly stop working the moment anything re-rendered — and the failure would
+     be invisible, since the OS tip would simply come back. Doing it lazily on
+     the way past means it cannot rot. The text moves to aria-label, because
+     title was carrying the accessible name and dropping it would trade a visual
+     nit for a real regression. */
+  const tipEl = document.createElement("div");
+  tipEl.className = "tip";
+  document.body.appendChild(tipEl);
+  let tipTimer = null;
+
+  function tipHost(target) {
+    const el = target?.closest?.("[title], [data-tip]");
+    if (!el) return null;
+    const native = el.getAttribute("title");
+    if (native !== null) {
+      el.dataset.tip = native;
+      if (!el.getAttribute("aria-label")) el.setAttribute("aria-label", native);
+      el.removeAttribute("title");
+    }
+    return el.dataset.tip ? el : null;
+  }
+  function showTip(el) {
+    tipEl.textContent = el.dataset.tip;
+    const r = el.getBoundingClientRect();
+    const t = tipEl.getBoundingClientRect();     /* measured before it is shown,
+                                                    so it never flashes at a
+                                                    stale position */
+    const x = Math.max(6, Math.min(r.left + r.width / 2 - t.width / 2,
+                                   window.innerWidth - t.width - 6));
+    const below = r.bottom + 6;
+    const y = below + t.height > window.innerHeight - 6 ? r.top - t.height - 6 : below;
+    tipEl.style.left = `${Math.round(x)}px`;
+    tipEl.style.top = `${Math.round(y)}px`;
+    tipEl.classList.add("show");
+  }
+  const hideTip = () => { clearTimeout(tipTimer); tipEl.classList.remove("show"); };
+
+  document.addEventListener("pointerover", (e) => {
+    const el = tipHost(e.target);
+    if (!el || document.body.classList.contains("dragging")) return;
+    clearTimeout(tipTimer);
+    /* This one really is the 300-500ms case the guidance is about: a tip is
+       content laid over what you are reading, so a false positive costs you the
+       view. (The formula tools are the opposite — they surface in the margin,
+       where a false positive costs nothing and delay costs everything.) */
+    tipTimer = setTimeout(() => showTip(el), 380);
+  });
+  document.addEventListener("pointerout", (e) => {
+    const el = tipHost(e.target);
+    if (el && !(e.relatedTarget && el.contains(e.relatedTarget))) hideTip();
+  });
+  document.addEventListener("pointerdown", hideTip);
+  window.addEventListener("blur", hideTip);
 
   applyTheme();
   render();
