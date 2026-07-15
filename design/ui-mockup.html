@@ -1323,6 +1323,18 @@
   function swapTabIntoFocusedPane(wsId) {
     const src = tabById(wsId), tgt = activeTab();
     if (!src || src.id === tgt.id) return;
+    /* With a single pane there is nothing to swap INTO, and doing it anyway
+       trades the two tabs' contents — which reads as the two tabs having changed
+       places in the strip, when all you did was switch to one. Switching must
+       never move a tab: the strip is what muscle memory is aimed at.
+       The spec has always said so ("单窗时自然退化成普通切标签"); only the code
+       did not. */
+    if (paneCount(tgt) <= 1) {
+      state.active = wsId;
+      leavesOf(src.tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
+      render();
+      return;
+    }
     const outLeaf = focusedLeaf(tgt);
     const displaced = session(outLeaf.uid);
     const incoming = src.tree, incomingFocus = focusedLeaf(src).id;
@@ -1367,12 +1379,15 @@
   function tabIcon(w) {
     return stateIcon(session(focusedLeaf(w).uid), tabBusy(w), tabUnread(w));
   }
-  /* In swap mode the only layout is the one you're looking at, so a count would
-     just be telling you what you can already see. In switch mode a tab can hide
-     a layout, so the count earns its place. */
+  /* How many terminals this tab holds — a fact about the tab, not about the mode.
+     It used to be hidden in swap mode, on the grounds that the only layout is the
+     one you are looking at. That is true of the ACTIVE tab and false of every
+     other one: a tab in the strip can hold a whole split tree, and in swap mode
+     clicking it brings all of it into the focused pane. "This one holds three
+     terminals" is exactly what you want to know before you click, and it is the
+     one thing you cannot see. */
   const paneBadge = (w) =>
-    (state.tabMode === "switch" && paneCount(w) > 1)
-      ? `<span class="panecount">${paneCount(w)}</span>` : "";
+    paneCount(w) > 1 ? `<span class="panecount">${paneCount(w)}</span>` : "";
 
   function termHtml(s, focused) {
     return s.lines.map(l => `<div>${l}</div>`).join("") +
@@ -1725,6 +1740,12 @@
      the way. Sliding is FLIP: let the DOM jump to its new layout, then invert
      that jump with a transform and release it — the browser animates the rest. */
   const GRAB_EASE = "transform .16s cubic-bezier(.2, 0, 0, 1)";
+  /* how far past "half the neighbour is covered" a tab must go before they trade
+     places, as a fraction of half a tab. Half is the floor stability allows;
+     everything above it is dead zone bought at the price of travel. 10% of half a
+     tab ≈ 21px of dead zone on a 200px tab — twenty times pointer noise, and
+     invisible to the hand. */
+  const REORDER_MARGIN = 0.1;
   const stripEls = () => [...stripEl().querySelectorAll(".tab, .vtab")];
 
   function snapshotStrip() {
@@ -1795,11 +1816,18 @@
      right one — the threshold moves with your grip. And it made the decision
      depend on where the pointer was rather than where the TAB was, so a tab could
      be sent past a neighbour it had not visually reached yet.
-     Comparing centres is stable by construction, which is why it needs no
-     fudge factor: the instant the dragged tab's centre passes its neighbour's,
-     they swap, and afterwards its centre is by definition on the far side of that
-     neighbour's new centre — so the reverse test cannot fire without you actually
-     dragging back. The hysteresis is the geometry, not a tuned percentage.
+     The test is the dragged tab's LEADING EDGE against the neighbour's centre:
+     they trade places once it has covered more than half of the neighbour.
+     Centre-against-centre was the first version and it was stable but sluggish —
+     it demanded a full slot of travel, which is exactly twice what stability
+     costs. The algebra says so. Let d be how far the tab has left its own slot
+     and T the threshold: a forward swap makes d' = d - pitch, so a swap back
+     needs d < pitch - T, and since the forward swap fires at d = T, dithering is
+     possible only when T < pitch/2. Half a slot is the floor; centre-vs-centre
+     sat at a whole one.
+     So the threshold is half a slot plus a small margin, and that margin IS the
+     hysteresis — 5% of a tab buys ~21px of dead zone, twenty times any pointer
+     noise, while cutting the travel needed from a whole tab to about half.
      offsetLeft, not getBoundingClientRect: rects include transforms, and the
      neighbours are mid-FLIP for 160ms after every swap, so rects would report
      where a tab is flying rather than where its slot is. offsetLeft is layout —
@@ -1820,10 +1848,12 @@
       const me = els[cur];
       if (!me) return;
       const myMid = slotMid(me) + offset;      /* where it visually is */
+      const half = (horizontal ? me.offsetWidth : me.offsetHeight) / 2;
+      const margin = half * REORDER_MARGIN;
       const next = els[cur + 1], prev = els[cur - 1];
       let to = -1;
-      if (next && myMid > slotMid(next)) to = cur + 1;
-      else if (prev && myMid < slotMid(prev)) to = cur - 1;
+      if (next && myMid + half > slotMid(next) + margin) to = cur + 1;
+      else if (prev && myMid - half < slotMid(prev) - margin) to = cur - 1;
       if (to < 0) return;
 
       const before = snapshotStrip();
