@@ -1,0 +1,5 @@
+/target
+**/*.rs.bk
+.playwright-mcp/
+*.png
+!design/assets/*.png

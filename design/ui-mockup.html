@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BetterTerminal UI 原型</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  /* ── Notion/Typora-like tokens, light & dark ── */
+  :root {
+    --page: #F1F0EE;
+    --win: #FFFFFF;
+    --panel: #F7F7F5;            /* sidebar / secondary surface */
+    --border: rgba(0,0,0,.088);
+    --border-soft: rgba(0,0,0,.055);
+    --ink: #37352F;              /* Notion ink */
+    --ink2: rgba(55,53,47,.65);
+    --ink3: rgba(55,53,47,.45);
+    --hover: rgba(55,53,47,.055);
+    --active: rgba(55,53,47,.09);
+    --accent: #5E6AD2;           /* Linear indigo */
+    --prompt: #5E6AD2;
+    --termbg: #FFFFFF;
+    --cursor: #37352F;
+    --shadow: 0 16px 48px rgba(0,0,0,.13), 0 2px 8px rgba(0,0,0,.06);
+    --menu: #FFFFFF;
+  }
+  body.dark {
+    --page: #141414;
+    --win: #202020;
+    --panel: #252525;
+    --border: rgba(255,255,255,.094);
+    --border-soft: rgba(255,255,255,.06);
+    --ink: rgba(255,255,255,.87);
+    --ink2: rgba(255,255,255,.55);
+    --ink3: rgba(255,255,255,.38);
+    --hover: rgba(255,255,255,.055);
+    --active: rgba(255,255,255,.09);
+    --accent: #828FFF;
+    --prompt: #828FFF;
+    --termbg: #1B1B1B;
+    --cursor: #D4D4D4;
+    --shadow: 0 16px 48px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
+    --menu: #2A2A2A;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", -apple-system, sans-serif;
+    font-size: 14px;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    transition: background .18s ease;
+  }
+  :root { --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace; }
+
+  /* ── Window ── */
+  .window {
+    width: min(1080px, 100%);
+    height: min(660px, 88vh);
+    background: var(--win);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+    transition: background .18s ease;
+  }
+
+  /* ── Title bar (40px, native behaviors, quiet look) ── */
+  .titlebar { height: 40px; flex: none; display: flex; align-items: stretch; }
+  .window[data-tabs="horizontal"] .titlebar { background: var(--panel); }
+  .titlebar .drag {
+    display: flex; align-items: center; gap: 8px;
+    padding-left: 14px; min-width: 0; flex: 1;
+  }
+  .logo {
+    width: 15px; height: 15px; border-radius: 4px; flex: none;
+    border: 1.4px solid var(--ink3);
+    position: relative;
+  }
+  .logo::after {
+    content: "❯"; position: absolute; inset: 0;
+    font-family: var(--mono); font-size: 7.5px; font-weight: 700; color: var(--ink2);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .apptitle { font-size: 12.5px; color: var(--ink3); white-space: nowrap; }
+  .window[data-tabs="horizontal"] .apptitle { display: none; }
+
+  /* Tabs in title bar (horizontal) — Windows Terminal style: active tab
+     connects seamlessly with the terminal area below */
+  .tabs-inline {
+    display: none; align-items: flex-end; gap: 1px;
+    margin-left: 12px; min-width: 0; height: 100%;
+  }
+  .window[data-tabs="horizontal"] .tabs-inline { display: flex; }
+  .tab {
+    position: relative;
+    display: flex; align-items: center; gap: 8px;
+    height: 34px; padding: 0 8px 0 13px;
+    border-radius: 8px 8px 0 0;
+    font-size: 13px; color: var(--ink2);
+    cursor: pointer; white-space: nowrap;
+  }
+  .tab:hover:not(.active) { background: var(--hover); color: var(--ink); }
+  .tab.active { background: var(--termbg); color: var(--ink); }
+  /* concave corners where the active tab meets the content below */
+  .tab.active::before, .tab.active::after {
+    content: ""; position: absolute; bottom: 0; width: 8px; height: 8px;
+    pointer-events: none;
+  }
+  .tab.active::before { left: -8px;  background: radial-gradient(circle 8px at 0 0,   transparent 98%, var(--termbg) 100%); }
+  .tab.active::after  { right: -8px; background: radial-gradient(circle 8px at 100% 0, transparent 98%, var(--termbg) 100%); }
+  .ticon {
+    font-family: var(--mono); font-size: 11px; font-weight: 700;
+    color: var(--ink3); flex: none; width: 13px; text-align: center;
+  }
+  .tab.active .ticon, .vtab.active .ticon { color: var(--prompt); }
+  .tab .ttitle { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+  .tab .close, .vtab .close {
+    width: 17px; height: 17px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink3);
+  }
+  .tab .close:hover, .vtab .close:hover { background: var(--active); color: var(--ink); }
+  .close svg { width: 8px; height: 8px; pointer-events: none; }
+  .newtab {
+    width: 28px; height: 28px; border: none; background: none; border-radius: 6px;
+    color: var(--ink3); font-size: 13px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; flex: none; gap: 7px;
+  }
+  .newtab svg { width: 10px; height: 10px; flex: none; }
+  .chevbtn svg { width: 9px; height: 6px; }
+  .tabs-inline .newtab { margin: 0 0 3px 6px; }
+  .tabs-inline .chevbtn { margin-left: 0; width: 24px; }
+  .newtab:hover { background: var(--hover); color: var(--ink); }
+
+  /* Caption buttons — native metrics, quiet colors */
+  .caption { display: flex; flex: none; }
+  .capbtn {
+    width: 46px; height: 40px; border: none; background: none;
+    color: var(--ink2); cursor: pointer; padding: 0;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .capbtn svg { width: 10px; height: 10px; }
+  .capbtn.gear svg { width: 14px; height: 14px; }
+  .capbtn:hover { background: var(--hover); color: var(--ink); }
+  .capbtn.close-w:hover { background: #E5484D; color: #fff; }
+  .capbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 4px; }
+
+  /* ── Body ── */
+  .body { flex: 1; min-height: 0; display: flex; }
+
+  /* Vertical rail — Notion sidebar feel */
+  .rail {
+    display: none;
+    width: 220px; flex: none;
+    flex-direction: column; gap: 1px;
+    padding: 6px 8px 10px;
+    background: var(--panel);
+    border-right: 1px solid var(--border-soft);
+  }
+  .window[data-tabs="vertical"] .rail { display: flex; }
+  .rail .label {
+    font-size: 11px; font-weight: 600; letter-spacing: .04em;
+    color: var(--ink3); padding: 4px 10px 6px;
+  }
+  .vtab {
+    display: flex; align-items: center; gap: 8px;
+    height: 30px; padding: 0 5px 0 10px;
+    border-radius: 6px; font-size: 13px; color: var(--ink2);
+    cursor: pointer;
+  }
+  .vtab:hover { background: var(--hover); }
+  .vtab.active { background: var(--active); color: var(--ink); font-weight: 500; }
+  .vtab .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .vtab .close { visibility: hidden; }
+  .vtab:hover .close { visibility: visible; }
+  .rail-new { display: flex; gap: 2px; margin-top: 2px; }
+  .rail-new .nt-main {
+    flex: 1; width: auto; height: 30px; justify-content: flex-start; gap: 8px;
+    padding: 0 10px; font-size: 13px; color: var(--ink3);
+  }
+  .rail-new .nt-chev { width: 28px; height: 30px; }
+
+  /* Profile picker menu (shared by both layouts) */
+  .profile-menu {
+    position: absolute;
+    min-width: 180px;
+    background: var(--menu);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.18);
+    padding: 4px;
+    display: none; z-index: 30;
+  }
+  .profile-menu.show { display: block; }
+  .profile-item {
+    display: flex; align-items: center; gap: 10px;
+    border-radius: 5px; padding: 7px 10px;
+    font-size: 13px; color: var(--ink2); cursor: pointer; white-space: nowrap;
+  }
+  .profile-item:hover { background: var(--hover); color: var(--ink); }
+  .profile-item .ticon { width: 14px; }
+  .profile-item .default-hint { margin-left: auto; font-size: 11px; color: var(--ink3); }
+
+  /* Terminal viewport */
+  .termhost { flex: 1; min-width: 0; display: flex; }
+  .term {
+    flex: 1; min-width: 0;
+    background: var(--termbg);
+    font-family: var(--mono);
+    font-size: 13px; line-height: 1.55; font-weight: 400;
+    padding: 14px 18px;
+    overflow-y: auto;
+    border-top: 1px solid var(--border-soft);
+    transition: background .18s ease;
+  }
+  .window[data-tabs="vertical"] .term { border-top: none; }
+  .window[data-tabs="horizontal"] .term { border-top: none; }
+  .dim { color: var(--ink3); }
+  .prompt { color: var(--prompt); font-weight: 700; }
+  .cursor { display: inline-block; width: 7px; height: 15px; background: var(--cursor); vertical-align: text-bottom; opacity: .85; }
+
+  /* ── Settings — clean Notion-like panel ── */
+  .overlay {
+    position: absolute; inset: 0;
+    background: rgba(15,15,15,.35);
+    display: none; z-index: 10;
+  }
+  .overlay.show { display: block; }
+  .settings {
+    width: min(480px, 92%);
+    margin: 54px auto 0;
+    background: var(--win);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow);
+  }
+  .settings header {
+    display: flex; align-items: center;
+    padding: 16px 10px 10px 22px;
+  }
+  .settings header h1 { margin: 0; font-size: 16px; font-weight: 600; flex: 1; }
+  .settings .content { padding: 2px 22px 18px; }
+  .group-label {
+    font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
+    color: var(--ink3); margin: 10px 0 2px;
+  }
+  .row {
+    display: flex; align-items: center; gap: 16px;
+    padding: 11px 2px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .row:last-child { border-bottom: none; }
+  .row .text { flex: 1; min-width: 0; }
+  .row .title { font-size: 13.5px; color: var(--ink); }
+  .row .desc { font-size: 12px; color: var(--ink3); margin-top: 1px; }
+
+  /* Minimal dropdown */
+  .combo { position: relative; flex: none; }
+  .combo > button {
+    min-width: 118px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--ink);
+    font-family: inherit; font-size: 13px;
+    padding: 5px 10px 5px 12px;
+    cursor: pointer;
+  }
+  .combo > button:hover { background: var(--hover); }
+  .combo .chev { font-size: 8.5px; color: var(--ink3); }
+  .combo-menu {
+    position: absolute; right: 0; top: calc(100% + 4px);
+    min-width: 100%;
+    background: var(--menu);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.18);
+    padding: 4px;
+    display: none; z-index: 20;
+  }
+  .combo.open .combo-menu { display: block; }
+  .combo-item {
+    display: flex; align-items: center; gap: 8px;
+    border-radius: 5px;
+    padding: 6px 10px;
+    font-size: 13px; color: var(--ink2);
+    cursor: pointer; white-space: nowrap;
+  }
+  .combo-item:hover { background: var(--hover); color: var(--ink); }
+  .combo-item .tick { width: 14px; font-size: 11px; color: var(--accent); visibility: hidden; }
+  .combo-item.selected .tick { visibility: visible; }
+  .combo-item.selected { color: var(--ink); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 6px; }
+</style>
+</head>
+<body>
+
+
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="i-min" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1"/></symbol>
+  <symbol id="i-max" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" rx="1.8" fill="none" stroke="currentColor" stroke-width="1"/></symbol>
+  <symbol id="i-close" viewBox="0 0 10 10"><path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor" stroke-width="1"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 10 10"><path d="M5 0.5v9M0.5 5h9" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></symbol>
+  <symbol id="i-chev" viewBox="0 0 10 6"><path d="M1 1l4 3.6L9 1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></symbol>
+</svg>
+
+<div class="window" id="win" data-tabs="horizontal">
+  <div class="titlebar">
+    <div class="drag">
+      <div class="logo"></div>
+      <span class="apptitle">BetterTerminal</span>
+      <div class="tabs-inline" id="tabstrip"></div>
+    </div>
+    <button class="capbtn gear" id="btn-settings" title="Settings" aria-label="Settings"><svg><use href="#i-gear"/></svg></button>
+    <div class="caption">
+      <button class="capbtn" title="Minimize" aria-label="Minimize"><svg><use href="#i-min"/></svg></button>
+      <button class="capbtn" title="Maximize" aria-label="Maximize"><svg><use href="#i-max"/></svg></button>
+      <button class="capbtn close-w" title="Close" aria-label="Close"><svg><use href="#i-close"/></svg></button>
+    </div>
+  </div>
+
+  <div class="body">
+    <nav class="rail" id="rail"></nav>
+    <div class="termhost"><div class="term" id="term"></div></div>
+  </div>
+
+  <div class="profile-menu" id="profile-menu"></div>
+
+  <div class="overlay" id="settings-overlay">
+    <div class="settings" role="dialog" aria-label="Settings">
+      <header>
+        <h1>Settings</h1>
+        <button class="capbtn" id="btn-close-settings" title="Close" aria-label="Close settings"><svg><use href="#i-close"/></svg></button>
+      </header>
+      <div class="content">
+        <div class="group-label">Appearance</div>
+
+        <div class="row">
+          <div class="text">
+            <div class="title">Theme</div>
+            <div class="desc">Light, dark, or follow your system setting</div>
+          </div>
+          <div class="combo" data-combo="theme">
+            <button aria-haspopup="listbox"><span class="value">System</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item" data-v="light" role="option"><span class="tick">✓</span>Light</div>
+              <div class="combo-item" data-v="dark" role="option"><span class="tick">✓</span>Dark</div>
+              <div class="combo-item selected" data-v="system" role="option"><span class="tick">✓</span>System</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <div class="title">Tab layout</div>
+            <div class="desc">Choose where tabs appear in the window</div>
+          </div>
+          <div class="combo" data-combo="layout">
+            <button aria-haspopup="listbox"><span class="value">Horizontal</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="horizontal" role="option"><span class="tick">✓</span>Horizontal</div>
+              <div class="combo-item" data-v="vertical" role="option"><span class="tick">✓</span>Vertical</div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  const state = {
+    tabs: [
+      { title: "PowerShell", icon: "❯", content: powershell() },
+      { title: "claude", icon: "✳", content: claude() },
+      { title: "wsl", icon: "$", content: wsl() },
+    ],
+    active: 0,
+    layout: "horizontal",
+    theme: "system",
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const closeSvg = `<svg><use href="#i-close"/></svg>`;
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+
+  function powershell() {
+    return `<div class="dim">BetterTerminal v0.1.0 — PowerShell 7.5</div>
+<div><span class="prompt">❯ </span>cargo --version</div>
+<div>cargo 1.88.0 (873a06493 2026-04-28)</div>
+<div><span class="prompt">❯ </span><span class="cursor"></span></div>`;
+  }
+  function claude() {
+    return `<div><span class="prompt">❯ </span>claude</div>
+<div class="dim">Welcome to Claude Code.</div>
+<div><span class="prompt">❯ </span><span class="cursor"></span></div>`;
+  }
+  function wsl() {
+    return `<div class="dim">Ubuntu 24.04 LTS (WSL2)</div>
+<div><span class="prompt">$ </span>uname -r</div>
+<div>6.6.87-microsoft-standard-WSL2</div>
+<div><span class="prompt">$ </span><span class="cursor"></span></div>`;
+  }
+  function gitbash() {
+    return `<div class="dim">MINGW64 — Git Bash</div>
+<div><span class="prompt">$ </span>git status</div>
+<div>On branch main, nothing to commit</div>
+<div><span class="prompt">$ </span><span class="cursor"></span></div>`;
+  }
+  function cmdsh() {
+    return `<div class="dim">Microsoft Windows [Version 10.0.26200]</div>
+<div><span class="prompt">&gt; </span><span class="cursor"></span></div>`;
+  }
+
+  const PROFILES = [
+    { title: "PowerShell", icon: "❯", make: powershell, default: true },
+    { title: "WSL · Ubuntu", icon: "$", make: wsl },
+    { title: "Git Bash", icon: "%", make: gitbash },
+    { title: "Command Prompt", icon: ">", make: cmdsh },
+  ];
+
+  function applyTheme() {
+    const resolved = state.theme === "system" ? (media.matches ? "dark" : "light") : state.theme;
+    document.body.classList.toggle("dark", resolved === "dark");
+  }
+  media.addEventListener("change", () => { if (state.theme === "system") applyTheme(); });
+
+  function render() {
+    $("win").dataset.tabs = state.layout;
+
+    $("tabstrip").innerHTML = state.tabs.map((t, i) => `
+      <div class="tab ${i === state.active ? "active" : ""}" data-i="${i}">
+        <span class="ticon">${t.icon}</span><span class="ttitle">${t.title}</span><span class="close" data-close="${i}">${closeSvg}</span>
+      </div>`).join("") + `<button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button>`;
+
+    $("rail").innerHTML = `<div class="label">Tabs</div>` + state.tabs.map((t, i) => `
+      <div class="vtab ${i === state.active ? "active" : ""}" data-i="${i}">
+        <span class="ticon">${t.icon}</span><span class="title">${t.title}</span><span class="close" data-close="${i}">${closeSvg}</span>
+      </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg>New tab</button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
+
+    $("term").innerHTML = state.tabs[state.active].content;
+
+    document.querySelectorAll(".tab, .vtab").forEach(el =>
+      el.addEventListener("click", (e) => {
+        const closeEl = e.target.closest(".close");
+        if (closeEl) { closeTab(+closeEl.dataset.close); e.stopPropagation(); return; }
+        state.active = +el.dataset.i; render();
+      }));
+    document.querySelectorAll(".nt-main").forEach(el =>
+      el.addEventListener("click", () => newTab(PROFILES.find(p => p.default))));
+    document.querySelectorAll(".nt-chev").forEach(el =>
+      el.addEventListener("click", (e) => { e.stopPropagation(); openProfileMenu(el); }));
+  }
+
+  function closeTab(i) {
+    if (state.tabs.length === 1) return;
+    state.tabs.splice(i, 1);
+    state.active = Math.min(state.active, state.tabs.length - 1);
+    render();
+  }
+
+  function newTab(profile) {
+    state.tabs.push({ title: profile.title.split(" ·")[0], icon: profile.icon, content: profile.make() });
+    state.active = state.tabs.length - 1;
+    render();
+  }
+
+  /* Profile picker — same semantics in both layouts:
+     plus = default profile, chevron = pick a profile */
+  function openProfileMenu(anchor) {
+    const menu = $("profile-menu");
+    menu.innerHTML = PROFILES.map((p, i) => `
+      <div class="profile-item" data-p="${i}">
+        <span class="ticon">${p.icon}</span>${p.title}
+        ${p.default ? `<span class="default-hint">default</span>` : ""}
+      </div>`).join("");
+    menu.querySelectorAll(".profile-item").forEach(el =>
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        menu.classList.remove("show");
+        newTab(PROFILES[+el.dataset.p]);
+      }));
+    const win = $("win").getBoundingClientRect();
+    const a = anchor.getBoundingClientRect();
+    menu.classList.add("show");
+    const mw = menu.offsetWidth;
+    menu.style.top = (a.bottom - win.top + 4) + "px";
+    menu.style.left = Math.min(a.left - win.left, win.width - mw - 8) + "px";
+  }
+
+  /* Settings dialog */
+  $("btn-settings").addEventListener("click", () => $("settings-overlay").classList.add("show"));
+  $("btn-close-settings").addEventListener("click", () => $("settings-overlay").classList.remove("show"));
+  $("settings-overlay").addEventListener("click", (e) => {
+    if (e.target === $("settings-overlay")) $("settings-overlay").classList.remove("show");
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      $("settings-overlay").classList.remove("show");
+      $("profile-menu").classList.remove("show");
+      document.querySelectorAll(".combo").forEach(c => c.classList.remove("open"));
+    }
+  });
+  document.addEventListener("click", () => $("profile-menu").classList.remove("show"));
+
+  /* Dropdowns */
+  document.querySelectorAll(".combo").forEach(combo => {
+    const btn = combo.querySelector("button");
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      document.querySelectorAll(".combo").forEach(c => { if (c !== combo) c.classList.remove("open"); });
+      combo.classList.toggle("open");
+    });
+    combo.querySelectorAll(".combo-item").forEach(item =>
+      item.addEventListener("click", (e) => {
+        e.stopPropagation();
+        combo.querySelectorAll(".combo-item").forEach(x => x.classList.remove("selected"));
+        item.classList.add("selected");
+        combo.querySelector(".value").textContent = item.dataset.v[0].toUpperCase() + item.dataset.v.slice(1);
+        combo.classList.remove("open");
+        const kind = combo.dataset.combo;
+        if (kind === "layout") { state.layout = item.dataset.v; render(); }
+        if (kind === "theme") { state.theme = item.dataset.v; applyTheme(); }
+      }));
+  });
+  document.addEventListener("click", () => document.querySelectorAll(".combo").forEach(c => c.classList.remove("open")));
+
+  applyTheme();
+  render();
+</script>
+
+</body>
+</html>

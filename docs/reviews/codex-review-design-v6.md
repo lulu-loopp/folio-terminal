@@ -1,0 +1,1 @@
+- **BLOCKER：锚点迁移仍未统一。** §3.2 为 `Live→Staging→History`，但 G3 仍写 `Live→Staging→Frozen`；`ContentAnchor` 无 `Frozen` 变体。因此第三处未 closed，v3.3 尚不能作为 M-1 实施规格。
