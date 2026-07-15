@@ -7,6 +7,9 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<!-- real KaTeX, so what you see here is what the real renderer would produce -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <style>
   /* ── Notion/Typora-like tokens, light & dark ── */
   :root {
@@ -323,6 +326,66 @@
   }
   .dim { color: var(--ink3); }
   .prompt { color: var(--prompt); font-weight: 700; }
+
+  /* ── the reason this terminal exists: rendered LaTeX in the output ──
+     A rendered formula is a view over the frozen text, never a replacement for
+     it. The source is still there; hovering says so, and you can take it back. */
+  .math {
+    position: relative;
+    margin: 6px 0 6px -6px;
+    padding: 8px 10px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    cursor: default;
+    /* left-aligned like every other line: centring is a document's habit, not a
+       terminal's. A formula wider than the pane scrolls on its own rather than
+       widening the pane or being silently cut. */
+    overflow-x: auto;
+  }
+  .math:hover { border-color: var(--border); background: var(--panel); }
+  .math .rendered { font-size: 15px; color: var(--ink); }
+  .math .katex-display { margin: 0; text-align: left; }
+  .math .katex-display > .katex { text-align: left; }
+  .math .src { display: none; color: var(--prompt); font-family: var(--mono); font-size: 13px; }
+  .math.as-source { display: block; }
+  .math.as-source .rendered { display: none; }
+  .math.as-source .src { display: block; }
+  /* the mark says "this is the terminal's doing, not the program's" */
+  .math::before {
+    content: ""; position: absolute; left: 0; top: 8px; bottom: 8px;
+    width: 2px; border-radius: 1px;
+    background: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .math-tools {
+    position: absolute; top: -11px; right: 8px;
+    display: none; gap: 2px;
+    background: var(--menu); border: 1px solid var(--border);
+    border-radius: 6px; padding: 2px;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .12);
+  }
+  .math:hover .math-tools { display: flex; }
+  .math-tools button {
+    border: none; background: none; border-radius: 4px;
+    font-family: inherit; font-size: 11px; color: var(--ink2);
+    padding: 3px 8px; cursor: pointer; white-space: nowrap;
+  }
+  .math-tools button:hover { background: var(--hover); color: var(--ink); }
+
+  /* markdown, kept as text — selectable, searchable, still a terminal */
+  .md-h { font-weight: 600; color: var(--ink); margin: 8px 0 2px; }
+  .md-code {
+    margin: 6px 0; padding: 8px 12px;
+    border-radius: 7px; border: 1px solid var(--border-soft);
+    background: var(--panel);
+    position: relative;
+  }
+  .md-code .lang {
+    position: absolute; top: 5px; right: 9px;
+    font-size: 9.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink3);
+  }
+  .kw { color: #C678DD; } .fn { color: #61AFEF; } .st { color: #98C379; }
+  .nm { color: #D19A66; } .cm { color: var(--ink3); }
+  body.dark .kw { color: #C678DD; } body.dark .fn { color: #61AFEF; }
   .cursor {
     display: inline-block; width: 7px; height: 15px; background: var(--cursor);
     vertical-align: text-bottom; opacity: .85;
@@ -697,6 +760,36 @@
 
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
+  /* A block the terminal detected as math. It carries its own source: rendering
+     is a view, and "revert" and "copy LaTeX" have to hand back exactly what the
+     program wrote — see DESIGN.md, text is the truth. */
+  function math(tex) {
+    const src = tex.replace(/\s+/g, " ").trim();
+    return `<div class="math" data-tex="${esc(src)}">
+      <div class="math-tools">
+        <button data-act="revert">Show source</button>
+        <button data-act="copy">Copy LaTeX</button>
+      </div>
+      <span class="rendered"></span>
+      <span class="src">$$${esc(src)}$$</span>
+    </div>`;
+  }
+  /* KaTeX renders after the DOM exists; failures leave the source visible, which
+     is the honest fallback — a formula we cannot typeset is still readable text */
+  function typeset(root) {
+    if (!window.katex) return;
+    root.querySelectorAll(".math").forEach(el => {
+      const target = el.querySelector(".rendered");
+      if (!target || target.dataset.done) return;
+      try {
+        katex.render(el.dataset.tex, target, { displayMode: true, throwOnError: true });
+        target.dataset.done = "1";
+      } catch {
+        el.classList.add("as-source");
+      }
+    });
+  }
+
   /* ── sessions ── */
   function powershell() {
     return { prompt: `<span class="prompt">❯ </span>`, lines: [
@@ -707,9 +800,16 @@
   }
   function claude() {
     return { prompt: `<span class="prompt">❯ </span>`, lines: [
-      `<span class="prompt">❯ </span>claude "整理 docs 目录"`,
-      `<span class="dim">Welcome to Claude Code.</span>`,
-      `<span class="dim">✳ Reading files…</span>`,
+      `<span class="prompt">❯ </span>claude "推导 Adam 的更新公式"`,
+      `<span class="dim">Adam 对每个参数维护一阶矩和二阶矩的移动平均：</span>`,
+      math(String.raw`m_t = \beta_1 m_{t-1} + (1-\beta_1) g_t,
+        \qquad v_t = \beta_2 v_{t-1} + (1-\beta_2) g_t^2`),
+      `<span class="dim">由于 m₀ = v₀ = 0，早期估计偏向零，需要偏差修正：</span>`,
+      math(String.raw`\hat{m}_t = \frac{m_t}{1-\beta_1^t},
+        \qquad \hat{v}_t = \frac{v_t}{1-\beta_2^t}`),
+      `<span class="dim">于是最终的更新规则为：</span>`,
+      math(String.raw`\theta_t = \theta_{t-1}
+        - \eta \, \frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon}`),
     ]};
   }
   function wsl() {
@@ -980,7 +1080,22 @@
       </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (${defaultProfile().title})"><svg><use href="#i-plus"/></svg><span>New tab</span></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
 
     $("termhost").innerHTML = renderNode(aw.tree, aw) + `<div id="dock-preview"></div>`;
+    typeset($("termhost"));
     document.querySelectorAll("#termhost .term").forEach(el => { el.scrollTop = el.scrollHeight; });
+
+    document.querySelectorAll(".math-tools button").forEach(btn =>
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const block = btn.closest(".math");
+        if (btn.dataset.act === "copy") {
+          navigator.clipboard?.writeText(`$$${block.dataset.tex}$$`);
+          btn.textContent = "Copied";
+          setTimeout(() => { btn.textContent = "Copy LaTeX"; }, 1200);
+          return;
+        }
+        const asSource = block.classList.toggle("as-source");
+        btn.textContent = asSource ? "Render" : "Show source";
+      }));
 
     document.querySelectorAll(".tab, .vtab").forEach(el => {
       el.addEventListener("click", (e) => {
@@ -1032,12 +1147,28 @@
   function fakeOutput(cmd) {
     const parts = cmd.trim().split(/\s+/), head = parts[0], rest = parts.slice(1);
     switch (head) {
-      case "help":   return [`<span class="dim">This is a UI mockup — try: echo · ls · git · cargo · claude · clear</span>`];
+      case "help":   return [`<span class="dim">A UI mockup — try: math · md · echo · ls · git · cargo · clear</span>`];
       case "echo":   return [esc(rest.join(" ")) || " "];
-      case "ls": case "dir": return [`design  docs  <span class="dim">.gitignore</span>`];
+      case "ls": case "dir": return [`design  docs  crates  <span class="dim">.gitignore</span>`];
       case "git":    return [`On branch <span class="prompt">main</span> — nothing to commit, working tree clean`];
       case "cargo":  return [`cargo 1.88.0 (873a06493 2026-04-28)`];
       case "claude": return [`<span class="dim">Welcome to Claude Code.</span>`];
+      /* the whole point of the project, in one command */
+      case "math":   return [
+        `<span class="dim">Euler's identity, and the Gaussian integral:</span>`,
+        math(String.raw`e^{i\pi} + 1 = 0`),
+        math(String.raw`\int_{-\infty}^{\infty} e^{-x^2}\,dx = \sqrt{\pi}`),
+        `<span class="dim">Hover a formula: the source is still underneath.</span>`,
+      ];
+      case "md":     return [
+        `<div class="md-h">Adam optimiser</div>`,
+        `<span class="dim">Combines momentum with RMSProp. A minimal step:</span>`,
+        `<div class="md-code"><span class="lang">python</span><span class="kw">def</span> <span class="fn">adam_step</span>(theta, g, m, v, t, lr=<span class="nm">1e-3</span>):
+    m = <span class="nm">0.9</span> * m + <span class="nm">0.1</span> * g
+    v = <span class="nm">0.999</span> * v + <span class="nm">0.001</span> * g**<span class="nm">2</span>
+    m_hat = m / (<span class="nm">1</span> - <span class="nm">0.9</span>**t)   <span class="cm"># bias correction</span>
+    <span class="kw">return</span> theta - lr * m_hat / (v**<span class="nm">0.5</span> + <span class="nm">1e-8</span>)</div>`,
+      ];
       default:       return [`<span class="dim">'${esc(head)}' is not recognized — this terminal is a mockup. Try 'help'.</span>`];
     }
   }
