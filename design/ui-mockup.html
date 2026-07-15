@@ -1072,6 +1072,30 @@
   function clearDropPreview() {
     document.querySelectorAll(".drop-preview").forEach(el => el.remove());
   }
+
+  /* Reorder as you drag, the way a browser does: swap with a neighbour the moment
+     the pointer crosses its middle. Swapping on the crossed neighbour's midpoint
+     (rather than recomputing an insertion index) is what keeps it from flip-flopping
+     once the tabs have moved under the pointer. */
+  function reorderWhileDragging(e) {
+    const horizontal = state.layoutMode === "horizontal";
+    const pos = horizontal ? e.clientX : e.clientY;
+    const entries = stripEntries();
+    const cur = state.tabs.findIndex(w => w.id === drag.wsId);
+    if (cur < 0) return;
+    const over = entries.findIndex(el => {
+      const r = el.getBoundingClientRect();
+      return horizontal ? pos >= r.left && pos <= r.right : pos >= r.top && pos <= r.bottom;
+    });
+    if (over < 0 || over === cur) return;
+    const r = entries[over].getBoundingClientRect();
+    const mid = horizontal ? r.left + r.width / 2 : r.top + r.height / 2;
+    if ((over > cur && pos > mid) || (over < cur && pos < mid)) {
+      const [w] = state.tabs.splice(cur, 1);
+      state.tabs.splice(over, 0, w);
+      render();
+    }
+  }
   function dragLabel(d) {
     const s = d.kind === "tab"
       ? session(focusedLeaf(tabById(d.wsId)).uid)
@@ -1099,7 +1123,8 @@
     clearDropPreview();
     drag.ghost.style.opacity = "";
 
-    /* over the strip? a pane dropped here becomes its own tab again */
+    /* over the strip? a pane dropped here becomes its own tab again; a tab
+       dragged along it reorders live */
     const sr = stripEl().getBoundingClientRect();
     if (e.clientX >= sr.left && e.clientX <= sr.right && e.clientY >= sr.top && e.clientY <= sr.bottom) {
       if (drag.kind === "pane" && paneCount(activeTab()) > 1) {
@@ -1107,6 +1132,10 @@
         drag.target = { strip: true, index: idx };
         showDropPreview(idx);
         drag.ghost.style.opacity = "0";   /* the preview in the strip is the ghost now */
+      } else if (drag.kind === "tab") {
+        reorderWhileDragging(e);
+        drag.target = { reordered: true };
+        drag.ghost.style.opacity = "0";   /* the tab itself is the feedback */
       }
       pv.classList.remove("show");
       return;
@@ -1157,6 +1186,7 @@
     if (pv) pv.classList.remove("show");
     clearDropPreview();
     if (!d.started || !d.target) return;
+    if (d.target.reordered) return;                /* already done, live */
     if (d.target.strip) { extractPaneToTab(d.leafId, d.target.index); return; }
     if (d.kind === "tab") mergeTabIntoPane(d.wsId, d.target.leafId, d.target.zone);
     else movePane(d.leafId, d.target.leafId, d.target.zone);
