@@ -281,20 +281,19 @@
     flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
     background: var(--termbg); overflow: hidden;
   }
-  /* Panes sit flush. While you drag a divider, the two sides pull back from it —
-     the way a window shrinks as you resize it in Windows. That opens a temporary
-     gap with an edge on each side, so both sides are visibly moving and the
-     resize reads as a boundary being moved rather than one pane wiping over the
-     other. On release they close up again. */
-  .slot > * { transition: margin .1s ease, border-radius .1s ease; }
-  .split-row > .slot.pull-a > * { margin-right: 6px; }
-  .split-row > .slot.pull-b > * { margin-left: 6px; }
-  .split-col > .slot.pull-a > * { margin-bottom: 6px; }
-  .split-col > .slot.pull-b > * { margin-top: 6px; }
-  .split-row > .slot.pull-a > .pane { border-radius: 0 7px 7px 0; }
-  .split-row > .slot.pull-b > .pane { border-radius: 7px 0 0 7px; }
-  .split-col > .slot.pull-a > .pane { border-radius: 0 0 7px 7px; }
-  .split-col > .slot.pull-b > .pane { border-radius: 7px 7px 0 0; }
+  /* Panes sit flush. The moment you grab a divider, the panes it resizes shrink
+     into slightly smaller rounded cards — the way a window you are resizing in
+     Windows pulls in from its edges. The gap is the consequence of the panes
+     getting smaller, not a seam that widened, and it appears on every side, so
+     what you read is "these two are being resized" rather than "the seam moved".
+     They snap back flush on release. */
+  .pane { transition: margin .1s ease, border-radius .1s ease, box-shadow .1s ease; }
+  .slot.resizing .pane {
+    margin: 5px;
+    border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0, 0, 0, .10);
+  }
+  body.dark .slot.resizing .pane { box-shadow: 0 2px 12px rgba(0, 0, 0, .35); }
 
   /* A hairline at rest with a comfortable hit area; the accent line marks the
      boundary you are moving once you grab it. */
@@ -973,8 +972,9 @@
                                    : rect.height - a.height - b.height;
     resize = { node, el, splitEl, rect, gap };
     el.classList.add("dragging");
-    splitEl.children[0].classList.add("pull-a");   /* both sides pull back from */
-    splitEl.children[2].classList.add("pull-b");   /* the boundary being dragged */
+    /* every pane this divider resizes shrinks while you hold it */
+    splitEl.children[0].classList.add("resizing");
+    splitEl.children[2].classList.add("resizing");
     document.body.classList.add("resizing");
     document.body.style.cursor = node.dir === "row" ? "col-resize" : "row-resize";
     e.preventDefault(); e.stopPropagation();
@@ -996,8 +996,8 @@
   document.addEventListener("pointerup", () => {
     if (!resize) return;
     resize.el.classList.remove("dragging");
-    resize.splitEl.children[0].classList.remove("pull-a");
-    resize.splitEl.children[2].classList.remove("pull-b");
+    resize.splitEl.children[0].classList.remove("resizing");
+    resize.splitEl.children[2].classList.remove("resizing");
     document.body.classList.remove("resizing");
     document.body.style.cursor = "";
     resize = null;
