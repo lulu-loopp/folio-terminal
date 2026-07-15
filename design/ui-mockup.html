@@ -189,6 +189,32 @@
   .window[data-tabs="vertical"] .rail { display: flex; }
   .window.rail-collapsed .rail { width: 0; padding-left: 0; padding-right: 0; border-right: none; opacity: 0; }
 
+  /* Icon rail: parked as a strip of icons, opens over the terminal on hover, so
+     the panes never reflow just because you went looking for a tab. */
+  .window.rail-icons .rail { width: 44px; padding-left: 4px; padding-right: 4px; }
+  .window.rail-icons .rail:hover {
+    width: 220px; padding-left: 8px; padding-right: 8px;
+    position: absolute; top: 40px; bottom: 0; left: 0; z-index: 15;
+    box-shadow: 6px 0 20px rgba(0, 0, 0, .10);
+  }
+  body.dark .window.rail-icons .rail:hover { box-shadow: 6px 0 20px rgba(0, 0, 0, .4); }
+  .window.rail-icons .rail .label,
+  .window.rail-icons .rail .vtab .title,
+  .window.rail-icons .rail .panecount,
+  .window.rail-icons .rail .vtab .close,
+  .window.rail-icons .rail .nt-main span,
+  .window.rail-icons .rail .nt-chev { display: none; }
+  .window.rail-icons .rail:hover .label,
+  .window.rail-icons .rail:hover .vtab .title,
+  .window.rail-icons .rail:hover .panecount,
+  .window.rail-icons .rail:hover .nt-main span,
+  .window.rail-icons .rail:hover .nt-chev { display: revert; }
+  .window.rail-icons .rail:hover .vtab .close { display: flex; }
+  .window.rail-icons .rail .vtab { padding: 0 8px; justify-content: center; }
+  .window.rail-icons .rail:hover .vtab { padding: 0 5px 0 10px; justify-content: flex-start; }
+  .window.rail-icons .rail .rail-new .nt-main { justify-content: center; padding: 0; }
+  .window.rail-icons .rail:hover .rail-new .nt-main { justify-content: flex-start; padding: 0 10px; }
+
   .panel-toggle {
     display: none; width: 30px; height: 26px; border: none; background: none;
     border-radius: 6px; color: var(--ink3); cursor: pointer;
@@ -286,6 +312,12 @@
   .pane {
     flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
     background: var(--termbg); overflow: hidden;
+  }
+  /* the box animates; this counter-scales so the text inside never distorts */
+  .pane-inner {
+    flex: 1; min-width: 0; min-height: 0; width: 100%; height: 100%;
+    display: flex; flex-direction: column;
+    transform-origin: top left;
   }
   /* Panes sit flush. The moment you grab a divider, the panes it resizes shrink
      into slightly smaller rounded cards — the way a window you are resizing in
@@ -556,6 +588,20 @@
           </div>
         </div>
 
+        <div class="row" id="row-railmode">
+          <div class="text">
+            <div class="title">Sidebar</div>
+            <div class="desc">How the vertical tab sidebar rests</div>
+          </div>
+          <div class="combo" data-combo="railmode">
+            <button aria-haspopup="listbox"><span class="value">Expanded</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
+              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons, expand on hover</div>
+            </div>
+          </div>
+        </div>
+
         <div class="group-label" style="margin-top:16px">Tabs &amp; panes</div>
         <div class="row">
           <div class="text">
@@ -568,6 +614,18 @@
               <div class="combo-item selected" data-v="switch" role="option"><span class="tick">✓</span>Switch view</div>
               <div class="combo-item" data-v="swap" role="option"><span class="tick">✓</span>Swap focused pane</div>
             </div>
+          </div>
+        </div>
+
+        <div class="group-label" style="margin-top:16px">Startup</div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Default profile</div>
+            <div class="desc">What opens on a new tab, and when BetterTerminal starts</div>
+          </div>
+          <div class="combo" data-combo="profile">
+            <button aria-haspopup="listbox"><span class="value">PowerShell</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox" id="profile-options"></div>
           </div>
         </div>
       </div>
@@ -639,11 +697,12 @@
     return { prompt: `<span class="prompt">&gt; </span>`, lines: [`<span class="dim">Microsoft Windows [Version 10.0.26200]</span>`]};
   }
   const PROFILES = [
-    { title: "PowerShell", icon: "❯", make: powershell, default: true },
+    { title: "PowerShell", icon: "❯", make: powershell },
     { title: "WSL · Ubuntu", icon: "$", make: wsl },
     { title: "Git Bash", icon: "%", make: gitbash },
     { title: "Command Prompt", icon: ">", make: cmdsh },
   ];
+  const defaultProfile = () => PROFILES[state.defaultProfile];
 
   function mkSession(title, icon, c, busy) {
     const s = { uid: uidSeq++, title, icon, prompt: c.prompt, lines: c.lines, input: "", busy: !!busy, unread: false };
@@ -661,9 +720,11 @@
     tabs: [],            // workspaces
     active: null,        // workspace id
     layoutMode: "horizontal",
-    tabMode: "switch",     // switch | swap  (see the header comment)
+    tabMode: "switch",       // switch | swap  (see the header comment)
+    railMode: "expanded",    // expanded | icons
     theme: "system",
     railCollapsed: false,
+    defaultProfile: 0,       // index into PROFILES: new tabs, and startup
   };
   state.tabs = [
     mkWs(mkSession("PowerShell", "❯", powershell())),
@@ -721,39 +782,43 @@
   function mergeTabIntoPane(srcWsId, targetLeafId, zone) {
     const src = tabById(srcWsId), tgt = activeTab();
     if (!src || src.id === tgt.id) return;
+    const before = snapshotPanes();
     const keepFocus = focusedLeaf(src).id;
     splitLeafIn(tgt, targetLeafId, zone, src.tree);
     tgt.focus = keepFocus;
     state.tabs = state.tabs.filter(w => w.id !== srcWsId);
     leavesOf(tgt.tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
-    render();
+    renderWithPaneFlip(before);
   }
   /* pane dropped on the strip → leaves the layout, becomes its own tab at that slot */
   function extractPaneToTab(leafId, index) {
     const w = activeTab();
+    const before = snapshotPanes();
     const leaf = detachLeaf(w, leafId);
     if (!leaf) return;
     const nw = { id: wsSeq++, tree: leaf, focus: leaf.id };
     const at = index == null ? state.tabs.indexOf(w) + 1 : Math.min(index, state.tabs.length);
     state.tabs.splice(at, 0, nw);
-    render();      /* stay in the layout you were in; the pane is now waiting in the strip */
+    renderWithPaneFlip(before);   /* stay in the layout you were in; the pane waits in the strip */
   }
   /* pane dropped on another pane's edge → rearrange inside the layout */
   function movePane(leafId, targetLeafId, zone) {
     const w = activeTab();
     if (leafId === targetLeafId) return;
+    const before = snapshotPanes();
     const leaf = detachLeaf(w, leafId);
     if (!leaf || !findLeafIn(w, targetLeafId)) { render(); return; }
     splitLeafIn(w, targetLeafId, zone, leaf);
     w.focus = leaf.id;
-    render();
+    renderWithPaneFlip(before);
   }
   function closePane(leafId) {
     const w = activeTab();
+    const before = snapshotPanes();
     const leaf = detachLeaf(w, leafId);
     if (!leaf) { closeTab(w.id); return; }        /* last pane → close the tab */
     state.sessions = state.sessions.filter(s => s.uid !== leaf.uid);
-    render();
+    renderWithPaneFlip(before);
   }
   function closeTab(wsId) {
     if (state.tabs.length === 1) return;
@@ -839,9 +904,11 @@
       const focused = node.id === w.focus;
       const multi = paneCount(w) > 1;
       return `<div class="pane ${focused ? "focused" : ""}" data-leaf="${node.id}">
-        ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.title}</span>
-          <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : ""}
-        <div class="term" data-leaf="${node.id}">${termHtml(s, focused)}</div>
+        <div class="pane-inner">
+          ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.title}</span>
+            <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : ""}
+          <div class="term" data-leaf="${node.id}">${termHtml(s, focused)}</div>
+        </div>
       </div>`;
     }
     return `<div class="split split-${node.dir}" data-split="${node.id}">
@@ -867,19 +934,21 @@
   function render() {
     $("win").dataset.tabs = state.layoutMode;
     $("win").classList.toggle("rail-collapsed", state.railCollapsed);
+    $("win").classList.toggle("rail-icons", state.railMode === "icons" && !state.railCollapsed);
+    $("row-railmode").style.display = state.layoutMode === "vertical" ? "" : "none";
     const aw = activeTab();
 
     $("tabstrip").innerHTML = state.tabs.map(w => `
       <div class="tab ${w.id === state.active ? "active" : ""}" data-ws="${w.id}">
         ${tabIcon(w)}<span class="ttitle">${session(focusedLeaf(w).uid).title}</span>${paneBadge(w)}
         <span class="close" data-close="${w.id}">${closeSvg}</span>
-      </div>`).join("") + `<button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button>`;
+      </div>`).join("") + `<button class="newtab nt-main" title="New tab (${defaultProfile().title})"><svg><use href="#i-plus"/></svg></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button>`;
 
     $("rail").innerHTML = `<div class="label">Tabs</div>` + state.tabs.map(w => `
       <div class="vtab ${w.id === state.active ? "active" : ""}" data-ws="${w.id}">
         ${tabIcon(w)}<span class="title">${session(focusedLeaf(w).uid).title}</span>${paneBadge(w)}
         <span class="close" data-close="${w.id}">${closeSvg}</span>
-      </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg>New tab</button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
+      </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (${defaultProfile().title})"><svg><use href="#i-plus"/></svg><span>New tab</span></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
 
     $("termhost").innerHTML = renderNode(aw.tree, aw) + `<div id="dock-preview"></div>`;
     document.querySelectorAll("#termhost .term").forEach(el => { el.scrollTop = el.scrollHeight; });
@@ -897,7 +966,7 @@
     document.querySelectorAll(".divider").forEach(el =>
       el.addEventListener("pointerdown", (e) => startResize(e, el)));
     document.querySelectorAll(".nt-main").forEach(el =>
-      el.addEventListener("click", () => newTab(PROFILES.find(p => p.default))));
+      el.addEventListener("click", () => newTab(defaultProfile())));
     document.querySelectorAll(".nt-chev").forEach(el =>
       el.addEventListener("click", (e) => { e.stopPropagation(); openProfileMenu(el); }));
     document.querySelectorAll(".pane").forEach(el =>
@@ -1083,6 +1152,51 @@
     document.querySelectorAll(".drop-preview").forEach(el => el.remove());
   }
 
+  /* ── layout changes, animated ──
+     Same FLIP idea as the tab strip: let the DOM jump to the new layout, measure
+     how far each pane jumped, put it back with a transform, then let go. The
+     inner wrapper counter-scales, so the box animates its size while the text
+     inside stays the size it will end up at instead of being stretched. */
+  const PANE_EASE = "transform .2s cubic-bezier(.2, 0, 0, 1)";
+  function snapshotPanes() {
+    const m = new Map();
+    document.querySelectorAll("#termhost .pane").forEach(el =>
+      m.set(el.dataset.leaf, el.getBoundingClientRect()));
+    return m;
+  }
+  function renderWithPaneFlip(before) {
+    render();
+    document.querySelectorAll("#termhost .pane").forEach(el => {
+      const b = before.get(el.dataset.leaf);
+      const now = el.getBoundingClientRect();
+      const inner = el.querySelector(".pane-inner");
+      if (!b) {                                   /* a pane that wasn't there: fade it in */
+        el.style.transition = "none";
+        el.style.opacity = "0";
+        el.getBoundingClientRect();
+        el.style.transition = "opacity .18s ease";
+        el.style.opacity = "";
+        setTimeout(() => { el.style.transition = ""; }, 220);
+        return;
+      }
+      const dx = b.left - now.left, dy = b.top - now.top;
+      const sx = now.width ? b.width / now.width : 1;
+      const sy = now.height ? b.height / now.height : 1;
+      if (Math.abs(dx) < .5 && Math.abs(dy) < .5 && Math.abs(sx - 1) < .005 && Math.abs(sy - 1) < .005) return;
+      el.style.transformOrigin = "top left";
+      el.style.transition = "none";
+      inner.style.transition = "none";
+      el.style.transform = `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`;
+      inner.style.transform = `scale(${1 / sx}, ${1 / sy})`;
+      el.getBoundingClientRect();                 /* commit the inverted layout */
+      el.style.transition = PANE_EASE;
+      inner.style.transition = PANE_EASE;
+      el.style.transform = "";
+      inner.style.transform = "";
+      setTimeout(() => { el.style.transition = ""; inner.style.transition = ""; }, 240);
+    });
+  }
+
   /* ── reordering, animated ──
      The tab you grabbed tracks the pointer; the ones it displaces slide out of
      the way. Sliding is FLIP: let the DOM jump to its new layout, then invert
@@ -1159,9 +1273,13 @@
       return horizontal ? pos >= r.left && pos <= r.right : pos >= r.top && pos <= r.bottom;
     });
     if (over >= 0) {
+      /* swap once a third of the way into the neighbour rather than at its middle:
+         earlier to trigger, still with enough hysteresis that it cannot flip-flop */
       const r = entries[over].getBoundingClientRect();
-      const mid = horizontal ? r.left + r.width / 2 : r.top + r.height / 2;
-      if ((over > cur && pos > mid) || (over < cur && pos < mid)) {
+      const reach = horizontal ? r.width * 0.35 : r.height * 0.35;
+      const enter = over > cur ? (horizontal ? r.left : r.top) + reach
+                               : (horizontal ? r.right : r.bottom) - reach;
+      if ((over > cur && pos > enter) || (over < cur && pos < enter)) {
         const before = snapshotStrip();
         const [w] = state.tabs.splice(cur, 1);
         state.tabs.splice(over, 0, w);
@@ -1276,7 +1394,7 @@
     menu.innerHTML = PROFILES.map((p, i) => `
       <div class="profile-item" data-p="${i}">
         <span class="ticon">${p.icon}</span>${p.title}
-        ${p.default ? `<span class="default-hint">default</span>` : ""}
+        ${i === state.defaultProfile ? `<span class="default-hint">default</span>` : ""}
       </div>`).join("");
     menu.querySelectorAll(".profile-item").forEach(el =>
       el.addEventListener("click", (e) => {
@@ -1299,6 +1417,12 @@
   $("settings-overlay").addEventListener("click", (e) => {
     if (e.target === $("settings-overlay")) $("settings-overlay").classList.remove("show");
   });
+  /* the default-profile picker is built from the same list the ⌄ menu uses */
+  $("profile-options").innerHTML = PROFILES.map((p, i) => `
+    <div class="combo-item ${i === state.defaultProfile ? "selected" : ""}" data-v="${i}" role="option">
+      <span class="tick">✓</span><span class="ticon">${p.icon}</span>${p.title}
+    </div>`).join("");
+
   document.querySelectorAll(".combo").forEach(combo => {
     const btn = combo.querySelector("button");
     btn.addEventListener("click", (e) => {
@@ -1316,6 +1440,17 @@
         const kind = combo.dataset.combo;
         if (kind === "layout") { state.layoutMode = item.dataset.v; render(); }
         if (kind === "theme") { state.theme = item.dataset.v; applyTheme(); }
+        if (kind === "railmode") {
+          state.railMode = item.dataset.v;
+          combo.querySelector(".value").textContent =
+            item.dataset.v === "icons" ? "Icons, expand on hover" : "Expanded";
+          render();
+        }
+        if (kind === "profile") {
+          state.defaultProfile = +item.dataset.v;
+          combo.querySelector(".value").textContent = PROFILES[state.defaultProfile].title;
+          render();
+        }
         if (kind === "tabmode") {
           state.tabMode = item.dataset.v;
           combo.querySelector(".value").textContent = item.dataset.v === "swap" ? "Swap focused pane" : "Switch view";
