@@ -12,20 +12,21 @@
   :root {
     --page: #F1F0EE;
     --win: #FFFFFF;
-    --panel: #F7F7F5;            /* sidebar / secondary surface */
+    --panel: #F7F7F5;
     --border: rgba(0,0,0,.088);
     --border-soft: rgba(0,0,0,.055);
-    --ink: #37352F;              /* Notion ink */
+    --ink: #37352F;
     --ink2: rgba(55,53,47,.65);
     --ink3: rgba(55,53,47,.45);
     --hover: rgba(55,53,47,.055);
     --active: rgba(55,53,47,.09);
-    --accent: #5E6AD2;           /* Linear indigo */
+    --accent: #5E6AD2;
     --prompt: #5E6AD2;
     --termbg: #FFFFFF;
     --cursor: #37352F;
     --shadow: 0 16px 48px rgba(0,0,0,.13), 0 2px 8px rgba(0,0,0,.06);
     --menu: #FFFFFF;
+    --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace;
   }
   body.dark {
     --page: #141414;
@@ -59,7 +60,6 @@
     padding: 24px;
     transition: background .18s ease;
   }
-  :root { --mono: "JetBrains Mono", "Cascadia Code", Consolas, monospace; }
 
   /* ── Window ── */
   .window {
@@ -76,7 +76,7 @@
     transition: background .18s ease;
   }
 
-  /* ── Title bar (40px, native behaviors, quiet look) ── */
+  /* ── Title bar ── */
   .titlebar { height: 40px; flex: none; display: flex; align-items: stretch; }
   .window[data-tabs="horizontal"] .titlebar { background: var(--panel); }
   .titlebar .drag {
@@ -96,8 +96,7 @@
   .apptitle { font-size: 12.5px; color: var(--ink3); white-space: nowrap; }
   .window[data-tabs="horizontal"] .apptitle { display: none; }
 
-  /* Tabs in title bar (horizontal) — Windows Terminal style: active tab
-     connects seamlessly with the terminal area below */
+  /* Tabs in title bar (horizontal) — WT style: active tab connects with content */
   .tabs-inline {
     display: none; align-items: flex-end; gap: 1px;
     margin-left: 12px; min-width: 0; height: 100%;
@@ -112,8 +111,8 @@
     cursor: pointer; white-space: nowrap;
   }
   .tab:hover:not(.active) { background: var(--hover); color: var(--ink); }
+  .tab.shown:not(.active) { background: var(--hover); }
   .tab.active { background: var(--termbg); color: var(--ink); }
-  /* concave corners where the active tab meets the content below */
   .tab.active::before, .tab.active::after {
     content: ""; position: absolute; bottom: 0; width: 8px; height: 8px;
     pointer-events: none;
@@ -124,8 +123,9 @@
     font-family: var(--mono); font-size: 11px; font-weight: 700;
     color: var(--ink3); flex: none; width: 13px; text-align: center;
   }
+  .tab.active .ticon, .vtab.active .ticon { color: var(--prompt); }
   .ticon-wrap { position: relative; display: inline-flex; flex: none; align-items: center; }
-  /* working = spinner replaces the icon (browser-tab semantics) */
+  /* working = spinner replaces the icon */
   .spinner {
     width: 11px; height: 11px; border-radius: 50%;
     border: 1.5px solid var(--border);
@@ -134,13 +134,12 @@
     margin: 0 1px;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
-  /* finished-but-unread = static dot on the icon */
+  /* finished-but-unread = static dot */
   .unreaddot {
     position: absolute; top: -2px; right: -4px;
     width: 6px; height: 6px; border-radius: 50%;
     background: var(--accent);
   }
-  .tab.active .ticon, .vtab.active .ticon { color: var(--prompt); }
   .tab .ttitle { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
   .tab .close, .vtab .close {
     width: 17px; height: 17px; border-radius: 4px;
@@ -160,7 +159,7 @@
   .tabs-inline .chevbtn { margin-left: 0; width: 24px; }
   .newtab:hover { background: var(--hover); color: var(--ink); }
 
-  /* Caption buttons — native metrics, quiet colors */
+  /* Caption buttons */
   .caption { display: flex; flex: none; }
   .capbtn {
     width: 46px; height: 40px; border: none; background: none;
@@ -176,7 +175,7 @@
   /* ── Body ── */
   .body { flex: 1; min-height: 0; display: flex; }
 
-  /* Vertical rail — Notion sidebar feel */
+  /* Vertical rail */
   .rail {
     display: none;
     width: 220px; flex: none;
@@ -190,7 +189,6 @@
   .window[data-tabs="vertical"] .rail { display: flex; }
   .window.rail-collapsed .rail { width: 0; padding-left: 0; padding-right: 0; border-right: none; opacity: 0; }
 
-  /* Sidebar toggle (vertical layout only) */
   .panel-toggle {
     display: none; width: 30px; height: 26px; border: none; background: none;
     border-radius: 6px; color: var(--ink3); cursor: pointer;
@@ -199,6 +197,7 @@
   .window[data-tabs="vertical"] .panel-toggle { display: flex; }
   .panel-toggle:hover { background: var(--hover); color: var(--ink); }
   .panel-toggle svg { width: 14px; height: 14px; }
+
   .rail .label {
     font-size: 11px; font-weight: 600; letter-spacing: .04em;
     color: var(--ink3); padding: 4px 10px 6px;
@@ -210,6 +209,7 @@
     cursor: pointer;
   }
   .vtab:hover { background: var(--hover); }
+  .vtab.shown:not(.active) { background: var(--hover); }
   .vtab.active { background: var(--active); color: var(--ink); font-weight: 500; }
   .vtab .title { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .vtab .close { visibility: hidden; }
@@ -220,8 +220,10 @@
     padding: 0 10px; font-size: 13px; color: var(--ink3);
   }
   .rail-new .nt-chev { width: 28px; height: 30px; }
+  .tabstrip-drop, .rail.tabstrip-drop { box-shadow: inset 0 0 0 1.5px var(--accent); border-radius: 8px; }
+  .tabs-inline.tabstrip-drop { box-shadow: inset 0 0 0 1.5px var(--accent); }
 
-  /* Profile picker menu (shared by both layouts) */
+  /* Profile picker menu */
   .profile-menu {
     position: absolute;
     min-width: 180px;
@@ -242,22 +244,18 @@
   .profile-item .ticon { width: 14px; }
   .profile-item .default-hint { margin-left: auto; font-size: 11px; color: var(--ink3); }
 
-  /* Terminal viewport */
-  .termhost { flex: 1; min-width: 0; display: flex; }
+  /* ── Terminal & panes ── */
+  .termhost { flex: 1; min-width: 0; display: flex; position: relative; }
   .term {
-    flex: 1; min-width: 0;
+    flex: 1; min-width: 0; min-height: 0;
     background: var(--termbg);
     font-family: var(--mono);
     font-size: 13px; line-height: 1.55; font-weight: 400;
     padding: 14px 18px;
     overflow-y: auto;
-    border-top: 1px solid var(--border-soft);
+    cursor: text;
     transition: background .18s ease;
   }
-  .window[data-tabs="vertical"] .term { border-top: none; }
-  .window[data-tabs="horizontal"] .term { border-top: none; }
-  .window[data-tabs="horizontal"] .panel-toggle { display: none; }
-  .term { cursor: text; }
   .dim { color: var(--ink3); }
   .prompt { color: var(--prompt); font-weight: 700; }
   .cursor {
@@ -266,34 +264,39 @@
     animation: blink 1.1s step-end infinite;
   }
   @keyframes blink { 50% { opacity: 0; } }
-  @media (prefers-reduced-motion: reduce) {
-    .spinner, .cursor { animation: none; }
-    .rail { transition: none; }
-  }
 
-  /* ── Split panes + tab-drag docking ── */
-  .termhost { position: relative; }
   .split { flex: 1; min-width: 0; min-height: 0; display: flex; }
   .split-row { flex-direction: row; }
   .split-col { flex-direction: column; }
+  .split-row > * + * { border-left: 1px solid var(--border); }
+  .split-col > * + * { border-top: 1px solid var(--border); }
   .pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-  .split-row .pane + .pane { border-left: 1px solid var(--border); }
-  .split-col .pane + .pane { border-top: 1px solid var(--border); }
+  /* Every pane header is identical; only the focus accent differs. */
   .panehead {
-    flex: none; display: flex; align-items: center; gap: 7px;
-    padding: 4px 10px; font-size: 11.5px; color: var(--ink3);
-    background: var(--panel); border-bottom: 1px solid var(--border-soft);
+    flex: none; position: relative;
+    display: flex; align-items: center; gap: 7px;
+    height: 26px; padding: 0 6px 0 11px;
+    font-size: 11.5px; color: var(--ink3);
+    border-bottom: 1px solid var(--border-soft);
+    cursor: grab; user-select: none;
   }
+  .panehead::before {
+    content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1.5px;
+    background: var(--accent); opacity: 0;
+  }
+  .pane.focused .panehead { color: var(--ink); }
+  .pane.focused .panehead::before { opacity: 1; }
+  .pane.focused .panehead .ticon { color: var(--accent); }
   .panehead .ticon { width: auto; }
-  .pane.focused .panehead { color: var(--ink); box-shadow: inset 0 2px 0 var(--accent); }
+  .panehead .ptitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .panehead .pane-close {
     margin-left: auto; width: 17px; height: 17px; border-radius: 4px;
     display: flex; align-items: center; justify-content: center;
-    color: var(--ink3); cursor: pointer;
+    color: var(--ink3); cursor: pointer; visibility: hidden; flex: none;
   }
+  .pane:hover .pane-close { visibility: visible; }
   .panehead .pane-close:hover { background: var(--active); color: var(--ink); }
   .panehead .pane-close svg { width: 8px; height: 8px; pointer-events: none; }
-  .pane .term { border-top: none; }
 
   #dock-preview {
     position: absolute; z-index: 25; pointer-events: none;
@@ -313,11 +316,16 @@
   .drag-ghost .ticon { width: auto; }
   body.dragging { user-select: none; cursor: grabbing; }
 
-  /* ── Settings — clean Notion-like panel ── */
+  @media (prefers-reduced-motion: reduce) {
+    .spinner, .cursor { animation: none; }
+    .rail { transition: none; }
+  }
+
+  /* ── Settings ── */
   .overlay {
     position: absolute; inset: 0;
     background: rgba(15,15,15,.35);
-    display: none; z-index: 10;
+    display: none; z-index: 40;
   }
   .overlay.show { display: block; }
   .settings {
@@ -328,10 +336,7 @@
     border-radius: 10px;
     box-shadow: var(--shadow);
   }
-  .settings header {
-    display: flex; align-items: center;
-    padding: 16px 10px 10px 22px;
-  }
+  .settings header { display: flex; align-items: center; padding: 16px 10px 10px 22px; }
   .settings header h1 { margin: 0; font-size: 16px; font-weight: 600; flex: 1; }
   .settings .content { padding: 2px 22px 18px; }
   .group-label {
@@ -348,7 +353,6 @@
   .row .title { font-size: 13.5px; color: var(--ink); }
   .row .desc { font-size: 12px; color: var(--ink3); margin-top: 1px; }
 
-  /* Minimal dropdown */
   .combo { position: relative; flex: none; }
   .combo > button {
     min-width: 118px;
@@ -371,7 +375,7 @@
     border-radius: 8px;
     box-shadow: 0 10px 28px rgba(0,0,0,.18);
     padding: 4px;
-    display: none; z-index: 20;
+    display: none; z-index: 50;
   }
   .combo.open .combo-menu { display: block; }
   .combo-item {
@@ -389,7 +393,6 @@
 </style>
 </head>
 <body>
-
 
 <svg style="display:none" xmlns="http://www.w3.org/2000/svg">
   <symbol id="i-min" viewBox="0 0 10 10"><path d="M0 5h10" stroke="currentColor" stroke-width="1"/></symbol>
@@ -432,7 +435,6 @@
       </header>
       <div class="content">
         <div class="group-label">Appearance</div>
-
         <div class="row">
           <div class="text">
             <div class="title">Theme</div>
@@ -447,7 +449,6 @@
             </div>
           </div>
         </div>
-
         <div class="row">
           <div class="text">
             <div class="title">Tab layout</div>
@@ -461,36 +462,39 @@
             </div>
           </div>
         </div>
-
       </div>
     </div>
   </div>
 </div>
 
 <script>
-  const state = {
-    tabs: [
-      tabFrom("PowerShell", "❯", powershell()),
-      tabFrom("claude", "✳", claude(), true),   /* demo: this tab is "working" */
-      tabFrom("wsl", "$", wsl()),
-    ],
-    active: 0,
-    layout: "horizontal",
-    theme: "system",
-    railCollapsed: false,
-  };
-
-  function tabFrom(title, icon, c, busy) {
-    return { title, icon, prompt: c.prompt, lines: c.lines, input: "", busy: !!busy };
-  }
-  function esc(s) {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
+  /* ══════════════════════════════════════════════════════════
+     Model: panes belong to the WINDOW (tmux-style).
+     - The tab strip is the session list — sessions never leave it.
+     - The window content is a binary split tree of panes (max 4).
+     - Active tab = the session shown in the FOCUSED pane.
+     - Sessions visible in other panes get a subtle "shown" tint.
+     - Clicking a session that's already visible focuses its pane.
+     - Drag a tab onto a pane edge → split that pane (recursive).
+       Drag onto pane center → that pane switches to the session.
+     - Drag a pane by its header → re-dock, or drop on the tab
+       strip to close the pane (session stays in the list).
+     ══════════════════════════════════════════════════════════ */
 
   const $ = (id) => document.getElementById(id);
   const closeSvg = `<svg><use href="#i-close"/></svg>`;
   const media = window.matchMedia("(prefers-color-scheme: dark)");
+  /* A pane must stay usable; splits that would go below this are not offered.
+     This — not an arbitrary pane count — is what limits how far you can split. */
+  const MIN_PANE_W = 260, MIN_PANE_H = 120;
 
+  let uidSeq = 1, leafSeq = 1;
+
+  function esc(s) {
+    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /* ── session factories ── */
   function powershell() {
     return { prompt: `<span class="prompt">❯ </span>`, lines: [
       `<span class="dim">BetterTerminal v0.1.0 — PowerShell 7.5</span>`,
@@ -522,7 +526,6 @@
       `<span class="dim">Microsoft Windows [Version 10.0.26200]</span>`,
     ]};
   }
-
   const PROFILES = [
     { title: "PowerShell", icon: "❯", make: powershell, default: true },
     { title: "WSL · Ubuntu", icon: "$", make: wsl },
@@ -530,61 +533,141 @@
     { title: "Command Prompt", icon: ">", make: cmdsh },
   ];
 
+  function mkSession(title, icon, c, busy) {
+    return { uid: uidSeq++, title, icon, prompt: c.prompt, lines: c.lines, input: "", busy: !!busy, unread: false };
+  }
+  function mkLeaf(uid) { return { type: "leaf", id: leafSeq++, uid }; }
+
+  const state = {
+    sessions: [
+      mkSession("PowerShell", "❯", powershell()),
+      mkSession("claude", "✳", claude(), true),
+      mkSession("wsl", "$", wsl()),
+    ],
+    layout: null,          // split tree
+    focus: null,           // focused leaf id
+    layoutMode: "horizontal",
+    theme: "system",
+    railCollapsed: false,
+  };
+  state.layout = mkLeaf(state.sessions[0].uid);
+  state.focus = state.layout.id;
+
+  /* ── tree helpers ── */
+  function leaves(node = state.layout, out = []) {
+    if (node.type === "leaf") out.push(node);
+    else { leaves(node.a, out); leaves(node.b, out); }
+    return out;
+  }
+  function findLeaf(id) { return leaves().find(l => l.id === id); }
+  function leafOfSession(uid) { return leaves().find(l => l.uid === uid); }
+  function session(uid) { return state.sessions.find(s => s.uid === uid); }
+  function focusedSession() { return session(findLeaf(state.focus).uid); }
+
+  function splitLeaf(leafId, zone, uid) {
+    const walk = (node) => {
+      if (node.type === "leaf") {
+        if (node.id !== leafId) return node;
+        const fresh = mkLeaf(uid);
+        const dir = (zone === "left" || zone === "right") ? "row" : "col";
+        const first = (zone === "left" || zone === "top");
+        state.focus = fresh.id;
+        return { type: "split", dir, a: first ? fresh : node, b: first ? node : fresh };
+      }
+      return { ...node, a: walk(node.a), b: walk(node.b) };
+    };
+    state.layout = walk(state.layout);
+  }
+  function removeLeaf(leafId) {
+    if (leaves().length === 1) return;
+    const walk = (node) => {
+      if (node.type === "leaf") return node;
+      if (node.a.type === "leaf" && node.a.id === leafId) return walk(node.b);
+      if (node.b.type === "leaf" && node.b.id === leafId) return walk(node.a);
+      return { ...node, a: walk(node.a), b: walk(node.b) };
+    };
+    state.layout = walk(state.layout);
+    if (!findLeaf(state.focus)) state.focus = leaves()[0].id;
+  }
+  /* place session uid at target leaf/zone; if it's shown elsewhere, move it */
+  function placeSession(uid, targetLeafId, zone) {
+    const old = leafOfSession(uid);
+    if (old && old.id === targetLeafId) return;
+    if (old) removeLeaf(old.id);                 /* moving a pane: vacate its old slot first */
+    const target = findLeaf(targetLeafId);
+    if (!target) { render(); return; }
+    if (zone === "center") {
+      target.uid = uid;
+      state.focus = target.id;
+    } else {
+      splitLeaf(targetLeafId, zone, uid);
+    }
+    const s = session(uid);
+    if (s) s.unread = false;
+    render();
+  }
+
+  /* ── theme ── */
   function applyTheme() {
     const resolved = state.theme === "system" ? (media.matches ? "dark" : "light") : state.theme;
     document.body.classList.toggle("dark", resolved === "dark");
   }
   media.addEventListener("change", () => { if (state.theme === "system") applyTheme(); });
 
+  /* ── render ── */
+  function iconHtml(s) {
+    return s.busy
+      ? `<span class="ticon-wrap"><span class="spinner"></span></span>`
+      : `<span class="ticon-wrap"><span class="ticon">${s.icon}</span>${s.unread ? `<span class="unreaddot"></span>` : ""}</span>`;
+  }
+  function termHtml(s, focused) {
+    return s.lines.map(l => `<div>${l}</div>`).join("") +
+      `<div>${s.prompt}<span>${esc(s.input)}</span>${focused ? `<span class="cursor"></span>` : ""}</div>`;
+  }
+  function renderNode(node) {
+    if (node.type === "leaf") {
+      const s = session(node.uid);
+      const focused = node.id === state.focus;
+      const multi = leaves().length > 1;
+      return `<div class="pane ${focused ? "focused" : ""}" data-leaf="${node.id}">
+        ${multi ? `<div class="panehead" data-leaf="${node.id}">${iconHtml(s)}<span class="ptitle">${s.title}</span>
+          <span class="pane-close" title="Close pane (session stays in tabs)">${closeSvg}</span></div>` : ""}
+        <div class="term" data-leaf="${node.id}">${termHtml(s, focused)}</div>
+      </div>`;
+    }
+    return `<div class="split split-${node.dir}">${renderNode(node.a)}${renderNode(node.b)}</div>`;
+  }
+
   function render() {
-    $("win").dataset.tabs = state.layout;
+    $("win").dataset.tabs = state.layoutMode;
     $("win").classList.toggle("rail-collapsed", state.railCollapsed);
 
-    const iconHtml = (t) => t.busy
-      ? `<span class="ticon-wrap"><span class="spinner"></span></span>`
-      : `<span class="ticon-wrap"><span class="ticon">${t.icon}</span>${t.unread ? `<span class="unreaddot"></span>` : ""}</span>`;
+    const activeUid = findLeaf(state.focus).uid;
+    const shownUids = new Set(leaves().map(l => l.uid));
 
-    $("tabstrip").innerHTML = state.tabs.map((t, i) => `
-      <div class="tab ${i === state.active ? "active" : ""}" data-i="${i}">
-        ${iconHtml(t)}<span class="ttitle">${t.title}</span><span class="close" data-close="${i}">${closeSvg}</span>
+    const tabAttrs = (s) => `${s.uid === activeUid ? "active" : ""} ${shownUids.has(s.uid) && s.uid !== activeUid ? "shown" : ""}`;
+
+    $("tabstrip").innerHTML = state.sessions.map(s => `
+      <div class="tab ${tabAttrs(s)}" data-uid="${s.uid}">
+        ${iconHtml(s)}<span class="ttitle">${s.title}</span><span class="close" data-close="${s.uid}">${closeSvg}</span>
       </div>`).join("") + `<button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button>`;
 
-    $("rail").innerHTML = `<div class="label">Tabs</div>` + state.tabs.map((t, i) => `
-      <div class="vtab ${i === state.active ? "active" : ""}" data-i="${i}">
-        ${iconHtml(t)}<span class="title">${t.title}</span><span class="close" data-close="${i}">${closeSvg}</span>
+    $("rail").innerHTML = `<div class="label">Tabs</div>` + state.sessions.map(s => `
+      <div class="vtab ${tabAttrs(s)}" data-uid="${s.uid}">
+        ${iconHtml(s)}<span class="title">${s.title}</span><span class="close" data-close="${s.uid}">${closeSvg}</span>
       </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg>New tab</button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
 
-    /* content area: single terminal, or two docked panes after a tab drag */
-    const main = state.tabs[state.active];
-    if (!state.split) {
-      state.focus = "main";
-      $("termhost").innerHTML = `<div class="term" data-pane="main">${termHtml(main, true)}</div><div id="dock-preview"></div>`;
-    } else {
-      const s = state.split;
-      const dir = (s.zone === "left" || s.zone === "right") ? "split-row" : "split-col";
-      const paneHtml = (tab, key, focused) => `
-        <div class="pane ${focused ? "focused" : ""}" data-pane="${key}">
-          <div class="panehead"><span class="ticon">${tab.icon}</span>${tab.title}
-            ${key === "second" ? `<span class="pane-close" title="Return to tabs">${closeSvg}</span>` : ""}</div>
-          <div class="term">${termHtml(tab, focused)}</div>
-        </div>`;
-      const secondFirst = (s.zone === "left" || s.zone === "top");
-      const mainP = paneHtml(main, "main", state.focus === "main");
-      const secP = paneHtml(s.tab, "second", state.focus === "second");
-      $("termhost").innerHTML = `<div class="split ${dir}">${secondFirst ? secP + mainP : mainP + secP}</div><div id="dock-preview"></div>`;
-    }
+    $("termhost").innerHTML = renderNode(state.layout) + `<div id="dock-preview"></div>`;
     document.querySelectorAll("#termhost .term").forEach(el => { el.scrollTop = el.scrollHeight; });
 
+    /* bindings */
     document.querySelectorAll(".tab, .vtab").forEach(el => {
       el.addEventListener("click", (e) => {
         const closeEl = e.target.closest(".close");
-        if (closeEl) { closeTab(+closeEl.dataset.close); e.stopPropagation(); return; }
-        state.active = +el.dataset.i;
-        state.focus = "main";
-        state.tabs[state.active].unread = false;
-        render();
+        if (closeEl) { closeSession(+closeEl.dataset.close); e.stopPropagation(); return; }
+        selectSession(+el.dataset.uid);
       });
-      el.addEventListener("pointerdown", (e) => startDrag(e, el));
+      el.addEventListener("pointerdown", (e) => startDrag(e, { kind: "tab", uid: +el.dataset.uid }));
     });
     document.querySelectorAll(".nt-main").forEach(el =>
       el.addEventListener("click", () => newTab(PROFILES.find(p => p.default))));
@@ -592,36 +675,51 @@
       el.addEventListener("click", (e) => { e.stopPropagation(); openProfileMenu(el); }));
     document.querySelectorAll(".pane").forEach(el =>
       el.addEventListener("click", (e) => {
-        if (e.target.closest(".pane-close")) { closePane(); return; }
-        if (state.focus !== el.dataset.pane) { state.focus = el.dataset.pane; render(); }
+        if (e.target.closest(".pane-close")) { removeLeaf(+el.dataset.leaf); render(); return; }
+        const id = +el.dataset.leaf;
+        if (state.focus !== id) {
+          state.focus = id;
+          const s = session(findLeaf(id).uid);
+          if (s) s.unread = false;
+          render();
+        }
+      }));
+    document.querySelectorAll(".panehead").forEach(el =>
+      el.addEventListener("pointerdown", (e) => {
+        if (e.target.closest(".pane-close")) return;
+        startDrag(e, { kind: "pane", leafId: +el.dataset.leaf, uid: findLeaf(+el.dataset.leaf).uid });
       }));
   }
 
-  function termHtml(tab, focused) {
-    return tab.lines.map(l => `<div>${l}</div>`).join("") +
-      `<div>${tab.prompt}<span>${esc(tab.input)}</span>${focused ? `<span class="cursor"></span>` : ""}</div>`;
+  function selectSession(uid) {
+    const shownIn = leafOfSession(uid);
+    if (shownIn) state.focus = shownIn.id;           /* already visible → jump to its pane */
+    else findLeaf(state.focus).uid = uid;            /* not visible → focused pane shows it */
+    session(uid).unread = false;
+    render();
   }
 
-  function currentTab() {
-    return (state.split && state.focus === "second") ? state.split.tab : state.tabs[state.active];
-  }
-
-  function closeTab(i) {
-    if (state.tabs.length === 1) return;
-    state.tabs.splice(i, 1);
-    state.active = Math.min(state.active, state.tabs.length - 1);
+  function closeSession(uid) {
+    if (state.sessions.length === 1) return;
+    const l = leafOfSession(uid);
+    if (l && leaves().length > 1) removeLeaf(l.id);
+    state.sessions = state.sessions.filter(s => s.uid !== uid);
+    const still = leafOfSession(uid);                 /* it was the only pane */
+    if (still) still.uid = state.sessions[0].uid;
+    if (!findLeaf(state.focus)) state.focus = leaves()[0].id;
     render();
   }
 
   function newTab(profile) {
-    state.tabs.push(tabFrom(profile.title.split(" ·")[0], profile.icon, profile.make()));
-    state.active = state.tabs.length - 1;
+    const s = mkSession(profile.title.split(" ·")[0], profile.icon, profile.make());
+    state.sessions.push(s);
+    findLeaf(state.focus).uid = s.uid;
     render();
   }
 
-  /* Fake command execution — enough to feel the input loop and the busy animation */
+  /* ── input & fake execution ── */
   function runCommand() {
-    const t = currentTab();
+    const t = focusedSession();
     const cmd = t.input;
     t.input = "";
     t.lines.push(t.prompt + esc(cmd));
@@ -633,12 +731,10 @@
     setTimeout(() => {
       t.busy = false;
       t.lines.push(...fakeOutput(cmd));
-      const visible = t === state.tabs[state.active] || (state.split && t === state.split.tab);
-      if (!visible) t.unread = true;   /* finished in background → unread dot */
+      if (!leafOfSession(t.uid)) t.unread = true;    /* finished off-screen → unread */
       render();
     }, 1600);
   }
-
   function fakeOutput(cmd) {
     const parts = cmd.trim().split(/\s+/), head = parts[0], rest = parts.slice(1);
     switch (head) {
@@ -652,8 +748,112 @@
     }
   }
 
-  /* Profile picker — same semantics in both layouts:
-     plus = default profile, chevron = pick a profile */
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      $("settings-overlay").classList.remove("show");
+      $("profile-menu").classList.remove("show");
+      document.querySelectorAll(".combo").forEach(c => c.classList.remove("open"));
+      return;
+    }
+    if ($("settings-overlay").classList.contains("show")) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const t = focusedSession();
+    if (e.key === "Enter") { e.preventDefault(); runCommand(); }
+    else if (e.key === "Backspace") { e.preventDefault(); t.input = t.input.slice(0, -1); render(); }
+    else if (e.key.length === 1) { e.preventDefault(); t.input += e.key; render(); }
+  });
+
+  /* ── drag & dock (tabs AND panes share one engine) ── */
+  let drag = null;
+  function startDrag(e, src) {
+    if (e.button !== 0 || e.target.closest(".close")) return;
+    drag = { ...src, x0: e.clientX, y0: e.clientY, started: false, ghost: null, target: null };
+  }
+  function stripEls() {
+    return state.layoutMode === "horizontal" ? [$("tabstrip")] : [$("rail")];
+  }
+  document.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    if (!drag.started) {
+      if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 6) return;
+      drag.started = true;
+      document.body.classList.add("dragging");
+      const s = session(drag.uid);
+      const g = document.createElement("div");
+      g.className = "drag-ghost";
+      g.innerHTML = `<span class="ticon">${s.icon}</span>${s.title}`;
+      document.body.appendChild(g);
+      drag.ghost = g;
+    }
+    drag.ghost.style.left = (e.clientX + 10) + "px";
+    drag.ghost.style.top = (e.clientY + 8) + "px";
+
+    const pv = $("dock-preview");
+    drag.target = null;
+    stripEls().forEach(el => el.classList.remove("tabstrip-drop"));
+
+    /* over the tab strip? (pane drag → close pane; tab drag → no-op) */
+    for (const el of stripEls()) {
+      const r = el.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
+        if (drag.kind === "pane" && leaves().length > 1) {
+          drag.target = { strip: true };
+          el.classList.add("tabstrip-drop");
+        }
+        pv.classList.remove("show");
+        return;
+      }
+    }
+
+    /* over a pane? zone is relative to THAT pane */
+    const host = $("termhost").getBoundingClientRect();
+    let hit = null;
+    for (const el of document.querySelectorAll("#termhost .pane, #termhost > .term")) {
+      const r = el.getBoundingClientRect();
+      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) { hit = { el, r }; break; }
+    }
+    if (!hit) { pv.classList.remove("show"); return; }
+    const leafId = +hit.el.dataset.leaf;
+    const rx = (e.clientX - hit.r.left) / hit.r.width;
+    const ry = (e.clientY - hit.r.top) / hit.r.height;
+    let zone = rx < 0.25 ? "left" : rx > 0.75 ? "right" : ry < 0.3 ? "top" : ry > 0.7 ? "bottom" : "center";
+    /* refuse splits that would make either half unusable */
+    if ((zone === "left" || zone === "right") && hit.r.width / 2 < MIN_PANE_W) zone = "center";
+    if ((zone === "top" || zone === "bottom") && hit.r.height / 2 < MIN_PANE_H) zone = "center";
+    /* dropping a session onto the pane that already shows it = pointless */
+    const target = findLeaf(leafId);
+    if (target && target.uid === drag.uid && (zone === "center" || drag.kind === "pane")) { pv.classList.remove("show"); return; }
+    drag.target = { leafId, zone };
+
+    /* preview rect (relative to termhost) */
+    let x = hit.r.left - host.left, y = hit.r.top - host.top, w = hit.r.width, h = hit.r.height;
+    if (zone === "left") w /= 2;
+    if (zone === "right") { x += w / 2; w /= 2; }
+    if (zone === "top") h /= 2;
+    if (zone === "bottom") { y += h / 2; h /= 2; }
+    pv.style.left = x + "px"; pv.style.top = y + "px";
+    pv.style.width = w + "px"; pv.style.height = h + "px";
+    pv.classList.add("show");
+  });
+  document.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (d.ghost) d.ghost.remove();
+    document.body.classList.remove("dragging");
+    const pv = $("dock-preview");
+    if (pv) pv.classList.remove("show");
+    stripEls().forEach(el => el.classList.remove("tabstrip-drop"));
+    if (!d.started || !d.target) return;
+    if (d.target.strip) {                       /* pane dropped on strip → close pane */
+      removeLeaf(d.leafId);
+      render();
+      return;
+    }
+    placeSession(d.uid, d.target.leafId, d.target.zone);
+  });
+
+  /* ── profile menu ── */
   function openProfileMenu(anchor) {
     const menu = $("profile-menu");
     menu.innerHTML = PROFILES.map((p, i) => `
@@ -674,120 +874,14 @@
     menu.style.top = (a.bottom - win.top + 4) + "px";
     menu.style.left = Math.min(a.left - win.left, win.width - mw - 8) + "px";
   }
+  document.addEventListener("click", () => $("profile-menu").classList.remove("show"));
 
-  /* Settings dialog */
+  /* ── settings dialog ── */
   $("btn-settings").addEventListener("click", () => $("settings-overlay").classList.add("show"));
   $("btn-close-settings").addEventListener("click", () => $("settings-overlay").classList.remove("show"));
   $("settings-overlay").addEventListener("click", (e) => {
     if (e.target === $("settings-overlay")) $("settings-overlay").classList.remove("show");
   });
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") {
-      $("settings-overlay").classList.remove("show");
-      $("profile-menu").classList.remove("show");
-      document.querySelectorAll(".combo").forEach(c => c.classList.remove("open"));
-      return;
-    }
-    /* Terminal input — goes to the focused pane, active whenever no dialog is open */
-    if ($("settings-overlay").classList.contains("show")) return;
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const t = currentTab();
-    if (e.key === "Enter") { e.preventDefault(); runCommand(); }
-    else if (e.key === "Backspace") { e.preventDefault(); t.input = t.input.slice(0, -1); render(); }
-    else if (e.key.length === 1) { e.preventDefault(); t.input += e.key; render(); }
-  });
-  document.addEventListener("click", () => $("profile-menu").classList.remove("show"));
-
-  /* Sidebar collapse */
-  $("btn-rail").addEventListener("click", () => {
-    state.railCollapsed = !state.railCollapsed;
-    render();
-  });
-
-  /* ── Tab drag → docked pane (VS Code style, with drop-zone preview) ── */
-  let drag = null;
-  function startDrag(e, el) {
-    if (e.button !== 0 || e.target.closest(".close")) return;
-    drag = { i: +el.dataset.i, x0: e.clientX, y0: e.clientY, started: false, ghost: null, zone: null };
-  }
-  document.addEventListener("pointermove", (e) => {
-    if (!drag) return;
-    if (!drag.started) {
-      if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 6) return;
-      if (state.tabs.length < 2) { drag = null; return; }   /* can't tear out the only tab */
-      drag.started = true;
-      document.body.classList.add("dragging");
-      const t = state.tabs[drag.i];
-      const g = document.createElement("div");
-      g.className = "drag-ghost";
-      g.innerHTML = `<span class="ticon">${t.icon}</span>${t.title}`;
-      document.body.appendChild(g);
-      drag.ghost = g;
-    }
-    drag.ghost.style.left = (e.clientX + 10) + "px";
-    drag.ghost.style.top = (e.clientY + 8) + "px";
-
-    const host = $("termhost").getBoundingClientRect();
-    let zone = null;
-    if (e.clientX >= host.left && e.clientX <= host.right && e.clientY >= host.top && e.clientY <= host.bottom) {
-      const rx = (e.clientX - host.left) / host.width;
-      const ry = (e.clientY - host.top) / host.height;
-      zone = rx < 0.25 ? "left" : rx > 0.75 ? "right" : ry < 0.3 ? "top" : ry > 0.7 ? "bottom" : null;
-    }
-    drag.zone = zone;
-    const pv = $("dock-preview");
-    if (!zone) { pv.classList.remove("show"); return; }
-    const r = { left: 0, top: 0, width: 100, height: 100 };
-    if (zone === "left") r.width = 50;
-    if (zone === "right") { r.left = 50; r.width = 50; }
-    if (zone === "top") r.height = 50;
-    if (zone === "bottom") { r.top = 50; r.height = 50; }
-    pv.style.left = r.left + "%"; pv.style.top = r.top + "%";
-    pv.style.width = r.width + "%"; pv.style.height = r.height + "%";
-    pv.classList.add("show");
-  });
-  document.addEventListener("pointerup", () => {
-    if (!drag) return;
-    const { started, zone, i, ghost } = drag;
-    if (ghost) ghost.remove();
-    document.body.classList.remove("dragging");
-    const pv = $("dock-preview");
-    if (pv) pv.classList.remove("show");
-    drag = null;
-    if (started && zone != null) performSplit(i, zone);
-  });
-
-  function performSplit(i, zone) {
-    if (state.split) state.tabs.push(state.split.tab);   /* previous docked tab returns to the strip */
-    const t = state.tabs.splice(i, 1)[0];
-    t.unread = false;
-    if (state.active >= i && state.active > 0) state.active--;
-    state.active = Math.min(state.active, state.tabs.length - 1);
-    state.split = { zone, tab: t };
-    state.focus = "second";
-    render();
-  }
-  function closePane() {
-    state.tabs.push(state.split.tab);
-    state.split = null;
-    state.focus = "main";
-    render();
-  }
-
-  /* Demo: the claude tab is "working"; it finishes after a while —
-     if you're not looking at it, it gets the unread dot */
-  setTimeout(() => {
-    const c = state.tabs.find(x => x.title === "claude") || (state.split && state.split.tab.title === "claude" ? state.split.tab : null);
-    if (c && c.busy) {
-      c.busy = false;
-      c.lines.push(`<span class="dim">✓ Done — 3 files changed.</span>`);
-      const visible = c === state.tabs[state.active] || (state.split && c === state.split.tab);
-      if (!visible) c.unread = true;
-      render();
-    }
-  }, 6000);
-
-  /* Dropdowns */
   document.querySelectorAll(".combo").forEach(combo => {
     const btn = combo.querySelector("button");
     btn.addEventListener("click", (e) => {
@@ -803,11 +897,28 @@
         combo.querySelector(".value").textContent = item.dataset.v[0].toUpperCase() + item.dataset.v.slice(1);
         combo.classList.remove("open");
         const kind = combo.dataset.combo;
-        if (kind === "layout") { state.layout = item.dataset.v; render(); }
+        if (kind === "layout") { state.layoutMode = item.dataset.v; render(); }
         if (kind === "theme") { state.theme = item.dataset.v; applyTheme(); }
       }));
   });
   document.addEventListener("click", () => document.querySelectorAll(".combo").forEach(c => c.classList.remove("open")));
+
+  /* sidebar collapse */
+  $("btn-rail").addEventListener("click", () => {
+    state.railCollapsed = !state.railCollapsed;
+    render();
+  });
+
+  /* demo: claude is working; finishes in 6s → unread if off-screen */
+  setTimeout(() => {
+    const c = state.sessions.find(x => x.title === "claude");
+    if (c && c.busy) {
+      c.busy = false;
+      c.lines.push(`<span class="dim">✓ Done — 3 files changed.</span>`);
+      if (!leafOfSession(c.uid)) c.unread = true;
+      render();
+    }
+  }, 6000);
 
   applyTheme();
   render();
