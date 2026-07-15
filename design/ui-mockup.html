@@ -156,8 +156,12 @@
      joining the terminal below it, and said better. */
   .ticon-wrap { position: relative; display: inline-flex; flex: none; align-items: center; }
   /* working = the icon itself breathes. Nothing is added to the tab; the thing
-     that is alive is the terminal, so the thing that breathes is its icon. */
-  .ticon.working { color: var(--accent); animation: breathe 1.7s ease-in-out infinite; }
+     that is alive is the terminal, so the thing that breathes is its icon.
+     No colour: a mark carries its own, so `color` here would paint nothing, and
+     the accent belongs to the unread dot — running and finished-unread are
+     different claims and must not arrive in the same colour. Breathing is a
+     channel of its own, which is what lets the two coexist on one icon. */
+  .ticon.working { animation: breathe 1.7s ease-in-out infinite; }
   @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .28; } }
   /* finished-but-unread = static dot */
   .unreaddot {
@@ -174,7 +178,12 @@
     display: flex; align-items: center; justify-content: center;
     font-variant-numeric: tabular-nums;
   }
-  .tab.active .panecount, .vtab.active .panecount { background: var(--accent); color: #fff; }
+  /* The badge counts panes. That is all it ever meant, so it looks the same on
+     every tab — filling it with the accent on the active tab made it say "you
+     are here" in the colour reserved for "that one wants you", right in the
+     strip where unread dots live and the eye is scanning for exactly that. The
+     active tab is already unmistakable: it is the one joined to the terminal. */
+  .tab.active .panecount, .vtab.active .panecount { color: var(--ink); }
   .tab .close, .vtab .close {
     width: 17px; height: 17px; border-radius: 4px; flex: none;
     display: flex; align-items: center; justify-content: center;
@@ -596,12 +605,20 @@
     cursor: grab; user-select: none;
     transition: background .12s ease, color .12s ease;
   }
+  /* Focus is a step in contrast, not a hue — and the reason is a collision, not
+     taste. The accent already means "something over there wants you": it is the
+     unread dot. Tinting the focused pane with it made one colour say both "you
+     are here" and "look away from here", side by side in the same row, in a
+     product whose whole thesis is deciding where to look. Neutral, the only
+     accent left in that row is the dot, and the eye goes to it.
+     Dark made it obvious first because the dark accent is light and saturated,
+     so tinting a dark surface with it moves lightness AND hue at once, landing
+     on the OS selection-highlight this design is not written in. But the
+     collision was there in both themes; only its loudness differed. */
   .pane.focused .panehead {
     color: var(--ink);
-    background: color-mix(in srgb, var(--accent) 9%, transparent);
-    border-bottom-color: color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--active);
   }
-  .pane.focused .panehead .ticon { color: var(--accent); }
   .panehead .ticon { width: auto; }
   .panehead .ptitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .panehead .pane-close {
@@ -665,7 +682,10 @@
     font-size: 10.5px; color: var(--ink3);
     overflow: hidden; white-space: nowrap;
   }
-  .mini-leaf.focused { border-color: var(--accent); color: var(--ink); }
+  /* neutral for the same reason the pane header is: this peek shows unread dots
+     too, so "the focused one" and "the one wanting you" would arrive in one
+     colour inside one popup */
+  .mini-leaf.focused { border-color: var(--ink3); background: var(--active); color: var(--ink); }
   .mini-leaf .ticon { width: auto; font-size: 9px; }
   .mini-leaf .mtitle { overflow: hidden; text-overflow: ellipsis; }
 
