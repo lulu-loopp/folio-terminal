@@ -355,12 +355,34 @@
      place at the spot it would take, the way a browser slots a dragged tab in. */
   .drop-preview {
     pointer-events: none;
+    /* over everything else in the strip, including the active tab's corners.
+       The active tab paints its concave corners OUTSIDE its own box, on top of
+       its neighbours (that is what makes it read as joined to the terminal), so
+       a preview landing next to it was getting a bite taken out of its edge by a
+       corner belonging to a tab that is not even involved in the drag. This is
+       the only thing in the strip the eye should be following, so it goes above
+       the z-index: 1 those corners ride on. */
+    z-index: 2;
     background: color-mix(in srgb, var(--accent) 9%, transparent);
     box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--accent);
   }
   .drop-preview .ticon { color: var(--accent); }
   .rail .drop-preview { border-radius: 6px; }
+  /* The tab landing where the preview stood. The preview already holds the slot,
+     so nothing around it moves — but without this the accent outline blinks
+     straight into an ordinary tab, and a hand-off with no transition reads as the
+     thing appearing out of nowhere rather than as the one you were dragging
+     coming to rest. Only the `from` is written: the animation ends at whatever
+     the tab already is, so it needs no knowledge of the tab's real styling. */
+  @keyframes tab-land {
+    from {
+      background: color-mix(in srgb, var(--accent) 9%, transparent);
+      box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
+    }
+  }
+  .tab.landing, .vtab.landing { animation: tab-land .2s cubic-bezier(.2, 0, 0, 1); }
+  @media (prefers-reduced-motion: reduce) { .tab.landing, .vtab.landing { animation: none; } }
 
   /* the tab you are holding rides above the ones getting out of its way */
   .tab.grabbed, .vtab.grabbed { z-index: 20; }
@@ -705,6 +727,17 @@
     opacity: 0; transition: opacity .1s ease, left .12s ease, top .12s ease, width .12s ease, height .12s ease;
   }
   #dock-preview.show { opacity: 1; }
+  /* Aimed at an edge that cannot split, because the halves would be narrower than
+     a terminal has any business being. Refusing silently was the bug: nothing
+     appeared at all, so "this pane is too narrow to divide" and "this app is
+     broken" looked exactly the same, and the only way to tell was to already know
+     the rule. It shows the pane it will not cut, with a dashed edge and no fill —
+     the shape says "I heard you", the absence of fill says "nothing lands here".
+     Not red: this is not an error, it is a limit. */
+  #dock-preview.refused {
+    background: none;
+    border: 1.5px dashed var(--ink3);
+  }
   .drag-ghost {
     position: fixed; z-index: 100; pointer-events: none;
     display: flex; align-items: center; gap: 7px;
@@ -1243,6 +1276,18 @@
     };
     w.tree = walk(w.tree);
   }
+  /* Split the WHOLE layout, not a pane inside it.
+     Without this there was no gesture for "put this alongside everything" — every
+     drop zone belonged to a leaf, so with two panes stacked you could only ever
+     add a third beside the TOP one or beside the BOTTOM one. Asking for a column
+     down the side of both was simply not expressible: the shape the user wanted
+     needed the root split, and the root had no edge you could aim at. */
+  function splitRootOf(w, zone, subtree) {
+    const dir = (zone === "left" || zone === "right") ? "row" : "col";
+    const first = (zone === "left" || zone === "top");
+    w.tree = { type: "split", id: splitSeq++, dir, ratio: 0.5,
+               a: first ? subtree : w.tree, b: first ? w.tree : subtree };
+  }
   /* detach a leaf, promoting its sibling; returns the leaf (null if it was the last one) */
   function detachLeaf(w, leafId) {
     if (paneCount(w) <= 1) return null;
@@ -1263,12 +1308,18 @@
     const src = tabById(srcWsId), tgt = activeTab();
     if (!src || src.id === tgt.id) return;
     const before = snapshotPanes();
+    /* the mirror of the landing above: this tab leaves the strip, so the ones
+       beside it have to close the gap — and closing it in one frame is the same
+       jump, just in the other direction */
+    const beforeStrip = snapshotStrip();
     const keepFocus = focusedLeaf(src).id;
-    splitLeafIn(tgt, targetLeafId, zone, src.tree);
+    if (targetLeafId == null) splitRootOf(tgt, zone, src.tree);
+    else splitLeafIn(tgt, targetLeafId, zone, src.tree);
     tgt.focus = keepFocus;
     state.tabs = state.tabs.filter(w => w.id !== srcWsId);
     leavesOf(tgt.tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
     renderWithPaneFlip(before);
+    playStripFlip(beforeStrip);
   }
   /* pane dropped on the strip → leaves the layout, becomes its own tab at that slot */
   function extractPaneToTab(leafId, index) {
@@ -1280,6 +1331,12 @@
     const at = index == null ? state.tabs.indexOf(w) + 1 : Math.min(index, state.tabs.length);
     state.tabs.splice(at, 0, nw);
     renderWithPaneFlip(before);   /* stay in the layout you were in; the pane waits in the strip */
+    /* hand the drag over to the strip: the accent releases into an ordinary tab */
+    const landed = stripEl().querySelector(`[data-ws="${nw.id}"]`);
+    if (landed) {
+      landed.classList.add("landing");
+      setTimeout(() => landed.classList.remove("landing"), 240);
+    }
   }
   /* pane dropped on another pane's edge → rearrange inside the layout */
   function movePane(leafId, targetLeafId, zone) {
@@ -1287,8 +1344,10 @@
     if (leafId === targetLeafId) return;
     const before = snapshotPanes();
     const leaf = detachLeaf(w, leafId);
-    if (!leaf || !findLeafIn(w, targetLeafId)) { render(); return; }
-    splitLeafIn(w, targetLeafId, zone, leaf);
+    if (!leaf) { render(); return; }
+    if (targetLeafId == null) splitRootOf(w, zone, leaf);           /* alongside everything */
+    else if (!findLeafIn(w, targetLeafId)) { render(); return; }
+    else splitLeafIn(w, targetLeafId, zone, leaf);
     w.focus = leaf.id;
     renderWithPaneFlip(before);
   }
@@ -1389,6 +1448,38 @@
   const paneBadge = (w) =>
     paneCount(w) > 1 ? `<span class="panecount">${paneCount(w)}</span>` : "";
 
+  /* ── scroll memory ──
+     Every render rebuilds the panes from innerHTML, and the old code answered the
+     resulting "where was I?" with "the bottom, always". So any render at all —
+     switching tabs, dragging one, opening settings — hauled every terminal down
+     to its last line, and with several panes open they all lurched at once.
+     A terminal follows its tail while you are AT the tail, and stops the moment
+     you scroll up to read something: that is the behaviour every terminal has,
+     and it is why the position has to be remembered per session rather than
+     recomputed. Anchored to the session, not the pane, so a session keeps its
+     place across being dragged between panes and tabs.
+     The threshold exists because a tail-following terminal is rarely at exactly
+     scrollHeight: one fractional line, a reflow, a zoom level and it sits a pixel
+     short, which must not read as "the user scrolled up". */
+  const TAIL_SLACK = 24;
+  function rememberScroll() {
+    document.querySelectorAll("#termhost .term").forEach(el => {
+      const s = session(+el.dataset.uid);
+      if (!s) return;
+      s.scrollTop = el.scrollTop;
+      s.atTail = el.scrollHeight - el.clientHeight - el.scrollTop <= TAIL_SLACK;
+    });
+  }
+  function restoreScroll() {
+    document.querySelectorAll("#termhost .term").forEach(el => {
+      const s = session(+el.dataset.uid);
+      if (!s) return;
+      /* a session seen for the first time starts at its tail, like a terminal you
+         just opened; one you had scrolled up in comes back where you left it */
+      el.scrollTop = s.atTail === false ? s.scrollTop : el.scrollHeight;
+    });
+  }
+
   function termHtml(s, focused) {
     return s.lines.map(l => `<div>${l}</div>`).join("") +
       `<div>${s.prompt}<span>${esc(s.input)}</span>${focused ? `<span class="cursor"></span>` : ""}</div>`;
@@ -1402,7 +1493,7 @@
         <div class="pane-inner">
           ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.title}</span>
             <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : ""}
-          <div class="term" data-leaf="${node.id}">${termHtml(s, focused)}</div>
+          <div class="term" data-leaf="${node.id}" data-uid="${s.uid}">${termHtml(s, focused)}</div>
         </div>
       </div>`;
     }
@@ -1453,9 +1544,12 @@
         <span class="close" data-close="${w.id}">${closeSvg}</span>
       </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (${defaultProfile().title})"><span class="ticon"><svg><use href="#i-plus"/></svg></span><span>New tab</span></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
 
+    /* Remember where each terminal was BEFORE the DOM is thrown away — after the
+       innerHTML below, every .term is a new element scrolled to the top. */
+    rememberScroll();
     $("termhost").innerHTML = renderNode(aw.tree, aw) + `<div id="dock-preview"></div>`;
     typeset($("termhost"));
-    document.querySelectorAll("#termhost .term").forEach(el => { el.scrollTop = el.scrollHeight; });
+    restoreScroll();
 
     document.querySelectorAll(".math-tools button").forEach(btn =>
       btn.addEventListener("click", (e) => {
@@ -1916,14 +2010,60 @@
 
     /* over a pane? zones are relative to THAT pane */
     const host = $("termhost").getBoundingClientRect();
+    const insideHost = e.clientX >= host.left && e.clientX <= host.right &&
+                       e.clientY >= host.top && e.clientY <= host.bottom;
+    if (!insideHost) { pv.classList.remove("show"); pv.classList.remove("refused"); return; }
+    /* dragging the active tab onto its own layout is meaningless */
+    if (drag.kind === "tab" && drag.wsId === state.active) { pv.classList.remove("show"); return; }
+
+    /* The outer rim of the whole layout docks against the whole layout, not
+       against whichever pane happens to be under it. Without this there is no
+       way to ask for "a column beside all of it": with two panes stacked, every
+       zone belongs to the top pane or the bottom one, so the third pane can only
+       ever join one of them — the shape the user wants needs the ROOT split, and
+       the root had no edge to aim at.
+       It is tested BEFORE any pane is looked for, because the rim belongs to the
+       layout and not to a pane. Testing it after cost me the whole feature on the
+       first try: run the pane hit first and a pointer on the rim at the height of
+       a divider matches no pane, returns early, and never reaches the rim at all —
+       which is to say the gesture died exactly along the seam of the very layout
+       it exists to serve.
+       Being generous costs a pane's own edge zone nothing: a pane claims its outer
+       35% — around 190px on a half-width pane — so a 48px rim moves that zone
+       inward rather than displacing it, and both gestures stay reachable. With a
+       single pane the rim is skipped entirely, because splitting the root and
+       splitting the only pane are the same act. 22px was a 2%-of-the-window
+       ribbon asking for precision this gesture has not earned. */
+    const OUTER_RIM = 48;
+    const rim = { left: e.clientX - host.left, right: host.right - e.clientX,
+                  top: e.clientY - host.top, bottom: host.bottom - e.clientY };
+    const nearRim = Object.keys(rim).reduce((a, b) => rim[a] <= rim[b] ? a : b);
+    if (rim[nearRim] < OUTER_RIM && paneCount(activeTab()) > 1) {
+      const wouldSplit = (nearRim === "left" || nearRim === "right")
+        ? host.width / 2 >= MIN_PANE_W : host.height / 2 >= MIN_PANE_H;
+      drag.target = wouldSplit ? { leafId: null, zone: nearRim } : null;
+      pv.classList.toggle("refused", !wouldSplit);
+      let x = 0, y = 0, w = host.width, h = host.height;
+      if (wouldSplit) {
+        if (nearRim === "left") w /= 2;
+        if (nearRim === "right") { x = w / 2; w /= 2; }
+        if (nearRim === "top") h /= 2;
+        if (nearRim === "bottom") { y = h / 2; h /= 2; }
+      }
+      pv.style.left = x + "px"; pv.style.top = y + "px";
+      pv.style.width = w + "px"; pv.style.height = h + "px";
+      pv.classList.add("show");
+      return;
+    }
+    pv.classList.remove("refused");
+
+    /* inside the rim now: which pane is under the pointer? */
     let hit = null;
     for (const el of document.querySelectorAll("#termhost .pane")) {
       const r = el.getBoundingClientRect();
       if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) { hit = { el, r }; break; }
     }
-    if (!hit) { pv.classList.remove("show"); return; }
-    /* dragging the active tab onto its own layout is meaningless */
-    if (drag.kind === "tab" && drag.wsId === state.active) { pv.classList.remove("show"); return; }
+    if (!hit) { pv.classList.remove("show"); return; }   /* on a divider: nothing to aim at */
 
     const leafId = +hit.el.dataset.leaf;
     const rx = (e.clientX - hit.r.left) / hit.r.width;
@@ -1933,13 +2073,24 @@
     const d4 = { left: rx, right: 1 - rx, top: ry, bottom: 1 - ry };
     const near = Object.keys(d4).reduce((a, b) => d4[a] <= d4[b] ? a : b);
     let zone = d4[near] < 0.35 ? near : "center";
-    /* refuse splits that would leave either half unusable */
-    if ((zone === "left" || zone === "right") && hit.r.width / 2 < MIN_PANE_W) zone = "center";
-    if ((zone === "top" || zone === "bottom") && hit.r.height / 2 < MIN_PANE_H) zone = "center";
-    if (zone === "center" || (drag.kind === "pane" && drag.leafId === leafId)) { pv.classList.remove("show"); return; }
-    drag.target = { leafId, zone };
+    /* Refuse splits that would leave either half unusable — but say so. Folding
+       this into "center" made a refusal identical to aiming at nothing, which is
+       how a rule the user cannot see becomes an app that seems broken. */
+    const tooNarrow = (zone === "left" || zone === "right") && hit.r.width / 2 < MIN_PANE_W;
+    const tooShort = (zone === "top" || zone === "bottom") && hit.r.height / 2 < MIN_PANE_H;
+    if (zone === "center" || (drag.kind === "pane" && drag.leafId === leafId)) {
+      pv.classList.remove("show"); pv.classList.remove("refused"); return;
+    }
+    pv.classList.toggle("refused", tooNarrow || tooShort);
+    drag.target = (tooNarrow || tooShort) ? null : { leafId, zone };
 
     let x = hit.r.left - host.left, y = hit.r.top - host.top, w = hit.r.width, h = hit.r.height;
+    if (tooNarrow || tooShort) {          /* outline the whole pane it will not cut */
+      pv.style.left = x + "px"; pv.style.top = y + "px";
+      pv.style.width = w + "px"; pv.style.height = h + "px";
+      pv.classList.add("show");
+      return;
+    }
     if (zone === "left") w /= 2;
     if (zone === "right") { x += w / 2; w /= 2; }
     if (zone === "top") h /= 2;
@@ -1958,10 +2109,16 @@
     document.body.classList.remove("dragging");
     const pv = $("dock-preview");
     if (pv) pv.classList.remove("show");
-    clearDropPreview();
-    if (!d.started || !d.target) return;
-    if (d.target.reordered) return;                /* already done, live */
+    if (!d.started || !d.target || d.target.reordered) { clearDropPreview(); return; }
+    /* Do NOT clear the preview first. It is holding the slot the new tab is about
+       to take, and removing it makes the strip re-lay out — every tab widens to
+       close the gap — only for the render below to insert the tab and squeeze
+       them back. Two instant re-layouts that cancel out, which is the jerk you
+       see rather than a hand-off. render() rebuilds the strip and takes the
+       preview with it, so the tab lands in the slot the preview was already
+       keeping warm and nothing else moves at all. */
     if (d.target.strip) { extractPaneToTab(d.leafId, d.target.index); return; }
+    clearDropPreview();
     if (d.kind === "tab") mergeTabIntoPane(d.wsId, d.target.leafId, d.target.zone);
     else movePane(d.leafId, d.target.leafId, d.target.zone);
   });
