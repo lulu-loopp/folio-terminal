@@ -1896,18 +1896,22 @@
     const w = activeTab();
     const arriving = { type: "leaf", id: PLAN_ID };
     let tree = cloneTree(w.tree);
-    /* the same pluck the drop will do, rebalance included — the preview and the
-       result must not be two opinions */
-    if (movingLeafId != null) tree = pluckLeaf(tree, movingLeafId);
-    const dir = (zone === "left" || zone === "right") ? "row" : "col";
-    const first = (zone === "left" || zone === "top");
-    /* the centre takes the pane's place rather than dividing it: same box, same
-       everyone else, so nothing needs balancing */
+    /* The centre is decided BEFORE anything is plucked, because taking a pane's
+       place moves no boxes at all — the two panes trade what they hold, and the
+       layout is untouched. Deciding it after the pluck was wrong and quietly so:
+       the preview collapsed the dragged pane's slot and rebalanced its run,
+       while the drop just swapped the two sessions and moved nothing. Two
+       algorithms for one gesture, disagreeing. */
     if (zone === "center") {
       const walk = (n) => n.type === "leaf" ? (n.id === targetLeafId ? arriving : n)
                                             : { ...n, a: walk(n.a), b: walk(n.b) };
       return rectsOf(walk(tree), 0, 0, host.width, host.height);
     }
+    /* the same pluck the drop will do, rebalance included — the preview and the
+       result must not be two opinions */
+    if (movingLeafId != null) tree = pluckLeaf(tree, movingLeafId);
+    const dir = (zone === "left" || zone === "right") ? "row" : "col";
+    const first = (zone === "left" || zone === "top");
     let made = null;
     const mk = (node) => (made = { type: "split", id: PLAN_SPLIT, dir, ratio: 0.5,
                                    a: first ? arriving : node, b: first ? node : arriving });
@@ -2259,7 +2263,23 @@
       pv.classList.add("show");
       const sh = $("dock-shift");
       if (!fits) { sh?.classList.remove("show"); return; }
-      sh.innerHTML = rects.filter(r => r.id !== PLAN_ID)
+      /* A dashed box means "this pane moves". Drawing one for a pane that stays
+         exactly where it is says the opposite of what is true, and says it about
+         everyone at once — which is what taking a pane's place looked like, since
+         a replace moves nobody and every pane got an outline drawn over itself.
+         Rather than excusing the centre as a special case, the rule is the honest
+         one it always should have been: only the panes that actually move are
+         shown moving. It covers the quieter version too — split a pane inside a
+         column and the panes in some other column do not budge either. */
+      const movers = rects.filter(r => r.id !== PLAN_ID).filter(r => {
+        const el = document.querySelector(`#termhost .pane[data-leaf="${r.id}"]`);
+        if (!el) return true;
+        const b = el.getBoundingClientRect();
+        return Math.abs(b.left - host.left - r.x) > 0.5 || Math.abs(b.top - host.top - r.y) > 0.5
+            || Math.abs(b.width - r.w) > 0.5 || Math.abs(b.height - r.h) > 0.5;
+      });
+      if (!movers.length) { sh.classList.remove("show"); return; }
+      sh.innerHTML = movers
         .map(r => `<i style="left:${r.x + SHIFT_INSET}px;top:${r.y + SHIFT_INSET}px;` +
                   `width:${Math.max(0, r.w - SHIFT_INSET * 2)}px;` +
                   `height:${Math.max(0, r.h - SHIFT_INSET * 2)}px"></i>`).join("");
