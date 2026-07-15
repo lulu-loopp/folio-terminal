@@ -27,6 +27,17 @@
     --prompt: #5E6AD2;
     --thumb: rgba(55,53,47,.24);
     --thumb-hover: rgba(55,53,47,.42);
+    /* The focused pane's header. Not --active: that is a generic pressed tint,
+       and on this theme it composites to 237 — darker than --panel, which is the
+       darkest surface this design owns. A tone below the floor belongs to no
+       ladder and reads as a dirty grey band across white content.
+       Light and dark are not mirrors here, and the token says so rather than
+       hiding it in a number: light runs 247→255, so --panel IS the floor and
+       there is nothing below it to step to; dark runs 27→37 with headroom above,
+       where a lift past the chrome tone is what elevation has always looked
+       like. Either way the fill is the quiet half of the signal — the title
+       going from --ink3 to --ink is what the eye actually catches. */
+    --pane-focus: var(--panel);
     --termbg: #FFFFFF;
     --cursor: #37352F;
     --shadow: 0 16px 48px rgba(0,0,0,.13), 0 2px 8px rgba(0,0,0,.06);
@@ -48,6 +59,7 @@
     --prompt: #828FFF;
     --thumb: rgba(255,255,255,.22);
     --thumb-hover: rgba(255,255,255,.4);
+    --pane-focus: rgba(255,255,255,.09);   /* a lift, not a tint — see the light note */
     --termbg: #1B1B1B;
     --cursor: #D4D4D4;
     --shadow: 0 16px 48px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
@@ -617,7 +629,7 @@
      collision was there in both themes; only its loudness differed. */
   .pane.focused .panehead {
     color: var(--ink);
-    background: var(--active);
+    background: var(--pane-focus);
   }
   .panehead .ticon { width: auto; }
   .panehead .ptitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
