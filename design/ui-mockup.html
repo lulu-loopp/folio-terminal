@@ -1252,11 +1252,27 @@
   ];
   const defaultProfile = () => PROFILES[state.defaultProfile];
 
-  function mkSession(title, icon, c, busy) {
-    const s = { uid: uidSeq++, title, icon, prompt: c.prompt, lines: c.lines, input: "", busy: !!busy, unread: false };
+  /* A session is a profile AND a place, and it takes both to name one.
+     The strip used to read "[PowerShell icon] PowerShell", where the text repeated
+     what the icon had already said, and three agents working in three repos came
+     out as three identical rows. The directory is the thing that actually differs
+     — with N of the same agent running, it IS the identity — so the icon carries
+     the profile and the text carries the place. Together they are unique in both
+     directions: same icon, different repo; same repo, different icon.
+     Its source is OSC 7: the shell reports its cwd. This is not something we read
+     off the screen and hope about — which is exactly why it does not have to wait
+     behind global search the way "is it asking me a question?" does. */
+  function mkSession(title, icon, c, busy, cwd) {
+    const s = { uid: uidSeq++, title, icon, cwd: cwd || "~", prompt: c.prompt,
+                lines: c.lines, input: "", busy: !!busy, unread: false };
     state.sessions.push(s);
     return s;
   }
+  /* what to show when there is room for one word: the folder you are in */
+  const cwdLeaf = (s) => {
+    const p = (s.cwd || "~").replace(/[\\/]+$/, "");
+    return p.split(/[\\/]/).pop() || p;
+  };
   const mkLeaf = (uid) => ({ type: "leaf", id: leafSeq++, uid });
   function mkWs(session) {
     const leaf = mkLeaf(session.uid);
@@ -1276,10 +1292,12 @@
     blockMax: 0,             // px ceiling on a rendered block; 0 means none
     wrap: true,              // fold long lines (P2-9); rendered blocks follow it
   };
+  /* two claudes in two repos, and a shell in one of them: the case the strip has
+     to survive, and the case a profile name alone cannot */
   state.tabs = [
-    mkWs(mkSession("PowerShell", mark("pwsh"), powershell())),
-    mkWs(mkSession("claude", mark("claude"), claude(), true)),
-    mkWs(mkSession("wsl", mark("ubuntu"), wsl())),
+    mkWs(mkSession("PowerShell", mark("pwsh"), powershell(), false, "~/Developer/BetterTerminal")),
+    mkWs(mkSession("claude", mark("claude"), claude(), true, "~/Developer/BetterTerminal")),
+    mkWs(mkSession("wsl", mark("ubuntu"), wsl(), false, "~/src/bt-corpus")),
   ];
   state.active = state.tabs[0].id;
 
@@ -1526,7 +1544,10 @@
     render();
   }
   function newTab(profile) {
-    const s = mkSession(profile.title.split(" ·")[0], profile.icon, profile.make());
+    /* a new shell opens where the one you are looking at is standing — which is
+       also what makes the strip readable: a tab with no place has no name */
+    const s = mkSession(profile.title.split(" ·")[0], profile.icon, profile.make(),
+                        false, focusedSession()?.cwd || "~");
     const w = mkWs(s);
     state.tabs.push(w);
     state.active = w.id;
@@ -1606,7 +1627,7 @@
       const multi = paneCount(w) > 1;
       return `<div class="pane ${focused ? "focused" : ""}" data-leaf="${node.id}">
         <div class="pane-inner">
-          ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.title}</span>
+          ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.cwd}</span>
             <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : ""}
           <div class="term" data-leaf="${node.id}" data-uid="${s.uid}">${termHtml(s, focused)}</div>
         </div>
@@ -1624,7 +1645,7 @@
     if (node.type === "leaf") {
       const s = session(node.uid);
       return `<div class="mini-leaf ${node.id === w.focus ? "focused" : ""}">
-        <span class="ticon">${s.icon}</span><span class="mtitle">${s.title}</span></div>`;
+        <span class="ticon">${s.icon}</span><span class="mtitle">${cwdLeaf(s)}</span></div>`;
     }
     return `<div class="mini-split mini-${node.dir}">
       <div class="mini-slot" style="flex-grow:${node.ratio}">${miniNode(node.a, w)}</div>
@@ -1649,13 +1670,13 @@
 
     $("tabstrip").innerHTML = state.tabs.map(w => `
       <div class="tab ${w.id === state.active ? "active" : ""}" data-ws="${w.id}">
-        ${tabIcon(w)}<span class="ttitle">${session(focusedLeaf(w).uid).title}</span>${paneBadge(w)}
+        ${tabIcon(w)}<span class="ttitle">${cwdLeaf(session(focusedLeaf(w).uid))}</span>${paneBadge(w)}
         <span class="close" data-close="${w.id}">${closeSvg}</span>
       </div>`).join("") + `<button class="newtab nt-main" title="New tab (${defaultProfile().title})"><svg><use href="#i-plus"/></svg></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button>`;
 
     $("rail").innerHTML = `<div class="label">Tabs</div>` + state.tabs.map(w => `
       <div class="vtab ${w.id === state.active ? "active" : ""}" data-ws="${w.id}">
-        ${tabIcon(w)}<span class="title">${session(focusedLeaf(w).uid).title}</span>${paneBadge(w)}
+        ${tabIcon(w)}<span class="title">${cwdLeaf(session(focusedLeaf(w).uid))}</span>${paneBadge(w)}
         <span class="close" data-close="${w.id}">${closeSvg}</span>
       </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (${defaultProfile().title})"><span class="ticon"><svg><use href="#i-plus"/></svg></span><span>New tab</span></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
 
@@ -1837,7 +1858,7 @@
     const peek = $("layout-peek");
     const names = leavesOf(w.tree).map(l => {
       const s = session(l.uid);
-      return `<span>${stateIcon(s, s.busy, s.unread)}${s.title}</span>`;
+      return `<span>${stateIcon(s, s.busy, s.unread)}${cwdLeaf(s)}</span>`;
     }).join("");
     peek.innerHTML = `<div class="peek-grid">${miniNode(w.tree, w)}</div><div class="peek-list">${names}</div>`;
     peek.classList.add("show");
@@ -1973,7 +1994,7 @@
       ph = document.createElement("div");
       ph.className = (state.layoutMode === "horizontal" ? "tab" : "vtab") + " drop-preview";
       ph.innerHTML = `${stateIcon(s, s.busy, s.unread)}
-        <span class="${state.layoutMode === "horizontal" ? "ttitle" : "title"}">${s.title}</span>`;
+        <span class="${state.layoutMode === "horizontal" ? "ttitle" : "title"}">${cwdLeaf(s)}</span>`;
       strip.appendChild(ph);
     }
     const entries = stripEntries();
@@ -2165,7 +2186,7 @@
     const s = d.kind === "tab"
       ? session(focusedLeaf(tabById(d.wsId)).uid)
       : session(findLeafIn(activeTab(), d.leafId).uid);
-    return `<span class="ticon">${s.icon}</span>${s.title}`;
+    return `<span class="ticon">${s.icon}</span>${cwdLeaf(s)}`;
   }
 
   document.addEventListener("pointermove", (e) => {
