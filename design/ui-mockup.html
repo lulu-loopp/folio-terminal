@@ -79,9 +79,12 @@
     transition: background .18s ease;
   }
 
-  /* ── Title bar ── */
-  .titlebar { height: 40px; flex: none; display: flex; align-items: stretch; }
-  .window[data-tabs="horizontal"] .titlebar { background: var(--panel); }
+  /* ── Title bar ──
+     Panel colour is what chrome is made of and white is what content is made of.
+     The title bar is chrome in both tab layouts, so it does not get to change
+     colour because of a tab setting — it was only tinted in horizontal mode
+     because that is where the white active tab needs something to sit against. */
+  .titlebar { height: 40px; flex: none; display: flex; align-items: stretch; background: var(--panel); }
   .titlebar .drag {
     display: flex; align-items: center; gap: 8px;
     padding-left: 12px; min-width: 0; flex: 1;
@@ -339,14 +342,36 @@
     cursor: default;
   }
   .math:hover { border-color: var(--border); background: var(--panel); }
-  /* The scroll lives on an inner box, not on .math: overflow makes a clipping
-     context, and the tools are positioned outside the block, so putting it on
-     .math cut them in half. Left-aligned like every other line — centring is a
-     document's habit, not a terminal's — and a formula wider than the pane
-     scrolls here rather than widening the pane or being silently cut. */
-  .math .scroller { overflow-x: auto; }
+  /* A block shows all of itself. It gets no scroll of its own, because the
+     terminal is already a scroll container and a second one nested inside it
+     eats the wheel whenever the pointer happens to rest on a formula. A block
+     too wide for the pane makes the pane scroll sideways, exactly as an
+     over-long line of text does — one scroll container, not two.
+     Left-aligned like every other line; centring is a document's habit.
+     Scroll appears only where the user asked for a ceiling and the content
+     reached it, which is the one case where clipping is not a surprise. The
+     inner box exists to carry that: overflow makes a clipping context, and
+     the tools live outside the block, so on .math it would cut them in half.
+     The rule carries no overflow until a ceiling exists: setting overflow on
+     one axis makes CSS compute the other to auto, so an unconditional
+     overflow-y would quietly bring back both the clipping and the sideways
+     scrollbar this is trying to be rid of. */
+  .window.block-capped .math .scroller {
+    max-height: var(--blockmax); overflow-y: auto; overscroll-behavior: contain;
+  }
   .math .rendered { font-size: 15px; color: var(--ink); }
-  .math .katex-display { margin: 0; text-align: left; }
+  /* KaTeX sizes the formula's box from TeX metrics, but the glyph spans inside
+     still carry their font's full descent — a subscript hangs ~4px below the
+     box with no ink in it. Nothing shows it until something upstream is asked
+     to scroll, and then every block sprouts a scrollbar over 4px of nothing.
+     So the phantom is cut off here at its source. It has to be `clip` rather
+     than `hidden`: hidden on one axis makes CSS compute the other to auto,
+     which is the horizontal scrollbar we are trying not to have, whereas
+     visible + clip is a legal pair. The generous clip-margin means the cut
+     can only ever remove emptiness, never a glyph — clip propagates no
+     scrollable overflow regardless of how far the margin reaches.
+     A real renderer owns its own boxes and will not need this. */
+  .math .katex-display { margin: 0; text-align: left; overflow-y: clip; overflow-clip-margin: 8px; }
   .math .katex-display > .katex { text-align: left; }
   .math .src { display: none; color: var(--prompt); font-family: var(--mono); font-size: 13px; }
   .math.as-source .rendered { display: none; }
@@ -695,6 +720,23 @@
           </div>
         </div>
 
+        <div class="group-label" style="margin-top:16px">Rendered blocks</div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Maximum height</div>
+            <div class="desc" id="blockmax-desc">Rendered blocks show in full, however tall they are</div>
+          </div>
+          <div class="combo" data-combo="blockmax">
+            <button aria-haspopup="listbox"><span class="value">No limit</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="0" role="option"><span class="tick">✓</span>No limit</div>
+              <div class="combo-item" data-v="120" role="option"><span class="tick">✓</span>120 px</div>
+              <div class="combo-item" data-v="240" role="option"><span class="tick">✓</span>240 px</div>
+              <div class="combo-item" data-v="480" role="option"><span class="tick">✓</span>480 px</div>
+            </div>
+          </div>
+        </div>
+
         <div class="group-label" style="margin-top:16px">Tabs &amp; panes</div>
         <div class="row">
           <div class="text">
@@ -857,6 +899,7 @@
     theme: "system",
     railCollapsed: false,
     defaultProfile: 0,       // index into PROFILES: new tabs, and startup
+    blockMax: 0,             // px ceiling on a rendered block; 0 means none
   };
   state.tabs = [
     mkWs(mkSession("PowerShell", "❯", powershell())),
@@ -1068,6 +1111,8 @@
     $("win").classList.toggle("rail-collapsed", state.railCollapsed);
     $("win").classList.toggle("rail-icons", state.railMode === "icons" && !state.railCollapsed);
     $("row-railmode").style.display = state.layoutMode === "vertical" ? "" : "none";
+    $("win").classList.toggle("block-capped", state.blockMax > 0);
+    $("win").style.setProperty("--blockmax", state.blockMax + "px");
     const aw = activeTab();
 
     $("tabstrip").innerHTML = state.tabs.map(w => `
@@ -1619,6 +1664,14 @@
           state.railCollapsed = false;
           combo.querySelector(".value").textContent =
             item.dataset.v === "icons" ? "Icons, expand on hover" : "Expanded";
+          render();
+        }
+        if (kind === "blockmax") {
+          state.blockMax = +item.dataset.v;
+          combo.querySelector(".value").textContent = state.blockMax ? state.blockMax + " px" : "No limit";
+          $("blockmax-desc").textContent = state.blockMax
+            ? "Blocks taller than this scroll inside themselves; the source stays whole"
+            : "Rendered blocks show in full, however tall they are";
           render();
         }
         if (kind === "profile") {
