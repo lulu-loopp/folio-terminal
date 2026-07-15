@@ -125,24 +125,10 @@
   }
   .tab.active .ticon, .vtab.active .ticon { color: var(--prompt); }
   .ticon-wrap { position: relative; display: inline-flex; flex: none; align-items: center; }
-  /* working = output is flowing. Bars, not a spinner: a spinner reads as
-     "waiting for something to load", this reads as "something is live". */
-  .activity {
-    display: inline-flex; align-items: flex-end; justify-content: center; gap: 1.5px;
-    width: 13px; height: 11px;
-  }
-  .activity i {
-    width: 2px; height: 100%; border-radius: 1px;
-    background: var(--accent); transform-origin: bottom;
-    animation: eq .9s ease-in-out infinite;
-  }
-  .activity i:nth-child(1) { animation-delay: 0s; }
-  .activity i:nth-child(2) { animation-delay: .18s; }
-  .activity i:nth-child(3) { animation-delay: .36s; }
-  @keyframes eq {
-    0%, 100% { transform: scaleY(.3); }
-    50%      { transform: scaleY(1); }
-  }
+  /* working = the icon itself breathes. Nothing is added to the tab; the thing
+     that is alive is the terminal, so the thing that breathes is its icon. */
+  .ticon.working { color: var(--accent); animation: breathe 1.7s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { opacity: 1; } 50% { opacity: .28; } }
   /* finished-but-unread = static dot */
   .unreaddot {
     position: absolute; top: -2px; right: -4px;
@@ -238,8 +224,11 @@
     padding: 0 10px; font-size: 13px; color: var(--ink3);
   }
   .rail-new .nt-chev { width: 28px; height: 30px; }
-  .tabstrip-drop, .rail.tabstrip-drop { box-shadow: inset 0 0 0 1.5px var(--accent); border-radius: 8px; }
-  .tabs-inline.tabstrip-drop { box-shadow: inset 0 0 0 1.5px var(--accent); }
+  /* Where a dragged pane will land in the strip: a caret at the insertion point,
+     the way a browser shows it — not a box around the whole strip. */
+  .tab-insert { flex: none; background: var(--accent); border-radius: 1.5px; }
+  .tabs-inline .tab-insert { width: 3px; align-self: flex-end; height: 30px; margin: 0 1px; }
+  .rail .tab-insert { height: 3px; margin: 1px 4px; }
 
   /* Profile picker menu */
   .profile-menu {
@@ -298,26 +287,26 @@
   }
   .split-row > .divider::before { left: 2px; top: 0; bottom: 0; width: 1px; }
   .split-col > .divider::before { top: 2px; left: 0; right: 0; height: 1px; }
+  .divider::before { transition: background .12s ease; }
   .divider:hover::before, .divider.dragging::before { background: var(--accent); }
-  .split-row > .divider:hover::before, .split-row > .divider.dragging::before { width: 2px; left: 1.5px; }
-  .split-col > .divider:hover::before, .split-col > .divider.dragging::before { height: 2px; top: 1.5px; }
   body.resizing { user-select: none; }
   body.resizing * { cursor: inherit !important; }
-  /* Every pane header is identical; only the focus accent differs. */
+  /* Every pane header is identical. Focus is shown by a tint, not by a rule:
+     a hard line here would compete with the divider hairlines around it. */
   .panehead {
     flex: none; position: relative;
     display: flex; align-items: center; gap: 7px;
-    height: 26px; padding: 0 6px 0 11px;
+    height: 28px; padding: 0 6px 0 12px;
     font-size: 11.5px; color: var(--ink3);
     border-bottom: 1px solid var(--border-soft);
     cursor: grab; user-select: none;
+    transition: background .12s ease, color .12s ease;
   }
-  .panehead::before {
-    content: ""; position: absolute; left: 0; right: 0; top: 0; height: 1.5px;
-    background: var(--accent); opacity: 0;
+  .pane.focused .panehead {
+    color: var(--ink);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border-bottom-color: color-mix(in srgb, var(--accent) 22%, transparent);
   }
-  .pane.focused .panehead { color: var(--ink); }
-  .pane.focused .panehead::before { opacity: 1; }
   .pane.focused .panehead .ticon { color: var(--accent); }
   .panehead .ticon { width: auto; }
   .panehead .ptitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -369,7 +358,6 @@
   }
   .peek-list span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
   .peek-list .ticon { width: auto; }
-  .peek-list .activity { width: 9px; height: 8px; }
   .peek-grid .mini-split { display: flex; gap: 3px; flex: 1; min-width: 0; min-height: 0; }
   .peek-grid .mini-row { flex-direction: row; }
   .peek-grid .mini-col { flex-direction: column; }
@@ -388,8 +376,8 @@
   .mini-leaf .mtitle { overflow: hidden; text-overflow: ellipsis; }
 
   @media (prefers-reduced-motion: reduce) {
-    .activity i, .cursor { animation: none; }
-    .activity i:nth-child(2) { transform: scaleY(.7); }
+    .ticon.working, .cursor { animation: none; }
+    .ticon.working { opacity: .6; }
     .rail { transition: none; }
   }
 
@@ -791,9 +779,10 @@
 
   /* ── render ── */
   function stateIcon(s, busy, unread) {
-    return busy
-      ? `<span class="ticon-wrap"><span class="activity" title="Working"><i></i><i></i><i></i></span></span>`
-      : `<span class="ticon-wrap"><span class="ticon">${s.icon}</span>${unread ? `<span class="unreaddot" title="Finished"></span>` : ""}</span>`;
+    return `<span class="ticon-wrap">
+      <span class="ticon ${busy ? "working" : ""}" ${busy ? `title="Working"` : ""}>${s.icon}</span>
+      ${!busy && unread ? `<span class="unreaddot" title="Finished"></span>` : ""}
+    </span>`;
   }
   /* a tab aggregates the state of every session in its layout */
   const tabBusy = (w) => leavesOf(w.tree).some(l => (session(l.uid) || {}).busy);
@@ -1008,6 +997,20 @@
     drag = { ...src, x0: e.clientX, y0: e.clientY, started: false, ghost: null, target: null };
   }
   const stripEl = () => state.layoutMode === "horizontal" ? $("tabstrip") : $("rail");
+
+  /* the caret marks exactly where extractPaneToTab() will insert the tab */
+  function showInsertCaret() {
+    const strip = stripEl();
+    let caret = strip.querySelector(".tab-insert");
+    if (!caret) { caret = document.createElement("div"); caret.className = "tab-insert"; }
+    const entries = [...strip.querySelectorAll(".tab, .vtab")];
+    const at = state.tabs.indexOf(activeTab()) + 1;
+    if (entries[at]) strip.insertBefore(caret, entries[at]);
+    else strip.insertBefore(caret, entries[entries.length - 1].nextSibling);
+  }
+  function clearInsertCaret() {
+    document.querySelectorAll(".tab-insert").forEach(el => el.remove());
+  }
   function dragLabel(d) {
     const s = d.kind === "tab"
       ? session(focusedLeaf(tabById(d.wsId)).uid)
@@ -1032,14 +1035,14 @@
 
     const pv = $("dock-preview");
     drag.target = null;
-    stripEl().classList.remove("tabstrip-drop");
+    clearInsertCaret();
 
     /* over the strip? a pane dropped here becomes its own tab again */
     const sr = stripEl().getBoundingClientRect();
     if (e.clientX >= sr.left && e.clientX <= sr.right && e.clientY >= sr.top && e.clientY <= sr.bottom) {
       if (drag.kind === "pane" && paneCount(activeTab()) > 1) {
         drag.target = { strip: true };
-        stripEl().classList.add("tabstrip-drop");
+        showInsertCaret();
       }
       pv.classList.remove("show");
       return;
@@ -1059,7 +1062,11 @@
     const leafId = +hit.el.dataset.leaf;
     const rx = (e.clientX - hit.r.left) / hit.r.width;
     const ry = (e.clientY - hit.r.top) / hit.r.height;
-    let zone = rx < 0.25 ? "left" : rx > 0.75 ? "right" : ry < 0.3 ? "top" : ry > 0.7 ? "bottom" : "center";
+    /* nearest edge wins, so anywhere in the outer third of the pane splits —
+       no need to reach the very edge. The middle stays a cancel zone. */
+    const d4 = { left: rx, right: 1 - rx, top: ry, bottom: 1 - ry };
+    const near = Object.keys(d4).reduce((a, b) => d4[a] <= d4[b] ? a : b);
+    let zone = d4[near] < 0.35 ? near : "center";
     /* refuse splits that would leave either half unusable */
     if ((zone === "left" || zone === "right") && hit.r.width / 2 < MIN_PANE_W) zone = "center";
     if ((zone === "top" || zone === "bottom") && hit.r.height / 2 < MIN_PANE_H) zone = "center";
@@ -1084,7 +1091,7 @@
     document.body.classList.remove("dragging");
     const pv = $("dock-preview");
     if (pv) pv.classList.remove("show");
-    stripEl().classList.remove("tabstrip-drop");
+    clearInsertCaret();
     if (!d.started || !d.target) return;
     if (d.target.strip) { extractPaneToTab(d.leafId); return; }
     if (d.kind === "tab") mergeTabIntoPane(d.wsId, d.target.leafId, d.target.zone);
