@@ -83,16 +83,6 @@
     display: flex; align-items: center; gap: 8px;
     padding-left: 14px; min-width: 0; flex: 1;
   }
-  .logo {
-    width: 15px; height: 15px; border-radius: 4px; flex: none;
-    border: 1.4px solid var(--ink3);
-    position: relative;
-  }
-  .logo::after {
-    content: "❯"; position: absolute; inset: 0;
-    font-family: var(--mono); font-size: 7.5px; font-weight: 700; color: var(--ink2);
-    display: flex; align-items: center; justify-content: center;
-  }
   .apptitle { font-size: 12.5px; color: var(--ink3); white-space: nowrap; }
   .window[data-tabs="horizontal"] .apptitle { display: none; }
 
@@ -224,11 +214,16 @@
     padding: 0 10px; font-size: 13px; color: var(--ink3);
   }
   .rail-new .nt-chev { width: 28px; height: 30px; }
-  /* Where a dragged pane will land in the strip: a caret at the insertion point,
-     the way a browser shows it — not a box around the whole strip. */
-  .tab-insert { flex: none; background: var(--accent); border-radius: 1.5px; }
-  .tabs-inline .tab-insert { width: 3px; align-self: flex-end; height: 30px; margin: 0 1px; }
-  .rail .tab-insert { height: 3px; margin: 1px 4px; }
+  /* Where a dragged pane will land in the strip: the tab itself, previewed in
+     place at the spot it would take, the way a browser slots a dragged tab in. */
+  .drop-preview {
+    pointer-events: none;
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent);
+    color: var(--accent);
+  }
+  .drop-preview .ticon { color: var(--accent); }
+  .rail .drop-preview { border-radius: 6px; }
 
   /* Profile picker menu */
   .profile-menu {
@@ -494,7 +489,6 @@
 <div class="window" id="win" data-tabs="horizontal">
   <div class="titlebar">
     <div class="drag">
-      <div class="logo"></div>
       <button class="panel-toggle" id="btn-rail" title="Toggle sidebar" aria-label="Toggle sidebar"><svg><use href="#i-panel"/></svg></button>
       <span class="apptitle">BetterTerminal</span>
       <div class="tabs-inline" id="tabstrip"></div>
@@ -723,13 +717,13 @@
     leavesOf(tgt.tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
     render();
   }
-  /* pane dropped on the strip → leaves the layout, becomes its own tab again */
-  function extractPaneToTab(leafId) {
+  /* pane dropped on the strip → leaves the layout, becomes its own tab at that slot */
+  function extractPaneToTab(leafId, index) {
     const w = activeTab();
     const leaf = detachLeaf(w, leafId);
     if (!leaf) return;
     const nw = { id: wsSeq++, tree: leaf, focus: leaf.id };
-    const at = state.tabs.indexOf(w) + 1;
+    const at = index == null ? state.tabs.indexOf(w) + 1 : Math.min(index, state.tabs.length);
     state.tabs.splice(at, 0, nw);
     render();      /* stay in the layout you were in; the pane is now waiting in the strip */
   }
@@ -1039,18 +1033,38 @@
   }
   const stripEl = () => state.layoutMode === "horizontal" ? $("tabstrip") : $("rail");
 
-  /* the caret marks exactly where extractPaneToTab() will insert the tab */
-  function showInsertCaret() {
-    const strip = stripEl();
-    let caret = strip.querySelector(".tab-insert");
-    if (!caret) { caret = document.createElement("div"); caret.className = "tab-insert"; }
-    const entries = [...strip.querySelectorAll(".tab, .vtab")];
-    const at = state.tabs.indexOf(activeTab()) + 1;
-    if (entries[at]) strip.insertBefore(caret, entries[at]);
-    else strip.insertBefore(caret, entries[entries.length - 1].nextSibling);
+  /* Preview the tab where the pointer would drop it — any slot, not a fixed one. */
+  function stripEntries() {
+    return [...stripEl().querySelectorAll(".tab, .vtab")].filter(el => !el.classList.contains("drop-preview"));
   }
-  function clearInsertCaret() {
-    document.querySelectorAll(".tab-insert").forEach(el => el.remove());
+  function insertIndexAt(e) {
+    const horizontal = state.layoutMode === "horizontal";
+    const pos = horizontal ? e.clientX : e.clientY;
+    const entries = stripEntries();
+    for (let i = 0; i < entries.length; i++) {
+      const r = entries[i].getBoundingClientRect();
+      const mid = horizontal ? r.left + r.width / 2 : r.top + r.height / 2;
+      if (pos < mid) return i;
+    }
+    return entries.length;
+  }
+  function showDropPreview(idx) {
+    const strip = stripEl();
+    let ph = strip.querySelector(".drop-preview");
+    if (!ph) {
+      const s = session(findLeafIn(activeTab(), drag.leafId).uid);
+      ph = document.createElement("div");
+      ph.className = (state.layoutMode === "horizontal" ? "tab" : "vtab") + " drop-preview";
+      ph.innerHTML = `${stateIcon(s, s.busy, s.unread)}
+        <span class="${state.layoutMode === "horizontal" ? "ttitle" : "title"}">${s.title}</span>`;
+      strip.appendChild(ph);
+    }
+    const entries = stripEntries();
+    if (entries[idx]) strip.insertBefore(ph, entries[idx]);
+    else if (entries.length) strip.insertBefore(ph, entries[entries.length - 1].nextSibling);
+  }
+  function clearDropPreview() {
+    document.querySelectorAll(".drop-preview").forEach(el => el.remove());
   }
   function dragLabel(d) {
     const s = d.kind === "tab"
@@ -1076,14 +1090,17 @@
 
     const pv = $("dock-preview");
     drag.target = null;
-    clearInsertCaret();
+    clearDropPreview();
+    drag.ghost.style.opacity = "";
 
     /* over the strip? a pane dropped here becomes its own tab again */
     const sr = stripEl().getBoundingClientRect();
     if (e.clientX >= sr.left && e.clientX <= sr.right && e.clientY >= sr.top && e.clientY <= sr.bottom) {
       if (drag.kind === "pane" && paneCount(activeTab()) > 1) {
-        drag.target = { strip: true };
-        showInsertCaret();
+        const idx = insertIndexAt(e);
+        drag.target = { strip: true, index: idx };
+        showDropPreview(idx);
+        drag.ghost.style.opacity = "0";   /* the preview in the strip is the ghost now */
       }
       pv.classList.remove("show");
       return;
@@ -1132,9 +1149,9 @@
     document.body.classList.remove("dragging");
     const pv = $("dock-preview");
     if (pv) pv.classList.remove("show");
-    clearInsertCaret();
+    clearDropPreview();
     if (!d.started || !d.target) return;
-    if (d.target.strip) { extractPaneToTab(d.leafId); return; }
+    if (d.target.strip) { extractPaneToTab(d.leafId, d.target.index); return; }
     if (d.kind === "tab") mergeTabIntoPane(d.wsId, d.target.leafId, d.target.zone);
     else movePane(d.leafId, d.target.leafId, d.target.zone);
   });
