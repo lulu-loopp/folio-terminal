@@ -753,10 +753,16 @@
      squeezed, and now you can see each pane's destination while you aim. */
   #dock-shift { position: absolute; inset: 0; pointer-events: none; z-index: 24; display: none; }
   #dock-shift.show { display: block; }
+  /* The dashes carry this, so they get the weight and the fill gets out of their
+     way: a wash at 11% behind a 1px 62% line put the two at nearly the same
+     value, and the line lost — the fill was competing with the only part that
+     says "outline, not surface". The arriving pane is the filled thing; these
+     are where you are going, and an outline is the right word for a place that
+     is empty until you let go. */
   #dock-shift i {
     position: absolute; border-radius: 6px;
-    border: 1px dashed color-mix(in srgb, var(--accent) 62%, transparent);
-    background: color-mix(in srgb, var(--accent) 11%, transparent);
+    border: 1.5px dashed color-mix(in srgb, var(--accent) 85%, transparent);
+    background: color-mix(in srgb, var(--accent) 5%, transparent);
   }
   /* Aimed at an edge that cannot split, because the halves would be narrower than
      a terminal has any business being. Refusing silently was the bug: nothing
@@ -1314,10 +1320,11 @@
      re-decided when a pane joins it. The run is not the set of panes it was.
      (i3 and Zellij do this; tmux does not, which is why tmux ships a command
      called even-horizontal for you to run afterwards.) */
-  function balanceRunAt(root, splitId, dir) {
+  function balanceRunAt(root, target, dir) {
     const walk = (node) => {
+      if (node === target) return true;
       if (node.type === "leaf") return false;
-      const found = node.id === splitId || walk(node.a) || walk(node.b);
+      const found = walk(node.a) || walk(node.b);
       if (found && node.dir === dir) {
         const na = runLeaves(node.a, dir), nb = runLeaves(node.b, dir);
         node.ratio = na / (na + nb);
@@ -1326,22 +1333,46 @@
     };
     walk(root);
   }
+  /* put a subtree where a leaf was; the layout around it does not move */
+  function replaceLeafIn(w, leafId, subtree) {
+    const walk = (n) => n.type === "leaf" ? (n.id === leafId ? subtree : n)
+                                          : { ...n, a: walk(n.a), b: walk(n.b) };
+    w.tree = walk(w.tree);
+  }
+  /* Take a leaf out, promoting its sibling, and re-divide the run it left.
+     Joining a run re-divided it and leaving one did not, which is a rule that
+     only half exists. Removing the MIDDLE of three is where it shows: the parent
+     keeps the 1/3 it was given when there were three of them, so the two
+     survivors come out 1/3 and 2/3 — holding the shares of a set they are no
+     longer in. */
+  function pluckLeaf(tree, id) {
+    let promoted = null, dir = null;
+    const walk = (node) => {
+      if (node.type === "leaf") return node;
+      if (node.a.type === "leaf" && node.a.id === id) { promoted = node.b; dir = node.dir; return node.b; }
+      if (node.b.type === "leaf" && node.b.id === id) { promoted = node.a; dir = node.dir; return node.a; }
+      return { ...node, a: walk(node.a), b: walk(node.b) };
+    };
+    const next = walk(tree);
+    if (promoted) balanceRunAt(next, promoted, dir);
+    return next;
+  }
 
   function splitLeafIn(w, leafId, zone, subtree) {
     const dir = (zone === "left" || zone === "right") ? "row" : "col";
     const first = (zone === "left" || zone === "top");
-    let newId = null;
+    let made = null;
     const walk = (node) => {
       if (node.type === "leaf") {
         if (node.id !== leafId) return node;
-        newId = splitSeq++;
-        return { type: "split", id: newId, dir, ratio: 0.5,
+        made = { type: "split", id: splitSeq++, dir, ratio: 0.5,
                  a: first ? subtree : node, b: first ? node : subtree };
+        return made;
       }
       return { ...node, a: walk(node.a), b: walk(node.b) };
     };
     w.tree = walk(w.tree);
-    if (newId != null) balanceRunAt(w.tree, newId, dir);
+    if (made) balanceRunAt(w.tree, made, dir);
   }
   /* Split the WHOLE layout, not a pane inside it.
      Without this there was no gesture for "put this alongside everything" — every
@@ -1352,22 +1383,15 @@
   function splitRootOf(w, zone, subtree) {
     const dir = (zone === "left" || zone === "right") ? "row" : "col";
     const first = (zone === "left" || zone === "top");
-    const id = splitSeq++;
-    w.tree = { type: "split", id, dir, ratio: 0.5,
+    w.tree = { type: "split", id: splitSeq++, dir, ratio: 0.5,
                a: first ? subtree : w.tree, b: first ? w.tree : subtree };
-    balanceRunAt(w.tree, id, dir);
+    balanceRunAt(w.tree, w.tree, dir);
   }
   /* detach a leaf, promoting its sibling; returns the leaf (null if it was the last one) */
   function detachLeaf(w, leafId) {
     if (paneCount(w) <= 1) return null;
     const leaf = findLeafIn(w, leafId);
-    const walk = (node) => {
-      if (node.type === "leaf") return node;
-      if (node.a.type === "leaf" && node.a.id === leafId) return node.b;
-      if (node.b.type === "leaf" && node.b.id === leafId) return node.a;
-      return { ...node, a: walk(node.a), b: walk(node.b) };
-    };
-    w.tree = walk(w.tree);
+    w.tree = pluckLeaf(w.tree, leafId);
     if (!findLeafIn(w, w.focus)) w.focus = leavesOf(w.tree)[0].id;
     return leaf;
   }
@@ -1382,10 +1406,20 @@
        jump, just in the other direction */
     const beforeStrip = snapshotStrip();
     const keepFocus = focusedLeaf(src).id;
-    if (targetLeafId == null) splitRootOf(tgt, zone, src.tree);
-    else splitLeafIn(tgt, targetLeafId, zone, src.tree);
+    if (zone === "center") {
+      /* the pane's place, not a division of it: what was there goes back to the
+         strip, into the slot this tab is vacating — the same trade "swap focused
+         pane" makes when you click a tab, done with a pointer instead */
+      const out = findLeafIn(tgt, targetLeafId);
+      const displaced = session(out.uid);
+      replaceLeafIn(tgt, targetLeafId, src.tree);
+      state.tabs[state.tabs.indexOf(src)] = mkWs(displaced);
+    } else {
+      if (targetLeafId == null) splitRootOf(tgt, zone, src.tree);
+      else splitLeafIn(tgt, targetLeafId, zone, src.tree);
+      state.tabs = state.tabs.filter(w => w.id !== srcWsId);
+    }
     tgt.focus = keepFocus;
-    state.tabs = state.tabs.filter(w => w.id !== srcWsId);
     leavesOf(tgt.tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
     renderWithPaneFlip(before);
     playStripFlip(beforeStrip);
@@ -1412,6 +1446,18 @@
     const w = activeTab();
     if (leafId === targetLeafId) return;
     const before = snapshotPanes();
+    if (zone === "center") {
+      /* two panes already in the layout, one dropped on the other's middle: they
+         trade places. Nothing is displaced to the strip because nothing is
+         homeless — this is the rearranging you could otherwise only do by pulling
+         a pane out and dragging it back in. */
+      const a = findLeafIn(w, leafId), b = findLeafIn(w, targetLeafId);
+      if (!a || !b) { render(); return; }
+      const au = a.uid; a.uid = b.uid; b.uid = au;
+      w.focus = targetLeafId;
+      renderWithPaneFlip(before);
+      return;
+    }
     const leaf = detachLeaf(w, leafId);
     if (!leaf) { render(); return; }
     if (targetLeafId == null) splitRootOf(w, zone, leaf);           /* alongside everything */
@@ -1836,13 +1882,6 @@
     return out;
   }
   /* detachLeaf's walk without the mutation, for asking "what would it look like" */
-  const withoutLeaf = (node, id) => {
-    if (node.type === "leaf") return node;
-    if (node.a.type === "leaf" && node.a.id === id) return node.b;
-    if (node.b.type === "leaf" && node.b.id === id) return node.a;
-    return { ...node, a: withoutLeaf(node.a, id), b: withoutLeaf(node.b, id) };
-  };
-
   const cloneTree = (n) => n.type === "leaf" ? n : { ...n, a: cloneTree(n.a), b: cloneTree(n.b) };
   const PLAN_ID = -1, PLAN_SPLIT = -2;
   /* The layout a drop would make — arriving pane included — worked out on the
@@ -1857,18 +1896,28 @@
     const w = activeTab();
     const arriving = { type: "leaf", id: PLAN_ID };
     let tree = cloneTree(w.tree);
-    if (movingLeafId != null) tree = withoutLeaf(tree, movingLeafId);
+    /* the same pluck the drop will do, rebalance included — the preview and the
+       result must not be two opinions */
+    if (movingLeafId != null) tree = pluckLeaf(tree, movingLeafId);
     const dir = (zone === "left" || zone === "right") ? "row" : "col";
     const first = (zone === "left" || zone === "top");
-    const mk = (node) => ({ type: "split", id: PLAN_SPLIT, dir, ratio: 0.5,
-                            a: first ? arriving : node, b: first ? node : arriving });
+    /* the centre takes the pane's place rather than dividing it: same box, same
+       everyone else, so nothing needs balancing */
+    if (zone === "center") {
+      const walk = (n) => n.type === "leaf" ? (n.id === targetLeafId ? arriving : n)
+                                            : { ...n, a: walk(n.a), b: walk(n.b) };
+      return rectsOf(walk(tree), 0, 0, host.width, host.height);
+    }
+    let made = null;
+    const mk = (node) => (made = { type: "split", id: PLAN_SPLIT, dir, ratio: 0.5,
+                                   a: first ? arriving : node, b: first ? node : arriving });
     if (targetLeafId == null) tree = mk(tree);
     else {
       const walk = (n) => n.type === "leaf" ? (n.id === targetLeafId ? mk(n) : n)
                                             : { ...n, a: walk(n.a), b: walk(n.b) };
       tree = walk(tree);
     }
-    balanceRunAt(tree, PLAN_SPLIT, dir);
+    if (made) balanceRunAt(tree, made, dir);
     return rectsOf(tree, 0, 0, host.width, host.height);
   }
   /* Too small is a fact about the layout that WOULD exist, not a guess from the
@@ -2198,8 +2247,15 @@
         : (() => { const r = document.querySelector(`#termhost .pane[data-leaf="${targetLeafId}"]`)
                      .getBoundingClientRect();
                    return { x: r.left - host.left, y: r.top - host.top, w: r.width, h: r.height }; })());
-      pv.style.left = box.x + "px"; pv.style.top = box.y + "px";
-      pv.style.width = box.w + "px"; pv.style.height = box.h + "px";
+      /* Inset like the destinations are. They are cells in one drawing, so they
+         must be measured the same way — inset only the dashed ones and the seam
+         beside the arriving pane comes out 1px narrower than the seams between
+         the others, which is exactly the "the bottom gap is wider than the top"
+         you can see the moment three cells sit in a column. */
+      const I = fits ? SHIFT_INSET : 0;
+      pv.style.left = (box.x + I) + "px"; pv.style.top = (box.y + I) + "px";
+      pv.style.width = Math.max(0, box.w - I * 2) + "px";
+      pv.style.height = Math.max(0, box.h - I * 2) + "px";
       pv.classList.add("show");
       const sh = $("dock-shift");
       if (!fits) { sh?.classList.remove("show"); return; }
@@ -2252,10 +2308,19 @@
        no need to reach the very edge. The middle stays a cancel zone. */
     const d4 = { left: rx, right: 1 - rx, top: ry, bottom: 1 - ry };
     const near = Object.keys(d4).reduce((a, b) => d4[a] <= d4[b] ? a : b);
-    let zone = d4[near] < 0.35 ? near : "center";
-    if (zone === "center" || (drag.kind === "pane" && drag.leafId === leafId)) {
-      hidePreview(); return;
-    }
+    /* Edges divide the pane; the middle takes its place. The middle used to do
+       nothing, which left "replace" with no gesture at all — and made the obvious
+       target, the one that needs no aim, the one dead spot on the pane.
+       Replace is not a new idea here: clicking a tab in swap mode already
+       replaces the focused pane and sends the displaced session back to the
+       strip. This is the same act with a pointer.
+       It is emphatically NOT the fallback for a split that will not fit. That
+       would make the gesture's meaning depend on arithmetic nobody can see — the
+       same drag in the same spot splitting in a two-pane layout and replacing in
+       a four-pane one — and it would make the destructive outcome the consolation
+       prize of a harmless one. */
+    const zone = d4[near] < 0.35 ? near : "center";
+    if (drag.kind === "pane" && drag.leafId === leafId) { hidePreview(); return; }
     drawPlan(zone, leafId, `${leafId}:${zone}`);
   });
 
