@@ -471,6 +471,21 @@
             </div>
           </div>
         </div>
+
+        <div class="group-label" style="margin-top:16px">Tabs &amp; panes</div>
+        <div class="row">
+          <div class="text">
+            <div class="title">Clicking a tab</div>
+            <div class="desc" id="tabmode-desc">Switches the whole view; each tab keeps its own split layout</div>
+          </div>
+          <div class="combo" data-combo="tabmode">
+            <button aria-haspopup="listbox"><span class="value">Switch view</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="switch" role="option"><span class="tick">✓</span>Switch view</div>
+              <div class="combo-item" data-v="swap" role="option"><span class="tick">✓</span>Swap focused pane</div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -478,19 +493,26 @@
 
 <script>
   /* ══════════════════════════════════════════════════════════
-     Model: a TAB is a workspace that owns a pane layout.
-       - Every tab holds a split tree; most tabs hold a single pane.
-       - The tab strip shows one entry per tab. The active tab's
-         layout fills the content area.
-       - A tab's title follows the FOCUSED pane inside it, and a
-         count badge appears once it holds more than one pane.
-       - Drag a tab onto a pane edge: that tab's layout merges in
-         at that edge and its entry leaves the strip. So the strip
-         holds (tabs not merged) + 1 for the layout you're in.
-       - Drag a pane header onto the strip: that pane leaves the
-         layout and becomes its own tab again.
-       - Clicking another tab swaps the whole content area; the
-         split layout stays alive and returns when you click back.
+     Every tab owns a split tree; most tabs own a single pane.
+     The strip shows one entry per tab; the active tab's layout
+     fills the content area. A tab's title follows the FOCUSED
+     pane inside it, plus a badge once it holds more than one.
+
+     Dragging is the same in both modes:
+       - tab onto a pane edge → its layout merges in there and its
+         strip entry disappears, so the strip holds
+         (tabs not merged) + 1 for the layout you're in
+       - pane header onto the strip → that pane leaves the layout
+         and becomes its own tab again
+
+     Clicking a tab is what the "Tab behavior" setting switches:
+       - "switch"  → the whole content area swaps to that tab; each
+                     tab keeps its own layout, waiting for you
+       - "swap"    → only the FOCUSED pane is taken over by that
+                     tab; the session it displaces returns to the
+                     strip as a tab. Other panes are untouched, so
+                     the split survives. With a single pane this is
+                     just ordinary tab switching.
      ══════════════════════════════════════════════════════════ */
 
   const $ = (id) => document.getElementById(id);
@@ -555,6 +577,7 @@
     tabs: [],            // workspaces
     active: null,        // workspace id
     layoutMode: "horizontal",
+    tabMode: "switch",     // switch | swap  (see the header comment)
     theme: "system",
     railCollapsed: false,
   };
@@ -658,8 +681,32 @@
     render();
   }
   function selectTab(wsId) {
+    if (state.tabMode === "swap" && wsId !== state.active) { swapTabIntoFocusedPane(wsId); return; }
     state.active = wsId;
     leavesOf(tabById(wsId).tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
+    render();
+  }
+
+  /* "swap" mode: the clicked tab takes over the focused pane; the session it
+     displaces goes back to the strip, taking the clicked tab's place. Other
+     panes never move — the split survives. */
+  function swapTabIntoFocusedPane(wsId) {
+    const src = tabById(wsId), tgt = activeTab();
+    if (!src || src.id === tgt.id) return;
+    const outLeaf = focusedLeaf(tgt);
+    const displaced = session(outLeaf.uid);
+    const incoming = src.tree, incomingFocus = focusedLeaf(src).id;
+
+    const walk = (node) => {
+      if (node.type === "leaf") return node.id === outLeaf.id ? incoming : node;
+      return { ...node, a: walk(node.a), b: walk(node.b) };
+    };
+    tgt.tree = walk(tgt.tree);
+    tgt.focus = incomingFocus;
+
+    /* the displaced session becomes a tab again, in the slot the clicked tab left */
+    state.tabs[state.tabs.indexOf(src)] = mkWs(displaced);
+    leavesOf(tgt.tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
     render();
   }
   function newTab(profile) {
@@ -935,6 +982,14 @@
         const kind = combo.dataset.combo;
         if (kind === "layout") { state.layoutMode = item.dataset.v; render(); }
         if (kind === "theme") { state.theme = item.dataset.v; applyTheme(); }
+        if (kind === "tabmode") {
+          state.tabMode = item.dataset.v;
+          combo.querySelector(".value").textContent = item.dataset.v === "swap" ? "Swap focused pane" : "Switch view";
+          $("tabmode-desc").textContent = item.dataset.v === "swap"
+            ? "Takes over the pane you're in; the pane it replaces goes back to the strip"
+            : "Switches the whole view; each tab keeps its own split layout";
+          render();
+        }
       }));
   });
   document.addEventListener("click", () => document.querySelectorAll(".combo").forEach(c => c.classList.remove("open")));
