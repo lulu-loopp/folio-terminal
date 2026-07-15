@@ -39,7 +39,7 @@
 
 | # | 问题 | 对标痛点 |
 |---|---|---|
-| P2-1 | CJK/emoji 宽度计算正确 | WT #370/#900：ambiguous width、grapheme clustering、VS15/16；中文用户日常痛点 |
+| P2-1 | CJK/emoji 宽度计算正确 | WT #370/#900：ambiguous width、grapheme clustering、VS15/16；中文用户日常痛点。**spike 04 实测查明：`bt-term` 今天没有 grapheme 聚类**（`vendor/alacritty_terminal/src/term/mod.rs:1203` 是逐 `char` 的 `c.width()`），所以 `👨‍👩‍👧‍👦` 现在会被拆成 **8 个 cell**、`👍🏽` 拆成 4 —— **WT #900 本体在我们自己的终端里**。**M0 裁决项：要不要给 bt-term 上 grapheme 聚类。****另有一个既有规格缺口**：CJK 语境下 **ambiguous width 判宽还是窄**（WT #370 的本体）DESIGN 里没有规定——`unicode-width` 的 `width()` 与 `width_cjk()` 对 `☆` 分别给 narrow/wide。**这条必须裁决后再写进任何测试**，否则测试只是把某一侧固化下来。详见 docs/spikes/04-ime-cjk.md |
 | P2-2 | 中文 IME 体验 | Windows TSF 集成、候选框跟随光标、预编辑显示正确 |
 | P2-3 | 输入延迟作为架构指标 | danluu 基准：目标事件→上屏个位数毫秒；waitable swapchain；避免 WT #649 式合成器掉帧 |
 | P2-4 | 大输出不衰减 | iTerm2 #6897 反例：分段 buffer 设计，`tail -f` 大日志后打字不卡 |
