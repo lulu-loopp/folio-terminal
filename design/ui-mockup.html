@@ -692,8 +692,25 @@
     border-radius: 10px;
     box-shadow: var(--shadow);
   }
-  .settings header { flex: none; display: flex; align-items: center; padding: 16px 10px 10px 22px; }
+  /* padding-right is 12 so that the icon inside the 30px button ends 22px from the
+     dialog's edge — the same right margin every row below it uses */
+  .settings header { flex: none; display: flex; align-items: center; padding: 16px 12px 10px 22px; }
   .settings header h1 { margin: 0; font-size: 16px; font-weight: 600; flex: 1; }
+  /* A dialog's close is not a caption button. A caption button is a hard-edged
+     46x40 because it touches the window's edge and fills the corner — the shape
+     is owed to what it sits against. Borrowed into a padded dialog header it
+     became an unanchored rectangle with nothing to explain its corners, in a
+     dialog where every other control is rounded. It speaks the dialog's language
+     instead. */
+  .dlg-close {
+    width: 30px; height: 30px; flex: none; padding: 0;
+    border: none; background: none; border-radius: 6px;
+    color: var(--ink2); cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .dlg-close svg { width: 10px; height: 10px; }
+  .dlg-close:hover { background: var(--hover); color: var(--ink); }
+  .dlg-close:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .settings .content { padding: 2px 22px 18px; overflow-y: auto; }
   .group-label {
     font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
@@ -846,7 +863,7 @@
     <div class="settings" role="dialog" aria-label="Settings">
       <header>
         <h1>Settings</h1>
-        <button class="capbtn" id="btn-close-settings" title="Close" aria-label="Close settings"><svg><use href="#i-close"/></svg></button>
+        <button class="dlg-close" id="btn-close-settings" title="Close" aria-label="Close settings"><svg><use href="#i-close"/></svg></button>
       </header>
       <div class="content">
         <div class="group-label">Appearance</div>
