@@ -83,15 +83,19 @@
     display: flex; align-items: center; gap: 8px;
     padding-left: 12px; min-width: 0; flex: 1;
   }
-  /* the first tab starts 8px in: exactly the width of its own concave corner, so
-     the corner lands on the window edge and the tab reads as joined to it */
-  .window[data-tabs="horizontal"] .titlebar .drag { padding-left: 8px; gap: 0; }
+  /* the first tab starts one corner in, so its corner lands on the window edge
+     and the tab reads as joined to it */
+  .window[data-tabs="horizontal"] .titlebar .drag { padding-left: var(--tabr); gap: 0; }
   .apptitle { font-size: 12.5px; color: var(--ink3); white-space: nowrap; }
   .window[data-tabs="horizontal"] .apptitle { display: none; }
 
   /* Tabs in title bar (horizontal) — WT style: active tab connects with content */
+  /* The active tab's concave corners live in the gap beside it. The gap plus the
+     neighbour's inset fill has to equal the corner, or the corner paints over
+     the neighbour's hover fill. --tabr ties the three together. */
+  :root { --tabr: 7px; --tabgap: 2px; }
   .tabs-inline {
-    display: none; align-items: flex-end; gap: 1px;
+    display: none; align-items: flex-end; gap: var(--tabgap);
     min-width: 0; flex: 1; height: 100%;
   }
   .window[data-tabs="horizontal"] .tabs-inline { display: flex; }
@@ -102,19 +106,30 @@
     flex: 1 1 0; min-width: 46px; max-width: 200px;
     display: flex; align-items: center; gap: 8px;
     height: 34px; padding: 0 6px 0 12px;
-    border-radius: 8px 8px 0 0;
     font-size: 13px; color: var(--ink2);
     cursor: pointer; white-space: nowrap;
   }
-  .tab:hover:not(.active) { background: var(--hover); color: var(--ink); }
-  .tab.shown:not(.active) { background: var(--hover); }
-  .tab.active { background: var(--termbg); color: var(--ink); }
+  /* inactive tabs fill an inset rounded rect, clear of the active tab's corners */
+  .tab:not(.active)::before {
+    content: ""; position: absolute; top: 3px; bottom: 0;
+    left: calc(var(--tabr) - var(--tabgap)); right: calc(var(--tabr) - var(--tabgap));
+    border-radius: 6px 6px 0 0;
+    background: transparent;
+    transition: background .12s ease;
+  }
+  .tab:not(.active):hover { color: var(--ink); }
+  .tab:not(.active):hover::before { background: var(--hover); }
+  .tab.active {
+    background: var(--termbg); color: var(--ink);
+    border-radius: var(--tabr) var(--tabr) 0 0;
+  }
   .tab.active::before, .tab.active::after {
-    content: ""; position: absolute; bottom: 0; width: 8px; height: 8px;
+    content: ""; position: absolute; bottom: 0;
+    width: var(--tabr); height: var(--tabr);
     pointer-events: none;
   }
-  .tab.active::before { left: -8px;  background: radial-gradient(circle 8px at 0 0,   transparent 98%, var(--termbg) 100%); }
-  .tab.active::after  { right: -8px; background: radial-gradient(circle 8px at 100% 0, transparent 98%, var(--termbg) 100%); }
+  .tab.active::before { left: calc(-1 * var(--tabr));  background: radial-gradient(circle at 0 0,   transparent 98%, var(--termbg) 100%); }
+  .tab.active::after  { right: calc(-1 * var(--tabr)); background: radial-gradient(circle at 100% 0, transparent 98%, var(--termbg) 100%); }
   .ticon {
     font-family: var(--mono); font-size: 11px; font-weight: 700;
     color: var(--ink3); flex: none; width: 13px; text-align: center;
@@ -194,33 +209,37 @@
      has to look like a panel resting ON the terminal — menu material, its own
      corners, a real shadow. Without that it reads as the terminal being sliced
      in half, because it cuts straight through the text behind it. */
-  .window.rail-icons .rail { width: 44px; padding-left: 4px; padding-right: 4px; }
+  .window.rail-icons .rail { width: 46px; }
+  /* Opened, it must COVER the parked strip exactly — flush left, same top and
+     bottom. Inset it and the pointer sitting in the inset is no longer on the
+     rail: it closes, which puts the strip back under the pointer, which opens
+     it again. That loop is what the gap on the left was. */
   .window.rail-icons .rail:hover {
-    width: 220px; padding: 6px 8px 8px;
-    position: absolute; top: 46px; bottom: 8px; left: 6px; z-index: 15;
-    background: var(--panel);              /* not the terminal's white: it must
-                                              read as a different surface */
-    border: 1px solid var(--border);
-    border-radius: 10px;                   /* a card that floated out, not a wall */
-    box-shadow: 0 10px 34px rgba(0, 0, 0, .17);
+    width: 220px;
+    position: absolute; top: 40px; bottom: 0; left: 0; z-index: 15;
+    background: var(--panel);          /* never the terminal's white, or it reads
+                                          as the text being sliced, not covered */
+    border-right: 1px solid var(--border);
+    border-radius: 0 12px 12px 0;
+    box-shadow: 8px 0 30px rgba(0, 0, 0, .16);
   }
-  body.dark .window.rail-icons .rail:hover { box-shadow: 0 10px 34px rgba(0, 0, 0, .55); }
+  body.dark .window.rail-icons .rail:hover { box-shadow: 8px 0 30px rgba(0, 0, 0, .5); }
+  /* Fade the labels rather than display:none them. Layout stays identical in both
+     states — the icons never jump — and the rail's own overflow does the clipping
+     while the width animates. */
   .window.rail-icons .rail .label,
   .window.rail-icons .rail .vtab .title,
   .window.rail-icons .rail .panecount,
   .window.rail-icons .rail .vtab .close,
   .window.rail-icons .rail .nt-main span,
-  .window.rail-icons .rail .nt-chev { display: none; }
+  .window.rail-icons .rail .nt-chev { opacity: 0; transition: opacity .1s ease; }
   .window.rail-icons .rail:hover .label,
   .window.rail-icons .rail:hover .vtab .title,
   .window.rail-icons .rail:hover .panecount,
   .window.rail-icons .rail:hover .nt-main span,
-  .window.rail-icons .rail:hover .nt-chev { display: revert; }
-  .window.rail-icons .rail:hover .vtab .close { display: flex; }
-  .window.rail-icons .rail .vtab { padding: 0 8px; justify-content: center; }
-  .window.rail-icons .rail:hover .vtab { padding: 0 5px 0 10px; justify-content: flex-start; }
-  .window.rail-icons .rail .rail-new .nt-main { justify-content: center; padding: 0; }
-  .window.rail-icons .rail:hover .rail-new .nt-main { justify-content: flex-start; padding: 0 10px; }
+  .window.rail-icons .rail:hover .nt-chev,
+  .window.rail-icons .rail:hover .vtab .close { opacity: 1; transition-delay: .06s; }
+  .window.rail-icons .rail .vtab .close { visibility: visible; }
 
   .panel-toggle {
     display: none; width: 30px; height: 26px; border: none; background: none;
