@@ -190,14 +190,21 @@
   .window.rail-collapsed .rail { width: 0; padding-left: 0; padding-right: 0; border-right: none; opacity: 0; }
 
   /* Icon rail: parked as a strip of icons, opens over the terminal on hover, so
-     the panes never reflow just because you went looking for a tab. */
+     the panes never reflow just because you went looking for a tab. Opened, it
+     has to look like a panel resting ON the terminal — menu material, its own
+     corners, a real shadow. Without that it reads as the terminal being sliced
+     in half, because it cuts straight through the text behind it. */
   .window.rail-icons .rail { width: 44px; padding-left: 4px; padding-right: 4px; }
   .window.rail-icons .rail:hover {
-    width: 220px; padding-left: 8px; padding-right: 8px;
-    position: absolute; top: 40px; bottom: 0; left: 0; z-index: 15;
-    box-shadow: 6px 0 20px rgba(0, 0, 0, .10);
+    width: 220px; padding: 6px 8px 8px;
+    position: absolute; top: 46px; bottom: 8px; left: 6px; z-index: 15;
+    background: var(--panel);              /* not the terminal's white: it must
+                                              read as a different surface */
+    border: 1px solid var(--border);
+    border-radius: 10px;                   /* a card that floated out, not a wall */
+    box-shadow: 0 10px 34px rgba(0, 0, 0, .17);
   }
-  body.dark .window.rail-icons .rail:hover { box-shadow: 6px 0 20px rgba(0, 0, 0, .4); }
+  body.dark .window.rail-icons .rail:hover { box-shadow: 0 10px 34px rgba(0, 0, 0, .55); }
   .window.rail-icons .rail .label,
   .window.rail-icons .rail .vtab .title,
   .window.rail-icons .rail .panecount,
@@ -221,6 +228,8 @@
     align-items: center; justify-content: center; flex: none;
   }
   .window[data-tabs="vertical"] .panel-toggle { display: flex; }
+  /* in icon mode the sidebar is already parked — nothing left to collapse */
+  .window.rail-icons .panel-toggle { display: none; }
   .panel-toggle:hover { background: var(--hover); color: var(--ink); }
   .panel-toggle svg { width: 14px; height: 14px; }
 
@@ -456,14 +465,16 @@
   .settings {
     width: min(480px, 92%);
     margin: 54px auto 0;
+    max-height: calc(100% - 72px);     /* never taller than the window it sits in */
+    display: flex; flex-direction: column;
     background: var(--win);
     border: 1px solid var(--border);
     border-radius: 10px;
     box-shadow: var(--shadow);
   }
-  .settings header { display: flex; align-items: center; padding: 16px 10px 10px 22px; }
+  .settings header { flex: none; display: flex; align-items: center; padding: 16px 10px 10px 22px; }
   .settings header h1 { margin: 0; font-size: 16px; font-weight: 600; flex: 1; }
-  .settings .content { padding: 2px 22px 18px; }
+  .settings .content { padding: 2px 22px 18px; overflow-y: auto; }
   .group-label {
     font-size: 11px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase;
     color: var(--ink3); margin: 10px 0 2px;
@@ -503,6 +514,8 @@
     display: none; z-index: 50;
   }
   .combo.open .combo-menu { display: block; }
+  /* no room below → open upwards instead of spilling out of the window */
+  .combo.flip-up .combo-menu { top: auto; bottom: calc(100% + 4px); }
   .combo-item {
     display: flex; align-items: center; gap: 8px;
     border-radius: 5px;
@@ -1429,6 +1442,14 @@
       e.stopPropagation();
       document.querySelectorAll(".combo").forEach(c => { if (c !== combo) c.classList.remove("open"); });
       combo.classList.toggle("open");
+      if (combo.classList.contains("open")) {
+        /* measure where it landed; flip it up if it would spill out of whatever
+           actually clips it — its scroll container if it has one, else the window */
+        combo.classList.remove("flip-up");
+        const menu = combo.querySelector(".combo-menu").getBoundingClientRect();
+        const clip = (combo.closest(".content") || $("win")).getBoundingClientRect();
+        if (menu.bottom > clip.bottom - 8) combo.classList.add("flip-up");
+      }
     });
     combo.querySelectorAll(".combo-item").forEach(item =>
       item.addEventListener("click", (e) => {
