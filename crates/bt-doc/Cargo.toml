@@ -7,7 +7,6 @@ rust-version.workspace = true
 
 [dependencies]
 bt-transcript = { path = "../bt-transcript" }
-serde.workspace = true
 thiserror.workspace = true
 
 [lints]

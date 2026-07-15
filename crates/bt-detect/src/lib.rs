@@ -2,8 +2,8 @@
 
 use bt_doc::{DecorationIntent, HistoryDocument};
 pub use bt_doc::{
-    DecorationLifecycle, DetectionRevision, LayoutKey, SourceLifecycle, VersionStamp,
-    ViewGeneration,
+    DecorationLifecycle, DetectionRevision, LayoutKey, SUBPIXELS_PER_PX, SourceLifecycle,
+    VersionStamp, ViewGeneration,
 };
 use bt_transcript::{SourceGeneration, TranscriptId};
 
@@ -166,7 +166,7 @@ pub fn render_placeholder(task: &DetectionTask) -> PlaceholderArtifact {
             "math:{}:{}:{}",
             task.transcript_id.0, task.span.byte_start, task.versions.detection.0
         ),
-        height_subpixels: 64 * 1024,
+        height_subpixels: 64 * SUBPIXELS_PER_PX,
     }
 }
 
@@ -174,14 +174,19 @@ pub fn render_placeholder(task: &DetectionTask) -> PlaceholderArtifact {
 mod tests {
     use super::*;
     use bt_transcript::{CapturedRow, TranscriptStore};
+    use std::{num::NonZeroU32, num::NonZeroUsize};
+
+    fn nz32(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).unwrap()
+    }
 
     fn stamp() -> VersionStamp {
         VersionStamp {
             source: SourceGeneration(1),
             detection: DetectionRevision(1),
             layout: LayoutKey {
-                width_cells: 80,
-                dpi_milli: 1000,
+                width_cells: nz32(80),
+                dpi_milli: nz32(1000),
                 font_rev: 1,
                 theme_rev: 1,
             },
@@ -215,7 +220,7 @@ mod tests {
 
         let source_before = record.versions.source;
         record.layout_changed(LayoutKey {
-            width_cells: 40,
+            width_cells: nz32(40),
             ..stamp().layout
         });
         assert_eq!(record.versions.source, source_before);
@@ -237,7 +242,7 @@ mod tests {
 
     #[test]
     fn redetection_revision_is_recorded_in_rebuilt_intent() {
-        let mut store = TranscriptStore::new(8);
+        let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
         let finalized = store
             .capture(CapturedRow::plain("$$x$$", false))
             .finalized

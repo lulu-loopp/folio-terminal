@@ -46,9 +46,9 @@ alacritty_terminal = "=0.26.0"
 anyhow = "1"
 bitflags = "2"
 portable-pty = "0.9"
-serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 unicode-segmentation = "1"
+vte = "0.15"
 
 [profile.test]
 opt-level = 1

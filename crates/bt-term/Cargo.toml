@@ -11,8 +11,6 @@ bt-transcript = { path = "../bt-transcript" }
 bt-doc = { path = "../bt-doc" }
 bt-detect = { path = "../bt-detect" }
 bt-viewport = { path = "../bt-viewport" }
-serde.workspace = true
-thiserror.workspace = true
 
 [dev-dependencies]
 proptest = "1"

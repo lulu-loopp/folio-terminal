@@ -1,41 +1,72 @@
 //! Canonical frozen transcript and mutable staging primitives.
 
-use std::collections::VecDeque;
+use std::{collections::VecDeque, num::NonZeroUsize};
 
-use serde::{Deserialize, Serialize};
+use bitflags::bitflags;
 use unicode_segmentation::UnicodeSegmentation;
 
-pub const DEFAULT_STAGING_QUOTA: usize = 4096;
-pub const DEFAULT_FROZEN_QUOTA: usize = 100_000;
+pub const DEFAULT_STAGING_QUOTA: NonZeroUsize = NonZeroUsize::new(4096).unwrap();
+/// Spike-only value; M0 must replace it with a measured or configured quota.
+pub const SPIKE_DEFAULT_FROZEN_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 
-#[derive(
-    Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TranscriptId(pub u64);
 
-#[derive(
-    Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StagingId(pub u64);
 
-#[derive(
-    Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct SourceGeneration(pub u64);
 
-#[derive(
-    Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize,
-)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct GraphemeOffset(pub u32);
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct CellStyle {
-    pub flags: u16,
-    pub foreground: u32,
-    pub background: u32,
+/// Stable transcript color vocabulary; no upstream discriminants cross this boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TerminalColor {
+    Named(u8),
+    Indexed(u8),
+    Rgb(u8, u8, u8),
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+bitflags! {
+    /// Stable transcript style flags. Bit positions are owned by BetterTerminal.
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct CellFlags: u16 {
+        const INVERSE = 1 << 0;
+        const BOLD = 1 << 1;
+        const ITALIC = 1 << 2;
+        const UNDERLINE = 1 << 3;
+        const DIM = 1 << 4;
+        const HIDDEN = 1 << 5;
+        const STRIKEOUT = 1 << 6;
+        const DOUBLE_UNDERLINE = 1 << 7;
+        const UNDERCURL = 1 << 8;
+        const DOTTED_UNDERLINE = 1 << 9;
+        const DASHED_UNDERLINE = 1 << 10;
+        const WIDE_CHAR = 1 << 11;
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CellStyle {
+    pub flags: CellFlags,
+    pub foreground: TerminalColor,
+    pub background: TerminalColor,
+}
+
+impl Default for CellStyle {
+    fn default() -> Self {
+        Self {
+            flags: CellFlags::empty(),
+            // Named codes are BetterTerminal-owned; 16/17 mean default foreground/background.
+            foreground: TerminalColor::Named(16),
+            background: TerminalColor::Named(17),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CapturedCell {
     pub text: String,
     pub style: CellStyle,
@@ -53,7 +84,7 @@ impl CapturedCell {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CapturedRow {
     pub cells: Vec<CapturedCell>,
     /// True when this physical row soft-wraps into the next physical row.
@@ -74,7 +105,7 @@ impl CapturedRow {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct StyleSpan {
     pub byte_start: u32,
     pub byte_end: u32,
@@ -82,14 +113,14 @@ pub struct StyleSpan {
     pub hyperlink: Option<String>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PhysicalFragment {
     pub byte_start: u32,
     pub byte_end: u32,
     pub soft_wrapped: bool,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FrozenLine {
     pub id: TranscriptId,
     pub source_generation: SourceGeneration,
@@ -124,7 +155,7 @@ pub struct AnchorMapping {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Finalized {
+pub struct FinalizedLine {
     pub line: FrozenLine,
     pub mappings: Vec<AnchorMapping>,
 }
@@ -132,7 +163,13 @@ pub struct Finalized {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CaptureResult {
     pub staging_id: StagingId,
-    pub finalized: Vec<Finalized>,
+    pub finalized: Vec<FinalizedLine>,
+}
+
+/// External event that requires every mutable logical-line candidate to freeze.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FinalizeReason {
+    WidthResize,
 }
 
 /// The only owner and quota authority for frozen terminal history.
@@ -157,16 +194,14 @@ impl Default for TranscriptStore {
 }
 
 impl TranscriptStore {
-    pub fn new(quota: usize) -> Self {
-        Self::with_quotas(quota, DEFAULT_FROZEN_QUOTA)
+    pub fn new(quota: NonZeroUsize) -> Self {
+        Self::with_quotas(quota, SPIKE_DEFAULT_FROZEN_QUOTA)
     }
 
-    pub fn with_quotas(staging_quota: usize, frozen_quota: usize) -> Self {
-        assert!(staging_quota > 0, "staging quota must be non-zero");
-        assert!(frozen_quota > 0, "frozen quota must be non-zero");
+    pub fn with_quotas(staging_quota: NonZeroUsize, frozen_quota: NonZeroUsize) -> Self {
         Self {
-            staging_quota,
-            frozen_quota,
+            staging_quota: staging_quota.get(),
+            frozen_quota: frozen_quota.get(),
             next_staging: 1,
             next_transcript: 1,
             source_generation: SourceGeneration(1),
@@ -198,14 +233,15 @@ impl TranscriptStore {
     pub fn capture(&mut self, row: CapturedRow) -> CaptureResult {
         let id = StagingId(self.next_staging);
         self.next_staging += 1;
+        let completes_candidate = !row.continues;
         let staged = StagedRow { id, row };
 
-        if self
+        if let Some(candidate) = self
             .staging
-            .back()
-            .is_some_and(|candidate| candidate.rows.last().is_some_and(|row| row.row.continues))
+            .back_mut()
+            .filter(|candidate| candidate.rows.last().is_some_and(|row| row.row.continues))
         {
-            self.staging.back_mut().unwrap().rows.push(staged);
+            candidate.rows.push(staged);
         } else {
             self.staging.push_back(FreezeCandidate {
                 rows: vec![staged],
@@ -215,25 +251,16 @@ impl TranscriptStore {
         self.staging_rows += 1;
 
         let mut finalized = Vec::new();
-        if !self
-            .staging
-            .back()
-            .unwrap()
-            .rows
-            .last()
-            .unwrap()
-            .row
-            .continues
-        {
-            let candidate = self.staging.pop_back().unwrap();
-            self.staging_rows -= candidate.rows.len();
-            finalized.push(self.finalize(candidate, false));
+        if completes_candidate {
+            if let Some(candidate) = self.staging.pop_back() {
+                self.staging_rows -= candidate.rows.len();
+                finalized.push(self.finalize(candidate, false));
+            }
         }
         while self.staging_rows > self.staging_quota {
-            let candidate = self
-                .staging
-                .pop_front()
-                .expect("quota overflow requires staging");
+            let Some(candidate) = self.staging.pop_front() else {
+                break;
+            };
             self.staging_rows -= candidate.rows.len();
             finalized.push(self.finalize(candidate, true));
         }
@@ -245,12 +272,13 @@ impl TranscriptStore {
     }
 
     /// A width change never joins a staged head with a live-grid tail.
-    pub fn width_resize(&mut self) -> Vec<Finalized> {
+    pub fn finalize_all_candidates(&mut self, reason: FinalizeReason) -> Vec<FinalizedLine> {
         let candidates = self.staging.drain(..).collect::<Vec<_>>();
         self.staging_rows = 0;
+        let wrap_split = matches!(reason, FinalizeReason::WidthResize);
         candidates
             .into_iter()
-            .map(|c| self.finalize(c, true))
+            .map(|candidate| self.finalize(candidate, wrap_split))
             .collect()
     }
 
@@ -296,7 +324,9 @@ impl TranscriptStore {
         self.staging_rows = 0;
         self.tombstones.extend(removed.iter().copied());
         self.source_generation.0 += 1;
-        // Staging IDs are not tombstones, but their anchors are invalidated by the generation bump.
+        // Staging IDs are not tombstones. The caller must explicitly relocate their anchors by
+        // invoking HistoryDocument::delete_transaction with clear_staging=true; generation only
+        // invalidates versioned work and is not an anchor-deletion mechanism.
         removed.shrink_to_fit();
         removed
     }
@@ -308,7 +338,7 @@ impl TranscriptStore {
         self.source_generation.0 += 1;
     }
 
-    fn finalize(&mut self, candidate: FreezeCandidate, wrap_split: bool) -> Finalized {
+    fn finalize(&mut self, candidate: FreezeCandidate, wrap_split: bool) -> FinalizedLine {
         let id = TranscriptId(self.next_transcript);
         self.next_transcript += 1;
         let (line, mappings) = normalize(id, self.source_generation, candidate.rows, wrap_split);
@@ -318,7 +348,7 @@ impl TranscriptStore {
             let removed = self.evict_oldest(overflow);
             self.pending_evictions.extend(removed);
         }
-        Finalized { line, mappings }
+        FinalizedLine { line, mappings }
     }
 }
 
@@ -402,9 +432,13 @@ fn normalize(
 mod tests {
     use super::*;
 
+    fn nz(value: usize) -> NonZeroUsize {
+        NonZeroUsize::new(value).unwrap()
+    }
+
     #[test]
     fn partial_wrap_waits_then_freezes_as_one_logical_line() {
-        let mut store = TranscriptStore::new(8);
+        let mut store = TranscriptStore::new(nz(8));
         let first = store.capture(CapturedRow::plain("ab  ", true));
         assert!(first.finalized.is_empty());
         let second = store.capture(CapturedRow::plain("c", false));
@@ -414,19 +448,23 @@ mod tests {
 
     #[test]
     fn resize_and_quota_force_wrap_split() {
-        let mut store = TranscriptStore::new(1);
+        let mut store = TranscriptStore::new(nz(1));
         let first = store.capture(CapturedRow::plain("head", true));
         assert!(first.finalized.is_empty());
         let overflow = store.capture(CapturedRow::plain("tail", true));
         assert!(overflow.finalized[0].line.wrap_split);
 
         store.capture(CapturedRow::plain("again", true));
-        assert!(store.width_resize()[0].line.wrap_split);
+        assert!(
+            store.finalize_all_candidates(FinalizeReason::WidthResize)[0]
+                .line
+                .wrap_split
+        );
     }
 
     #[test]
     fn normalization_keeps_graphemes_links_and_drops_wide_spacers() {
-        let mut store = TranscriptStore::new(8);
+        let mut store = TranscriptStore::new(nz(8));
         let linked = CapturedCell {
             text: "e\u{301}".into(),
             hyperlink: Some("https://example.test".into()),
@@ -453,14 +491,16 @@ mod tests {
 
     #[test]
     fn mutable_staging_can_be_rewritten_and_eviction_leaves_tombstone() {
-        let mut store = TranscriptStore::new(8);
+        let mut store = TranscriptStore::new(nz(8));
         let staged = store.capture(CapturedRow::plain("old", true));
         assert!(store.rewrite_staged(staged.staging_id, CapturedRow::plain("new", true)));
         assert_eq!(
             store.staged_tail(staged.staging_id),
             Some(&CapturedRow::plain("new", true))
         );
-        let finalized = store.width_resize().remove(0);
+        let finalized = store
+            .finalize_all_candidates(FinalizeReason::WidthResize)
+            .remove(0);
         assert_eq!(finalized.line.text, "old");
         let removed = store.evict_oldest(1);
         assert_eq!(removed, vec![finalized.line.id]);
@@ -469,7 +509,7 @@ mod tests {
 
     #[test]
     fn frozen_quota_is_enforced_by_the_store() {
-        let mut store = TranscriptStore::with_quotas(8, 2);
+        let mut store = TranscriptStore::with_quotas(nz(8), nz(2));
         for text in ["one", "two", "three"] {
             store.capture(CapturedRow::plain(text, false));
         }

@@ -2,6 +2,7 @@
 
 | Spike | 结论 | 状态 |
 |---|---|---|
+| 00 工程基线清理 | go | 完成；概念拆分、稳定样式类型、公开 API 门禁、generation/LayoutKey 接线；241 tests，clippy 0 warning |
 | 01 语料录制与回放 | go-with-caveats | 完成；7 个真实 ConPTY corpus（276,066 bytes），含 226 KB Claude Code 交互语料 |
 | 02 双平面最小原型 | go-with-caveats | 第二轮返工完成；G1/G2/G3 通过；224 tests（含 vendored alacritty 180 tests），clippy 0 warning |
 | 03 数学渲染引擎 | 未执行 | 不在本会话范围 |

@@ -1,6 +1,9 @@
 //! Exact byte/timing/resize corpus format and deterministic replay support.
 
-use std::io::{self, Read, Write};
+use std::{
+    io::{self, Read, Write},
+    num::NonZeroU16,
+};
 
 use thiserror::Error;
 
@@ -43,6 +46,8 @@ pub enum CorpusError {
     BadTag(u8),
     #[error("invalid zero-sized replay chunk")]
     ZeroChunk,
+    #[error("corpus contains a zero terminal dimension")]
+    ZeroDimension,
 }
 
 impl Corpus {
@@ -116,7 +121,7 @@ impl Corpus {
         &self,
         chunking: Chunking,
         mut output: impl FnMut(&[u8]),
-        mut resize: impl FnMut(u16, u16),
+        mut resize: impl FnMut(NonZeroU16, NonZeroU16),
     ) -> Result<(), CorpusError> {
         let mut pattern_index = 0;
         for event in &self.events {
@@ -145,7 +150,11 @@ impl Corpus {
                         }
                     }
                 },
-                EventKind::Resize { cols, rows } => resize(*cols, *rows),
+                EventKind::Resize { cols, rows } => {
+                    let cols = NonZeroU16::new(*cols).ok_or(CorpusError::ZeroDimension)?;
+                    let rows = NonZeroU16::new(*rows).ok_or(CorpusError::ZeroDimension)?;
+                    resize(cols, rows);
+                }
                 EventKind::Exit { .. } => {}
             }
         }
@@ -221,7 +230,7 @@ mod tests {
                     sizes.push(chunk.len());
                     bytes.extend_from_slice(chunk)
                 },
-                |cols, rows| assert_eq!((cols, rows), (120, 40)),
+                |cols, rows| assert_eq!((cols.get(), rows.get()), (120, 40)),
             )
             .unwrap();
         assert_eq!(
@@ -229,5 +238,15 @@ mod tests {
             [0x1b, b'[', b'3', b'1', b'm', 0xf0, 0x9f, 0x98, 0x80]
         );
         assert!(sizes.iter().all(|size| *size <= 3));
+    }
+
+    #[test]
+    fn zero_resize_dimension_is_rejected_at_the_corpus_boundary() {
+        let mut corpus = sample();
+        corpus.events[1].kind = EventKind::Resize { cols: 0, rows: 40 };
+        assert!(matches!(
+            corpus.replay(Chunking::Recorded, |_| {}, |_, _| {}),
+            Err(CorpusError::ZeroDimension)
+        ));
     }
 }

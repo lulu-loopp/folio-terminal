@@ -1,4 +1,4 @@
-use std::{cell::RefCell, fs::File, path::PathBuf};
+use std::{cell::RefCell, fs::File, num::NonZeroU32, path::PathBuf};
 
 use bt_corpus::{Chunking, Corpus};
 use bt_term::TerminalAdapter;
@@ -13,8 +13,8 @@ fn corpus_path(name: &str) -> PathBuf {
 fn replay(name: &str, chunking: Chunking) -> (Vec<String>, Vec<String>, (usize, usize)) {
     let corpus = Corpus::read_from(File::open(corpus_path(name)).unwrap()).unwrap();
     let terminal = RefCell::new(TerminalAdapter::new(
-        corpus.initial_cols as usize,
-        corpus.initial_rows as usize,
+        NonZeroU32::new(u32::from(corpus.initial_cols)).unwrap(),
+        NonZeroU32::new(u32::from(corpus.initial_rows)).unwrap(),
     ));
     corpus
         .replay(
@@ -23,7 +23,9 @@ fn replay(name: &str, chunking: Chunking) -> (Vec<String>, Vec<String>, (usize, 
                 terminal.borrow_mut().feed(bytes);
             },
             |cols, rows| {
-                terminal.borrow_mut().resize(cols as usize, rows as usize);
+                terminal
+                    .borrow_mut()
+                    .resize(NonZeroU32::from(cols), NonZeroU32::from(rows));
             },
         )
         .unwrap();
@@ -35,7 +37,12 @@ fn replay(name: &str, chunking: Chunking) -> (Vec<String>, Vec<String>, (usize, 
         .iter()
         .map(|line| line.text.clone())
         .collect();
-    (visible, frozen, terminal.dimensions())
+    let dimensions = terminal.dimensions();
+    (
+        visible,
+        frozen,
+        (dimensions.0.get() as usize, dimensions.1.get() as usize),
+    )
 }
 
 #[test]

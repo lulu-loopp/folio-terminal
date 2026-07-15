@@ -10,6 +10,7 @@ anyhow.workspace = true
 bt-term = { path = "../bt-term" }
 portable-pty.workspace = true
 thiserror.workspace = true
+vte.workspace = true
 
 [[bin]]
 name = "bt-record"

@@ -1,14 +1,20 @@
-//! Per-viewport projection, layout cache, fixed-point height tree and scroll anchoring.
+//! Per-viewport projection, layout cache and scroll anchoring.
 
-use std::collections::{HashMap, HashSet};
+mod height_tree;
+
+use std::{
+    collections::{HashMap, HashSet},
+    num::{NonZeroI64, NonZeroU32},
+};
 
 use bt_doc::{
-    AnchorError, ContentAnchor, DetectionRevision, HistoryDocument, LayoutKey, ScreenId,
-    ViewGeneration,
+    AnchorError, ContentAnchor, DetectionRevision, GridGeneration, HistoryDocument, LayoutKey,
+    ScreenId, ViewGeneration,
 };
 use bt_transcript::{SourceGeneration, TranscriptId};
 
-pub const SUBPIXELS_PER_PX: i64 = 1024;
+pub use bt_doc::SUBPIXELS_PER_PX;
+pub use height_tree::HeightTree;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TranscriptSpan {
@@ -28,54 +34,6 @@ pub struct LayoutCacheKey {
 pub struct MeasuredLayout {
     pub height: i64,
     pub visual_lines: u32,
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct HeightTree {
-    heights: Vec<i64>,
-    fenwick: Vec<i64>,
-}
-
-impl HeightTree {
-    pub fn rebuild(&mut self, heights: impl IntoIterator<Item = i64>) {
-        self.heights = heights.into_iter().collect();
-        self.fenwick = vec![0; self.heights.len() + 1];
-        for index in 0..self.heights.len() {
-            let value = self.heights[index];
-            self.add(index, value);
-        }
-    }
-
-    fn add(&mut self, index: usize, delta: i64) {
-        let mut i = index + 1;
-        while i < self.fenwick.len() {
-            self.fenwick[i] += delta;
-            i += i & i.wrapping_neg();
-        }
-    }
-
-    pub fn set(&mut self, index: usize, value: i64) {
-        let delta = value - self.heights[index];
-        self.heights[index] = value;
-        self.add(index, delta);
-    }
-
-    pub fn prefix_sum(&self, count: usize) -> i64 {
-        let mut i = count.min(self.heights.len());
-        let mut sum = 0;
-        while i > 0 {
-            sum += self.fenwick[i];
-            i &= i - 1;
-        }
-        sum
-    }
-
-    pub fn total(&self) -> i64 {
-        self.prefix_sum(self.heights.len())
-    }
-    pub fn get(&self, index: usize) -> Option<i64> {
-        self.heights.get(index).copied()
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -101,8 +59,10 @@ pub struct ViewportProjection {
     scroll_anchor: Option<ScrollAnchor>,
     selection: Option<ViewSelection>,
     view_generation: ViewGeneration,
-    live_rows: u32,
-    cell_height_subpixels: i64,
+    live_rows: NonZeroU32,
+    cell_height_subpixels: NonZeroI64,
+    source_generation: SourceGeneration,
+    grid_generation: GridGeneration,
     cache_misses: u64,
 }
 
@@ -110,12 +70,11 @@ impl ViewportProjection {
     pub fn new(
         layout_key: LayoutKey,
         detection_rev: DetectionRevision,
-        live_rows: u32,
-        cell_height_subpixels: i64,
+        live_rows: NonZeroU32,
+        cell_height_subpixels: NonZeroI64,
+        source_generation: SourceGeneration,
+        grid_generation: GridGeneration,
     ) -> Self {
-        assert!(layout_key.width_cells > 0);
-        assert!(live_rows > 0);
-        assert!(cell_height_subpixels > 0);
         Self {
             layout_key,
             detection_rev,
@@ -128,6 +87,8 @@ impl ViewportProjection {
             view_generation: ViewGeneration(1),
             live_rows,
             cell_height_subpixels,
+            source_generation,
+            grid_generation,
             cache_misses: 0,
         }
     }
@@ -186,9 +147,15 @@ impl ViewportProjection {
         }
         self.artifact_heights = next;
     }
-    pub fn set_live_rows(&mut self, live_rows: u32) {
-        assert!(live_rows > 0);
+    pub fn set_live_state(
+        &mut self,
+        live_rows: NonZeroU32,
+        source_generation: SourceGeneration,
+        grid_generation: GridGeneration,
+    ) {
         self.live_rows = live_rows;
+        self.source_generation = source_generation;
+        self.grid_generation = grid_generation;
     }
 
     pub fn project(&mut self, document: &HistoryDocument) {
@@ -218,10 +185,11 @@ impl ViewportProjection {
                     } else {
                         let graphemes =
                             entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
-                        let visual_lines = graphemes.max(1).div_ceil(self.layout_key.width_cells);
+                        let visual_lines =
+                            graphemes.max(1).div_ceil(self.layout_key.width_cells.get());
                         MeasuredLayout {
                             visual_lines,
-                            height: visual_lines as i64 * self.cell_height_subpixels,
+                            height: visual_lines as i64 * self.cell_height_subpixels.get(),
                         }
                     }
                 };
@@ -241,7 +209,12 @@ impl ViewportProjection {
         anchor: &ContentAnchor,
     ) -> Result<i64, AnchorError> {
         match anchor {
-            ContentAnchor::History { id, offset, .. } => {
+            ContentAnchor::History {
+                id,
+                offset,
+                generation,
+                ..
+            } => {
                 let index = self
                     .ordered_ids
                     .iter()
@@ -251,25 +224,37 @@ impl ViewportProjection {
                     .entries()
                     .get(id)
                     .ok_or(AnchorError::UnknownAnchor)?;
+                if *generation != entry.line.source_generation {
+                    return Err(AnchorError::StaleGeneration);
+                }
                 let max_offset = entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
                 let local_y = if self.artifact_heights.contains_key(id) {
                     0
                 } else {
-                    let row = offset.0.min(max_offset) / self.layout_key.width_cells;
-                    row as i64 * self.cell_height_subpixels
+                    let row = offset.0.min(max_offset) / self.layout_key.width_cells.get();
+                    row as i64 * self.cell_height_subpixels.get()
                 };
                 Ok(self.heights.prefix_sum(index) + local_y)
             }
-            ContentAnchor::Staging { .. } => Ok(self.heights.total()),
+            ContentAnchor::Staging { generation, .. } => {
+                if *generation != self.source_generation {
+                    return Err(AnchorError::StaleGeneration);
+                }
+                Ok(self.heights.total())
+            }
             ContentAnchor::Live {
                 screen: ScreenId::Primary,
                 point,
+                generation,
                 ..
             } => {
-                if point.row >= self.live_rows {
+                if *generation != self.grid_generation {
+                    return Err(AnchorError::StaleGeneration);
+                }
+                if point.row >= self.live_rows.get() {
                     return Err(AnchorError::LiveOutOfBounds);
                 }
-                Ok(self.heights.total() + point.row as i64 * self.cell_height_subpixels)
+                Ok(self.heights.total() + point.row as i64 * self.cell_height_subpixels.get())
             }
             ContentAnchor::Live {
                 screen: ScreenId::Alternate,
@@ -328,10 +313,19 @@ impl ViewportProjection {
 mod tests {
     use super::*;
     use bt_doc::{Bias, GridGeneration, GridPoint, ScreenId};
-    use bt_transcript::{CapturedRow, TranscriptStore};
+    use bt_transcript::{CapturedRow, GraphemeOffset, StagingId, TranscriptStore};
+    use std::{num::NonZeroU32, num::NonZeroUsize};
+
+    fn nz32(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).unwrap()
+    }
+
+    fn cell_height() -> NonZeroI64 {
+        NonZeroI64::new(18 * SUBPIXELS_PER_PX).unwrap()
+    }
 
     fn history() -> HistoryDocument {
-        let mut store = TranscriptStore::new(8);
+        let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
         let line = store
             .capture(CapturedRow::plain("abcdefgh", false))
             .finalized
@@ -343,8 +337,8 @@ mod tests {
 
     fn key(width_cells: u32) -> LayoutKey {
         LayoutKey {
-            width_cells,
-            dpi_milli: 1000,
+            width_cells: nz32(width_cells),
+            dpi_milli: nz32(1000),
             font_rev: 1,
             theme_rev: 1,
         }
@@ -355,14 +349,26 @@ mod tests {
         let document = history();
         let anchor = ContentAnchor::Live {
             screen: ScreenId::Primary,
-            point: GridPoint { row: 0, column: 0 },
+            point: GridPoint { row: 3, column: 0 },
             bias: Bias::Before,
             generation: GridGeneration(1),
         };
-        let mut narrow =
-            ViewportProjection::new(key(4), DetectionRevision(1), 24, 18 * SUBPIXELS_PER_PX);
-        let mut wide =
-            ViewportProjection::new(key(8), DetectionRevision(1), 24, 18 * SUBPIXELS_PER_PX);
+        let mut narrow = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(24),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut wide = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(24),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
         narrow.set_scroll_anchor(Some(ScrollAnchor {
             source: anchor.clone(),
             local_offset: 7,
@@ -395,19 +401,16 @@ mod tests {
     }
 
     #[test]
-    fn fixed_point_tree_updates_without_float_drift() {
-        let mut tree = HeightTree::default();
-        tree.rebuild([i64::MAX / 8, i64::MAX / 8, 42]);
-        let before = tree.total();
-        tree.set(2, 84);
-        assert_eq!(tree.total(), before + 42);
-    }
-
-    #[test]
     fn live_anchor_outside_grid_is_rejected() {
         let document = history();
-        let mut projection =
-            ViewportProjection::new(key(8), DetectionRevision(1), 2, 18 * SUBPIXELS_PER_PX);
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
         projection.project(&document);
         let anchor = ContentAnchor::Live {
             screen: ScreenId::Primary,
@@ -418,6 +421,91 @@ mod tests {
         assert_eq!(
             projection.anchor_y(&document, &anchor),
             Err(AnchorError::LiveOutOfBounds)
+        );
+    }
+
+    #[test]
+    fn every_layout_key_field_has_an_independent_cache_identity() {
+        let document = history();
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let base = key(8);
+        for changed in [
+            LayoutKey {
+                width_cells: nz32(9),
+                ..key(8)
+            },
+            LayoutKey {
+                dpi_milli: nz32(1250),
+                ..key(8)
+            },
+            LayoutKey {
+                font_rev: 2,
+                ..key(8)
+            },
+            LayoutKey {
+                theme_rev: 2,
+                ..key(8)
+            },
+        ] {
+            projection.relayout(base, &document);
+            let misses = projection.cache_misses();
+            projection.relayout(changed, &document);
+            assert_eq!(projection.cache_misses(), misses + 1);
+        }
+    }
+
+    #[test]
+    fn stale_anchor_generations_are_rejected() {
+        let document = history();
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(3),
+            GridGeneration(4),
+        );
+        projection.project(&document);
+        let stale_live = ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point: GridPoint { row: 1, column: 0 },
+            bias: Bias::Before,
+            generation: GridGeneration(3),
+        };
+        assert_eq!(
+            projection.anchor_y(&document, &stale_live),
+            Err(AnchorError::StaleGeneration)
+        );
+
+        let entry = document.entries().first_key_value().unwrap().1;
+        let stale_history = ContentAnchor::History {
+            id: entry.line.id,
+            offset: GraphemeOffset(0),
+            bias: Bias::Before,
+            generation: SourceGeneration(entry.line.source_generation.0 + 1),
+        };
+        assert_eq!(
+            projection.anchor_y(&document, &stale_history),
+            Err(AnchorError::StaleGeneration)
+        );
+
+        let stale_staging = ContentAnchor::Staging {
+            id: StagingId(9),
+            offset: GraphemeOffset(0),
+            bias: Bias::Before,
+            generation: SourceGeneration(2),
+        };
+        assert_eq!(
+            projection.anchor_y(&document, &stale_staging),
+            Err(AnchorError::StaleGeneration)
         );
     }
 }

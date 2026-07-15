@@ -1,5 +1,4 @@
 use std::{
-    collections::VecDeque,
     env, fs,
     io::{Read, Write},
     sync::mpsc,
@@ -10,6 +9,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use bt_corpus::{Corpus, CorpusEvent, EventKind};
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use vte::{Params, Parser, Perform};
 
 #[derive(Clone, Copy, Debug)]
 struct ScheduledResize {
@@ -22,6 +22,34 @@ struct ScheduledResize {
 struct ScheduledInput {
     at_ms: u64,
     bytes: Vec<u8>,
+}
+
+#[derive(Default)]
+struct CursorQueryDetector {
+    reports_requested: usize,
+}
+
+impl Perform for CursorQueryDetector {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], ignore: bool, action: char) {
+        if !ignore && action == 'n' && intermediates.is_empty() && params.iter().eq([&[6_u16][..]])
+        {
+            self.reports_requested += 1;
+        }
+    }
+}
+
+#[derive(Default)]
+struct TerminalQueries {
+    parser: Parser,
+    detector: CursorQueryDetector,
+}
+
+impl TerminalQueries {
+    fn advance(&mut self, bytes: &[u8]) -> usize {
+        let before = self.detector.reports_requested;
+        self.parser.advance(&mut self.detector, bytes);
+        self.detector.reports_requested - before
+    }
 }
 
 fn main() -> Result<()> {
@@ -74,7 +102,7 @@ fn main() -> Result<()> {
     // Keep the input side so the recorder can answer terminal status reports emitted by ConPTY.
     let mut writer = pair.master.take_writer()?;
     let mut pending_input = stdin_file.map(fs::read).transpose()?;
-    let mut output_tail = VecDeque::with_capacity(4);
+    let mut terminal_queries = TerminalQueries::default();
 
     let mut reader = pair.master.try_clone_reader()?;
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
@@ -125,16 +153,11 @@ fn main() -> Result<()> {
         match rx.recv_timeout(Duration::from_millis(2)) {
             Ok(bytes) => {
                 std::io::stdout().write_all(&bytes)?;
-                for byte in &bytes {
-                    output_tail.push_back(*byte);
-                    while output_tail.len() > 4 {
-                        output_tail.pop_front();
-                    }
-                    if output_tail.iter().copied().eq(b"\x1b[6n".iter().copied()) {
-                        writer.write_all(b"\x1b[1;1R")?;
-                        if let Some(input) = pending_input.take() {
-                            writer.write_all(&input)?;
-                        }
+                let reports_requested = terminal_queries.advance(&bytes);
+                for _ in 0..reports_requested {
+                    writer.write_all(b"\x1b[1;1R")?;
+                    if let Some(input) = pending_input.take() {
+                        writer.write_all(&input)?;
                     }
                 }
                 events.push(CorpusEvent {
@@ -218,4 +241,34 @@ fn parse_resize(value: &str) -> Result<ScheduledResize> {
         cols,
         rows,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cursor_query_is_recognized_across_arbitrary_chunks() {
+        let mut queries = TerminalQueries::default();
+        assert_eq!(queries.advance(b"prefix\x1b["), 0);
+        assert_eq!(queries.advance(b"6"), 0);
+        assert_eq!(queries.advance(b"n suffix"), 1);
+    }
+
+    #[test]
+    fn every_cursor_query_in_one_output_chunk_gets_a_response() {
+        let mut queries = TerminalQueries::default();
+        assert_eq!(queries.advance(b"\x1b[6n middle \x1b[6n suffix"), 2);
+    }
+
+    #[test]
+    fn dcs_and_apc_data_do_not_impersonate_cursor_queries() {
+        for bytes in [
+            b"\x1bP0;1|payload [6n\x1b\\".as_slice(),
+            b"\x1b_payload [6n\x1b\\".as_slice(),
+        ] {
+            let mut queries = TerminalQueries::default();
+            assert_eq!(queries.advance(bytes), 0);
+        }
+    }
 }
