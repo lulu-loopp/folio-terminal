@@ -252,7 +252,7 @@
   .profile-item .default-hint { margin-left: auto; font-size: 11px; color: var(--ink3); }
 
   /* ── Terminal & panes ── */
-  :root { --gap: 8px; }
+  /* the panel colour shows only in the gap that opens while a divider is dragged */
   .termhost { flex: 1; min-width: 0; display: flex; position: relative; background: var(--panel); }
   .term {
     flex: 1; min-width: 0; min-height: 0;
@@ -281,25 +281,41 @@
     flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
     background: var(--termbg); overflow: hidden;
   }
-  /* only split panes are cards; a lone pane stays flush with the tab above it */
-  .split .pane { border-radius: 7px; }
+  /* Panes sit flush. While you drag a divider, the two sides pull back from it —
+     the way a window shrinks as you resize it in Windows. That opens a temporary
+     gap with an edge on each side, so both sides are visibly moving and the
+     resize reads as a boundary being moved rather than one pane wiping over the
+     other. On release they close up again. */
+  .slot > * { transition: margin .1s ease, border-radius .1s ease; }
+  .split-row > .slot.pull-a > * { margin-right: 6px; }
+  .split-row > .slot.pull-b > * { margin-left: 6px; }
+  .split-col > .slot.pull-a > * { margin-bottom: 6px; }
+  .split-col > .slot.pull-b > * { margin-top: 6px; }
+  .split-row > .slot.pull-a > .pane { border-radius: 0 7px 7px 0; }
+  .split-row > .slot.pull-b > .pane { border-radius: 7px 0 0 7px; }
+  .split-col > .slot.pull-a > .pane { border-radius: 0 0 7px 7px; }
+  .split-col > .slot.pull-b > .pane { border-radius: 7px 7px 0 0; }
 
-  /* Panes are separated by a real gap, not a shared hairline — the way Windows
-     separates snapped windows. Two edges instead of one means both sides visibly
-     move when you drag, so the resize reads as a boundary moving rather than as
-     the growing pane wiping over its neighbour. The gap is also the drag handle. */
-  .divider { flex: none; position: relative; transition: background .12s ease; }
-  .split-row > .divider { width: var(--gap); cursor: col-resize; }
-  .split-col > .divider { height: var(--gap); cursor: row-resize; }
-  .divider:hover, .divider.dragging { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-  /* a grip, so the gap reads as something you can grab */
+  /* A hairline at rest with a comfortable hit area; the accent line marks the
+     boundary you are moving once you grab it. */
+  .divider { flex: none; position: relative; z-index: 5; }
+  .split-row > .divider { width: 7px; margin: 0 -3px; cursor: col-resize; }
+  .split-col > .divider { height: 7px; margin: -3px 0; cursor: row-resize; }
+  .divider::before {
+    content: ""; position: absolute; background: var(--border);
+    transition: background .12s ease;
+  }
+  .split-row > .divider::before { left: 3px; top: 0; bottom: 0; width: 1px; }
+  .split-col > .divider::before { top: 3px; left: 0; right: 0; height: 1px; }
+  .divider:hover::before, .divider.dragging::before { background: var(--accent); }
+  /* a grip, so the boundary reads as something you can grab */
   .divider::after {
-    content: ""; position: absolute; border-radius: 3px;
+    content: ""; position: absolute; border-radius: 2px;
     background: var(--accent); opacity: 0;
     transition: opacity .12s ease;
   }
-  .split-row > .divider::after { left: 2px; right: 2px; top: 50%; height: 28px; margin-top: -14px; }
-  .split-col > .divider::after { top: 2px; bottom: 2px; left: 50%; width: 28px; margin-left: -14px; }
+  .split-row > .divider::after { left: 2px; width: 3px; top: 50%; height: 28px; margin-top: -14px; }
+  .split-col > .divider::after { top: 2px; height: 3px; left: 50%; width: 28px; margin-left: -14px; }
   .divider:hover::after, .divider.dragging::after { opacity: 1; }
   body.resizing { user-select: none; }
   body.resizing * { cursor: inherit !important; }
@@ -949,10 +965,16 @@
     if (e.button !== 0) return;
     const node = findSplit(activeTab().tree, +el.dataset.split);
     const splitEl = el.parentElement;
-    const dr = el.getBoundingClientRect();
-    resize = { node, el, splitEl, rect: splitEl.getBoundingClientRect(),
-               gap: node.dir === "row" ? dr.width : dr.height };
+    const rect = splitEl.getBoundingClientRect();
+    const a = splitEl.children[0].getBoundingClientRect();
+    const b = splitEl.children[2].getBoundingClientRect();
+    /* whatever the divider actually costs in layout, measured rather than assumed */
+    const gap = node.dir === "row" ? rect.width - a.width - b.width
+                                   : rect.height - a.height - b.height;
+    resize = { node, el, splitEl, rect, gap };
     el.classList.add("dragging");
+    splitEl.children[0].classList.add("pull-a");   /* both sides pull back from */
+    splitEl.children[2].classList.add("pull-b");   /* the boundary being dragged */
     document.body.classList.add("resizing");
     document.body.style.cursor = node.dir === "row" ? "col-resize" : "row-resize";
     e.preventDefault(); e.stopPropagation();
@@ -974,6 +996,8 @@
   document.addEventListener("pointerup", () => {
     if (!resize) return;
     resize.el.classList.remove("dragging");
+    resize.splitEl.children[0].classList.remove("pull-a");
+    resize.splitEl.children[2].classList.remove("pull-b");
     document.body.classList.remove("resizing");
     document.body.style.cursor = "";
     resize = null;
