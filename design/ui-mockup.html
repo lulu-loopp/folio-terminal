@@ -736,6 +736,21 @@
      happen if you let go right now, and it is at its most wrong precisely when
      the pointer is moving fastest. */
   #dock-preview.snap { transition: opacity .1s ease; }
+  /* Where everything else is about to go.
+     Without it the root-dock preview is a riddle. The box is honest — the new
+     pane really does take that half — but a half-layout box lands exactly on the
+     panes already sitting there, and a filled rectangle laid precisely over two
+     windows says "replace these two", which is the one thing this gesture never
+     does. Drawing the box smaller would only trade a misread for a lie about the
+     size. What was missing is the other half of the sentence: the rest gets
+     squeezed, and now you can see each pane's destination while you aim. */
+  #dock-shift { position: absolute; inset: 0; pointer-events: none; z-index: 24; display: none; }
+  #dock-shift.show { display: block; }
+  #dock-shift i {
+    position: absolute; border-radius: 6px;
+    border: 1px dashed color-mix(in srgb, var(--accent) 50%, transparent);
+    background: color-mix(in srgb, var(--accent) 4%, transparent);
+  }
   /* Aimed at an edge that cannot split, because the halves would be narrower than
      a terminal has any business being. Refusing silently was the bug: nothing
      appeared at all, so "this pane is too narrow to divide" and "this app is
@@ -1556,7 +1571,8 @@
     /* Remember where each terminal was BEFORE the DOM is thrown away — after the
        innerHTML below, every .term is a new element scrolled to the top. */
     rememberScroll();
-    $("termhost").innerHTML = renderNode(aw.tree, aw) + `<div id="dock-preview"></div>`;
+    $("termhost").innerHTML = renderNode(aw.tree, aw) +
+      `<div id="dock-shift"></div><div id="dock-preview"></div>`;
     typeset($("termhost"));
     restoreScroll();
 
@@ -1751,10 +1767,33 @@
      starts where it belongs instead of gliding in from wherever it last was. */
   function hidePreview() {
     const pv = $("dock-preview");
-    if (!pv) return;
-    pv.classList.remove("show");
-    pv.classList.remove("refused");
-    delete pv.dataset.promise;
+    if (pv) {
+      pv.classList.remove("show");
+      pv.classList.remove("refused");
+      delete pv.dataset.promise;
+    }
+    $("dock-shift")?.classList.remove("show");
+  }
+  /* A root split maps every existing pane through one linear squeeze — half the
+     space, pushed to the far side — so each pane's destination is exact, not a
+     sketch. Showing them is what turns "a rectangle over your windows" into "a
+     new one lands here and you all move there". */
+  function showRootShift(zone, host) {
+    const sh = $("dock-shift");
+    if (!sh) return;
+    const panes = [...document.querySelectorAll("#termhost .pane")];
+    const place = (r) => {
+      const x = r.left - host.left, y = r.top - host.top, w = r.width, h = r.height;
+      if (zone === "top")    return [x, host.height / 2 + y / 2, w, h / 2];
+      if (zone === "bottom") return [x, y / 2, w, h / 2];
+      if (zone === "left")   return [host.width / 2 + x / 2, y, w / 2, h];
+      return [x / 2, y, w / 2, h];                                  /* right */
+    };
+    sh.innerHTML = panes.map(p => {
+      const [x, y, w, h] = place(p.getBoundingClientRect());
+      return `<i style="left:${x}px;top:${y}px;width:${w}px;height:${h}px"></i>`;
+    }).join("");
+    sh.classList.add("show");
   }
   function startDrag(e, src) {
     if (e.button !== 0 || e.target.closest(".close")) return;
@@ -2091,8 +2130,11 @@
       pv.style.left = x + "px"; pv.style.top = y + "px";
       pv.style.width = w + "px"; pv.style.height = h + "px";
       pv.classList.add("show");
+      /* a refusal squeezes nobody, so there is nothing to show going anywhere */
+      if (wouldSplit) showRootShift(nearRim, host); else $("dock-shift")?.classList.remove("show");
       return;
     }
+    $("dock-shift")?.classList.remove("show");   /* pane docks displace nothing outside the pane */
     pv.classList.remove("refused");
 
     /* inside the rim now: which pane is under the pointer? */
