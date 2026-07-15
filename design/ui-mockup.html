@@ -727,6 +727,15 @@
     opacity: 0; transition: opacity .1s ease, left .12s ease, top .12s ease, width .12s ease, height .12s ease;
   }
   #dock-preview.show { opacity: 1; }
+  /* Snap, do not glide, when the answer itself changes.
+     The glide is only ever pleasant while the answer stays the same and the box
+     is sliding between zones. When yes becomes no, a 120ms glide means the box
+     spends those 120ms still saying yes, in the old shape, in the old colour —
+     which is exactly the "blue first, then dashed" a fast drag shows. A preview
+     that lags is not a soft transition, it is a stale promise about what will
+     happen if you let go right now, and it is at its most wrong precisely when
+     the pointer is moving fastest. */
+  #dock-preview.snap { transition: opacity .1s ease; }
   /* Aimed at an edge that cannot split, because the halves would be narrower than
      a terminal has any business being. Refusing silently was the bug: nothing
      appeared at all, so "this pane is too narrow to divide" and "this app is
@@ -1738,6 +1747,15 @@
 
   /* ── drag & dock (tabs and panes share one engine) ── */
   let drag = null;
+  /* Hiding also forgets what the preview was promising, so its next appearance
+     starts where it belongs instead of gliding in from wherever it last was. */
+  function hidePreview() {
+    const pv = $("dock-preview");
+    if (!pv) return;
+    pv.classList.remove("show");
+    pv.classList.remove("refused");
+    delete pv.dataset.promise;
+  }
   function startDrag(e, src) {
     if (e.button !== 0 || e.target.closest(".close")) return;
     hidePeek();
@@ -2002,7 +2020,7 @@
         drag.target = { reordered: true };
         drag.ghost.style.opacity = "0";   /* the tab itself is the feedback */
       }
-      pv.classList.remove("show");
+      hidePreview();
       return;
     }
     /* left the strip: the tab drops back into its slot, the ghost takes over */
@@ -2010,11 +2028,30 @@
 
     /* over a pane? zones are relative to THAT pane */
     const host = $("termhost").getBoundingClientRect();
-    const insideHost = e.clientX >= host.left && e.clientX <= host.right &&
-                       e.clientY >= host.top && e.clientY <= host.bottom;
-    if (!insideHost) { pv.classList.remove("show"); pv.classList.remove("refused"); return; }
+    /* Pushing past an edge is how a hand aims at an edge, so overshooting must
+       not cancel: clamped, the rim is 48px deep going in and bottomless going
+       out, which is what makes an edge easy to hit — it is why snapping a window
+       to the side of a screen works. Unclamped it was a 48px target with a wall
+       on its far side, and every overshoot was a miss. Widening the band would
+       not have fixed that; it would only have moved the wall.
+       Up is the exception: the strip lives up there and has already had its say,
+       so a pointer above the layout is not overshooting, it is somewhere else. */
+    if (e.clientY < host.top) { hidePreview(); return; }
+    const cx = Math.max(host.left, Math.min(e.clientX, host.right));
+    const cy = Math.min(e.clientY, host.bottom);
     /* dragging the active tab onto its own layout is meaningless */
-    if (drag.kind === "tab" && drag.wsId === state.active) { pv.classList.remove("show"); return; }
+    if (drag.kind === "tab" && drag.wsId === state.active) { hidePreview(); return; }
+
+    /* Name what the preview is currently promising, so the moment that promise
+       changes can be told apart from the box merely being nudged. */
+    const promise = (what) => {
+      if (pv.dataset.promise !== what) {
+        pv.classList.add("snap");
+        pv.getBoundingClientRect();       /* land the new geometry with no transition */
+        requestAnimationFrame(() => pv.classList.remove("snap"));
+        pv.dataset.promise = what;
+      }
+    };
 
     /* The outer rim of the whole layout docks against the whole layout, not
        against whichever pane happens to be under it. Without this there is no
@@ -2035,13 +2072,14 @@
        splitting the only pane are the same act. 22px was a 2%-of-the-window
        ribbon asking for precision this gesture has not earned. */
     const OUTER_RIM = 48;
-    const rim = { left: e.clientX - host.left, right: host.right - e.clientX,
-                  top: e.clientY - host.top, bottom: host.bottom - e.clientY };
+    const rim = { left: cx - host.left, right: host.right - cx,
+                  top: cy - host.top, bottom: host.bottom - cy };
     const nearRim = Object.keys(rim).reduce((a, b) => rim[a] <= rim[b] ? a : b);
     if (rim[nearRim] < OUTER_RIM && paneCount(activeTab()) > 1) {
       const wouldSplit = (nearRim === "left" || nearRim === "right")
         ? host.width / 2 >= MIN_PANE_W : host.height / 2 >= MIN_PANE_H;
       drag.target = wouldSplit ? { leafId: null, zone: nearRim } : null;
+      promise(`root:${nearRim}:${wouldSplit}`);
       pv.classList.toggle("refused", !wouldSplit);
       let x = 0, y = 0, w = host.width, h = host.height;
       if (wouldSplit) {
@@ -2061,13 +2099,13 @@
     let hit = null;
     for (const el of document.querySelectorAll("#termhost .pane")) {
       const r = el.getBoundingClientRect();
-      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) { hit = { el, r }; break; }
+      if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) { hit = { el, r }; break; }
     }
-    if (!hit) { pv.classList.remove("show"); return; }   /* on a divider: nothing to aim at */
+    if (!hit) { hidePreview(); return; }   /* on a divider: nothing to aim at */
 
     const leafId = +hit.el.dataset.leaf;
-    const rx = (e.clientX - hit.r.left) / hit.r.width;
-    const ry = (e.clientY - hit.r.top) / hit.r.height;
+    const rx = (cx - hit.r.left) / hit.r.width;
+    const ry = (cy - hit.r.top) / hit.r.height;
     /* nearest edge wins, so anywhere in the outer third of the pane splits —
        no need to reach the very edge. The middle stays a cancel zone. */
     const d4 = { left: rx, right: 1 - rx, top: ry, bottom: 1 - ry };
@@ -2079,8 +2117,9 @@
     const tooNarrow = (zone === "left" || zone === "right") && hit.r.width / 2 < MIN_PANE_W;
     const tooShort = (zone === "top" || zone === "bottom") && hit.r.height / 2 < MIN_PANE_H;
     if (zone === "center" || (drag.kind === "pane" && drag.leafId === leafId)) {
-      pv.classList.remove("show"); pv.classList.remove("refused"); return;
+      hidePreview(); return;
     }
+    promise(`${leafId}:${zone}:${!(tooNarrow || tooShort)}`);
     pv.classList.toggle("refused", tooNarrow || tooShort);
     drag.target = (tooNarrow || tooShort) ? null : { leafId, zone };
 
@@ -2108,7 +2147,7 @@
     if (d.ghost) d.ghost.remove();
     document.body.classList.remove("dragging");
     const pv = $("dock-preview");
-    if (pv) pv.classList.remove("show");
+    if (pv) { pv.classList.remove("show"); delete pv.dataset.promise; }
     if (!d.started || !d.target || d.target.reordered) { clearDropPreview(); return; }
     /* Do NOT clear the preview first. It is holding the slot the new tab is about
        to take, and removing it makes the strip re-lay out — every tab widens to
