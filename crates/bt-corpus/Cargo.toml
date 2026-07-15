@@ -1,0 +1,23 @@
+[package]
+name = "bt-corpus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bt-term = { path = "../bt-term" }
+portable-pty.workspace = true
+thiserror.workspace = true
+
+[[bin]]
+name = "bt-record"
+path = "src/bin/bt-record.rs"
+
+[[bin]]
+name = "bt-replay"
+path = "src/bin/bt-replay.rs"
+
+[lints]
+workspace = true

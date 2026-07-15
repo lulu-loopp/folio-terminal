@@ -1,0 +1,21 @@
+[package]
+name = "bt-term"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+bt-transcript = { path = "../bt-transcript" }
+bt-doc = { path = "../bt-doc" }
+bt-detect = { path = "../bt-detect" }
+bt-viewport = { path = "../bt-viewport" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"
+
+[lints]
+workspace = true

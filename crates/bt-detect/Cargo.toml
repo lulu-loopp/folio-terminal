@@ -1,0 +1,15 @@
+[package]
+name = "bt-detect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bt-doc = { path = "../bt-doc" }
+bt-transcript = { path = "../bt-transcript" }
+serde.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
