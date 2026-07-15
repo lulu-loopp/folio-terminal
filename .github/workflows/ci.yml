@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # no toolchain given: rust-toolchain.toml is the single source of truth.
+      # Naming a channel here would silently win over it.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: none
+      - uses: Swatinem/rust-cache@v2
+
+      # vendor/alacritty_terminal must stay a workspace member: its own upstream
+      # suite is our regression line against our patches breaking VT semantics,
+      # and it only runs while it is a member. A real regression hid behind
+      # exactly this gap — see docs/reviews/claude-review-M-1-part1-rework.md.
+      #
+      # Asked of cargo, not of a grep: the manifest mentions this path twice
+      # (members and [patch.crates-io]), so grepping it passes even with the
+      # member deleted.
+      - name: vendored alacritty is a workspace member at the pinned version
+        shell: pwsh
+        run: |
+          $meta = cargo metadata --format-version 1 --no-deps --locked | ConvertFrom-Json
+          $want = [IO.Path]::GetFullPath("vendor/alacritty_terminal/Cargo.toml", $PWD.Path)
+          $pkg = $meta.packages | Where-Object {
+            $_.name -eq "alacritty_terminal" -and
+            [IO.Path]::GetFullPath($_.manifest_path) -eq $want
+          }
+          if (-not $pkg) { throw "vendored alacritty_terminal is not in the workspace" }
+          if ($pkg.id -notin $meta.workspace_members) {
+            throw "vendored alacritty_terminal left workspace.members - its upstream tests would stop running"
+          }
+          if ($pkg.version -ne "0.26.0") { throw "vendored alacritty is $($pkg.version), expected 0.26.0" }
+
+      # first-party only: vendor is upstream's code in upstream's format, and
+      # reformatting it would bury our patches in 300 lines of whitespace diff
+      - name: fmt
+        run: >
+          cargo fmt
+          --package bt-term --package bt-transcript --package bt-doc
+          --package bt-viewport --package bt-detect --package bt-corpus
+          -- --check
+
+      # A gate that cannot fail is the same thing as an assertion that cannot fail
+      # — and this repo has shipped one of those, plus a comment that lied, plus a
+      # lint table that inherited into nothing. Prove the gate fires before
+      # trusting a green one: plant a violation, demand red, put the file back.
+      - name: the lint gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-doc/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`nfn _lint_gate_probe() { todo!() }`n")
+            cargo clippy -p bt-doc --locked -- -D warnings 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              throw "clippy passed a planted todo!() - workspace lints are not reaching this crate ([lints] workspace = true missing?)"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # ours and alacritty's upstream suite in one go, because vendor is a member
+      - name: test
+        run: cargo test --workspace --locked
+
+      # asks the harness what it will skip, rather than grepping for the attribute
+      # and missing `#[ignore = "..."]` or matching it inside a string
+      - name: no ignored tests
+        shell: pwsh
+        run: |
+          $out = cargo test --workspace --locked -- --ignored --list 2>&1 | Out-String
+          if ($out -notmatch '0 tests, 0 benchmarks') { $out; throw "ignored tests are not allowed" }

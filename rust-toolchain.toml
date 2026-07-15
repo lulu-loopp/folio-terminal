@@ -1,0 +1,8 @@
+# Pinned, not floating: clippy's lint set changes between releases, so an
+# unpinned toolchain means "clippy is clean" is a statement about one machine on
+# one day. Bump this deliberately, and expect to fix new lints when you do.
+[toolchain]
+# a full version, not a series: "1.85" would still float across patch releases,
+# and CI installs whatever this file says rather than naming a channel of its own
+channel = "1.85.1"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,57 @@
+[workspace]
+# 3 is edition 2024's resolver: it takes rust-version into account when picking
+# dependency versions, so a dep can't silently resolve to something our pinned
+# toolchain can't build.
+resolver = "3"
+members = [
+    "crates/bt-term",
+    "crates/bt-transcript",
+    "crates/bt-doc",
+    "crates/bt-viewport",
+    "crates/bt-detect",
+    "crates/bt-corpus",
+    "vendor/alacritty_terminal",
+]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+
+# Pinned here rather than left to whatever clippy happens to default to, so the
+# same code gets the same verdict on every machine and in CI.
+#
+# Only lints the tree passes TODAY live here. CI runs -D warnings, so a "warn"
+# entry is a deny wearing a disguise — there is no such thing as an advisory lint
+# in this manifest. Lints we intend to adopt are staged in CONVENTIONS.md §8 with
+# the cleanup each one needs first; they move here once that cleanup lands.
+#
+# Members must opt in with `[lints] workspace = true` — cargo does not inherit
+# these automatically, and without that line this whole table is decoration.
+# vendor/ deliberately does NOT opt in: it is upstream code held to upstream's
+# choices, not ours.
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
+[workspace.dependencies]
+# exact: a 0.26.x release on crates.io would otherwise out-resolve the local
+# 0.26.0 patch and quietly take our capture hooks out of the build
+alacritty_terminal = "=0.26.0"
+anyhow = "1"
+bitflags = "2"
+portable-pty = "0.9"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+unicode-segmentation = "1"
+
+[profile.test]
+opt-level = 1
+
+[patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }

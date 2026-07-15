@@ -1,0 +1,7 @@
+# A test's unwrap says "if this fixture doesn't hold, fail now" — that is the
+# right semantics, and rewriting 50-odd of them into `?` buys nothing. Product
+# code is where a panic costs the user their scrollback, so the restriction lints
+# staged in CONVENTIONS.md §8 apply there and only there.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-indexing-slicing-in-tests = true

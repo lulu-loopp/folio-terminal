@@ -1,0 +1,4 @@
+# Defaults, pinned to an edition so formatting doesn't drift between machines.
+# Nothing exotic: rustfmt's defaults are the format every Rust reader expects,
+# and a house style buys nothing but diff noise.
+edition = "2024"
