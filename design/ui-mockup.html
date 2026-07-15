@@ -666,6 +666,13 @@
   .split-row > .divider::after { left: 2px; width: 3px; top: 50%; height: 28px; margin-top: -14px; }
   .split-col > .divider::after { top: 2px; height: 3px; left: 50%; width: 28px; margin-left: -14px; }
   .divider:hover::after, .divider.dragging::after { opacity: 1; }
+  /* Silent while something is being dragged. A divider lighting up mid-drag is a
+     false offer — resizing is not on the table with the button already down — and
+     it makes the offer in the accent, which during a drag is the colour that
+     means "let go and it lands here". So the one line under the pointer that
+     means nothing at all was impersonating the one thing that does. */
+  body.dragging .divider:hover::before { background: var(--border); }
+  body.dragging .divider:hover::after { opacity: 0; }
   body.resizing { user-select: none; }
   body.resizing * { cursor: inherit !important; }
   /* Every pane header is identical, and focus is carried by the title, not by a
@@ -1287,18 +1294,54 @@
   const isVisible = (uid) => leavesOf(activeTab().tree).some(l => l.uid === uid);
 
   /* ── tree ops ── */
+  /* How many panes a run of same-direction splits holds. A differently-oriented
+     split counts as ONE member — from the row's point of view, a stack of two is
+     a single column that happens to be divided. */
+  const runLeaves = (node, dir) =>
+    node.type === "split" && node.dir === dir
+      ? runLeaves(node.a, dir) + runLeaves(node.b, dir) : 1;
+
+  /* Re-divide the run a new split just joined, so panes in a row are a row of
+     equals.
+     Halving the pane you dropped on is what a binary tree does, not what anyone
+     asked for: three columns came out 539/269/269, a ratio nobody chose and the
+     shape of the data structure showing through. It compounds — a fourth column
+     gave 539/269/134/134, and 134 is below the minimum, so the geometry ran the
+     layout out of room and the split was refused. Divided evenly the same four
+     fit at 269 apiece. Equal is not only what the eye expects; it is what buys
+     the next pane.
+     The cost, stated plainly: a ratio you dragged by hand inside that run is
+     re-decided when a pane joins it. The run is not the set of panes it was.
+     (i3 and Zellij do this; tmux does not, which is why tmux ships a command
+     called even-horizontal for you to run afterwards.) */
+  function balanceRunAt(root, splitId, dir) {
+    const walk = (node) => {
+      if (node.type === "leaf") return false;
+      const found = node.id === splitId || walk(node.a) || walk(node.b);
+      if (found && node.dir === dir) {
+        const na = runLeaves(node.a, dir), nb = runLeaves(node.b, dir);
+        node.ratio = na / (na + nb);
+      }
+      return found;
+    };
+    walk(root);
+  }
+
   function splitLeafIn(w, leafId, zone, subtree) {
+    const dir = (zone === "left" || zone === "right") ? "row" : "col";
+    const first = (zone === "left" || zone === "top");
+    let newId = null;
     const walk = (node) => {
       if (node.type === "leaf") {
         if (node.id !== leafId) return node;
-        const dir = (zone === "left" || zone === "right") ? "row" : "col";
-        const first = (zone === "left" || zone === "top");
-        return { type: "split", id: splitSeq++, dir, ratio: 0.5,
+        newId = splitSeq++;
+        return { type: "split", id: newId, dir, ratio: 0.5,
                  a: first ? subtree : node, b: first ? node : subtree };
       }
       return { ...node, a: walk(node.a), b: walk(node.b) };
     };
     w.tree = walk(w.tree);
+    if (newId != null) balanceRunAt(w.tree, newId, dir);
   }
   /* Split the WHOLE layout, not a pane inside it.
      Without this there was no gesture for "put this alongside everything" — every
@@ -1309,8 +1352,10 @@
   function splitRootOf(w, zone, subtree) {
     const dir = (zone === "left" || zone === "right") ? "row" : "col";
     const first = (zone === "left" || zone === "top");
-    w.tree = { type: "split", id: splitSeq++, dir, ratio: 0.5,
+    const id = splitSeq++;
+    w.tree = { type: "split", id, dir, ratio: 0.5,
                a: first ? subtree : w.tree, b: first ? w.tree : subtree };
+    balanceRunAt(w.tree, id, dir);
   }
   /* detach a leaf, promoting its sibling; returns the leaf (null if it was the last one) */
   function detachLeaf(w, leafId) {
