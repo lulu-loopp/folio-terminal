@@ -141,6 +141,15 @@
     background: var(--accent);
   }
   .tab .ttitle { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
+  /* how many panes this tab holds — only shown once it holds more than one */
+  .panecount {
+    flex: none; min-width: 15px; height: 15px; padding: 0 4px;
+    border-radius: 4px; background: var(--active);
+    font-size: 10px; font-weight: 600; color: var(--ink2);
+    display: flex; align-items: center; justify-content: center;
+    font-variant-numeric: tabular-nums;
+  }
+  .tab.active .panecount, .vtab.active .panecount { background: var(--accent); color: #fff; }
   .tab .close, .vtab .close {
     width: 17px; height: 17px; border-radius: 4px;
     display: flex; align-items: center; justify-content: center;
@@ -469,16 +478,19 @@
 
 <script>
   /* ══════════════════════════════════════════════════════════
-     Model: panes belong to the WINDOW (tmux-style).
-     - The tab strip is the session list — sessions never leave it.
-     - The window content is a binary split tree of panes (max 4).
-     - Active tab = the session shown in the FOCUSED pane.
-     - Sessions visible in other panes get a subtle "shown" tint.
-     - Clicking a session that's already visible focuses its pane.
-     - Drag a tab onto a pane edge → split that pane (recursive).
-       Drag onto pane center → that pane switches to the session.
-     - Drag a pane by its header → re-dock, or drop on the tab
-       strip to close the pane (session stays in the list).
+     Model: a TAB is a workspace that owns a pane layout.
+       - Every tab holds a split tree; most tabs hold a single pane.
+       - The tab strip shows one entry per tab. The active tab's
+         layout fills the content area.
+       - A tab's title follows the FOCUSED pane inside it, and a
+         count badge appears once it holds more than one pane.
+       - Drag a tab onto a pane edge: that tab's layout merges in
+         at that edge and its entry leaves the strip. So the strip
+         holds (tabs not merged) + 1 for the layout you're in.
+       - Drag a pane header onto the strip: that pane leaves the
+         layout and becomes its own tab again.
+       - Clicking another tab swaps the whole content area; the
+         split layout stays alive and returns when you click back.
      ══════════════════════════════════════════════════════════ */
 
   const $ = (id) => document.getElementById(id);
@@ -488,13 +500,11 @@
      This — not an arbitrary pane count — is what limits how far you can split. */
   const MIN_PANE_W = 260, MIN_PANE_H = 120;
 
-  let uidSeq = 1, leafSeq = 1;
+  let uidSeq = 1, leafSeq = 1, wsSeq = 1;
 
-  function esc(s) {
-    return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-  }
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-  /* ── session factories ── */
+  /* ── sessions ── */
   function powershell() {
     return { prompt: `<span class="prompt">❯ </span>`, lines: [
       `<span class="dim">BetterTerminal v0.1.0 — PowerShell 7.5</span>`,
@@ -517,14 +527,10 @@
     ]};
   }
   function gitbash() {
-    return { prompt: `<span class="prompt">$ </span>`, lines: [
-      `<span class="dim">MINGW64 — Git Bash</span>`,
-    ]};
+    return { prompt: `<span class="prompt">$ </span>`, lines: [`<span class="dim">MINGW64 — Git Bash</span>`]};
   }
   function cmdsh() {
-    return { prompt: `<span class="prompt">&gt; </span>`, lines: [
-      `<span class="dim">Microsoft Windows [Version 10.0.26200]</span>`,
-    ]};
+    return { prompt: `<span class="prompt">&gt; </span>`, lines: [`<span class="dim">Microsoft Windows [Version 10.0.26200]</span>`]};
   }
   const PROFILES = [
     { title: "PowerShell", icon: "❯", make: powershell, default: true },
@@ -534,76 +540,133 @@
   ];
 
   function mkSession(title, icon, c, busy) {
-    return { uid: uidSeq++, title, icon, prompt: c.prompt, lines: c.lines, input: "", busy: !!busy, unread: false };
+    const s = { uid: uidSeq++, title, icon, prompt: c.prompt, lines: c.lines, input: "", busy: !!busy, unread: false };
+    state.sessions.push(s);
+    return s;
   }
-  function mkLeaf(uid) { return { type: "leaf", id: leafSeq++, uid }; }
+  const mkLeaf = (uid) => ({ type: "leaf", id: leafSeq++, uid });
+  function mkWs(session) {
+    const leaf = mkLeaf(session.uid);
+    return { id: wsSeq++, tree: leaf, focus: leaf.id };
+  }
 
   const state = {
-    sessions: [
-      mkSession("PowerShell", "❯", powershell()),
-      mkSession("claude", "✳", claude(), true),
-      mkSession("wsl", "$", wsl()),
-    ],
-    layout: null,          // split tree
-    focus: null,           // focused leaf id
+    sessions: [],
+    tabs: [],            // workspaces
+    active: null,        // workspace id
     layoutMode: "horizontal",
     theme: "system",
     railCollapsed: false,
   };
-  state.layout = mkLeaf(state.sessions[0].uid);
-  state.focus = state.layout.id;
+  state.tabs = [
+    mkWs(mkSession("PowerShell", "❯", powershell())),
+    mkWs(mkSession("claude", "✳", claude(), true)),
+    mkWs(mkSession("wsl", "$", wsl())),
+  ];
+  state.active = state.tabs[0].id;
 
-  /* ── tree helpers ── */
-  function leaves(node = state.layout, out = []) {
+  /* ── lookups ── */
+  const session = (uid) => state.sessions.find(s => s.uid === uid);
+  const tabById = (id) => state.tabs.find(w => w.id === id);
+  const activeTab = () => tabById(state.active);
+  function leavesOf(node, out = []) {
     if (node.type === "leaf") out.push(node);
-    else { leaves(node.a, out); leaves(node.b, out); }
+    else { leavesOf(node.a, out); leavesOf(node.b, out); }
     return out;
   }
-  function findLeaf(id) { return leaves().find(l => l.id === id); }
-  function leafOfSession(uid) { return leaves().find(l => l.uid === uid); }
-  function session(uid) { return state.sessions.find(s => s.uid === uid); }
-  function focusedSession() { return session(findLeaf(state.focus).uid); }
+  const paneCount = (w) => leavesOf(w.tree).length;
+  const findLeafIn = (w, id) => leavesOf(w.tree).find(l => l.id === id);
+  const focusedLeaf = (w) => findLeafIn(w, w.focus) || leavesOf(w.tree)[0];
+  const focusedSession = () => session(focusedLeaf(activeTab()).uid);
+  const tabOfLeaf = (id) => state.tabs.find(w => findLeafIn(w, id));
+  const isVisible = (uid) => leavesOf(activeTab().tree).some(l => l.uid === uid);
 
-  function splitLeaf(leafId, zone, uid) {
+  /* ── tree ops ── */
+  function splitLeafIn(w, leafId, zone, subtree) {
     const walk = (node) => {
       if (node.type === "leaf") {
         if (node.id !== leafId) return node;
-        const fresh = mkLeaf(uid);
         const dir = (zone === "left" || zone === "right") ? "row" : "col";
         const first = (zone === "left" || zone === "top");
-        state.focus = fresh.id;
-        return { type: "split", dir, a: first ? fresh : node, b: first ? node : fresh };
+        return { type: "split", dir, a: first ? subtree : node, b: first ? node : subtree };
       }
       return { ...node, a: walk(node.a), b: walk(node.b) };
     };
-    state.layout = walk(state.layout);
+    w.tree = walk(w.tree);
   }
-  function removeLeaf(leafId) {
-    if (leaves().length === 1) return;
+  /* detach a leaf, promoting its sibling; returns the leaf (null if it was the last one) */
+  function detachLeaf(w, leafId) {
+    if (paneCount(w) <= 1) return null;
+    const leaf = findLeafIn(w, leafId);
     const walk = (node) => {
       if (node.type === "leaf") return node;
-      if (node.a.type === "leaf" && node.a.id === leafId) return walk(node.b);
-      if (node.b.type === "leaf" && node.b.id === leafId) return walk(node.a);
+      if (node.a.type === "leaf" && node.a.id === leafId) return node.b;
+      if (node.b.type === "leaf" && node.b.id === leafId) return node.a;
       return { ...node, a: walk(node.a), b: walk(node.b) };
     };
-    state.layout = walk(state.layout);
-    if (!findLeaf(state.focus)) state.focus = leaves()[0].id;
+    w.tree = walk(w.tree);
+    if (!findLeafIn(w, w.focus)) w.focus = leavesOf(w.tree)[0].id;
+    return leaf;
   }
-  /* place session uid at target leaf/zone; if it's shown elsewhere, move it */
-  function placeSession(uid, targetLeafId, zone) {
-    const old = leafOfSession(uid);
-    if (old && old.id === targetLeafId) return;
-    if (old) removeLeaf(old.id);                 /* moving a pane: vacate its old slot first */
-    const target = findLeaf(targetLeafId);
-    if (!target) { render(); return; }
-    if (zone === "center") {
-      target.uid = uid;
-      state.focus = target.id;
-    } else {
-      splitLeaf(targetLeafId, zone, uid);
-    }
-    const s = session(uid);
-    if (s) s.unread = false;
+
+  /* tab dropped on a pane edge → its whole layout merges in, its strip entry disappears */
+  function mergeTabIntoPane(srcWsId, targetLeafId, zone) {
+    const src = tabById(srcWsId), tgt = activeTab();
+    if (!src || src.id === tgt.id) return;
+    const keepFocus = focusedLeaf(src).id;
+    splitLeafIn(tgt, targetLeafId, zone, src.tree);
+    tgt.focus = keepFocus;
+    state.tabs = state.tabs.filter(w => w.id !== srcWsId);
+    leavesOf(tgt.tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
+    render();
+  }
+  /* pane dropped on the strip → leaves the layout, becomes its own tab again */
+  function extractPaneToTab(leafId) {
+    const w = activeTab();
+    const leaf = detachLeaf(w, leafId);
+    if (!leaf) return;
+    const nw = { id: wsSeq++, tree: leaf, focus: leaf.id };
+    const at = state.tabs.indexOf(w) + 1;
+    state.tabs.splice(at, 0, nw);
+    render();      /* stay in the layout you were in; the pane is now waiting in the strip */
+  }
+  /* pane dropped on another pane's edge → rearrange inside the layout */
+  function movePane(leafId, targetLeafId, zone) {
+    const w = activeTab();
+    if (leafId === targetLeafId) return;
+    const leaf = detachLeaf(w, leafId);
+    if (!leaf || !findLeafIn(w, targetLeafId)) { render(); return; }
+    splitLeafIn(w, targetLeafId, zone, leaf);
+    w.focus = leaf.id;
+    render();
+  }
+  function closePane(leafId) {
+    const w = activeTab();
+    const leaf = detachLeaf(w, leafId);
+    if (!leaf) { closeTab(w.id); return; }        /* last pane → close the tab */
+    state.sessions = state.sessions.filter(s => s.uid !== leaf.uid);
+    render();
+  }
+  function closeTab(wsId) {
+    if (state.tabs.length === 1) return;
+    const w = tabById(wsId);
+    const uids = leavesOf(w.tree).map(l => l.uid);
+    state.sessions = state.sessions.filter(s => !uids.includes(s.uid));
+    const idx = state.tabs.indexOf(w);
+    state.tabs = state.tabs.filter(x => x.id !== wsId);
+    if (state.active === wsId) state.active = state.tabs[Math.min(idx, state.tabs.length - 1)].id;
+    render();
+  }
+  function selectTab(wsId) {
+    state.active = wsId;
+    leavesOf(tabById(wsId).tree).forEach(l => { const s = session(l.uid); if (s) s.unread = false; });
+    render();
+  }
+  function newTab(profile) {
+    const s = mkSession(profile.title.split(" ·")[0], profile.icon, profile.make());
+    const w = mkWs(s);
+    state.tabs.push(w);
+    state.active = w.id;
     render();
   }
 
@@ -615,59 +678,64 @@
   media.addEventListener("change", () => { if (state.theme === "system") applyTheme(); });
 
   /* ── render ── */
-  function iconHtml(s) {
-    return s.busy
+  function stateIcon(s, busy, unread) {
+    return busy
       ? `<span class="ticon-wrap"><span class="spinner"></span></span>`
-      : `<span class="ticon-wrap"><span class="ticon">${s.icon}</span>${s.unread ? `<span class="unreaddot"></span>` : ""}</span>`;
+      : `<span class="ticon-wrap"><span class="ticon">${s.icon}</span>${unread ? `<span class="unreaddot"></span>` : ""}</span>`;
   }
+  /* a tab aggregates the state of every session in its layout */
+  const tabBusy = (w) => leavesOf(w.tree).some(l => (session(l.uid) || {}).busy);
+  const tabUnread = (w) => leavesOf(w.tree).some(l => (session(l.uid) || {}).unread);
+  function tabIcon(w) {
+    return stateIcon(session(focusedLeaf(w).uid), tabBusy(w), tabUnread(w));
+  }
+  const paneBadge = (w) => paneCount(w) > 1 ? `<span class="panecount" title="${paneCount(w)} panes">${paneCount(w)}</span>` : "";
+
   function termHtml(s, focused) {
     return s.lines.map(l => `<div>${l}</div>`).join("") +
       `<div>${s.prompt}<span>${esc(s.input)}</span>${focused ? `<span class="cursor"></span>` : ""}</div>`;
   }
-  function renderNode(node) {
+  function renderNode(node, w) {
     if (node.type === "leaf") {
       const s = session(node.uid);
-      const focused = node.id === state.focus;
-      const multi = leaves().length > 1;
+      const focused = node.id === w.focus;
+      const multi = paneCount(w) > 1;
       return `<div class="pane ${focused ? "focused" : ""}" data-leaf="${node.id}">
-        ${multi ? `<div class="panehead" data-leaf="${node.id}">${iconHtml(s)}<span class="ptitle">${s.title}</span>
-          <span class="pane-close" title="Close pane (session stays in tabs)">${closeSvg}</span></div>` : ""}
+        ${multi ? `<div class="panehead" data-leaf="${node.id}">${stateIcon(s, s.busy, s.unread)}<span class="ptitle">${s.title}</span>
+          <span class="pane-close" title="Close pane">${closeSvg}</span></div>` : ""}
         <div class="term" data-leaf="${node.id}">${termHtml(s, focused)}</div>
       </div>`;
     }
-    return `<div class="split split-${node.dir}">${renderNode(node.a)}${renderNode(node.b)}</div>`;
+    return `<div class="split split-${node.dir}">${renderNode(node.a, w)}${renderNode(node.b, w)}</div>`;
   }
 
   function render() {
     $("win").dataset.tabs = state.layoutMode;
     $("win").classList.toggle("rail-collapsed", state.railCollapsed);
+    const aw = activeTab();
 
-    const activeUid = findLeaf(state.focus).uid;
-    const shownUids = new Set(leaves().map(l => l.uid));
-
-    const tabAttrs = (s) => `${s.uid === activeUid ? "active" : ""} ${shownUids.has(s.uid) && s.uid !== activeUid ? "shown" : ""}`;
-
-    $("tabstrip").innerHTML = state.sessions.map(s => `
-      <div class="tab ${tabAttrs(s)}" data-uid="${s.uid}">
-        ${iconHtml(s)}<span class="ttitle">${s.title}</span><span class="close" data-close="${s.uid}">${closeSvg}</span>
+    $("tabstrip").innerHTML = state.tabs.map(w => `
+      <div class="tab ${w.id === state.active ? "active" : ""}" data-ws="${w.id}">
+        ${tabIcon(w)}<span class="ttitle">${session(focusedLeaf(w).uid).title}</span>${paneBadge(w)}
+        <span class="close" data-close="${w.id}">${closeSvg}</span>
       </div>`).join("") + `<button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button>`;
 
-    $("rail").innerHTML = `<div class="label">Tabs</div>` + state.sessions.map(s => `
-      <div class="vtab ${tabAttrs(s)}" data-uid="${s.uid}">
-        ${iconHtml(s)}<span class="title">${s.title}</span><span class="close" data-close="${s.uid}">${closeSvg}</span>
+    $("rail").innerHTML = `<div class="label">Tabs</div>` + state.tabs.map(w => `
+      <div class="vtab ${w.id === state.active ? "active" : ""}" data-ws="${w.id}">
+        ${tabIcon(w)}<span class="title">${session(focusedLeaf(w).uid).title}</span>${paneBadge(w)}
+        <span class="close" data-close="${w.id}">${closeSvg}</span>
       </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg>New tab</button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
 
-    $("termhost").innerHTML = renderNode(state.layout) + `<div id="dock-preview"></div>`;
+    $("termhost").innerHTML = renderNode(aw.tree, aw) + `<div id="dock-preview"></div>`;
     document.querySelectorAll("#termhost .term").forEach(el => { el.scrollTop = el.scrollHeight; });
 
-    /* bindings */
     document.querySelectorAll(".tab, .vtab").forEach(el => {
       el.addEventListener("click", (e) => {
-        const closeEl = e.target.closest(".close");
-        if (closeEl) { closeSession(+closeEl.dataset.close); e.stopPropagation(); return; }
-        selectSession(+el.dataset.uid);
+        const c = e.target.closest(".close");
+        if (c) { closeTab(+c.dataset.close); e.stopPropagation(); return; }
+        selectTab(+el.dataset.ws);
       });
-      el.addEventListener("pointerdown", (e) => startDrag(e, { kind: "tab", uid: +el.dataset.uid }));
+      el.addEventListener("pointerdown", (e) => startDrag(e, { kind: "tab", wsId: +el.dataset.ws }));
     });
     document.querySelectorAll(".nt-main").forEach(el =>
       el.addEventListener("click", () => newTab(PROFILES.find(p => p.default))));
@@ -675,46 +743,15 @@
       el.addEventListener("click", (e) => { e.stopPropagation(); openProfileMenu(el); }));
     document.querySelectorAll(".pane").forEach(el =>
       el.addEventListener("click", (e) => {
-        if (e.target.closest(".pane-close")) { removeLeaf(+el.dataset.leaf); render(); return; }
+        if (e.target.closest(".pane-close")) { closePane(+el.dataset.leaf); return; }
         const id = +el.dataset.leaf;
-        if (state.focus !== id) {
-          state.focus = id;
-          const s = session(findLeaf(id).uid);
-          if (s) s.unread = false;
-          render();
-        }
+        if (aw.focus !== id) { aw.focus = id; render(); }
       }));
     document.querySelectorAll(".panehead").forEach(el =>
       el.addEventListener("pointerdown", (e) => {
         if (e.target.closest(".pane-close")) return;
-        startDrag(e, { kind: "pane", leafId: +el.dataset.leaf, uid: findLeaf(+el.dataset.leaf).uid });
+        startDrag(e, { kind: "pane", leafId: +el.dataset.leaf });
       }));
-  }
-
-  function selectSession(uid) {
-    const shownIn = leafOfSession(uid);
-    if (shownIn) state.focus = shownIn.id;           /* already visible → jump to its pane */
-    else findLeaf(state.focus).uid = uid;            /* not visible → focused pane shows it */
-    session(uid).unread = false;
-    render();
-  }
-
-  function closeSession(uid) {
-    if (state.sessions.length === 1) return;
-    const l = leafOfSession(uid);
-    if (l && leaves().length > 1) removeLeaf(l.id);
-    state.sessions = state.sessions.filter(s => s.uid !== uid);
-    const still = leafOfSession(uid);                 /* it was the only pane */
-    if (still) still.uid = state.sessions[0].uid;
-    if (!findLeaf(state.focus)) state.focus = leaves()[0].id;
-    render();
-  }
-
-  function newTab(profile) {
-    const s = mkSession(profile.title.split(" ·")[0], profile.icon, profile.make());
-    state.sessions.push(s);
-    findLeaf(state.focus).uid = s.uid;
-    render();
   }
 
   /* ── input & fake execution ── */
@@ -731,7 +768,7 @@
     setTimeout(() => {
       t.busy = false;
       t.lines.push(...fakeOutput(cmd));
-      if (!leafOfSession(t.uid)) t.unread = true;    /* finished off-screen → unread */
+      if (!isVisible(t.uid)) t.unread = true;     /* finished off-screen → unread */
       render();
     }, 1600);
   }
@@ -747,7 +784,6 @@
       default:       return [`<span class="dim">'${esc(head)}' is not recognized — this terminal is a mockup. Try 'help'.</span>`];
     }
   }
-
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
       $("settings-overlay").classList.remove("show");
@@ -763,25 +799,29 @@
     else if (e.key.length === 1) { e.preventDefault(); t.input += e.key; render(); }
   });
 
-  /* ── drag & dock (tabs AND panes share one engine) ── */
+  /* ── drag & dock (tabs and panes share one engine) ── */
   let drag = null;
   function startDrag(e, src) {
     if (e.button !== 0 || e.target.closest(".close")) return;
     drag = { ...src, x0: e.clientX, y0: e.clientY, started: false, ghost: null, target: null };
   }
-  function stripEls() {
-    return state.layoutMode === "horizontal" ? [$("tabstrip")] : [$("rail")];
+  const stripEl = () => state.layoutMode === "horizontal" ? $("tabstrip") : $("rail");
+  function dragLabel(d) {
+    const s = d.kind === "tab"
+      ? session(focusedLeaf(tabById(d.wsId)).uid)
+      : session(findLeafIn(activeTab(), d.leafId).uid);
+    return `<span class="ticon">${s.icon}</span>${s.title}`;
   }
+
   document.addEventListener("pointermove", (e) => {
     if (!drag) return;
     if (!drag.started) {
       if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 6) return;
       drag.started = true;
       document.body.classList.add("dragging");
-      const s = session(drag.uid);
       const g = document.createElement("div");
       g.className = "drag-ghost";
-      g.innerHTML = `<span class="ticon">${s.icon}</span>${s.title}`;
+      g.innerHTML = dragLabel(drag);
       document.body.appendChild(g);
       drag.ghost = g;
     }
@@ -790,42 +830,40 @@
 
     const pv = $("dock-preview");
     drag.target = null;
-    stripEls().forEach(el => el.classList.remove("tabstrip-drop"));
+    stripEl().classList.remove("tabstrip-drop");
 
-    /* over the tab strip? (pane drag → close pane; tab drag → no-op) */
-    for (const el of stripEls()) {
-      const r = el.getBoundingClientRect();
-      if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) {
-        if (drag.kind === "pane" && leaves().length > 1) {
-          drag.target = { strip: true };
-          el.classList.add("tabstrip-drop");
-        }
-        pv.classList.remove("show");
-        return;
+    /* over the strip? a pane dropped here becomes its own tab again */
+    const sr = stripEl().getBoundingClientRect();
+    if (e.clientX >= sr.left && e.clientX <= sr.right && e.clientY >= sr.top && e.clientY <= sr.bottom) {
+      if (drag.kind === "pane" && paneCount(activeTab()) > 1) {
+        drag.target = { strip: true };
+        stripEl().classList.add("tabstrip-drop");
       }
+      pv.classList.remove("show");
+      return;
     }
 
-    /* over a pane? zone is relative to THAT pane */
+    /* over a pane? zones are relative to THAT pane */
     const host = $("termhost").getBoundingClientRect();
     let hit = null;
-    for (const el of document.querySelectorAll("#termhost .pane, #termhost > .term")) {
+    for (const el of document.querySelectorAll("#termhost .pane")) {
       const r = el.getBoundingClientRect();
       if (e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom) { hit = { el, r }; break; }
     }
     if (!hit) { pv.classList.remove("show"); return; }
+    /* dragging the active tab onto its own layout is meaningless */
+    if (drag.kind === "tab" && drag.wsId === state.active) { pv.classList.remove("show"); return; }
+
     const leafId = +hit.el.dataset.leaf;
     const rx = (e.clientX - hit.r.left) / hit.r.width;
     const ry = (e.clientY - hit.r.top) / hit.r.height;
     let zone = rx < 0.25 ? "left" : rx > 0.75 ? "right" : ry < 0.3 ? "top" : ry > 0.7 ? "bottom" : "center";
-    /* refuse splits that would make either half unusable */
+    /* refuse splits that would leave either half unusable */
     if ((zone === "left" || zone === "right") && hit.r.width / 2 < MIN_PANE_W) zone = "center";
     if ((zone === "top" || zone === "bottom") && hit.r.height / 2 < MIN_PANE_H) zone = "center";
-    /* dropping a session onto the pane that already shows it = pointless */
-    const target = findLeaf(leafId);
-    if (target && target.uid === drag.uid && (zone === "center" || drag.kind === "pane")) { pv.classList.remove("show"); return; }
+    if (zone === "center" || (drag.kind === "pane" && drag.leafId === leafId)) { pv.classList.remove("show"); return; }
     drag.target = { leafId, zone };
 
-    /* preview rect (relative to termhost) */
     let x = hit.r.left - host.left, y = hit.r.top - host.top, w = hit.r.width, h = hit.r.height;
     if (zone === "left") w /= 2;
     if (zone === "right") { x += w / 2; w /= 2; }
@@ -835,6 +873,7 @@
     pv.style.width = w + "px"; pv.style.height = h + "px";
     pv.classList.add("show");
   });
+
   document.addEventListener("pointerup", () => {
     if (!drag) return;
     const d = drag;
@@ -843,14 +882,11 @@
     document.body.classList.remove("dragging");
     const pv = $("dock-preview");
     if (pv) pv.classList.remove("show");
-    stripEls().forEach(el => el.classList.remove("tabstrip-drop"));
+    stripEl().classList.remove("tabstrip-drop");
     if (!d.started || !d.target) return;
-    if (d.target.strip) {                       /* pane dropped on strip → close pane */
-      removeLeaf(d.leafId);
-      render();
-      return;
-    }
-    placeSession(d.uid, d.target.leafId, d.target.zone);
+    if (d.target.strip) { extractPaneToTab(d.leafId); return; }
+    if (d.kind === "tab") mergeTabIntoPane(d.wsId, d.target.leafId, d.target.zone);
+    else movePane(d.leafId, d.target.leafId, d.target.zone);
   });
 
   /* ── profile menu ── */
@@ -876,7 +912,7 @@
   }
   document.addEventListener("click", () => $("profile-menu").classList.remove("show"));
 
-  /* ── settings dialog ── */
+  /* ── settings ── */
   $("btn-settings").addEventListener("click", () => $("settings-overlay").classList.add("show"));
   $("btn-close-settings").addEventListener("click", () => $("settings-overlay").classList.remove("show"));
   $("settings-overlay").addEventListener("click", (e) => {
@@ -903,19 +939,18 @@
   });
   document.addEventListener("click", () => document.querySelectorAll(".combo").forEach(c => c.classList.remove("open")));
 
-  /* sidebar collapse */
   $("btn-rail").addEventListener("click", () => {
     state.railCollapsed = !state.railCollapsed;
     render();
   });
 
-  /* demo: claude is working; finishes in 6s → unread if off-screen */
+  /* demo: claude is working; it finishes in 6s → unread dot if you're elsewhere */
   setTimeout(() => {
     const c = state.sessions.find(x => x.title === "claude");
     if (c && c.busy) {
       c.busy = false;
       c.lines.push(`<span class="dim">✓ Done — 3 files changed.</span>`);
-      if (!leafOfSession(c.uid)) c.unread = true;
+      if (!isVisible(c.uid)) c.unread = true;
       render();
     }
   }, 6000);
