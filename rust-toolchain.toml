@@ -1,8 +1,17 @@
 # Pinned, not floating: clippy's lint set changes between releases, so an
 # unpinned toolchain means "clippy is clean" is a statement about one machine on
 # one day. Bump this deliberately, and expect to fix new lints when you do.
+#
+# This is the toolchain we BUILD WITH, which is a different question from the
+# oldest toolchain we promise to compile on — that is rust-version in
+# Cargo.toml, and it stays where it is. Pinning this to the MSRV confused the
+# floor with the ceiling: it pulled a compiler old enough to have no clippy
+# component built for it, so `cargo clippy` failed to launch and every lint the
+# workspace declares had never once run.
 [toolchain]
-# a full version, not a series: "1.85" would still float across patch releases,
+# a full version, not a series: "1.94" would still float across patch releases,
 # and CI installs whatever this file says rather than naming a channel of its own
-channel = "1.85.1"
+# Include the host triple: rustup otherwise inherits each machine's default host, which made the
+# same pinned version select GNU on one Windows workstation and fail at link time without dlltool.
+channel = "1.94.1-x86_64-pc-windows-msvc"
 components = ["rustfmt", "clippy"]
