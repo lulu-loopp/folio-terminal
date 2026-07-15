@@ -125,15 +125,24 @@
   }
   .tab.active .ticon, .vtab.active .ticon { color: var(--prompt); }
   .ticon-wrap { position: relative; display: inline-flex; flex: none; align-items: center; }
-  /* working = spinner replaces the icon */
-  .spinner {
-    width: 11px; height: 11px; border-radius: 50%;
-    border: 1.5px solid var(--border);
-    border-top-color: var(--accent);
-    animation: spin .8s linear infinite;
-    margin: 0 1px;
+  /* working = output is flowing. Bars, not a spinner: a spinner reads as
+     "waiting for something to load", this reads as "something is live". */
+  .activity {
+    display: inline-flex; align-items: flex-end; justify-content: center; gap: 1.5px;
+    width: 13px; height: 11px;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
+  .activity i {
+    width: 2px; height: 100%; border-radius: 1px;
+    background: var(--accent); transform-origin: bottom;
+    animation: eq .9s ease-in-out infinite;
+  }
+  .activity i:nth-child(1) { animation-delay: 0s; }
+  .activity i:nth-child(2) { animation-delay: .18s; }
+  .activity i:nth-child(3) { animation-delay: .36s; }
+  @keyframes eq {
+    0%, 100% { transform: scaleY(.3); }
+    50%      { transform: scaleY(1); }
+  }
   /* finished-but-unread = static dot */
   .unreaddot {
     position: absolute; top: -2px; right: -4px;
@@ -277,9 +286,23 @@
   .split { flex: 1; min-width: 0; min-height: 0; display: flex; }
   .split-row { flex-direction: row; }
   .split-col { flex-direction: column; }
-  .split-row > * + * { border-left: 1px solid var(--border); }
-  .split-col > * + * { border-top: 1px solid var(--border); }
+  .slot { display: flex; flex-basis: 0; min-width: 0; min-height: 0; }
   .pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+
+  /* draggable divider: a hairline with a comfortable hit area around it */
+  .divider { flex: none; position: relative; background: none; }
+  .split-row > .divider { width: 5px; margin: 0 -2px; cursor: col-resize; z-index: 5; }
+  .split-col > .divider { height: 5px; margin: -2px 0; cursor: row-resize; z-index: 5; }
+  .divider::before {
+    content: ""; position: absolute; background: var(--border);
+  }
+  .split-row > .divider::before { left: 2px; top: 0; bottom: 0; width: 1px; }
+  .split-col > .divider::before { top: 2px; left: 0; right: 0; height: 1px; }
+  .divider:hover::before, .divider.dragging::before { background: var(--accent); }
+  .split-row > .divider:hover::before, .split-row > .divider.dragging::before { width: 2px; left: 1.5px; }
+  .split-col > .divider:hover::before, .split-col > .divider.dragging::before { height: 2px; top: 1.5px; }
+  body.resizing { user-select: none; }
+  body.resizing * { cursor: inherit !important; }
   /* Every pane header is identical; only the focus accent differs. */
   .panehead {
     flex: none; position: relative;
@@ -325,8 +348,48 @@
   .drag-ghost .ticon { width: auto; }
   body.dragging { user-select: none; cursor: grabbing; }
 
+  /* hover a tab that holds a layout → see the layout and what's in it */
+  .layout-peek {
+    position: absolute; z-index: 35; pointer-events: none;
+    background: var(--menu);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    box-shadow: 0 10px 28px rgba(0,0,0,.18);
+    padding: 7px;
+    display: none;
+  }
+  .layout-peek.show { display: block; }
+  .peek-grid { display: flex; width: 210px; height: 92px; gap: 3px; }
+  /* the schematic shows the shape; this row guarantees you can read every name
+     even when a pane is too narrow to fit its own label */
+  .peek-list {
+    display: flex; flex-wrap: wrap; gap: 3px 10px;
+    max-width: 210px; padding: 7px 2px 1px;
+    font-size: 11px; color: var(--ink2);
+  }
+  .peek-list span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .peek-list .ticon { width: auto; }
+  .peek-list .activity { width: 9px; height: 8px; }
+  .peek-grid .mini-split { display: flex; gap: 3px; flex: 1; min-width: 0; min-height: 0; }
+  .peek-grid .mini-row { flex-direction: row; }
+  .peek-grid .mini-col { flex-direction: column; }
+  .peek-grid .mini-slot { display: flex; flex-basis: 0; min-width: 0; min-height: 0; }
+  .mini-leaf {
+    flex: 1; min-width: 0; min-height: 0;
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 5px;
+    border: 1px solid var(--border-soft); border-radius: 4px;
+    background: var(--termbg);
+    font-size: 10.5px; color: var(--ink3);
+    overflow: hidden; white-space: nowrap;
+  }
+  .mini-leaf.focused { border-color: var(--accent); color: var(--ink); }
+  .mini-leaf .ticon { width: auto; font-size: 9px; }
+  .mini-leaf .mtitle { overflow: hidden; text-overflow: ellipsis; }
+
   @media (prefers-reduced-motion: reduce) {
-    .spinner, .cursor { animation: none; }
+    .activity i, .cursor { animation: none; }
+    .activity i:nth-child(2) { transform: scaleY(.7); }
     .rail { transition: none; }
   }
 
@@ -435,6 +498,7 @@
   </div>
 
   <div class="profile-menu" id="profile-menu"></div>
+  <div class="layout-peek" id="layout-peek"></div>
 
   <div class="overlay" id="settings-overlay">
     <div class="settings" role="dialog" aria-label="Settings">
@@ -522,7 +586,7 @@
      This — not an arbitrary pane count — is what limits how far you can split. */
   const MIN_PANE_W = 260, MIN_PANE_H = 120;
 
-  let uidSeq = 1, leafSeq = 1, wsSeq = 1;
+  let uidSeq = 1, leafSeq = 1, wsSeq = 1, splitSeq = 1;
 
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -611,7 +675,8 @@
         if (node.id !== leafId) return node;
         const dir = (zone === "left" || zone === "right") ? "row" : "col";
         const first = (zone === "left" || zone === "top");
-        return { type: "split", dir, a: first ? subtree : node, b: first ? node : subtree };
+        return { type: "split", id: splitSeq++, dir, ratio: 0.5,
+                 a: first ? subtree : node, b: first ? node : subtree };
       }
       return { ...node, a: walk(node.a), b: walk(node.b) };
     };
@@ -727,8 +792,8 @@
   /* ── render ── */
   function stateIcon(s, busy, unread) {
     return busy
-      ? `<span class="ticon-wrap"><span class="spinner"></span></span>`
-      : `<span class="ticon-wrap"><span class="ticon">${s.icon}</span>${unread ? `<span class="unreaddot"></span>` : ""}</span>`;
+      ? `<span class="ticon-wrap"><span class="activity" title="Working"><i></i><i></i><i></i></span></span>`
+      : `<span class="ticon-wrap"><span class="ticon">${s.icon}</span>${unread ? `<span class="unreaddot" title="Finished"></span>` : ""}</span>`;
   }
   /* a tab aggregates the state of every session in its layout */
   const tabBusy = (w) => leavesOf(w.tree).some(l => (session(l.uid) || {}).busy);
@@ -736,7 +801,12 @@
   function tabIcon(w) {
     return stateIcon(session(focusedLeaf(w).uid), tabBusy(w), tabUnread(w));
   }
-  const paneBadge = (w) => paneCount(w) > 1 ? `<span class="panecount" title="${paneCount(w)} panes">${paneCount(w)}</span>` : "";
+  /* In swap mode the only layout is the one you're looking at, so a count would
+     just be telling you what you can already see. In switch mode a tab can hide
+     a layout, so the count earns its place. */
+  const paneBadge = (w) =>
+    (state.tabMode === "switch" && paneCount(w) > 1)
+      ? `<span class="panecount">${paneCount(w)}</span>` : "";
 
   function termHtml(s, focused) {
     return s.lines.map(l => `<div>${l}</div>`).join("") +
@@ -753,7 +823,24 @@
         <div class="term" data-leaf="${node.id}">${termHtml(s, focused)}</div>
       </div>`;
     }
-    return `<div class="split split-${node.dir}">${renderNode(node.a, w)}${renderNode(node.b, w)}</div>`;
+    return `<div class="split split-${node.dir}" data-split="${node.id}">
+      <div class="slot" style="flex-grow:${node.ratio}">${renderNode(node.a, w)}</div>
+      <div class="divider" data-split="${node.id}"></div>
+      <div class="slot" style="flex-grow:${1 - node.ratio}">${renderNode(node.b, w)}</div>
+    </div>`;
+  }
+
+  /* the same tree, drawn small: what a tab is holding, at a glance */
+  function miniNode(node, w) {
+    if (node.type === "leaf") {
+      const s = session(node.uid);
+      return `<div class="mini-leaf ${node.id === w.focus ? "focused" : ""}">
+        <span class="ticon">${s.icon}</span><span class="mtitle">${s.title}</span></div>`;
+    }
+    return `<div class="mini-split mini-${node.dir}">
+      <div class="mini-slot" style="flex-grow:${node.ratio}">${miniNode(node.a, w)}</div>
+      <div class="mini-slot" style="flex-grow:${1 - node.ratio}">${miniNode(node.b, w)}</div>
+    </div>`;
   }
 
   function render() {
@@ -783,7 +870,11 @@
         selectTab(+el.dataset.ws);
       });
       el.addEventListener("pointerdown", (e) => startDrag(e, { kind: "tab", wsId: +el.dataset.ws }));
+      el.addEventListener("pointerenter", () => schedulePeek(el, +el.dataset.ws));
+      el.addEventListener("pointerleave", hidePeek);
     });
+    document.querySelectorAll(".divider").forEach(el =>
+      el.addEventListener("pointerdown", (e) => startResize(e, el)));
     document.querySelectorAll(".nt-main").forEach(el =>
       el.addEventListener("click", () => newTab(PROFILES.find(p => p.default))));
     document.querySelectorAll(".nt-chev").forEach(el =>
@@ -846,10 +937,74 @@
     else if (e.key.length === 1) { e.preventDefault(); t.input += e.key; render(); }
   });
 
+  /* ── resizing a split ── */
+  let resize = null;
+  function findSplit(node, id) {
+    if (node.type === "leaf") return null;
+    if (node.id === id) return node;
+    return findSplit(node.a, id) || findSplit(node.b, id);
+  }
+  function startResize(e, el) {
+    if (e.button !== 0) return;
+    const node = findSplit(activeTab().tree, +el.dataset.split);
+    const splitEl = el.parentElement;
+    resize = { node, el, splitEl, rect: splitEl.getBoundingClientRect() };
+    el.classList.add("dragging");
+    document.body.classList.add("resizing");
+    document.body.style.cursor = node.dir === "row" ? "col-resize" : "row-resize";
+    e.preventDefault(); e.stopPropagation();
+  }
+  document.addEventListener("pointermove", (e) => {
+    if (!resize) return;
+    const { node, rect, splitEl } = resize;
+    const total = node.dir === "row" ? rect.width : rect.height;
+    const pos = node.dir === "row" ? e.clientX - rect.left : e.clientY - rect.top;
+    const min = (node.dir === "row" ? MIN_PANE_W : MIN_PANE_H) / total;
+    node.ratio = Math.max(min, Math.min(1 - min, pos / total));
+    /* move the divider live without re-rendering the terminals underneath */
+    splitEl.children[0].style.flexGrow = node.ratio;
+    splitEl.children[2].style.flexGrow = 1 - node.ratio;
+  });
+  document.addEventListener("pointerup", () => {
+    if (!resize) return;
+    resize.el.classList.remove("dragging");
+    document.body.classList.remove("resizing");
+    document.body.style.cursor = "";
+    resize = null;
+  });
+
+  /* ── layout peek: hover a tab to see the layout it holds ── */
+  let peekTimer = null;
+  function schedulePeek(el, wsId) {
+    clearTimeout(peekTimer);
+    const w = tabById(wsId);
+    if (!w || paneCount(w) < 2 || drag) return;
+    peekTimer = setTimeout(() => showPeek(el, w), 350);
+  }
+  function showPeek(el, w) {
+    const peek = $("layout-peek");
+    const names = leavesOf(w.tree).map(l => {
+      const s = session(l.uid);
+      return `<span>${stateIcon(s, s.busy, s.unread)}${s.title}</span>`;
+    }).join("");
+    peek.innerHTML = `<div class="peek-grid">${miniNode(w.tree, w)}</div><div class="peek-list">${names}</div>`;
+    peek.classList.add("show");
+    const win = $("win").getBoundingClientRect();
+    const r = el.getBoundingClientRect();
+    const pw = peek.offsetWidth;
+    peek.style.top = (r.bottom - win.top + 5) + "px";
+    peek.style.left = Math.max(6, Math.min(r.left - win.left, win.width - pw - 6)) + "px";
+  }
+  function hidePeek() {
+    clearTimeout(peekTimer);
+    $("layout-peek").classList.remove("show");
+  }
+
   /* ── drag & dock (tabs and panes share one engine) ── */
   let drag = null;
   function startDrag(e, src) {
     if (e.button !== 0 || e.target.closest(".close")) return;
+    hidePeek();
     drag = { ...src, x0: e.clientX, y0: e.clientY, started: false, ghost: null, target: null };
   }
   const stripEl = () => state.layoutMode === "horizontal" ? $("tabstrip") : $("rail");
@@ -861,7 +1016,7 @@
   }
 
   document.addEventListener("pointermove", (e) => {
-    if (!drag) return;
+    if (!drag || resize) return;
     if (!drag.started) {
       if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 6) return;
       drag.started = true;
