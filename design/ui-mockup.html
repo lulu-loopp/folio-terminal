@@ -124,14 +124,22 @@
     font-family: var(--mono); font-size: 11px; font-weight: 700;
     color: var(--ink3); flex: none; width: 13px; text-align: center;
   }
-  .ticon-wrap { position: relative; display: inline-flex; flex: none; }
-  .busydot {
+  .ticon-wrap { position: relative; display: inline-flex; flex: none; align-items: center; }
+  /* working = spinner replaces the icon (browser-tab semantics) */
+  .spinner {
+    width: 11px; height: 11px; border-radius: 50%;
+    border: 1.5px solid var(--border);
+    border-top-color: var(--accent);
+    animation: spin .8s linear infinite;
+    margin: 0 1px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* finished-but-unread = static dot on the icon */
+  .unreaddot {
     position: absolute; top: -2px; right: -4px;
     width: 6px; height: 6px; border-radius: 50%;
     background: var(--accent);
-    animation: busypulse 1.3s ease-in-out infinite;
   }
-  @keyframes busypulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .35; transform: scale(.72); } }
   .tab.active .ticon, .vtab.active .ticon { color: var(--prompt); }
   .tab .ttitle { max-width: 170px; overflow: hidden; text-overflow: ellipsis; }
   .tab .close, .vtab .close {
@@ -259,9 +267,51 @@
   }
   @keyframes blink { 50% { opacity: 0; } }
   @media (prefers-reduced-motion: reduce) {
-    .busydot, .cursor { animation: none; }
+    .spinner, .cursor { animation: none; }
     .rail { transition: none; }
   }
+
+  /* ── Split panes + tab-drag docking ── */
+  .termhost { position: relative; }
+  .split { flex: 1; min-width: 0; min-height: 0; display: flex; }
+  .split-row { flex-direction: row; }
+  .split-col { flex-direction: column; }
+  .pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  .split-row .pane + .pane { border-left: 1px solid var(--border); }
+  .split-col .pane + .pane { border-top: 1px solid var(--border); }
+  .panehead {
+    flex: none; display: flex; align-items: center; gap: 7px;
+    padding: 4px 10px; font-size: 11.5px; color: var(--ink3);
+    background: var(--panel); border-bottom: 1px solid var(--border-soft);
+  }
+  .panehead .ticon { width: auto; }
+  .pane.focused .panehead { color: var(--ink); box-shadow: inset 0 2px 0 var(--accent); }
+  .panehead .pane-close {
+    margin-left: auto; width: 17px; height: 17px; border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    color: var(--ink3); cursor: pointer;
+  }
+  .panehead .pane-close:hover { background: var(--active); color: var(--ink); }
+  .panehead .pane-close svg { width: 8px; height: 8px; pointer-events: none; }
+  .pane .term { border-top: none; }
+
+  #dock-preview {
+    position: absolute; z-index: 25; pointer-events: none;
+    background: color-mix(in srgb, var(--accent) 13%, transparent);
+    border: 1.5px solid var(--accent); border-radius: 8px;
+    opacity: 0; transition: opacity .1s ease, left .12s ease, top .12s ease, width .12s ease, height .12s ease;
+  }
+  #dock-preview.show { opacity: 1; }
+  .drag-ghost {
+    position: fixed; z-index: 100; pointer-events: none;
+    display: flex; align-items: center; gap: 7px;
+    background: var(--menu); border: 1px solid var(--border);
+    border-radius: 7px; padding: 5px 12px; font-size: 12.5px; color: var(--ink);
+    box-shadow: 0 8px 24px rgba(0,0,0,.25);
+    font-family: inherit;
+  }
+  .drag-ghost .ticon { width: auto; }
+  body.dragging { user-select: none; cursor: grabbing; }
 
   /* ── Settings — clean Notion-like panel ── */
   .overlay {
@@ -369,7 +419,7 @@
 
   <div class="body">
     <nav class="rail" id="rail"></nav>
-    <div class="termhost"><div class="term" id="term"></div></div>
+    <div class="termhost" id="termhost"></div>
   </div>
 
   <div class="profile-menu" id="profile-menu"></div>
@@ -490,7 +540,9 @@
     $("win").dataset.tabs = state.layout;
     $("win").classList.toggle("rail-collapsed", state.railCollapsed);
 
-    const iconHtml = (t) => `<span class="ticon-wrap"><span class="ticon">${t.icon}</span>${t.busy ? `<span class="busydot"></span>` : ""}</span>`;
+    const iconHtml = (t) => t.busy
+      ? `<span class="ticon-wrap"><span class="spinner"></span></span>`
+      : `<span class="ticon-wrap"><span class="ticon">${t.icon}</span>${t.unread ? `<span class="unreaddot"></span>` : ""}</span>`;
 
     $("tabstrip").innerHTML = state.tabs.map((t, i) => `
       <div class="tab ${i === state.active ? "active" : ""}" data-i="${i}">
@@ -502,21 +554,56 @@
         ${iconHtml(t)}<span class="title">${t.title}</span><span class="close" data-close="${i}">${closeSvg}</span>
       </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (PowerShell)"><svg><use href="#i-plus"/></svg>New tab</button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
 
-    const cur = state.tabs[state.active];
-    $("term").innerHTML = cur.lines.map(l => `<div>${l}</div>`).join("") +
-      `<div>${cur.prompt}<span>${esc(cur.input)}</span><span class="cursor"></span></div>`;
-    $("term").scrollTop = $("term").scrollHeight;
+    /* content area: single terminal, or two docked panes after a tab drag */
+    const main = state.tabs[state.active];
+    if (!state.split) {
+      state.focus = "main";
+      $("termhost").innerHTML = `<div class="term" data-pane="main">${termHtml(main, true)}</div><div id="dock-preview"></div>`;
+    } else {
+      const s = state.split;
+      const dir = (s.zone === "left" || s.zone === "right") ? "split-row" : "split-col";
+      const paneHtml = (tab, key, focused) => `
+        <div class="pane ${focused ? "focused" : ""}" data-pane="${key}">
+          <div class="panehead"><span class="ticon">${tab.icon}</span>${tab.title}
+            ${key === "second" ? `<span class="pane-close" title="Return to tabs">${closeSvg}</span>` : ""}</div>
+          <div class="term">${termHtml(tab, focused)}</div>
+        </div>`;
+      const secondFirst = (s.zone === "left" || s.zone === "top");
+      const mainP = paneHtml(main, "main", state.focus === "main");
+      const secP = paneHtml(s.tab, "second", state.focus === "second");
+      $("termhost").innerHTML = `<div class="split ${dir}">${secondFirst ? secP + mainP : mainP + secP}</div><div id="dock-preview"></div>`;
+    }
+    document.querySelectorAll("#termhost .term").forEach(el => { el.scrollTop = el.scrollHeight; });
 
-    document.querySelectorAll(".tab, .vtab").forEach(el =>
+    document.querySelectorAll(".tab, .vtab").forEach(el => {
       el.addEventListener("click", (e) => {
         const closeEl = e.target.closest(".close");
         if (closeEl) { closeTab(+closeEl.dataset.close); e.stopPropagation(); return; }
-        state.active = +el.dataset.i; render();
-      }));
+        state.active = +el.dataset.i;
+        state.focus = "main";
+        state.tabs[state.active].unread = false;
+        render();
+      });
+      el.addEventListener("pointerdown", (e) => startDrag(e, el));
+    });
     document.querySelectorAll(".nt-main").forEach(el =>
       el.addEventListener("click", () => newTab(PROFILES.find(p => p.default))));
     document.querySelectorAll(".nt-chev").forEach(el =>
       el.addEventListener("click", (e) => { e.stopPropagation(); openProfileMenu(el); }));
+    document.querySelectorAll(".pane").forEach(el =>
+      el.addEventListener("click", (e) => {
+        if (e.target.closest(".pane-close")) { closePane(); return; }
+        if (state.focus !== el.dataset.pane) { state.focus = el.dataset.pane; render(); }
+      }));
+  }
+
+  function termHtml(tab, focused) {
+    return tab.lines.map(l => `<div>${l}</div>`).join("") +
+      `<div>${tab.prompt}<span>${esc(tab.input)}</span>${focused ? `<span class="cursor"></span>` : ""}</div>`;
+  }
+
+  function currentTab() {
+    return (state.split && state.focus === "second") ? state.split.tab : state.tabs[state.active];
   }
 
   function closeTab(i) {
@@ -534,7 +621,7 @@
 
   /* Fake command execution — enough to feel the input loop and the busy animation */
   function runCommand() {
-    const t = state.tabs[state.active];
+    const t = currentTab();
     const cmd = t.input;
     t.input = "";
     t.lines.push(t.prompt + esc(cmd));
@@ -546,8 +633,10 @@
     setTimeout(() => {
       t.busy = false;
       t.lines.push(...fakeOutput(cmd));
+      const visible = t === state.tabs[state.active] || (state.split && t === state.split.tab);
+      if (!visible) t.unread = true;   /* finished in background → unread dot */
       render();
-    }, 900);
+    }, 1600);
   }
 
   function fakeOutput(cmd) {
@@ -599,10 +688,10 @@
       document.querySelectorAll(".combo").forEach(c => c.classList.remove("open"));
       return;
     }
-    /* Terminal input — active whenever no dialog is open */
+    /* Terminal input — goes to the focused pane, active whenever no dialog is open */
     if ($("settings-overlay").classList.contains("show")) return;
     if (e.ctrlKey || e.metaKey || e.altKey) return;
-    const t = state.tabs[state.active];
+    const t = currentTab();
     if (e.key === "Enter") { e.preventDefault(); runCommand(); }
     else if (e.key === "Backspace") { e.preventDefault(); t.input = t.input.slice(0, -1); render(); }
     else if (e.key.length === 1) { e.preventDefault(); t.input += e.key; render(); }
@@ -614,6 +703,89 @@
     state.railCollapsed = !state.railCollapsed;
     render();
   });
+
+  /* ── Tab drag → docked pane (VS Code style, with drop-zone preview) ── */
+  let drag = null;
+  function startDrag(e, el) {
+    if (e.button !== 0 || e.target.closest(".close")) return;
+    drag = { i: +el.dataset.i, x0: e.clientX, y0: e.clientY, started: false, ghost: null, zone: null };
+  }
+  document.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    if (!drag.started) {
+      if (Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 6) return;
+      if (state.tabs.length < 2) { drag = null; return; }   /* can't tear out the only tab */
+      drag.started = true;
+      document.body.classList.add("dragging");
+      const t = state.tabs[drag.i];
+      const g = document.createElement("div");
+      g.className = "drag-ghost";
+      g.innerHTML = `<span class="ticon">${t.icon}</span>${t.title}`;
+      document.body.appendChild(g);
+      drag.ghost = g;
+    }
+    drag.ghost.style.left = (e.clientX + 10) + "px";
+    drag.ghost.style.top = (e.clientY + 8) + "px";
+
+    const host = $("termhost").getBoundingClientRect();
+    let zone = null;
+    if (e.clientX >= host.left && e.clientX <= host.right && e.clientY >= host.top && e.clientY <= host.bottom) {
+      const rx = (e.clientX - host.left) / host.width;
+      const ry = (e.clientY - host.top) / host.height;
+      zone = rx < 0.25 ? "left" : rx > 0.75 ? "right" : ry < 0.3 ? "top" : ry > 0.7 ? "bottom" : null;
+    }
+    drag.zone = zone;
+    const pv = $("dock-preview");
+    if (!zone) { pv.classList.remove("show"); return; }
+    const r = { left: 0, top: 0, width: 100, height: 100 };
+    if (zone === "left") r.width = 50;
+    if (zone === "right") { r.left = 50; r.width = 50; }
+    if (zone === "top") r.height = 50;
+    if (zone === "bottom") { r.top = 50; r.height = 50; }
+    pv.style.left = r.left + "%"; pv.style.top = r.top + "%";
+    pv.style.width = r.width + "%"; pv.style.height = r.height + "%";
+    pv.classList.add("show");
+  });
+  document.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const { started, zone, i, ghost } = drag;
+    if (ghost) ghost.remove();
+    document.body.classList.remove("dragging");
+    const pv = $("dock-preview");
+    if (pv) pv.classList.remove("show");
+    drag = null;
+    if (started && zone != null) performSplit(i, zone);
+  });
+
+  function performSplit(i, zone) {
+    if (state.split) state.tabs.push(state.split.tab);   /* previous docked tab returns to the strip */
+    const t = state.tabs.splice(i, 1)[0];
+    t.unread = false;
+    if (state.active >= i && state.active > 0) state.active--;
+    state.active = Math.min(state.active, state.tabs.length - 1);
+    state.split = { zone, tab: t };
+    state.focus = "second";
+    render();
+  }
+  function closePane() {
+    state.tabs.push(state.split.tab);
+    state.split = null;
+    state.focus = "main";
+    render();
+  }
+
+  /* Demo: the claude tab is "working"; it finishes after a while —
+     if you're not looking at it, it gets the unread dot */
+  setTimeout(() => {
+    const c = state.tabs.find(x => x.title === "claude") || (state.split && state.split.tab.title === "claude" ? state.split.tab : null);
+    if (c && c.busy) {
+      c.busy = false;
+      c.lines.push(`<span class="dim">✓ Done — 3 files changed.</span>`);
+      const visible = c === state.tabs[state.active] || (state.split && c === state.split.tab);
+      if (!visible) c.unread = true;
+      render();
+    }
+  }, 6000);
 
   /* Dropdowns */
   document.querySelectorAll(".combo").forEach(combo => {
