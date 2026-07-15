@@ -25,6 +25,8 @@
     --active: rgba(55,53,47,.09);
     --accent: #5E6AD2;
     --prompt: #5E6AD2;
+    --thumb: rgba(55,53,47,.24);
+    --thumb-hover: rgba(55,53,47,.42);
     --termbg: #FFFFFF;
     --cursor: #37352F;
     --shadow: 0 16px 48px rgba(0,0,0,.13), 0 2px 8px rgba(0,0,0,.06);
@@ -44,11 +46,24 @@
     --active: rgba(255,255,255,.09);
     --accent: #828FFF;
     --prompt: #828FFF;
+    --thumb: rgba(255,255,255,.22);
+    --thumb-hover: rgba(255,255,255,.4);
     --termbg: #1B1B1B;
     --cursor: #D4D4D4;
     --shadow: 0 16px 48px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
     --menu: #2A2A2A;
   }
+  /* Scrollbars, form controls and every other widget the browser draws itself are
+     painted from color-scheme, not from our tokens — and with it unset the answer
+     is always "light", so a dark terminal got a white scrollbar with 1990s arrow
+     buttons on it. This is the property that actually asks the question, so it is
+     declared rather than each widget patched one at a time.
+     scrollbar-color then takes it the rest of the way: the UA dark bar is still a
+     chunky opaque thing, and a scrollbar in a terminal should be a mark on the
+     text, not a piece of furniture beside it. */
+  body { color-scheme: light; }
+  body.dark { color-scheme: dark; }
+  body, body * { scrollbar-width: thin; scrollbar-color: var(--thumb) transparent; }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; }
   body {
@@ -175,7 +190,9 @@
   .newtab svg { width: 10px; height: 10px; flex: none; }
   .chevbtn svg { width: 9px; height: 6px; }
   .tabs-inline .newtab { margin: 0 0 3px 6px; }
-  .tabs-inline .chevbtn { margin-left: 0; width: 24px; }
+  /* same box as the + it sits beside: two buttons of the same kind, side by side,
+     at two different widths reads as a mistake rather than as a hierarchy */
+  .tabs-inline .chevbtn { margin-left: 0; }
   .newtab:hover { background: var(--hover); color: var(--ink); }
 
   /* Caption buttons */
@@ -220,11 +237,26 @@
      Open/close is driven from JS (see railZone), not :hover: CSS :hover has no
      way to express "stay open while the pointer is anywhere near", and a zone
      with hysteresis does. */
+  /* One source for the two widths, since four things have to agree on them:
+     the rail, the space the terminal keeps clear, and where the shade falls. */
+  .window.rail-icons { --railpark: 46px; --railw: 46px; }
+  .window.rail-icons.rail-open { --railw: 220px; }
   .window.rail-icons .rail {
-    width: 46px;
+    width: var(--railw);
     position: absolute; top: var(--titleh); bottom: 0; left: 0; z-index: 15;
   }
-  .window.rail-icons .termhost { margin-left: 46px; }
+  .window.rail-icons .termhost { margin-left: var(--railpark); }
+  /* Parked, the icon is the only thing in a 46px strip, so it has to sit in the
+     middle of it — the rail's 8px plus this 7.5px puts its centre at exactly
+     46/2. The same padding holds when open, because the layout must not change
+     between the two states or every icon shifts as the panel slides. */
+  .window.rail-icons .rail .vtab,
+  .window.rail-icons .rail .rail-new .nt-main { padding-left: 7.5px; padding-right: 7.5px; }
+  /* Parked there is no room for the chevron, and a 28px chevron in a 30px strip
+     squeezes the + button to nothing. It collapses to zero width instead, which
+     leaves the + where it already was: nt-main is flex:1, so its left edge — and
+     the + inside it — does not depend on what the chevron is doing. */
+  .window.rail-icons:not(.rail-open) .rail .nt-chev { width: 0; padding: 0; }
   /* Opened, it grows straight down out of the title bar instead of floating free
      of it. A card inset on all four sides had to announce itself as a separate
      object — its own corners, its own shadow on every side — and that is exactly
@@ -232,13 +264,28 @@
      the rail is the same material meeting it at a shared edge: the two read as
      one piece of chrome that got wider, and the only edge that still needs
      drawing is the one facing the terminal. */
-  .window.rail-icons.rail-open .rail {
-    width: 220px;
-    border-right: 1px solid var(--border);
-    /* cast only to the right — that is the one side it covers anything on */
-    box-shadow: 5px 0 18px rgba(0, 0, 0, .10);
+  .window.rail-icons.rail-open .rail { border-right: 1px solid var(--border); }
+  /* The shade the open panel casts on the terminal, and the reason it is not a
+     box-shadow: a box-shadow spreads around the box in every direction, so an
+     18px blur on a panel whose top edge IS the header's bottom edge paints ~9px
+     of grey across that join — the panel drew its own seam against the very
+     thing it was supposed to be continuous with. A shadow that exists on one
+     side only is not a box-shadow; it is a gradient. This one is bounded by the
+     terminal it falls on, so it cannot reach the header at all.
+     It lives on the terminal because the rail clips its own overflow (that is
+     what hides the labels while the width animates), so nothing the rail owns
+     can escape its right edge. */
+  .window.rail-icons .termhost::before {
+    content: ""; position: absolute; z-index: 14; pointer-events: none;
+    top: 0; bottom: 0; width: 14px;
+    left: calc(var(--railw) - var(--railpark));
+    background: linear-gradient(to right, rgba(0, 0, 0, .09), rgba(0, 0, 0, 0));
+    opacity: 0; transition: left .18s ease, opacity .18s ease;
   }
-  body.dark .window.rail-icons.rail-open .rail { box-shadow: 5px 0 18px rgba(0, 0, 0, .38); }
+  .window.rail-icons.rail-open .termhost::before { opacity: 1; }
+  body.dark .window.rail-icons .termhost::before {
+    background: linear-gradient(to right, rgba(0, 0, 0, .34), rgba(0, 0, 0, 0));
+  }
   /* Nothing left to name: in icon mode the strip is the rail's resting state, and
      a heading that is invisible half the time is not a heading. */
   .window.rail-icons .rail .label { display: none; }
@@ -288,10 +335,13 @@
   .vtab:hover .close { visibility: visible; }
   .rail-new { display: flex; gap: 2px; margin-top: 2px; }
   .rail-new .nt-main {
-    flex: 1; width: auto; height: 30px; justify-content: flex-start; gap: 8px;
+    flex: 1; min-width: 0; width: auto; height: 30px; justify-content: flex-start; gap: 8px;
     padding: 0 10px; font-size: 13px; color: var(--ink3);
   }
-  .rail-new .nt-chev { width: 28px; height: 30px; }
+  /* the + rides in the same 15px box a tab's icon does, so the two line up on
+     their centres rather than on the left edges of differently-sized glyphs */
+  .rail-new .nt-main .ticon { justify-content: center; }
+  .rail-new .nt-chev { width: 28px; height: 30px; flex: none; overflow: hidden; }
   /* Where a dragged pane will land in the strip: the tab itself, previewed in
      place at the spot it would take, the way a browser slots a dragged tab in. */
   .drop-preview {
@@ -348,21 +398,27 @@
   /* ── the reason this terminal exists: rendered LaTeX in the output ──
      A rendered formula is a view over the frozen text, never a replacement for
      it. The source is still there; hovering says so, and you can take it back. */
+  /* The hover region is the formula AND its tools, which is why this is a row
+     holding both rather than a box with the tools pinned outside it. Hung off
+     the outside, the tools were unreachable: crossing the 6px gap left the block,
+     :hover ended, and they went untouchable mid-approach — only :focus-within
+     kept them alive, so they could be used only after clicking the formula
+     first. A thing you reveal on hover has to live inside the thing you hover.
+     Shrink to the formula: left full-width, an 86px formula sat in a 1040px box,
+     the fill enclosed a region that was 90% empty, and the tools anchored to an
+     edge 700px from the last glyph. margin-left cancels the fill's padding-left,
+     so the ink still lands on the terminal's text column and only the fill
+     reaches into the gutter. */
   .math {
-    position: relative;
-    /* Shrink to the formula. Left as a full-width block, a 90px formula sat in a
-       1000px box: the hover fill enclosed a region that was 90% empty, the tools
-       anchored to a right edge 700px from the last glyph, and pointing at blank
-       space far from the formula popped the tools up. The block is the formula's
-       region, so it should be the formula's size — and then the right edge is a
-       property of the content, which is what lets the tools hang off it.
-       margin-left cancels padding-left, so the ink still lands exactly on the
-       terminal's text column and only the fill reaches into the gutter. */
+    display: flex; align-items: center; gap: 6px;
     width: max-content;
     margin: 4px 0 4px -10px;
+    cursor: default;
+  }
+  /* The fill is the formula's region alone — the tools sit beside it, not in it */
+  .math .mbox {
     padding: 8px 10px;
     border-radius: 7px;
-    cursor: default;
     transition: background 100ms cubic-bezier(.2, 0, 0, 1);   /* M3 standard */
   }
   /* One way of saying "this is a region", not three. A fill, a border and a rule
@@ -370,7 +426,7 @@
      is not three times as clear — it is one instruction repeated three times, and
      the 1px border landing 0px from a 2px accent rule is what made that left edge
      read as a 3px striped seam. */
-  .math:hover { background: var(--panel); }
+  .math:hover .mbox { background: var(--panel); }
   /* A block shows all of itself. It gets no scroll of its own, because the
      terminal is already a scroll container and a second one nested inside it
      eats the wheel whenever the pointer happens to rest on a formula. A block
@@ -427,14 +483,10 @@
      something no program on the other end of a pty can emit. That signal costs no
      ink and cannot lie. (Jupyter marks rendered output the same way — by
      switching the whole typographic system, with no border, badge or rule.) */
+  /* Beside the formula, not above it: a terminal line is 20px, so anything
+     hanging overhead covers the previous line of output. */
   .math-tools {
-    /* Hung off the formula's right edge, vertically centred — reachable in one
-       short move from the formula you are looking at. Not overhead: a terminal
-       line is 20px, so anything hanging above the block covers the previous line
-       of output. */
-    position: absolute; left: 100%; top: 50%; transform: translateY(-50%);
-    margin-left: 6px;
-    display: flex; gap: 2px;
+    display: flex; gap: 2px; flex: none;
     opacity: 0; pointer-events: none;
     transition: opacity 100ms cubic-bezier(.2, 0, 0, 1);
   }
@@ -457,7 +509,7 @@
   .math-tools button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   .math-tools svg { width: 14px; height: 14px; }
   @media (prefers-reduced-motion: reduce) {
-    .math, .math-tools { transition-duration: 1ms; }
+    .math .mbox, .math-tools { transition-duration: 1ms; }
   }
 
   /* markdown, kept as text — selectable, searchable, still a terminal */
@@ -929,13 +981,15 @@
   function math(tex) {
     const src = tex.replace(/\s+/g, " ").trim();
     return `<div class="math" data-tex="${esc(src)}">
+      <div class="mbox">
+        <div class="scroller">
+          <span class="rendered"></span>
+          <span class="src">$$${esc(src)}$$</span>
+        </div>
+      </div>
       <div class="math-tools">
         <button data-act="revert" title="Show source" aria-label="Show source"><svg><use href="#i-code"/></svg></button>
         <button data-act="copy" title="Copy LaTeX" aria-label="Copy LaTeX"><svg><use href="#i-copy"/></svg></button>
-      </div>
-      <div class="scroller">
-        <span class="rendered"></span>
-        <span class="src">$$${esc(src)}$$</span>
       </div>
     </div>`;
   }
@@ -1231,7 +1285,12 @@
   function render() {
     $("win").dataset.tabs = state.layoutMode;
     $("win").classList.toggle("rail-collapsed", state.railCollapsed);
-    $("win").classList.toggle("rail-icons", state.railMode === "icons" && !state.railCollapsed);
+    /* railMode only means anything where there is a rail. Without the layout
+       check the class survived into horizontal mode, where the rail is display:
+       none but the terminal was still keeping its 46px clear — a strip of dead
+       space with nothing in it. */
+    $("win").classList.toggle("rail-icons",
+      state.layoutMode === "vertical" && state.railMode === "icons" && !state.railCollapsed);
     $("row-railmode").style.display = state.layoutMode === "vertical" ? "" : "none";
     $("win").classList.toggle("block-capped", state.blockMax > 0);
     $("win").style.setProperty("--blockmax", state.blockMax + "px");
@@ -1247,7 +1306,7 @@
       <div class="vtab ${w.id === state.active ? "active" : ""}" data-ws="${w.id}">
         ${tabIcon(w)}<span class="title">${session(focusedLeaf(w).uid).title}</span>${paneBadge(w)}
         <span class="close" data-close="${w.id}">${closeSvg}</span>
-      </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (${defaultProfile().title})"><svg><use href="#i-plus"/></svg><span>New tab</span></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
+      </div>`).join("") + `<div class="rail-new"><button class="newtab nt-main" title="New tab (${defaultProfile().title})"><span class="ticon"><svg><use href="#i-plus"/></svg></span><span>New tab</span></button><button class="newtab chevbtn nt-chev" title="Choose a profile"><svg><use href="#i-chev"/></svg></button></div>`;
 
     $("termhost").innerHTML = renderNode(aw.tree, aw) + `<div id="dock-preview"></div>`;
     typeset($("termhost"));
