@@ -337,17 +337,18 @@
     border-radius: 7px;
     border: 1px solid transparent;
     cursor: default;
-    /* left-aligned like every other line: centring is a document's habit, not a
-       terminal's. A formula wider than the pane scrolls on its own rather than
-       widening the pane or being silently cut. */
-    overflow-x: auto;
   }
   .math:hover { border-color: var(--border); background: var(--panel); }
+  /* The scroll lives on an inner box, not on .math: overflow makes a clipping
+     context, and the tools are positioned outside the block, so putting it on
+     .math cut them in half. Left-aligned like every other line — centring is a
+     document's habit, not a terminal's — and a formula wider than the pane
+     scrolls here rather than widening the pane or being silently cut. */
+  .math .scroller { overflow-x: auto; }
   .math .rendered { font-size: 15px; color: var(--ink); }
   .math .katex-display { margin: 0; text-align: left; }
   .math .katex-display > .katex { text-align: left; }
   .math .src { display: none; color: var(--prompt); font-family: var(--mono); font-size: 13px; }
-  .math.as-source { display: block; }
   .math.as-source .rendered { display: none; }
   .math.as-source .src { display: block; }
   /* the mark says "this is the terminal's doing, not the program's" */
@@ -770,8 +771,10 @@
         <button data-act="revert">Show source</button>
         <button data-act="copy">Copy LaTeX</button>
       </div>
-      <span class="rendered"></span>
-      <span class="src">$$${esc(src)}$$</span>
+      <div class="scroller">
+        <span class="rendered"></span>
+        <span class="src">$$${esc(src)}$$</span>
+      </div>
     </div>`;
   }
   /* KaTeX renders after the DOM exists; failures leave the source visible, which
@@ -1610,6 +1613,10 @@
         if (kind === "theme") { state.theme = item.dataset.v; applyTheme(); }
         if (kind === "railmode") {
           state.railMode = item.dataset.v;
+          /* picking how the sidebar should rest says you want one — otherwise
+             choosing "icons" while it is collapsed does nothing visible and the
+             collapse button sits there claiming to control something invisible */
+          state.railCollapsed = false;
           combo.querySelector(".value").textContent =
             item.dataset.v === "icons" ? "Icons, expand on hover" : "Expanded";
           render();
