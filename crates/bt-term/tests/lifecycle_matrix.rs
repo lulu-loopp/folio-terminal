@@ -26,7 +26,7 @@ fn g1_scroll_out_stages_finalizes_decorates_and_observes_tail_rewrite() {
     let mut session = DualPlaneSession::new(nz32(8), nz32(2));
     session.feed(b"$$abcdef$$Z\r\n").unwrap();
     assert!(session.document().entries().is_empty());
-    assert_eq!(session.terminal().transcript().staging_len(), 1);
+    assert_eq!(session.transcript().staging_len(), 1);
 
     session.feed(b"\x1b[1;5H!\x1b[2;1H\r\n").unwrap();
     let (id, entry) = session.document().entries().first_key_value().unwrap();
@@ -90,7 +90,7 @@ fn g1_resize_jitter_does_not_duplicate_captured_rows() {
 fn g1_width_resize_forces_a_cross_boundary_logical_line_split() {
     let mut session = DualPlaneSession::new(nz32(4), nz32(2));
     session.feed(b"abcde\r\n").unwrap();
-    assert_eq!(session.terminal().transcript().staging_len(), 1);
+    assert_eq!(session.transcript().staging_len(), 1);
     session.resize(nz32(5), nz32(2)).unwrap();
     let entry = session.document().entries().first_key_value().unwrap().1;
     assert_eq!(entry.line.text, "abcd");
@@ -101,7 +101,7 @@ fn g1_width_resize_forces_a_cross_boundary_logical_line_split() {
 fn g1_staging_quota_forces_a_split_instead_of_growing_without_bound() {
     let mut session = DualPlaneSession::with_quotas(nz32(4), nz32(2), nz_size(1), nz_size(32));
     session.feed(b"abcdefghijklmnop").unwrap();
-    assert!(session.terminal().transcript().staging_len() <= 1);
+    assert!(session.transcript().staging_len() <= 1);
     assert!(
         session
             .document()
@@ -184,10 +184,10 @@ fn g1_ris_and_deccolm_invalidate_candidates_but_keep_frozen_history() {
         let mut session = DualPlaneSession::new(nz32(4), nz32(2));
         session.feed(b"old\r\nabcde\r\n").unwrap();
         let before = session.document().entries().clone();
-        assert!(session.terminal().transcript().staging_len() > 0);
+        assert!(session.transcript().staging_len() > 0);
         session.feed(reset).unwrap();
         assert_eq!(session.document().entries(), &before);
-        assert_eq!(session.terminal().transcript().staging_len(), 0);
+        assert_eq!(session.transcript().staging_len(), 0);
     }
 }
 

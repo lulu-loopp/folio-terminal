@@ -46,8 +46,33 @@ pub enum TranscriptEvent {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScrollOutCause {
-    Normal,
+    Normal {
+        screen: TranscriptScreen,
+        scope: ScrollRegionScope,
+    },
+    DeleteLines {
+        screen: TranscriptScreen,
+        scope: ScrollRegionScope,
+    },
     Resize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScrollOperation {
+    Normal,
+    DeleteLines,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TranscriptScreen {
+    Primary,
+    Alternate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ScrollRegionScope {
+    FullScreen,
+    Partial,
 }
 
 #[derive(Clone, Debug)]
@@ -837,7 +862,7 @@ impl<T> Term<T> {
     /// Text moves up; clear at top
     /// Expects origin to be in scroll range.
     #[inline]
-    fn scroll_up_relative(&mut self, origin: Line, mut lines: usize, capture_history: bool) {
+    fn scroll_up_relative(&mut self, origin: Line, mut lines: usize, operation: ScrollOperation) {
         trace!("Scrolling up relative: origin={origin}, lines={lines}");
 
         lines = cmp::min(lines, (self.scroll_region.end - self.scroll_region.start).0 as usize);
@@ -847,23 +872,41 @@ impl<T> Term<T> {
         // Scroll selection.
         self.selection = self.selection.take().and_then(|s| s.rotate(self, &region, lines as i32));
 
-        if capture_history
-            && origin == Line(0)
-            && self.scroll_region.start == Line(0)
-            && self.scroll_region.end == Line(self.screen_lines() as i32)
-            && !self.mode.contains(TermMode::ALT_SCREEN)
-        {
-            let rows = (0..lines)
+        // `Grid::scroll_up` treats an oversized local delete as clearing the remaining region.
+        // Report that effective removal count instead of indexing beyond the region.
+        let removed_lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
+        if removed_lines != 0 {
+            let rows = (0..removed_lines)
                 .map(|line| RemovedRow {
-                    live_row: line,
+                    live_row: origin.0 as usize + line,
                     cells: (0..self.columns())
-                        .map(|column| self.grid[Line(line as i32)][Column(column)].clone())
+                        .map(|column| {
+                            self.grid[Line(origin.0 + line as i32)][Column(column)].clone()
+                        })
                         .collect(),
                 })
                 .collect();
             if let Some(hook) = &self.transcript_hook {
+                let screen = if self.mode.contains(TermMode::ALT_SCREEN) {
+                    TranscriptScreen::Alternate
+                } else {
+                    TranscriptScreen::Primary
+                };
+                let scope = if origin == Line(0)
+                    && self.scroll_region.start == Line(0)
+                    && self.scroll_region.end == Line(self.screen_lines() as i32)
+                {
+                    ScrollRegionScope::FullScreen
+                } else {
+                    ScrollRegionScope::Partial
+                };
                 hook(TranscriptEvent::ScrollOut {
-                    cause: ScrollOutCause::Normal,
+                    cause: match operation {
+                        ScrollOperation::Normal => ScrollOutCause::Normal { screen, scope },
+                        ScrollOperation::DeleteLines => {
+                            ScrollOutCause::DeleteLines { screen, scope }
+                        },
+                    },
                     rows,
                 });
             }
@@ -1580,7 +1623,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn scroll_up(&mut self, lines: usize) {
         let origin = self.scroll_region.start;
-        self.scroll_up_relative(origin, lines, true);
+        self.scroll_up_relative(origin, lines, ScrollOperation::Normal);
     }
 
     #[inline]
@@ -1607,7 +1650,7 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Deleting {lines} lines");
 
         if lines > 0 && self.scroll_region.contains(&origin) {
-            self.scroll_up_relative(origin, lines, false);
+            self.scroll_up_relative(origin, lines, ScrollOperation::DeleteLines);
         }
     }
 
@@ -3294,7 +3337,7 @@ mod tests {
         assert!(term.damage.full);
         term.reset_damage();
 
-        term.scroll_up_relative(Line(3), 2, true);
+        term.scroll_up_relative(Line(3), 2, ScrollOperation::Normal);
         assert!(term.damage.full);
         term.reset_damage();
 

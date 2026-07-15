@@ -14,13 +14,14 @@ use bt_doc::{
     SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp, ViewGeneration,
 };
 use bt_transcript::{
-    DEFAULT_STAGING_QUOTA, FinalizedLine, SPIKE_DEFAULT_FROZEN_QUOTA, StagingId, TranscriptId,
+    CaptureResult, DEFAULT_STAGING_QUOTA, FinalizeReason, FinalizedLine,
+    SPIKE_DEFAULT_FROZEN_QUOTA, StagingId, TranscriptId, TranscriptStore,
 };
 use bt_viewport::ViewportProjection;
 
 use crate::{
     adapter::{AdapterEvent, TerminalAdapter},
-    lifecycle::{LifecycleDirective, directive},
+    lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WorkerScheduler},
 };
 
@@ -30,8 +31,6 @@ pub const SPIKE_CELL_HEIGHT_SUBPIXELS: NonZeroI64 = NonZeroI64::new(18 * SUBPIXE
 pub enum SessionError {
     InvalidSourceTransition(InvalidSourceTransition),
     MissingStagingSource(StagingId),
-    MissingLifecycleRule,
-    LifecyclePayloadMismatch,
 }
 
 impl fmt::Display for SessionError {
@@ -44,12 +43,6 @@ impl fmt::Display for SessionError {
                     "finalization references unknown staging source {}",
                     id.0
                 )
-            }
-            Self::MissingLifecycleRule => {
-                formatter.write_str("adapter event has no lifecycle rule")
-            }
-            Self::LifecyclePayloadMismatch => {
-                formatter.write_str("lifecycle rule does not match its adapter payload")
             }
         }
     }
@@ -67,6 +60,7 @@ impl From<InvalidSourceTransition> for SessionError {
 /// terminal facts with lifecycle, transcript, detection, scheduling, and viewport policy.
 pub struct DualPlaneSession {
     terminal: TerminalAdapter,
+    transcript: TranscriptStore,
     document: HistoryDocument,
     decorations: BTreeMap<TranscriptId, DecorationRecord>,
     scheduler: WorkerScheduler,
@@ -101,7 +95,8 @@ impl DualPlaneSession {
         frozen_quota: NonZeroUsize,
     ) -> Self {
         Self {
-            terminal: TerminalAdapter::with_quotas(columns, rows, staging_quota, frozen_quota),
+            terminal: TerminalAdapter::new(columns, rows),
+            transcript: TranscriptStore::with_quotas(staging_quota, frozen_quota),
             document: HistoryDocument::default(),
             decorations: BTreeMap::new(),
             scheduler: WorkerScheduler::default(),
@@ -128,6 +123,10 @@ impl DualPlaneSession {
 
     pub fn document(&self) -> &HistoryDocument {
         &self.document
+    }
+
+    pub fn transcript(&self) -> &TranscriptStore {
+        &self.transcript
     }
 
     pub fn decoration(&self, id: TranscriptId) -> Option<&DecorationRecord> {
@@ -183,8 +182,21 @@ impl DualPlaneSession {
     }
 
     pub fn resize(&mut self, columns: NonZeroU32, rows: NonZeroU32) -> Result<(), SessionError> {
-        self.resize_epoch.changed();
-        self.grid_generation.0 += 1;
+        let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
+        if plan.begin_cooldown {
+            self.resize_epoch.changed();
+            self.grid_generation.0 += 1;
+        }
+        if plan.finalize_staging {
+            let finalized = self
+                .transcript
+                .finalize_all_candidates(FinalizeReason::WidthResize);
+            let evicted = self.transcript.take_evictions();
+            for line in finalized {
+                self.ingest_finalized(line)?;
+            }
+            self.delete_history(&evicted, false);
+        }
         let events = self.terminal.resize(columns, rows);
         self.apply_events(events)?;
         // A grow or width-only resize can change the generation without removing rows.
@@ -267,7 +279,7 @@ impl DualPlaneSession {
             self.detection_revision,
             self.terminal.dimensions().1,
             SPIKE_CELL_HEIGHT_SUBPIXELS,
-            self.terminal.transcript().source_generation(),
+            self.transcript.source_generation(),
             self.grid_generation,
         );
         self.refresh_projection(&mut projection);
@@ -277,7 +289,7 @@ impl DualPlaneSession {
     pub fn refresh_projection(&self, projection: &mut ViewportProjection) {
         projection.set_live_state(
             self.terminal.dimensions().1,
-            self.terminal.transcript().source_generation(),
+            self.transcript.source_generation(),
             self.grid_generation,
         );
         projection.sync_artifact_heights(self.decorations.iter().filter_map(|(id, record)| {
@@ -300,65 +312,73 @@ impl DualPlaneSession {
 
     fn apply_events(&mut self, events: Vec<AdapterEvent>) -> Result<(), SessionError> {
         for event in events {
-            let directive = directive(&event).ok_or(SessionError::MissingLifecycleRule)?;
-            match (directive, event) {
-                (LifecycleDirective::CaptureAndRebase, AdapterEvent::RowsRemoved(rows)) => {
-                    self.grid_generation.0 += 1;
-                    let removals = rows
-                        .iter()
-                        .map(|row| LiveRowRemoval {
-                            row: row.live_row,
-                            staging: row
-                                .capture
-                                .as_ref()
-                                .map(|(result, generation)| (result.staging_id, *generation)),
-                        })
-                        .collect::<Vec<_>>();
-                    self.document
-                        .capture_rows_transaction(&removals, self.grid_generation);
-                    for row in rows {
-                        let Some((result, _)) = row.capture else {
-                            continue;
-                        };
-                        self.staging_sources
-                            .insert(result.staging_id, SourceLifecycle::Live);
-                        self.active_staging_tail =
-                            result.finalized.is_empty().then_some(result.staging_id);
-                        for finalized in result.finalized {
-                            self.ingest_finalized(finalized)?;
-                        }
-                    }
+            match classify(event) {
+                LifecycleDirective::RowsRemoved(rows) => self.apply_removed_rows(rows)?,
+                LifecycleDirective::ClearHistoryAndStaging => {
+                    let removed = self.transcript.clear_history();
+                    self.delete_history(&removed, true);
                 }
-                (LifecycleDirective::Finalize, AdapterEvent::ForcedFinalize(finalized)) => {
-                    self.ingest_finalized(finalized)?;
-                }
-                (
-                    LifecycleDirective::DeleteHistoryAndStaging,
-                    AdapterEvent::HistoryCleared(removed),
-                ) => self.delete_history(&removed, true),
-                (LifecycleDirective::DeleteHistory, AdapterEvent::QuotaEvicted(removed)) => {
-                    self.delete_history(&removed, false);
-                }
-                (LifecycleDirective::InvalidateStaging, AdapterEvent::CandidatesInvalidated) => {
+                LifecycleDirective::InvalidateStaging => {
+                    self.transcript.invalidate_staging();
                     self.staging_sources.clear();
                     self.active_staging_tail = None;
                     self.document
                         .delete_transaction(&[], true, self.grid_generation);
                 }
-                (LifecycleDirective::ParkPrimary, AdapterEvent::PrimaryParked) => {
+                LifecycleDirective::ParkPrimary => {
                     self.primary_parked = true;
                     self.bump_view_generation();
                 }
-                (LifecycleDirective::RestorePrimary, AdapterEvent::PrimaryRestored) => {
+                LifecycleDirective::RestorePrimary => {
                     self.primary_parked = false;
                     self.grid_generation.0 += 1;
                     self.document
                         .capture_rows_transaction(&[], self.grid_generation);
                     self.bump_view_generation();
                 }
-                _ => return Err(SessionError::LifecyclePayloadMismatch),
             }
         }
+        Ok(())
+    }
+
+    fn apply_removed_rows(&mut self, rows: Vec<RowDirective>) -> Result<(), SessionError> {
+        let mut removals = Vec::new();
+        let mut captured = Vec::<CaptureResult>::new();
+        for row in rows {
+            match row {
+                RowDirective::Capture { live_row, row } => {
+                    let result = self.transcript.capture(row);
+                    let generation = self.transcript.source_generation();
+                    removals.push(LiveRowRemoval {
+                        row: live_row,
+                        staging: Some((result.staging_id, generation)),
+                    });
+                    captured.push(result);
+                }
+                RowDirective::DiscardFromTop { live_row } => removals.push(LiveRowRemoval {
+                    row: live_row,
+                    staging: None,
+                }),
+                RowDirective::Ignore => {}
+            }
+        }
+        if removals.is_empty() {
+            return Ok(());
+        }
+
+        self.grid_generation.0 += 1;
+        self.document
+            .capture_rows_transaction(&removals, self.grid_generation);
+        for result in captured {
+            self.staging_sources
+                .insert(result.staging_id, SourceLifecycle::Live);
+            self.active_staging_tail = result.finalized.is_empty().then_some(result.staging_id);
+            for finalized in result.finalized {
+                self.ingest_finalized(finalized)?;
+            }
+        }
+        let evicted = self.transcript.take_evictions();
+        self.delete_history(&evicted, false);
         Ok(())
     }
 
@@ -487,7 +507,7 @@ impl DualPlaneSession {
         let Some(row) = self.terminal.visible_row(0) else {
             return;
         };
-        if !self.terminal.transcript_mut().rewrite_staged(id, row) {
+        if !self.transcript.rewrite_staged(id, row) {
             self.active_staging_tail = None;
         }
     }

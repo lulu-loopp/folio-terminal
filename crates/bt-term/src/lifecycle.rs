@@ -1,107 +1,260 @@
-use crate::adapter::AdapterEvent;
+//! Executable DESIGN.md §3.1 policy.
+//!
+//! The adapter supplies terminal facts. This module decides which removed rows enter staging,
+//! which resize requests force a staging split, and which semantic terminal events mutate the
+//! transcript. Soft-wrap completion and the 4K staging bound remain enforced by `TranscriptStore`;
+//! viewport-only scrolling and an unterminated live last line produce no adapter event and therefore
+//! cannot enter this policy pipeline.
+
+use std::num::NonZeroU32;
+
+use bt_transcript::CapturedRow;
+
+use crate::{
+    adapter::{
+        AdapterEvent, RemovalCause, RemovalContext, RemovalScope, RemovalScreen, RemovedLiveRow,
+    },
+    cell_capture::captured_row_is_blank,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LifecycleEventKind {
-    RowsRemoved,
-    ForcedFinalize,
-    PrimaryParked,
-    PrimaryRestored,
-    HistoryCleared,
-    QuotaEvicted,
-    CandidatesInvalidated,
+pub enum RowShape {
+    Blank,
+    NonBlank,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LifecycleDirective {
+pub enum RowAction {
     CaptureAndRebase,
-    Finalize,
-    ParkPrimary,
-    RestorePrimary,
-    DeleteHistoryAndStaging,
-    DeleteHistory,
-    InvalidateStaging,
+    DiscardAndRebase,
+    Ignore,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatchValue<T> {
+    Any,
+    Exact(T),
+}
+
+impl<T: Copy + Eq> MatchValue<T> {
+    fn matches(self, value: T) -> bool {
+        match self {
+            Self::Any => true,
+            Self::Exact(expected) => expected == value,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LifecycleRule {
-    pub event: LifecycleEventKind,
-    pub directive: LifecycleDirective,
+    pub screen: MatchValue<RemovalScreen>,
+    pub scope: MatchValue<RemovalScope>,
+    pub cause: MatchValue<RemovalCause>,
+    pub shape: MatchValue<RowShape>,
+    pub action: RowAction,
 }
 
-/// DESIGN.md §3.1 executable lifecycle table. Payload handling remains in the session actor.
-pub const LIFECYCLE_RULES: [LifecycleRule; 7] = [
-    LifecycleRule {
-        event: LifecycleEventKind::RowsRemoved,
-        directive: LifecycleDirective::CaptureAndRebase,
-    },
-    LifecycleRule {
-        event: LifecycleEventKind::ForcedFinalize,
-        directive: LifecycleDirective::Finalize,
-    },
-    LifecycleRule {
-        event: LifecycleEventKind::PrimaryParked,
-        directive: LifecycleDirective::ParkPrimary,
-    },
-    LifecycleRule {
-        event: LifecycleEventKind::PrimaryRestored,
-        directive: LifecycleDirective::RestorePrimary,
-    },
-    LifecycleRule {
-        event: LifecycleEventKind::HistoryCleared,
-        directive: LifecycleDirective::DeleteHistoryAndStaging,
-    },
-    LifecycleRule {
-        event: LifecycleEventKind::QuotaEvicted,
-        directive: LifecycleDirective::DeleteHistory,
-    },
-    LifecycleRule {
-        event: LifecycleEventKind::CandidatesInvalidated,
-        directive: LifecycleDirective::InvalidateStaging,
-    },
-];
-
-fn event_kind(event: &AdapterEvent) -> LifecycleEventKind {
-    match event {
-        AdapterEvent::RowsRemoved(_) => LifecycleEventKind::RowsRemoved,
-        AdapterEvent::ForcedFinalize(_) => LifecycleEventKind::ForcedFinalize,
-        AdapterEvent::PrimaryParked => LifecycleEventKind::PrimaryParked,
-        AdapterEvent::PrimaryRestored => LifecycleEventKind::PrimaryRestored,
-        AdapterEvent::HistoryCleared(_) => LifecycleEventKind::HistoryCleared,
-        AdapterEvent::QuotaEvicted(_) => LifecycleEventKind::QuotaEvicted,
-        AdapterEvent::CandidatesInvalidated => LifecycleEventKind::CandidatesInvalidated,
+impl LifecycleRule {
+    fn matches(self, context: RemovalContext, shape: RowShape) -> bool {
+        self.screen.matches(context.screen)
+            && self.scope.matches(context.scope)
+            && self.cause.matches(context.cause)
+            && self.shape.matches(shape)
     }
 }
 
-pub(crate) fn directive(event: &AdapterEvent) -> Option<LifecycleDirective> {
-    let kind = event_kind(event);
-    LIFECYCLE_RULES
+/// Ordered DESIGN.md §3.1 row-removal decision table.
+///
+/// The last rule is a fail-closed catch-all: local scroll regions, IL/DL, and alternate-screen
+/// removal are observable facts but never become canonical history.
+pub const LIFECYCLE_RULES: [LifecycleRule; 4] = [
+    LifecycleRule {
+        screen: MatchValue::Exact(RemovalScreen::Primary),
+        scope: MatchValue::Exact(RemovalScope::FullScreen),
+        cause: MatchValue::Exact(RemovalCause::NormalScroll),
+        shape: MatchValue::Any,
+        action: RowAction::CaptureAndRebase,
+    },
+    LifecycleRule {
+        screen: MatchValue::Exact(RemovalScreen::Primary),
+        scope: MatchValue::Exact(RemovalScope::FullScreen),
+        cause: MatchValue::Exact(RemovalCause::Resize),
+        shape: MatchValue::Exact(RowShape::NonBlank),
+        action: RowAction::CaptureAndRebase,
+    },
+    LifecycleRule {
+        screen: MatchValue::Exact(RemovalScreen::Primary),
+        scope: MatchValue::Exact(RemovalScope::FullScreen),
+        cause: MatchValue::Exact(RemovalCause::Resize),
+        shape: MatchValue::Exact(RowShape::Blank),
+        action: RowAction::DiscardAndRebase,
+    },
+    LifecycleRule {
+        screen: MatchValue::Any,
+        scope: MatchValue::Any,
+        cause: MatchValue::Any,
+        shape: MatchValue::Any,
+        action: RowAction::Ignore,
+    },
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RowDirective {
+    Capture { live_row: u32, row: CapturedRow },
+    DiscardFromTop { live_row: u32 },
+    Ignore,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LifecycleDirective {
+    RowsRemoved(Vec<RowDirective>),
+    ClearHistoryAndStaging,
+    InvalidateStaging,
+    ParkPrimary,
+    RestorePrimary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResizePlan {
+    pub begin_cooldown: bool,
+    pub finalize_staging: bool,
+}
+
+/// DESIGN.md §3.1 resize policy derived only from old/new terminal facts.
+pub fn plan_resize(old: (NonZeroU32, NonZeroU32), new: (NonZeroU32, NonZeroU32)) -> ResizePlan {
+    ResizePlan {
+        begin_cooldown: old != new,
+        finalize_staging: old.0 != new.0,
+    }
+}
+
+/// Consume one adapter fact and return a payload-safe directive. Session code never pairs an
+/// independently looked-up action with the original event, so an event/directive mismatch is not
+/// representable.
+pub fn classify(event: AdapterEvent) -> LifecycleDirective {
+    match event {
+        AdapterEvent::RowsRemoved { context, rows } => LifecycleDirective::RowsRemoved(
+            rows.into_iter()
+                .map(|row| classify_row(context, row))
+                .collect(),
+        ),
+        AdapterEvent::ClearHistory => LifecycleDirective::ClearHistoryAndStaging,
+        AdapterEvent::Reset | AdapterEvent::Deccolm => LifecycleDirective::InvalidateStaging,
+        AdapterEvent::PrimaryParked => LifecycleDirective::ParkPrimary,
+        AdapterEvent::PrimaryRestored => LifecycleDirective::RestorePrimary,
+    }
+}
+
+fn classify_row(context: RemovalContext, row: RemovedLiveRow) -> RowDirective {
+    let shape = if captured_row_is_blank(&row.row) {
+        RowShape::Blank
+    } else {
+        RowShape::NonBlank
+    };
+    let action = LIFECYCLE_RULES
         .iter()
-        .find(|rule| rule.event == kind)
-        .map(|rule| rule.directive)
+        .find(|rule| rule.matches(context, shape))
+        .map_or(RowAction::Ignore, |rule| rule.action);
+    match action {
+        RowAction::CaptureAndRebase => RowDirective::Capture {
+            live_row: row.live_row,
+            row: row.row,
+        },
+        RowAction::DiscardAndRebase => RowDirective::DiscardFromTop {
+            live_row: row.live_row,
+        },
+        RowAction::Ignore => RowDirective::Ignore,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_transcript::CapturedRow;
+
+    fn row(text: &str) -> RemovedLiveRow {
+        RemovedLiveRow {
+            live_row: 2,
+            row: CapturedRow::plain(text, false),
+        }
+    }
+
+    fn context(screen: RemovalScreen, scope: RemovalScope, cause: RemovalCause) -> RemovalContext {
+        RemovalContext {
+            cause,
+            screen,
+            scope,
+        }
+    }
 
     #[test]
-    fn every_event_kind_occurs_exactly_once() {
-        for kind in [
-            LifecycleEventKind::RowsRemoved,
-            LifecycleEventKind::ForcedFinalize,
-            LifecycleEventKind::PrimaryParked,
-            LifecycleEventKind::PrimaryRestored,
-            LifecycleEventKind::HistoryCleared,
-            LifecycleEventKind::QuotaEvicted,
-            LifecycleEventKind::CandidatesInvalidated,
-        ] {
-            assert_eq!(
-                LIFECYCLE_RULES
-                    .iter()
-                    .filter(|rule| rule.event == kind)
-                    .count(),
-                1
-            );
+    fn row_table_covers_every_fact_combination_and_uses_the_first_matching_rule() {
+        for screen in [RemovalScreen::Primary, RemovalScreen::Alternate] {
+            for scope in [RemovalScope::FullScreen, RemovalScope::Partial] {
+                for cause in [
+                    RemovalCause::NormalScroll,
+                    RemovalCause::DeleteLines,
+                    RemovalCause::Resize,
+                ] {
+                    for shape in [RowShape::Blank, RowShape::NonBlank] {
+                        let context = context(screen, scope, cause);
+                        assert!(
+                            LIFECYCLE_RULES
+                                .iter()
+                                .any(|rule| rule.matches(context, shape)),
+                            "missing lifecycle rule for {context:?} {shape:?}"
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    #[test]
+    fn resize_blank_is_discarded_while_nonblank_is_captured() {
+        let context = context(
+            RemovalScreen::Primary,
+            RemovalScope::FullScreen,
+            RemovalCause::Resize,
+        );
+        assert!(matches!(
+            classify_row(context, row("   ")),
+            RowDirective::DiscardFromTop { live_row: 2 }
+        ));
+        assert!(matches!(
+            classify_row(context, row("kept")),
+            RowDirective::Capture { live_row: 2, .. }
+        ));
+    }
+
+    #[test]
+    fn local_delete_and_alternate_rows_are_ignored() {
+        for context in [
+            context(
+                RemovalScreen::Primary,
+                RemovalScope::Partial,
+                RemovalCause::NormalScroll,
+            ),
+            context(
+                RemovalScreen::Primary,
+                RemovalScope::FullScreen,
+                RemovalCause::DeleteLines,
+            ),
+            context(
+                RemovalScreen::Alternate,
+                RemovalScope::FullScreen,
+                RemovalCause::NormalScroll,
+            ),
+        ] {
+            assert_eq!(classify_row(context, row("drop")), RowDirective::Ignore);
+        }
+    }
+
+    #[test]
+    fn width_change_forces_staging_finalize_but_height_only_change_does_not() {
+        let nz = |value| NonZeroU32::new(value).unwrap();
+        assert!(plan_resize((nz(80), nz(24)), (nz(100), nz(30))).finalize_staging);
+        assert!(!plan_resize((nz(80), nz(24)), (nz(80), nz(30))).finalize_staging);
+        assert!(!plan_resize((nz(80), nz(24)), (nz(80), nz(24))).begin_cooldown);
     }
 }

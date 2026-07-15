@@ -22,9 +22,10 @@ pub(crate) fn snapshot(term: &Term<CaptureListener>) -> Vec<Vec<Cell>> {
         .collect()
 }
 
-pub(crate) fn row_is_blank(row: &[Cell]) -> bool {
-    row.iter()
-        .all(|cell| cell.c == ' ' && cell.zerowidth().is_none_or(|z| z.is_empty()))
+pub(crate) fn captured_row_is_blank(row: &CapturedRow) -> bool {
+    row.cells
+        .iter()
+        .all(|cell| !cell.wide_spacer && cell.text.chars().all(char::is_whitespace))
 }
 
 pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
@@ -198,19 +199,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn style_flags_round_trip_without_upstream_bits_crossing_the_boundary() {
-        let upstream = Flags::BOLD | Flags::ITALIC | Flags::UNDERCURL | Flags::WIDE_CHAR;
-        assert_eq!(decode_flags(capture_flags(upstream)), upstream);
+    fn every_style_flag_maps_and_round_trips_independently() {
+        for (upstream, stable) in [
+            (Flags::INVERSE, CellFlags::INVERSE),
+            (Flags::BOLD, CellFlags::BOLD),
+            (Flags::ITALIC, CellFlags::ITALIC),
+            (Flags::UNDERLINE, CellFlags::UNDERLINE),
+            (Flags::DIM, CellFlags::DIM),
+            (Flags::HIDDEN, CellFlags::HIDDEN),
+            (Flags::STRIKEOUT, CellFlags::STRIKEOUT),
+            (Flags::DOUBLE_UNDERLINE, CellFlags::DOUBLE_UNDERLINE),
+            (Flags::UNDERCURL, CellFlags::UNDERCURL),
+            (Flags::DOTTED_UNDERLINE, CellFlags::DOTTED_UNDERLINE),
+            (Flags::DASHED_UNDERLINE, CellFlags::DASHED_UNDERLINE),
+            (Flags::WIDE_CHAR, CellFlags::WIDE_CHAR),
+        ] {
+            assert_eq!(capture_flags(upstream), stable, "capture {upstream:?}");
+            assert_eq!(decode_flags(stable), upstream, "decode {stable:?}");
+            assert_eq!(decode_flags(capture_flags(upstream)), upstream);
+        }
     }
 
     #[test]
-    fn every_upstream_color_family_round_trips_through_stable_types() {
-        for color in [
-            Color::Named(NamedColor::Foreground),
-            Color::Named(NamedColor::DimCyan),
-            Color::Indexed(213),
-            Color::Spec(Rgb { r: 3, g: 5, b: 8 }),
+    fn every_named_color_maps_and_round_trips_independently() {
+        for (named, code) in [
+            (NamedColor::Black, 0),
+            (NamedColor::Red, 1),
+            (NamedColor::Green, 2),
+            (NamedColor::Yellow, 3),
+            (NamedColor::Blue, 4),
+            (NamedColor::Magenta, 5),
+            (NamedColor::Cyan, 6),
+            (NamedColor::White, 7),
+            (NamedColor::BrightBlack, 8),
+            (NamedColor::BrightRed, 9),
+            (NamedColor::BrightGreen, 10),
+            (NamedColor::BrightYellow, 11),
+            (NamedColor::BrightBlue, 12),
+            (NamedColor::BrightMagenta, 13),
+            (NamedColor::BrightCyan, 14),
+            (NamedColor::BrightWhite, 15),
+            (NamedColor::Foreground, 16),
+            (NamedColor::Background, 17),
+            (NamedColor::Cursor, 18),
+            (NamedColor::DimBlack, 19),
+            (NamedColor::DimRed, 20),
+            (NamedColor::DimGreen, 21),
+            (NamedColor::DimYellow, 22),
+            (NamedColor::DimBlue, 23),
+            (NamedColor::DimMagenta, 24),
+            (NamedColor::DimCyan, 25),
+            (NamedColor::DimWhite, 26),
+            (NamedColor::BrightForeground, 27),
+            (NamedColor::DimForeground, 28),
         ] {
+            let upstream = Color::Named(named);
+            let stable = TerminalColor::Named(code);
+            assert_eq!(capture_color(upstream), stable, "capture {named:?}");
+            assert_eq!(decode_color(stable), Some(upstream), "decode {named:?}");
+            assert_eq!(decode_color(capture_color(upstream)), Some(upstream));
+        }
+    }
+
+    #[test]
+    fn indexed_and_rgb_colors_round_trip_through_stable_types() {
+        for color in [Color::Indexed(213), Color::Spec(Rgb { r: 3, g: 5, b: 8 })] {
             assert_eq!(decode_color(capture_color(color)), Some(color));
         }
         assert_eq!(decode_color(TerminalColor::Named(u8::MAX)), None);

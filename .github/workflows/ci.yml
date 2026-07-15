@@ -11,6 +11,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  adapter-boundary:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
+      # terminal facts; importing document, detection, or viewport policy here recreates the
+      # layering bug Task 00b removed. Prove this gate fires before trusting the green run.
+      - name: the adapter boundary gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-term/src/adapter.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`nuse bt_doc::HistoryDocument as _AdapterBoundaryProbe;`n")
+            $failed = $false
+            try {
+              & ./scripts/check-adapter-boundary.ps1 *> $null
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "adapter boundary check accepted a planted bt_doc import"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+
+      - name: adapter modules do not import policy crates
+        shell: pwsh
+        run: ./scripts/check-adapter-boundary.ps1
+
   check:
     runs-on: windows-latest
     timeout-minutes: 30

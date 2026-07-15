@@ -1,7 +1,7 @@
 use std::{cell::RefCell, fs::File, num::NonZeroU32, path::PathBuf};
 
 use bt_corpus::{Chunking, Corpus};
-use bt_term::TerminalAdapter;
+use bt_term::DualPlaneSession;
 
 fn corpus_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -12,7 +12,7 @@ fn corpus_path(name: &str) -> PathBuf {
 
 fn replay(name: &str, chunking: Chunking) -> (Vec<String>, Vec<String>, (usize, usize)) {
     let corpus = Corpus::read_from(File::open(corpus_path(name)).unwrap()).unwrap();
-    let terminal = RefCell::new(TerminalAdapter::new(
+    let session = RefCell::new(DualPlaneSession::new(
         NonZeroU32::new(u32::from(corpus.initial_cols)).unwrap(),
         NonZeroU32::new(u32::from(corpus.initial_rows)).unwrap(),
     ));
@@ -20,24 +20,25 @@ fn replay(name: &str, chunking: Chunking) -> (Vec<String>, Vec<String>, (usize, 
         .replay(
             chunking,
             |bytes| {
-                terminal.borrow_mut().feed(bytes);
+                session.borrow_mut().feed(bytes).unwrap();
             },
             |cols, rows| {
-                terminal
+                session
                     .borrow_mut()
-                    .resize(NonZeroU32::from(cols), NonZeroU32::from(rows));
+                    .resize(NonZeroU32::from(cols), NonZeroU32::from(rows))
+                    .unwrap();
             },
         )
         .unwrap();
-    let terminal = terminal.into_inner();
-    let visible = terminal.visible_text();
-    let frozen = terminal
+    let session = session.into_inner();
+    let visible = session.terminal().visible_text();
+    let frozen = session
         .transcript()
         .frozen()
         .iter()
         .map(|line| line.text.clone())
         .collect();
-    let dimensions = terminal.dimensions();
+    let dimensions = session.terminal().dimensions();
     (
         visible,
         frozen,
