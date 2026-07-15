@@ -252,7 +252,8 @@
   .profile-item .default-hint { margin-left: auto; font-size: 11px; color: var(--ink3); }
 
   /* ── Terminal & panes ── */
-  .termhost { flex: 1; min-width: 0; display: flex; position: relative; }
+  :root { --gap: 8px; }
+  .termhost { flex: 1; min-width: 0; display: flex; position: relative; background: var(--panel); }
   .term {
     flex: 1; min-width: 0; min-height: 0;
     background: var(--termbg);
@@ -276,31 +277,29 @@
   .split-row { flex-direction: row; }
   .split-col { flex-direction: column; }
   .slot { display: flex; flex-basis: 0; min-width: 0; min-height: 0; }
-  .pane { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
-
-  /* Draggable divider. At rest it is a hairline; the moment you touch it, it
-     becomes a solid sash — you have to be able to see the thing you are moving,
-     or the eye reads the resize as the growing pane wiping over the other one. */
-  .divider { flex: none; position: relative; background: none; }
-  .split-row > .divider { width: 7px; margin: 0 -3px; cursor: col-resize; z-index: 5; }
-  .split-col > .divider { height: 7px; margin: -3px 0; cursor: row-resize; z-index: 5; }
-  .divider::before {
-    content: ""; position: absolute; background: var(--border);
-    transition: background .12s ease, transform .12s ease;
+  .pane {
+    flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
+    background: var(--termbg); overflow: hidden;
   }
-  .split-row > .divider::before { left: 3px; top: 0; bottom: 0; width: 1px; transform-origin: center; }
-  .split-col > .divider::before { top: 3px; left: 0; right: 0; height: 1px; transform-origin: center; }
-  .divider:hover::before, .divider.dragging::before { background: var(--accent); }
-  .split-row > .divider:hover::before, .split-row > .divider.dragging::before { transform: scaleX(3); }
-  .split-col > .divider:hover::before, .split-col > .divider.dragging::before { transform: scaleY(3); }
-  /* a grip, so the sash reads as a handle you grabbed rather than a coloured seam */
+  /* only split panes are cards; a lone pane stays flush with the tab above it */
+  .split .pane { border-radius: 7px; }
+
+  /* Panes are separated by a real gap, not a shared hairline — the way Windows
+     separates snapped windows. Two edges instead of one means both sides visibly
+     move when you drag, so the resize reads as a boundary moving rather than as
+     the growing pane wiping over its neighbour. The gap is also the drag handle. */
+  .divider { flex: none; position: relative; transition: background .12s ease; }
+  .split-row > .divider { width: var(--gap); cursor: col-resize; }
+  .split-col > .divider { height: var(--gap); cursor: row-resize; }
+  .divider:hover, .divider.dragging { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+  /* a grip, so the gap reads as something you can grab */
   .divider::after {
-    content: ""; position: absolute; border-radius: 4px;
+    content: ""; position: absolute; border-radius: 3px;
     background: var(--accent); opacity: 0;
     transition: opacity .12s ease;
   }
-  .split-row > .divider::after { left: 1px; width: 5px; top: 50%; height: 30px; margin-top: -15px; }
-  .split-col > .divider::after { top: 1px; height: 5px; left: 50%; width: 30px; margin-left: -15px; }
+  .split-row > .divider::after { left: 2px; right: 2px; top: 50%; height: 28px; margin-top: -14px; }
+  .split-col > .divider::after { top: 2px; bottom: 2px; left: 50%; width: 28px; margin-left: -14px; }
   .divider:hover::after, .divider.dragging::after { opacity: 1; }
   body.resizing { user-select: none; }
   body.resizing * { cursor: inherit !important; }
@@ -950,7 +949,9 @@
     if (e.button !== 0) return;
     const node = findSplit(activeTab().tree, +el.dataset.split);
     const splitEl = el.parentElement;
-    resize = { node, el, splitEl, rect: splitEl.getBoundingClientRect() };
+    const dr = el.getBoundingClientRect();
+    resize = { node, el, splitEl, rect: splitEl.getBoundingClientRect(),
+               gap: node.dir === "row" ? dr.width : dr.height };
     el.classList.add("dragging");
     document.body.classList.add("resizing");
     document.body.style.cursor = node.dir === "row" ? "col-resize" : "row-resize";
@@ -958,11 +959,14 @@
   }
   document.addEventListener("pointermove", (e) => {
     if (!resize) return;
-    const { node, rect, splitEl } = resize;
+    const { node, rect, splitEl, gap } = resize;
     const total = node.dir === "row" ? rect.width : rect.height;
     const pos = node.dir === "row" ? e.clientX - rect.left : e.clientY - rect.top;
-    const min = (node.dir === "row" ? MIN_PANE_W : MIN_PANE_H) / total;
-    node.ratio = Math.max(min, Math.min(1 - min, pos / total));
+    /* the two panes share (total - gap); solve for the ratio that puts the
+       middle of the gap exactly under the pointer */
+    const usable = total - gap;
+    const min = (node.dir === "row" ? MIN_PANE_W : MIN_PANE_H) / usable;
+    node.ratio = Math.max(min, Math.min(1 - min, (pos - gap / 2) / usable));
     /* move the divider live without re-rendering the terminals underneath */
     splitEl.children[0].style.flexGrow = node.ratio;
     splitEl.children[2].style.flexGrow = 1 - node.ratio;
