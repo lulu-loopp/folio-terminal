@@ -23,6 +23,9 @@ pub struct WidthCase {
     pub id: String,
     pub text: String,
     pub expected_cells: usize,
+    pub expected_cells_source: String,
+    pub expected_cells_bt_term: usize,
+    pub expected_cells_bt_term_source: String,
     pub class: String,
 }
 
@@ -31,9 +34,9 @@ pub struct ClusterAudit {
     pub text: String,
     pub byte_start: usize,
     pub byte_end: usize,
-    pub terminal_cells: usize,
+    pub candidate_cells: usize,
     pub slot_start_px: f32,
-    pub slot_width_px: f32,
+    pub candidate_slot_width_px: f32,
     pub natural_start_px: f32,
     pub natural_advance_px: f32,
     pub constrained_offset_px: f32,
@@ -48,9 +51,12 @@ pub struct ShapeCaseAudit {
     pub text: String,
     pub class: String,
     pub expected_cells: usize,
-    pub policy_cells: usize,
+    pub expected_cells_source: String,
+    pub expected_cells_bt_term: usize,
+    pub expected_cells_bt_term_source: String,
+    pub candidate_cells: usize,
     pub natural_line_width_px: f32,
-    pub authoritative_width_px: f32,
+    pub candidate_slot_width_px: f32,
     pub shape_micros: u128,
     pub clusters: Vec<ClusterAudit>,
 }
@@ -134,6 +140,7 @@ pub struct LogAudit {
     pub nonempty_preedits: usize,
     pub nonempty_commits: usize,
     pub distinct_candidate_areas: usize,
+    pub checklist_items: Vec<u8>,
     pub failures: Vec<String>,
 }
 
@@ -141,6 +148,7 @@ pub fn audit_log(path: &Path, strict_ime: bool) -> Result<LogAudit> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let mut audit = LogAudit::default();
     let mut areas = BTreeSet::new();
+    let mut checklist_items = BTreeSet::new();
     let mut saw_boot = false;
     let mut saw_shutdown = false;
 
@@ -199,10 +207,20 @@ pub fn audit_log(path: &Path, strict_ime: bool) -> Result<LogAudit> {
                     audit.nonempty_commits += 1;
                 }
             }
+            "checklist_item" => match record.payload.get("item").and_then(Value::as_u64) {
+                Some(item @ 1..=10) => {
+                    checklist_items.insert(item as u8);
+                }
+                _ => audit.failures.push(format!(
+                    "line {} has invalid checklist item; expected integer 1..=10",
+                    line_index + 1
+                )),
+            },
             _ => {}
         }
     }
     audit.distinct_candidate_areas = areas.len();
+    audit.checklist_items = checklist_items.iter().copied().collect();
     if !saw_boot {
         audit.failures.push("missing boot record".to_owned());
     }
@@ -238,6 +256,14 @@ pub fn audit_log(path: &Path, strict_ime: bool) -> Result<LogAudit> {
                 "candidate area never moved; cursor-follow behavior was not exercised".to_owned(),
             );
         }
+        let missing_items = (1..=10)
+            .filter(|item| !checklist_items.contains(item))
+            .collect::<Vec<_>>();
+        if !missing_items.is_empty() {
+            audit.failures.push(format!(
+                "missing operator checklist markers: {missing_items:?}; markers prove only that each item was visited, not that its visual result passed"
+            ));
+        }
     }
     Ok(audit)
 }
@@ -270,9 +296,17 @@ pub fn load_width_cases() -> Result<Vec<WidthCase>> {
         .context("parse cjk-width-cases.json")
 }
 
-pub fn terminal_policy_cells(text: &str) -> usize {
+/// Candidate grapheme policy used by this spike for comparison. This is not bt-term's authority.
+pub fn candidate_grapheme_cells(text: &str) -> usize {
     UnicodeSegmentation::graphemes(text, true)
         .map(UnicodeWidthStr::width)
+        .sum()
+}
+
+/// Alternative candidate where East Asian Ambiguous graphemes are wide.
+pub fn candidate_grapheme_cells_cjk(text: &str) -> usize {
+    UnicodeSegmentation::graphemes(text, true)
+        .map(UnicodeWidthStr::width_cjk)
         .sum()
 }
 
@@ -321,8 +355,8 @@ fn shape_case(font_system: &mut FontSystem, case: WidthCase) -> Result<ShapeCase
     let mut slot_start_px = 0.0;
     let mut clusters = Vec::with_capacity(ranges.len());
     for (byte_start, byte_end, cluster) in ranges.drain(..) {
-        let terminal_cells = UnicodeWidthStr::width(cluster);
-        let slot_width_px = terminal_cells as f32 * CELL_WIDTH_PX;
+        let candidate_cells = UnicodeWidthStr::width(cluster);
+        let slot_width_px = candidate_cells as f32 * CELL_WIDTH_PX;
         let overlapping = glyphs
             .iter()
             .filter(|glyph| glyph.start < byte_end && glyph.end > byte_start)
@@ -348,9 +382,9 @@ fn shape_case(font_system: &mut FontSystem, case: WidthCase) -> Result<ShapeCase
             text: cluster.to_owned(),
             byte_start,
             byte_end,
-            terminal_cells,
+            candidate_cells,
             slot_start_px,
-            slot_width_px,
+            candidate_slot_width_px: slot_width_px,
             natural_start_px,
             natural_advance_px,
             constrained_offset_px,
@@ -363,15 +397,18 @@ fn shape_case(font_system: &mut FontSystem, case: WidthCase) -> Result<ShapeCase
         });
         slot_start_px += slot_width_px;
     }
-    let policy_cells = terminal_policy_cells(&case.text);
+    let candidate_cells = candidate_grapheme_cells(&case.text);
     Ok(ShapeCaseAudit {
         id: case.id,
         text: case.text,
         class: case.class,
         expected_cells: case.expected_cells,
-        policy_cells,
+        expected_cells_source: case.expected_cells_source,
+        expected_cells_bt_term: case.expected_cells_bt_term,
+        expected_cells_bt_term_source: case.expected_cells_bt_term_source,
+        candidate_cells,
         natural_line_width_px,
-        authoritative_width_px: policy_cells as f32 * CELL_WIDTH_PX,
+        candidate_slot_width_px: candidate_cells as f32 * CELL_WIDTH_PX,
         shape_micros,
         clusters,
     })
@@ -380,19 +417,71 @@ fn shape_case(font_system: &mut FontSystem, case: WidthCase) -> Result<ShapeCase
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::{
+        Term, event::VoidListener, grid::Dimensions, term::Config, vte::ansi::Handler,
+    };
     use serde_json::json;
-    use std::io::Write;
+    use std::{io::Write, time::SystemTime};
+
+    struct OracleSize;
+
+    impl Dimensions for OracleSize {
+        fn total_lines(&self) -> usize {
+            2
+        }
+
+        fn screen_lines(&self) -> usize {
+            2
+        }
+
+        fn columns(&self) -> usize {
+            128
+        }
+    }
+
+    fn bt_term_cells(text: &str) -> usize {
+        let mut term = Term::new(
+            Config {
+                scrolling_history: 0,
+                ..Config::default()
+            },
+            &OracleSize,
+            VoidListener,
+        );
+        for character in text.chars() {
+            Handler::input(&mut term, character);
+        }
+        assert!(!term.grid().cursor.input_needs_wrap);
+        term.grid().cursor.point.column.0
+    }
+
+    fn temp_log(label: &str) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "bt-ime-{label}-{}-{nonce}.jsonl",
+            std::process::id()
+        ))
+    }
 
     #[test]
-    fn explicit_width_corpus_catches_each_policy_case() {
+    fn explicit_width_corpus_catches_each_candidate_policy_case() {
         let cases = load_width_cases().unwrap();
         let mut ids = BTreeSet::new();
         for case in cases {
             assert!(ids.insert(case.id.clone()), "duplicate id {}", case.id);
+            assert!(!case.expected_cells_source.trim().is_empty(), "{}", case.id);
+            assert!(
+                !case.expected_cells_bt_term_source.trim().is_empty(),
+                "{}",
+                case.id
+            );
             assert_eq!(
-                terminal_policy_cells(&case.text),
+                candidate_grapheme_cells(&case.text),
                 case.expected_cells,
-                "terminal width policy changed for {} ({:?})",
+                "candidate grapheme policy changed for {} ({:?}); check the cited UAX/UTS/product-decision source rather than copying the implementation",
                 case.id,
                 case.text
             );
@@ -400,20 +489,56 @@ mod tests {
     }
 
     #[test]
-    fn constrained_slots_are_driven_only_by_terminal_cells() {
+    fn vendored_term_input_matches_only_fifteen_candidate_cases() {
+        let cases = load_width_cases().unwrap();
+        let mut matches = 0;
+        let mut mismatches = Vec::new();
+        for case in cases {
+            let actual = bt_term_cells(&case.text);
+            assert_eq!(actual, case.expected_cells_bt_term, "{}", case.id);
+            if actual == case.expected_cells {
+                matches += 1;
+            } else {
+                mismatches.push((case.id, case.expected_cells, actual));
+            }
+        }
+        assert_eq!(matches, 15);
+        assert_eq!(
+            mismatches,
+            vec![
+                ("heart-emoji-vs16".to_owned(), 2, 1),
+                ("keycap".to_owned(), 2, 1),
+                ("skin-tone".to_owned(), 2, 4),
+                ("woman-technologist".to_owned(), 2, 4),
+                ("family-zwj".to_owned(), 2, 8),
+                ("rainbow-flag".to_owned(), 2, 3),
+                ("wt-900-pencil-emoji".to_owned(), 4, 3),
+            ]
+        );
+    }
+
+    #[test]
+    fn ambiguous_width_has_unresolved_narrow_and_cjk_wide_results() {
+        let text = "A☆中│Ｂ";
+        assert_eq!(candidate_grapheme_cells(text), 7);
+        assert_eq!(candidate_grapheme_cells_cjk(text), 9);
+    }
+
+    #[test]
+    fn constrained_slots_are_driven_only_by_candidate_cells() {
         let report = run_shape_audit().unwrap();
         for case in report.cases {
-            assert_eq!(case.policy_cells, case.expected_cells, "{}", case.id);
+            assert_eq!(case.candidate_cells, case.expected_cells, "{}", case.id);
             let slot_sum = case
                 .clusters
                 .iter()
-                .map(|cluster| cluster.slot_width_px)
+                .map(|cluster| cluster.candidate_slot_width_px)
                 .sum::<f32>();
-            assert_eq!(slot_sum, case.authoritative_width_px, "{}", case.id);
+            assert_eq!(slot_sum, case.candidate_slot_width_px, "{}", case.id);
             for cluster in case.clusters {
                 assert_eq!(
-                    cluster.slot_width_px,
-                    cluster.terminal_cells as f32 * CELL_WIDTH_PX,
+                    cluster.candidate_slot_width_px,
+                    cluster.candidate_cells as f32 * CELL_WIDTH_PX,
                     "{} {:?}",
                     case.id,
                     cluster.text
@@ -424,11 +549,7 @@ mod tests {
 
     #[test]
     fn log_audit_rejects_a_green_but_empty_probe() {
-        let path = std::env::temp_dir().join(format!(
-            "bt-ime-empty-{}-{}.jsonl",
-            std::process::id(),
-            Instant::now().elapsed().as_nanos()
-        ));
+        let path = temp_log("empty");
         let mut file = File::create(&path).unwrap();
         let record = LogRecord {
             schema: LOG_SCHEMA.to_owned(),
@@ -443,6 +564,38 @@ mod tests {
         drop(file);
         let audit = audit_log(&path, true).unwrap();
         assert!(!audit.failures.is_empty());
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn strict_log_rejects_minimum_ime_evidence_without_all_ten_markers() {
+        let path = temp_log("partial-checklist");
+        let mut logger = JsonlLogger::create(&path, "Totally Real Pinyin 9.9".to_owned()).unwrap();
+        logger.emit("boot", json!({})).unwrap();
+        logger
+            .emit("set_ime_cursor_area", json!({"area": {"x": 1, "y": 1}}))
+            .unwrap();
+        logger.emit("frame", json!({})).unwrap();
+        logger.emit("ime_enabled", json!({})).unwrap();
+        logger
+            .emit(
+                "ime_preedit",
+                json!({"text": "zhong", "cursor_begin": 5, "cursor_end": 5}),
+            )
+            .unwrap();
+        logger
+            .emit("set_ime_cursor_area", json!({"area": {"x": 2, "y": 1}}))
+            .unwrap();
+        logger.emit("ime_commit", json!({"text": "中"})).unwrap();
+        logger.emit("checklist_item", json!({"item": 1})).unwrap();
+        logger.emit("checklist_item", json!({"item": 6})).unwrap();
+        logger.emit("shutdown", json!({})).unwrap();
+        drop(logger);
+
+        let audit = audit_log(&path, true).unwrap();
+        assert_eq!(audit.checklist_items, vec![1, 6]);
+        assert_eq!(audit.failures.len(), 1, "{:?}", audit.failures);
+        assert!(audit.failures[0].contains("[2, 3, 4, 5, 7, 8, 9, 10]"));
         std::fs::remove_file(path).unwrap();
     }
 }

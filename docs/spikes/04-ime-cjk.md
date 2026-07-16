@@ -1,97 +1,139 @@
-# Spike 04：Windows 中文 IME 与 CJK cell 宽度
+# Spike 04：Windows 中文 IME 与 CJK cell 宽度（04b 返工版）
 
 ## 结论
 
-**no-go（等待真人 IME 证据，不代表 winit 已被技术性否决）**。
+**no-go（等待真人 IME 证据；winit 尚未被技术性否决）**。
 
-当前不能批准 M0 以 winit IME 起步。可交互探针、结构化日志、严格审计器、CJK/emoji/ZWJ 宽度语料和 cosmic-text 约束原型均已完成并通过自动门禁，但中文输入最关键的三家 IME 实测尚未由真人完成。自动烟测没有伪造键盘输入，并被严格审计器正确判为失败。因此，“M0 能不能用 winit 的 IME 起步？”在本轮交接点的明确答案是：**不能，必须先完成下述人工门；若三家均通过，可改判 go-with-caveats，若出现协议级失败则改判 no-go 并让 M0 直接评估 TSF。**
+原报告关于人工门的判定规则保持不变：三家核心项全 PASS 才能改判 go-with-caveats；协议级失败转向直接 TSF；少于三家或缺肉眼结果维持 no-go。没有用 `SendInput`，没有把未测项写成“应该可用”。
 
-这是提示词规定的人工停点。本轮不启动 spike 03/05/06，也不进入 M0。
+04b 同时撤回原报告最响亮但错误的“22/22 cell oracle 匹配”结论。真实结论是：
+
+1. grapheme 候选目标自身是 22/22，但 vendored `alacritty_terminal::Term::input` 的真实 cell 占用只与其匹配 **15/22**；七条 emoji/ZWJ/VS 序列分歧是本 spike 的核心产出。
+2. `bt-term` 当前沿用 alacritty 的逐 Unicode scalar 宽度，没有 grapheme 聚类；`👨‍👩‍👧‍👦` 实际占 8 cells，而候选产品目标是 2。**是否在 M0 给 bt-term 增加 grapheme 聚类/cluster width 是必须裁决的事项。** 本 spike 只读对照，没有修改现有 crate。
+3. WT #370 暴露的 Ambiguous Width 没有 DESIGN 决策：`A☆中│Ｂ` 按 narrow 是 7，按 CJK-wide 是 9。原语料暗中选择 narrow，现已改为显式规格缺口。
+4. cosmic-text 有三条**已知视觉失败**：`❤︎`、`☆`、`✏` 的自然字形宽于 1-cell slot，被裁剪。宽度数字正确不代表能正确画出。
+
+因此当前不能批准 M0 以 winit IME 起步，也不能把现有 bt-term 宽度行为当作 emoji/ZWJ 产品目标。
+
+## 04b 修改、原因与会红证据
+
+| 修改 | 为什么 | 坏掉时如何会红 |
+|---|---|---|
+| corpus 同时保存 `expected_cells`、`expected_cells_bt_term` 及两套来源 | 候选产品策略与现状权威必须分离 | 改任一 bt-term 数字，vendored `Term::input` 对照测试失败；改候选数字，UAX/UTS 候选测试失败 |
+| spike 以 dev-dependency 只读路径依赖 vendored alacritty | 不能再用 grapheme 实现给自身发证书 | `vendored_term_input_matches_only_fifteen_candidate_cases` 逐字符调用 `Handler::input`，断言 15/22 和精确七条差异 |
+| `terminal_policy_cells` 改名为 `candidate_grapheme_cells` | 它是候选策略，不是 bt-term 权威 | 全树不再存在旧名；测试和 artifact 明确使用 `candidate_cells` |
+| narrow 与 CJK-wide Ambiguous 策略同时测量 | 原 narrow 是未申报产品决策 | `ambiguous_width_has_unresolved_narrow_and_cjk_wide_results` 固定同一字符串 7/9，任一侧行为变化都会失败 |
+| 清单第 10 条改为“蓝框/系统候选框相对关系跨 DPI 不变” | 黄色 preedit 用自然 advance，必然与 cell 几何漂移；不能把探针限制误判为 winit 缺陷 | 真人跨 DPI 后若候选框相对蓝框漂移即 FAIL；黄色字形末端与蓝框不重合不再构成失败 |
+| F4 依次写入 1～10 的 `checklist_item` | 一条 preedit/commit + 一次移动不能冒充十项完成 | 严格审计缺任一 marker 就失败；审核式“最低 8 条日志”由回归测试明确拒绝 |
+| 脚本成功输出降格为“最低日志/marker 门通过” | 自动绿不能代替肉眼表 | `run-manual.ps1` 明示最终结论仍需表格；报告判定规则拒绝“只有日志” |
+| 更正 target clause、UTF-16 cursor 与 IME 身份边界 | 原能力表一处事实失准，另有两个未披露 caveat | 清单第 2 条按 target clause 观察；非 BMP 与身份真实性保留为人工/后续 native probe 风险，不伪造 PASS |
 
 ## 证据边界
 
 | 项目 | 证据来源 | 当前状态 |
 |---|---|---|
 | winit 窗口创建、绘制、定时退出 | 本机自动烟测 | PASS |
-| 每个 `Ime::` 事件、每次 `set_ime_cursor_area`、每帧状态的 JSONL | 代码与无输入烟测 | PASS（日志格式/顺序）；真实 IME 内容未覆盖 |
+| `Ime::`、候选区调用、帧、清单 marker 的 JSONL | 自动测试与无输入烟测 | PASS（格式/门禁）；真实 IME 内容未覆盖 |
 | Microsoft Pinyin 全拼/双拼/编辑/候选框跟随 | 真人实体键盘 + 肉眼 + JSONL | **未测** |
 | 微信输入法 2.1.0.36 同上 | 真人实体键盘 + 肉眼 + JSONL | **未测** |
 | 搜狗拼音或另一家指定主流第三方 IME 同上 | 真人实体键盘 + 肉眼 + JSONL | **未测；本机未安装** |
-| cosmic-text 的 CJK/emoji/ZWJ 整形及 cell 约束 | 本机自动审计 | PASS（数值协议）；视觉抽查待真人 |
+| alacritty/bt-term 现状 cell 占用 | vendored `Term::input` 路径依赖测试 | PASS：实际测得 15/22 与候选一致 |
+| cosmic-text 数值整形 | 自动 artifact | 已测；三条明确视觉失败，截图级审查未完成 |
 
-未测试项不按“应当可用”计入结论。探针的 `--ime-name` 是操作者声明的标签；winit 事件本身不提供当前输入法的可验证身份。
+`--ime-name` 只是操作者声明，不能证明当前活动 TIP。winit 不提供可验证身份，但 Win32 可以通过 `GetKeyboardLayout` / `ImmGetDescriptionW` 取证。本 spike 为保持 `unsafe_code = "deny"` 且不扩张 native FFI 面，选择不实现；代价是三家身份仍需操作者与环境截图佐证，而不是“Windows 做不到”。
 
-## 产物
+## 双 oracle：候选目标与 bt-term 现状
 
-- 独立 workspace：`spikes/04-ime-cjk/`，不属于根 workspace，也不依赖或修改现有 BetterTerminal crate。
-- 交互探针：`src/bin/ime-probe.rs`。显示 committed/preedit、byte cursor range 和候选区；蓝框严格等于传给 `set_ime_cursor_area` 的物理像素矩形。
-- 日志审计器：`src/bin/ime-log-audit.rs`。校验 schema、连续 sequence、启动/退出、帧、候选区调用、UTF-8 byte cursor 边界；`--strict-ime` 额外要求 Enabled、非空 Preedit/Commit 和候选区移动。
-- 人工执行入口：`run-manual.ps1`；已有日志不会被覆盖，探针或审计非零退出会终止并保留证据。
-- 逐项人工清单：`spikes/04-ime-cjk/MANUAL-CHECKLIST.md`。
-- 宽度语料：`corpus/cjk-width-cases.json`，22 例，覆盖 CJK、East Asian Ambiguous、全角、组合字符、emoji、VS15/VS16、keycap、肤色、国旗、ZWJ，以及 Windows Terminal #370 的 `☆` 与 #900 的 `✏` / `✏️`。
-- 可复查数据：`docs/spikes/artifacts/04-cjk-shaping.json`。
+DESIGN 的不变量仍是 bt-term 的 cell 占用控制光标、选择和后续 cell；cosmic-text 只能被约束。问题在于 bt-term 今天的实际算法并不是 grapheme 策略：vendored `Term::input` 对每个 `char` 调 `c.width()`，零宽 scalar 附着到前一 cell，宽 scalar 各自推进。`vendor/alacritty_terminal` 和 `crates/bt-term` 没有 grapheme 聚类路径。
 
-## winit IME 能力边界
+corpus 现在并列两套数值：
 
-本 spike 锁定 `winit 0.30.13`。其 Windows backend 通过 `WM_IME_*` 和 IMM32 兼容 API 处理组合输入：源码路径会调用 `ImmGetCompositionStringW` 读取组合串，并用 `ImmSetCandidateWindow` / `ImmSetCompositionWindow` 实现候选区定位；`set_ime_allowed` 对应 IME context 的关联控制。这不是一个应用自持的 TSF text store。
+- `expected_cells`：候选产品目标。每条注明 UAX #11、UTS #51、wcwidth 约定或“PRODUCT DECISION PENDING”，不再只写裸数字。
+- `expected_cells_bt_term`：由 `alacritty_terminal 0.26.0 Term::input` 实际喂入后读取 cursor cell advancement；逐条注明来源。
 
-winit 当前足以表达的最小终端输入协议是：
+七条真实分歧：
 
-- 启用/停用 IME；
-- `Enabled` / `Disabled` / `Preedit(String, Option<(usize, usize)>)` / `Commit(String)`；
-- 用一个窗口级矩形提示候选框位置；
-- preedit 活跃时由后端抑制普通 `KeyboardInput` 文本路径，避免同一文本被提交两次。
+| 用例 | grapheme 候选目标 | bt-term/alacritty 实际 |
+|---|---:|---:|
+| `❤️` heart-emoji-vs16 | 2 | **1** |
+| `1️⃣` keycap | 2 | **1** |
+| `👍🏽` skin-tone | 2 | **4** |
+| `👩‍💻` woman-technologist | 2 | **4** |
+| `👨‍👩‍👧‍👦` family-zwj | 2 | **8** |
+| `🏳️‍🌈` rainbow-flag | 2 | **3** |
+| `A✏️B` WT #900 | 4 | **3** |
 
-winit 没有暴露下列能力；产品一旦需要，必须绕过 winit 的高层 IME 接口，直接实现 Windows TSF（可继续让 winit 管窗口）：
+这不是为了让测试变绿而修改产品期望；两列都保留，分歧进入 M0 决策。路径 dev-dependency 不会把 spike 加进根 workspace，也没有改动 vendor 或 bt-term。
 
-1. TSF `ITextStoreACP` 文档锁、异步 edit session、surrounding text、selection 与 reconversion；
-2. 候选列表内容、当前候选、分页、reading string，或 UI-less candidate sink；
-3. preedit clause、target-converted range、display attribute 等富组合标记；winit 只有一个可选 byte cursor range；
-4. 输入法 profile/语言/实际 TIP 身份、input scope 和按 IME 制定兼容策略；
-5. 应用自绘候选 UI、候选可访问性语义，以及 TSF-only 输入法不提供 IMM32 兼容行为时的兜底；
-6. 需要 surrounding text 的预测、手写、语音或复杂文本服务。
+### WT #370：待裁决的 Ambiguous Width
 
-BetterTerminal M0 若只要求“单一活动 cell 上的 preedit + 系统候选窗 + commit”，winit 在协议形状上可能足够，但仍必须由三家真实 IME 的人工门证明。若人工测试出现无 Preedit/Commit、候选框无法稳定跟随、DPI 偏移、切换后幽灵组合串或重复提交，应先把失败归类为 winit/IMM32 能力缺口；不得在 M0 用按键启发式掩盖。
+`A☆中│Ｂ` 在候选 narrow 模式下是 7 cells，在 `width_cjk`（Ambiguous 视为 wide）下是 9。`☆` 和 box-drawing 都受语境策略影响。DESIGN 没有规定固定 narrow、固定 wide、locale 驱动还是用户可配置；因此原“#370 已覆盖”撤回，当前状态是**已复现规格缺口，等待裁决**。
 
-## CJK / emoji 宽度约束原型
+## cosmic-text 约束结果与已知视觉失败
 
-设计不变量是：**终端 cell 是宽度权威，cosmic-text 只负责整形，不能反向决定光标或下一 cell 的位置。** spike 中的 `unicode-width` 只用于把显式 oracle 变成一个可运行的候选策略；M0 接线时必须从 `bt-term` 的真实 cell 占用和 wide-char spacer 取得权威范围，不能把本函数升级成第二套权威。
+原型仍对整行 `Shaping::Advanced`，以 grapheme byte range 映射 glyph，再把自然几何居中/裁剪进候选 slot；自然 advance 不推进候选后续 cell。这个算法验证的是候选视觉约束，不是 bt-term 现状权威。
 
-原型算法：
-
-1. 对整行用 cosmic-text `Shaping::Advanced` 整形，保留字体 fallback、combining 与 ZWJ 形成整体 glyph 的机会；
-2. 以 grapheme byte range 把 layout glyph 映射回 cluster；
-3. 每个 cluster 的目标 slot 宽度只等于 `terminal_cells × cell_width`；
-4. 自然 glyph advance 小于 slot 时居中，大于 slot 时裁剪；自然 advance 永不推进后续 cell；
-5. 光标、选择和命中测试只走权威 slot，不走 cosmic-text 的自然 advance。
-
-本机数据（Windows 报告为 25H2 build 26200.8875，Rust 1.94.1，`cosmic-text 0.19.0`）：
+本机数据（Windows 25H2 build 26200.8875，Rust 1.94.1，`cosmic-text 0.19.0`）：
 
 | 指标 | 结果 |
 |---|---:|
-| `FontSystem::new` | 51,246 µs（独立 shaping 进程）；探针为 52,543 µs |
+| `FontSystem::new` | 50,256 µs |
 | 语料 | 22 |
-| cell oracle 匹配 | 22 / 22 |
+| 候选实现 vs 候选 oracle | 22 / 22 |
+| bt-term 实际 vs 候选目标 | **15 / 22** |
 | glyph id 0 | 0 |
-| 被 slot 裁剪的 cluster | 3（1-cell 的 `♥︎`、`☆`、`✏`） |
-| 单例 shape p50 / p95 / max | 40 / 10,129 / 15,998 µs |
+| 已知裁剪/视觉失败 | **3** |
+| 单例 shape p50 / p95 / max | 43 / 10,018 / 16,062 µs |
 
-p95/max 由首次加载 ASCII 与全角字体 fallback 的冷缓存成本主导；这些数字不是 steady-state 帧预算。该 spike 的目标是对齐协议而非渲染性能。完整逐例数据见 JSON artifact。
+三条裁剪不是中性统计：
 
-这个原型仍有两个不能带入 M0 时隐去的风险：glyph id 0 只是 `.notdef` 的粗检测，不能替代截图视觉检查；跨多个 grapheme 的字体 ligature 可能让按 byte overlap 分配 glyph 产生歧义，生产实现需要按终端 cluster/cell range 建立一次性绘制片段，不能重复绘 glyph。
+- `heart-text-vs15` `❤︎`（U+2764 + VS15）：自然 27.46 px、slot 14 px、2 glyph。VS15 请求文本形态，但当前 fallback 形成 emoji 宽几何并被裁剪。
+- WT #370 `☆`：自然 16.66 px、narrow slot 14 px，被裁剪；这与 Ambiguous Width 未决直接相关。
+- WT #900 `✏`：自然 27.46 px、slot 14 px；`A✏B` 自然总宽 51.83 px，而候选 slot 总宽 42 px。宽度/字形不一致正是 #900 一族问题。
+
+所以 22/22 只说明候选 width 函数复现了候选数字，**不代表视觉通过**。完整逐例数据在 `docs/spikes/artifacts/04-cjk-shaping.json`。
+
+## 探针几何与人工 marker
+
+探针没有假装已把自然字形约束渲染接入交互窗口：黄色 preedit 仍是 cosmic-text 自然 advance，蓝框是传给 `set_ime_cursor_area` 的 cell 几何。两者对 `汉` 等字符会自然漂移。04b 采用审核允许的第二方案：
+
+- UI 明示不要把黄色文字末端当候选位置 oracle；
+- 第 10 条只比较“蓝框与系统候选框”的相对关系跨 DPI 是否稳定；
+- 第 6/7 条同样只以蓝框/候选框判跟随；
+- 完成每项后按 F4，依次 emit 1～10；严格审计缺任何一项即失败。
+
+marker 只是操作者声明“该项已访问”，不能证明肉眼 PASS。即使自动审计退出 0，没有结果表仍按证据不足处理。
+
+## winit / IMM32 能力边界更正
+
+本 spike 锁定 `winit 0.30.13`。Windows backend 只使用 `WM_IME_*` / IMM32：`ImmGetCompositionStringW`、`ImmSetCandidateWindow`、`ImmSetCompositionWindow`、`ImmAssociateContextEx`；不是 TSF text store。
+
+winit 暴露 Enabled/Disabled、Preedit、Commit 和候选区矩形。原报告称 target-converted range 未暴露不准确：Windows backend 会读取 `GCS_COMPATTR`，把 `ATTR_TARGET_CONVERTED` / `ATTR_TARGET_NOTCONVERTED` 合并成一个 byte range；IME 未标 target 时才用 `GCS_CURSORPOS` 回退成零长度 caret。真正丢失的是：
+
+- 多 clause 的全部边界；
+- 每个 clause 的 converted/not-converted/display attributes；
+- target 之外的 selection/reading/candidate 细节。
+
+因此清单第 2 条不再把该 range 恒称“预编辑光标”，而是先按 target clause 解释。
+
+另有一条可复现的上游 latent bug：IMM32 的 `GCS_CURSORPOS` 是 UTF-16 code-unit offset，而 winit 0.30.13 用 `text.chars().take(cursor)` 把它当 Unicode scalar 数量，再求 UTF-8 byte offset。BMP 拼音不受影响，非 BMP preedit 的 caret fallback 可能错误。这是 IMM32 兼容层有损的具体证据。
+
+以下需求仍必须绕过 winit 高层接口直接做 TSF/native integration：`ITextStoreACP` 文档锁/edit session、surrounding text/reconversion、完整 clause/display attributes、候选列表/UI-less sink、input scope、可验证 TIP/profile 身份、应用自绘候选与 TSF-only 文本服务。
 
 ## 自动门禁与反向验证
 
-- `cargo fmt --manifest-path spikes/04-ime-cjk/Cargo.toml -- --check`：PASS。
-- `cargo clippy --manifest-path spikes/04-ime-cjk/Cargo.toml --all-targets --locked -- -D warnings`：PASS，0 warning。
-- `cargo test --manifest-path spikes/04-ime-cjk/Cargo.toml --locked`：3 passed，0 failed，0 ignored。
-- release 探针无输入烟测：1,686 ms 退出；7 条记录、1 帧、1 次候选区调用，非严格结构审计 PASS。
-- 同一无输入日志启用 `--strict-ime`：退出码 1，明确报告缺少 Enabled、非空 Preedit、非空 Commit、候选区移动四项；证明自动烟测不能冒充真实 IME PASS。
-- 故意把语料中“汉”的期望宽度由 2 改为 1：目标测试退出码 101，报告 `left: 2, right: 1`；随后恢复 oracle 并重跑全套测试。
+- `cargo test --manifest-path spikes/04-ime-cjk/Cargo.toml --locked`：**6 passed，0 failed，0 ignored**。
+- `cargo clippy --manifest-path spikes/04-ime-cjk/Cargo.toml --all-targets --locked -- -D warnings`：0 warning。
+- 候选 oracle 故障注入：把“汉”的候选期望 2 改 1，候选测试退出 101。
+- bt-term oracle 故障注入：把任一 `expected_cells_bt_term` 改错，真实 `Term::input` 对照立即报告对应 id 的 actual/expected 差异。
+- 自证式实现防回归：精确断言只有 15 条匹配及七条 mismatch id/数值；若未来 alacritty 聚类或宽度库变化，测试必须红并要求重新裁决，不能静默变成“22/22”。
+- 最低日志反向门：构造含 boot/area/frame/enabled/preedit/第二 area/commit/shutdown 的“Totally Real Pinyin 9.9”日志，并只给 item 1/6 marker；严格审计拒绝，明确缺 `[2, 3, 4, 5, 7, 8, 9, 10]`。
+- 无输入烟测仍被严格审计拒绝；不得冒充真实 IME PASS。
+- 根 workspace `cargo metadata` 中 spike package/member 数均为 0；vendored alacritty 仍是根 workspace member。
 
 ## 真人验收交接
 
-当前机器已发现 Microsoft Pinyin 与微信输入法 2.1.0.36；没有搜狗拼音，注册表中的“搜狗高速浏览器”不算输入法。人工执行者需要先安装搜狗拼音，或明确指定另一家主流第三方输入法作为第三家，然后对每家运行：
+本机已发现 Microsoft Pinyin 与微信输入法 2.1.0.36，没有搜狗拼音。需安装搜狗或明确指定另一家主流第三方输入法，然后逐家运行：
 
 ```powershell
 cd D:\Developer\BetterTerminal\spikes\04-ime-cjk
@@ -100,29 +142,37 @@ cd D:\Developer\BetterTerminal\spikes\04-ime-cjk
 .\run-manual.ps1 -ImeName "Sogou Pinyin <version>" -LogName sogou-pinyin
 ```
 
-每家都必须按 `MANUAL-CHECKLIST.md` 做全拼、双拼、Backspace、Esc、中英切换、组合中途换 IME、F2 静态候选区移动、F3 动态跟随和跨 DPI（无条件则记 N/A）。交回三份 JSONL 和三行肉眼结果表。任何 FAIL 都保留原日志和复现动作，不覆盖重跑，不用 `SendInput`。
+每做完清单一项并记录肉眼结果后按一次 F4。交回三份 JSONL、三行结果表，并用系统输入法 UI/截图佐证实际身份。已有日志不会被覆盖。脚本退出 0 只代表最低结构和十个 marker 存在。
 
-人工结果回来后的判定规则：
+判定规则不变：
 
-- 三家核心项全 PASS，双拼/DPI 只有有理由的 N/A：**go-with-caveats**，M0 可从 winit IME 起步，同时把上述 TSF 边界写成升级触发器；
-- 任一家缺失或重复 Preedit/Commit、候选区跟随失败、切换后状态损坏：先复现并归因；若是 winit/IMM32 表达能力不足：**no-go**，M0 改为直接 TSF spike，不自行修改 DESIGN.md；
-- 少于三家或只有日志没有肉眼结果：维持本报告的 **no-go（证据不足）**。
+- 三家核心项全 PASS，双拼/DPI 只有有理由的 N/A：**go-with-caveats**，M0 可从 winit IME 起步；
+- 任一家出现协议级 Preedit/Commit、候选跟随或切换损坏，且归因为 winit/IMM32 表达能力不足：**no-go**，先提交 TSF 方案裁决；
+- 少于三家、身份无法佐证或只有日志没有肉眼表：维持 **no-go（证据不足）**。
 
 ## 遗留风险
 
-1. 三家 IME 与双拼、候选框、DPI 的真实交互尚未测试，这是当前 blocker。
-2. 本机缺第三家输入法；安装和选择属于人工环境准备，不由代码伪造。
-3. winit Windows backend 的 IMM32 兼容路径可能无法覆盖 TSF-only 或富文本服务；是否影响“最小终端输入”必须由人工证据决定。
-4. cosmic-text 视觉质量、彩色 emoji、字体 fallback 一致性和 ligature 跨 cluster 行为尚未做截图级人工审核。
-5. 字体冷启动约 52.6 ms；M0 若采用该栈，应在窗口展示前或后台预热，但本 spike 不改产品启动架构。
+1. 三家 IME、双拼、候选框与 DPI 的真人交互仍未完成。
+2. bt-term 的 char-by-char 宽度与七条 grapheme 产品目标冲突；M0 前必须裁决是否以及在哪一层聚类。
+3. Ambiguous Width 缺规格决策；WT #370 不能以单一 narrow oracle 宣称解决。
+4. 三条裁剪是已知视觉失败；字体 fallback、彩色 emoji 与 cluster-aware 绘制仍需后续原型。
+5. 非 BMP preedit 可能触发 winit UTF-16 cursor offset bug。
+6. 输入法身份当前不可由 JSONL 自证；需要环境佐证，或以后增加受控 native 身份探针。
 
 ## 上游依据
 
-- winit 0.30.13 `Ime` / `set_ime_allowed` / `set_ime_cursor_area` API：<https://docs.rs/winit/0.30.13/winit/event/enum.Ime.html>、<https://docs.rs/winit/0.30.13/winit/window/struct.Window.html>。
-- winit 0.30.13 Windows IMM32 实现：<https://docs.rs/winit/0.30.13/src/winit/platform_impl/windows/ime.rs.html>。
-- Windows Terminal #370（CJK 环境下 Ambiguous Width 的 `☆`）：<https://github.com/microsoft/terminal/issues/370>。
-- Windows Terminal #900（`✏` 显示为半尺寸）：<https://github.com/microsoft/terminal/issues/900>。
+- winit 0.30.13 `Ime` / cursor area API：<https://docs.rs/winit/0.30.13/winit/event/enum.Ime.html>、<https://docs.rs/winit/0.30.13/winit/window/struct.Window.html>。
+- winit Windows IMM32 实现：<https://docs.rs/winit/0.30.13/src/winit/platform_impl/windows/ime.rs.html>。
+- Unicode Standard Annex #11：<https://www.unicode.org/reports/tr11/>。
+- Unicode Emoji / UTS #51：<https://www.unicode.org/reports/tr51/>。
+- Windows Terminal #370：<https://github.com/microsoft/terminal/issues/370>。
+- Windows Terminal #900：<https://github.com/microsoft/terminal/issues/900>。
 
-## 偏离申请
+## 偏离／裁决申请
 
-无。没有用 `SendInput`，没有把未测项写成通过，也没有修改 DESIGN.md、现有 crate 或根 workspace。若人工门迫使 M0 从 winit IME 改为直接 TSF，将另行提交偏离申请，不能由本 spike 自行改架构。
+没有自行偏离现有 DESIGN 决策，也没有修改现有 crate。请求后续审核裁决两个规格空白：
+
+1. **Ambiguous Width**：固定 narrow、固定 CJK-wide、locale 驱动，还是用户可配置；在裁决前 corpus 同时保留 7/9，不把任一侧冒充权威。
+2. **Emoji/ZWJ grapheme cell 聚类**：是否在 M0 修改 bt-term 的输入/cell 占用协议，使七条候选目标成为真实权威；在裁决前保留 15/22 差异，不为追求绿灯改产品目标。
+
+本轮不启动 03/05/06，不进入 M0。

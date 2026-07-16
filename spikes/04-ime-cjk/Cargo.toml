@@ -18,6 +18,9 @@ unicode-segmentation = "1"
 unicode-width = "0.2"
 winit = "0.30.13"
 
+[dev-dependencies]
+alacritty_terminal = { path = "../../vendor/alacritty_terminal", default-features = false }
+
 [lints.rust]
 unsafe_code = "deny"
 

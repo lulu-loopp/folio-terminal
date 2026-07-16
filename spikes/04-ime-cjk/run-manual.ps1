@@ -19,6 +19,8 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "IME log audit failed with exit code $LASTEXITCODE; keep $log as evidence"
     }
+    Write-Host "Automated audit passed only the minimum log/marker gate." -ForegroundColor Yellow
+    Write-Host "It does NOT mean the 10 visual checklist items passed; return the completed table with $log." -ForegroundColor Yellow
 } finally {
     Pop-Location
 }

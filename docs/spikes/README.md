@@ -7,7 +7,7 @@
 | 01 语料录制与回放 | go-with-caveats | 完成；7 个真实 ConPTY corpus（276,066 bytes），含 226 KB Claude Code 交互语料 |
 | 02 双平面最小原型 | go-with-caveats | 第二轮返工完成；G1/G2/G3 通过；224 tests（含 vendored alacritty 180 tests），clippy 0 warning |
 | 03 数学渲染引擎 | 未执行 | 不在本会话范围 |
-| 04 Windows IME/CJK | 未执行 | 不在本会话范围 |
+| 04 Windows IME/CJK | no-go（证据不足） | 04b 返工完成；真实 IME 人工门待执行；bt-term 与 grapheme 候选仅 15/22 匹配，Ambiguous Width 7/9 待裁决 |
 | 05 延迟基建 | 未执行 | 不在本会话范围 |
 | 06 背压与取消 | 未执行 | 不在本会话范围 |
 

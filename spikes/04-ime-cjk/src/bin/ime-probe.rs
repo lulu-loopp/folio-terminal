@@ -6,11 +6,10 @@ use std::{
 };
 
 use anyhow::{Result, bail};
-use bt_spike_ime_cjk::{JsonlLogger, LINE_HEIGHT_PX};
+use bt_spike_ime_cjk::{JsonlLogger, LINE_HEIGHT_PX, candidate_grapheme_cells};
 use cosmic_text::{Attrs, Buffer, Color, FontSystem, Metrics, Shaping, SwashCache};
 use serde_json::json;
 use softbuffer::{Context, Surface};
-use unicode_width::UnicodeWidthStr;
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
@@ -85,6 +84,7 @@ struct ProbeWindow {
     track_mouse: bool,
     modifiers: ModifiersState,
     frame_number: u64,
+    next_checklist_item: u8,
 }
 
 impl ProbeWindow {
@@ -115,6 +115,7 @@ impl ProbeWindow {
             track_mouse: false,
             modifiers: ModifiersState::empty(),
             frame_number: 0,
+            next_checklist_item: 1,
         };
         state.window.set_ime_allowed(true);
         state.recompute_candidate_area();
@@ -127,7 +128,7 @@ impl ProbeWindow {
             .cursor_range
             .map_or(self.preedit.len(), |range| range.0.min(self.preedit.len()));
         let prefix = self.preedit.get(..cursor_byte).unwrap_or(&self.preedit);
-        let prefix_cells = UnicodeWidthStr::width(prefix) as f64;
+        let prefix_cells = candidate_grapheme_cells(prefix) as f64;
         self.candidate_area = CandidateArea {
             x: self.anchor.x + (prefix_cells * LOGICAL_CELL_WIDTH * scale).round() as i32,
             y: self.anchor.y,
@@ -156,6 +157,7 @@ impl ProbeWindow {
             "cursor_end": self.cursor_range.map(|range| range.1),
             "candidate_area": self.candidate_area.payload(),
             "track_mouse": self.track_mouse,
+            "next_checklist_item": self.next_checklist_item,
             "scale_factor": self.window.scale_factor()
         })
     }
@@ -185,16 +187,23 @@ impl ProbeWindow {
             0x003c_8cff,
         );
         let scale = self.window.scale_factor() as f32;
+        let checklist_status = if self.next_checklist_item <= 10 {
+            format!("item {} pending", self.next_checklist_item)
+        } else {
+            "all 10 items marked; visual table still required".to_owned()
+        };
         let status = format!(
             "BetterTerminal M-1 IME probe\n\
              Declared IME: {ime_name}\n\
-             Ctrl+Q exit | F2 move caret | F3 mouse tracking | Ctrl+L clear committed\n\
+             Ctrl+Q exit | F2 move caret | F3 mouse tracking | F4 mark item complete\n\
+             Checklist: {checklist_status}\n\
              Mouse tracking: {}\n\
              Committed: {}\n\
              Preedit: {}\n\
              Cursor byte range: {:?}\n\
              Candidate area (physical px): x={} y={} w={} h={}\n\n\
              Blue rectangle is exactly the area passed to set_ime_cursor_area.\n\
+             Preedit glyphs use natural advance; compare blue-box/candidate relative geometry.\n\
              Type here with a real IME; do not use synthetic SendInput.",
             self.track_mouse,
             self.committed,
@@ -422,13 +431,16 @@ impl ApplicationHandler for App {
                 state.modifiers = modifiers.state();
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                handle_key(
+                if let Err(error) = handle_key(
                     state,
                     &event,
                     &mut self.logger,
                     &mut area_reason,
                     &mut redraw,
-                );
+                ) {
+                    self.failure = Some(error);
+                    exit_reason = Some("keyboard_log_failed");
+                }
                 if state.modifiers.control_key() && event.logical_key == Key::Character("q".into())
                 {
                     exit_reason = Some("ctrl_q");
@@ -506,15 +518,15 @@ fn handle_key(
     logger: &mut JsonlLogger,
     area_reason: &mut Option<&'static str>,
     redraw: &mut bool,
-) {
-    let _ = logger.emit(
+) -> Result<()> {
+    logger.emit(
         "keyboard_input",
         json!({
             "logical_key": format!("{:?}", event.logical_key),
             "text": event.text.as_deref(),
             "preedit_active": !state.preedit.is_empty()
         }),
-    );
+    )?;
     match &event.logical_key {
         Key::Named(NamedKey::F2) => {
             let size = state.window.inner_size();
@@ -542,6 +554,18 @@ fn handle_key(
             }
             *redraw = true;
         }
+        Key::Named(NamedKey::F4) if state.next_checklist_item <= 10 => {
+            let item = state.next_checklist_item;
+            logger.emit(
+                "checklist_item",
+                json!({
+                    "item": item,
+                    "meaning": "operator marked this checklist item complete; visual PASS/FAIL remains in the manual table"
+                }),
+            )?;
+            state.next_checklist_item += 1;
+            *redraw = true;
+        }
         Key::Named(NamedKey::Backspace) if state.preedit.is_empty() => {
             state.committed.pop();
             *redraw = true;
@@ -560,6 +584,7 @@ fn handle_key(
         }
         _ => {}
     }
+    Ok(())
 }
 
 fn softbuffer_error(error: softbuffer::SoftBufferError) -> anyhow::Error {
