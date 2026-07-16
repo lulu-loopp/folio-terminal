@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 bt-doc = { path = "../bt-doc" }
+bt-platform = { path = "../bt-platform" }
 bt-pty = { path = "../bt-pty" }
 bt-render = { path = "../bt-render" }
 bt-term = { path = "../bt-term" }

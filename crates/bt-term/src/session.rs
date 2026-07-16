@@ -627,6 +627,35 @@ mod tests {
         assert_eq!((frame.cursor.row, frame.cursor.column), (0, 1));
     }
 
+    #[test]
+    fn byte_driven_prompt_cursor_is_the_cell_after_typed_text_and_ignores_prediction() {
+        let mut session = DualPlaneSession::new(nz(32), nz(2));
+        session.feed(b"PS> carg").unwrap();
+        let projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&projection).unwrap();
+        let typed_end = frame.cells[..32]
+            .iter()
+            .rposition(|cell| !cell.text.chars().all(char::is_whitespace))
+            .unwrap() as u32;
+
+        assert_eq!(frame.cursor.column, typed_end + 1);
+        assert_eq!(frame.cursor.column, 8);
+
+        // PSReadLine paints inline prediction after saving the input cursor, then restores it.
+        // Prediction cells remain visible but must not participate in the cursor column.
+        session.feed(b"o\x1b7 --version\x1b8").unwrap();
+        let projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&projection).unwrap();
+        assert_eq!(frame.cursor.column, "PS> cargo".len() as u32);
+        assert!(
+            frame.cells[..32]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .contains("cargo --version")
+        );
+    }
+
     proptest! {
         #[test]
         fn parser_is_invariant_under_random_chunk_boundaries(cuts in prop::collection::vec(1usize..32, 1..32)) {

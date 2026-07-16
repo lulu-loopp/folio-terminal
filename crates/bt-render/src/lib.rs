@@ -5,15 +5,18 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bt_transcript::{CellFlags, CellStyle, TerminalColor};
+use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
 use bt_viewport::{SUBPIXELS_PER_PX, ViewportFrame};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+    Attrs, AttrsOwned, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution,
+    Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    Wrap,
 };
 use thiserror::Error;
 use wgpu::util::DeviceExt;
+
+pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [9, 11, 14];
 
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
@@ -26,6 +29,7 @@ pub struct CellMetrics {
     pub font_size_px: f32,
     pub padding_px: f32,
     pub scale_factor: f64,
+    glyph_advance_px: f32,
 }
 
 impl CellMetrics {
@@ -52,6 +56,7 @@ impl CellMetrics {
             font_size_px,
             padding_px: (PADDING_LOGICAL_PX * scale).ceil(),
             scale_factor,
+            glyph_advance_px: line.w.max(1.0),
         })
     }
 
@@ -161,16 +166,14 @@ impl LatestFrameSlot {
 pub enum RenderError {
     #[error("wgpu error: {0}")]
     Wgpu(String),
-    #[error("glyph atlas preparation failed: {0}")]
-    GlyphPrepare(String),
     #[error("glyph rendering failed: {0}")]
     GlyphRender(String),
     #[error("no usable monospace font metrics were produced")]
     MissingMonospaceMetrics,
-    #[error("surface was lost and must be recreated")]
-    SurfaceLost,
     #[error("surface validation failed")]
     SurfaceValidation,
+    #[error("native presentation setup failed: {0}")]
+    NativePresentation(String),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -187,11 +190,49 @@ struct RectInstance {
     color: [f32; 4],
 }
 
-struct TextPlacement {
-    left: f32,
-    top: f32,
-    bounds: TextBounds,
-    color: Color,
+struct TextRow {
+    cells: Vec<CapturedCell>,
+    buffer: Buffer,
+    has_visible_text: bool,
+}
+
+struct StyledRun {
+    text: String,
+    attrs: AttrsOwned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrepareFailurePolicy {
+    PresentWithoutText,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceFailure {
+    Unavailable,
+    Outdated,
+    Lost,
+    Validation,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceFailurePolicy {
+    Skip,
+    Reconfigure,
+    FatalValidation,
+}
+
+fn prepare_failure_policy(error: PrepareError) -> PrepareFailurePolicy {
+    match error {
+        PrepareError::AtlasFull => PrepareFailurePolicy::PresentWithoutText,
+    }
+}
+
+fn surface_failure_policy(failure: SurfaceFailure) -> SurfaceFailurePolicy {
+    match failure {
+        SurfaceFailure::Unavailable => SurfaceFailurePolicy::Skip,
+        SurfaceFailure::Outdated | SurfaceFailure::Lost => SurfaceFailurePolicy::Reconfigure,
+        SurfaceFailure::Validation => SurfaceFailurePolicy::FatalValidation,
+    }
 }
 
 pub struct Renderer {
@@ -199,6 +240,9 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    configured_size: (u32, u32),
+    source_size: (u32, u32),
+    dxgi_presentation: bt_platform::DxgiPresentationState,
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
@@ -206,6 +250,19 @@ pub struct Renderer {
     text_renderer: TextRenderer,
     rect_pipeline: wgpu::RenderPipeline,
     metrics: CellMetrics,
+    init_timings: RendererInitTimings,
+    text_rows: Vec<TextRow>,
+    glyph_degraded_frames: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RendererInitTimings {
+    pub adapter: Duration,
+    pub device: Duration,
+    pub surface_configure: Duration,
+    pub font_system: Duration,
+    pub font_metrics: Duration,
+    pub render_resources: Duration,
 }
 
 impl Renderer {
@@ -213,12 +270,15 @@ impl Renderer {
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
+        capacity_width: u32,
+        capacity_height: u32,
         scale_factor: f64,
     ) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let surface = instance
             .create_surface(target)
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let phase_started = Instant::now();
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
@@ -228,6 +288,8 @@ impl Renderer {
             })
             .await
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let adapter_time = phase_started.elapsed();
+        let phase_started = Instant::now();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("BetterTerminal device"),
@@ -235,14 +297,28 @@ impl Renderer {
             })
             .await
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let device_time = phase_started.elapsed();
+        let phase_started = Instant::now();
+        let allocation_width = capacity_width.max(width).max(1);
+        let allocation_height = capacity_height.max(height).max(1);
+        let source_size = (width.max(1), height.max(1));
         let mut config = surface
-            .get_default_config(&adapter, width.max(1), height.max(1))
+            .get_default_config(&adapter, allocation_width, allocation_height)
             .ok_or_else(|| RenderError::Wgpu("surface has no default configuration".to_owned()))?;
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
+        let dxgi_presentation =
+            bt_platform::configure_dxgi_presentation(&surface, DEFAULT_BACKGROUND_RGB, source_size)
+                .map_err(RenderError::NativePresentation)?;
+        let surface_configure_time = phase_started.elapsed();
 
-        let mut font_system = FontSystem::new();
+        let phase_started = Instant::now();
+        let mut font_system = terminal_font_system();
+        let font_system_time = phase_started.elapsed();
+        let phase_started = Instant::now();
         let metrics = CellMetrics::measure(&mut font_system, scale_factor)?;
+        let font_metrics_time = phase_started.elapsed();
+        let phase_started = Instant::now();
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
@@ -250,11 +326,15 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rect_pipeline = create_rect_pipeline(&device, config.format);
+        let render_resources_time = phase_started.elapsed();
         Ok(Self {
             surface,
             device,
             queue,
             config,
+            configured_size: (allocation_width, allocation_height),
+            source_size,
+            dxgi_presentation,
             font_system,
             swash_cache,
             viewport,
@@ -262,6 +342,16 @@ impl Renderer {
             text_renderer,
             rect_pipeline,
             metrics,
+            init_timings: RendererInitTimings {
+                adapter: adapter_time,
+                device: device_time,
+                surface_configure: surface_configure_time,
+                font_system: font_system_time,
+                font_metrics: font_metrics_time,
+                render_resources: render_resources_time,
+            },
+            text_rows: Vec::new(),
+            glyph_degraded_frames: 0,
         })
     }
 
@@ -269,17 +359,28 @@ impl Renderer {
         self.metrics
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    pub fn init_timings(&self) -> RendererInitTimings {
+        self.init_timings
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         if width == 0 || height == 0 {
-            return;
+            return Ok(());
         }
-        self.config.width = width;
-        self.config.height = height;
-        self.surface.configure(&self.device, &self.config);
+        self.source_size = (width, height);
+        self.config.width = surface_capacity_for_request(self.config.width, width);
+        self.config.height = surface_capacity_for_request(self.config.height, height);
+        if self.configured_size == (self.config.width, self.config.height) {
+            bt_platform::set_dxgi_source_size(&self.surface, width, height)
+                .map_err(RenderError::NativePresentation)?;
+            self.dxgi_presentation.source_size = (width, height);
+        }
+        Ok(())
     }
 
     pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
         self.metrics = CellMetrics::measure(&mut self.font_system, scale_factor)?;
+        self.text_rows.clear();
         Ok(self.metrics)
     }
 
@@ -295,31 +396,61 @@ impl Renderer {
                 height: self.config.height,
             },
         );
-        let (mut buffers, placements) = self.text_buffers(frame);
-        let text_areas = buffers
-            .iter_mut()
-            .zip(&placements)
-            .map(|(buffer, placement)| TextArea {
-                buffer,
-                left: placement.left,
-                top: placement.top,
-                scale: 1.0,
-                bounds: placement.bounds,
-                default_color: placement.color,
-                custom_glyphs: &[],
-            })
-            .collect::<Vec<_>>();
-        self.text_renderer
-            .prepare(
-                &self.device,
-                &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                text_areas,
-                &mut self.swash_cache,
-            )
-            .map_err(|error| RenderError::GlyphPrepare(error.to_string()))?;
+        self.prepare_text_rows(frame);
+        let padding = self.metrics.padding_px;
+        let cell_height = self.metrics.cell_height_px;
+        let text_right =
+            (padding + frame.columns.get() as f32 * self.metrics.cell_width_px).ceil() as i32;
+        let text_areas = self
+            .text_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.has_visible_text)
+            .map(|(index, row)| {
+                let [left, top, _, _] = cell_bounds_px(self.metrics, index, 0);
+                TextArea {
+                    buffer: &row.buffer,
+                    left,
+                    top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: padding.floor() as i32,
+                        top: top.floor() as i32,
+                        right: text_right,
+                        bottom: (top + cell_height).ceil() as i32,
+                    },
+                    default_color: Color::rgb(218, 222, 230),
+                    custom_glyphs: &[],
+                }
+            });
+        let text_prepared = match self.text_renderer.prepare(
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            text_areas,
+            &mut self.swash_cache,
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                // glyphon grows each atlas geometrically before returning AtlasFull. If the
+                // device limit is genuinely exhausted, keep the terminal alive and present the
+                // theme/background rectangles; trimming allows the next frame to retry.
+                match prepare_failure_policy(error) {
+                    PrepareFailurePolicy::PresentWithoutText => {
+                        if self.glyph_degraded_frames == 0 {
+                            eprintln!(
+                                "BetterTerminal glyph atlas reached the device limit; presenting without text and retrying"
+                            );
+                        }
+                        self.glyph_degraded_frames += 1;
+                        self.atlas.trim();
+                        false
+                    }
+                }
+            }
+        };
 
         let rects = self.rectangles(frame);
         let empty_rect = [RectInstance::zeroed()];
@@ -335,21 +466,28 @@ impl Renderer {
                 contents: bytemuck::cast_slice(rect_data),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
+        // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
+        // both the default-black interval and DXGI's stretch of the old frame.
+        self.configure_surface_if_needed()?;
         let texture = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture) => texture,
             wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
-                self.surface.configure(&self.device, &self.config);
+                self.configure_surface()?;
                 texture
             }
             wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
-                return Ok(PresentOutcome::Skipped);
+                return self.handle_surface_failure(SurfaceFailure::Unavailable);
             }
             wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
-                return Ok(PresentOutcome::Reconfigure);
+                return self.handle_surface_failure(SurfaceFailure::Outdated);
             }
-            wgpu::CurrentSurfaceTexture::Lost => return Err(RenderError::SurfaceLost),
-            wgpu::CurrentSurfaceTexture::Validation => return Err(RenderError::SurfaceValidation),
+            wgpu::CurrentSurfaceTexture::Lost => {
+                return self.handle_surface_failure(SurfaceFailure::Lost);
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return self.handle_surface_failure(SurfaceFailure::Validation);
+            }
         };
         let view = texture.texture.create_view(&Default::default());
         let mut encoder = self
@@ -365,12 +503,11 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.035,
-                            g: 0.043,
-                            b: 0.055,
-                            a: 1.0,
-                        }),
+                        // M0 uses the same channel/255 convention as the rectangle shader. This
+                        // intentionally has no explicit sRGB conversion yet; color management is
+                        // deferred, but default-background cells and the clear are numerically one
+                        // theme color instead of relying on rounded decimal coincidence.
+                        load: wgpu::LoadOp::Clear(theme_clear_color()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -381,9 +518,11 @@ impl Renderer {
                 pass.set_vertex_buffer(0, rect_buffer.slice(..));
                 pass.draw(0..6, 0..rects.len() as u32);
             }
-            self.text_renderer
-                .render(&self.atlas, &self.viewport, &mut pass)
-                .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            if text_prepared {
+                self.text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            }
         }
         self.queue.submit([encoder.finish()]);
         let submitted_at = Instant::now();
@@ -397,61 +536,77 @@ impl Renderer {
         Ok(PresentOutcome::Presented(receipt))
     }
 
-    fn text_buffers(&mut self, frame: &ViewportFrame) -> (Vec<Buffer>, Vec<TextPlacement>) {
+    fn prepare_text_rows(&mut self, frame: &ViewportFrame) {
         let columns = frame.columns.get() as usize;
-        let mut buffers = Vec::new();
-        let mut placements = Vec::new();
-        for (index, cell) in frame.cells.iter().enumerate() {
-            if cell.wide_spacer
-                || cell.text.is_empty()
-                || cell.text.chars().all(char::is_whitespace)
-                || cell.style.flags.contains(CellFlags::HIDDEN)
-            {
-                continue;
-            }
-            let row = index / columns;
-            let column = index % columns;
-            let slot_cells = if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
-                2.0
-            } else {
-                1.0
-            };
-            let (foreground, _) = resolve_colors(&cell.style);
-            let color = Color::rgb(foreground[0], foreground[1], foreground[2]);
-            let mut attrs = Attrs::new().family(Family::Monospace).color(color);
-            if cell.style.flags.contains(CellFlags::BOLD) {
-                attrs = attrs.weight(Weight::BOLD);
-            }
-            if cell.style.flags.contains(CellFlags::ITALIC) {
-                attrs = attrs.style(Style::Italic);
-            }
+        let rows = frame.rows.get() as usize;
+        let metrics = self.metrics;
+        while self.text_rows.len() < rows {
             let mut buffer = Buffer::new(
                 &mut self.font_system,
-                Metrics::new(self.metrics.font_size_px, self.metrics.cell_height_px),
+                Metrics::new(metrics.font_size_px, metrics.cell_height_px),
             );
             buffer.set_wrap(Wrap::None);
-            buffer.set_size(
-                Some(self.metrics.cell_width_px * slot_cells),
-                Some(self.metrics.cell_height_px),
-            );
-            buffer.set_text(&cell.text, &attrs, Shaping::Advanced, None);
-            buffer.shape_until_scroll(&mut self.font_system, false);
-            let left = self.metrics.padding_px + column as f32 * self.metrics.cell_width_px;
-            let top = self.metrics.padding_px + row as f32 * self.metrics.cell_height_px;
-            placements.push(TextPlacement {
-                left,
-                top,
-                bounds: TextBounds {
-                    left: left.floor() as i32,
-                    top: top.floor() as i32,
-                    right: (left + self.metrics.cell_width_px * slot_cells).ceil() as i32,
-                    bottom: (top + self.metrics.cell_height_px).ceil() as i32,
-                },
-                color,
+            self.text_rows.push(TextRow {
+                cells: Vec::new(),
+                buffer,
+                has_visible_text: false,
             });
-            buffers.push(buffer);
         }
-        (buffers, placements)
+        self.text_rows.truncate(rows);
+
+        for (row_index, row) in self.text_rows.iter_mut().enumerate() {
+            let start = row_index * columns;
+            let cells = &frame.cells[start..start + columns];
+            if !row_needs_reshaping(&row.cells, cells) {
+                continue;
+            }
+
+            let runs = styled_runs(cells, metrics);
+            row.has_visible_text = !runs.is_empty();
+            reshape_text_row(
+                &mut row.buffer,
+                &mut self.font_system,
+                &runs,
+                metrics,
+                columns,
+            );
+            row.cells.clear();
+            row.cells.extend_from_slice(cells);
+        }
+    }
+
+    fn handle_surface_failure(
+        &mut self,
+        failure: SurfaceFailure,
+    ) -> Result<PresentOutcome, RenderError> {
+        match surface_failure_policy(failure) {
+            SurfaceFailurePolicy::Skip => Ok(PresentOutcome::Skipped),
+            SurfaceFailurePolicy::Reconfigure => {
+                self.configure_surface()?;
+                Ok(PresentOutcome::Reconfigure)
+            }
+            SurfaceFailurePolicy::FatalValidation => Err(RenderError::SurfaceValidation),
+        }
+    }
+
+    fn configure_surface_if_needed(&mut self) -> Result<(), RenderError> {
+        let requested_size = (self.config.width, self.config.height);
+        if self.configured_size != requested_size {
+            self.configure_surface()?;
+        }
+        Ok(())
+    }
+
+    fn configure_surface(&mut self) -> Result<(), RenderError> {
+        self.surface.configure(&self.device, &self.config);
+        self.configured_size = (self.config.width, self.config.height);
+        self.dxgi_presentation = bt_platform::configure_dxgi_presentation(
+            &self.surface,
+            DEFAULT_BACKGROUND_RGB,
+            self.source_size,
+        )
+        .map_err(RenderError::NativePresentation)?;
+        Ok(())
     }
 
     fn rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
@@ -477,10 +632,7 @@ impl Renderer {
     }
 
     fn cell_rect(&self, row: usize, column: usize, color: [u8; 3]) -> RectInstance {
-        let left = self.metrics.padding_px + column as f32 * self.metrics.cell_width_px;
-        let top = self.metrics.padding_px + row as f32 * self.metrics.cell_height_px;
-        let right = left + self.metrics.cell_width_px;
-        let bottom = top + self.metrics.cell_height_px;
+        let [left, top, right, bottom] = cell_bounds_px(self.metrics, row, column);
         let width = self.config.width.max(1) as f32;
         let height = self.config.height.max(1) as f32;
         RectInstance {
@@ -497,6 +649,147 @@ impl Renderer {
                 1.0,
             ],
         }
+    }
+}
+
+fn cell_bounds_px(metrics: CellMetrics, row: usize, column: usize) -> [f32; 4] {
+    let left = metrics.padding_px + column as f32 * metrics.cell_width_px;
+    let top = metrics.padding_px + row as f32 * metrics.cell_height_px;
+    [
+        left,
+        top,
+        left + metrics.cell_width_px,
+        top + metrics.cell_height_px,
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn terminal_font_system() -> FontSystem {
+    // M0 renders ASCII with the Windows terminal monospace family. Loading these four bounded
+    // files avoids cosmic-text's eager scan and parse of every installed system font during the
+    // launch critical path. Broader fallback belongs with the later width/IME work.
+    let windows = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
+    let fonts = std::path::PathBuf::from(windows).join("Fonts");
+    let mut db = glyphon::fontdb::Database::new();
+    for file in [
+        "consola.ttf",
+        "consolab.ttf",
+        "consolai.ttf",
+        "consolaz.ttf",
+    ] {
+        let _ = db.load_font_file(fonts.join(file));
+    }
+    if db.is_empty() {
+        return FontSystem::new();
+    }
+    db.set_monospace_family("Consolas");
+    FontSystem::new_with_locale_and_db("en-US".to_owned(), db)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn terminal_font_system() -> FontSystem {
+    FontSystem::new()
+}
+
+fn styled_runs(cells: &[CapturedCell], metrics: CellMetrics) -> Vec<StyledRun> {
+    let Some(last_visible) = cells.iter().rposition(|cell| {
+        !cell.wide_spacer
+            && !cell.style.flags.contains(CellFlags::HIDDEN)
+            && !cell.text.is_empty()
+            && !cell.text.chars().all(char::is_whitespace)
+    }) else {
+        return Vec::new();
+    };
+
+    let mut runs: Vec<StyledRun> = Vec::new();
+    for cell in &cells[..=last_visible] {
+        if cell.wide_spacer {
+            continue;
+        }
+        let text = if cell.style.flags.contains(CellFlags::HIDDEN)
+            || cell.text.is_empty()
+            || cell.text.chars().all(char::is_whitespace)
+        {
+            if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
+                "  "
+            } else {
+                " "
+            }
+        } else {
+            cell.text.as_str()
+        };
+        let attrs = text_attrs(&cell.style, metrics);
+        if let Some(run) = runs.last_mut()
+            && run.attrs == attrs
+        {
+            run.text.push_str(text);
+        } else {
+            runs.push(StyledRun {
+                text: text.to_owned(),
+                attrs,
+            });
+        }
+    }
+    runs
+}
+
+fn row_needs_reshaping(previous: &[CapturedCell], next: &[CapturedCell]) -> bool {
+    previous != next
+}
+
+fn reshape_text_row(
+    buffer: &mut Buffer,
+    font_system: &mut FontSystem,
+    runs: &[StyledRun],
+    metrics: CellMetrics,
+    columns: usize,
+) {
+    buffer.set_size(
+        Some(metrics.cell_width_px * columns as f32),
+        Some(metrics.cell_height_px),
+    );
+    buffer.set_monospace_width(Some(metrics.cell_width_px));
+    let default_attrs = Attrs::new().family(Family::Monospace);
+    if runs.is_empty() {
+        buffer.set_text("", &default_attrs, Shaping::Advanced, None);
+    } else {
+        buffer.set_rich_text(
+            runs.iter()
+                .map(|run| (run.text.as_str(), run.attrs.as_attrs())),
+            &default_attrs,
+            Shaping::Advanced,
+            None,
+        );
+    }
+    buffer.shape_until_scroll(font_system, false);
+}
+
+fn text_attrs(style: &CellStyle, metrics: CellMetrics) -> AttrsOwned {
+    let (foreground, _) = resolve_colors(style);
+    let tracking_em = (metrics.cell_width_px - metrics.glyph_advance_px) / metrics.font_size_px;
+    let mut attrs = Attrs::new()
+        .family(Family::Monospace)
+        // cosmic-text's monospace_width normalizes fallback font size but does not quantize the
+        // primary font's glyph advances. Track the measured advance up to the integer terminal
+        // cell width so long rows cannot accumulate a high-DPI cursor drift.
+        .letter_spacing(tracking_em)
+        .color(Color::rgb(foreground[0], foreground[1], foreground[2]));
+    if style.flags.contains(CellFlags::BOLD) {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    if style.flags.contains(CellFlags::ITALIC) {
+        attrs = attrs.style(Style::Italic);
+    }
+    AttrsOwned::new(&attrs)
+}
+
+fn theme_clear_color() -> wgpu::Color {
+    let [r, g, b] = default_background();
+    wgpu::Color {
+        r: f64::from(r) / 255.0,
+        g: f64::from(g) / 255.0,
+        b: f64::from(b) / 255.0,
+        a: 1.0,
     }
 }
 
@@ -560,7 +853,15 @@ fn default_foreground() -> [u8; 3] {
 }
 
 fn default_background() -> [u8; 3] {
-    [9, 11, 14]
+    DEFAULT_BACKGROUND_RGB
+}
+
+fn surface_capacity_for_request(current: u32, requested: u32) -> u32 {
+    if requested <= current {
+        current
+    } else {
+        requested.max(current.saturating_mul(3).saturating_div(2))
+    }
 }
 
 fn resolve_colors(style: &CellStyle) -> ([u8; 3], [u8; 3]) {
@@ -576,6 +877,7 @@ fn resolve_colors(style: &CellStyle) -> ([u8; 3], [u8; 3]) {
 }
 
 fn terminal_color(color: TerminalColor, foreground: bool) -> [u8; 3] {
+    // Named codes 16..=28 are the stable BetterTerminal encoding declared by bt-transcript.
     match color {
         TerminalColor::Rgb(r, g, b) => [r, g, b],
         TerminalColor::Indexed(index) => indexed_color(index),
@@ -638,6 +940,7 @@ mod tests {
             font_size_px: 16.0,
             padding_px: 5.0,
             scale_factor: 1.0,
+            glyph_advance_px: 10.0,
         };
         assert_eq!(
             metrics.grid_for_pixels(810, 490),
@@ -707,5 +1010,192 @@ mod tests {
         };
         assert_eq!(resolve_colors(&style), (indexed_color(4), indexed_color(1)));
         assert_ne!(indexed_color(196), indexed_color(21));
+    }
+
+    #[test]
+    fn surface_clear_is_exactly_the_default_cell_background() {
+        let clear = theme_clear_color();
+        let [r, g, b] = default_background();
+        assert_eq!(clear.r, f64::from(r) / 255.0);
+        assert_eq!(clear.g, f64::from(g) / 255.0);
+        assert_eq!(clear.b, f64::from(b) / 255.0);
+        assert_eq!(clear.a, 1.0);
+    }
+
+    #[test]
+    fn surface_capacity_grows_geometrically_only_after_source_exceeds_it() {
+        assert_eq!(surface_capacity_for_request(1920, 1919), 1920);
+        assert_eq!(surface_capacity_for_request(1920, 2000), 2880);
+        assert_eq!(surface_capacity_for_request(1920, 4000), 4000);
+        assert_eq!(surface_capacity_for_request(u32::MAX, u32::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn text_cache_reshapes_rows_instead_of_cells_and_reuses_unchanged_rows() {
+        let columns = 80;
+        let rows = 24;
+        let frame = vec![CapturedCell::plain("x"); columns * rows];
+        let mut cached = vec![Vec::new(); rows];
+
+        let initial_changed = cached
+            .iter()
+            .enumerate()
+            .filter(|(row, previous)| {
+                let start = row * columns;
+                row_needs_reshaping(previous, &frame[start..start + columns])
+            })
+            .count();
+        assert_eq!(initial_changed, rows);
+        assert_ne!(initial_changed, columns * rows);
+
+        for (row, previous) in cached.iter_mut().enumerate() {
+            previous.extend_from_slice(&frame[row * columns..(row + 1) * columns]);
+        }
+        assert_eq!(
+            cached
+                .iter()
+                .enumerate()
+                .filter(|(row, previous)| {
+                    let start = row * columns;
+                    row_needs_reshaping(previous, &frame[start..start + columns])
+                })
+                .count(),
+            0
+        );
+
+        let mut changed = frame;
+        changed[3 * columns + 7].text = "y".to_owned();
+        assert_eq!(
+            cached
+                .iter()
+                .enumerate()
+                .filter(|(row, previous)| {
+                    let start = row * columns;
+                    row_needs_reshaping(previous, &changed[start..start + columns])
+                })
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn row_runs_preserve_blank_columns_and_style_boundaries() {
+        let mut red = CapturedCell::plain("A");
+        red.style.foreground = TerminalColor::Rgb(255, 0, 0);
+        let cells = [
+            red,
+            CapturedCell::plain(""),
+            CapturedCell::plain("B"),
+            CapturedCell::plain(" "),
+        ];
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let runs = styled_runs(&cells, metrics);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "A");
+        assert_eq!(runs[1].text, " B");
+    }
+
+    #[test]
+    fn shaped_ascii_glyphs_stay_on_integer_cell_columns() {
+        const COLUMNS: usize = 80;
+        const X_TOLERANCE: f32 = 0.0001;
+
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let cells = vec![CapturedCell::plain("M"); COLUMNS];
+        let runs = styled_runs(&cells, metrics);
+        let mut buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+        );
+        buffer.set_wrap(Wrap::None);
+
+        reshape_text_row(&mut buffer, &mut font_system, &runs, metrics, COLUMNS);
+
+        let layout_runs = buffer.layout_runs().collect::<Vec<_>>();
+        assert_eq!(layout_runs.len(), 1);
+        assert_eq!(layout_runs[0].glyphs.len(), COLUMNS);
+        for (column, glyph) in layout_runs[0].glyphs.iter().enumerate() {
+            let expected_x = column as f32 * metrics.cell_width_px;
+            assert!(
+                (glyph.x - expected_x).abs() <= X_TOLERANCE,
+                "column {column}: glyph x={} but cell-grid x={expected_x}",
+                glyph.x
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_prompt_glyphs_and_cursor_share_the_same_cell_axis() {
+        for scale_factor in [1.0, 1.25, 1.5, 1.75, 2.0] {
+            let mut font_system = terminal_font_system();
+            let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
+            let mut cells = "PS D:\\Developer\\BetterTerminal> carg"
+                .chars()
+                .map(|character| CapturedCell::plain(character.to_string()))
+                .collect::<Vec<_>>();
+            for cell in &mut cells[..3] {
+                cell.style.foreground = TerminalColor::Rgb(120, 130, 140);
+            }
+            let runs = styled_runs(&cells, metrics);
+            let mut buffer = Buffer::new(
+                &mut font_system,
+                Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+            );
+            buffer.set_wrap(Wrap::None);
+            reshape_text_row(&mut buffer, &mut font_system, &runs, metrics, cells.len());
+
+            let glyphs = buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .collect::<Vec<_>>();
+            assert_eq!(glyphs.len(), cells.len());
+            for (column, glyph) in glyphs.into_iter().enumerate() {
+                assert_eq!(
+                    glyph.x,
+                    column as f32 * metrics.cell_width_px,
+                    "scale factor {scale_factor}, column {column}"
+                );
+            }
+
+            let last_text_cell = cell_bounds_px(metrics, 0, cells.len() - 1);
+            let cursor_cell = cell_bounds_px(metrics, 0, cells.len());
+            assert_eq!(last_text_cell[2], cursor_cell[0]);
+        }
+    }
+
+    #[test]
+    fn top_left_cell_origins_do_not_depend_on_surface_width() {
+        let metrics = CellMetrics {
+            cell_width_px: 10.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 8.0,
+            scale_factor: 1.0,
+            glyph_advance_px: 10.0,
+        };
+        assert_eq!(cell_bounds_px(metrics, 0, 0), [8.0, 8.0, 18.0, 28.0]);
+        assert_eq!(cell_bounds_px(metrics, 3, 7), [78.0, 68.0, 88.0, 88.0]);
+    }
+
+    #[test]
+    fn atlas_exhaustion_degrades_the_frame_instead_of_exiting() {
+        assert_eq!(
+            prepare_failure_policy(PrepareError::AtlasFull),
+            PrepareFailurePolicy::PresentWithoutText
+        );
+    }
+
+    #[test]
+    fn lost_surface_reconfigures_instead_of_becoming_fatal() {
+        assert_eq!(
+            surface_failure_policy(SurfaceFailure::Lost),
+            SurfaceFailurePolicy::Reconfigure
+        );
+        assert_eq!(
+            surface_failure_policy(SurfaceFailure::Validation),
+            SurfaceFailurePolicy::FatalValidation
+        );
     }
 }

@@ -11,6 +11,7 @@ members = [
     "crates/bt-detect",
     "crates/bt-corpus",
     "crates/bt-pty",
+    "crates/bt-platform",
     "crates/bt-render",
     "crates/bt-app",
     "vendor/alacritty_terminal",

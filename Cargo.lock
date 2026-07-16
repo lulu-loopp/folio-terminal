@@ -156,6 +156,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bt-doc",
+ "bt-platform",
  "bt-pty",
  "bt-render",
  "bt-term",
@@ -193,6 +194,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-platform"
+version = "0.0.0"
+dependencies = [
+ "wgpu",
+ "windows",
+]
+
+[[package]]
 name = "bt-pty"
 version = "0.0.0"
 dependencies = [
@@ -205,6 +214,7 @@ name = "bt-render"
 version = "0.0.0"
 dependencies = [
  "bt-doc",
+ "bt-platform",
  "bt-transcript",
  "bt-viewport",
  "bytemuck",
