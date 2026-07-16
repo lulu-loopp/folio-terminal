@@ -1,0 +1,13 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "bt-rex-svg-link-probe"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+cairo-rs = { version = "0.21.5", features = ["svg"] }
+rex = { git = "https://github.com/KenyC/ReX", rev = "aeccdba38f3fa54195c469319b65c423e17a77ae", features = ["cairo-renderer", "ttfparser-fontparser"] }
+ttf-parser = "0.25.1"

@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "bt-spike-latency"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1.0.103"
+pollster = "0.4.0"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

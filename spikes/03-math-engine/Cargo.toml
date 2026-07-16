@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "bt-spike-math"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1.0.103"
+mitex = "0.2.4"
+mitex-spec-gen = "0.2.4"
+regex = "1.12.3"
+rquickjs = "0.12.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+typst-as-lib = { version = "0.16.0", features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
+typst-layout = "0.15.0"
+typst-library = "0.15.0"
+typst-svg = "0.15.0"
+win32job = "2.0.3"
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Threading"] }
+
+[lints.rust]
+unsafe_code = "warn"
+
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"

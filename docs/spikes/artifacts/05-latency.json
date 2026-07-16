@@ -1,0 +1,102 @@
+{
+  "schema": "bt-latency-spike/v1",
+  "timestamp_unix_seconds": 1784186149,
+  "measurement_definition": "t0 immediately before EventLoopProxy::send_event; t1 immediately after wgpu Queue::submit returns; includes winit user-event dispatch, clear-pass encoding, surface acquisition, and queue submission; excludes physical keyboard/TSF and scanout",
+  "present_call_warning": "SurfaceTexture::present call is a CPU enqueue boundary, not proof that a photon changed",
+  "flood_definition": "a concurrent producer advances output generation at 2000 Hz; at most one Flood event is queued (latest generation wins), each dispatch performs deterministic parser-like CPU work, and every fourth dispatch requests a coalesced competing clear/present",
+  "wgpu_version": "30.0.0",
+  "winit_version": "0.30.13",
+  "present_mode": "Immediate",
+  "desired_maximum_frame_latency": 1,
+  "adapter": {
+    "name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+    "vendor": 4318,
+    "device": 12120,
+    "device_type": "DiscreteGpu",
+    "driver": "32.0.15.9184",
+    "driver_info": "",
+    "backend": "Dx12"
+  },
+  "monitor": {
+    "name": "\\\\.\\DISPLAY1",
+    "current_refresh_hz": 120.0,
+    "width_px": 1280,
+    "height_px": 720,
+    "scale_factor": 2.0
+  },
+  "flood_events_processed": 6610,
+  "rates": [
+    {
+      "target_injection_hz": 60,
+      "samples": 240,
+      "event_to_submit": {
+        "samples": 240,
+        "min_us": 249,
+        "p50_us": 775,
+        "p95_us": 2545,
+        "p99_us": 4637,
+        "max_us": 7443
+      },
+      "event_to_present_call": {
+        "samples": 240,
+        "min_us": 658,
+        "p50_us": 1652,
+        "p95_us": 3398,
+        "p99_us": 5304,
+        "max_us": 8497
+      }
+    },
+    {
+      "target_injection_hz": 120,
+      "samples": 240,
+      "event_to_submit": {
+        "samples": 240,
+        "min_us": 248,
+        "p50_us": 1209,
+        "p95_us": 3210,
+        "p99_us": 4721,
+        "max_us": 6358
+      },
+      "event_to_present_call": {
+        "samples": 240,
+        "min_us": 889,
+        "p50_us": 2039,
+        "p95_us": 4072,
+        "p99_us": 5388,
+        "max_us": 7618
+      }
+    },
+    {
+      "target_injection_hz": 144,
+      "samples": 240,
+      "event_to_submit": {
+        "samples": 240,
+        "min_us": 259,
+        "p50_us": 885,
+        "p95_us": 3525,
+        "p99_us": 7276,
+        "max_us": 9366
+      },
+      "event_to_present_call": {
+        "samples": 240,
+        "min_us": 933,
+        "p50_us": 1892,
+        "p95_us": 4268,
+        "p99_us": 8629,
+        "max_us": 10988
+      }
+    }
+  ],
+  "photon_baseline": {
+    "measured": false,
+    "reason": "no photodiode/high-speed-camera timing device was available in this session",
+    "recommended_alternatives": [
+      "1000 fps camera recording keyboard LED/physical key and display patch",
+      "photodiode plus microcontroller wired to a hardware input switch"
+    ],
+    "expected_instrument_error": [
+      "1000 fps camera: approximately +/-1 ms quantization, plus frame exposure uncertainty",
+      "photodiode/microcontroller: approximately +/-0.1 ms after calibration; display scan position remains a variable"
+    ]
+  }
+}

@@ -1,0 +1,119 @@
+{
+  "schema": "bt-math-engine-spike/v1",
+  "timestamp_unix_seconds": 1784188752,
+  "corpus_samples": 360,
+  "corpus_categories": {
+    "ams-align": 40,
+    "custom-macro": 30,
+    "fraction": 40,
+    "huge": 20,
+    "large-operator": 40,
+    "left-right": 30,
+    "malformed": 30,
+    "malicious": 20,
+    "matrix": 40,
+    "root": 40,
+    "unicode-math": 30
+  },
+  "path_a": {
+    "path": "A-mitex-typst-svg",
+    "total": 360,
+    "successes": 328,
+    "expected_valid": 310,
+    "expected_valid_successes": 310,
+    "safety_rejections": 20,
+    "h_d_available": 301,
+    "missing_h_d_by_category": {
+      "custom-macro": 9,
+      "malformed": 18
+    },
+    "p50_us": 20605,
+    "p95_us": 35077,
+    "errors_by_category": {
+      "malformed": 12,
+      "malicious": 20
+    }
+  },
+  "path_b": {
+    "repository": "https://github.com/KenyC/ReX",
+    "revision": "aeccdba38f3fa54195c469319b65c423e17a77ae",
+    "last_push_observed": "2026-03-10T17:28:32Z",
+    "compile_probe": "PASS: pinned dependency and parser probe compile on Rust 1.94.1",
+    "svg_status": "upstream SVG example requires cairo + an external OpenType MATH font"
+  },
+  "path_c": {
+    "path": "C-rquickjs-katex-foreignObject-svg",
+    "total": 360,
+    "successes": 310,
+    "expected_valid": 310,
+    "expected_valid_successes": 310,
+    "safety_rejections": 20,
+    "h_d_available": 310,
+    "missing_h_d_by_category": {},
+    "p50_us": 3989,
+    "p95_us": 344743,
+    "errors_by_category": {
+      "malformed": 30,
+      "malicious": 20
+    }
+  },
+  "line_breaks": [
+    {
+      "path": "A-mitex-typst",
+      "wide_width_pt": 480.0,
+      "wide_height_pt": 14.127999999999998,
+      "narrow_width_pt": 160.0,
+      "narrow_height_pt": 14.127999999999998,
+      "automatic_break_observed": false,
+      "continuation_alignment": "derived from rendered page; inspect SVG for relation/operator breakpoints"
+    },
+    {
+      "path": "C-rquickjs-katex",
+      "wide_width_pt": 0.0,
+      "wide_height_pt": 9.3336,
+      "narrow_width_pt": 0.0,
+      "narrow_height_pt": 9.3336,
+      "automatic_break_observed": false,
+      "continuation_alignment": "none; KaTeX output is nowrap and the adapter cannot add semantic breaks"
+    }
+  ],
+  "memory": {
+    "combined_peak_working_set": 64413696,
+    "typst": {
+      "baseline_working_set": 7315456,
+      "peak_working_set": 19042304,
+      "output_bytes": 4880
+    },
+    "quickjs": {
+      "baseline_working_set": 4706304,
+      "peak_working_set": 9662464,
+      "output_bytes": 2989
+    }
+  },
+  "binary_bytes": {
+    "math-bench": 47851520,
+    "math-worker": 168960,
+    "quickjs-probe": 3247616,
+    "size-baseline": 130048,
+    "typst-probe": 47080448
+  },
+  "process_isolation": {
+    "configured_process_memory_limit_bytes": 33554432,
+    "memory_watchdog_threshold_bytes": 16777216,
+    "normal_runs": 10,
+    "spawn_job_assign_p50_us": 20246,
+    "spawn_job_assign_p95_us": 35379,
+    "timeout_budget_ms": 50,
+    "timeout_kill_observed": true,
+    "timeout_elapsed_ms": 53,
+    "memory_limit_termination_observed": true,
+    "memory_probe_peak_private_bytes": 17469440,
+    "memory_probe_elapsed_ms": 20
+  },
+  "sandbox": {
+    "typst_file_resolver": "in-memory main source only; no filesystem resolver installed",
+    "typst_network": "package/network resolver features are disabled",
+    "quickjs_host_capabilities": "no file, process, socket, fetch, require, or module host bindings",
+    "host_caps": "64 KiB input, nesting <=256, direct recursion and file/network TeX commands rejected"
+  }
+}

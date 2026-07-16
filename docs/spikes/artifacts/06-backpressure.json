@@ -1,0 +1,42 @@
+{
+  "schema": "bt-backpressure-spike/v1",
+  "flood": {
+    "generated_bytes": 67108864,
+    "parsed_bytes": 67108864,
+    "parse_quantum_bytes": 262144,
+    "ring": {
+      "capacity": 1048576,
+      "current_bytes": 0,
+      "max_bytes": 1048576,
+      "blocked_pushes": 252,
+      "closed": true
+    },
+    "input_events": 512,
+    "input_latency_p50_us": 49,
+    "input_latency_p95_us": 555,
+    "input_latency_max_us": 990,
+    "snapshot_max_occupied": 1,
+    "snapshot_overwrites": 509
+  },
+  "workers": {
+    "max_queued": 64,
+    "replacements": 576,
+    "rejections": 1,
+    "retry_markers_after_retry": 0,
+    "stale_canceled": 48,
+    "fresh_completed": 16,
+    "cancellation_rate": 0.75,
+    "visible_dispatches": 700,
+    "invisible_dispatches": 100,
+    "invisible_share": 0.125,
+    "max_global_running": 8,
+    "max_per_session_running": 2
+  },
+  "shutdown": {
+    "blocked_writer_released": true,
+    "elapsed_us": 281
+  },
+  "parser_threads_1_core": 1,
+  "parser_threads_2_cores": 1,
+  "parser_threads_12_cores_8_sessions": 8
+}
