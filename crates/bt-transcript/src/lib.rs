@@ -251,11 +251,9 @@ impl TranscriptStore {
         self.staging_rows += 1;
 
         let mut finalized = Vec::new();
-        if completes_candidate {
-            if let Some(candidate) = self.staging.pop_back() {
-                self.staging_rows -= candidate.rows.len();
-                finalized.push(self.finalize(candidate, false));
-            }
+        if completes_candidate && let Some(candidate) = self.staging.pop_back() {
+            self.staging_rows -= candidate.rows.len();
+            finalized.push(self.finalize(candidate, false));
         }
         while self.staging_rows > self.staging_quota {
             let Some(candidate) = self.staging.pop_front() else {

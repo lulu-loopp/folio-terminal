@@ -17,7 +17,7 @@ use bt_transcript::{
     CaptureResult, DEFAULT_STAGING_QUOTA, FinalizeReason, FinalizedLine,
     SPIKE_DEFAULT_FROZEN_QUOTA, StagingId, TranscriptId, TranscriptStore,
 };
-use bt_viewport::ViewportProjection;
+use bt_viewport::{FrameProjectionError, GridCursor, ViewportFrame, ViewportProjection};
 
 use crate::{
     adapter::{AdapterEvent, TerminalAdapter},
@@ -73,11 +73,28 @@ pub struct DualPlaneSession {
     grid_generation: GridGeneration,
     stale_results: usize,
     primary_parked: bool,
+    cell_height_subpixels: NonZeroI64,
 }
 
 impl DualPlaneSession {
     pub fn new(columns: NonZeroU32, rows: NonZeroU32) -> Self {
-        Self::with_frozen_quota(columns, rows, SPIKE_DEFAULT_FROZEN_QUOTA)
+        Self::with_cell_height(columns, rows, SPIKE_CELL_HEIGHT_SUBPIXELS)
+    }
+
+    /// Compatibility constructor for logic callers that still use the spike frozen-line limit.
+    /// Product callers should use `with_quotas_and_cell_height` and own both limits explicitly.
+    pub fn with_cell_height(
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        cell_height_subpixels: NonZeroI64,
+    ) -> Self {
+        Self::with_quotas_and_cell_height(
+            columns,
+            rows,
+            DEFAULT_STAGING_QUOTA,
+            SPIKE_DEFAULT_FROZEN_QUOTA,
+            cell_height_subpixels,
+        )
     }
 
     pub fn with_frozen_quota(
@@ -85,7 +102,13 @@ impl DualPlaneSession {
         rows: NonZeroU32,
         frozen_quota: NonZeroUsize,
     ) -> Self {
-        Self::with_quotas(columns, rows, DEFAULT_STAGING_QUOTA, frozen_quota)
+        Self::with_quotas_and_cell_height(
+            columns,
+            rows,
+            DEFAULT_STAGING_QUOTA,
+            frozen_quota,
+            SPIKE_CELL_HEIGHT_SUBPIXELS,
+        )
     }
 
     pub fn with_quotas(
@@ -93,6 +116,23 @@ impl DualPlaneSession {
         rows: NonZeroU32,
         staging_quota: NonZeroUsize,
         frozen_quota: NonZeroUsize,
+    ) -> Self {
+        Self::with_quotas_and_cell_height(
+            columns,
+            rows,
+            staging_quota,
+            frozen_quota,
+            SPIKE_CELL_HEIGHT_SUBPIXELS,
+        )
+    }
+
+    /// Product construction path with explicit transcript limits and measured cell height.
+    pub fn with_quotas_and_cell_height(
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        staging_quota: NonZeroUsize,
+        frozen_quota: NonZeroUsize,
+        cell_height_subpixels: NonZeroI64,
     ) -> Self {
         Self {
             terminal: TerminalAdapter::new(columns, rows),
@@ -114,11 +154,17 @@ impl DualPlaneSession {
             grid_generation: GridGeneration(1),
             stale_results: 0,
             primary_parked: false,
+            cell_height_subpixels,
         }
     }
 
     pub fn terminal(&self) -> &TerminalAdapter {
         &self.terminal
+    }
+
+    /// Protocol replies are returned to the owning app, which is the only PTY writer.
+    pub fn take_pty_writes(&self) -> Vec<Vec<u8>> {
+        self.terminal.take_pty_writes()
     }
 
     pub fn document(&self) -> &HistoryDocument {
@@ -151,6 +197,10 @@ impl DualPlaneSession {
 
     pub fn layout_key(&self) -> LayoutKey {
         self.layout_key
+    }
+
+    pub fn set_cell_height_subpixels(&mut self, cell_height_subpixels: NonZeroI64) {
+        self.cell_height_subpixels = cell_height_subpixels;
     }
 
     pub fn register_live_anchor(
@@ -263,12 +313,12 @@ impl DualPlaneSession {
         }
         let detected = redetect_document(&mut self.document, revision);
         for (id, span) in detected {
-            if let Some(record) = self.decorations.get_mut(&id) {
-                if !self.primary_parked && self.resize_epoch.decorations_allowed() {
-                    if let Some(task) = record.schedule(id, span) {
-                        self.enqueue_task(task);
-                    }
-                }
+            if let Some(record) = self.decorations.get_mut(&id)
+                && !self.primary_parked
+                && self.resize_epoch.decorations_allowed()
+                && let Some(task) = record.schedule(id, span)
+            {
+                self.enqueue_task(task);
             }
         }
     }
@@ -278,12 +328,32 @@ impl DualPlaneSession {
             layout_key,
             self.detection_revision,
             self.terminal.dimensions().1,
-            SPIKE_CELL_HEIGHT_SUBPIXELS,
+            self.cell_height_subpixels,
             self.transcript.source_generation(),
             self.grid_generation,
         );
         self.refresh_projection(&mut projection);
         projection
+    }
+
+    pub fn viewport_frame(
+        &self,
+        projection: &ViewportProjection,
+    ) -> Result<ViewportFrame, FrameProjectionError> {
+        let (columns, rows) = self.terminal.dimensions();
+        let visible_rows = (0..rows.get())
+            .filter_map(|row| self.terminal.visible_row(row))
+            .collect::<Vec<_>>();
+        let cursor = self.terminal.cursor();
+        projection.live_frame(
+            columns,
+            visible_rows,
+            GridCursor {
+                row: cursor.row,
+                column: cursor.column,
+                visible: cursor.visible,
+            },
+        )
     }
 
     pub fn refresh_projection(&self, projection: &mut ViewportProjection) {
@@ -493,10 +563,10 @@ impl DualPlaneSession {
 
     fn enqueue_task(&mut self, task: DetectionTask) {
         let transcript_id = task.transcript_id;
-        if self.scheduler.enqueue(task) == EnqueueOutcome::RetryOnIdle {
-            if let Some(record) = self.decorations.get_mut(&transcript_id) {
-                record.decoration = bt_doc::DecorationLifecycle::None;
-            }
+        if self.scheduler.enqueue(task) == EnqueueOutcome::RetryOnIdle
+            && let Some(record) = self.decorations.get_mut(&transcript_id)
+        {
+            record.decoration = bt_doc::DecorationLifecycle::None;
         }
     }
 
@@ -517,6 +587,7 @@ impl DualPlaneSession {
 mod tests {
     use super::*;
     use bt_doc::DecorationLifecycle;
+    use bt_transcript::TerminalColor;
     use proptest::prelude::*;
 
     fn nz(value: u32) -> NonZeroU32 {
@@ -540,6 +611,20 @@ mod tests {
         assert!(session.document().entries().iter().all(|(id, _)| {
             session.decoration(*id).unwrap().decoration == DecorationLifecycle::Ready
         }));
+    }
+
+    #[test]
+    fn byte_driven_terminal_state_projects_through_the_viewport_frame_boundary() {
+        let mut session = DualPlaneSession::new(nz(4), nz(2));
+        session.feed(b"\x1b[31mA").unwrap();
+        let projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&projection).unwrap();
+
+        assert_eq!((frame.columns.get(), frame.rows.get()), (4, 2));
+        assert_eq!(frame.cells.len(), 8);
+        assert_eq!(frame.cells[0].text, "A");
+        assert_eq!(frame.cells[0].style.foreground, TerminalColor::Named(1));
+        assert_eq!((frame.cursor.row, frame.cursor.column), (0, 1));
     }
 
     proptest! {

@@ -65,6 +65,17 @@ fn g1_resize_shrink_captures_exactly_nonblank_rows_removed_from_the_top() {
 }
 
 #[test]
+fn g1_resize_shrink_discards_blank_rows_below_the_cursor() {
+    let mut session = DualPlaneSession::new(nz32(8), nz32(4));
+    session.feed(b"top\r\ncursor").unwrap();
+
+    session.resize(nz32(8), nz32(2)).unwrap();
+
+    assert!(session.document().entries().is_empty());
+    assert_eq!(session.terminal().visible_text(), vec!["top", "cursor"]);
+}
+
+#[test]
 fn g1_width_reflow_never_rewrites_frozen_source() {
     let mut session = DualPlaneSession::new(nz32(12), nz32(2));
     session.feed(b"abcdefgh\r\nnext\r\ntail").unwrap();

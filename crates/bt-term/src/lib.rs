@@ -8,7 +8,7 @@ mod session;
 
 pub use adapter::{
     AdapterEvent, RemovalCause, RemovalContext, RemovalScope, RemovalScreen, RemovedLiveRow,
-    SCROLLBACK_LINES, TerminalAdapter,
+    SCROLLBACK_LINES, TerminalAdapter, TerminalCursor,
 };
 pub use lifecycle::{
     LIFECYCLE_RULES, LifecycleDirective, LifecycleRule, MatchValue, ResizePlan, RowAction,

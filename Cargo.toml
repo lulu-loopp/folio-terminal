@@ -10,6 +10,9 @@ members = [
     "crates/bt-viewport",
     "crates/bt-detect",
     "crates/bt-corpus",
+    "crates/bt-pty",
+    "crates/bt-render",
+    "crates/bt-app",
     "vendor/alacritty_terminal",
 ]
 
@@ -17,7 +20,7 @@ members = [
 version = "0.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-rust-version = "1.85"
+rust-version = "1.89"
 
 # Pinned here rather than left to whatever clippy happens to default to, so the
 # same code gets the same verdict on every machine and in CI.
@@ -45,10 +48,15 @@ dbg_macro = "deny"
 alacritty_terminal = "=0.26.0"
 anyhow = "1"
 bitflags = "2"
+bytemuck = { version = "1", features = ["derive"] }
+glyphon = "0.12"
+pollster = "0.4"
 portable-pty = "0.9"
 thiserror = "2"
 unicode-segmentation = "1"
 vte = "0.15"
+wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
 [profile.test]
 opt-level = 1

@@ -4,6 +4,8 @@ mod height_tree;
 
 use std::{
     collections::{HashMap, HashSet},
+    error::Error,
+    fmt,
     num::{NonZeroI64, NonZeroU32},
 };
 
@@ -11,7 +13,7 @@ use bt_doc::{
     AnchorError, ContentAnchor, DetectionRevision, GridGeneration, HistoryDocument, LayoutKey,
     ScreenId, ViewGeneration,
 };
-use bt_transcript::{SourceGeneration, TranscriptId};
+use bt_transcript::{CapturedCell, CapturedRow, SourceGeneration, TranscriptId};
 
 pub use bt_doc::SUBPIXELS_PER_PX;
 pub use height_tree::HeightTree;
@@ -47,6 +49,57 @@ pub struct ViewSelection {
     pub start: ContentAnchor,
     pub end: ContentAnchor,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GridCursor {
+    pub row: u32,
+    pub column: u32,
+    pub visible: bool,
+}
+
+/// Stable render input owned by the viewport layer. Renderers never inspect the upstream grid.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ViewportFrame {
+    pub columns: NonZeroU32,
+    pub rows: NonZeroU32,
+    pub cells: Vec<CapturedCell>,
+    pub cursor: GridCursor,
+    pub layout_key: LayoutKey,
+    pub view_generation: ViewGeneration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameProjectionError {
+    RowCount {
+        expected: usize,
+        actual: usize,
+    },
+    ColumnCount {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
+}
+
+impl fmt::Display for FrameProjectionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RowCount { expected, actual } => {
+                write!(formatter, "expected {expected} live rows, got {actual}")
+            }
+            Self::ColumnCount {
+                row,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "expected {expected} cells in live row {row}, got {actual}"
+            ),
+        }
+    }
+}
+
+impl Error for FrameProjectionError {}
 
 #[derive(Clone, Debug)]
 pub struct ViewportProjection {
@@ -116,6 +169,42 @@ impl ViewportProjection {
     }
     pub fn detection_revision(&self) -> DetectionRevision {
         self.detection_rev
+    }
+
+    /// Compose the live terminal grid into a viewport-owned frame consumed by bt-render.
+    pub fn live_frame(
+        &self,
+        columns: NonZeroU32,
+        rows: Vec<CapturedRow>,
+        cursor: GridCursor,
+    ) -> Result<ViewportFrame, FrameProjectionError> {
+        let expected_rows = self.live_rows.get() as usize;
+        if rows.len() != expected_rows {
+            return Err(FrameProjectionError::RowCount {
+                expected: expected_rows,
+                actual: rows.len(),
+            });
+        }
+        let expected_columns = columns.get() as usize;
+        let mut cells = Vec::with_capacity(expected_rows.saturating_mul(expected_columns));
+        for (row_index, row) in rows.into_iter().enumerate() {
+            if row.cells.len() != expected_columns {
+                return Err(FrameProjectionError::ColumnCount {
+                    row: row_index,
+                    expected: expected_columns,
+                    actual: row.cells.len(),
+                });
+            }
+            cells.extend(row.cells);
+        }
+        Ok(ViewportFrame {
+            columns,
+            rows: self.live_rows,
+            cells,
+            cursor,
+            layout_key: self.layout_key,
+            view_generation: self.view_generation,
+        })
     }
 
     pub fn set_selection(&mut self, selection: Option<ViewSelection>) {
@@ -342,6 +431,53 @@ mod tests {
             font_rev: 1,
             theme_rev: 1,
         }
+    }
+
+    #[test]
+    fn live_frame_flattens_only_well_formed_viewport_rows() {
+        let projection = ViewportProjection::new(
+            key(2),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let frame = projection
+            .live_frame(
+                nz32(2),
+                vec![
+                    CapturedRow::plain("ab", false),
+                    CapturedRow::plain("cd", false),
+                ],
+                GridCursor {
+                    row: 1,
+                    column: 1,
+                    visible: true,
+                },
+            )
+            .unwrap();
+        assert_eq!(frame.cells.len(), 4);
+        assert_eq!(frame.cells[0].text, "a");
+        assert_eq!(frame.cells[3].text, "d");
+        assert_eq!(frame.layout_key, key(2));
+        assert_eq!(frame.cursor.column, 1);
+
+        assert_eq!(
+            projection.live_frame(
+                nz32(2),
+                vec![CapturedRow::plain("ab", false)],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+            ),
+            Err(FrameProjectionError::RowCount {
+                expected: 2,
+                actual: 1,
+            })
+        );
     }
 
     #[test]
