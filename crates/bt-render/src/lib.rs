@@ -474,6 +474,25 @@ impl NarrowShapingCache {
                     baseline_offset_px(metrics.ascii_baseline_px, glyph_baseline_px),
                 )
             }
+            NarrowSizePolicy::FitCell => {
+                let em_scale = cell_fitted_symbol_em_scale(
+                    &buffer,
+                    font_system,
+                    swash_cache,
+                    metrics.cell_width_px,
+                    metrics.cell_height_px,
+                );
+                if (em_scale - 1.0).abs() > f32::EPSILON {
+                    buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
+                }
+                center_ink_offsets(
+                    &buffer,
+                    font_system,
+                    swash_cache,
+                    metrics.cell_width_px,
+                    metrics.cell_height_px,
+                )
+            }
             NarrowSizePolicy::CellHeightEmoji => center_ink_offsets(
                 &buffer,
                 font_system,
@@ -1312,7 +1331,11 @@ fn shape_narrow_buffer_for_key(
             (
                 shape_narrow_buffer(key, font_system, metrics, 1.0, family),
                 family,
-                NarrowSizePolicy::StrictCell,
+                if key.text.chars().any(is_cell_fitted_text_symbol) {
+                    NarrowSizePolicy::FitCell
+                } else {
+                    NarrowSizePolicy::StrictCell
+                },
             )
         }
         PresentationRoute::ColorEmoji => {
@@ -1360,6 +1383,7 @@ fn shape_narrow_buffer_for_key(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NarrowSizePolicy {
     StrictCell,
+    FitCell,
     CellHeightEmoji,
 }
 
@@ -1405,6 +1429,25 @@ fn narrow_fallback_em_scale(
     let side_bearing_px = (cell_width_px * NARROW_FALLBACK_SIDE_BEARING_EM).max(1.0);
     let target_width = (cell_width_px - 2.0 * side_bearing_px).max(1.0);
     (target_width / occupied_width).min(1.0)
+}
+
+fn cell_fitted_symbol_em_scale(
+    buffer: &Buffer,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    cell_width_px: f32,
+    cell_height_px: f32,
+) -> f32 {
+    let Some([left, top, right, bottom]) = glyph_ink_bounds(buffer, font_system, swash_cache)
+    else {
+        return 1.0;
+    };
+    let ink_width = right - left;
+    let ink_height = bottom - top;
+    if ink_width <= 0.0 || ink_height <= 0.0 {
+        return 1.0;
+    }
+    (cell_width_px / ink_width).min(cell_height_px / ink_height)
 }
 
 fn glyph_ink_bounds(
@@ -1636,6 +1679,12 @@ fn font_presentation_route(text: &str, font_system: &mut FontSystem) -> Presenta
         return route;
     }
 
+    // Keep bare media controls and geometric shapes on a stable monochrome face so their cell-fit
+    // policy does not depend on primary-font coverage. An explicit VS16 above still requests color.
+    if text.chars().any(is_cell_fitted_text_symbol) {
+        return PresentationRoute::TextSymbol;
+    }
+
     // Match Windows Terminal's visual default: characters with Emoji=Yes use the color route even
     // when Emoji_Presentation=No and even when Consolas contains a monochrome glyph. Bare ASCII
     // keycap components remain terminal text until VS16 or U+20E3 makes the intent explicit.
@@ -1680,6 +1729,10 @@ fn has_color_emoji_property(character: char) -> bool {
 
 fn is_text_symbol(character: char) -> bool {
     matches!(character, '\u{2190}'..='\u{2bff}')
+}
+
+fn is_cell_fitted_text_symbol(character: char) -> bool {
+    matches!(character, '\u{23ef}'..='\u{23fa}' | '\u{25a0}'..='\u{25ff}')
 }
 
 fn primary_font_supports_text(font_system: &mut FontSystem, text: &str) -> bool {
@@ -2023,13 +2076,13 @@ mod tests {
                 PresentationRoute::ColorEmoji
             );
         }
-        for text in ["☂︎", "⚠︎", "☆"] {
+        for text in ["☂︎", "⚠︎", "☆", "⏵", "▶", "▲", "■"] {
             assert_eq!(
                 font_presentation_route(text, &mut font_system),
                 PresentationRoute::TextSymbol
             );
         }
-        for text in ["■", "#", "*", "1", "A"] {
+        for text in ["#", "*", "1", "A"] {
             assert_eq!(
                 font_presentation_route(text, &mut font_system),
                 PresentationRoute::TerminalText
@@ -2315,8 +2368,49 @@ mod tests {
                 star.font_size < metrics.font_size_px,
                 "scale {scale_factor}: fallback star must be em-normalized"
             );
+            assert!(!is_cell_fitted_text_symbol('☆'));
 
             assert!(procedural::supports_text("│"));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn pinned_media_and_geometric_symbols_fit_and_center_in_one_cell() {
+        let mut font_system = terminal_font_system();
+        for scale_factor in [1.0, 1.25, 1.5, 2.0] {
+            let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
+            for text in ["⏵", "▶"] {
+                let shaped =
+                    shape_narrow_for_test(&[CapturedCell::plain(text)], &mut font_system, metrics);
+                let glyph = &shaped[0];
+                let layout = first_layout_glyph(&glyph.buffer);
+                assert_ne!(layout.glyph_id, 0, "{text} must not be .notdef");
+                assert_eq!(
+                    glyph_family(&font_system, &layout),
+                    TEXT_SYMBOL_FONT_FAMILY,
+                    "{text} must use the monochrome symbol face"
+                );
+                let mut swash_cache = SwashCache::new();
+                let [left, top, right, bottom] =
+                    glyph_ink_bounds(&glyph.buffer, &mut font_system, &mut swash_cache).unwrap();
+                let ink_width = right - left;
+                let ink_height = bottom - top;
+                assert!(
+                    ink_width >= 0.8 * metrics.cell_width_px
+                        || ink_height >= 0.8 * metrics.cell_height_px,
+                    "scale {scale_factor}: {text} ink must visibly fill its cell"
+                );
+                assert!(
+                    ink_width <= metrics.cell_width_px + 1.0
+                        && ink_height <= metrics.cell_height_px + 1.0,
+                    "scale {scale_factor}: {text} ink must remain inside one cell"
+                );
+                let centered_x = (left + right) / 2.0 + glyph.left_offset_px;
+                let centered_y = (top + bottom) / 2.0 + glyph.top_offset_px;
+                assert!((centered_x - metrics.cell_width_px / 2.0).abs() <= 0.5);
+                assert!((centered_y - metrics.cell_height_px / 2.0).abs() <= 0.5);
+            }
         }
     }
 

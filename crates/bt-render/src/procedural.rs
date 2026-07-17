@@ -352,7 +352,11 @@ fn rounded_geometry(shape: LineShape, width: i32, height: i32, thickness: i32) -
         center_y - half
     };
     let radius = x_clearance.min(y_clearance).max(0.0);
-    let points = quarter_arc_points(center_x, center_y, radius, x_direction, y_direction);
+    // The arc's center lies toward the inside of the box. Sampling the opposite quadrant makes
+    // the curve bulge toward the cell's outside corner instead of looking bitten inward.
+    let arc_center_x = center_x + x_direction * radius;
+    let arc_center_y = center_y + y_direction * radius;
+    let points = quarter_arc_points(arc_center_x, arc_center_y, radius, x_direction, y_direction);
     let mut rects = Vec::with_capacity(points.len() + 2);
 
     let horizontal_endpoint = points[0];
@@ -405,8 +409,8 @@ fn rounded_geometry(shape: LineShape, width: i32, height: i32, thickness: i32) -
 }
 
 fn quarter_arc_points(
-    center_x: f32,
-    center_y: f32,
+    arc_center_x: f32,
+    arc_center_y: f32,
     radius: f32,
     x_direction: f32,
     y_direction: f32,
@@ -416,8 +420,8 @@ fn quarter_arc_points(
         .map(|sample| {
             let angle = sample as f32 / sample_count as f32 * std::f32::consts::FRAC_PI_2;
             (
-                center_x + x_direction * radius * angle.cos(),
-                center_y + y_direction * radius * angle.sin(),
+                arc_center_x - x_direction * radius * angle.sin(),
+                arc_center_y - y_direction * radius * angle.cos(),
             )
         })
         .collect()
@@ -752,10 +756,10 @@ mod tests {
     fn rounded_corner_samples_a_dpi_scaled_quarter_circle() {
         for radius in [4.0_f32, 7.0] {
             let points = quarter_arc_points(8.0, 12.0, radius, 1.0, 1.0);
-            assert_eq!(points.first().copied(), Some((8.0 + radius, 12.0)));
+            assert_eq!(points.first().copied(), Some((8.0, 12.0 - radius)));
             let last = points.last().copied().unwrap();
-            assert!((last.0 - 8.0).abs() < 0.0001);
-            assert!((last.1 - (12.0 + radius)).abs() < 0.0001);
+            assert!((last.0 - (8.0 - radius)).abs() < 0.0001);
+            assert!((last.1 - 12.0).abs() < 0.0001);
             for (x, y) in points {
                 let measured_radius = ((x - 8.0).powi(2) + (y - 12.0).powi(2)).sqrt();
                 assert!((measured_radius - radius).abs() < 0.0001);
@@ -765,6 +769,36 @@ mod tests {
             quarter_arc_points(0.0, 0.0, 7.0, 1.0, 1.0).len()
                 > quarter_arc_points(0.0, 0.0, 4.0, 1.0, 1.0).len()
         );
+    }
+
+    #[test]
+    fn every_rounded_corner_bulges_toward_the_cell_outside_corner() {
+        let cell_center = (5.0_f32, 10.0_f32);
+        let radius = 4.0_f32;
+        for (corner, x_direction, y_direction, outside_corner) in [
+            ('╭', 1.0, 1.0, (0.0, 0.0)),
+            ('╮', -1.0, 1.0, (10.0, 0.0)),
+            ('╯', -1.0, -1.0, (10.0, 20.0)),
+            ('╰', 1.0, -1.0, (0.0, 20.0)),
+        ] {
+            let arc_center = (
+                cell_center.0 + x_direction * radius,
+                cell_center.1 + y_direction * radius,
+            );
+            let points =
+                quarter_arc_points(arc_center.0, arc_center.1, radius, x_direction, y_direction);
+            let arc_midpoint = points[points.len() / 2];
+            let first = points[0];
+            let last = *points.last().unwrap();
+            let chord_midpoint = ((first.0 + last.0) / 2.0, (first.1 + last.1) / 2.0);
+            let distance_to_outside = |point: (f32, f32)| {
+                ((point.0 - outside_corner.0).powi(2) + (point.1 - outside_corner.1).powi(2)).sqrt()
+            };
+            assert!(
+                distance_to_outside(arc_midpoint) < distance_to_outside(chord_midpoint),
+                "{corner} must bulge toward its outside corner"
+            );
+        }
     }
 
     #[test]
