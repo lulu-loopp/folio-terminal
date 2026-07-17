@@ -14,6 +14,7 @@ use glyphon::{
     Wrap,
 };
 use thiserror::Error;
+use unicode_width::UnicodeWidthChar;
 use wgpu::util::DeviceExt;
 
 pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [9, 11, 14];
@@ -30,6 +31,7 @@ pub struct CellMetrics {
     pub padding_px: f32,
     pub scale_factor: f64,
     glyph_advance_px: f32,
+    ascii_baseline_px: f32,
 }
 
 impl CellMetrics {
@@ -50,6 +52,12 @@ impl CellMetrics {
             .line_layout(font_system, 0)
             .and_then(|lines| lines.first().cloned())
             .ok_or(RenderError::MissingMonospaceMetrics)?;
+        buffer.shape_until_scroll(font_system, false);
+        let ascii_baseline_px = buffer
+            .layout_runs()
+            .next()
+            .map(|run| run.line_y)
+            .ok_or(RenderError::MissingMonospaceMetrics)?;
         Ok(Self {
             cell_width_px: line.w.max(1.0).ceil(),
             cell_height_px: cell_height_px.ceil(),
@@ -57,6 +65,7 @@ impl CellMetrics {
             padding_px: (PADDING_LOGICAL_PX * scale).ceil(),
             scale_factor,
             glyph_advance_px: line.w.max(1.0),
+            ascii_baseline_px,
         })
     }
 
@@ -92,6 +101,152 @@ impl CellMetrics {
 pub struct GridSize {
     pub columns: NonZeroU16,
     pub rows: NonZeroU16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Preedit {
+    pub text: String,
+    /// UTF-8 byte offset of the collapsed IME caret. M0 intentionally ignores target clauses.
+    pub cursor_byte: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImeCursorArea {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ComposedFrame {
+    pub frame: ViewportFrame,
+    pub ime_caret: bt_viewport::GridCursor,
+}
+
+/// Overlay IME preedit on a frame without mutating terminal state.
+///
+/// The terminal grid remains the sole authority for committed cell width. Preedit is transient UI;
+/// this routine uses scalar width only to place its underline and caret and deliberately does not
+/// attempt grapheme clustering or ambiguous-width policy (both are M1 work).
+pub fn compose_preedit(frame: &ViewportFrame, preedit: Option<&Preedit>) -> ComposedFrame {
+    let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty()) else {
+        return ComposedFrame {
+            frame: frame.clone(),
+            ime_caret: frame.cursor,
+        };
+    };
+
+    let mut composed = frame.clone();
+    let cursor_byte = valid_cursor_byte(
+        &preedit.text,
+        preedit.cursor_byte.unwrap_or(preedit.text.len()),
+    );
+    let ime_caret = advance_grid_position(
+        frame.cursor,
+        &preedit.text[..cursor_byte],
+        frame.columns.get(),
+        frame.rows.get(),
+    );
+    overlay_preedit_cells(&mut composed, preedit);
+    composed.cursor = ime_caret;
+    ComposedFrame {
+        frame: composed,
+        ime_caret,
+    }
+}
+
+fn valid_cursor_byte(text: &str, requested: usize) -> usize {
+    let mut cursor = requested.min(text.len());
+    while !text.is_char_boundary(cursor) {
+        cursor -= 1;
+    }
+    cursor
+}
+
+fn scalar_cell_width(character: char) -> usize {
+    UnicodeWidthChar::width(character).unwrap_or(0)
+}
+
+fn advance_grid_position(
+    start: bt_viewport::GridCursor,
+    text: &str,
+    columns: u32,
+    rows: u32,
+) -> bt_viewport::GridCursor {
+    let mut row = start.row;
+    let mut column = start.column;
+    for character in text.chars() {
+        let width = scalar_cell_width(character) as u32;
+        if width == 0 {
+            continue;
+        }
+        if width == 2 && column + width > columns {
+            row = row.saturating_add(1);
+            column = 0;
+        }
+        column += width;
+        if column >= columns {
+            row = row.saturating_add(column / columns);
+            column %= columns;
+        }
+        if row >= rows {
+            row = rows.saturating_sub(1);
+            column = columns.saturating_sub(1);
+            break;
+        }
+    }
+    bt_viewport::GridCursor {
+        row,
+        column,
+        visible: true,
+    }
+}
+
+fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
+    let columns = frame.columns.get() as usize;
+    let rows = frame.rows.get() as usize;
+    let mut row = frame.cursor.row as usize;
+    let mut column = frame.cursor.column as usize;
+    let mut previous_lead: Option<usize> = None;
+
+    for character in preedit.text.chars() {
+        let width = scalar_cell_width(character);
+        if width == 0 {
+            if let Some(index) = previous_lead {
+                frame.cells[index].text.push(character);
+            }
+            continue;
+        }
+        if width == 2 && column + width > columns {
+            row += 1;
+            column = 0;
+        }
+        if row >= rows || column >= columns {
+            break;
+        }
+
+        let index = row * columns + column;
+        let mut cell = CapturedCell::plain(character.to_string());
+        cell.style.flags.insert(CellFlags::UNDERLINE);
+        if width == 2 {
+            cell.style.flags.insert(CellFlags::WIDE_CHAR);
+        }
+        frame.cells[index] = cell;
+        previous_lead = Some(index);
+
+        if width == 2 && column + 1 < columns {
+            let mut spacer = CapturedCell::plain("");
+            spacer.wide_spacer = true;
+            spacer.style.flags.insert(CellFlags::UNDERLINE);
+            frame.cells[index + 1] = spacer;
+        }
+        column += width;
+        if column >= columns {
+            row += column / columns;
+            column %= columns;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,8 +327,6 @@ pub enum RenderError {
     MissingMonospaceMetrics,
     #[error("surface validation failed")]
     SurfaceValidation,
-    #[error("native presentation setup failed: {0}")]
-    NativePresentation(String),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -194,11 +347,25 @@ struct TextRow {
     cells: Vec<CapturedCell>,
     buffer: Buffer,
     has_visible_text: bool,
+    wide_glyphs: Vec<WideGlyph>,
 }
 
 struct StyledRun {
     text: String,
     attrs: AttrsOwned,
+}
+
+struct WideGlyph {
+    column: usize,
+    buffer: Buffer,
+    top_offset_px: f32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct WideCellSlot {
+    column: usize,
+    text: String,
+    style: CellStyle,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -241,8 +408,6 @@ pub struct Renderer {
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     configured_size: (u32, u32),
-    source_size: (u32, u32),
-    dxgi_presentation: bt_platform::DxgiPresentationState,
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
@@ -253,6 +418,12 @@ pub struct Renderer {
     init_timings: RendererInitTimings,
     text_rows: Vec<TextRow>,
     glyph_degraded_frames: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PresentationGeometry {
+    /// Physical pixel size requested by the current surface configuration.
+    pub swapchain_size: (u32, u32),
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -270,8 +441,6 @@ impl Renderer {
         target: impl Into<wgpu::SurfaceTarget<'static>>,
         width: u32,
         height: u32,
-        capacity_width: u32,
-        capacity_height: u32,
         scale_factor: f64,
     ) -> Result<Self, RenderError> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
@@ -299,17 +468,12 @@ impl Renderer {
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
         let device_time = phase_started.elapsed();
         let phase_started = Instant::now();
-        let allocation_width = capacity_width.max(width).max(1);
-        let allocation_height = capacity_height.max(height).max(1);
-        let source_size = (width.max(1), height.max(1));
+        let swapchain_size = physical_client_size(width, height);
         let mut config = surface
-            .get_default_config(&adapter, allocation_width, allocation_height)
+            .get_default_config(&adapter, swapchain_size.0, swapchain_size.1)
             .ok_or_else(|| RenderError::Wgpu("surface has no default configuration".to_owned()))?;
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
-        let dxgi_presentation =
-            bt_platform::configure_dxgi_presentation(&surface, DEFAULT_BACKGROUND_RGB, source_size)
-                .map_err(RenderError::NativePresentation)?;
         let surface_configure_time = phase_started.elapsed();
 
         let phase_started = Instant::now();
@@ -332,9 +496,7 @@ impl Renderer {
             device,
             queue,
             config,
-            configured_size: (allocation_width, allocation_height),
-            source_size,
-            dxgi_presentation,
+            configured_size: swapchain_size,
             font_system,
             swash_cache,
             viewport,
@@ -363,18 +525,23 @@ impl Renderer {
         self.init_timings
     }
 
+    pub fn ime_cursor_area(&self, frame: &ViewportFrame) -> ImeCursorArea {
+        ime_cursor_area_for_metrics(self.metrics, frame.cursor)
+    }
+
+    pub fn presentation_geometry(&self) -> PresentationGeometry {
+        PresentationGeometry {
+            swapchain_size: (self.config.width, self.config.height),
+        }
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        self.source_size = (width, height);
-        self.config.width = surface_capacity_for_request(self.config.width, width);
-        self.config.height = surface_capacity_for_request(self.config.height, height);
-        if self.configured_size == (self.config.width, self.config.height) {
-            bt_platform::set_dxgi_source_size(&self.surface, width, height)
-                .map_err(RenderError::NativePresentation)?;
-            self.dxgi_presentation.source_size = (width, height);
-        }
+        let swapchain_size = physical_client_size(width, height);
+        self.config.width = swapchain_size.0;
+        self.config.height = swapchain_size.1;
         Ok(())
     }
 
@@ -399,9 +566,10 @@ impl Renderer {
         self.prepare_text_rows(frame);
         let padding = self.metrics.padding_px;
         let cell_height = self.metrics.cell_height_px;
+        let metrics = self.metrics;
         let text_right =
             (padding + frame.columns.get() as f32 * self.metrics.cell_width_px).ceil() as i32;
-        let text_areas = self
+        let row_text_areas = self
             .text_rows
             .iter()
             .enumerate()
@@ -423,13 +591,36 @@ impl Renderer {
                     custom_glyphs: &[],
                 }
             });
+        let wide_text_areas = self
+            .text_rows
+            .iter()
+            .enumerate()
+            .flat_map(|(row, text_row)| {
+                text_row.wide_glyphs.iter().map(move |wide| {
+                    let [left, top, _, bottom] = cell_bounds_px(metrics, row, wide.column);
+                    TextArea {
+                        buffer: &wide.buffer,
+                        left,
+                        top: top + wide.top_offset_px,
+                        scale: 1.0,
+                        bounds: TextBounds {
+                            left: left.floor() as i32,
+                            top: top.floor() as i32,
+                            right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                            bottom: bottom.ceil() as i32,
+                        },
+                        default_color: Color::rgb(218, 222, 230),
+                        custom_glyphs: &[],
+                    }
+                })
+            });
         let text_prepared = match self.text_renderer.prepare(
             &self.device,
             &self.queue,
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            text_areas,
+            row_text_areas.chain(wide_text_areas),
             &mut self.swash_cache,
         ) {
             Ok(()) => true,
@@ -513,6 +704,15 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
+            pass.set_viewport(
+                0.0,
+                0.0,
+                self.config.width as f32,
+                self.config.height as f32,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
             if !rects.is_empty() {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_vertex_buffer(0, rect_buffer.slice(..));
@@ -550,6 +750,7 @@ impl Renderer {
                 cells: Vec::new(),
                 buffer,
                 has_visible_text: false,
+                wide_glyphs: Vec::new(),
             });
         }
         self.text_rows.truncate(rows);
@@ -570,6 +771,7 @@ impl Renderer {
                 metrics,
                 columns,
             );
+            row.wide_glyphs = shape_wide_glyphs(cells, &mut self.font_system, metrics);
             row.cells.clear();
             row.cells.extend_from_slice(cells);
         }
@@ -600,12 +802,6 @@ impl Renderer {
     fn configure_surface(&mut self) -> Result<(), RenderError> {
         self.surface.configure(&self.device, &self.config);
         self.configured_size = (self.config.width, self.config.height);
-        self.dxgi_presentation = bt_platform::configure_dxgi_presentation(
-            &self.surface,
-            DEFAULT_BACKGROUND_RGB,
-            self.source_size,
-        )
-        .map_err(RenderError::NativePresentation)?;
         Ok(())
     }
 
@@ -622,17 +818,62 @@ impl Renderer {
             && frame.cursor.row < frame.rows.get()
             && frame.cursor.column < frame.columns.get()
         {
-            rects.push(self.cell_rect(
+            let (column, span) = cursor_cell_span(frame);
+            rects.push(self.cell_rect_span(
                 frame.cursor.row as usize,
-                frame.cursor.column as usize,
+                column,
+                span,
                 [180, 190, 205],
             ));
+        }
+        for (index, cell) in frame.cells.iter().enumerate() {
+            if cell.style.flags.contains(CellFlags::UNDERLINE) {
+                let row = index / columns;
+                let column = index % columns;
+                let [left, _, right, bottom] = cell_bounds_px(self.metrics, row, column);
+                let (foreground, _) = resolve_colors(&cell.style);
+                rects.push(self.pixel_rect(
+                    left,
+                    bottom - self.metrics.scale_factor as f32,
+                    right,
+                    bottom,
+                    foreground,
+                ));
+            }
         }
         rects
     }
 
     fn cell_rect(&self, row: usize, column: usize, color: [u8; 3]) -> RectInstance {
         let [left, top, right, bottom] = cell_bounds_px(self.metrics, row, column);
+        self.pixel_rect(left, top, right, bottom, color)
+    }
+
+    fn cell_rect_span(
+        &self,
+        row: usize,
+        column: usize,
+        span: usize,
+        color: [u8; 3],
+    ) -> RectInstance {
+        let [left, top, _, bottom] = cell_bounds_px(self.metrics, row, column);
+        self.pixel_rect(
+            left,
+            top,
+            left + span as f32 * self.metrics.cell_width_px,
+            bottom,
+            color,
+        )
+    }
+
+    fn pixel_rect(
+        &self,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        color: [u8; 3],
+    ) -> RectInstance {
         let width = self.config.width.max(1) as f32;
         let height = self.config.height.max(1) as f32;
         RectInstance {
@@ -663,11 +904,42 @@ fn cell_bounds_px(metrics: CellMetrics, row: usize, column: usize) -> [f32; 4] {
     ]
 }
 
+fn ime_cursor_area_for_metrics(
+    metrics: CellMetrics,
+    cursor: bt_viewport::GridCursor,
+) -> ImeCursorArea {
+    let [left, top, right, bottom] =
+        cell_bounds_px(metrics, cursor.row as usize, cursor.column as usize);
+    ImeCursorArea {
+        x: left.floor() as i32,
+        y: top.floor() as i32,
+        width: (right.ceil() - left.floor()).max(1.0) as u32,
+        height: (bottom.ceil() - top.floor()).max(1.0) as u32,
+    }
+}
+
+fn cursor_cell_span(frame: &ViewportFrame) -> (usize, usize) {
+    let columns = frame.columns.get() as usize;
+    let row = frame.cursor.row as usize;
+    let column = frame.cursor.column as usize;
+    let index = row * columns + column;
+    let Some(cell) = frame.cells.get(index) else {
+        return (column, 1);
+    };
+    if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
+        (column, 2.min(columns.saturating_sub(column)))
+    } else if cell.wide_spacer && column > 0 {
+        (column - 1, 2)
+    } else {
+        (column, 1)
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn terminal_font_system() -> FontSystem {
-    // M0 renders ASCII with the Windows terminal monospace family. Loading these four bounded
-    // files avoids cosmic-text's eager scan and parse of every installed system font during the
-    // launch critical path. Broader fallback belongs with the later width/IME work.
+    // Keep startup bounded: load a fixed terminal/CJK fallback chain, never enumerate Fonts/.
+    // Microsoft YaHei UI and DengXian cover Simplified Chinese on supported Windows versions;
+    // SimSun is the final compatibility face. Missing optional files are harmless.
     let windows = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
     let fonts = std::path::PathBuf::from(windows).join("Fonts");
     let mut db = glyphon::fontdb::Database::new();
@@ -676,6 +948,13 @@ fn terminal_font_system() -> FontSystem {
         "consolab.ttf",
         "consolai.ttf",
         "consolaz.ttf",
+        "msyh.ttc",
+        "msyhbd.ttc",
+        "msyhl.ttc",
+        "Deng.ttf",
+        "Dengb.ttf",
+        "Dengl.ttf",
+        "simsun.ttc",
     ] {
         let _ = db.load_font_file(fonts.join(file));
     }
@@ -706,15 +985,16 @@ fn styled_runs(cells: &[CapturedCell], metrics: CellMetrics) -> Vec<StyledRun> {
         if cell.wide_spacer {
             continue;
         }
-        let text = if cell.style.flags.contains(CellFlags::HIDDEN)
+        let text = if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
+            // The row buffer reserves the exact two-cell advance. The actual glyph is shaped in
+            // an independently positioned two-cell slot, so fallback metrics cannot shift any
+            // following ASCII cell.
+            "  "
+        } else if cell.style.flags.contains(CellFlags::HIDDEN)
             || cell.text.is_empty()
             || cell.text.chars().all(char::is_whitespace)
         {
-            if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
-                "  "
-            } else {
-                " "
-            }
+            " "
         } else {
             cell.text.as_str()
         };
@@ -731,6 +1011,68 @@ fn styled_runs(cells: &[CapturedCell], metrics: CellMetrics) -> Vec<StyledRun> {
         }
     }
     runs
+}
+
+fn wide_cell_slots(cells: &[CapturedCell]) -> Vec<WideCellSlot> {
+    cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| {
+            cell.style.flags.contains(CellFlags::WIDE_CHAR)
+                && !cell.style.flags.contains(CellFlags::HIDDEN)
+                && !cell.text.is_empty()
+        })
+        .map(|(column, cell)| WideCellSlot {
+            column,
+            text: cell.text.clone(),
+            style: cell.style.clone(),
+        })
+        .collect()
+}
+
+fn shape_wide_glyphs(
+    cells: &[CapturedCell],
+    font_system: &mut FontSystem,
+    metrics: CellMetrics,
+) -> Vec<WideGlyph> {
+    wide_cell_slots(cells)
+        .into_iter()
+        .map(|slot| {
+            let mut buffer = Buffer::new(
+                font_system,
+                Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+            );
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(
+                Some(2.0 * metrics.cell_width_px),
+                Some(metrics.cell_height_px),
+            );
+            // A CJK full-width glyph owns a two-cell slot. Matching one cell would shrink the
+            // fallback face to half width; omitting this entirely leaves each fallback face at a
+            // different visual size. Let cosmic-text normalize the fallback em to the full slot.
+            buffer.set_monospace_width(Some(metrics.font_size_px * wide_slot_em_scale(metrics)));
+            let attrs = wide_text_attrs(&slot.style);
+            buffer.set_text(&slot.text, &attrs, Shaping::Advanced, None);
+            buffer.shape_until_scroll(font_system, false);
+            let wide_baseline_px = buffer
+                .layout_runs()
+                .next()
+                .map_or(metrics.ascii_baseline_px, |run| run.line_y);
+            WideGlyph {
+                column: slot.column,
+                buffer,
+                top_offset_px: baseline_offset_px(metrics.ascii_baseline_px, wide_baseline_px),
+            }
+        })
+        .collect()
+}
+
+fn baseline_offset_px(reference_baseline_px: f32, glyph_baseline_px: f32) -> f32 {
+    reference_baseline_px - glyph_baseline_px
+}
+
+fn wide_slot_em_scale(metrics: CellMetrics) -> f32 {
+    2.0 * metrics.cell_width_px / metrics.font_size_px
 }
 
 fn row_needs_reshaping(previous: &[CapturedCell], next: &[CapturedCell]) -> bool {
@@ -781,6 +1123,22 @@ fn text_attrs(style: &CellStyle, metrics: CellMetrics) -> AttrsOwned {
         attrs = attrs.style(Style::Italic);
     }
     AttrsOwned::new(&attrs)
+}
+
+fn wide_text_attrs(style: &CellStyle) -> Attrs<'static> {
+    let (foreground, _) = resolve_colors(style);
+    let mut attrs = Attrs::new().family(Family::Monospace).color(Color::rgb(
+        foreground[0],
+        foreground[1],
+        foreground[2],
+    ));
+    if style.flags.contains(CellFlags::BOLD) {
+        attrs = attrs.weight(Weight::BOLD);
+    }
+    if style.flags.contains(CellFlags::ITALIC) {
+        attrs = attrs.style(Style::Italic);
+    }
+    attrs
 }
 
 fn theme_clear_color() -> wgpu::Color {
@@ -856,12 +1214,8 @@ fn default_background() -> [u8; 3] {
     DEFAULT_BACKGROUND_RGB
 }
 
-fn surface_capacity_for_request(current: u32, requested: u32) -> u32 {
-    if requested <= current {
-        current
-    } else {
-        requested.max(current.saturating_mul(3).saturating_div(2))
-    }
+fn physical_client_size(width: u32, height: u32) -> (u32, u32) {
+    (width.max(1), height.max(1))
 }
 
 fn resolve_colors(style: &CellStyle) -> ([u8; 3], [u8; 3]) {
@@ -941,6 +1295,7 @@ mod tests {
             padding_px: 5.0,
             scale_factor: 1.0,
             glyph_advance_px: 10.0,
+            ascii_baseline_px: 16.0,
         };
         assert_eq!(
             metrics.grid_for_pixels(810, 490),
@@ -950,6 +1305,35 @@ mod tests {
             }
         );
         assert_eq!(metrics.grid_for_pixels(0, 0).columns.get(), 1);
+    }
+
+    #[test]
+    fn metrics_and_ime_client_rect_apply_the_reported_dpi_scale() {
+        for scale_factor in [1.0, 1.25, 1.5, 2.0] {
+            let mut font_system = terminal_font_system();
+            let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
+            assert_eq!(metrics.scale_factor, scale_factor);
+            assert_eq!(
+                metrics.font_size_px,
+                BASE_FONT_SIZE_LOGICAL_PX * scale_factor as f32
+            );
+            assert_eq!(
+                metrics.cell_height_px,
+                (BASE_LINE_HEIGHT_LOGICAL_PX * scale_factor as f32).ceil()
+            );
+
+            let cursor = bt_viewport::GridCursor {
+                row: 2,
+                column: 3,
+                visible: true,
+            };
+            let area = ime_cursor_area_for_metrics(metrics, cursor);
+            let bounds = cell_bounds_px(metrics, 2, 3);
+            assert_eq!(area.x, bounds[0].floor() as i32);
+            assert_eq!(area.y, bounds[1].floor() as i32);
+            assert_eq!(area.width, (bounds[2].ceil() - bounds[0].floor()) as u32);
+            assert_eq!(area.height, (bounds[3].ceil() - bounds[1].floor()) as u32);
+        }
     }
 
     #[test]
@@ -1023,11 +1407,15 @@ mod tests {
     }
 
     #[test]
-    fn surface_capacity_grows_geometrically_only_after_source_exceeds_it() {
-        assert_eq!(surface_capacity_for_request(1920, 1919), 1920);
-        assert_eq!(surface_capacity_for_request(1920, 2000), 2880);
-        assert_eq!(surface_capacity_for_request(1920, 4000), 4000);
-        assert_eq!(surface_capacity_for_request(u32::MAX, u32::MAX), u32::MAX);
+    fn swapchain_size_is_always_exactly_the_physical_client_size() {
+        for physical_client in [(960, 600), (1440, 900), (1920, 1200), (2560, 1440)] {
+            assert_eq!(
+                physical_client_size(physical_client.0, physical_client.1),
+                physical_client
+            );
+        }
+        assert_eq!(physical_client_size(0, 0), (1, 1));
+        assert_ne!(physical_client_size(1920, 1200), (3840, 2160));
     }
 
     #[test]
@@ -1094,6 +1482,175 @@ mod tests {
         assert_eq!(runs.len(), 2);
         assert_eq!(runs[0].text, "A");
         assert_eq!(runs[1].text, " B");
+    }
+
+    #[test]
+    fn preedit_is_transient_underlined_grid_content_with_a_collapsed_caret() {
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(8).unwrap(),
+            rows: NonZeroU32::new(2).unwrap(),
+            cells: vec![CapturedCell::plain(""); 16],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 2,
+                visible: true,
+            },
+            layout_key: bt_doc_layout_key(),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        let composed = compose_preedit(
+            &frame,
+            Some(&Preedit {
+                text: "nihao".to_owned(),
+                cursor_byte: Some(2),
+            }),
+        );
+
+        assert_eq!(composed.ime_caret.column, 4);
+        assert_eq!(composed.frame.cursor, composed.ime_caret);
+        assert_eq!(composed.frame.cells[2].text, "n");
+        assert!(
+            composed.frame.cells[2]
+                .style
+                .flags
+                .contains(CellFlags::UNDERLINE)
+        );
+        assert_eq!(
+            frame.cells[2].text, "",
+            "source terminal frame is untouched"
+        );
+    }
+
+    #[test]
+    fn mixed_cjk_ascii_wide_slots_use_exact_terminal_cell_origins() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut ni = CapturedCell::plain("你");
+        ni.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut hao = CapturedCell::plain("好");
+        hao.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut spacer = CapturedCell::plain("");
+        spacer.wide_spacer = true;
+        let cells = [
+            CapturedCell::plain("A"),
+            ni,
+            spacer.clone(),
+            CapturedCell::plain("B"),
+            hao,
+            spacer,
+        ];
+
+        let slots = wide_cell_slots(&cells);
+        assert_eq!(
+            slots.iter().map(|slot| slot.column).collect::<Vec<_>>(),
+            [1, 4]
+        );
+        assert_eq!(
+            cell_bounds_px(metrics, 0, slots[0].column)[0],
+            metrics.padding_px + metrics.cell_width_px
+        );
+        assert_eq!(
+            cell_bounds_px(metrics, 0, slots[1].column)[0],
+            metrics.padding_px + 4.0 * metrics.cell_width_px
+        );
+
+        let runs = styled_runs(&cells, metrics);
+        let mut buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+        );
+        buffer.set_wrap(Wrap::None);
+        reshape_text_row(&mut buffer, &mut font_system, &runs, metrics, cells.len());
+        let b = buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .find(|glyph| glyph.start == 3)
+            .expect("ASCII after a wide cell must still be shaped");
+        assert_eq!(b.x, 3.0 * metrics.cell_width_px);
+    }
+
+    #[test]
+    fn baseline_offset_aligns_an_independent_fallback_buffer() {
+        assert_eq!(baseline_offset_px(17.5, 15.0), 2.5);
+        assert_eq!(baseline_offset_px(15.0, 17.5), -2.5);
+    }
+
+    #[test]
+    fn cjk_size_compensation_targets_the_two_cell_em() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
+        assert_eq!(
+            metrics.font_size_px * wide_slot_em_scale(metrics),
+            2.0 * metrics.cell_width_px
+        );
+        assert!(wide_slot_em_scale(metrics) > 1.0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cjk_wide_buffer_matches_two_cells_and_the_ascii_baseline() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
+        let mut cell = CapturedCell::plain("你");
+        cell.style.flags.insert(CellFlags::WIDE_CHAR);
+        let glyphs = shape_wide_glyphs(&[cell], &mut font_system, metrics);
+        let wide = &glyphs[0];
+        let run = wide.buffer.layout_runs().next().unwrap();
+        let glyph = &run.glyphs[0];
+
+        assert_eq!(
+            wide.buffer.monospace_width(),
+            Some(2.0 * metrics.cell_width_px)
+        );
+        assert!(glyph.font_size >= metrics.font_size_px);
+        assert!(glyph.w > metrics.cell_width_px);
+        assert!(glyph.w <= 2.0 * metrics.cell_width_px);
+        assert_eq!(run.line_y + wide.top_offset_px, metrics.ascii_baseline_px);
+    }
+
+    #[test]
+    fn cursor_on_either_half_of_a_wide_cell_covers_both_cells() {
+        let mut lead = CapturedCell::plain("中");
+        lead.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut spacer = CapturedCell::plain("");
+        spacer.wide_spacer = true;
+        let mut frame = ViewportFrame {
+            columns: NonZeroU32::new(3).unwrap(),
+            rows: NonZeroU32::new(1).unwrap(),
+            cells: vec![lead, spacer, CapturedCell::plain("x")],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: true,
+            },
+            layout_key: bt_doc_layout_key(),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        assert_eq!(cursor_cell_span(&frame), (0, 2));
+        frame.cursor.column = 1;
+        assert_eq!(cursor_cell_span(&frame), (0, 2));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn bounded_cjk_fallback_shapes_chinese_without_notdef() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut buffer = Buffer::new(
+            &mut font_system,
+            Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+        );
+        buffer.set_text("你好世界", &Attrs::new(), Shaping::Advanced, None);
+        buffer.shape_until_scroll(&mut font_system, false);
+        let glyphs = buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(glyphs.len(), 4);
+        assert!(
+            glyphs.iter().all(|glyph| glyph.glyph_id != 0),
+            "every CJK scalar must resolve to a real fallback glyph"
+        );
     }
 
     #[test]
@@ -1174,6 +1731,7 @@ mod tests {
             padding_px: 8.0,
             scale_factor: 1.0,
             glyph_advance_px: 10.0,
+            ascii_baseline_px: 16.0,
         };
         assert_eq!(cell_bounds_px(metrics, 0, 0), [8.0, 8.0, 18.0, 28.0]);
         assert_eq!(cell_bounds_px(metrics, 3, 7), [78.0, 68.0, 88.0, 88.0]);

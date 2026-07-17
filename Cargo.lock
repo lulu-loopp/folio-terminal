@@ -197,7 +197,6 @@ dependencies = [
 name = "bt-platform"
 version = "0.0.0"
 dependencies = [
- "wgpu",
  "windows",
 ]
 
@@ -214,12 +213,12 @@ name = "bt-render"
 version = "0.0.0"
 dependencies = [
  "bt-doc",
- "bt-platform",
  "bt-transcript",
  "bt-viewport",
  "bytemuck",
  "glyphon",
  "thiserror 2.0.18",
+ "unicode-width",
  "wgpu",
 ]
 

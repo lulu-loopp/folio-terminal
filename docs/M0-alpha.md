@@ -4,7 +4,7 @@
 
 ## 结论
 
-**go**。五轮返工全部收口，代码路径、真实 ConPTY 行为测试、全 workspace 门禁和人工验收清单全项通过。resize 四角同机同操作对照 Windows Terminal 后，BetterTerminal 的表现与 WT 同级，满足第四轮返工单的人工横杆。
+**go**。五轮返工全部收口，代码路径、真实 ConPTY 行为测试、全 workspace 门禁和人工验收清单全项通过。resize 四角同机同操作对照 Windows Terminal 后，BetterTerminal 的表现与 WT 同级，满足第四轮返工单的人工横杆。该结论中的“预分配 swapchain + `SetSourceSize`”实现后来被 M0-beta 五轮像素级实测证伪，现已回退；详见文末回退记录。
 
 本次只完成 M0 第一片：单窗口、单 session、单 pane、默认 PowerShell、ASCII 输入和纯文本 GPU 绘制。没有进入 IME、CJK 宽度裁决、滚动回溯 UI、富内容、标签、分屏或 M1。
 
@@ -86,8 +86,8 @@
 ## 遗留风险
 
 - resize 四角同机对照 Windows Terminal 已人工 PASS：右下角拖拽零伪影；右上、左下、左上三角在新暴露区仍有瞬时黑块与旧帧轻微拉伸，方向与窗口原点移动一致，但与 WT 同机同操作表现同级。
-- 正常单屏尺寸内的拖大不再调用 `ResizeBuffers`；若窗口跨屏或超过预分配的最大单显示器宽/高，renderer 会按 1.5 倍增长 swapchain，并退回“末刻 configure + 同步主题 present”。该越界增长点仍可能留下一个 DWM 合成周期的瞬时伪影；是否与 WT 同级必须由人工观察，不宣称物理上的零伪影。
-- 为避免正常拖拽期间重建 swapchain，第四轮以最大单显示器宽/高预分配 back buffer；按 4K（3840×2160、4 bytes/pixel）计算约为 33.2 MB/buffer，FLIP 双缓冲合计约 66 MB。多显示器或高分辨率机器会增加显存占用，但不按整个虚拟桌面总宽预分配，以免横向多屏造成无界浪费。
+- M0-beta 五轮已经回退预分配方案：每次有效 resize 都令 swapchain 配置严格等于当前物理客户区并重新走 `ResizeBuffers`。因此瞬时伪影风险重新受 DXGI buffer 重建约束，最终品质仍以人工持续拖拽观察为准。
+- α 第三轮的三项缓解继续保留：CPU shaping 完成后末刻 configure、模态 resize 回调内同步 present、用上一完整帧回填；主题色窗口类背景刷也继续保留。回退只删除容量与 `SetSourceSize` 裁剪路径。
 - 本片明确不保证 IME、CJK/emoji cell 宽度、复杂文本装饰或滚动回溯 UI。
 - Windows M0 ASCII-only 路径有意只加载 4 个 Consolas 文件；CJK/IME 片必须在渲染任何非 ASCII PTY 输出之前恢复字体回退，否则会静默显示豆腐块。
 - M0 frozen-line quota 当前是 app 显式拥有的 100,000 行固定值；后续配置切片可公开它，但转录层已经是唯一执行配额的权威。
@@ -204,6 +204,12 @@
 - `cargo build -p bt-app --release --locked`：通过。
 
 第四轮偏离申请：无。
+
+### 预分配方案后续实测证伪与回退（M0-beta 五轮，2026-07-17）
+
+- wgpu-hal DX12 以 `DXGI_SCALING_STRETCH` 创建 HWND swapchain。`SetSourceSize` 的元数据虽然能成功写入并由 `GetSourceSize` 原样读回，实际 HWND 合成却仍把整张预分配 back buffer 拉伸进客户区；因此“source 读回正确”不能证明合成器尊重裁剪。
+- 像素级实测命中容量拉伸模型：3840×2160 容量呈现到约 1920px 客户区时，文字、矩形和光标整体按 `inner/capacity` 缩小；IME 矩形不经过该拉伸，所以候选框相对视觉内容偏移。该结果证伪第四轮的预分配替代实现，不归因于 DPI metrics 或 IME 坐标。
+- 回退决定：renderer 创建和每次有效 resize 都只用当前 `inner_size` 配置 surface，删除最大显示器容量、几何增长、`SetSourceSize`/回读及 DXGI 背景色诊断桥。新不变量为 `swapchain_size == inner_size`；α 第三轮缓解和主题类背景刷保持不变。
 
 ## 第五轮人工验收结论
 

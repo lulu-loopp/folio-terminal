@@ -5,19 +5,16 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-[dependencies]
-wgpu.workspace = true
-
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
-# This crate is the deliberately narrow unsafe boundary for native presentation APIs. All other
+# This crate is the deliberately narrow unsafe boundary for native Win32 APIs. All other
 # first-party crates continue inheriting the workspace-wide `unsafe_code = "deny"` policy.
 [lints.clippy]
 todo = "deny"

@@ -55,6 +55,7 @@ pollster = "0.4"
 portable-pty = "0.9"
 thiserror = "2"
 unicode-segmentation = "1"
+unicode-width = "0.2"
 vte = "0.15"
 wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
