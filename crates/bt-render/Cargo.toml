@@ -13,6 +13,7 @@ bt-viewport = { path = "../bt-viewport" }
 bytemuck.workspace = true
 glyphon.workspace = true
 thiserror.workspace = true
+unicode-properties.workspace = true
 wgpu.workspace = true
 
 [lints]

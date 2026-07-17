@@ -1,5 +1,7 @@
 # M1：宽度正确性交付报告
 
+> M1.5 已补足彩色 emoji 与 fallback em 归一；当前字形验收和字体资产策略见 `M1.5-glyph-quality.md`。本文保留 M1 当时的宽度证据与历史边界。
+
 ## 结论与证据边界
 
 M1 的代码与自动化门完成：单一 width oracle 默认把 East Asian Ambiguous 判窄；DEC private mode 2027 开启 UAX #29 extended grapheme clustering；emoji/VS/ZWJ/flag 簇宽最多 2 cells；grid 继续产出既有 `WIDE_CHAR` lead + spacer，renderer 对 committed 内容没有新增宽度特判。
@@ -98,7 +100,7 @@ ConPTY 端到端：清掉 `BT_PROBE_INPUT`，正常启动 shell，运行 `script
 
 ## 已知边界
 
-- 本片没有承诺 COLR/CPAL 彩色 emoji。renderer 的固定 fallback 链未为“可能有字形但颜色栈未验证”扩张；豆腐块可接受，cell 宽度与光标必须正确。
+- M1 当时没有承诺彩色 emoji；该历史边界已由 M1.5 的显式 Noto/VS 路由与彩色光栅测试解除，见 `M1.5-glyph-quality.md`。
 - 当前 ConPTY 自身即使收到并转发 2027，也不改变 Console API cursor 簿记。协商程序应以终端的 DECRQM/DSR 结果为准，不应把 ConPTY 的 `Console.CursorLeft` 当作 grapheme oracle。
 - PowerShell/ConPTY 的 shell 标尺不再承担宽度视觉验收；双方记账不一致时，CUP 重画可制造间隙。`BT_PROBE_INPUT` fixture 才是受控视觉证据。
 - `can_extend_grapheme` 只校验进行中簇的锚点、预期光标/换行状态与屏幕，不重新校验 lead 格当前内容。因此 CUP 精确移走再移回后到达的组合符仍可能按原进行中簇附着；该兼容语义本轮不改。

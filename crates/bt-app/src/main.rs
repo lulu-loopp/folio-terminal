@@ -1176,6 +1176,34 @@ mod tests {
     }
 
     #[test]
+    fn direct_glyph_fixture_preserves_emoji_and_ambiguous_cell_occupancy() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(80).unwrap(), NonZeroU32::new(24).unwrap());
+        session
+            .feed(include_bytes!("../../../scripts/dev/glyph-probe-input.vt"))
+            .unwrap();
+
+        let bar_columns = |row: u32| {
+            session
+                .terminal()
+                .visible_row(row)
+                .unwrap()
+                .cells
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| cell.text == "|")
+                .map(|(column, _)| column)
+                .collect::<Vec<_>>()
+        };
+        for (content_row, width) in [(2, 2), (4, 2), (6, 2), (8, 2), (10, 1)] {
+            assert_eq!(bar_columns(content_row), [0, 1 + width]);
+            assert_eq!(bar_columns(content_row + 1), [0, 1 + width]);
+        }
+        assert_eq!(bar_columns(13), [0, 2, 4]);
+        assert_eq!(bar_columns(14), [0, 2, 4]);
+    }
+
+    #[test]
     fn real_powershell_input_reaches_a_viewport_owned_frame() {
         let columns = std::num::NonZeroU16::new(48).unwrap();
         let rows = std::num::NonZeroU16::new(10).unwrap();

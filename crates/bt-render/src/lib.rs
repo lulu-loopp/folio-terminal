@@ -13,9 +13,11 @@ use bt_viewport::{SUBPIXELS_PER_PX, ViewportFrame};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
-    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+    Stretch, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
+    Wrap,
 };
 use thiserror::Error;
+use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
 pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [9, 11, 14];
@@ -24,6 +26,14 @@ const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
 const PADDING_LOGICAL_PX: f32 = 8.0;
 const NARROW_SHAPING_CACHE_CAPACITY: usize = 1024;
+const PRIMARY_FONT_FAMILY: &str = "Consolas";
+const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
+const TEXT_SYMBOL_FONT_FAMILY: &str = "Segoe UI Symbol";
+const NARROW_FALLBACK_SIDE_BEARING_EM: f32 = 0.05;
+const NOTO_COLOR_EMOJI_BYTES: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../assets/fonts/NotoColorEmoji_WindowsCompatible.ttf"
+));
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CellMetrics {
@@ -33,6 +43,7 @@ pub struct CellMetrics {
     pub padding_px: f32,
     pub scale_factor: f64,
     ascii_baseline_px: f32,
+    primary_advance_px: f32,
 }
 
 impl CellMetrics {
@@ -59,13 +70,15 @@ impl CellMetrics {
             .next()
             .map(|run| run.line_y)
             .ok_or(RenderError::MissingMonospaceMetrics)?;
+        let primary_advance_px = line.w.max(1.0);
         Ok(Self {
-            cell_width_px: line.w.max(1.0).ceil(),
+            cell_width_px: primary_advance_px.ceil(),
             cell_height_px: cell_height_px.ceil(),
             font_size_px,
             padding_px: (PADDING_LOGICAL_PX * scale).ceil(),
             scale_factor,
             ascii_baseline_px,
+            primary_advance_px,
         })
     }
 
@@ -392,6 +405,7 @@ impl NarrowShapingCache {
         &mut self,
         key: NarrowShapeKey,
         font_system: &mut FontSystem,
+        swash_cache: &mut SwashCache,
         metrics: CellMetrics,
     ) -> (Arc<Buffer>, f32) {
         self.access_clock = self.access_clock.saturating_add(1);
@@ -411,23 +425,12 @@ impl NarrowShapingCache {
             self.entries.remove(&lru_key);
         }
 
-        let mut buffer = Buffer::new(
-            font_system,
-            Metrics::new(metrics.font_size_px, metrics.cell_height_px),
-        );
-        buffer.set_wrap(Wrap::None);
-        // A finite line width makes RTL scalars align within the cell-sized buffer, shifting the
-        // local pen away from zero. The TextArea owns the absolute grid origin and row clipping,
-        // so the shaping buffer itself must stay horizontally unbounded.
-        buffer.set_size(None, Some(metrics.cell_height_px));
-        buffer.set_monospace_width(None);
-        buffer.set_text(
-            &key.text,
-            &narrow_shape_attrs(&key),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(font_system, false);
+        let mut buffer = shape_narrow_buffer(&key, font_system, metrics, 1.0);
+        let em_scale =
+            narrow_fallback_em_scale(&buffer, font_system, swash_cache, metrics.cell_width_px);
+        if em_scale < 1.0 {
+            buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale);
+        }
         let glyph_baseline_px = buffer
             .layout_runs()
             .next()
@@ -856,6 +859,7 @@ impl Renderer {
             row.narrow_glyphs = shape_narrow_glyphs(
                 cells,
                 &mut self.font_system,
+                &mut self.swash_cache,
                 metrics,
                 &mut self.narrow_shaping_cache,
             );
@@ -1025,12 +1029,17 @@ fn cursor_cell_span(frame: &ViewportFrame) -> (usize, usize) {
 
 #[cfg(target_os = "windows")]
 fn terminal_font_system() -> FontSystem {
-    // Keep startup bounded: load a fixed terminal/CJK fallback chain, never enumerate Fonts/.
+    // Keep startup bounded: load a fixed terminal/CJK/symbol fallback chain, never enumerate
+    // Fonts/. Noto Color Emoji is compiled into the executable so tests and a standalone binary
+    // do not depend on their working directory or on an installer copying a sidecar font.
     // Microsoft YaHei UI and DengXian cover Simplified Chinese on supported Windows versions;
     // SimSun is the final compatibility face. Missing optional files are harmless.
     let windows = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
     let fonts = std::path::PathBuf::from(windows).join("Fonts");
     let mut db = glyphon::fontdb::Database::new();
+    db.load_font_source(glyphon::fontdb::Source::Binary(Arc::new(
+        NOTO_COLOR_EMOJI_BYTES,
+    )));
     for file in [
         "consola.ttf",
         "consolab.ttf",
@@ -1043,19 +1052,24 @@ fn terminal_font_system() -> FontSystem {
         "Dengb.ttf",
         "Dengl.ttf",
         "simsun.ttc",
+        "seguiemj.ttf",
+        "seguisym.ttf",
     ] {
         let _ = db.load_font_file(fonts.join(file));
     }
-    if db.is_empty() {
-        return FontSystem::new();
-    }
-    db.set_monospace_family("Consolas");
+    db.set_monospace_family(PRIMARY_FONT_FAMILY);
     FontSystem::new_with_locale_and_db("en-US".to_owned(), db)
 }
 
 #[cfg(not(target_os = "windows"))]
 fn terminal_font_system() -> FontSystem {
-    FontSystem::new()
+    let mut font_system = FontSystem::new();
+    font_system
+        .db_mut()
+        .load_font_source(glyphon::fontdb::Source::Binary(Arc::new(
+            NOTO_COLOR_EMOJI_BYTES,
+        )));
+    font_system
 }
 
 fn narrow_cell_slots(cells: &[CapturedCell]) -> Vec<NarrowCellSlot> {
@@ -1079,9 +1093,89 @@ fn narrow_cell_slots(cells: &[CapturedCell]) -> Vec<NarrowCellSlot> {
         .collect()
 }
 
+fn shape_narrow_buffer(
+    key: &NarrowShapeKey,
+    font_system: &mut FontSystem,
+    metrics: CellMetrics,
+    em_scale: f32,
+) -> Buffer {
+    let mut buffer = Buffer::new(
+        font_system,
+        Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+    );
+    buffer.set_wrap(Wrap::None);
+    // A finite line width makes RTL scalars align within the cell-sized buffer, shifting the
+    // local pen away from zero. The TextArea owns the absolute grid origin and row clipping,
+    // so the shaping buffer itself must stay horizontally unbounded.
+    buffer.set_size(None, Some(metrics.cell_height_px));
+    let family = presentation_family(&key.text, font_system);
+    buffer.set_monospace_width(None);
+    let mut attrs = narrow_shape_attrs(key, family).metrics(Metrics::new(
+        metrics.font_size_px * em_scale,
+        metrics.cell_height_px,
+    ));
+    if matches!(family, Family::Monospace) && key.text.chars().count() == 1 {
+        attrs = attrs.letter_spacing(
+            (metrics.cell_width_px - metrics.primary_advance_px) / metrics.font_size_px,
+        );
+    }
+    buffer.set_text(&key.text, &attrs, Shaping::Advanced, None);
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+}
+
+fn narrow_fallback_em_scale(
+    buffer: &Buffer,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    cell_width_px: f32,
+) -> f32 {
+    let glyphs = buffer
+        .layout_runs()
+        .flat_map(|run| run.glyphs.iter().cloned())
+        .collect::<Vec<_>>();
+    if glyphs.is_empty()
+        || glyphs
+            .iter()
+            .any(|glyph| is_primary_font_id(font_system, glyph.font_id))
+    {
+        return 1.0;
+    }
+
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for glyph in &glyphs {
+        left = left.min(glyph.x);
+        right = right.max(glyph.x + glyph.w);
+        let physical = glyph.physical((0.0, 0.0), 1.0);
+        if let Some(image) = swash_cache.get_image_uncached(font_system, physical.cache_key) {
+            let ink_left = physical.x as f32 + image.placement.left as f32;
+            left = left.min(ink_left);
+            right = right.max(ink_left + image.placement.width as f32);
+        }
+    }
+    let occupied_width = (right - left).max(0.0);
+    if occupied_width <= cell_width_px {
+        return 1.0;
+    }
+
+    let side_bearing_px = (cell_width_px * NARROW_FALLBACK_SIDE_BEARING_EM).max(1.0);
+    let target_width = (cell_width_px - 2.0 * side_bearing_px).max(1.0);
+    (target_width / occupied_width).min(1.0)
+}
+
+fn is_primary_font_id(font_system: &FontSystem, id: glyphon::fontdb::ID) -> bool {
+    font_system.db().face(id).is_some_and(|face| {
+        face.families
+            .iter()
+            .any(|(family, _)| family == PRIMARY_FONT_FAMILY)
+    })
+}
+
 fn shape_narrow_glyphs(
     cells: &[CapturedCell],
     font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
     metrics: CellMetrics,
     cache: &mut NarrowShapingCache,
 ) -> Vec<NarrowGlyph> {
@@ -1093,7 +1187,8 @@ fn shape_narrow_glyphs(
                 bold: slot.style.flags.contains(CellFlags::BOLD),
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
-            let (buffer, top_offset_px) = cache.get_or_shape(key, font_system, metrics);
+            let (buffer, top_offset_px) =
+                cache.get_or_shape(key, font_system, swash_cache, metrics);
             let (foreground, _) = resolve_colors(&slot.style);
             NarrowGlyph {
                 column: slot.column,
@@ -1143,7 +1238,8 @@ fn shape_wide_glyphs(
             // fallback face to half width; omitting this entirely leaves each fallback face at a
             // different visual size. Let cosmic-text normalize the fallback em to the full slot.
             buffer.set_monospace_width(Some(metrics.font_size_px * wide_slot_em_scale(metrics)));
-            let attrs = text_attrs(&slot.style);
+            let family = presentation_family(&slot.text, font_system);
+            let attrs = text_attrs(&slot.style, family);
             buffer.set_text(&slot.text, &attrs, Shaping::Advanced, None);
             buffer.shape_until_scroll(font_system, false);
             let wide_baseline_px = buffer
@@ -1171,8 +1267,89 @@ fn row_needs_reshaping(previous: &[CapturedCell], next: &[CapturedCell]) -> bool
     previous != next
 }
 
-fn narrow_shape_attrs(key: &NarrowShapeKey) -> Attrs<'static> {
-    let mut attrs = Attrs::new().family(Family::Monospace);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresentationRoute {
+    TerminalText,
+    TextSymbol,
+    ColorEmoji,
+}
+
+fn presentation_route(text: &str, font_system: &mut FontSystem) -> PresentationRoute {
+    if primary_font_supports_text(font_system, text) {
+        return PresentationRoute::TerminalText;
+    }
+
+    if let Some(selector) = text
+        .chars()
+        .rev()
+        .find(|character| matches!(character, '\u{fe0e}' | '\u{fe0f}'))
+    {
+        return if selector == '\u{fe0e}' {
+            PresentationRoute::TextSymbol
+        } else {
+            PresentationRoute::ColorEmoji
+        };
+    }
+    if text.chars().any(has_default_emoji_presentation) {
+        return PresentationRoute::ColorEmoji;
+    }
+    if text
+        .chars()
+        .any(|character| has_default_text_presentation(character) || is_text_symbol(character))
+    {
+        return PresentationRoute::TextSymbol;
+    }
+    PresentationRoute::TerminalText
+}
+
+fn has_default_emoji_presentation(character: char) -> bool {
+    matches!(
+        character.emoji_status(),
+        EmojiStatus::EmojiPresentation
+            | EmojiStatus::EmojiPresentationAndModifierBase
+            | EmojiStatus::EmojiPresentationAndEmojiComponent
+            | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+    )
+}
+
+fn has_default_text_presentation(character: char) -> bool {
+    matches!(
+        character.emoji_status(),
+        EmojiStatus::EmojiOther | EmojiStatus::EmojiModifierBase
+    )
+}
+
+fn is_text_symbol(character: char) -> bool {
+    matches!(character, '\u{2190}'..='\u{2bff}')
+}
+
+fn primary_font_supports_text(font_system: &mut FontSystem, text: &str) -> bool {
+    let primary_id = font_system.db().query(&glyphon::fontdb::Query {
+        families: &[Family::Name(PRIMARY_FONT_FAMILY)],
+        weight: Weight::NORMAL,
+        stretch: Stretch::Normal,
+        style: Style::Normal,
+    });
+    let Some(primary_id) = primary_id else {
+        return false;
+    };
+    let Some(primary_font) = font_system.get_font(primary_id, Weight::NORMAL) else {
+        return false;
+    };
+    let charmap = primary_font.as_swash().charmap();
+    text.chars().all(|character| charmap.map(character) != 0)
+}
+
+fn presentation_family(text: &str, font_system: &mut FontSystem) -> Family<'static> {
+    match presentation_route(text, font_system) {
+        PresentationRoute::TerminalText => Family::Monospace,
+        PresentationRoute::TextSymbol => Family::Name(TEXT_SYMBOL_FONT_FAMILY),
+        PresentationRoute::ColorEmoji => Family::Name(COLOR_EMOJI_FONT_FAMILY),
+    }
+}
+
+fn narrow_shape_attrs(key: &NarrowShapeKey, family: Family<'static>) -> Attrs<'static> {
+    let mut attrs = Attrs::new().family(family);
     if key.bold {
         attrs = attrs.weight(Weight::BOLD);
     }
@@ -1182,13 +1359,12 @@ fn narrow_shape_attrs(key: &NarrowShapeKey) -> Attrs<'static> {
     attrs
 }
 
-fn text_attrs(style: &CellStyle) -> Attrs<'static> {
+fn text_attrs(style: &CellStyle, family: Family<'static>) -> Attrs<'static> {
     let (foreground, _) = resolve_colors(style);
-    let mut attrs = Attrs::new().family(Family::Monospace).color(Color::rgb(
-        foreground[0],
-        foreground[1],
-        foreground[2],
-    ));
+    let mut attrs =
+        Attrs::new()
+            .family(family)
+            .color(Color::rgb(foreground[0], foreground[1], foreground[2]));
     if style.flags.contains(CellFlags::BOLD) {
         attrs = attrs.weight(Weight::BOLD);
     }
@@ -1348,7 +1524,13 @@ mod tests {
         font_system: &mut FontSystem,
         metrics: CellMetrics,
     ) -> Vec<NarrowGlyph> {
-        shape_narrow_glyphs(cells, font_system, metrics, &mut NarrowShapingCache::new())
+        shape_narrow_glyphs(
+            cells,
+            font_system,
+            &mut SwashCache::new(),
+            metrics,
+            &mut NarrowShapingCache::new(),
+        )
     }
 
     fn assert_narrow_glyph_origins(glyphs: &[NarrowGlyph], metrics: CellMetrics) {
@@ -1377,6 +1559,232 @@ mod tests {
         }
     }
 
+    fn first_layout_glyph(buffer: &Buffer) -> glyphon::cosmic_text::LayoutGlyph {
+        buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter())
+            .next()
+            .cloned()
+            .expect("shaped buffer has a glyph")
+    }
+
+    fn glyph_family(font_system: &FontSystem, glyph: &glyphon::cosmic_text::LayoutGlyph) -> String {
+        font_system
+            .db()
+            .face(glyph.font_id)
+            .and_then(|face| face.families.first())
+            .map(|(family, _)| family.clone())
+            .expect("glyph font has a family")
+    }
+
+    fn raster_content(font_system: &mut FontSystem, buffer: &Buffer) -> glyphon::SwashContent {
+        let glyph = first_layout_glyph(buffer);
+        SwashCache::new()
+            .get_image_uncached(font_system, glyph.physical((0.0, 0.0), 1.0).cache_key)
+            .expect("glyph rasterizes")
+            .content
+    }
+
+    fn occupied_width_px(font_system: &mut FontSystem, buffer: &Buffer) -> f32 {
+        let glyphs = buffer
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter().cloned())
+            .collect::<Vec<_>>();
+        let mut cache = SwashCache::new();
+        let mut left = f32::INFINITY;
+        let mut right = f32::NEG_INFINITY;
+        for glyph in glyphs {
+            left = left.min(glyph.x);
+            right = right.max(glyph.x + glyph.w);
+            let physical = glyph.physical((0.0, 0.0), 1.0);
+            if let Some(image) = cache.get_image_uncached(font_system, physical.cache_key) {
+                let ink_left = physical.x as f32 + image.placement.left as f32;
+                left = left.min(ink_left);
+                right = right.max(ink_left + image.placement.width as f32);
+            }
+        }
+        right - left
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn presentation_selectors_and_ambiguous_symbols_route_explicitly() {
+        let mut font_system = terminal_font_system();
+        for text in ["👨‍👩‍👧‍👦", "👍🏽", "🇺🇸", "☂️"] {
+            assert_eq!(
+                presentation_route(text, &mut font_system),
+                PresentationRoute::ColorEmoji
+            );
+        }
+        for text in ["☂︎", "☆"] {
+            assert_eq!(
+                presentation_route(text, &mut font_system),
+                PresentationRoute::TextSymbol
+            );
+        }
+        for text in ["│", "─", "█", "▓", "▒", "■", "©", "1", "A"] {
+            assert_eq!(
+                presentation_route(text, &mut font_system),
+                PresentationRoute::TerminalText
+            );
+        }
+        assert_eq!(cluster_width("☆"), 1);
+        assert_eq!(cluster_width("│"), 1);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fixed_font_database_contains_embedded_noto_and_windows_symbol_faces() {
+        let font_system = terminal_font_system();
+        let families = font_system
+            .db()
+            .faces()
+            .flat_map(|face| face.families.iter().map(|(family, _)| family.as_str()))
+            .collect::<Vec<_>>();
+        assert!(families.contains(&COLOR_EMOJI_FONT_FAMILY));
+        assert!(families.contains(&"Segoe UI Emoji"));
+        assert!(families.contains(&TEXT_SYMBOL_FONT_FAMILY));
+        let noto = font_system
+            .db()
+            .faces()
+            .find(|face| {
+                face.families
+                    .iter()
+                    .any(|(family, _)| family == COLOR_EMOJI_FONT_FAMILY)
+            })
+            .unwrap();
+        assert!(matches!(noto.source, glyphon::fontdb::Source::Binary(_)));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn emoji_sequences_shape_to_one_noto_color_glyph_in_two_cell_slots() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        for text in ["👨‍👩‍👧‍👦", "👍🏽", "🇺🇸", "☂️"] {
+            let mut cell = CapturedCell::plain(text);
+            cell.style.flags.insert(CellFlags::WIDE_CHAR);
+            let shaped = shape_wide_glyphs(&[cell], &mut font_system, metrics);
+            let wide = &shaped[0];
+            let glyphs = wide
+                .buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .collect::<Vec<_>>();
+            assert_eq!(glyphs.len(), 1, "{text} must be one shaped glyph");
+            assert_ne!(glyphs[0].glyph_id, 0, "{text} must not be .notdef");
+            assert_eq!(
+                glyph_family(&font_system, glyphs[0]),
+                COLOR_EMOJI_FONT_FAMILY
+            );
+            assert_eq!(
+                raster_content(&mut font_system, &wide.buffer),
+                glyphon::SwashContent::Color,
+                "{text} must reach glyphon's color atlas"
+            );
+            assert_eq!(
+                wide.buffer.monospace_width(),
+                Some(2.0 * metrics.cell_width_px)
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn vs15_and_ambiguous_symbols_stay_monochrome_and_inside_narrow_cells() {
+        let mut font_system = terminal_font_system();
+        for scale_factor in [1.0, 1.25, 1.5, 2.0] {
+            let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
+            let glyphs = shape_narrow_for_test(
+                &[
+                    CapturedCell::plain("☂︎"),
+                    CapturedCell::plain("☆"),
+                    CapturedCell::plain("│"),
+                ],
+                &mut font_system,
+                metrics,
+            );
+            assert_eq!(glyphs.len(), 3);
+            for glyph in &glyphs[..2] {
+                let layout = first_layout_glyph(&glyph.buffer);
+                assert_ne!(layout.glyph_id, 0);
+                assert_eq!(glyph_family(&font_system, &layout), TEXT_SYMBOL_FONT_FAMILY);
+                assert_eq!(
+                    raster_content(&mut font_system, &glyph.buffer),
+                    glyphon::SwashContent::Mask
+                );
+                assert!(
+                    occupied_width_px(&mut font_system, &glyph.buffer) <= metrics.cell_width_px,
+                    "scale {scale_factor}, column {} fallback ink/advance must fit one cell",
+                    glyph.column
+                );
+            }
+
+            let star = first_layout_glyph(&glyphs[1].buffer);
+            assert!(
+                star.font_size < metrics.font_size_px,
+                "scale {scale_factor}: fallback star must be em-normalized"
+            );
+
+            let vertical = first_layout_glyph(&glyphs[2].buffer);
+            assert_ne!(vertical.glyph_id, 0);
+            assert_eq!(glyph_family(&font_system, &vertical), PRIMARY_FONT_FAMILY);
+            assert_eq!(vertical.font_size, metrics.font_size_px);
+            assert!(
+                (vertical.w - metrics.cell_width_px).abs() <= 0.001,
+                "scale {scale_factor}: primary box drawing advance {} must equal cell width {}",
+                vertical.w,
+                metrics.cell_width_px
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn box_drawing_and_block_elements_keep_primary_cell_continuity() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
+
+        for text in ["█", "─"] {
+            let cells = (0..8)
+                .map(|_| CapturedCell::plain(text))
+                .collect::<Vec<_>>();
+            let glyphs = shape_narrow_for_test(&cells, &mut font_system, metrics);
+            assert_eq!(glyphs.len(), 8);
+            assert_narrow_glyph_origins(&glyphs, metrics);
+
+            for glyph in &glyphs {
+                let layout = first_layout_glyph(&glyph.buffer);
+                assert_eq!(glyph_family(&font_system, &layout), PRIMARY_FONT_FAMILY);
+                assert_eq!(
+                    layout.font_size, metrics.font_size_px,
+                    "{text} in column {} must not be em-normalized",
+                    glyph.column
+                );
+                assert!(
+                    (layout.w - metrics.cell_width_px).abs() <= 0.001,
+                    "{text} in column {} advance {} must equal cell width {}",
+                    glyph.column,
+                    layout.w,
+                    metrics.cell_width_px
+                );
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn primary_italic_glyph_is_not_em_normalized() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut cell = CapturedCell::plain("f");
+        cell.style.flags.insert(CellFlags::ITALIC);
+        let glyphs = shape_narrow_for_test(&[cell], &mut font_system, metrics);
+        let glyph = first_layout_glyph(&glyphs[0].buffer);
+        assert_eq!(glyph_family(&font_system, &glyph), PRIMARY_FONT_FAMILY);
+        assert_eq!(glyph.font_size, metrics.font_size_px);
+    }
+
     #[test]
     fn grid_dimensions_are_nonzero_and_derived_from_metrics() {
         let metrics = CellMetrics {
@@ -1386,6 +1794,7 @@ mod tests {
             padding_px: 5.0,
             scale_factor: 1.0,
             ascii_baseline_px: 16.0,
+            primary_advance_px: 10.0,
         };
         assert_eq!(
             metrics.grid_for_pixels(810, 490),
@@ -1801,7 +2210,14 @@ mod tests {
         cells[1].style.foreground = TerminalColor::Rgb(255, 0, 0);
         let mut cache = NarrowShapingCache::new();
 
-        let first = shape_narrow_glyphs(&cells, &mut font_system, metrics, &mut cache);
+        let mut swash_cache = SwashCache::new();
+        let first = shape_narrow_glyphs(
+            &cells,
+            &mut font_system,
+            &mut swash_cache,
+            metrics,
+            &mut cache,
+        );
         assert_eq!(cache.entries.len(), 1);
         assert!(
             first
@@ -1810,12 +2226,24 @@ mod tests {
         );
         assert_ne!(first[0].color, first[1].color);
 
-        let second = shape_narrow_glyphs(&cells, &mut font_system, metrics, &mut cache);
+        let second = shape_narrow_glyphs(
+            &cells,
+            &mut font_system,
+            &mut swash_cache,
+            metrics,
+            &mut cache,
+        );
         assert_eq!(cache.entries.len(), 1);
         assert!(Arc::ptr_eq(&first[0].buffer, &second[0].buffer));
 
         cells[0].style.flags.insert(CellFlags::BOLD);
-        let bold = shape_narrow_glyphs(&cells, &mut font_system, metrics, &mut cache);
+        let bold = shape_narrow_glyphs(
+            &cells,
+            &mut font_system,
+            &mut swash_cache,
+            metrics,
+            &mut cache,
+        );
         assert_eq!(cache.entries.len(), 2);
         assert!(!Arc::ptr_eq(&first[0].buffer, &bold[0].buffer));
     }
@@ -1980,6 +2408,7 @@ mod tests {
             padding_px: 8.0,
             scale_factor: 1.0,
             ascii_baseline_px: 16.0,
+            primary_advance_px: 10.0,
         };
         assert_eq!(cell_bounds_px(metrics, 0, 0), [8.0, 8.0, 18.0, 28.0]);
         assert_eq!(cell_bounds_px(metrics, 3, 7), [78.0, 68.0, 88.0, 88.0]);

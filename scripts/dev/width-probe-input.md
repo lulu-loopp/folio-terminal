@@ -9,7 +9,7 @@ $env:BT_PROBE_INPUT = (Resolve-Path .\scripts\dev\width-probe-input.vt)
 cargo run -p bt-app --release --locked
 ```
 
-The left half is legacy mode; the fixture then sends `CSI ? 2027 h` and draws the right half before restoring with `CSI ? 2027 l`. For every pair, the closing `|` on the content row must align with the closing `|` on its `#` ruler row. Tofu glyphs are acceptable; column occupancy is the assertion.
+The left half is legacy mode; the fixture then sends `CSI ? 2027 h` and draws the right half before restoring with `CSI ? 2027 l`. For every pair, the closing `|` on the content row must align with the closing `|` on its `#` ruler row. Column occupancy is the assertion. M1.5 additionally requires real color emoji; use `glyph-probe-input.vt` and its companion instructions for that visual check.
 
 | Case | Legacy cells | Mode 2027 cells |
 |---|---:|---:|

@@ -1,4 +1,6 @@
 /target
+/target-probe/
+/target-m1-render-probe/
 **/*.rs.bk
 .playwright-mcp/
 *.png
