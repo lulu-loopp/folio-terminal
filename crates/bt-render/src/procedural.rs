@@ -328,35 +328,124 @@ fn dashed_geometry(
 fn rounded_geometry(shape: LineShape, width: i32, height: i32, thickness: i32) -> Vec<PixelRect> {
     let (cx_start, cx_end) = centered_span(width, thickness);
     let (cy_start, cy_end) = centered_span(height, thickness);
-    let x_start = (cx_start + cx_end - 1) / 2;
-    let y_start = (cy_start + cy_end - 1) / 2;
-    let x_end = if shape.right != Stroke::None {
-        width - 1
+    let center_x = (cx_start + cx_end) as f32 / 2.0;
+    let center_y = (cy_start + cy_end) as f32 / 2.0;
+    let half = thickness as f32 / 2.0;
+    let x_direction = if shape.right != Stroke::None {
+        1.0
     } else {
-        0
+        -1.0
     };
-    let y_end = if shape.down != Stroke::None {
-        height - 1
+    let y_direction = if shape.down != Stroke::None {
+        1.0
     } else {
-        0
+        -1.0
     };
-    let steps = width.max(height).max(2);
-    let mut rects = Vec::with_capacity(steps as usize + 1);
-    for step in 0..=steps {
-        let t = step as f32 / steps as f32;
-        let eased = t * t * (3.0 - 2.0 * t);
-        let x = (x_start as f32 + (x_end - x_start) as f32 * eased).round() as i32;
-        let y = (y_end as f32 + (y_start - y_end) as f32 * eased).round() as i32;
-        let half = thickness / 2;
-        push_rect(
+    let x_clearance = if x_direction > 0.0 {
+        width as f32 - center_x - half
+    } else {
+        center_x - half
+    };
+    let y_clearance = if y_direction > 0.0 {
+        height as f32 - center_y - half
+    } else {
+        center_y - half
+    };
+    let radius = x_clearance.min(y_clearance).max(0.0);
+    let points = quarter_arc_points(center_x, center_y, radius, x_direction, y_direction);
+    let mut rects = Vec::with_capacity(points.len() + 2);
+
+    let horizontal_endpoint = points[0];
+    let (horizontal_left, horizontal_right) = if x_direction > 0.0 {
+        (horizontal_endpoint.0 - half, width as f32)
+    } else {
+        (0.0, horizontal_endpoint.0 + half)
+    };
+    push_clipped_rect(
+        &mut rects,
+        horizontal_left,
+        center_y - half,
+        horizontal_right,
+        center_y + half,
+        width,
+        height,
+    );
+
+    let vertical_endpoint = *points.last().expect("rounded arc has endpoints");
+    let (vertical_top, vertical_bottom) = if y_direction > 0.0 {
+        (vertical_endpoint.1 - half, height as f32)
+    } else {
+        (0.0, vertical_endpoint.1 + half)
+    };
+    push_clipped_rect(
+        &mut rects,
+        center_x - half,
+        vertical_top,
+        center_x + half,
+        vertical_bottom,
+        width,
+        height,
+    );
+
+    for segment in points.windows(2) {
+        let [(x0, y0), (x1, y1)] = segment else {
+            unreachable!("windows(2) always contains two arc samples");
+        };
+        push_clipped_rect(
             &mut rects,
-            (x - half).clamp(0, width),
-            (y - half).clamp(0, height),
-            (x - half + thickness).clamp(0, width),
-            (y - half + thickness).clamp(0, height),
+            x0.min(*x1) - half,
+            y0.min(*y1) - half,
+            x0.max(*x1) + half,
+            y0.max(*y1) + half,
+            width,
+            height,
         );
     }
     rects
+}
+
+fn quarter_arc_points(
+    center_x: f32,
+    center_y: f32,
+    radius: f32,
+    x_direction: f32,
+    y_direction: f32,
+) -> Vec<(f32, f32)> {
+    let sample_count = (std::f32::consts::FRAC_PI_2 * radius * 2.0).ceil().max(4.0) as usize;
+    (0..=sample_count)
+        .map(|sample| {
+            let angle = sample as f32 / sample_count as f32 * std::f32::consts::FRAC_PI_2;
+            (
+                center_x + x_direction * radius * angle.cos(),
+                center_y + y_direction * radius * angle.sin(),
+            )
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_clipped_rect(
+    rects: &mut Vec<PixelRect>,
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    width: i32,
+    height: i32,
+) {
+    let left = left.clamp(0.0, width as f32);
+    let top = top.clamp(0.0, height as f32);
+    let right = right.clamp(0.0, width as f32);
+    let bottom = bottom.clamp(0.0, height as f32);
+    if right <= left || bottom <= top {
+        return;
+    }
+    rects.push(PixelRect {
+        left,
+        top,
+        right,
+        bottom,
+    });
 }
 
 fn block_geometry(character: char, width: i32, height: i32) -> Vec<PixelRect> {
@@ -624,6 +713,58 @@ mod tests {
                 rect.left >= 0.0 && rect.top >= 0.0 && rect.right <= 10.0 && rect.bottom <= 20.0
             }));
         }
+
+        for (corner, horizontal_edge, vertical_edge) in [
+            ('╭', 10.0, 20.0),
+            ('╮', 0.0, 20.0),
+            ('╯', 0.0, 0.0),
+            ('╰', 10.0, 0.0),
+        ] {
+            let rects = local(corner, 10.0, 20.0, 2.0);
+            assert!(
+                rects
+                    .iter()
+                    .any(|rect| { rect.left == horizontal_edge || rect.right == horizontal_edge })
+            );
+            assert!(
+                rects
+                    .iter()
+                    .any(|rect| rect.top == vertical_edge || rect.bottom == vertical_edge)
+            );
+        }
+
+        let horizontal_lane = local('─', 10.0, 20.0, 2.0)[0];
+        let vertical_lane = local('│', 10.0, 20.0, 2.0)[0];
+        let upper_left = local('╭', 10.0, 20.0, 2.0);
+        let right_arm = upper_left.iter().find(|rect| rect.right == 10.0).unwrap();
+        let down_arm = upper_left.iter().find(|rect| rect.bottom == 20.0).unwrap();
+        assert_eq!(
+            (right_arm.top, right_arm.bottom),
+            (horizontal_lane.top, horizontal_lane.bottom)
+        );
+        assert_eq!(
+            (down_arm.left, down_arm.right),
+            (vertical_lane.left, vertical_lane.right)
+        );
+    }
+
+    #[test]
+    fn rounded_corner_samples_a_dpi_scaled_quarter_circle() {
+        for radius in [4.0_f32, 7.0] {
+            let points = quarter_arc_points(8.0, 12.0, radius, 1.0, 1.0);
+            assert_eq!(points.first().copied(), Some((8.0 + radius, 12.0)));
+            let last = points.last().copied().unwrap();
+            assert!((last.0 - 8.0).abs() < 0.0001);
+            assert!((last.1 - (12.0 + radius)).abs() < 0.0001);
+            for (x, y) in points {
+                let measured_radius = ((x - 8.0).powi(2) + (y - 12.0).powi(2)).sqrt();
+                assert!((measured_radius - radius).abs() < 0.0001);
+            }
+        }
+        assert!(
+            quarter_arc_points(0.0, 0.0, 7.0, 1.0, 1.0).len()
+                > quarter_arc_points(0.0, 0.0, 4.0, 1.0, 1.0).len()
+        );
     }
 
     #[test]

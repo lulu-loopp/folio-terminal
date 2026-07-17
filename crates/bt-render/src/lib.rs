@@ -1,6 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
 mod procedural;
+mod theme;
 
 use std::{
     collections::HashMap,
@@ -22,7 +23,8 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
-pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [9, 11, 14];
+pub use theme::DEFAULT_BACKGROUND_RGB;
+use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB, DEFAULT_FOREGROUND_RGB};
 
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
@@ -371,6 +373,7 @@ struct WideGlyph {
 struct NarrowGlyph {
     column: usize,
     buffer: Arc<Buffer>,
+    left_offset_px: f32,
     top_offset_px: f32,
     color: Color,
 }
@@ -384,6 +387,7 @@ struct ShapeKey {
 
 struct CachedNarrowShape {
     buffer: Arc<Buffer>,
+    left_offset_px: f32,
     top_offset_px: f32,
     last_used: u64,
 }
@@ -420,12 +424,16 @@ impl NarrowShapingCache {
         font_system: &mut FontSystem,
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
-    ) -> (Arc<Buffer>, f32) {
+    ) -> (Arc<Buffer>, f32, f32) {
         self.access_clock = self.access_clock.saturating_add(1);
         let last_used = self.access_clock;
         if let Some(cached) = self.entries.get_mut(&key) {
             cached.last_used = last_used;
-            return (Arc::clone(&cached.buffer), cached.top_offset_px);
+            return (
+                Arc::clone(&cached.buffer),
+                cached.left_offset_px,
+                cached.top_offset_px,
+            );
         }
 
         if self.entries.len() >= NARROW_SHAPING_CACHE_CAPACITY
@@ -438,7 +446,7 @@ impl NarrowShapingCache {
             self.entries.remove(&lru_key);
         }
 
-        let (mut buffer, family) = shape_narrow_buffer_for_key(
+        let (mut buffer, family, size_policy) = shape_narrow_buffer_for_key(
             &key,
             font_system,
             swash_cache,
@@ -446,26 +454,45 @@ impl NarrowShapingCache {
             #[cfg(test)]
             &mut self.color_emoji_trial_shapes,
         );
-        let em_scale =
-            narrow_fallback_em_scale(&buffer, font_system, swash_cache, metrics.cell_width_px);
-        if em_scale < 1.0 {
-            buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
-        }
-        let glyph_baseline_px = buffer
-            .layout_runs()
-            .next()
-            .map_or(metrics.ascii_baseline_px, |run| run.line_y);
-        let top_offset_px = baseline_offset_px(metrics.ascii_baseline_px, glyph_baseline_px);
+        let (left_offset_px, top_offset_px) = match size_policy {
+            NarrowSizePolicy::StrictCell => {
+                let em_scale = narrow_fallback_em_scale(
+                    &buffer,
+                    font_system,
+                    swash_cache,
+                    metrics.cell_width_px,
+                );
+                if em_scale < 1.0 {
+                    buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
+                }
+                let glyph_baseline_px = buffer
+                    .layout_runs()
+                    .next()
+                    .map_or(metrics.ascii_baseline_px, |run| run.line_y);
+                (
+                    0.0,
+                    baseline_offset_px(metrics.ascii_baseline_px, glyph_baseline_px),
+                )
+            }
+            NarrowSizePolicy::CellHeightEmoji => center_ink_offsets(
+                &buffer,
+                font_system,
+                swash_cache,
+                metrics.cell_width_px,
+                metrics.cell_height_px,
+            ),
+        };
         let buffer = Arc::new(buffer);
         self.entries.insert(
             key,
             CachedNarrowShape {
                 buffer: Arc::clone(&buffer),
+                left_offset_px,
                 top_offset_px,
                 last_used,
             },
         );
-        (buffer, top_offset_px)
+        (buffer, left_offset_px, top_offset_px)
     }
 }
 
@@ -671,6 +698,12 @@ impl Renderer {
         let mut config = surface
             .get_default_config(&adapter, swapchain_size.0, swapchain_size.1)
             .ok_or_else(|| RenderError::Wgpu("surface has no default configuration".to_owned()))?;
+        config.format = surface
+            .get_capabilities(&adapter)
+            .formats
+            .into_iter()
+            .find(wgpu::TextureFormat::is_srgb)
+            .ok_or_else(|| RenderError::Wgpu("surface has no sRGB format".to_owned()))?;
         config.desired_maximum_frame_latency = 1;
         surface.configure(&device, &config);
         let surface_configure_time = phase_started.elapsed();
@@ -780,7 +813,7 @@ impl Renderer {
                     let [left, top, _, bottom] = cell_bounds_px(metrics, row, glyph.column);
                     TextArea {
                         buffer: &glyph.buffer,
-                        left,
+                        left: left + glyph.left_offset_px,
                         top: top + glyph.top_offset_px,
                         scale: 1.0,
                         // Clip to the terminal row, not the cell. The grid owns pen origins, while
@@ -899,10 +932,8 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // M0 uses the same channel/255 convention as the rectangle shader. This
-                        // intentionally has no explicit sRGB conversion yet; color management is
-                        // deferred, but default-background cells and the clear are numerically one
-                        // theme color instead of relying on rounded decimal coincidence.
+                        // Theme colors are authored in sRGB. The sRGB surface encodes the linear
+                        // clear value exactly once, matching the rectangle upload path below.
                         load: wgpu::LoadOp::Clear(theme_clear_color()),
                         store: wgpu::StoreOp::Store,
                     },
@@ -1026,7 +1057,7 @@ impl Renderer {
                 frame.cursor.row as usize,
                 column,
                 span,
-                [180, 190, 205],
+                DEFAULT_CURSOR_RGB,
             ));
         }
         for (index, cell) in frame.cells.iter().enumerate() {
@@ -1115,12 +1146,7 @@ impl Renderer {
                 right / width * 2.0 - 1.0,
                 1.0 - bottom / height * 2.0,
             ],
-            color: [
-                color[0] as f32 / 255.0,
-                color[1] as f32 / 255.0,
-                color[2] as f32 / 255.0,
-                1.0,
-            ],
+            color: rect_gpu_color(color),
         }
     }
 }
@@ -1271,13 +1297,14 @@ fn shape_narrow_buffer_for_key(
     swash_cache: &mut SwashCache,
     metrics: CellMetrics,
     #[cfg(test)] color_emoji_trial_shapes: &mut u64,
-) -> (Buffer, Family<'static>) {
+) -> (Buffer, Family<'static>, NarrowSizePolicy) {
     match font_presentation_route(&key.text, font_system) {
         PresentationRoute::TerminalText => {
             let family = Family::Monospace;
             (
                 shape_narrow_buffer(key, font_system, metrics, 1.0, family),
                 family,
+                NarrowSizePolicy::StrictCell,
             )
         }
         PresentationRoute::TextSymbol => {
@@ -1285,6 +1312,7 @@ fn shape_narrow_buffer_for_key(
             (
                 shape_narrow_buffer(key, font_system, metrics, 1.0, family),
                 family,
+                NarrowSizePolicy::StrictCell,
             )
         }
         PresentationRoute::ColorEmoji => {
@@ -1294,24 +1322,49 @@ fn shape_narrow_buffer_for_key(
                 {
                     *color_emoji_trial_shapes = color_emoji_trial_shapes.saturating_add(1);
                 }
-                let segoe = shape_narrow_buffer(key, font_system, metrics, 1.0, segoe_family);
-                if is_single_color_glyph_from_family(
+                let segoe = shape_narrow_buffer(
+                    key,
+                    font_system,
+                    metrics,
+                    narrow_emoji_em_scale(metrics),
+                    segoe_family,
+                );
+                if is_color_cluster_from_family_within_slot(
                     &segoe,
                     font_system,
                     swash_cache,
                     SEGOE_COLOR_EMOJI_FONT_FAMILY,
+                    metrics.cell_height_px,
+                    metrics.cell_height_px,
                 ) {
-                    return (segoe, segoe_family);
+                    return (segoe, segoe_family, NarrowSizePolicy::CellHeightEmoji);
                 }
             }
 
             let noto_family = Family::Name(COLOR_EMOJI_FONT_FAMILY);
             (
-                shape_narrow_buffer(key, font_system, metrics, 1.0, noto_family),
+                shape_narrow_buffer(
+                    key,
+                    font_system,
+                    metrics,
+                    narrow_emoji_em_scale(metrics),
+                    noto_family,
+                ),
                 noto_family,
+                NarrowSizePolicy::CellHeightEmoji,
             )
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NarrowSizePolicy {
+    StrictCell,
+    CellHeightEmoji,
+}
+
+fn narrow_emoji_em_scale(metrics: CellMetrics) -> f32 {
+    metrics.cell_height_px / metrics.font_size_px
 }
 
 fn narrow_fallback_em_scale(
@@ -1354,6 +1407,52 @@ fn narrow_fallback_em_scale(
     (target_width / occupied_width).min(1.0)
 }
 
+fn glyph_ink_bounds(
+    buffer: &Buffer,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+) -> Option<[f32; 4]> {
+    let mut bounds = [
+        f32::INFINITY,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NEG_INFINITY,
+    ];
+    for run in buffer.layout_runs() {
+        for glyph in run.glyphs {
+            let physical = glyph.physical((0.0, 0.0), 1.0);
+            let Some(image) = swash_cache.get_image_uncached(font_system, physical.cache_key)
+            else {
+                continue;
+            };
+            let left = physical.x as f32 + image.placement.left as f32;
+            let top = run.line_y + physical.y as f32 - image.placement.top as f32;
+            bounds[0] = bounds[0].min(left);
+            bounds[1] = bounds[1].min(top);
+            bounds[2] = bounds[2].max(left + image.placement.width as f32);
+            bounds[3] = bounds[3].max(top + image.placement.height as f32);
+        }
+    }
+    bounds[0].is_finite().then_some(bounds)
+}
+
+fn center_ink_offsets(
+    buffer: &Buffer,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    slot_width_px: f32,
+    slot_height_px: f32,
+) -> (f32, f32) {
+    let Some([left, top, right, bottom]) = glyph_ink_bounds(buffer, font_system, swash_cache)
+    else {
+        return (0.0, 0.0);
+    };
+    (
+        (slot_width_px - (right - left)) / 2.0 - left,
+        (slot_height_px - (bottom - top)) / 2.0 - top,
+    )
+}
+
 fn is_primary_font_id(font_system: &FontSystem, id: glyphon::fontdb::ID) -> bool {
     font_system.db().face(id).is_some_and(|face| {
         face.families
@@ -1377,12 +1476,13 @@ fn shape_narrow_glyphs(
                 bold: slot.style.flags.contains(CellFlags::BOLD),
                 italic: slot.style.flags.contains(CellFlags::ITALIC),
             };
-            let (buffer, top_offset_px) =
+            let (buffer, left_offset_px, top_offset_px) =
                 cache.get_or_shape(key, font_system, swash_cache, metrics);
             let (foreground, _) = resolve_colors(&slot.style);
             NarrowGlyph {
                 column: slot.column,
                 buffer,
+                left_offset_px,
                 top_offset_px,
                 color: Color::rgb(foreground[0], foreground[1], foreground[2]),
             }
@@ -1490,11 +1590,13 @@ fn shape_wide_buffer_for_key(
                     metrics,
                     Family::Name(SEGOE_COLOR_EMOJI_FONT_FAMILY),
                 );
-                if is_single_color_glyph_from_family(
+                if is_color_cluster_from_family_within_slot(
                     &segoe,
                     font_system,
                     swash_cache,
                     SEGOE_COLOR_EMOJI_FONT_FAMILY,
+                    2.0 * metrics.cell_width_px,
+                    metrics.cell_height_px,
                 ) {
                     return segoe;
                 }
@@ -1530,51 +1632,49 @@ enum PresentationRoute {
 }
 
 fn font_presentation_route(text: &str, font_system: &mut FontSystem) -> PresentationRoute {
+    if let Some(route) = explicit_presentation_route(text) {
+        return route;
+    }
+
+    // Match Windows Terminal's visual default: characters with Emoji=Yes use the color route even
+    // when Emoji_Presentation=No and even when Consolas contains a monochrome glyph. Bare ASCII
+    // keycap components remain terminal text until VS16 or U+20E3 makes the intent explicit.
+    if text.chars().any(has_color_emoji_property) {
+        return PresentationRoute::ColorEmoji;
+    }
+
     if primary_font_supports_text(font_system, text) {
         return PresentationRoute::TerminalText;
     }
 
-    non_primary_presentation_route(text)
-}
-
-fn non_primary_presentation_route(text: &str) -> PresentationRoute {
-    if let Some(selector) = text
-        .chars()
-        .rev()
-        .find(|character| matches!(character, '\u{fe0e}' | '\u{fe0f}'))
-    {
-        return if selector == '\u{fe0e}' {
-            PresentationRoute::TextSymbol
-        } else {
-            PresentationRoute::ColorEmoji
-        };
-    }
-    if text.chars().any(has_default_emoji_presentation) {
-        return PresentationRoute::ColorEmoji;
-    }
-    if text
-        .chars()
-        .any(|character| has_default_text_presentation(character) || is_text_symbol(character))
-    {
+    if text.chars().any(is_text_symbol) {
         return PresentationRoute::TextSymbol;
     }
     PresentationRoute::TerminalText
 }
 
-fn has_default_emoji_presentation(character: char) -> bool {
+fn explicit_presentation_route(text: &str) -> Option<PresentationRoute> {
+    text.chars()
+        .rev()
+        .find(|character| matches!(character, '\u{fe0e}' | '\u{fe0f}'))
+        .map(|selector| {
+            if selector == '\u{fe0e}' {
+                PresentationRoute::TextSymbol
+            } else {
+                PresentationRoute::ColorEmoji
+            }
+        })
+}
+
+fn has_color_emoji_property(character: char) -> bool {
     matches!(
         character.emoji_status(),
         EmojiStatus::EmojiPresentation
             | EmojiStatus::EmojiPresentationAndModifierBase
             | EmojiStatus::EmojiPresentationAndEmojiComponent
             | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
-    )
-}
-
-fn has_default_text_presentation(character: char) -> bool {
-    matches!(
-        character.emoji_status(),
-        EmojiStatus::EmojiOther | EmojiStatus::EmojiModifierBase
+            | EmojiStatus::EmojiOther
+            | EmojiStatus::EmojiModifierBase
     )
 }
 
@@ -1607,33 +1707,57 @@ fn font_family_available(font_system: &FontSystem, family: &str) -> bool {
     })
 }
 
-fn is_single_color_glyph_from_family(
+fn is_color_cluster_from_family_within_slot(
     buffer: &Buffer,
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     family: &str,
+    slot_width_px: f32,
+    slot_height_px: f32,
 ) -> bool {
     let glyphs = buffer
         .layout_runs()
         .flat_map(|run| run.glyphs.iter())
         .collect::<Vec<_>>();
-    let [glyph] = glyphs.as_slice() else {
-        return false;
-    };
-    if glyph.glyph_id == 0
-        || !font_system.db().face(glyph.font_id).is_some_and(|face| {
-            face.families
-                .iter()
-                .any(|(candidate, _)| candidate == family)
+    if glyphs.is_empty()
+        || glyphs.iter().any(|glyph| {
+            glyph.glyph_id == 0
+                || !font_system.db().face(glyph.font_id).is_some_and(|face| {
+                    face.families
+                        .iter()
+                        .any(|(candidate, _)| candidate == family)
+                })
         })
     {
         return false;
     }
 
-    let physical = glyph.physical((0.0, 0.0), 1.0);
-    swash_cache
-        .get_image_uncached(font_system, physical.cache_key)
-        .is_some_and(|image| image.content == glyphon::SwashContent::Color)
+    for glyph in &glyphs {
+        let physical = glyph.physical((0.0, 0.0), 1.0);
+        if !swash_cache
+            .get_image_uncached(font_system, physical.cache_key)
+            .is_some_and(|image| image.content == glyphon::SwashContent::Color)
+        {
+            return false;
+        }
+    }
+
+    let Some([left, top, right, bottom]) = glyph_ink_bounds(buffer, font_system, swash_cache)
+    else {
+        return false;
+    };
+    const SIZE_TOLERANCE_PX: f32 = 0.5;
+    let dimensions_fit = right - left <= slot_width_px + SIZE_TOLERANCE_PX
+        && bottom - top <= slot_height_px + SIZE_TOLERANCE_PX;
+    if glyphs.len() == 1 {
+        return dimensions_fit;
+    }
+
+    dimensions_fit
+        && left >= -SIZE_TOLERANCE_PX
+        && top >= -SIZE_TOLERANCE_PX
+        && right <= slot_width_px + SIZE_TOLERANCE_PX
+        && bottom <= slot_height_px + SIZE_TOLERANCE_PX
 }
 
 fn shape_attrs(key: &ShapeKey, family: Family<'static>) -> Attrs<'static> {
@@ -1648,12 +1772,25 @@ fn shape_attrs(key: &ShapeKey, family: Family<'static>) -> Attrs<'static> {
 }
 
 fn theme_clear_color() -> wgpu::Color {
-    let [r, g, b] = default_background();
-    wgpu::Color {
-        r: f64::from(r) / 255.0,
-        g: f64::from(g) / 255.0,
-        b: f64::from(b) / 255.0,
-        a: 1.0,
+    let [r, g, b] = srgb_rgb_to_linear(default_background());
+    wgpu::Color { r, g, b, a: 1.0 }
+}
+
+fn rect_gpu_color(color: [u8; 3]) -> [f32; 4] {
+    let [r, g, b] = srgb_rgb_to_linear(color);
+    [r as f32, g as f32, b as f32, 1.0]
+}
+
+fn srgb_rgb_to_linear([r, g, b]: [u8; 3]) -> [f64; 3] {
+    [r, g, b].map(srgb_channel_to_linear)
+}
+
+fn srgb_channel_to_linear(channel: u8) -> f64 {
+    let srgb = f64::from(channel) / 255.0;
+    if srgb <= 0.04045 {
+        srgb / 12.92
+    } else {
+        ((srgb + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -1713,7 +1850,7 @@ fn create_rect_pipeline(
 }
 
 fn default_foreground() -> [u8; 3] {
-    [218, 222, 230]
+    DEFAULT_FOREGROUND_RGB
 }
 
 fn default_background() -> [u8; 3] {
@@ -1743,8 +1880,8 @@ fn terminal_color(color: TerminalColor, foreground: bool) -> [u8; 3] {
         TerminalColor::Indexed(index) => indexed_color(index),
         TerminalColor::Named(16 | 27) if foreground => default_foreground(),
         TerminalColor::Named(17) if !foreground => default_background(),
-        TerminalColor::Named(18) => [180, 190, 205],
-        TerminalColor::Named(28) => [145, 148, 153],
+        TerminalColor::Named(18) => DEFAULT_CURSOR_RGB,
+        TerminalColor::Named(28) => DEFAULT_DIM_FOREGROUND_RGB,
         TerminalColor::Named(code @ 19..=26) => {
             indexed_color(code - 19).map(|channel| channel.saturating_mul(2) / 3)
         }
@@ -1753,26 +1890,8 @@ fn terminal_color(color: TerminalColor, foreground: bool) -> [u8; 3] {
 }
 
 fn indexed_color(index: u8) -> [u8; 3] {
-    const ANSI: [[u8; 3]; 16] = [
-        [0, 0, 0],
-        [205, 49, 49],
-        [13, 188, 121],
-        [229, 229, 16],
-        [36, 114, 200],
-        [188, 63, 188],
-        [17, 168, 205],
-        [229, 229, 229],
-        [102, 102, 102],
-        [241, 76, 76],
-        [35, 209, 139],
-        [245, 245, 67],
-        [59, 142, 234],
-        [214, 112, 214],
-        [41, 184, 219],
-        [255, 255, 255],
-    ];
     if index < 16 {
-        return ANSI[index as usize];
+        return ANSI_16_RGB[index as usize];
     }
     if index < 232 {
         let cube = index - 16;
@@ -1897,19 +2016,20 @@ mod tests {
     #[test]
     fn presentation_selectors_and_ambiguous_symbols_route_explicitly() {
         let mut font_system = terminal_font_system();
-        for text in ["👨‍👩‍👧‍👦", "👍🏽", "🇺🇸", "☂️"] {
+        for text in ["👨‍👩‍👧‍👦", "👍🏽", "🇺🇸", "☂️", "☂", "⚠", "©"]
+        {
             assert_eq!(
                 font_presentation_route(text, &mut font_system),
                 PresentationRoute::ColorEmoji
             );
         }
-        for text in ["☂︎", "☆"] {
+        for text in ["☂︎", "⚠︎", "☆"] {
             assert_eq!(
                 font_presentation_route(text, &mut font_system),
                 PresentationRoute::TextSymbol
             );
         }
-        for text in ["■", "©", "1", "A"] {
+        for text in ["■", "#", "*", "1", "A"] {
             assert_eq!(
                 font_presentation_route(text, &mut font_system),
                 PresentationRoute::TerminalText
@@ -1921,6 +2041,7 @@ mod tests {
                 "{text} must bypass font routing"
             );
         }
+        assert_eq!(cluster_width("⚠"), 1);
         assert_eq!(cluster_width("☆"), 1);
         assert_eq!(cluster_width("│"), 1);
     }
@@ -1952,10 +2073,10 @@ mod tests {
     #[test]
     fn color_emoji_uses_segoe_for_supported_clusters_and_noto_for_missing_clusters() {
         let mut font_system = terminal_font_system();
-        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
         let segoe_available = font_family_available(&font_system, SEGOE_COLOR_EMOJI_FONT_FAMILY);
         for (text, uses_segoe_when_available) in
-            [("👍🏽", true), ("☂️", true), ("🇺🇸", false), ("👨‍👩‍👧‍👦", false)]
+            [("👍🏽", true), ("☂️", true), ("🇺🇸", false), ("👨‍👩‍👧‍👦", true)]
         {
             let mut cell = CapturedCell::plain(text);
             cell.style.flags.insert(CellFlags::WIDE_CHAR);
@@ -1966,27 +2087,102 @@ mod tests {
                 .layout_runs()
                 .flat_map(|run| run.glyphs.iter())
                 .collect::<Vec<_>>();
-            assert_eq!(glyphs.len(), 1, "{text} must be one shaped glyph");
-            assert_ne!(glyphs[0].glyph_id, 0, "{text} must not be .notdef");
             let expected_family = if segoe_available && uses_segoe_when_available {
                 SEGOE_COLOR_EMOJI_FONT_FAMILY
             } else {
                 COLOR_EMOJI_FONT_FAMILY
             };
+            let expected_glyph_count = if text == "👨‍👩‍👧‍👦"
+                && expected_family == SEGOE_COLOR_EMOJI_FONT_FAMILY
+            {
+                4
+            } else {
+                1
+            };
             assert_eq!(
-                glyph_family(&font_system, glyphs[0]),
-                expected_family,
-                "{text} must follow the mixed color-emoji route"
+                glyphs.len(),
+                expected_glyph_count,
+                "{text} must keep the accepted cluster composition"
             );
-            assert_eq!(
-                raster_content(&mut font_system, &wide.buffer),
-                glyphon::SwashContent::Color,
-                "{text} must reach glyphon's color atlas"
+            assert!(
+                glyphs.iter().all(|glyph| {
+                    glyph.glyph_id != 0 && glyph_family(&font_system, glyph) == expected_family
+                }),
+                "{text} must use non-.notdef glyphs from the selected family"
             );
+            if expected_family == SEGOE_COLOR_EMOJI_FONT_FAMILY {
+                let mut swash_cache = SwashCache::new();
+                assert!(
+                    is_color_cluster_from_family_within_slot(
+                        &wide.buffer,
+                        &mut font_system,
+                        &mut swash_cache,
+                        expected_family,
+                        2.0 * metrics.cell_width_px,
+                        metrics.cell_height_px,
+                    ),
+                    "{text} Segoe composition must normalize into its double-cell slot"
+                );
+            } else {
+                assert_eq!(
+                    raster_content(&mut font_system, &wide.buffer),
+                    glyphon::SwashContent::Color,
+                    "{text} Noto fallback must remain on glyphon's color atlas"
+                );
+            }
             assert_eq!(
                 wide.buffer.monospace_width(),
                 Some(2.0 * metrics.cell_width_px)
             );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn default_text_emoji_uses_cell_height_size_centered_over_its_narrow_cell() {
+        let mut font_system = terminal_font_system();
+        for scale_factor in [1.0, 1.25, 1.5, 2.0] {
+            let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
+            let shaped =
+                shape_narrow_for_test(&[CapturedCell::plain("⚠")], &mut font_system, metrics);
+            assert_eq!(shaped.len(), 1);
+            let glyphs = shaped[0]
+                .buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .collect::<Vec<_>>();
+            assert_eq!(glyphs.len(), 1, "⚠ must shape as one glyph");
+            assert_ne!(glyphs[0].glyph_id, 0, "⚠ must not be .notdef");
+            assert!(
+                [SEGOE_COLOR_EMOJI_FONT_FAMILY, COLOR_EMOJI_FONT_FAMILY]
+                    .contains(&glyph_family(&font_system, glyphs[0]).as_str()),
+                "⚠ must bypass monochrome primary-font coverage"
+            );
+            assert_eq!(
+                raster_content(&mut font_system, &shaped[0].buffer),
+                glyphon::SwashContent::Color,
+                "⚠ must reach glyphon's color atlas"
+            );
+            assert_eq!(glyphs[0].font_size, metrics.cell_height_px);
+            assert!(
+                occupied_width_px(&mut font_system, &shaped[0].buffer) > metrics.cell_width_px,
+                "scale {scale_factor}: ⚠ must retain square emoji size and may overhang one cell"
+            );
+            let mut swash_cache = SwashCache::new();
+            let [left, top, right, bottom] =
+                glyph_ink_bounds(&shaped[0].buffer, &mut font_system, &mut swash_cache).unwrap();
+            let centered_left = left + shaped[0].left_offset_px;
+            let centered_right = right + shaped[0].left_offset_px;
+            let centered_top = top + shaped[0].top_offset_px;
+            let centered_bottom = bottom + shaped[0].top_offset_px;
+            assert!(
+                ((centered_left + centered_right) / 2.0 - metrics.cell_width_px / 2.0).abs() <= 0.5
+            );
+            assert!(
+                ((centered_top + centered_bottom) / 2.0 - metrics.cell_height_px / 2.0).abs()
+                    <= 0.5
+            );
+            assert!(centered_top >= -0.5 && centered_bottom <= metrics.cell_height_px + 0.5);
         }
     }
 
@@ -2085,16 +2281,20 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn vs15_and_ambiguous_symbols_stay_monochrome_and_inside_narrow_cells() {
+    fn vs15_and_non_emoji_symbols_stay_monochrome_and_inside_narrow_cells() {
         let mut font_system = terminal_font_system();
         for scale_factor in [1.0, 1.25, 1.5, 2.0] {
             let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
             let glyphs = shape_narrow_for_test(
-                &[CapturedCell::plain("☂︎"), CapturedCell::plain("☆")],
+                &[
+                    CapturedCell::plain("☂︎"),
+                    CapturedCell::plain("⚠︎"),
+                    CapturedCell::plain("☆"),
+                ],
                 &mut font_system,
                 metrics,
             );
-            assert_eq!(glyphs.len(), 2);
+            assert_eq!(glyphs.len(), 3);
             for glyph in &glyphs {
                 let layout = first_layout_glyph(&glyph.buffer);
                 assert_ne!(layout.glyph_id, 0);
@@ -2110,7 +2310,7 @@ mod tests {
                 );
             }
 
-            let star = first_layout_glyph(&glyphs[1].buffer);
+            let star = first_layout_glyph(&glyphs[2].buffer);
             assert!(
                 star.font_size < metrics.font_size_px,
                 "scale {scale_factor}: fallback star must be em-normalized"
@@ -2278,13 +2478,80 @@ mod tests {
     }
 
     #[test]
-    fn surface_clear_is_exactly_the_default_cell_background() {
+    fn campbell_defaults_and_explicit_ansi_palette_keep_distinct_color_paths() {
+        assert_eq!(default_background(), [0x0c, 0x0c, 0x0c]);
+        assert_eq!(default_foreground(), [0xcc, 0xcc, 0xcc]);
+        assert_eq!(DEFAULT_CURSOR_RGB, [0xff, 0xff, 0xff]);
+        assert_eq!(
+            terminal_color(TerminalColor::Named(18), true),
+            DEFAULT_CURSOR_RGB,
+            "the cursor quad and cursor named color share Campbell white"
+        );
+        assert_eq!(
+            ANSI_16_RGB,
+            [
+                [0x0c, 0x0c, 0x0c],
+                [0xc5, 0x0f, 0x1f],
+                [0x13, 0xa1, 0x0e],
+                [0xc1, 0x9c, 0x00],
+                [0x00, 0x37, 0xda],
+                [0x88, 0x17, 0x98],
+                [0x3a, 0x96, 0xdd],
+                [0xcc, 0xcc, 0xcc],
+                [0x76, 0x76, 0x76],
+                [0xe7, 0x48, 0x56],
+                [0x16, 0xc6, 0x0c],
+                [0xf9, 0xf1, 0xa5],
+                [0x3b, 0x78, 0xff],
+                [0xb4, 0x00, 0x9e],
+                [0x61, 0xd6, 0xd6],
+                [0xf2, 0xf2, 0xf2],
+            ]
+        );
+        for (index, expected) in ANSI_16_RGB.into_iter().enumerate() {
+            assert_eq!(indexed_color(index as u8), expected);
+        }
+
+        assert_eq!(
+            terminal_color(TerminalColor::Named(16), true),
+            default_foreground(),
+            "SGR 39/default foreground must resolve through the theme default"
+        );
+        assert_eq!(
+            terminal_color(TerminalColor::Named(17), false),
+            default_background(),
+            "SGR 49/default background must resolve through the theme default"
+        );
+        assert_eq!(
+            terminal_color(TerminalColor::Named(0), true),
+            ANSI_16_RGB[0],
+            "explicit ANSI black must resolve through palette slot 0"
+        );
+        assert_eq!(
+            terminal_color(TerminalColor::Indexed(15), true),
+            ANSI_16_RGB[15],
+            "indexed ANSI bright white must resolve through palette slot 15"
+        );
+    }
+
+    #[test]
+    fn srgb_theme_colors_are_linearized_at_clear_and_rect_upload_boundaries() {
         let clear = theme_clear_color();
-        let [r, g, b] = default_background();
-        assert_eq!(clear.r, f64::from(r) / 255.0);
-        assert_eq!(clear.g, f64::from(g) / 255.0);
-        assert_eq!(clear.b, f64::from(b) / 255.0);
+        let expected = 0.003_676_507_324_047_436;
+        assert!((srgb_channel_to_linear(12) - expected).abs() < f64::EPSILON);
+        assert_eq!([clear.r, clear.g, clear.b], [expected; 3]);
         assert_eq!(clear.a, 1.0);
+
+        let rect = rect_gpu_color(default_background());
+        assert_eq!(
+            rect,
+            [expected as f32, expected as f32, expected as f32, 1.0]
+        );
+        assert_ne!(
+            rect[0],
+            12.0 / 255.0,
+            "sRGB bytes must never be uploaded to an sRGB surface as linear channels"
+        );
     }
 
     #[test]
