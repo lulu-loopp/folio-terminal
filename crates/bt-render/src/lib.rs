@@ -50,6 +50,8 @@ pub struct CellMetrics {
     pub scale_factor: f64,
     ascii_baseline_px: f32,
     primary_advance_px: f32,
+    primary_cap_height_px: f32,
+    primary_cap_center_y_px: f32,
 }
 
 impl CellMetrics {
@@ -61,7 +63,9 @@ impl CellMetrics {
         buffer.set_wrap(Wrap::None);
         buffer.set_size(None, None);
         buffer.set_text(
-            "M",
+            // `H` supplies both the monospace advance and the current-size cap-height ink box.
+            // Measuring the actual Consolas raster keeps symbol sizing coordinated at every DPI.
+            "H",
             &Attrs::new().family(Family::Monospace),
             Shaping::Advanced,
             None,
@@ -77,6 +81,9 @@ impl CellMetrics {
             .map(|run| run.line_y)
             .ok_or(RenderError::MissingMonospaceMetrics)?;
         let primary_advance_px = line.w.max(1.0);
+        let [_, cap_top, _, cap_bottom] =
+            glyph_ink_bounds(&buffer, font_system, &mut SwashCache::new())
+                .ok_or(RenderError::MissingMonospaceMetrics)?;
         Ok(Self {
             cell_width_px: primary_advance_px.ceil(),
             cell_height_px: cell_height_px.ceil(),
@@ -85,6 +92,8 @@ impl CellMetrics {
             scale_factor,
             ascii_baseline_px,
             primary_advance_px,
+            primary_cap_height_px: (cap_bottom - cap_top).max(1.0),
+            primary_cap_center_y_px: (cap_top + cap_bottom) / 2.0,
         })
     }
 
@@ -474,23 +483,23 @@ impl NarrowShapingCache {
                     baseline_offset_px(metrics.ascii_baseline_px, glyph_baseline_px),
                 )
             }
-            NarrowSizePolicy::FitCell => {
-                let em_scale = cell_fitted_symbol_em_scale(
+            NarrowSizePolicy::TextCoordinated => {
+                let em_scale = text_coordinated_symbol_em_scale(
                     &buffer,
                     font_system,
                     swash_cache,
                     metrics.cell_width_px,
-                    metrics.cell_height_px,
+                    metrics.primary_cap_height_px,
                 );
                 if (em_scale - 1.0).abs() > f32::EPSILON {
                     buffer = shape_narrow_buffer(&key, font_system, metrics, em_scale, family);
                 }
-                center_ink_offsets(
+                align_ink_offsets(
                     &buffer,
                     font_system,
                     swash_cache,
                     metrics.cell_width_px,
-                    metrics.cell_height_px,
+                    metrics.primary_cap_center_y_px,
                 )
             }
             NarrowSizePolicy::CellHeightEmoji => center_ink_offsets(
@@ -1105,7 +1114,14 @@ impl Renderer {
             };
             let (foreground, _) = resolve_colors(&cell.style);
             rects.extend(geometry.into_iter().map(|rect| {
-                self.pixel_rect(rect.left, rect.top, rect.right, rect.bottom, foreground)
+                self.pixel_rect_with_coverage(
+                    rect.left,
+                    rect.top,
+                    rect.right,
+                    rect.bottom,
+                    foreground,
+                    rect.coverage,
+                )
             }));
         }
         for (index, cell) in frame.cells.iter().enumerate() {
@@ -1156,6 +1172,19 @@ impl Renderer {
         bottom: f32,
         color: [u8; 3],
     ) -> RectInstance {
+        self.pixel_rect_with_coverage(left, top, right, bottom, color, 1.0)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn pixel_rect_with_coverage(
+        &self,
+        left: f32,
+        top: f32,
+        right: f32,
+        bottom: f32,
+        color: [u8; 3],
+        coverage: f32,
+    ) -> RectInstance {
         let width = self.config.width.max(1) as f32;
         let height = self.config.height.max(1) as f32;
         RectInstance {
@@ -1165,7 +1194,7 @@ impl Renderer {
                 right / width * 2.0 - 1.0,
                 1.0 - bottom / height * 2.0,
             ],
-            color: rect_gpu_color(color),
+            color: rect_gpu_color_with_coverage(color, coverage),
         }
     }
 }
@@ -1331,8 +1360,8 @@ fn shape_narrow_buffer_for_key(
             (
                 shape_narrow_buffer(key, font_system, metrics, 1.0, family),
                 family,
-                if key.text.chars().any(is_cell_fitted_text_symbol) {
-                    NarrowSizePolicy::FitCell
+                if key.text.chars().any(is_text_coordinated_symbol) {
+                    NarrowSizePolicy::TextCoordinated
                 } else {
                     NarrowSizePolicy::StrictCell
                 },
@@ -1383,7 +1412,7 @@ fn shape_narrow_buffer_for_key(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum NarrowSizePolicy {
     StrictCell,
-    FitCell,
+    TextCoordinated,
     CellHeightEmoji,
 }
 
@@ -1431,12 +1460,12 @@ fn narrow_fallback_em_scale(
     (target_width / occupied_width).min(1.0)
 }
 
-fn cell_fitted_symbol_em_scale(
+fn text_coordinated_symbol_em_scale(
     buffer: &Buffer,
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     cell_width_px: f32,
-    cell_height_px: f32,
+    cap_height_px: f32,
 ) -> f32 {
     let Some([left, top, right, bottom]) = glyph_ink_bounds(buffer, font_system, swash_cache)
     else {
@@ -1447,7 +1476,7 @@ fn cell_fitted_symbol_em_scale(
     if ink_width <= 0.0 || ink_height <= 0.0 {
         return 1.0;
     }
-    (cell_width_px / ink_width).min(cell_height_px / ink_height)
+    (cell_width_px / ink_width).min(cap_height_px / ink_height)
 }
 
 fn glyph_ink_bounds(
@@ -1493,6 +1522,23 @@ fn center_ink_offsets(
     (
         (slot_width_px - (right - left)) / 2.0 - left,
         (slot_height_px - (bottom - top)) / 2.0 - top,
+    )
+}
+
+fn align_ink_offsets(
+    buffer: &Buffer,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    slot_width_px: f32,
+    target_center_y_px: f32,
+) -> (f32, f32) {
+    let Some([left, top, right, bottom]) = glyph_ink_bounds(buffer, font_system, swash_cache)
+    else {
+        return (0.0, 0.0);
+    };
+    (
+        (slot_width_px - (right - left)) / 2.0 - left,
+        target_center_y_px - (top + bottom) / 2.0,
     )
 }
 
@@ -1679,9 +1725,10 @@ fn font_presentation_route(text: &str, font_system: &mut FontSystem) -> Presenta
         return route;
     }
 
-    // Keep bare media controls and geometric shapes on a stable monochrome face so their cell-fit
-    // policy does not depend on primary-font coverage. An explicit VS16 above still requests color.
-    if text.chars().any(is_cell_fitted_text_symbol) {
+    // Keep bare media controls and geometric shapes on a stable monochrome face so their
+    // text-coordinated size policy does not depend on primary-font coverage. An explicit VS16
+    // above still requests color.
+    if text.chars().any(is_text_coordinated_symbol) {
         return PresentationRoute::TextSymbol;
     }
 
@@ -1731,7 +1778,7 @@ fn is_text_symbol(character: char) -> bool {
     matches!(character, '\u{2190}'..='\u{2bff}')
 }
 
-fn is_cell_fitted_text_symbol(character: char) -> bool {
+fn is_text_coordinated_symbol(character: char) -> bool {
     matches!(character, '\u{23ef}'..='\u{23fa}' | '\u{25a0}'..='\u{25ff}')
 }
 
@@ -1829,9 +1876,14 @@ fn theme_clear_color() -> wgpu::Color {
     wgpu::Color { r, g, b, a: 1.0 }
 }
 
+#[cfg(test)]
 fn rect_gpu_color(color: [u8; 3]) -> [f32; 4] {
+    rect_gpu_color_with_coverage(color, 1.0)
+}
+
+fn rect_gpu_color_with_coverage(color: [u8; 3], coverage: f32) -> [f32; 4] {
     let [r, g, b] = srgb_rgb_to_linear(color);
-    [r as f32, g as f32, b as f32, 1.0]
+    [r as f32, g as f32, b as f32, coverage.clamp(0.0, 1.0)]
 }
 
 fn srgb_rgb_to_linear([r, g, b]: [u8; 3]) -> [f64; 3] {
@@ -1889,7 +1941,9 @@ fn create_rect_pipeline(
             entry_point: Some("fragment"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::REPLACE),
+                // Only rounded-corner edge instances use fractional alpha. Backgrounds, cursors,
+                // straight box lines, blocks, and underlines retain alpha=1 and stay pixel-sharp.
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
@@ -2368,7 +2422,9 @@ mod tests {
                 star.font_size < metrics.font_size_px,
                 "scale {scale_factor}: fallback star must be em-normalized"
             );
-            assert!(!is_cell_fitted_text_symbol('☆'));
+            for character in ['☆', '·', '•'] {
+                assert!(!is_text_coordinated_symbol(character));
+            }
 
             assert!(procedural::supports_text("│"));
         }
@@ -2376,7 +2432,7 @@ mod tests {
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn pinned_media_and_geometric_symbols_fit_and_center_in_one_cell() {
+    fn pinned_media_and_geometric_symbols_match_primary_cap_height_and_center() {
         let mut font_system = terminal_font_system();
         for scale_factor in [1.0, 1.25, 1.5, 2.0] {
             let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
@@ -2397,19 +2453,18 @@ mod tests {
                 let ink_width = right - left;
                 let ink_height = bottom - top;
                 assert!(
-                    ink_width >= 0.8 * metrics.cell_width_px
-                        || ink_height >= 0.8 * metrics.cell_height_px,
-                    "scale {scale_factor}: {text} ink must visibly fill its cell"
+                    (ink_height - metrics.primary_cap_height_px).abs() <= 1.0,
+                    "scale {scale_factor}: {text} ink height {ink_height} must match primary cap height {}",
+                    metrics.primary_cap_height_px
                 );
                 assert!(
-                    ink_width <= metrics.cell_width_px + 1.0
-                        && ink_height <= metrics.cell_height_px + 1.0,
-                    "scale {scale_factor}: {text} ink must remain inside one cell"
+                    ink_width <= metrics.cell_width_px + 1.0,
+                    "scale {scale_factor}: {text} ink width {ink_width} must remain inside one cell"
                 );
                 let centered_x = (left + right) / 2.0 + glyph.left_offset_px;
                 let centered_y = (top + bottom) / 2.0 + glyph.top_offset_px;
                 assert!((centered_x - metrics.cell_width_px / 2.0).abs() <= 0.5);
-                assert!((centered_y - metrics.cell_height_px / 2.0).abs() <= 0.5);
+                assert!((centered_y - metrics.primary_cap_center_y_px).abs() <= 0.5);
             }
         }
     }
@@ -2471,6 +2526,8 @@ mod tests {
             scale_factor: 1.0,
             ascii_baseline_px: 16.0,
             primary_advance_px: 10.0,
+            primary_cap_height_px: 12.0,
+            primary_cap_center_y_px: 10.0,
         };
         assert_eq!(
             metrics.grid_for_pixels(810, 490),
@@ -2646,6 +2703,16 @@ mod tests {
             12.0 / 255.0,
             "sRGB bytes must never be uploaded to an sRGB surface as linear channels"
         );
+
+        let antialiased = rect_gpu_color_with_coverage([0x80, 0x40, 0x20], 0.375);
+        assert_eq!(antialiased[3], 0.375);
+        assert_eq!(
+            &antialiased[..3],
+            &srgb_rgb_to_linear([0x80, 0x40, 0x20]).map(|channel| channel as f32),
+            "coverage belongs in straight alpha and must not premultiply linear RGB"
+        );
+        assert_eq!(rect_gpu_color_with_coverage([0, 0, 0], -1.0)[3], 0.0);
+        assert_eq!(rect_gpu_color_with_coverage([0, 0, 0], 2.0)[3], 1.0);
     }
 
     #[test]
@@ -3152,6 +3219,8 @@ mod tests {
             scale_factor: 1.0,
             ascii_baseline_px: 16.0,
             primary_advance_px: 10.0,
+            primary_cap_height_px: 12.0,
+            primary_cap_center_y_px: 10.0,
         };
         assert_eq!(cell_bounds_px(metrics, 0, 0), [8.0, 8.0, 18.0, 28.0]);
         assert_eq!(cell_bounds_px(metrics, 3, 7), [78.0, 68.0, 88.0, 88.0]);

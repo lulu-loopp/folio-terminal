@@ -6,6 +6,7 @@ pub(crate) struct PixelRect {
     pub(crate) top: f32,
     pub(crate) right: f32,
     pub(crate) bottom: f32,
+    pub(crate) coverage: f32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -131,6 +132,7 @@ pub(crate) fn geometry(
                 top: rect.top + top,
                 right: rect.right + left,
                 bottom: rect.bottom + top,
+                coverage: rect.coverage,
             })
             .collect(),
     )
@@ -173,6 +175,7 @@ fn line_geometry(
                 top: top as f32,
                 right: width as f32,
                 bottom: bottom as f32,
+                coverage: 1.0,
             })
             .collect();
     }
@@ -188,6 +191,7 @@ fn line_geometry(
                 top: 0.0,
                 right: right as f32,
                 bottom: height as f32,
+                coverage: 1.0,
             })
             .collect();
     }
@@ -356,10 +360,10 @@ fn rounded_geometry(shape: LineShape, width: i32, height: i32, thickness: i32) -
     // the curve bulge toward the cell's outside corner instead of looking bitten inward.
     let arc_center_x = center_x + x_direction * radius;
     let arc_center_y = center_y + y_direction * radius;
-    let points = quarter_arc_points(arc_center_x, arc_center_y, radius, x_direction, y_direction);
-    let mut rects = Vec::with_capacity(points.len() + 2);
+    let horizontal_endpoint = (arc_center_x, arc_center_y - y_direction * radius);
+    let vertical_endpoint = (arc_center_x - x_direction * radius, arc_center_y);
+    let mut rects = Vec::new();
 
-    let horizontal_endpoint = points[0];
     let (horizontal_left, horizontal_right) = if x_direction > 0.0 {
         (horizontal_endpoint.0 - half, width as f32)
     } else {
@@ -375,7 +379,6 @@ fn rounded_geometry(shape: LineShape, width: i32, height: i32, thickness: i32) -
         height,
     );
 
-    let vertical_endpoint = *points.last().expect("rounded arc has endpoints");
     let (vertical_top, vertical_bottom) = if y_direction > 0.0 {
         (vertical_endpoint.1 - half, height as f32)
     } else {
@@ -391,40 +394,98 @@ fn rounded_geometry(shape: LineShape, width: i32, height: i32, thickness: i32) -
         height,
     );
 
-    for segment in points.windows(2) {
-        let [(x0, y0), (x1, y1)] = segment else {
-            unreachable!("windows(2) always contains two arc samples");
-        };
-        push_clipped_rect(
-            &mut rects,
-            x0.min(*x1) - half,
-            y0.min(*y1) - half,
-            x0.max(*x1) + half,
-            y0.max(*y1) + half,
-            width,
-            height,
-        );
-    }
+    rasterize_quarter_arc(
+        &mut rects,
+        arc_center_x,
+        arc_center_y,
+        radius,
+        half,
+        x_direction,
+        y_direction,
+        width,
+        height,
+    );
     rects
 }
 
-fn quarter_arc_points(
+#[allow(clippy::too_many_arguments)]
+fn rasterize_quarter_arc(
+    rects: &mut Vec<PixelRect>,
     arc_center_x: f32,
     arc_center_y: f32,
     radius: f32,
+    half_thickness: f32,
     x_direction: f32,
     y_direction: f32,
-) -> Vec<(f32, f32)> {
-    let sample_count = (std::f32::consts::FRAC_PI_2 * radius * 2.0).ceil().max(4.0) as usize;
-    (0..=sample_count)
-        .map(|sample| {
-            let angle = sample as f32 / sample_count as f32 * std::f32::consts::FRAC_PI_2;
-            (
-                arc_center_x - x_direction * radius * angle.sin(),
-                arc_center_y - y_direction * radius * angle.cos(),
-            )
-        })
-        .collect()
+    width: i32,
+    height: i32,
+) {
+    let outer_radius = radius + half_thickness;
+    let inner_radius = (radius - half_thickness).max(0.0);
+    // Integrate each physical pixel's exact overlap with the quarter-annulus. Unlike tessellated
+    // opaque quads, fractional edge coverage smooths both circular boundaries without changing
+    // the sharp, integer-aligned arm rectangles.
+    for y in 0..height {
+        for x in 0..width {
+            let (u0, u1) = directed_interval(x as f32, (x + 1) as f32, arc_center_x, x_direction);
+            let (v0, v1) = directed_interval(y as f32, (y + 1) as f32, arc_center_y, y_direction);
+            let u0 = u0.max(0.0);
+            let v0 = v0.max(0.0);
+            if u1 <= u0 || v1 <= v0 {
+                continue;
+            }
+            let coverage = (circle_rect_area(outer_radius, u0, u1, v0, v1)
+                - circle_rect_area(inner_radius, u0, u1, v0, v1))
+            .clamp(0.0, 1.0);
+            if coverage > 0.0 {
+                rects.push(PixelRect {
+                    left: x as f32,
+                    top: y as f32,
+                    right: (x + 1) as f32,
+                    bottom: (y + 1) as f32,
+                    coverage,
+                });
+            }
+        }
+    }
+}
+
+fn directed_interval(start: f32, end: f32, center: f32, direction: f32) -> (f32, f32) {
+    let first = direction * (center - start);
+    let second = direction * (center - end);
+    (first.min(second), first.max(second))
+}
+
+fn circle_rect_area(radius: f32, u0: f32, u1: f32, v0: f32, v1: f32) -> f32 {
+    if radius <= 0.0 || u1 <= u0 || v1 <= v0 || u0 >= radius || v0 >= radius {
+        return 0.0;
+    }
+
+    let full_until = circle_extent(radius, u1);
+    let partial_until = circle_extent(radius, u0);
+    let full_end = v1.min(full_until);
+    let full_area = (u1 - u0) * (full_end - v0).max(0.0);
+    let partial_start = v0.max(full_until);
+    let partial_end = v1.min(partial_until);
+    if partial_end <= partial_start {
+        return full_area;
+    }
+
+    full_area + circle_segment_primitive(radius, partial_end)
+        - circle_segment_primitive(radius, partial_start)
+        - u0 * (partial_end - partial_start)
+}
+
+fn circle_extent(radius: f32, coordinate: f32) -> f32 {
+    (radius.mul_add(radius, -(coordinate * coordinate)))
+        .max(0.0)
+        .sqrt()
+}
+
+fn circle_segment_primitive(radius: f32, coordinate: f32) -> f32 {
+    let coordinate = coordinate.clamp(0.0, radius);
+    let extent = circle_extent(radius, coordinate);
+    0.5 * (coordinate * extent + radius * radius * (coordinate / radius).asin())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -449,6 +510,7 @@ fn push_clipped_rect(
         top,
         right,
         bottom,
+        coverage: 1.0,
     });
 }
 
@@ -556,6 +618,7 @@ fn push_rect(rects: &mut Vec<PixelRect>, left: i32, top: i32, right: i32, bottom
         top: top as f32,
         right: right as f32,
         bottom: bottom as f32,
+        coverage: 1.0,
     });
 }
 
@@ -647,7 +710,8 @@ mod tests {
                 left: 0.0,
                 top: 9.0,
                 right: 10.0,
-                bottom: 10.0
+                bottom: 10.0,
+                coverage: 1.0,
             }]
         );
         assert_eq!(
@@ -656,7 +720,8 @@ mod tests {
                 left: 4.0,
                 top: 0.0,
                 right: 5.0,
-                bottom: 20.0
+                bottom: 20.0,
+                coverage: 1.0,
             }]
         );
         assert_eq!(
@@ -665,7 +730,8 @@ mod tests {
                 left: 0.0,
                 top: 0.0,
                 right: 10.0,
-                bottom: 20.0
+                bottom: 20.0,
+                coverage: 1.0,
             }]
         );
         assert_eq!(
@@ -674,7 +740,8 @@ mod tests {
                 left: 0.0,
                 top: 0.0,
                 right: 10.0,
-                bottom: 10.0
+                bottom: 10.0,
+                coverage: 1.0,
             }]
         );
         assert_eq!(
@@ -683,7 +750,8 @@ mod tests {
                 left: 0.0,
                 top: 10.0,
                 right: 10.0,
-                bottom: 20.0
+                bottom: 20.0,
+                coverage: 1.0,
             }]
         );
         assert_eq!(
@@ -692,7 +760,8 @@ mod tests {
                 left: 0.0,
                 top: 0.0,
                 right: 5.0,
-                bottom: 20.0
+                bottom: 20.0,
+                coverage: 1.0,
             }]
         );
         assert_eq!(
@@ -701,7 +770,8 @@ mod tests {
                 left: 5.0,
                 top: 0.0,
                 right: 10.0,
-                bottom: 20.0
+                bottom: 20.0,
+                coverage: 1.0,
             }]
         );
     }
@@ -753,21 +823,53 @@ mod tests {
     }
 
     #[test]
-    fn rounded_corner_samples_a_dpi_scaled_quarter_circle() {
-        for radius in [4.0_f32, 7.0] {
-            let points = quarter_arc_points(8.0, 12.0, radius, 1.0, 1.0);
-            assert_eq!(points.first().copied(), Some((8.0, 12.0 - radius)));
-            let last = points.last().copied().unwrap();
-            assert!((last.0 - (8.0 - radius)).abs() < 0.0001);
-            assert!((last.1 - 12.0).abs() < 0.0001);
-            for (x, y) in points {
-                let measured_radius = ((x - 8.0).powi(2) + (y - 12.0).powi(2)).sqrt();
-                assert!((measured_radius - radius).abs() < 0.0001);
+    fn rounded_corner_rasterizes_fractional_one_pixel_coverage() {
+        for scale in [1.5, 2.0] {
+            let rects = local('╭', 20.0 * scale, 30.0 * scale, scale);
+            let edge_pixels = rects
+                .iter()
+                .filter(|rect| rect.coverage > 0.0 && rect.coverage < 1.0)
+                .collect::<Vec<_>>();
+            assert!(
+                !edge_pixels.is_empty(),
+                "scale {scale}: rounded edge must contain fractional coverage"
+            );
+            for rect in edge_pixels {
+                assert_eq!(rect.right - rect.left, 1.0);
+                assert_eq!(rect.bottom - rect.top, 1.0);
+                assert_eq!(rect.left.fract(), 0.0);
+                assert_eq!(rect.top.fract(), 0.0);
             }
+            assert!(
+                rects.iter().any(|rect| rect.coverage == 1.0),
+                "scale {scale}: the corner arms and arc interior must remain opaque"
+            );
         }
+    }
+
+    #[test]
+    fn quarter_annulus_coverage_matches_its_analytic_area() {
+        let mut arc = Vec::new();
+        let radius = 4.0;
+        let half_thickness = 0.5;
+        rasterize_quarter_arc(
+            &mut arc,
+            9.0,
+            14.0,
+            radius,
+            half_thickness,
+            1.0,
+            1.0,
+            10,
+            20,
+        );
+        let measured = arc.iter().map(|rect| rect.coverage).sum::<f32>();
+        let outer = radius + half_thickness;
+        let inner = radius - half_thickness;
+        let expected = std::f32::consts::FRAC_PI_4 * (outer * outer - inner * inner);
         assert!(
-            quarter_arc_points(0.0, 0.0, 7.0, 1.0, 1.0).len()
-                > quarter_arc_points(0.0, 0.0, 4.0, 1.0, 1.0).len()
+            (measured - expected).abs() < 0.0001,
+            "{measured} != {expected}"
         );
     }
 
@@ -785,17 +887,38 @@ mod tests {
                 cell_center.0 + x_direction * radius,
                 cell_center.1 + y_direction * radius,
             );
-            let points =
-                quarter_arc_points(arc_center.0, arc_center.1, radius, x_direction, y_direction);
-            let arc_midpoint = points[points.len() / 2];
-            let first = points[0];
-            let last = *points.last().unwrap();
-            let chord_midpoint = ((first.0 + last.0) / 2.0, (first.1 + last.1) / 2.0);
+            let mut arc = Vec::new();
+            rasterize_quarter_arc(
+                &mut arc,
+                arc_center.0,
+                arc_center.1,
+                radius,
+                0.5,
+                x_direction,
+                y_direction,
+                10,
+                20,
+            );
+            let total_coverage = arc.iter().map(|rect| rect.coverage).sum::<f32>();
+            let arc_center_of_mass = arc.iter().fold((0.0, 0.0), |sum, rect| {
+                (
+                    sum.0 + (rect.left + 0.5) * rect.coverage,
+                    sum.1 + (rect.top + 0.5) * rect.coverage,
+                )
+            });
+            let arc_center_of_mass = (
+                arc_center_of_mass.0 / total_coverage,
+                arc_center_of_mass.1 / total_coverage,
+            );
+            let chord_midpoint = (
+                arc_center.0 - x_direction * radius / 2.0,
+                arc_center.1 - y_direction * radius / 2.0,
+            );
             let distance_to_outside = |point: (f32, f32)| {
                 ((point.0 - outside_corner.0).powi(2) + (point.1 - outside_corner.1).powi(2)).sqrt()
             };
             assert!(
-                distance_to_outside(arc_midpoint) < distance_to_outside(chord_midpoint),
+                distance_to_outside(arc_center_of_mass) < distance_to_outside(chord_midpoint),
                 "{corner} must bulge toward its outside corner"
             );
         }
@@ -809,7 +932,8 @@ mod tests {
                 left: 0.0,
                 top: 9.0,
                 right: 10.0,
-                bottom: 11.0
+                bottom: 11.0,
+                coverage: 1.0,
             }]
         );
     }
