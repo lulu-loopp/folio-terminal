@@ -125,7 +125,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                 _ => {
                     reversed.push(row);
                     continue;
-                },
+                }
             };
 
             // Remove wrap flag before appending additional cells.
@@ -136,7 +136,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
             // Remove leading spacers when reflowing wide char to the previous line.
             let mut last_len = last_row.len();
             if last_len >= 1
-                && last_row[Column(last_len - 1)].flags().contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                && last_row[Column(last_len - 1)]
+                    .flags()
+                    .contains(Flags::LEADING_WIDE_CHAR_SPACER)
             {
                 last_row.shrink(last_len - 1);
                 last_len -= 1;
@@ -283,7 +285,7 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
                             new_raw.push(row);
                             break;
                         }
-                    },
+                    }
                 };
 
                 // Insert spacer if a wide char would be wrapped into the last column.
@@ -299,7 +301,11 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
 
                 // Remove wide char spacer before shrinking.
                 let len = wrapped.len();
-                if len > 0 && wrapped[len - 1].flags().contains(Flags::LEADING_WIDE_CHAR_SPACER) {
+                if len > 0
+                    && wrapped[len - 1]
+                        .flags()
+                        .contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                {
                     if len == 1 {
                         row[Column(columns - 1)].flags_mut().insert(Flags::WRAPLINE);
                         new_raw.push(row);
@@ -375,7 +381,9 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         if !reflow {
             self.cursor.point.column = min(self.cursor.point.column, Column(columns - 1));
         } else if self.cursor.point.column == columns
-            && !self[self.cursor.point.line][Column(columns - 1)].flags().contains(Flags::WRAPLINE)
+            && !self[self.cursor.point.line][Column(columns - 1)]
+                .flags()
+                .contains(Flags::WRAPLINE)
         {
             self.cursor.input_needs_wrap = true;
             self.cursor.point.column -= 1;

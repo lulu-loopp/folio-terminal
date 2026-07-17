@@ -17,6 +17,7 @@ version = "0.26.0"
 dependencies = [
  "base64",
  "bitflags 2.13.0",
+ "bt-unicode",
  "home",
  "libc",
  "log",
@@ -173,6 +174,7 @@ dependencies = [
  "anyhow",
  "bt-term",
  "portable-pty",
+ "serde_json",
  "thiserror 2.0.18",
  "vte",
 ]
@@ -204,6 +206,8 @@ dependencies = [
 name = "bt-pty"
 version = "0.0.0"
 dependencies = [
+ "bt-term",
+ "bt-transcript",
  "portable-pty",
  "thiserror 2.0.18",
 ]
@@ -214,11 +218,11 @@ version = "0.0.0"
 dependencies = [
  "bt-doc",
  "bt-transcript",
+ "bt-unicode",
  "bt-viewport",
  "bytemuck",
  "glyphon",
  "thiserror 2.0.18",
- "unicode-width",
  "wgpu",
 ]
 
@@ -240,6 +244,14 @@ version = "0.0.0"
 dependencies = [
  "bitflags 2.13.0",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "bt-unicode"
+version = "0.0.0"
+dependencies = [
+ "unicode-segmentation",
+ "unicode-width",
 ]
 
 [[package]]

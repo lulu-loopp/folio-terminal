@@ -1,5 +1,6 @@
 use std::{
     num::{NonZeroU32, NonZeroUsize},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -49,7 +50,7 @@ struct DpiSnapshot {
 
 struct Runtime {
     renderer: Renderer,
-    pty: PtySession,
+    pty: Option<PtySession>,
     session: DualPlaneSession,
     projection: ViewportProjection,
     pending_frames: LatestFrameSlot,
@@ -173,12 +174,19 @@ impl Runtime {
         let grid = renderer
             .metrics()
             .grid_for_pixels(physical.width, physical.height);
+        let probe_input = load_probe_input()?;
         let wake: OutputWake = Arc::new(move || {
             let _ = proxy.send_event(AppEvent::PtyOutput);
         });
         let phase_started = Instant::now();
-        let pty = PtySession::spawn_default(pty_size(grid, physical), wake)
-            .context("spawn default PowerShell in ConPTY")?;
+        let pty = if probe_input.is_none() {
+            Some(
+                PtySession::spawn_default(pty_size(grid, physical), wake)
+                    .context("spawn default PowerShell in ConPTY")?,
+            )
+        } else {
+            None
+        };
         let pty_time = phase_started.elapsed();
         let columns = nonzero_u32(grid.columns.get());
         let rows = nonzero_u32(grid.rows.get());
@@ -195,6 +203,11 @@ impl Runtime {
             font_rev: 1,
             theme_rev: 1,
         });
+        if let Some(bytes) = probe_input.as_deref() {
+            session
+                .feed(bytes)
+                .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
+        }
         let projection = session.new_projection(session.layout_key());
         let mut runtime = Self {
             renderer,
@@ -222,7 +235,7 @@ impl Runtime {
         if trace_startup {
             let renderer_phases = runtime.renderer.init_timings();
             eprintln!(
-                "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms runtime_ready={}ms",
+                "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} runtime_ready={}ms",
                 window_time.as_millis(),
                 renderer_phases.adapter.as_millis(),
                 renderer_phases.device.as_millis(),
@@ -232,6 +245,7 @@ impl Runtime {
                 renderer_phases.render_resources.as_millis(),
                 renderer_time.as_millis(),
                 pty_time.as_millis(),
+                probe_input.as_ref().map_or(0, Vec::len),
                 startup_started.elapsed().as_millis(),
             );
         }
@@ -304,9 +318,16 @@ impl Runtime {
     }
 
     fn drain_pty(&mut self) -> Result<()> {
+        if self.pty.is_none() {
+            return Ok(());
+        }
         let mut changed = false;
         loop {
-            let bytes = self.pty.read_output();
+            let bytes = self
+                .pty
+                .as_ref()
+                .expect("PTY mode checked above")
+                .read_output();
             if bytes.is_empty() {
                 break;
             }
@@ -314,6 +335,8 @@ impl Runtime {
             self.session.feed(&bytes).context("apply PTY output")?;
             for reply in self.session.take_pty_writes() {
                 self.pty
+                    .as_mut()
+                    .expect("PTY mode checked above")
                     .write(&reply)
                     .context("return terminal protocol reply to PTY")?;
             }
@@ -341,9 +364,10 @@ impl Runtime {
             return Ok(());
         };
         self.pending_keyboard_at = Some(Instant::now());
-        self.pty
-            .write(&bytes)
-            .context("write keyboard input to PTY")
+        match self.pty.as_mut() {
+            Some(pty) => pty.write(&bytes).context("write keyboard input to PTY"),
+            None => Ok(()),
+        }
     }
 
     fn ime_input(&mut self, event: Ime) -> Result<()> {
@@ -373,9 +397,10 @@ impl Runtime {
                 self.pending_keyboard_at = Some(Instant::now());
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
-                self.pty
-                    .write(&ime_commit_bytes(&text))
-                    .context("write IME UTF-8 commit to PTY")?;
+                if let Some(pty) = self.pty.as_mut() {
+                    pty.write(&ime_commit_bytes(&text))
+                        .context("write IME UTF-8 commit to PTY")?;
+                }
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Keyboard,
@@ -433,9 +458,10 @@ impl Runtime {
             return Ok(());
         }
         if next_grid != self.grid {
-            self.pty
-                .resize(pty_size(next_grid, physical))
-                .context("resize ConPTY")?;
+            if let Some(pty) = self.pty.as_ref() {
+                pty.resize(pty_size(next_grid, physical))
+                    .context("resize ConPTY")?;
+            }
             self.session
                 .resize(
                     nonzero_u32(next_grid.columns.get()),
@@ -493,9 +519,10 @@ impl Runtime {
                 .metrics()
                 .grid_for_pixels(physical.width, physical.height);
             if next_grid != self.grid {
-                self.pty
-                    .resize(pty_size(next_grid, physical))
-                    .context("resize ConPTY after authoritative DPI correction")?;
+                if let Some(pty) = self.pty.as_ref() {
+                    pty.resize(pty_size(next_grid, physical))
+                        .context("resize ConPTY after authoritative DPI correction")?;
+                }
                 self.session
                     .resize(
                         nonzero_u32(next_grid.columns.get()),
@@ -593,7 +620,9 @@ impl Runtime {
 
     fn shutdown(&mut self) -> Result<()> {
         self.ime_system_caret.destroy();
-        self.pty.shutdown().context("shut down child process")?;
+        if let Some(pty) = self.pty.as_mut() {
+            pty.shutdown().context("shut down child process")?;
+        }
         Ok(())
     }
 }
@@ -733,7 +762,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         };
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
-        match runtime.pty.try_wait() {
+        let Some(pty) = runtime.pty.as_mut() else {
+            return;
+        };
+        match pty.try_wait() {
             Ok(Some(_)) => {
                 if let Err(error) = runtime.drain_pty().and_then(|_| runtime.shutdown()) {
                     eprintln!("shell exit cleanup failed: {error:#}");
@@ -918,6 +950,16 @@ fn pty_size(grid: GridSize, physical: PhysicalSize<u32>) -> PtySize {
     }
 }
 
+fn load_probe_input() -> Result<Option<Vec<u8>>> {
+    let Some(path) = std::env::var_os("BT_PROBE_INPUT") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    std::fs::read(&path)
+        .with_context(|| format!("read BT_PROBE_INPUT {}", path.display()))
+        .map(Some)
+}
+
 fn main() -> Result<()> {
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
@@ -1083,6 +1125,54 @@ mod tests {
             PhysicalSize::new(100_000, 80_000),
         );
         assert_eq!((size.pixel_width, size.pixel_height), (u16::MAX, u16::MAX));
+    }
+
+    #[test]
+    fn direct_width_fixture_places_legacy_and_2027_closing_bars_on_their_rulers() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(80).unwrap(), NonZeroU32::new(24).unwrap());
+        session
+            .feed(include_bytes!("../../../scripts/dev/width-probe-input.vt"))
+            .unwrap();
+
+        let closing_bar = |row: u32, start: usize| {
+            session
+                .terminal()
+                .visible_row(row)
+                .unwrap()
+                .cells
+                .iter()
+                .enumerate()
+                .skip(start)
+                .filter(|(_, cell)| cell.text == "|")
+                .map(|(column, _)| column)
+                .nth(1)
+                .unwrap()
+        };
+        let rows = [2, 4, 6, 8, 10, 12, 14];
+        let legacy_widths = [8, 4, 2, 1, 7, 1, 1];
+        let mode_2027_widths = [2, 2, 2, 1, 7, 1, 2];
+        for ((row, legacy), clustered) in rows.into_iter().zip(legacy_widths).zip(mode_2027_widths)
+        {
+            assert_eq!(closing_bar(row, 0), 1 + legacy, "legacy content row {row}");
+            assert_eq!(
+                closing_bar(row + 1, 0),
+                1 + legacy,
+                "legacy ruler row {}",
+                row + 1
+            );
+            assert_eq!(
+                closing_bar(row, 40),
+                41 + clustered,
+                "2027 content row {row}"
+            );
+            assert_eq!(
+                closing_bar(row + 1, 40),
+                41 + clustered,
+                "2027 ruler row {}",
+                row + 1
+            );
+        }
     }
 
     #[test]

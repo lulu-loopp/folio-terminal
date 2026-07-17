@@ -1,20 +1,21 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
 use std::{
+    collections::HashMap,
     num::{NonZeroI64, NonZeroU16, NonZeroU32},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
+use bt_unicode::{cluster_width, graphemes};
 use bt_viewport::{SUBPIXELS_PER_PX, ViewportFrame};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
-    Attrs, AttrsOwned, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution,
-    Shaping, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
-    Wrap,
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
+    Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use thiserror::Error;
-use unicode_width::UnicodeWidthChar;
 use wgpu::util::DeviceExt;
 
 pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [9, 11, 14];
@@ -22,6 +23,7 @@ pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [9, 11, 14];
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
 const PADDING_LOGICAL_PX: f32 = 8.0;
+const NARROW_SHAPING_CACHE_CAPACITY: usize = 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CellMetrics {
@@ -30,7 +32,6 @@ pub struct CellMetrics {
     pub font_size_px: f32,
     pub padding_px: f32,
     pub scale_factor: f64,
-    glyph_advance_px: f32,
     ascii_baseline_px: f32,
 }
 
@@ -64,7 +65,6 @@ impl CellMetrics {
             font_size_px,
             padding_px: (PADDING_LOGICAL_PX * scale).ceil(),
             scale_factor,
-            glyph_advance_px: line.w.max(1.0),
             ascii_baseline_px,
         })
     }
@@ -126,9 +126,8 @@ pub struct ComposedFrame {
 
 /// Overlay IME preedit on a frame without mutating terminal state.
 ///
-/// The terminal grid remains the sole authority for committed cell width. Preedit is transient UI;
-/// this routine uses scalar width only to place its underline and caret and deliberately does not
-/// attempt grapheme clustering or ambiguous-width policy (both are M1 work).
+/// The terminal grid remains the sole authority for committed cell width. Preedit is transient UI,
+/// but it consumes the same grapheme width oracle so its caret does not jump when text commits.
 pub fn compose_preedit(frame: &ViewportFrame, preedit: Option<&Preedit>) -> ComposedFrame {
     let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty()) else {
         return ComposedFrame {
@@ -164,10 +163,6 @@ fn valid_cursor_byte(text: &str, requested: usize) -> usize {
     cursor
 }
 
-fn scalar_cell_width(character: char) -> usize {
-    UnicodeWidthChar::width(character).unwrap_or(0)
-}
-
 fn advance_grid_position(
     start: bt_viewport::GridCursor,
     text: &str,
@@ -176,8 +171,8 @@ fn advance_grid_position(
 ) -> bt_viewport::GridCursor {
     let mut row = start.row;
     let mut column = start.column;
-    for character in text.chars() {
-        let width = scalar_cell_width(character) as u32;
+    for cluster in graphemes(text) {
+        let width = cluster_width(cluster) as u32;
         if width == 0 {
             continue;
         }
@@ -210,11 +205,11 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
     let mut column = frame.cursor.column as usize;
     let mut previous_lead: Option<usize> = None;
 
-    for character in preedit.text.chars() {
-        let width = scalar_cell_width(character);
+    for cluster in graphemes(&preedit.text) {
+        let width = cluster_width(cluster);
         if width == 0 {
             if let Some(index) = previous_lead {
-                frame.cells[index].text.push(character);
+                frame.cells[index].text.push_str(cluster);
             }
             continue;
         }
@@ -227,7 +222,7 @@ fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
         }
 
         let index = row * columns + column;
-        let mut cell = CapturedCell::plain(character.to_string());
+        let mut cell = CapturedCell::plain(cluster.to_owned());
         cell.style.flags.insert(CellFlags::UNDERLINE);
         if width == 2 {
             cell.style.flags.insert(CellFlags::WIDE_CHAR);
@@ -345,20 +340,117 @@ struct RectInstance {
 
 struct TextRow {
     cells: Vec<CapturedCell>,
-    buffer: Buffer,
-    has_visible_text: bool,
+    narrow_glyphs: Vec<NarrowGlyph>,
     wide_glyphs: Vec<WideGlyph>,
-}
-
-struct StyledRun {
-    text: String,
-    attrs: AttrsOwned,
 }
 
 struct WideGlyph {
     column: usize,
     buffer: Buffer,
     top_offset_px: f32,
+}
+
+struct NarrowGlyph {
+    column: usize,
+    buffer: Arc<Buffer>,
+    top_offset_px: f32,
+    color: Color,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct NarrowShapeKey {
+    text: String,
+    bold: bool,
+    italic: bool,
+}
+
+struct CachedNarrowShape {
+    buffer: Arc<Buffer>,
+    top_offset_px: f32,
+    last_used: u64,
+}
+
+struct NarrowShapingCache {
+    entries: HashMap<NarrowShapeKey, CachedNarrowShape>,
+    access_clock: u64,
+}
+
+impl NarrowShapingCache {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            access_clock: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.access_clock = 0;
+    }
+
+    fn get_or_shape(
+        &mut self,
+        key: NarrowShapeKey,
+        font_system: &mut FontSystem,
+        metrics: CellMetrics,
+    ) -> (Arc<Buffer>, f32) {
+        self.access_clock = self.access_clock.saturating_add(1);
+        let last_used = self.access_clock;
+        if let Some(cached) = self.entries.get_mut(&key) {
+            cached.last_used = last_used;
+            return (Arc::clone(&cached.buffer), cached.top_offset_px);
+        }
+
+        if self.entries.len() >= NARROW_SHAPING_CACHE_CAPACITY
+            && let Some(lru_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(key, _)| key.clone())
+        {
+            self.entries.remove(&lru_key);
+        }
+
+        let mut buffer = Buffer::new(
+            font_system,
+            Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+        );
+        buffer.set_wrap(Wrap::None);
+        // A finite line width makes RTL scalars align within the cell-sized buffer, shifting the
+        // local pen away from zero. The TextArea owns the absolute grid origin and row clipping,
+        // so the shaping buffer itself must stay horizontally unbounded.
+        buffer.set_size(None, Some(metrics.cell_height_px));
+        buffer.set_monospace_width(None);
+        buffer.set_text(
+            &key.text,
+            &narrow_shape_attrs(&key),
+            Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(font_system, false);
+        let glyph_baseline_px = buffer
+            .layout_runs()
+            .next()
+            .map_or(metrics.ascii_baseline_px, |run| run.line_y);
+        let top_offset_px = baseline_offset_px(metrics.ascii_baseline_px, glyph_baseline_px);
+        let buffer = Arc::new(buffer);
+        self.entries.insert(
+            key,
+            CachedNarrowShape {
+                buffer: Arc::clone(&buffer),
+                top_offset_px,
+                last_used,
+            },
+        );
+        (buffer, top_offset_px)
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NarrowCellSlot {
+    column: usize,
+    text: String,
+    style: CellStyle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -417,6 +509,7 @@ pub struct Renderer {
     metrics: CellMetrics,
     init_timings: RendererInitTimings,
     text_rows: Vec<TextRow>,
+    narrow_shaping_cache: NarrowShapingCache,
     glyph_degraded_frames: u64,
 }
 
@@ -513,6 +606,7 @@ impl Renderer {
                 render_resources: render_resources_time,
             },
             text_rows: Vec::new(),
+            narrow_shaping_cache: NarrowShapingCache::new(),
             glyph_degraded_frames: 0,
         })
     }
@@ -548,6 +642,7 @@ impl Renderer {
     pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
         self.metrics = CellMetrics::measure(&mut self.font_system, scale_factor)?;
         self.text_rows.clear();
+        self.narrow_shaping_cache.clear();
         Ok(self.metrics)
     }
 
@@ -565,31 +660,33 @@ impl Renderer {
         );
         self.prepare_text_rows(frame);
         let padding = self.metrics.padding_px;
-        let cell_height = self.metrics.cell_height_px;
         let metrics = self.metrics;
         let text_right =
             (padding + frame.columns.get() as f32 * self.metrics.cell_width_px).ceil() as i32;
-        let row_text_areas = self
+        let narrow_text_areas = self
             .text_rows
             .iter()
             .enumerate()
-            .filter(|(_, row)| row.has_visible_text)
-            .map(|(index, row)| {
-                let [left, top, _, _] = cell_bounds_px(self.metrics, index, 0);
-                TextArea {
-                    buffer: &row.buffer,
-                    left,
-                    top,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: padding.floor() as i32,
-                        top: top.floor() as i32,
-                        right: text_right,
-                        bottom: (top + cell_height).ceil() as i32,
-                    },
-                    default_color: Color::rgb(218, 222, 230),
-                    custom_glyphs: &[],
-                }
+            .flat_map(|(row, text_row)| {
+                text_row.narrow_glyphs.iter().map(move |glyph| {
+                    let [left, top, _, bottom] = cell_bounds_px(metrics, row, glyph.column);
+                    TextArea {
+                        buffer: &glyph.buffer,
+                        left,
+                        top: top + glyph.top_offset_px,
+                        scale: 1.0,
+                        // Clip to the terminal row, not the cell. The grid owns pen origins, while
+                        // accents and fallback ink remain free to overhang adjacent cells.
+                        bounds: TextBounds {
+                            left: padding.floor() as i32,
+                            top: top.floor() as i32,
+                            right: text_right,
+                            bottom: bottom.ceil() as i32,
+                        },
+                        default_color: glyph.color,
+                        custom_glyphs: &[],
+                    }
+                })
             });
         let wide_text_areas = self
             .text_rows
@@ -620,7 +717,7 @@ impl Renderer {
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            row_text_areas.chain(wide_text_areas),
+            narrow_text_areas.chain(wide_text_areas),
             &mut self.swash_cache,
         ) {
             Ok(()) => true,
@@ -741,15 +838,9 @@ impl Renderer {
         let rows = frame.rows.get() as usize;
         let metrics = self.metrics;
         while self.text_rows.len() < rows {
-            let mut buffer = Buffer::new(
-                &mut self.font_system,
-                Metrics::new(metrics.font_size_px, metrics.cell_height_px),
-            );
-            buffer.set_wrap(Wrap::None);
             self.text_rows.push(TextRow {
                 cells: Vec::new(),
-                buffer,
-                has_visible_text: false,
+                narrow_glyphs: Vec::new(),
                 wide_glyphs: Vec::new(),
             });
         }
@@ -762,14 +853,11 @@ impl Renderer {
                 continue;
             }
 
-            let runs = styled_runs(cells, metrics);
-            row.has_visible_text = !runs.is_empty();
-            reshape_text_row(
-                &mut row.buffer,
+            row.narrow_glyphs = shape_narrow_glyphs(
+                cells,
                 &mut self.font_system,
-                &runs,
                 metrics,
-                columns,
+                &mut self.narrow_shaping_cache,
             );
             row.wide_glyphs = shape_wide_glyphs(cells, &mut self.font_system, metrics);
             row.cells.clear();
@@ -970,47 +1058,51 @@ fn terminal_font_system() -> FontSystem {
     FontSystem::new()
 }
 
-fn styled_runs(cells: &[CapturedCell], metrics: CellMetrics) -> Vec<StyledRun> {
-    let Some(last_visible) = cells.iter().rposition(|cell| {
-        !cell.wide_spacer
-            && !cell.style.flags.contains(CellFlags::HIDDEN)
-            && !cell.text.is_empty()
-            && !cell.text.chars().all(char::is_whitespace)
-    }) else {
-        return Vec::new();
-    };
+fn narrow_cell_slots(cells: &[CapturedCell]) -> Vec<NarrowCellSlot> {
+    cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| {
+            !cell.wide_spacer
+                && !cell
+                    .style
+                    .flags
+                    .intersects(CellFlags::WIDE_CHAR | CellFlags::HIDDEN)
+                && !cell.text.is_empty()
+                && !cell.text.chars().all(char::is_whitespace)
+        })
+        .map(|(column, cell)| NarrowCellSlot {
+            column,
+            text: cell.text.clone(),
+            style: cell.style.clone(),
+        })
+        .collect()
+}
 
-    let mut runs: Vec<StyledRun> = Vec::new();
-    for cell in &cells[..=last_visible] {
-        if cell.wide_spacer {
-            continue;
-        }
-        let text = if cell.style.flags.contains(CellFlags::WIDE_CHAR) {
-            // The row buffer reserves the exact two-cell advance. The actual glyph is shaped in
-            // an independently positioned two-cell slot, so fallback metrics cannot shift any
-            // following ASCII cell.
-            "  "
-        } else if cell.style.flags.contains(CellFlags::HIDDEN)
-            || cell.text.is_empty()
-            || cell.text.chars().all(char::is_whitespace)
-        {
-            " "
-        } else {
-            cell.text.as_str()
-        };
-        let attrs = text_attrs(&cell.style, metrics);
-        if let Some(run) = runs.last_mut()
-            && run.attrs == attrs
-        {
-            run.text.push_str(text);
-        } else {
-            runs.push(StyledRun {
-                text: text.to_owned(),
-                attrs,
-            });
-        }
-    }
-    runs
+fn shape_narrow_glyphs(
+    cells: &[CapturedCell],
+    font_system: &mut FontSystem,
+    metrics: CellMetrics,
+    cache: &mut NarrowShapingCache,
+) -> Vec<NarrowGlyph> {
+    narrow_cell_slots(cells)
+        .into_iter()
+        .map(|slot| {
+            let key = NarrowShapeKey {
+                text: slot.text,
+                bold: slot.style.flags.contains(CellFlags::BOLD),
+                italic: slot.style.flags.contains(CellFlags::ITALIC),
+            };
+            let (buffer, top_offset_px) = cache.get_or_shape(key, font_system, metrics);
+            let (foreground, _) = resolve_colors(&slot.style);
+            NarrowGlyph {
+                column: slot.column,
+                buffer,
+                top_offset_px,
+                color: Color::rgb(foreground[0], foreground[1], foreground[2]),
+            }
+        })
+        .collect()
 }
 
 fn wide_cell_slots(cells: &[CapturedCell]) -> Vec<WideCellSlot> {
@@ -1051,7 +1143,7 @@ fn shape_wide_glyphs(
             // fallback face to half width; omitting this entirely leaves each fallback face at a
             // different visual size. Let cosmic-text normalize the fallback em to the full slot.
             buffer.set_monospace_width(Some(metrics.font_size_px * wide_slot_em_scale(metrics)));
-            let attrs = wide_text_attrs(&slot.style);
+            let attrs = text_attrs(&slot.style);
             buffer.set_text(&slot.text, &attrs, Shaping::Advanced, None);
             buffer.shape_until_scroll(font_system, false);
             let wide_baseline_px = buffer
@@ -1079,53 +1171,18 @@ fn row_needs_reshaping(previous: &[CapturedCell], next: &[CapturedCell]) -> bool
     previous != next
 }
 
-fn reshape_text_row(
-    buffer: &mut Buffer,
-    font_system: &mut FontSystem,
-    runs: &[StyledRun],
-    metrics: CellMetrics,
-    columns: usize,
-) {
-    buffer.set_size(
-        Some(metrics.cell_width_px * columns as f32),
-        Some(metrics.cell_height_px),
-    );
-    buffer.set_monospace_width(Some(metrics.cell_width_px));
-    let default_attrs = Attrs::new().family(Family::Monospace);
-    if runs.is_empty() {
-        buffer.set_text("", &default_attrs, Shaping::Advanced, None);
-    } else {
-        buffer.set_rich_text(
-            runs.iter()
-                .map(|run| (run.text.as_str(), run.attrs.as_attrs())),
-            &default_attrs,
-            Shaping::Advanced,
-            None,
-        );
-    }
-    buffer.shape_until_scroll(font_system, false);
-}
-
-fn text_attrs(style: &CellStyle, metrics: CellMetrics) -> AttrsOwned {
-    let (foreground, _) = resolve_colors(style);
-    let tracking_em = (metrics.cell_width_px - metrics.glyph_advance_px) / metrics.font_size_px;
-    let mut attrs = Attrs::new()
-        .family(Family::Monospace)
-        // cosmic-text's monospace_width normalizes fallback font size but does not quantize the
-        // primary font's glyph advances. Track the measured advance up to the integer terminal
-        // cell width so long rows cannot accumulate a high-DPI cursor drift.
-        .letter_spacing(tracking_em)
-        .color(Color::rgb(foreground[0], foreground[1], foreground[2]));
-    if style.flags.contains(CellFlags::BOLD) {
+fn narrow_shape_attrs(key: &NarrowShapeKey) -> Attrs<'static> {
+    let mut attrs = Attrs::new().family(Family::Monospace);
+    if key.bold {
         attrs = attrs.weight(Weight::BOLD);
     }
-    if style.flags.contains(CellFlags::ITALIC) {
+    if key.italic {
         attrs = attrs.style(Style::Italic);
     }
-    AttrsOwned::new(&attrs)
+    attrs
 }
 
-fn wide_text_attrs(style: &CellStyle) -> Attrs<'static> {
+fn text_attrs(style: &CellStyle) -> Attrs<'static> {
     let (foreground, _) = resolve_colors(style);
     let mut attrs = Attrs::new().family(Family::Monospace).color(Color::rgb(
         foreground[0],
@@ -1286,6 +1343,40 @@ mod tests {
     use super::*;
     use bt_transcript::CapturedCell;
 
+    fn shape_narrow_for_test(
+        cells: &[CapturedCell],
+        font_system: &mut FontSystem,
+        metrics: CellMetrics,
+    ) -> Vec<NarrowGlyph> {
+        shape_narrow_glyphs(cells, font_system, metrics, &mut NarrowShapingCache::new())
+    }
+
+    fn assert_narrow_glyph_origins(glyphs: &[NarrowGlyph], metrics: CellMetrics) {
+        const X_TOLERANCE: f32 = 0.0001;
+
+        for slot in glyphs {
+            let layout_glyphs = slot
+                .buffer
+                .layout_runs()
+                .flat_map(|run| run.glyphs.iter())
+                .collect::<Vec<_>>();
+            assert!(
+                !layout_glyphs.is_empty(),
+                "column {} has no glyph",
+                slot.column
+            );
+            for glyph in layout_glyphs {
+                let actual_x = slot.column as f32 * metrics.cell_width_px + glyph.x;
+                let expected_x = slot.column as f32 * metrics.cell_width_px;
+                assert!(
+                    (actual_x - expected_x).abs() <= X_TOLERANCE,
+                    "column {}: glyph x={actual_x} but cell-grid x={expected_x}",
+                    slot.column
+                );
+            }
+        }
+    }
+
     #[test]
     fn grid_dimensions_are_nonzero_and_derived_from_metrics() {
         let metrics = CellMetrics {
@@ -1294,7 +1385,6 @@ mod tests {
             font_size_px: 16.0,
             padding_px: 5.0,
             scale_factor: 1.0,
-            glyph_advance_px: 10.0,
             ascii_baseline_px: 16.0,
         };
         assert_eq!(
@@ -1467,7 +1557,7 @@ mod tests {
     }
 
     #[test]
-    fn row_runs_preserve_blank_columns_and_style_boundaries() {
+    fn narrow_slots_preserve_blank_columns_and_style_boundaries() {
         let mut red = CapturedCell::plain("A");
         red.style.foreground = TerminalColor::Rgb(255, 0, 0);
         let cells = [
@@ -1476,12 +1566,11 @@ mod tests {
             CapturedCell::plain("B"),
             CapturedCell::plain(" "),
         ];
-        let mut font_system = terminal_font_system();
-        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
-        let runs = styled_runs(&cells, metrics);
-        assert_eq!(runs.len(), 2);
-        assert_eq!(runs[0].text, "A");
-        assert_eq!(runs[1].text, " B");
+        let slots = narrow_cell_slots(&cells);
+        assert_eq!(slots.len(), 2);
+        assert_eq!((slots[0].column, slots[0].text.as_str()), (0, "A"));
+        assert_eq!((slots[1].column, slots[1].text.as_str()), (2, "B"));
+        assert_ne!(slots[0].style, slots[1].style);
     }
 
     #[test]
@@ -1522,6 +1611,49 @@ mod tests {
     }
 
     #[test]
+    fn preedit_uses_the_same_cluster_oracle_as_committed_cells() {
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(8).unwrap(),
+            rows: NonZeroU32::new(2).unwrap(),
+            cells: vec![CapturedCell::plain(""); 16],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 1,
+                visible: true,
+            },
+            layout_key: bt_doc_layout_key(),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        let text = "👨‍👩‍👧‍👦☆中";
+        let composed = compose_preedit(
+            &frame,
+            Some(&Preedit {
+                text: text.to_owned(),
+                cursor_byte: Some(text.len()),
+            }),
+        );
+
+        assert_eq!(composed.ime_caret.column, 6);
+        assert_eq!(composed.frame.cells[1].text, "👨‍👩‍👧‍👦");
+        assert!(
+            composed.frame.cells[1]
+                .style
+                .flags
+                .contains(CellFlags::WIDE_CHAR)
+        );
+        assert!(composed.frame.cells[2].wide_spacer);
+        assert_eq!(composed.frame.cells[3].text, "☆");
+        assert!(
+            !composed.frame.cells[3]
+                .style
+                .flags
+                .contains(CellFlags::WIDE_CHAR)
+        );
+        assert_eq!(composed.frame.cells[4].text, "中");
+        assert!(composed.frame.cells[5].wide_spacer);
+    }
+
+    #[test]
     fn mixed_cjk_ascii_wide_slots_use_exact_terminal_cell_origins() {
         let mut font_system = terminal_font_system();
         let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
@@ -1554,19 +1686,12 @@ mod tests {
             metrics.padding_px + 4.0 * metrics.cell_width_px
         );
 
-        let runs = styled_runs(&cells, metrics);
-        let mut buffer = Buffer::new(
-            &mut font_system,
-            Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+        let narrow = shape_narrow_for_test(&cells, &mut font_system, metrics);
+        assert_eq!(
+            narrow.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
+            [0, 3]
         );
-        buffer.set_wrap(Wrap::None);
-        reshape_text_row(&mut buffer, &mut font_system, &runs, metrics, cells.len());
-        let b = buffer
-            .layout_runs()
-            .flat_map(|run| run.glyphs.iter())
-            .find(|glyph| glyph.start == 3)
-            .expect("ASCII after a wide cell must still be shaped");
-        assert_eq!(b.x, 3.0 * metrics.cell_width_px);
+        assert_narrow_glyph_origins(&narrow, metrics);
     }
 
     #[test]
@@ -1656,29 +1781,161 @@ mod tests {
     #[test]
     fn shaped_ascii_glyphs_stay_on_integer_cell_columns() {
         const COLUMNS: usize = 80;
-        const X_TOLERANCE: f32 = 0.0001;
 
         let mut font_system = terminal_font_system();
         let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
         let cells = vec![CapturedCell::plain("M"); COLUMNS];
-        let runs = styled_runs(&cells, metrics);
-        let mut buffer = Buffer::new(
-            &mut font_system,
-            Metrics::new(metrics.font_size_px, metrics.cell_height_px),
+        let glyphs = shape_narrow_for_test(&cells, &mut font_system, metrics);
+
+        assert_eq!(glyphs.len(), COLUMNS);
+        assert_narrow_glyph_origins(&glyphs, metrics);
+    }
+
+    #[test]
+    fn narrow_shaping_cache_reuses_content_across_columns_rows_and_colors() {
+        const COLUMNS: usize = 80;
+
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut cells = vec![CapturedCell::plain("M"); COLUMNS];
+        cells[1].style.foreground = TerminalColor::Rgb(255, 0, 0);
+        let mut cache = NarrowShapingCache::new();
+
+        let first = shape_narrow_glyphs(&cells, &mut font_system, metrics, &mut cache);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(
+            first
+                .iter()
+                .all(|glyph| Arc::ptr_eq(&first[0].buffer, &glyph.buffer))
         );
-        buffer.set_wrap(Wrap::None);
+        assert_ne!(first[0].color, first[1].color);
 
-        reshape_text_row(&mut buffer, &mut font_system, &runs, metrics, COLUMNS);
+        let second = shape_narrow_glyphs(&cells, &mut font_system, metrics, &mut cache);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(Arc::ptr_eq(&first[0].buffer, &second[0].buffer));
 
-        let layout_runs = buffer.layout_runs().collect::<Vec<_>>();
-        assert_eq!(layout_runs.len(), 1);
-        assert_eq!(layout_runs[0].glyphs.len(), COLUMNS);
-        for (column, glyph) in layout_runs[0].glyphs.iter().enumerate() {
-            let expected_x = column as f32 * metrics.cell_width_px;
+        cells[0].style.flags.insert(CellFlags::BOLD);
+        let bold = shape_narrow_glyphs(&cells, &mut font_system, metrics, &mut cache);
+        assert_eq!(cache.entries.len(), 2);
+        assert!(!Arc::ptr_eq(&first[0].buffer, &bold[0].buffer));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn regional_indicator_flag_cells_pin_every_glyph_to_its_grid_column() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
+        let cells = [
+            CapturedCell::plain("|"),
+            CapturedCell::plain("🇺"),
+            CapturedCell::plain("🇸"),
+            CapturedCell::plain("|"),
+        ];
+
+        let glyphs = shape_narrow_for_test(&cells, &mut font_system, metrics);
+        assert_eq!(
+            glyphs.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert_narrow_glyph_origins(&glyphs, metrics);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn arbitrary_multicodepoint_narrow_cluster_cannot_cross_cell_origins() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
+        // Lam + alef is a shaping cluster when presented as one run. A legacy terminal grid may
+        // still assign the two code points to separate narrow cells, so each grid slot must own an
+        // independent absolute origin just like the RI pair above.
+        let cells = [
+            CapturedCell::plain("x"),
+            CapturedCell::plain("ل"),
+            CapturedCell::plain("ا"),
+            CapturedCell::plain("y"),
+        ];
+
+        let glyphs = shape_narrow_for_test(&cells, &mut font_system, metrics);
+        assert_eq!(
+            glyphs.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
+            [0, 1, 2, 3]
+        );
+        assert_narrow_glyph_origins(&glyphs, metrics);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mixed_fallback_and_wide_glyphs_keep_every_pen_on_its_grid_column() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
+        let mut cjk = CapturedCell::plain("中");
+        cjk.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut fullwidth_b = CapturedCell::plain("Ｂ");
+        fullwidth_b.style.flags.insert(CellFlags::WIDE_CHAR);
+        let mut spacer = CapturedCell::plain("");
+        spacer.wide_spacer = true;
+        let cells = [
+            CapturedCell::plain("|"),
+            CapturedCell::plain("A"),
+            CapturedCell::plain("☆"),
+            cjk,
+            spacer.clone(),
+            CapturedCell::plain("│"),
+            fullwidth_b,
+            spacer,
+            CapturedCell::plain("|"),
+        ];
+        let narrow = shape_narrow_for_test(&cells, &mut font_system, metrics);
+        assert_eq!(
+            narrow.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
+            [0, 1, 2, 5, 8]
+        );
+        assert_narrow_glyph_origins(&narrow, metrics);
+
+        let wide = shape_wide_glyphs(&cells, &mut font_system, metrics);
+        assert_eq!(
+            wide.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
+            [3, 6]
+        );
+        for glyph in wide {
+            let local_x = glyph.buffer.layout_runs().next().unwrap().glyphs[0].x;
+            assert_eq!(local_x, 0.0);
+            assert_eq!(
+                cell_bounds_px(metrics, 0, glyph.column)[0],
+                metrics.padding_px + glyph.column as f32 * metrics.cell_width_px
+            );
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn fallback_in_left_half_cannot_shift_cup_positioned_right_half() {
+        const COLUMNS: usize = 64;
+        const RIGHT_HALF_COLUMN: usize = 42;
+
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
+        let mut fallback_row = vec![CapturedCell::plain(""); COLUMNS];
+        fallback_row[0] = CapturedCell::plain("|");
+        fallback_row[1] = CapturedCell::plain("A");
+        fallback_row[2] = CapturedCell::plain("🇺");
+        fallback_row[3] = CapturedCell::plain("🇸");
+        fallback_row[4] = CapturedCell::plain("|");
+        fallback_row[RIGHT_HALF_COLUMN] = CapturedCell::plain("|");
+        fallback_row[RIGHT_HALF_COLUMN + 1] = CapturedCell::plain("R");
+
+        let mut control_row = vec![CapturedCell::plain(""); COLUMNS];
+        control_row[RIGHT_HALF_COLUMN] = CapturedCell::plain("|");
+        control_row[RIGHT_HALF_COLUMN + 1] = CapturedCell::plain("R");
+
+        for cells in [&fallback_row, &control_row] {
+            let glyphs = shape_narrow_for_test(cells, &mut font_system, metrics);
+            assert_narrow_glyph_origins(&glyphs, metrics);
+            assert!(glyphs.iter().any(|glyph| glyph.column == RIGHT_HALF_COLUMN));
             assert!(
-                (glyph.x - expected_x).abs() <= X_TOLERANCE,
-                "column {column}: glyph x={} but cell-grid x={expected_x}",
-                glyph.x
+                glyphs
+                    .iter()
+                    .any(|glyph| glyph.column == RIGHT_HALF_COLUMN + 1)
             );
         }
     }
@@ -1695,26 +1952,18 @@ mod tests {
             for cell in &mut cells[..3] {
                 cell.style.foreground = TerminalColor::Rgb(120, 130, 140);
             }
-            let runs = styled_runs(&cells, metrics);
-            let mut buffer = Buffer::new(
-                &mut font_system,
-                Metrics::new(metrics.font_size_px, metrics.cell_height_px),
-            );
-            buffer.set_wrap(Wrap::None);
-            reshape_text_row(&mut buffer, &mut font_system, &runs, metrics, cells.len());
-
-            let glyphs = buffer
-                .layout_runs()
-                .flat_map(|run| run.glyphs.iter())
+            let glyphs = shape_narrow_for_test(&cells, &mut font_system, metrics);
+            let expected_columns = cells
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| !cell.text.chars().all(char::is_whitespace))
+                .map(|(column, _)| column)
                 .collect::<Vec<_>>();
-            assert_eq!(glyphs.len(), cells.len());
-            for (column, glyph) in glyphs.into_iter().enumerate() {
-                assert_eq!(
-                    glyph.x,
-                    column as f32 * metrics.cell_width_px,
-                    "scale factor {scale_factor}, column {column}"
-                );
-            }
+            assert_eq!(
+                glyphs.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
+                expected_columns
+            );
+            assert_narrow_glyph_origins(&glyphs, metrics);
 
             let last_text_cell = cell_bounds_px(metrics, 0, cells.len() - 1);
             let cursor_cell = cell_bounds_px(metrics, 0, cells.len());
@@ -1730,7 +1979,6 @@ mod tests {
             font_size_px: 16.0,
             padding_px: 8.0,
             scale_factor: 1.0,
-            glyph_advance_px: 10.0,
             ascii_baseline_px: 16.0,
         };
         assert_eq!(cell_bounds_px(metrics, 0, 0), [8.0, 8.0, 18.0, 28.0]);

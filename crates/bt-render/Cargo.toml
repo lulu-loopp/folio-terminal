@@ -7,12 +7,12 @@ rust-version.workspace = true
 
 [dependencies]
 bt-transcript = { path = "../bt-transcript" }
+bt-unicode = { path = "../bt-unicode" }
 bt-doc = { path = "../bt-doc" }
 bt-viewport = { path = "../bt-viewport" }
 bytemuck.workspace = true
 glyphon.workspace = true
 thiserror.workspace = true
-unicode-width.workspace = true
 wgpu.workspace = true
 
 [lints]

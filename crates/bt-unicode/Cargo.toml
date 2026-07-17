@@ -1,15 +1,13 @@
 [package]
-name = "bt-pty"
+name = "bt-unicode"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-bt-term = { path = "../bt-term" }
-bt-transcript = { path = "../bt-transcript" }
-portable-pty.workspace = true
-thiserror.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
 
 [lints]
 workspace = true

@@ -156,7 +156,10 @@ fn test_iter() {
     assert_eq!(&4, iter.cell());
 
     // Test that iter ends at end of grid.
-    let mut final_iter = grid.iter_from(Point { line: Line(4), column: Column(4) });
+    let mut final_iter = grid.iter_from(Point {
+        line: Line(4),
+        column: Column(4),
+    });
     assert_eq!(None, final_iter.next());
     assert_indexed(23, final_iter.prev());
 }

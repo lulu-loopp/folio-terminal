@@ -373,7 +373,7 @@ mod tests {
 
     #[test]
     fn reset_and_deccolm_are_distinct_facts() {
-        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        let mut terminal = TerminalAdapter::new(nz(4), nz(3));
         assert!(terminal.feed(b"\x1bc").contains(&AdapterEvent::Reset));
         assert!(terminal.feed(b"\x1b[?3h").contains(&AdapterEvent::Deccolm));
     }
@@ -384,6 +384,217 @@ mod tests {
         terminal.feed(b"\x1b[6n");
         assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[1;1R".to_vec()]);
         assert!(terminal.take_pty_writes().is_empty());
+    }
+
+    #[test]
+    fn dec_mode_2027_query_set_and_reset_use_standard_decrqm_semantics() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+        terminal.feed(b"\x1b[?2027$p");
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?2027;2$y".to_vec()]);
+
+        terminal.feed(b"\x1b[?2027h\x1b[?2027$p");
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?2027;1$y".to_vec()]);
+
+        terminal.feed(b"\x1b[?2027l\x1b[?2027$p");
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[?2027;2$y".to_vec()]);
+    }
+
+    #[test]
+    fn grapheme_mode_clusters_the_m1_width_matrix_while_legacy_mode_stays_compatible() {
+        let cases = [
+            ("👨‍👩‍👧‍👦", 2),
+            ("👍🏽", 2),
+            ("e\u{301}", 1),
+            ("☂\u{fe0e}", 1),
+            ("☂\u{fe0f}", 2),
+            ("⌚\u{fe0e}", 1),
+            ("🇺🇸", 2),
+            ("☆", 1),
+        ];
+        for (text, expected) in cases {
+            let mut terminal = TerminalAdapter::new(nz(20), nz(3));
+            terminal.feed(b"\x1b[?2027h");
+            for byte in text.as_bytes() {
+                terminal.feed(std::slice::from_ref(byte));
+            }
+            assert_eq!(terminal.cursor().column, expected, "{text:?}");
+            let row = terminal.visible_row(0).unwrap();
+            assert_eq!(row.cells[0].text, text, "{text:?}");
+            assert_eq!(
+                row.cells.get(1).is_some_and(|cell| cell.wide_spacer),
+                expected == 2
+            );
+        }
+
+        let mut legacy = TerminalAdapter::new(nz(20), nz(3));
+        legacy.feed("👨‍👩‍👧‍👦".as_bytes());
+        assert_eq!(legacy.cursor().column, 8);
+        legacy.feed(b"\x1b[?2027h\r");
+        legacy.feed("👨‍👩‍👧‍👦".as_bytes());
+        assert_eq!(legacy.cursor().column, 2);
+        legacy.feed(b"\x1b[?2027l\r");
+        legacy.feed("👍🏽".as_bytes());
+        assert_eq!(legacy.cursor().column, 4);
+    }
+
+    #[test]
+    fn decawm_margin_pressure_then_decrst_2027_cannot_consume_legacy_text() {
+        let mut terminal = TerminalAdapter::new(nz(80), nz(24));
+        terminal.feed(b"\x1b[?2027h\x1b[?7l\x1b[999G");
+        terminal.feed("☂\u{fe0f}".as_bytes());
+        terminal.feed(b"\r\n\x1b[?7hBT_PANIC_SURVIVED\r\n\x1b[?2027l|");
+        terminal.feed("👨\u{200d}👩\u{200d}👧\u{200d}👦".as_bytes());
+        terminal.feed(b"|");
+
+        let family_row = terminal
+            .visible_text()
+            .iter()
+            .position(|row| row.starts_with('|'))
+            .expect("post-DECRST family row remains visible");
+        let row = terminal.visible_row(family_row as u32).unwrap();
+        assert_eq!(row.cells[0].text, "|");
+        assert!(row.cells[1].text.starts_with('👨'));
+        assert_eq!(row.cells[9].text, "|");
+        assert_eq!(terminal.cursor().column, 10);
+        assert!(
+            terminal
+                .visible_text()
+                .iter()
+                .any(|row| row.contains("BT_PANIC_SURVIVED"))
+        );
+    }
+
+    #[test]
+    fn mixed_clusters_wrap_as_an_indivisible_wide_lead_and_spacer() {
+        let mut terminal = TerminalAdapter::new(nz(4), nz(3));
+        terminal.feed(b"\x1b[?2027habc");
+        terminal.feed("👨‍👩‍👧‍👦中Z".as_bytes());
+
+        let first = terminal.visible_row(0).unwrap();
+        assert_eq!(first.cells[0].text, "a");
+        assert_eq!(first.cells[3].text, " ");
+        let second = terminal.visible_row(1).unwrap();
+        assert_eq!(second.cells[0].text, "👨‍👩‍👧‍👦");
+        assert!(
+            second.cells[0]
+                .style
+                .flags
+                .contains(bt_transcript::CellFlags::WIDE_CHAR)
+        );
+        assert!(second.cells[1].wide_spacer);
+        assert_eq!(second.cells[2].text, "中");
+        assert!(second.cells[3].wide_spacer);
+        let third = terminal.visible_row(2).unwrap();
+        assert_eq!(third.cells[0].text, "Z");
+    }
+
+    #[test]
+    fn late_vs_and_flag_width_changes_rewrite_atomically_at_the_right_margin() {
+        for text in ["☂\u{fe0f}", "🇺🇸"] {
+            let mut terminal = TerminalAdapter::new(nz(4), nz(3));
+            terminal.feed(b"\x1b[?2027habc");
+            terminal.feed(text.as_bytes());
+            assert_eq!(terminal.cursor().row, 1, "{text:?}");
+            assert_eq!(terminal.cursor().column, 2, "{text:?}");
+            let first = terminal.visible_row(0).unwrap();
+            assert_eq!(first.cells[3].text, " ", "{text:?}");
+            let second = terminal.visible_row(1).unwrap();
+            assert_eq!(second.cells[0].text, text, "{text:?}");
+            assert!(second.cells[1].wide_spacer, "{text:?}");
+        }
+
+        let mut text_presentation = TerminalAdapter::new(nz(4), nz(3));
+        text_presentation.feed(b"\x1b[?2027habc");
+        text_presentation.feed("⌚\u{fe0e}".as_bytes());
+        assert_eq!(text_presentation.cursor().row, 0);
+        assert_eq!(text_presentation.cursor().column, 3);
+        let first = text_presentation.visible_row(0).unwrap();
+        assert_eq!(first.cells[3].text, "⌚\u{fe0e}");
+        assert!(
+            !first.cells[3]
+                .style
+                .flags
+                .contains(bt_transcript::CellFlags::WIDE_CHAR)
+        );
+        let cleared = text_presentation.visible_row(1).unwrap();
+        assert!(cleared.cells[0].text.trim().is_empty());
+        assert!(!cleared.cells[0].wide_spacer);
+    }
+
+    #[test]
+    fn late_cluster_width_changes_preserve_insert_mode_tail_cells() {
+        let mut upgrade = TerminalAdapter::new(nz(8), nz(2));
+        upgrade.feed(b"ABCDE\r\x1b[2C\x1b[4h\x1b[?2027h");
+        upgrade.feed("🇺🇸".as_bytes());
+        let row = upgrade.visible_row(0).unwrap();
+        assert_eq!(row.cells[0].text, "A");
+        assert_eq!(row.cells[1].text, "B");
+        assert_eq!(row.cells[2].text, "🇺🇸");
+        assert!(row.cells[3].wide_spacer);
+        assert_eq!(row.cells[4].text, "C");
+        assert_eq!(row.cells[5].text, "D");
+        assert_eq!(row.cells[6].text, "E");
+
+        let mut shrink = TerminalAdapter::new(nz(8), nz(2));
+        shrink.feed(b"ABCDE\r\x1b[2C\x1b[4h\x1b[?2027h");
+        shrink.feed("⌚\u{fe0e}".as_bytes());
+        let row = shrink.visible_row(0).unwrap();
+        assert_eq!(row.cells[2].text, "⌚\u{fe0e}");
+        assert!(!row.cells[3].wide_spacer);
+        assert_eq!(row.cells[3].text, "C");
+        assert_eq!(row.cells[4].text, "D");
+        assert_eq!(row.cells[5].text, "E");
+    }
+
+    #[test]
+    fn resize_never_separates_cluster_text_from_its_wide_spacer() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[?2027hA");
+        terminal.feed("👨‍👩‍👧‍👦".as_bytes());
+        terminal.feed(b"BCDE");
+        let events = terminal.resize(nz(8), nz(3));
+
+        let cluster = (0..3).find_map(|row| {
+            let row = terminal.visible_row(row)?;
+            let column = row.cells.iter().position(|cell| cell.text == "👨‍👩‍👧‍👦")?;
+            Some((row, column))
+        });
+        let (row, column) = cluster.unwrap_or_else(|| {
+            panic!(
+                "cluster survived resize: {:?}; {events:?}",
+                terminal.visible_text()
+            )
+        });
+        assert!(
+            row.cells[column]
+                .style
+                .flags
+                .contains(bt_transcript::CellFlags::WIDE_CHAR)
+        );
+        assert!(row.cells[column + 1].wide_spacer);
+    }
+
+    #[test]
+    fn resize_between_codepoints_reanchors_the_in_progress_cluster() {
+        let mut family = TerminalAdapter::new(nz(4), nz(3));
+        family.feed(b"\x1b[?2027hA");
+        family.feed("👨‍".as_bytes());
+        family.resize(nz(8), nz(3));
+        family.feed("👩‍👧‍👦".as_bytes());
+        let row = family.visible_row(0).unwrap();
+        assert_eq!(row.cells[1].text, "👨‍👩‍👧‍👦");
+        assert!(row.cells[2].wide_spacer);
+        assert_eq!(family.cursor().column, 3);
+
+        let mut flag = TerminalAdapter::new(nz(4), nz(3));
+        flag.feed(b"\x1b[?2027habc");
+        flag.feed("🇺".as_bytes());
+        flag.resize(nz(8), nz(3));
+        flag.feed("🇸".as_bytes());
+        let row = flag.visible_row(0).unwrap();
+        assert_eq!(row.cells[3].text, "🇺🇸");
+        assert!(row.cells[4].wide_spacer);
+        assert_eq!(flag.cursor().column, 5);
     }
 
     #[test]

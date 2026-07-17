@@ -50,6 +50,9 @@ path = "tests/ref.rs"
 [dependencies.base64]
 version = "0.22.0"
 
+[dependencies.bt-unicode]
+path = "../../crates/bt-unicode"
+
 [dependencies.bitflags]
 version = "2.4.1"
 

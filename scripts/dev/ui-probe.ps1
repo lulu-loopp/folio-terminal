@@ -23,9 +23,10 @@
 #   the first draft sprayed keys at whatever was foreground; never again), and
 #   scancode-level injection reaches classic Win32 apps (charmap), but bt-app
 #   (winit) does not surface the injected keys — under investigation. Until
-#   solved, rendering-path probes should use a future BT_PROBE_INPUT env hook
-#   (feed bytes to the PTY at startup) instead of keyboard injection; IME
-#   candidate-window checks stay with a human.
+#   solved, rendering-path probes should set BT_PROBE_INPUT to a raw byte file;
+#   bt-app feeds it directly into Term at startup without starting ConPTY. The
+#   M1 fixture is scripts/dev/width-probe-input.vt. IME candidate-window checks
+#   stay with a human.
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
