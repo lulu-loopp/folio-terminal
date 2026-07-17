@@ -162,6 +162,14 @@ impl DualPlaneSession {
         &self.terminal
     }
 
+    pub fn application_cursor_mode(&self) -> bool {
+        self.terminal.application_cursor_mode()
+    }
+
+    pub fn bracketed_paste_mode(&self) -> bool {
+        self.terminal.bracketed_paste_mode()
+    }
+
     /// Protocol replies are returned to the owning app, which is the only PTY writer.
     pub fn take_pty_writes(&self) -> Vec<Vec<u8>> {
         self.terminal.take_pty_writes()

@@ -1,0 +1,319 @@
+use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+const CSI: &[u8] = b"\x1b[";
+const BRACKETED_PASTE_START: &[u8] = b"\x1b[200~";
+const BRACKETED_PASTE_END: &str = "\x1b[201~";
+
+pub(crate) const PASTE_WRITE_CHUNK_BYTES: usize = 16 * 1024;
+
+pub(crate) fn is_paste_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
+    let ctrl_v = modifiers == ModifiersState::CONTROL
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"));
+    let shift_insert =
+        modifiers == ModifiersState::SHIFT && matches!(key, Key::Named(NamedKey::Insert));
+    ctrl_v || shift_insert
+}
+
+pub(crate) fn is_ime_owned_key(key: &Key, modifiers: ModifiersState) -> bool {
+    is_paste_shortcut(key, modifiers)
+        || matches!(
+            key,
+            Key::Named(
+                NamedKey::ArrowUp
+                    | NamedKey::ArrowDown
+                    | NamedKey::ArrowLeft
+                    | NamedKey::ArrowRight
+                    | NamedKey::Home
+                    | NamedKey::End
+                    | NamedKey::Delete
+                    | NamedKey::Insert
+                    | NamedKey::PageUp
+                    | NamedKey::PageDown
+                    | NamedKey::Backspace
+                    | NamedKey::Enter
+                    | NamedKey::Escape
+                    | NamedKey::Tab
+            )
+        )
+}
+
+pub(crate) fn keyboard_bytes(
+    key: &Key,
+    modifiers: ModifiersState,
+    application_cursor_mode: bool,
+) -> Option<Vec<u8>> {
+    // Spike 04's hard rule: Process is tested only on logical_key. Physical Backspace/Escape is
+    // still present during composition and must never leak into the shell.
+    if matches!(key, Key::Named(NamedKey::Process)) || is_paste_shortcut(key, modifiers) {
+        return None;
+    }
+    if modifiers.control_key()
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
+    {
+        return Some(vec![0x03]);
+    }
+
+    let modifier = xterm_modifier(modifiers);
+    match key {
+        Key::Named(NamedKey::ArrowUp) => Some(cursor_key(b'A', modifier, application_cursor_mode)),
+        Key::Named(NamedKey::ArrowDown) => {
+            Some(cursor_key(b'B', modifier, application_cursor_mode))
+        }
+        Key::Named(NamedKey::ArrowRight) => {
+            Some(cursor_key(b'C', modifier, application_cursor_mode))
+        }
+        Key::Named(NamedKey::ArrowLeft) => {
+            Some(cursor_key(b'D', modifier, application_cursor_mode))
+        }
+        Key::Named(NamedKey::Home) => Some(cursor_key(b'H', modifier, application_cursor_mode)),
+        Key::Named(NamedKey::End) => Some(cursor_key(b'F', modifier, application_cursor_mode)),
+        Key::Named(NamedKey::Insert) => Some(tilde_key(2, modifier)),
+        Key::Named(NamedKey::Delete) => Some(tilde_key(3, modifier)),
+        Key::Named(NamedKey::PageUp) => Some(tilde_key(5, modifier)),
+        Key::Named(NamedKey::PageDown) => Some(tilde_key(6, modifier)),
+        Key::Named(NamedKey::Tab) if modifiers.shift_key() => Some(b"\x1b[Z".to_vec()),
+        Key::Character(text)
+            if (text.is_ascii() || modifiers.alt_key())
+                && text.chars().all(|character| !character.is_control())
+                && !modifiers.control_key() =>
+        {
+            Some(meta_prefix(text.as_bytes(), modifiers.alt_key()))
+        }
+        Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
+        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
+        Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
+        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
+        // winit reports the text-producing space key as Named rather than Character.
+        Key::Named(NamedKey::Space) if !modifiers.control_key() => {
+            Some(meta_prefix(b" ", modifiers.alt_key()))
+        }
+        _ => None,
+    }
+}
+
+fn xterm_modifier(modifiers: ModifiersState) -> u8 {
+    1 + u8::from(modifiers.shift_key())
+        + 2 * u8::from(modifiers.alt_key())
+        + 4 * u8::from(modifiers.control_key())
+}
+
+fn cursor_key(final_byte: u8, modifier: u8, application_cursor_mode: bool) -> Vec<u8> {
+    if modifier == 1 {
+        let mut bytes = if application_cursor_mode {
+            b"\x1bO".to_vec()
+        } else {
+            CSI.to_vec()
+        };
+        bytes.push(final_byte);
+        bytes
+    } else {
+        format!("\x1b[1;{modifier}{}", char::from(final_byte)).into_bytes()
+    }
+}
+
+fn tilde_key(number: u8, modifier: u8) -> Vec<u8> {
+    if modifier == 1 {
+        format!("\x1b[{number}~").into_bytes()
+    } else {
+        format!("\x1b[{number};{modifier}~").into_bytes()
+    }
+}
+
+fn meta_prefix(bytes: &[u8], alt: bool) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(bytes.len() + usize::from(alt));
+    if alt {
+        encoded.push(0x1b);
+    }
+    encoded.extend_from_slice(bytes);
+    encoded
+}
+
+pub(crate) fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let sanitized = sanitize_paste(text);
+    if !bracketed {
+        return sanitized;
+    }
+
+    let mut bytes = Vec::with_capacity(
+        BRACKETED_PASTE_START.len() + sanitized.len() + BRACKETED_PASTE_END.len(),
+    );
+    bytes.extend_from_slice(BRACKETED_PASTE_START);
+    bytes.extend_from_slice(&sanitized);
+    bytes.extend_from_slice(BRACKETED_PASTE_END.as_bytes());
+    bytes
+}
+
+fn sanitize_paste(text: &str) -> Vec<u8> {
+    // Remove the complete terminator before generic control filtering. Merely removing ESC would
+    // leave a misleading printable "[201~" fragment and weakens later policy changes.
+    let without_terminators = text.replace(BRACKETED_PASTE_END, "");
+    let mut normalized = String::with_capacity(without_terminators.len());
+    let mut characters = without_terminators.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    characters.next();
+                }
+                normalized.push('\r');
+            }
+            '\n' => normalized.push('\r'),
+            '\t' => normalized.push('\t'),
+            character if !character.is_control() => normalized.push(character),
+            _ => {}
+        }
+    }
+    normalized.into_bytes()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MODIFIERS: [ModifiersState; 8] = [
+        ModifiersState::empty(),
+        ModifiersState::SHIFT,
+        ModifiersState::ALT,
+        ModifiersState::SHIFT.union(ModifiersState::ALT),
+        ModifiersState::CONTROL,
+        ModifiersState::SHIFT.union(ModifiersState::CONTROL),
+        ModifiersState::ALT.union(ModifiersState::CONTROL),
+        ModifiersState::SHIFT
+            .union(ModifiersState::ALT)
+            .union(ModifiersState::CONTROL),
+    ];
+
+    #[test]
+    fn cursor_home_end_matrix_covers_decckm_and_every_xterm_modifier() {
+        let keys = [
+            (NamedKey::ArrowUp, b'A'),
+            (NamedKey::ArrowDown, b'B'),
+            (NamedKey::ArrowRight, b'C'),
+            (NamedKey::ArrowLeft, b'D'),
+            (NamedKey::Home, b'H'),
+            (NamedKey::End, b'F'),
+        ];
+
+        for application_mode in [false, true] {
+            for modifiers in MODIFIERS {
+                let modifier = xterm_modifier(modifiers);
+                for (key, final_byte) in keys {
+                    let expected = if modifier == 1 && application_mode {
+                        format!("\x1bO{}", char::from(final_byte))
+                    } else if modifier == 1 {
+                        format!("\x1b[{}", char::from(final_byte))
+                    } else {
+                        format!("\x1b[1;{modifier}{}", char::from(final_byte))
+                    };
+                    assert_eq!(
+                        keyboard_bytes(&Key::Named(key), modifiers, application_mode),
+                        Some(expected.into_bytes()),
+                        "key={key:?} application_mode={application_mode} modifiers={modifiers:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tilde_key_matrix_covers_both_modes_and_every_xterm_modifier() {
+        let keys = [
+            (NamedKey::Insert, 2),
+            (NamedKey::Delete, 3),
+            (NamedKey::PageUp, 5),
+            (NamedKey::PageDown, 6),
+        ];
+
+        for application_mode in [false, true] {
+            for modifiers in MODIFIERS {
+                let modifier = xterm_modifier(modifiers);
+                for (key, number) in keys {
+                    // Exact Shift+Insert is the paste command and deliberately wins over encoding.
+                    if key == NamedKey::Insert && modifiers == ModifiersState::SHIFT {
+                        assert!(is_paste_shortcut(&Key::Named(key), modifiers));
+                        continue;
+                    }
+                    let expected = if modifier == 1 {
+                        format!("\x1b[{number}~")
+                    } else {
+                        format!("\x1b[{number};{modifier}~")
+                    };
+                    assert_eq!(
+                        keyboard_bytes(&Key::Named(key), modifiers, application_mode),
+                        Some(expected.into_bytes()),
+                        "key={key:?} application_mode={application_mode} modifiers={modifiers:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_meta_and_legacy_controls_have_terminal_encodings() {
+        assert_eq!(
+            keyboard_bytes(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, false),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Character("x".into()), ModifiersState::ALT, false),
+            Some(b"\x1bx".to_vec())
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Character("é".into()), ModifiersState::ALT, false),
+            Some("\u{1b}é".as_bytes().to_vec())
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Named(NamedKey::Space), ModifiersState::ALT, false),
+            Some(b"\x1b ".to_vec())
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Character("c".into()), ModifiersState::CONTROL, false),
+            Some(vec![0x03])
+        );
+    }
+
+    #[test]
+    fn paste_shortcuts_are_commands_and_preedit_owns_editing_keys() {
+        assert!(is_paste_shortcut(
+            &Key::Character("v".into()),
+            ModifiersState::CONTROL
+        ));
+        assert!(is_paste_shortcut(
+            &Key::Named(NamedKey::Insert),
+            ModifiersState::SHIFT
+        ));
+        assert!(is_ime_owned_key(
+            &Key::Named(NamedKey::ArrowLeft),
+            ModifiersState::CONTROL
+        ));
+        assert!(is_ime_owned_key(
+            &Key::Named(NamedKey::Delete),
+            ModifiersState::empty()
+        ));
+        assert!(!is_ime_owned_key(
+            &Key::Character("a".into()),
+            ModifiersState::empty()
+        ));
+    }
+
+    #[test]
+    fn paste_normalizes_newlines_filters_controls_and_strips_injected_terminators() {
+        assert_eq!(
+            paste_bytes("one\r\ntwo\nthree\rfour\tend", false),
+            b"one\rtwo\rthree\rfour\tend"
+        );
+        assert_eq!(
+            paste_bytes("safe\x1b[201~tail\0\u{0007}", false),
+            b"safetail"
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_wraps_only_after_sanitizing_payload() {
+        assert_eq!(
+            paste_bytes("one\n\x1b[201~two", true),
+            b"\x1b[200~one\rtwo\x1b[201~"
+        );
+        assert_eq!(paste_bytes("one\n", false), b"one\r");
+    }
+}

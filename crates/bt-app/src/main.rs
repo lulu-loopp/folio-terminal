@@ -5,6 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod input;
+
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::LayoutKey;
 use bt_pty::{OutputWake, PtySession, PtySize};
@@ -20,7 +22,7 @@ use winit::{
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    keyboard::{Key, ModifiersState, NamedKey},
+    keyboard::ModifiersState,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{Window, WindowId},
 };
@@ -360,7 +362,24 @@ impl Runtime {
         if event.state != ElementState::Pressed {
             return Ok(());
         }
-        let Some(bytes) = keyboard_bytes(&event.logical_key, self.modifiers) else {
+
+        // A non-empty winit Preedit is the composition authority. Editing/navigation keys are
+        // intentionally left to the IME here even if it also exposes a physical named key; no PTY
+        // byte may escape this branch and regress M0-beta's composition isolation.
+        if self.preedit.is_some() && input::is_ime_owned_key(&event.logical_key, self.modifiers) {
+            return Ok(());
+        }
+        if input::is_paste_shortcut(&event.logical_key, self.modifiers) {
+            if !event.repeat {
+                self.paste_from_clipboard()?;
+            }
+            return Ok(());
+        }
+
+        let application_cursor_mode = self.session.application_cursor_mode();
+        let Some(bytes) =
+            input::keyboard_bytes(&event.logical_key, self.modifiers, application_cursor_mode)
+        else {
             return Ok(());
         };
         self.pending_keyboard_at = Some(Instant::now());
@@ -368,6 +387,27 @@ impl Runtime {
             Some(pty) => pty.write(&bytes).context("write keyboard input to PTY"),
             None => Ok(()),
         }
+    }
+
+    fn paste_from_clipboard(&mut self) -> Result<()> {
+        let hwnd = window_hwnd(&self.window)?;
+        let text = match bt_platform::clipboard_text(hwnd) {
+            Ok(text) => text,
+            Err(error) => {
+                eprintln!("clipboard does not contain readable text; paste ignored: {error}");
+                return Ok(());
+            }
+        };
+        let bytes = input::paste_bytes(&text, self.session.bracketed_paste_mode());
+        self.pending_keyboard_at = Some(Instant::now());
+        if let Some(pty) = self.pty.as_mut() {
+            // Keep paste on the sole synchronous PTY writer. Fixed-size writes let ConPTY's
+            // existing write_all/flush path apply backpressure instead of one unbounded call.
+            for chunk in bytes.chunks(input::PASTE_WRITE_CHUNK_BYTES) {
+                pty.write(chunk).context("write clipboard paste to PTY")?;
+            }
+        }
+        Ok(())
     }
 
     fn ime_input(&mut self, event: Ime) -> Result<()> {
@@ -788,33 +828,6 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
     }
 }
 
-fn keyboard_bytes(key: &Key, modifiers: ModifiersState) -> Option<Vec<u8>> {
-    // Spike 04's hard rule: Process is tested only on logical_key. Physical Backspace/Escape is
-    // still present during composition and must never leak into the shell.
-    if matches!(key, Key::Named(NamedKey::Process)) {
-        return None;
-    }
-    if modifiers.control_key()
-        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
-    {
-        return Some(vec![0x03]);
-    }
-    // M0 intentionally implements only Ctrl+C. Other Ctrl+letter chords are consumed here until
-    // the later terminal-keybinding slice defines their byte and command semantics.
-    match key {
-        Key::Character(text) if text.is_ascii() && !modifiers.control_key() => {
-            Some(text.as_bytes().to_vec())
-        }
-        Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
-        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
-        Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
-        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-        // winit reports the text-producing space key as Named rather than Character.
-        Key::Named(NamedKey::Space) if !modifiers.control_key() => Some(vec![b' ']),
-        _ => None,
-    }
-}
-
 fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
@@ -974,39 +987,52 @@ fn main() -> Result<()> {
 mod tests {
     use super::*;
     use std::time::Duration;
+    use winit::keyboard::{Key, NamedKey};
 
     #[test]
     fn keyboard_mapping_is_ascii_only_and_preserves_terminal_controls() {
         assert_eq!(
-            keyboard_bytes(&Key::Character("hello".into()), ModifiersState::empty()),
+            input::keyboard_bytes(
+                &Key::Character("hello".into()),
+                ModifiersState::empty(),
+                false
+            ),
             Some(b"hello".to_vec())
         );
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::Enter), ModifiersState::empty()),
+            input::keyboard_bytes(&Key::Named(NamedKey::Enter), ModifiersState::empty(), false),
             Some(vec![b'\r'])
         );
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::Backspace), ModifiersState::empty()),
+            input::keyboard_bytes(
+                &Key::Named(NamedKey::Backspace),
+                ModifiersState::empty(),
+                false
+            ),
             Some(vec![0x7f])
         );
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::Space), ModifiersState::empty()),
+            input::keyboard_bytes(&Key::Named(NamedKey::Space), ModifiersState::empty(), false),
             Some(vec![b' '])
         );
         assert_eq!(
-            keyboard_bytes(&Key::Character("c".into()), ModifiersState::CONTROL),
+            input::keyboard_bytes(&Key::Character("c".into()), ModifiersState::CONTROL, false),
             Some(vec![0x03])
         );
         assert_eq!(
-            keyboard_bytes(&Key::Character("x".into()), ModifiersState::CONTROL),
+            input::keyboard_bytes(&Key::Character("x".into()), ModifiersState::CONTROL, false),
             None
         );
         assert_eq!(
-            keyboard_bytes(&Key::Character("中".into()), ModifiersState::empty()),
+            input::keyboard_bytes(&Key::Character("中".into()), ModifiersState::empty(), false),
             None
         );
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::Process), ModifiersState::CONTROL),
+            input::keyboard_bytes(
+                &Key::Named(NamedKey::Process),
+                ModifiersState::CONTROL,
+                false
+            ),
             None
         );
     }
