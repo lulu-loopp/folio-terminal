@@ -1,5 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
+mod procedural;
+
 use std::{
     collections::HashMap,
     num::{NonZeroI64, NonZeroU16, NonZeroU32},
@@ -1028,6 +1030,35 @@ impl Renderer {
             ));
         }
         for (index, cell) in frame.cells.iter().enumerate() {
+            if cell.style.flags.contains(CellFlags::HIDDEN) {
+                continue;
+            }
+            let mut characters = cell.text.chars();
+            let Some(character) = characters.next() else {
+                continue;
+            };
+            if characters.next().is_some() {
+                continue;
+            }
+            let row = index / columns;
+            let column = index % columns;
+            let [left, top, right, bottom] = cell_bounds_px(self.metrics, row, column);
+            let Some(geometry) = procedural::geometry(
+                character,
+                left,
+                top,
+                right - left,
+                bottom - top,
+                self.metrics.font_size_px / BASE_FONT_SIZE_LOGICAL_PX,
+            ) else {
+                continue;
+            };
+            let (foreground, _) = resolve_colors(&cell.style);
+            rects.extend(geometry.into_iter().map(|rect| {
+                self.pixel_rect(rect.left, rect.top, rect.right, rect.bottom, foreground)
+            }));
+        }
+        for (index, cell) in frame.cells.iter().enumerate() {
             if cell.style.flags.contains(CellFlags::UNDERLINE) {
                 let row = index / columns;
                 let column = index % columns;
@@ -1193,6 +1224,7 @@ fn narrow_cell_slots(cells: &[CapturedCell]) -> Vec<NarrowCellSlot> {
                     .intersects(CellFlags::WIDE_CHAR | CellFlags::HIDDEN)
                 && !cell.text.is_empty()
                 && !cell.text.chars().all(char::is_whitespace)
+                && !procedural::supports_text(&cell.text)
         })
         .map(|(column, cell)| NarrowCellSlot {
             column,
@@ -1240,7 +1272,7 @@ fn shape_narrow_buffer_for_key(
     metrics: CellMetrics,
     #[cfg(test)] color_emoji_trial_shapes: &mut u64,
 ) -> (Buffer, Family<'static>) {
-    match presentation_route(&key.text, font_system) {
+    match font_presentation_route(&key.text, font_system) {
         PresentationRoute::TerminalText => {
             let family = Family::Monospace;
             (
@@ -1366,6 +1398,7 @@ fn wide_cell_slots(cells: &[CapturedCell]) -> Vec<WideCellSlot> {
             cell.style.flags.contains(CellFlags::WIDE_CHAR)
                 && !cell.style.flags.contains(CellFlags::HIDDEN)
                 && !cell.text.is_empty()
+                && !procedural::supports_text(&cell.text)
         })
         .map(|(column, cell)| WideCellSlot {
             column,
@@ -1435,7 +1468,7 @@ fn shape_wide_buffer_for_key(
     metrics: CellMetrics,
     #[cfg(test)] color_emoji_trial_shapes: &mut u64,
 ) -> Buffer {
-    match presentation_route(&key.text, font_system) {
+    match font_presentation_route(&key.text, font_system) {
         PresentationRoute::TerminalText => {
             shape_wide_buffer(key, font_system, metrics, Family::Monospace)
         }
@@ -1496,7 +1529,7 @@ enum PresentationRoute {
     ColorEmoji,
 }
 
-fn presentation_route(text: &str, font_system: &mut FontSystem) -> PresentationRoute {
+fn font_presentation_route(text: &str, font_system: &mut FontSystem) -> PresentationRoute {
     if primary_font_supports_text(font_system, text) {
         return PresentationRoute::TerminalText;
     }
@@ -1866,20 +1899,26 @@ mod tests {
         let mut font_system = terminal_font_system();
         for text in ["👨‍👩‍👧‍👦", "👍🏽", "🇺🇸", "☂️"] {
             assert_eq!(
-                presentation_route(text, &mut font_system),
+                font_presentation_route(text, &mut font_system),
                 PresentationRoute::ColorEmoji
             );
         }
         for text in ["☂︎", "☆"] {
             assert_eq!(
-                presentation_route(text, &mut font_system),
+                font_presentation_route(text, &mut font_system),
                 PresentationRoute::TextSymbol
             );
         }
-        for text in ["│", "─", "█", "▓", "▒", "■", "©", "1", "A"] {
+        for text in ["■", "©", "1", "A"] {
             assert_eq!(
-                presentation_route(text, &mut font_system),
+                font_presentation_route(text, &mut font_system),
                 PresentationRoute::TerminalText
+            );
+        }
+        for text in ["│", "─", "█", "▓", "▒"] {
+            assert!(
+                procedural::supports_text(text),
+                "{text} must bypass font routing"
             );
         }
         assert_eq!(cluster_width("☆"), 1);
@@ -2051,16 +2090,12 @@ mod tests {
         for scale_factor in [1.0, 1.25, 1.5, 2.0] {
             let metrics = CellMetrics::measure(&mut font_system, scale_factor).unwrap();
             let glyphs = shape_narrow_for_test(
-                &[
-                    CapturedCell::plain("☂︎"),
-                    CapturedCell::plain("☆"),
-                    CapturedCell::plain("│"),
-                ],
+                &[CapturedCell::plain("☂︎"), CapturedCell::plain("☆")],
                 &mut font_system,
                 metrics,
             );
-            assert_eq!(glyphs.len(), 3);
-            for glyph in &glyphs[..2] {
+            assert_eq!(glyphs.len(), 2);
+            for glyph in &glyphs {
                 let layout = first_layout_glyph(&glyph.buffer);
                 assert_ne!(layout.glyph_id, 0);
                 assert_eq!(glyph_family(&font_system, &layout), TEXT_SYMBOL_FONT_FAMILY);
@@ -2081,49 +2116,41 @@ mod tests {
                 "scale {scale_factor}: fallback star must be em-normalized"
             );
 
-            let vertical = first_layout_glyph(&glyphs[2].buffer);
-            assert_ne!(vertical.glyph_id, 0);
-            assert_eq!(glyph_family(&font_system, &vertical), PRIMARY_FONT_FAMILY);
-            assert_eq!(vertical.font_size, metrics.font_size_px);
-            assert!(
-                (vertical.w - metrics.cell_width_px).abs() <= 0.001,
-                "scale {scale_factor}: primary box drawing advance {} must equal cell width {}",
-                vertical.w,
-                metrics.cell_width_px
-            );
+            assert!(procedural::supports_text("│"));
         }
     }
 
     #[cfg(target_os = "windows")]
     #[test]
-    fn box_drawing_and_block_elements_keep_primary_cell_continuity() {
+    fn box_drawing_and_block_elements_bypass_shaping_and_the_glyph_cache() {
         let mut font_system = terminal_font_system();
         let metrics = CellMetrics::measure(&mut font_system, 1.5).unwrap();
+        let mut swash_cache = SwashCache::new();
+        let mut cache = NarrowShapingCache::new();
 
-        for text in ["█", "─"] {
+        for text in ["─", "│", "┌", "╬", "╭", "█", "▀", "▒"] {
             let cells = (0..8)
                 .map(|_| CapturedCell::plain(text))
                 .collect::<Vec<_>>();
-            let glyphs = shape_narrow_for_test(&cells, &mut font_system, metrics);
-            assert_eq!(glyphs.len(), 8);
-            assert_narrow_glyph_origins(&glyphs, metrics);
+            let glyphs = shape_narrow_glyphs(
+                &cells,
+                &mut font_system,
+                &mut swash_cache,
+                metrics,
+                &mut cache,
+            );
+            assert!(glyphs.is_empty(), "{text} must not enter shaping");
+            assert!(
+                cache.entries.is_empty(),
+                "{text} must not enter the atlas cache"
+            );
 
-            for glyph in &glyphs {
-                let layout = first_layout_glyph(&glyph.buffer);
-                assert_eq!(glyph_family(&font_system, &layout), PRIMARY_FONT_FAMILY);
-                assert_eq!(
-                    layout.font_size, metrics.font_size_px,
-                    "{text} in column {} must not be em-normalized",
-                    glyph.column
-                );
-                assert!(
-                    (layout.w - metrics.cell_width_px).abs() <= 0.001,
-                    "{text} in column {} advance {} must equal cell width {}",
-                    glyph.column,
-                    layout.w,
-                    metrics.cell_width_px
-                );
-            }
+            let mut malformed_wide = CapturedCell::plain(text);
+            malformed_wide.style.flags.insert(CellFlags::WIDE_CHAR);
+            assert!(
+                shape_wide_for_test(&[malformed_wide], &mut font_system, metrics).is_empty(),
+                "{text} must have programmatic priority even if the grid marks it wide"
+            );
         }
     }
 
@@ -2671,7 +2698,7 @@ mod tests {
         let narrow = shape_narrow_for_test(&cells, &mut font_system, metrics);
         assert_eq!(
             narrow.iter().map(|glyph| glyph.column).collect::<Vec<_>>(),
-            [0, 1, 2, 5, 8]
+            [0, 1, 2, 8]
         );
         assert_narrow_glyph_origins(&narrow, metrics);
 
