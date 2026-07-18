@@ -8,7 +8,10 @@ use std::{
 
 use anyhow::{Context, Result, bail, ensure};
 use bt_corpus::{Chunking, Corpus, EventKind};
-use bt_render::{HeadlessRenderProbe, RenderProbeSample};
+use bt_render::{
+    FrameContentDigest, HeadlessRenderProbe, RenderProbeSample, frame_content_digest,
+    frame_is_alternate_screen,
+};
 use bt_term::{DualPlaneSession, TerminalAdapter};
 use bt_viewport::{ViewportFrame, ViewportProjection};
 use vte::{Params, Parser, Perform};
@@ -256,6 +259,7 @@ struct RenderReplay {
     probe: HeadlessRenderProbe,
     totals: PerfTotals,
     last_frame: Option<ViewportFrame>,
+    trace_perf: bool,
 }
 
 impl RenderReplay {
@@ -270,6 +274,7 @@ impl RenderReplay {
             probe,
             totals: PerfTotals::default(),
             last_frame: None,
+            trace_perf: env::var_os("BT_PERF_TRACE").is_some(),
         }
     }
 
@@ -303,8 +308,9 @@ impl RenderReplay {
         {
             self.totals.unchanged_frames = self.totals.unchanged_frames.saturating_add(1);
         }
+        let trace = self.frame_trace(&frame);
         let sample = self.probe.prepare_frame(&frame)?;
-        self.totals.record(sample);
+        self.totals.record(sample, trace);
         self.last_frame = Some(frame);
         Ok(())
     }
@@ -319,8 +325,9 @@ impl RenderReplay {
             self.totals.suppressed_frames = self.totals.suppressed_frames.saturating_add(1);
             return Ok(());
         }
+        let trace = self.frame_trace(&frame);
         let sample = self.probe.prepare_frame(&frame)?;
-        self.totals.record(sample);
+        self.totals.record(sample, trace);
         self.last_frame = Some(frame);
         Ok(())
     }
@@ -333,9 +340,28 @@ impl RenderReplay {
         Ok(frame)
     }
 
+    fn frame_trace(&self, frame: &ViewportFrame) -> Option<ReplayFrameTrace> {
+        self.trace_perf.then(|| {
+            let started = Instant::now();
+            let digest = frame_content_digest(frame);
+            ReplayFrameTrace {
+                digest,
+                digest_elapsed: started.elapsed(),
+                alternate_screen: frame_is_alternate_screen(frame),
+            }
+        })
+    }
+
     fn reset_totals(&mut self) {
         self.totals = PerfTotals::default();
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReplayFrameTrace {
+    digest: FrameContentDigest,
+    digest_elapsed: Duration,
+    alternate_screen: bool,
 }
 
 fn same_visual_frame(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
@@ -378,7 +404,7 @@ struct PerfTotals {
 }
 
 impl PerfTotals {
-    fn record(&mut self, sample: RenderProbeSample) {
+    fn record(&mut self, sample: RenderProbeSample, trace: Option<ReplayFrameTrace>) {
         self.render += sample.total;
         self.row_compose += sample.row_compose;
         self.shape_cache_miss += sample.shape_cache_miss;
@@ -405,10 +431,16 @@ impl PerfTotals {
         self.narrow_resident_bytes = sample.narrow_resident_bytes;
         self.wide_resident_bytes = sample.wide_resident_bytes;
         self.render_samples_us.push(sample.total.as_micros());
-        if env::var_os("BT_PERF_TRACE").is_some() {
+        if let Some(trace) = trace {
             eprintln!(
-                "BT_REPLAY_FRAME frame={} total_us={} row_compose_us={} shape_miss_us={} atlas_prepare_upload_us={} encode_submit_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_hits={} atlas_misses={} atlas_grows={} atlas_evictions={} atlas_upload_bytes={} narrow_glyphs={} wide_glyphs={}",
+                "BT_REPLAY_FRAME frame={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} total_us={} row_compose_us={} shape_miss_us={} atlas_prepare_upload_us={} encode_submit_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_hits={} atlas_misses={} atlas_grows={} atlas_evictions={} atlas_upload_bytes={} narrow_glyphs={} wide_glyphs={}",
                 self.frames,
+                trace.digest.nonblank_cells,
+                trace.digest.first_text_row,
+                trace.digest.last_text_row,
+                trace.digest.content_fnv,
+                u8::from(trace.alternate_screen),
+                trace.digest_elapsed.as_micros(),
                 sample.total.as_micros(),
                 sample.row_compose.as_micros(),
                 sample.shape_cache_miss.as_micros(),

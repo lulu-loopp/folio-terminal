@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bt_doc::{ContentAnchor, ScreenId};
 use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
 use bt_unicode::{cluster_width, graphemes};
 #[cfg(test)]
@@ -308,6 +309,81 @@ pub enum FrameSource {
     PtyOutput,
     Resize,
     Expose,
+}
+
+const FNV_1A_64_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_1A_64_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameContentDigest {
+    pub nonblank_cells: usize,
+    pub first_text_row: i64,
+    pub last_text_row: i64,
+    pub content_fnv: u64,
+}
+
+/// Produce a stable content-only fingerprint for trace correlation.
+///
+/// Each cell contributes its row and column as little-endian `u32`s, its UTF-8 byte length as a
+/// little-endian `u64`, the UTF-8 bytes, then tagged foreground and background colors. Render-only
+/// flags, hyperlinks, cursor state, and selection state are intentionally outside this digest.
+pub fn frame_content_digest(frame: &ViewportFrame) -> FrameContentDigest {
+    let columns = frame.columns.get() as usize;
+    let mut content_fnv = FNV_1A_64_OFFSET_BASIS;
+    let mut nonblank_cells = 0_usize;
+    let mut first_text_row = None;
+    let mut last_text_row = None;
+
+    for (index, cell) in frame.cells.iter().enumerate() {
+        let row = index / columns;
+        let column = index % columns;
+        fnv_write(&mut content_fnv, &(row as u32).to_le_bytes());
+        fnv_write(&mut content_fnv, &(column as u32).to_le_bytes());
+        fnv_write(&mut content_fnv, &(cell.text.len() as u64).to_le_bytes());
+        fnv_write(&mut content_fnv, cell.text.as_bytes());
+        fnv_write_color(&mut content_fnv, cell.style.foreground);
+        fnv_write_color(&mut content_fnv, cell.style.background);
+
+        if !cell.text.is_empty() && cell.text.as_bytes().iter().any(|byte| *byte != b' ') {
+            nonblank_cells = nonblank_cells.saturating_add(1);
+            first_text_row.get_or_insert(row as i64);
+            last_text_row = Some(row as i64);
+        }
+    }
+
+    FrameContentDigest {
+        nonblank_cells,
+        first_text_row: first_text_row.unwrap_or(-1),
+        last_text_row: last_text_row.unwrap_or(-1),
+        content_fnv,
+    }
+}
+
+pub fn frame_is_alternate_screen(frame: &ViewportFrame) -> bool {
+    frame.cell_anchors.first().is_some_and(|anchor| {
+        matches!(
+            anchor.start,
+            ContentAnchor::Live {
+                screen: ScreenId::Alternate,
+                ..
+            }
+        )
+    })
+}
+
+fn fnv_write(state: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *state ^= u64::from(*byte);
+        *state = state.wrapping_mul(FNV_1A_64_PRIME);
+    }
+}
+
+fn fnv_write_color(state: &mut u64, color: TerminalColor) {
+    match color {
+        TerminalColor::Named(value) => fnv_write(state, &[0, value]),
+        TerminalColor::Indexed(value) => fnv_write(state, &[1, value]),
+        TerminalColor::Rgb(red, green, blue) => fnv_write(state, &[2, red, green, blue]),
+    }
 }
 
 /// Replaceable event boundary carried into the renderer without a winit type.
@@ -1668,12 +1744,23 @@ impl Renderer {
         };
         self.atlas.trim();
         if self.trace_perf {
+            let total_elapsed = frame_started.elapsed();
+            let digest_started = Instant::now();
+            let digest = frame_content_digest(frame);
+            let alternate_screen = frame_is_alternate_screen(frame);
+            let digest_elapsed = digest_started.elapsed();
             self.perf_frame = self.perf_frame.saturating_add(1);
             eprintln!(
-                "BT_PERF_TRACE frame={} source={:?} cells={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
+                "BT_PERF_TRACE frame={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
                 self.perf_frame,
                 trigger.source,
                 frame.cells.len(),
+                digest.nonblank_cells,
+                digest.first_text_row,
+                digest.last_text_row,
+                digest.content_fnv,
+                u8::from(alternate_screen),
+                digest_elapsed.as_micros(),
                 (validated_at - frame_started).as_micros(),
                 (viewport_updated_at - validated_at).as_micros(),
                 text_stats.elapsed.as_micros(),
@@ -1696,7 +1783,7 @@ impl Renderer {
                 (surface_acquired_at - rectangles_prepared_at).as_micros(),
                 (encoded_at - surface_acquired_at).as_micros(),
                 (present_called_at - encoded_at).as_micros(),
-                frame_started.elapsed().as_micros(),
+                total_elapsed.as_micros(),
             );
         }
         Ok(PresentOutcome::Presented(receipt))
@@ -3539,6 +3626,61 @@ mod tests {
         assert!(slot.take().is_some());
         assert!(slot.pending_frame().is_none());
         assert!(slot.take().is_none());
+    }
+
+    #[test]
+    fn frame_content_digest_is_stable_for_known_and_blank_frames() {
+        let make_frame = |columns: u32, rows: u32, cells: Vec<CapturedCell>| ViewportFrame {
+            columns: NonZeroU32::new(columns).unwrap(),
+            rows: NonZeroU32::new(rows).unwrap(),
+            cell_anchors: test_cell_anchors(cells.len()),
+            cells,
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: true,
+            },
+            selection_spans: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+
+        let mut colored = CapturedCell::plain("A");
+        colored.style.foreground = TerminalColor::Rgb(1, 2, 3);
+        colored.style.background = TerminalColor::Indexed(4);
+        let known = make_frame(
+            3,
+            3,
+            vec![
+                CapturedCell::plain(""),
+                CapturedCell::plain(" "),
+                colored,
+                CapturedCell::plain("  "),
+                CapturedCell::plain(""),
+                CapturedCell::plain("你"),
+                CapturedCell::plain(""),
+                CapturedCell::plain(""),
+                CapturedCell::plain(""),
+            ],
+        );
+        assert_eq!(
+            frame_content_digest(&known),
+            FrameContentDigest {
+                nonblank_cells: 2,
+                first_text_row: 0,
+                last_text_row: 1,
+                content_fnv: 0x154a_541c_8466_f6df,
+            }
+        );
+
+        let blank = make_frame(2, 2, vec![CapturedCell::plain(""); 4]);
+        let blank_digest = frame_content_digest(&blank);
+        assert_eq!(blank_digest.nonblank_cells, 0);
+        assert_eq!(blank_digest.first_text_row, -1);
+        assert_eq!(blank_digest.last_text_row, -1);
     }
 
     #[test]

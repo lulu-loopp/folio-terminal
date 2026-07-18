@@ -16,7 +16,7 @@ use bt_doc::{Bias, LayoutKey};
 use bt_pty::{OutputWake, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, Preedit, PresentOutcome,
-    Renderer, background_rgb, compose_preedit,
+    Renderer, background_rgb, compose_preedit, frame_content_digest, frame_is_alternate_screen,
 };
 use bt_term::{DualPlaneSession, MouseTracking, TerminalModes};
 use bt_transcript::DEFAULT_STAGING_QUOTA;
@@ -489,7 +489,17 @@ impl Runtime {
             )
         {
             if self.trace_perf {
-                eprintln!("BT_PERF_TRACE skip=unchanged source={:?}", trigger.source);
+                let digest_started = Instant::now();
+                let digest = frame_content_digest(&composed.frame);
+                let alternate_screen = frame_is_alternate_screen(&composed.frame);
+                let digest_elapsed = digest_started.elapsed();
+                eprintln!(
+                    "BT_PERF_TRACE skip=unchanged source={:?} content_fnv={:016x} alt={} digest_us={}",
+                    trigger.source,
+                    digest.content_fnv,
+                    u8::from(alternate_screen),
+                    digest_elapsed.as_micros(),
+                );
             }
             return Ok(false);
         }
