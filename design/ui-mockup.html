@@ -417,6 +417,28 @@
   .capbtn:hover { background: var(--hover); color: var(--ink); }
   .capbtn.close-w:hover { background: #E5484D; color: #fff; }
   .capbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; border-radius: 4px; }
+  /* ── attention queue chip (P1-8, user-approved 2026-07-18) ──
+     One chip for the whole window: how many sessions are BLOCKED ON YOU.
+     Zero waiting = zero footprint (unmounted, no reserved gap — the
+     zero-placeholder discipline from §7.1.6). Click / Ctrl+Shift+A jumps to
+     the longest-waiting session; pressing again walks the queue, oldest
+     first (FCFS — whoever has waited longest deserves the next answer). */
+  .attn-chip {
+    flex: none; align-self: center; display: flex; align-items: center; gap: 5px;
+    height: 21px; padding: 0 9px 0 8px; margin-right: 6px;
+    border: 1px solid color-mix(in srgb, var(--warn) 26%, transparent);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+    border-radius: 11px; cursor: pointer;
+    color: var(--ink2); font-size: 11px; font-weight: 500;
+  }
+  .attn-chip:hover { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--ink); }
+  /* the class's display:flex outguns the UA sheet's [hidden] rule — say it
+     explicitly or the chip ignores being hidden (user caught it live) */
+  .attn-chip[hidden] { display: none; }
+  .attn-chip .adot { width: 5px; height: 5px; border-radius: 50%; flex: none;
+    background: var(--warn); animation: fcpulse .9s infinite; }
+  .attn-chip .acnt { color: var(--warn); }
+  @media (prefers-reduced-motion: reduce) { .attn-chip .adot { animation: none; } }
 
   /* ── Body ── */
   .body { flex: 1; min-height: 0; display: flex; }
@@ -2010,6 +2032,7 @@
       <span class="apptitle">BetterTerminal</span>
       <div class="tabs-inline" id="tabstrip"></div>
     </div>
+    <button class="attn-chip" id="attn-chip" hidden aria-label="Sessions waiting for you"><span class="adot"></span><span class="acnt">0</span><span>waiting</span></button>
     <button class="capbtn gear" id="btn-settings" title="Settings" aria-label="Settings"><svg><use href="#i-gear"/></svg></button>
     <div class="caption">
       <button class="capbtn" title="Minimize" aria-label="Minimize"><svg><use href="#i-min"/></svg></button>
@@ -2084,6 +2107,20 @@
             <div class="combo-menu" role="listbox">
               <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
               <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons, expand on hover</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="text">
+            <div class="title">Waiting badge</div>
+            <div class="desc">A pill in the title bar counts sessions waiting for your input. Off hides the pill; Ctrl+Shift+A still jumps to the longest-waiting one</div>
+          </div>
+          <div class="combo" data-combo="attnchip">
+            <button aria-haspopup="listbox"><span class="value">On</span><span class="chev">▼</span></button>
+            <div class="combo-menu" role="listbox">
+              <div class="combo-item selected" data-v="on" role="option"><span class="tick">✓</span>On</div>
+              <div class="combo-item" data-v="off" role="option"><span class="tick">✓</span>Off</div>
             </div>
           </div>
         </div>
@@ -2326,6 +2363,72 @@
   const cleanTitle = (t) => String(t).replace(/[\u0000-\u001F\u007F-\u009F]/g, "").trim().slice(0, TITLE_MAX);
   const autoName = (s) => s.progTitle || cwdLeaf(s);
   const displayName = (s) => s.name || autoName(s);
+  /* ── attention queue (P1-8, user-approved 2026-07-18) ──
+     awaiting is a QUEUE, not just a dot: order of arrival is the order of
+     service (FCFS — the ruling). The stamp is a monotonic sequence, not a
+     clock: only order matters, and the mock must replay deterministically.
+     Consumption is ANSWERING (Enter in that session), not visiting — looking
+     at a blocked agent does not unblock it. */
+  let attnSeq = 1;
+  function setAwaiting(s, on) {
+    if (on && !s.awaiting) s.awaitingAt = attnSeq++;
+    if (!on) delete s.awaitingAt;
+    s.awaiting = on;
+  }
+  const awaitingQueue = () =>
+    state.sessions.filter(s => s.awaiting && !s.dead)
+      .sort((a, b) => (a.awaitingAt || 0) - (b.awaitingAt || 0));
+  function renderAttnChip() {
+    const chip = $("attn-chip");
+    /* the setting hides the UI, not the capability (user ruling 2026-07-18:
+       the pill made them anxious — the QUEUE is wanted, the reminder is not);
+       Ctrl+Shift+A keeps working with the pill off */
+    const q = state.attnChip ? awaitingQueue() : [];
+    chip.hidden = !q.length;
+    if (!q.length) return;
+    chip.querySelector(".acnt").textContent = q.length;
+    chip.title = "Waiting for you — oldest first:\n"
+      + q.map((s, i) => `${i + 1}. ${displayName(s)}`).join("\n")
+      + "\n\nClick or Ctrl+Shift+A to jump";
+  }
+  /* jump = go answer the longest-waiting session; if you are already on a
+     queued session, go to the NEXT oldest — repeated presses walk the queue */
+  function jumpAttention() {
+    const q = awaitingQueue();
+    if (!q.length) return;
+    const cur = focusedSession();
+    const at = cur ? q.findIndex(s => s.uid === cur.uid) : -1;
+    focusSessionByUid(q[(at + 1) % q.length].uid);
+  }
+  function focusSessionByUid(uid) {
+    for (const w of state.tabs) {
+      const leaf = leavesOf(w.tree).find(l => l.kind === "term" && l.uid === uid);
+      if (leaf) {
+        state.active = w.id;
+        w.focus = leaf.id;
+        if (w.focusLeaf != null) w.focusLeaf = leaf.id;   /* focus mode: onto the stage */
+        render();
+        return;
+      }
+      /* standby card in a focus-mode pool: the jump OPENS the session there
+         too (user ruling 2026-07-18) — swap it onto the stage, the same trade
+         as clicking its card. A non-terminal stage has no seat to trade:
+         land on the tab and let the card's attention border point. */
+      if (w.focusLeaf != null
+          && (w.standby || []).some(x => typeof x === "number" && x === uid)) {
+        state.active = w.id;
+        const fl = findLeafIn(w, w.focusLeaf);
+        if (fl && !isFilesLeaf(fl) && !isPreviewLeaf(fl)) {
+          const i = w.standby.indexOf(uid);
+          w.standby[i] = fl.uid;
+          fl.uid = uid;
+        }
+        render();
+        return;
+      }
+    }
+  }
+  $("attn-chip").addEventListener("click", jumpAttention);
   const nameSource = (s) => s.name ? "manual" : s.progTitle ? "program" : "cwd";
   const NAME_SOURCE = { manual: "Named by you", program: "Set by the program", cwd: "Working folder" };
 
@@ -2486,6 +2589,7 @@
     defaultProfile: 0,       // index into PROFILES: new tabs, and startup
     blockMax: 0,             // px ceiling on a rendered block; 0 means none
     wrap: true,              // fold long lines (P2-9); rendered blocks follow it
+    attnChip: true,          // the waiting badge UI (P1-8); off hides the pill, the jump key stays
     recent: [],              // [{seed, at}] — places, never output (P1-13)
     lastSession: [],         // every tab's plan at shutdown, pin flag and all
   };
@@ -2508,7 +2612,7 @@
     /* the ring demos on the SQUARE pwsh mark — around the round ubuntu logo the
        ring reads as part of the logo and can't be judged (user, 2026-07-18) */
     const ask = state.sessions[1], dl = state.sessions[0];
-    if (ask) { ask.busy = false; ask.awaiting = true; }
+    if (ask) { ask.busy = false; setAwaiting(ask, true); }
     if (!dl) return;
     dl.progress = { pct: 0, kind: "normal" };
     setInterval(() => {
@@ -3466,6 +3570,7 @@
         dot.title = stateDotTitle(s, s.unread);
       }
     });
+    renderAttnChip();   /* awaiting may have flipped with this session's state */
   }
   /* a tab aggregates the state of every session in its layout */
   const tabBusy = (w) => leavesOf(w.tree).some(l => (session(l.uid) || {}).busy);
@@ -4811,6 +4916,7 @@
     syncFocusCards(aw);
     updateTabSqueeze();
     fitCmdRails();
+    renderAttnChip();
     typeset($("termhost"));
     restoreScroll();
     if (edState) {
@@ -5056,6 +5162,9 @@
     const t = focusedSession();
     const cmd = t.input;
     t.input = "";
+    /* Enter in an awaiting session IS the answer — the queue entry is consumed
+       here, not on visit (looking at a blocked agent does not unblock it) */
+    if (t.awaiting) setAwaiting(t, false);
     t.lines.push(t.prompt + esc(cmd));
     const head = cmd.trim().split(/\s+/)[0];
     if (!head) { render(); return; }
@@ -5119,6 +5228,15 @@
         jumpPrompt(leaf.id, e.key === "ArrowUp" ? -1 : 1);
         return;
       }
+    }
+    /* Ctrl+Shift+A — answer the longest-waiting session; repeat to walk the
+       queue (P1-8; the binding is provisional pending the P2-7 audit) */
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "a"
+        && !document.body.classList.contains("shut")
+        && !$("settings-overlay").classList.contains("show")) {
+      e.preventDefault();
+      jumpAttention();
+      return;
     }
     /* Ctrl+F — in-pane search on the focused terminal. Reopening refocuses the
        capsule and keeps the last query: search is a staying state, not a popup. */
@@ -6686,6 +6804,11 @@
           combo.querySelector(".value").textContent =
             item.dataset.v === "icons" ? "Icons, expand on hover" : "Expanded";
           render();
+        }
+        if (kind === "attnchip") {
+          state.attnChip = item.dataset.v === "on";
+          combo.querySelector(".value").textContent = state.attnChip ? "On" : "Off";
+          renderAttnChip();
         }
         if (kind === "wrap") {
           state.wrap = item.dataset.v === "on";
