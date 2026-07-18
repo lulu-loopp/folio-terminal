@@ -368,6 +368,10 @@ impl LatestFrameSlot {
         self.pending.take()
     }
 
+    pub fn pending_frame(&self) -> Option<&ViewportFrame> {
+        self.pending.as_ref().map(|(frame, _)| frame)
+    }
+
     pub fn overwrites(&self) -> u64 {
         self.overwrites
     }
@@ -407,6 +411,14 @@ struct TextRow {
     wide_glyphs: Vec<WideGlyph>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct TextPreparationStats {
+    elapsed: Duration,
+    rows_reshaped: u64,
+    narrow: ShapeCacheCounters,
+    wide: ShapeCacheCounters,
+}
+
 struct WideGlyph {
     column: usize,
     buffer: Arc<Buffer>,
@@ -436,18 +448,46 @@ struct CachedNarrowShape {
     last_used: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ShapeCacheCounters {
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    miss_time: Duration,
+}
+
+impl ShapeCacheCounters {
+    fn delta_since(self, earlier: Self) -> Self {
+        Self {
+            hits: self.hits.saturating_sub(earlier.hits),
+            misses: self.misses.saturating_sub(earlier.misses),
+            evictions: self.evictions.saturating_sub(earlier.evictions),
+            miss_time: self.miss_time.saturating_sub(earlier.miss_time),
+        }
+    }
+}
+
 struct NarrowShapingCache {
     entries: HashMap<ShapeKey, CachedNarrowShape>,
     access_clock: u64,
+    track_perf: bool,
+    counters: ShapeCacheCounters,
     #[cfg(test)]
     color_emoji_trial_shapes: u64,
 }
 
 impl NarrowShapingCache {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_perf_tracking(false)
+    }
+
+    fn with_perf_tracking(track_perf: bool) -> Self {
         Self {
             entries: HashMap::new(),
             access_clock: 0,
+            track_perf,
+            counters: ShapeCacheCounters::default(),
             #[cfg(test)]
             color_emoji_trial_shapes: 0,
         }
@@ -456,6 +496,7 @@ impl NarrowShapingCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.access_clock = 0;
+        self.counters = ShapeCacheCounters::default();
         #[cfg(test)]
         {
             self.color_emoji_trial_shapes = 0;
@@ -472,6 +513,9 @@ impl NarrowShapingCache {
         self.access_clock = self.access_clock.saturating_add(1);
         let last_used = self.access_clock;
         if let Some(cached) = self.entries.get_mut(&key) {
+            if self.track_perf {
+                self.counters.hits = self.counters.hits.saturating_add(1);
+            }
             cached.last_used = last_used;
             return (
                 Arc::clone(&cached.buffer),
@@ -480,6 +524,7 @@ impl NarrowShapingCache {
             );
         }
 
+        let miss_started = self.track_perf.then(Instant::now);
         if self.entries.len() >= NARROW_SHAPING_CACHE_CAPACITY
             && let Some(lru_key) = self
                 .entries
@@ -488,6 +533,9 @@ impl NarrowShapingCache {
                 .map(|(key, _)| key.clone())
         {
             self.entries.remove(&lru_key);
+            if self.track_perf {
+                self.counters.evictions = self.counters.evictions.saturating_add(1);
+            }
         }
 
         let (mut buffer, family, size_policy) = shape_narrow_buffer_for_key(
@@ -555,6 +603,13 @@ impl NarrowShapingCache {
                 last_used,
             },
         );
+        if let Some(miss_started) = miss_started {
+            self.counters.misses = self.counters.misses.saturating_add(1);
+            self.counters.miss_time = self
+                .counters
+                .miss_time
+                .saturating_add(miss_started.elapsed());
+        }
         (buffer, left_offset_px, top_offset_px)
     }
 }
@@ -568,15 +623,24 @@ struct CachedWideShape {
 struct WideShapingCache {
     entries: HashMap<ShapeKey, CachedWideShape>,
     access_clock: u64,
+    track_perf: bool,
+    counters: ShapeCacheCounters,
     #[cfg(test)]
     color_emoji_trial_shapes: u64,
 }
 
 impl WideShapingCache {
+    #[cfg(test)]
     fn new() -> Self {
+        Self::with_perf_tracking(false)
+    }
+
+    fn with_perf_tracking(track_perf: bool) -> Self {
         Self {
             entries: HashMap::new(),
             access_clock: 0,
+            track_perf,
+            counters: ShapeCacheCounters::default(),
             #[cfg(test)]
             color_emoji_trial_shapes: 0,
         }
@@ -585,6 +649,7 @@ impl WideShapingCache {
     fn clear(&mut self) {
         self.entries.clear();
         self.access_clock = 0;
+        self.counters = ShapeCacheCounters::default();
         #[cfg(test)]
         {
             self.color_emoji_trial_shapes = 0;
@@ -601,10 +666,14 @@ impl WideShapingCache {
         self.access_clock = self.access_clock.saturating_add(1);
         let last_used = self.access_clock;
         if let Some(cached) = self.entries.get_mut(&key) {
+            if self.track_perf {
+                self.counters.hits = self.counters.hits.saturating_add(1);
+            }
             cached.last_used = last_used;
             return (Arc::clone(&cached.buffer), cached.top_offset_px);
         }
 
+        let miss_started = self.track_perf.then(Instant::now);
         if self.entries.len() >= WIDE_SHAPING_CACHE_CAPACITY
             && let Some(lru_key) = self
                 .entries
@@ -613,6 +682,9 @@ impl WideShapingCache {
                 .map(|(key, _)| key.clone())
         {
             self.entries.remove(&lru_key);
+            if self.track_perf {
+                self.counters.evictions = self.counters.evictions.saturating_add(1);
+            }
         }
 
         let buffer = shape_wide_buffer_for_key(
@@ -637,6 +709,13 @@ impl WideShapingCache {
                 last_used,
             },
         );
+        if let Some(miss_started) = miss_started {
+            self.counters.misses = self.counters.misses.saturating_add(1);
+            self.counters.miss_time = self
+                .counters
+                .miss_time
+                .saturating_add(miss_started.elapsed());
+        }
         (buffer, top_offset_px)
     }
 }
@@ -709,6 +788,8 @@ pub struct Renderer {
     wide_shaping_cache: WideShapingCache,
     glyph_degraded_frames: u64,
     window_focused: bool,
+    trace_perf: bool,
+    perf_frame: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -727,6 +808,213 @@ pub struct RendererInitTimings {
     pub font_system: Duration,
     pub font_metrics: Duration,
     pub render_resources: Duration,
+}
+
+/// CPU-side phase timings from the headless replay probe. The probe executes the production text
+/// shaping, glyph rasterization/atlas upload, and command encoding paths against a real wgpu
+/// device, but has no window-system swapchain to present.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RenderProbeSample {
+    pub total: Duration,
+    pub row_compose: Duration,
+    pub shape_cache_miss: Duration,
+    pub atlas_prepare_upload: Duration,
+    pub encode_submit: Duration,
+    pub rows_reshaped: u64,
+    pub narrow_hits: u64,
+    pub narrow_misses: u64,
+    pub narrow_evictions: u64,
+    pub wide_hits: u64,
+    pub wide_misses: u64,
+    pub wide_evictions: u64,
+    pub narrow_glyphs: u64,
+    pub wide_glyphs: u64,
+}
+
+/// Headless render-path instrumentation used by `bt-replay`.
+#[doc(hidden)]
+pub struct HeadlessRenderProbe {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    font_system: FontSystem,
+    swash_cache: SwashCache,
+    viewport: Viewport,
+    atlas: TextAtlas,
+    text_renderer: TextRenderer,
+    metrics: CellMetrics,
+    text_rows: Vec<TextRow>,
+    narrow_shaping_cache: NarrowShapingCache,
+    wide_shaping_cache: WideShapingCache,
+    target: wgpu::Texture,
+    width: u32,
+    height: u32,
+    adapter_name: String,
+    max_texture_dimension_2d: u32,
+}
+
+impl HeadlessRenderProbe {
+    pub async fn new(width: u32, height: u32, scale_factor: f64) -> Result<Self, RenderError> {
+        let width = width.max(1);
+        let height = height.max(1);
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                compatible_surface: None,
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let adapter_name = adapter.get_info().name;
+        let (device, queue) = adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: Some("BetterTerminal replay probe device"),
+                ..Default::default()
+            })
+            .await
+            .map_err(|error| RenderError::Wgpu(error.to_string()))?;
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        let format = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, scale_factor)?;
+        let swash_cache = SwashCache::new();
+        let cache = Cache::new(&device);
+        let viewport = Viewport::new(&device, &cache);
+        let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
+        let text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("BetterTerminal replay probe target"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        Ok(Self {
+            device,
+            queue,
+            font_system,
+            swash_cache,
+            viewport,
+            atlas,
+            text_renderer,
+            metrics,
+            text_rows: Vec::new(),
+            narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(true),
+            wide_shaping_cache: WideShapingCache::with_perf_tracking(true),
+            target,
+            width,
+            height,
+            adapter_name,
+            max_texture_dimension_2d,
+        })
+    }
+
+    pub fn adapter_name(&self) -> &str {
+        &self.adapter_name
+    }
+
+    pub fn max_texture_dimension_2d(&self) -> u32 {
+        self.max_texture_dimension_2d
+    }
+
+    pub fn prepare_frame(
+        &mut self,
+        frame: &ViewportFrame,
+    ) -> Result<RenderProbeSample, RenderError> {
+        let started = Instant::now();
+        frame.validate_shape()?;
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.width,
+                height: self.height,
+            },
+        );
+        let text_stats = prepare_text_rows(
+            frame,
+            self.metrics,
+            &mut self.text_rows,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &mut self.narrow_shaping_cache,
+            &mut self.wide_shaping_cache,
+        )?;
+        let rows_prepared_at = Instant::now();
+        prepare_text_atlas(
+            &mut self.text_renderer,
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            &mut self.swash_cache,
+            &self.text_rows,
+            self.metrics,
+            frame.columns,
+        )
+        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+        let atlas_prepared_at = Instant::now();
+        let view = self.target.create_view(&Default::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("BetterTerminal replay probe frame"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("BetterTerminal replay probe pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(theme_clear_color()),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            self.text_renderer
+                .render(&self.atlas, &self.viewport, &mut pass)
+                .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+        }
+        self.queue.submit([encoder.finish()]);
+        let submitted_at = Instant::now();
+        self.atlas.trim();
+        Ok(RenderProbeSample {
+            total: started.elapsed(),
+            row_compose: text_stats.elapsed,
+            shape_cache_miss: text_stats.narrow.miss_time + text_stats.wide.miss_time,
+            atlas_prepare_upload: atlas_prepared_at - rows_prepared_at,
+            encode_submit: submitted_at - atlas_prepared_at,
+            rows_reshaped: text_stats.rows_reshaped,
+            narrow_hits: text_stats.narrow.hits,
+            narrow_misses: text_stats.narrow.misses,
+            narrow_evictions: text_stats.narrow.evictions,
+            wide_hits: text_stats.wide.hits,
+            wide_misses: text_stats.wide.misses,
+            wide_evictions: text_stats.wide.evictions,
+            narrow_glyphs: self
+                .text_rows
+                .iter()
+                .map(|row| row.narrow_glyphs.len() as u64)
+                .sum(),
+            wide_glyphs: self
+                .text_rows
+                .iter()
+                .map(|row| row.wide_glyphs.len() as u64)
+                .sum(),
+        })
+    }
 }
 
 impl Renderer {
@@ -791,6 +1079,7 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rect_pipeline = create_rect_pipeline(&device, config.format);
         let render_resources_time = phase_started.elapsed();
+        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
         Ok(Self {
             surface,
             device,
@@ -814,10 +1103,12 @@ impl Renderer {
                 render_resources: render_resources_time,
             },
             text_rows: Vec::new(),
-            narrow_shaping_cache: NarrowShapingCache::new(),
-            wide_shaping_cache: WideShapingCache::new(),
+            narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(trace_perf),
+            wide_shaping_cache: WideShapingCache::with_perf_tracking(trace_perf),
             glyph_degraded_frames: 0,
             window_focused: true,
+            trace_perf,
+            perf_frame: 0,
         })
     }
 
@@ -870,7 +1161,9 @@ impl Renderer {
         frame: &ViewportFrame,
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
+        let frame_started = Instant::now();
         frame.validate_shape()?;
+        let validated_at = Instant::now();
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -878,67 +1171,20 @@ impl Renderer {
                 height: self.config.height,
             },
         );
-        self.prepare_text_rows(frame)?;
-        let padding = self.metrics.padding_px;
-        let metrics = self.metrics;
-        let text_right =
-            (padding + frame.columns.get() as f32 * self.metrics.cell_width_px).ceil() as i32;
-        let narrow_text_areas = self
-            .text_rows
-            .iter()
-            .enumerate()
-            .flat_map(|(row, text_row)| {
-                text_row.narrow_glyphs.iter().map(move |glyph| {
-                    let [left, top, _, bottom] = cell_bounds_px(metrics, row, glyph.column);
-                    TextArea {
-                        buffer: &glyph.buffer,
-                        left: left + glyph.left_offset_px,
-                        top: top + glyph.top_offset_px,
-                        scale: 1.0,
-                        // Clip to the terminal row, not the cell. The grid owns pen origins, while
-                        // accents and fallback ink remain free to overhang adjacent cells.
-                        bounds: TextBounds {
-                            left: padding.floor() as i32,
-                            top: top.floor() as i32,
-                            right: text_right,
-                            bottom: bottom.ceil() as i32,
-                        },
-                        default_color: glyph.color,
-                        custom_glyphs: &[],
-                    }
-                })
-            });
-        let wide_text_areas = self
-            .text_rows
-            .iter()
-            .enumerate()
-            .flat_map(|(row, text_row)| {
-                text_row.wide_glyphs.iter().map(move |wide| {
-                    let [left, top, _, bottom] = cell_bounds_px(metrics, row, wide.column);
-                    TextArea {
-                        buffer: &wide.buffer,
-                        left,
-                        top: top + wide.top_offset_px,
-                        scale: 1.0,
-                        bounds: TextBounds {
-                            left: left.floor() as i32,
-                            top: top.floor() as i32,
-                            right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
-                            bottom: bottom.ceil() as i32,
-                        },
-                        default_color: wide.color,
-                        custom_glyphs: &[],
-                    }
-                })
-            });
-        let text_prepared = match self.text_renderer.prepare(
+        let viewport_updated_at = Instant::now();
+        let text_stats = self.prepare_text_rows(frame)?;
+        let rows_prepared_at = Instant::now();
+        let text_prepared = match prepare_text_atlas(
+            &mut self.text_renderer,
             &self.device,
             &self.queue,
             &mut self.font_system,
             &mut self.atlas,
             &self.viewport,
-            narrow_text_areas.chain(wide_text_areas),
             &mut self.swash_cache,
+            &self.text_rows,
+            self.metrics,
+            frame.columns,
         ) {
             Ok(()) => true,
             Err(error) => {
@@ -959,6 +1205,7 @@ impl Renderer {
                 }
             }
         };
+        let atlas_prepared_at = Instant::now();
 
         let rects = self.rectangles(frame);
         let empty_rect = [RectInstance::zeroed()];
@@ -974,6 +1221,7 @@ impl Renderer {
                 contents: bytemuck::cast_slice(rect_data),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        let rectangles_prepared_at = Instant::now();
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
         // both the default-black interval and DXGI's stretch of the old frame.
@@ -997,6 +1245,7 @@ impl Renderer {
                 return self.handle_surface_failure(SurfaceFailure::Validation);
             }
         };
+        let surface_acquired_at = Instant::now();
         let view = texture.texture.create_view(&Default::default());
         let mut encoder = self
             .device
@@ -1039,61 +1288,59 @@ impl Renderer {
                     .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             }
         }
+        let encoded_at = Instant::now();
         self.queue.submit([encoder.finish()]);
         let submitted_at = Instant::now();
         self.queue.present(texture);
+        let present_called_at = Instant::now();
         let receipt = PresentReceipt {
             trigger,
             submitted_at,
-            present_called_at: Instant::now(),
+            present_called_at,
         };
         self.atlas.trim();
+        if self.trace_perf {
+            self.perf_frame = self.perf_frame.saturating_add(1);
+            eprintln!(
+                "BT_PERF_TRACE frame={} source={:?} cells={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} wide_hits={} wide_misses={} wide_evictions={} atlas_prepare_upload_us={} rectangles_us={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
+                self.perf_frame,
+                trigger.source,
+                frame.cells.len(),
+                (validated_at - frame_started).as_micros(),
+                (viewport_updated_at - validated_at).as_micros(),
+                text_stats.elapsed.as_micros(),
+                text_stats.rows_reshaped,
+                (text_stats.narrow.miss_time + text_stats.wide.miss_time).as_micros(),
+                text_stats.narrow.hits,
+                text_stats.narrow.misses,
+                text_stats.narrow.evictions,
+                text_stats.wide.hits,
+                text_stats.wide.misses,
+                text_stats.wide.evictions,
+                (atlas_prepared_at - rows_prepared_at).as_micros(),
+                (rectangles_prepared_at - atlas_prepared_at).as_micros(),
+                (surface_acquired_at - rectangles_prepared_at).as_micros(),
+                (encoded_at - surface_acquired_at).as_micros(),
+                (present_called_at - encoded_at).as_micros(),
+                frame_started.elapsed().as_micros(),
+            );
+        }
         Ok(PresentOutcome::Presented(receipt))
     }
 
-    fn prepare_text_rows(&mut self, frame: &ViewportFrame) -> Result<(), RenderError> {
-        let source_rows = text_row_cells(frame)?;
-        let rows = frame.rows.get() as usize;
-        let metrics = self.metrics;
-        while self.text_rows.len() < rows {
-            self.text_rows.push(TextRow {
-                cells: Vec::new(),
-                narrow_glyphs: Vec::new(),
-                wide_glyphs: Vec::new(),
-            });
-        }
-        self.text_rows.truncate(rows);
-
-        for (row_index, (row, source_cells)) in
-            self.text_rows.iter_mut().zip(source_rows).enumerate()
-        {
-            let status_cells = (row_index + 1 == rows)
-                .then_some(frame.status_text.as_deref())
-                .flatten()
-                .map(|status| status_row_cells(source_cells, status));
-            let cells = status_cells.as_deref().unwrap_or(source_cells);
-            if !row_needs_reshaping(&row.cells, cells) {
-                continue;
-            }
-
-            row.narrow_glyphs = shape_narrow_glyphs(
-                cells,
-                &mut self.font_system,
-                &mut self.swash_cache,
-                metrics,
-                &mut self.narrow_shaping_cache,
-            );
-            row.wide_glyphs = shape_wide_glyphs(
-                cells,
-                &mut self.font_system,
-                &mut self.swash_cache,
-                metrics,
-                &mut self.wide_shaping_cache,
-            );
-            row.cells.clear();
-            row.cells.extend_from_slice(cells);
-        }
-        Ok(())
+    fn prepare_text_rows(
+        &mut self,
+        frame: &ViewportFrame,
+    ) -> Result<TextPreparationStats, RenderError> {
+        prepare_text_rows(
+            frame,
+            self.metrics,
+            &mut self.text_rows,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &mut self.narrow_shaping_cache,
+            &mut self.wide_shaping_cache,
+        )
     }
 
     fn handle_surface_failure(
@@ -1277,6 +1524,128 @@ impl Renderer {
             color: rect_gpu_color_with_coverage(color, coverage),
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_text_rows(
+    frame: &ViewportFrame,
+    metrics: CellMetrics,
+    text_rows: &mut Vec<TextRow>,
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    narrow_shaping_cache: &mut NarrowShapingCache,
+    wide_shaping_cache: &mut WideShapingCache,
+) -> Result<TextPreparationStats, RenderError> {
+    let started = Instant::now();
+    let narrow_before = narrow_shaping_cache.counters;
+    let wide_before = wide_shaping_cache.counters;
+    let mut rows_reshaped = 0_u64;
+    let source_rows = text_row_cells(frame)?;
+    let rows = frame.rows.get() as usize;
+    while text_rows.len() < rows {
+        text_rows.push(TextRow {
+            cells: Vec::new(),
+            narrow_glyphs: Vec::new(),
+            wide_glyphs: Vec::new(),
+        });
+    }
+    text_rows.truncate(rows);
+
+    for (row_index, (row, source_cells)) in text_rows.iter_mut().zip(source_rows).enumerate() {
+        let status_cells = (row_index + 1 == rows)
+            .then_some(frame.status_text.as_deref())
+            .flatten()
+            .map(|status| status_row_cells(source_cells, status));
+        let cells = status_cells.as_deref().unwrap_or(source_cells);
+        if !row_needs_reshaping(&row.cells, cells) {
+            continue;
+        }
+        rows_reshaped = rows_reshaped.saturating_add(1);
+
+        row.narrow_glyphs = shape_narrow_glyphs(
+            cells,
+            font_system,
+            swash_cache,
+            metrics,
+            narrow_shaping_cache,
+        );
+        row.wide_glyphs =
+            shape_wide_glyphs(cells, font_system, swash_cache, metrics, wide_shaping_cache);
+        row.cells.clear();
+        row.cells.extend_from_slice(cells);
+    }
+    Ok(TextPreparationStats {
+        elapsed: started.elapsed(),
+        rows_reshaped,
+        narrow: narrow_shaping_cache.counters.delta_since(narrow_before),
+        wide: wide_shaping_cache.counters.delta_since(wide_before),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_text_atlas(
+    text_renderer: &mut TextRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    font_system: &mut FontSystem,
+    atlas: &mut TextAtlas,
+    viewport: &Viewport,
+    swash_cache: &mut SwashCache,
+    text_rows: &[TextRow],
+    metrics: CellMetrics,
+    columns: NonZeroU32,
+) -> Result<(), PrepareError> {
+    let padding = metrics.padding_px;
+    let text_right = (padding + columns.get() as f32 * metrics.cell_width_px).ceil() as i32;
+    let narrow_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
+        text_row.narrow_glyphs.iter().map(move |glyph| {
+            let [left, top, _, bottom] = cell_bounds_px(metrics, row, glyph.column);
+            TextArea {
+                buffer: &glyph.buffer,
+                left: left + glyph.left_offset_px,
+                top: top + glyph.top_offset_px,
+                scale: 1.0,
+                // Clip to the terminal row, not the cell. The grid owns pen origins, while
+                // accents and fallback ink remain free to overhang adjacent cells.
+                bounds: TextBounds {
+                    left: padding.floor() as i32,
+                    top: top.floor() as i32,
+                    right: text_right,
+                    bottom: bottom.ceil() as i32,
+                },
+                default_color: glyph.color,
+                custom_glyphs: &[],
+            }
+        })
+    });
+    let wide_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
+        text_row.wide_glyphs.iter().map(move |wide| {
+            let [left, top, _, bottom] = cell_bounds_px(metrics, row, wide.column);
+            TextArea {
+                buffer: &wide.buffer,
+                left,
+                top: top + wide.top_offset_px,
+                scale: 1.0,
+                bounds: TextBounds {
+                    left: left.floor() as i32,
+                    top: top.floor() as i32,
+                    right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                    bottom: bottom.ceil() as i32,
+                },
+                default_color: wide.color,
+                custom_glyphs: &[],
+            }
+        })
+    });
+    text_renderer.prepare(
+        device,
+        queue,
+        font_system,
+        atlas,
+        viewport,
+        narrow_text_areas.chain(wide_text_areas),
+        swash_cache,
+    )
 }
 
 /// Validate the complete render frame before exposing exact terminal rows to text shaping.
@@ -2771,7 +3140,9 @@ mod tests {
         slot.publish(frame.clone(), trigger).unwrap();
         slot.publish(frame, trigger).unwrap();
         assert_eq!(slot.overwrites(), 1);
+        assert_eq!(slot.pending_frame().unwrap().cells[0].text, "a");
         assert!(slot.take().is_some());
+        assert!(slot.pending_frame().is_none());
         assert!(slot.take().is_none());
     }
 

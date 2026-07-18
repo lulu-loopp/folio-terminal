@@ -420,6 +420,24 @@ impl DualPlaneSession {
         self.resize_epoch.request_deadline()
     }
 
+    pub fn synchronized_update_deadline(&self) -> Option<Instant> {
+        self.terminal.synchronized_update_deadline()
+    }
+
+    /// Commit a DEC 2026 update when its parser-owned timeout expires without ESU.
+    pub fn finish_synchronized_update(
+        &mut self,
+        observed_at: Instant,
+    ) -> Result<bool, SessionError> {
+        if self.synchronized_update_deadline().is_none() {
+            return Ok(false);
+        }
+        let events = self.terminal.finish_synchronized_update();
+        self.apply_events(events, observed_at)?;
+        self.sync_staging_tail();
+        Ok(true)
+    }
+
     pub fn mark_pty_resize_requested_at(
         &mut self,
         columns: NonZeroU32,
@@ -1283,6 +1301,19 @@ mod tests {
         assert_eq!(frame.cells[0].text, "A");
         assert_eq!(frame.cells[0].style.foreground, TerminalColor::Named(1));
         assert_eq!((frame.cursor.row, frame.cursor.column), (0, 1));
+    }
+
+    #[test]
+    fn synchronized_update_timeout_commits_buffered_cells_at_session_boundary() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"old\x1b[?2026h\rnew").unwrap();
+        assert!(session.synchronized_update_deadline().is_some());
+        assert_eq!(session.terminal().visible_text()[0], "old");
+
+        assert!(session.finish_synchronized_update(Instant::now()).unwrap());
+        assert!(session.synchronized_update_deadline().is_none());
+        assert_eq!(session.terminal().visible_text()[0], "new");
+        assert!(!session.finish_synchronized_update(Instant::now()).unwrap());
     }
 
     #[test]

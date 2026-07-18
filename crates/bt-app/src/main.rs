@@ -72,6 +72,7 @@ struct Runtime {
     startup_started: Instant,
     trace_startup: bool,
     trace_resize: bool,
+    trace_perf: bool,
     resize_trace_logged_transaction: u64,
     resize_trace_logged_events: usize,
     background_visible: Option<Duration>,
@@ -292,6 +293,7 @@ impl Runtime {
     ) -> Result<Self> {
         let trace_startup = std::env::var_os("BT_STARTUP_TRACE").is_some();
         let trace_resize = std::env::var_os("BT_RESIZE_TRACE").is_some();
+        let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
         let phase_started = Instant::now();
         let attributes = Window::default_attributes()
             .with_title(WINDOW_TITLE)
@@ -397,6 +399,7 @@ impl Runtime {
             startup_started,
             trace_startup,
             trace_resize,
+            trace_perf,
             resize_trace_logged_transaction: 0,
             resize_trace_logged_events: 0,
             background_visible: None,
@@ -472,6 +475,18 @@ impl Runtime {
             .context("project terminal grid into viewport frame")?;
         let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
             .context("reject non-rectangular frame before IME composition")?;
+        if matches!(trigger.source, FrameSource::PtyOutput)
+            && self
+                .pending_frames
+                .pending_frame()
+                .or(self.last_presented_frame.as_ref())
+                .is_some_and(|previous| presentation_equivalent(previous, &composed.frame))
+        {
+            if self.trace_perf {
+                eprintln!("BT_PERF_TRACE skip=unchanged source={:?}", trigger.source);
+            }
+            return Ok(());
+        }
         if self.ime_active {
             let area = self.renderer.ime_cursor_area(&composed.frame);
             if let Some(area) = self.ime_cursor_throttle.offer(area, Instant::now()) {
@@ -556,10 +571,36 @@ impl Runtime {
             }
             changed = true;
         }
-        if changed {
+        if changed && self.session.synchronized_update_deadline().is_none() {
             let keyboard_at = self.pending_keyboard_at.take();
             self.publish_frame(FrameTrigger {
                 occurred_at: keyboard_at.unwrap_or_else(Instant::now),
+                source: if keyboard_at.is_some() {
+                    FrameSource::Keyboard
+                } else {
+                    FrameSource::PtyOutput
+                },
+            })?;
+        } else if changed && self.trace_perf {
+            eprintln!("BT_PERF_TRACE defer=synchronized-update");
+        }
+        Ok(())
+    }
+
+    fn finish_synchronized_update_if_due(&mut self, now: Instant) -> Result<()> {
+        let due = self
+            .session
+            .synchronized_update_deadline()
+            .is_some_and(|deadline| deadline <= now);
+        if due
+            && self
+                .session
+                .finish_synchronized_update(now)
+                .context("finish timed-out DEC 2026 synchronized update")?
+        {
+            let keyboard_at = self.pending_keyboard_at.take();
+            self.publish_frame(FrameTrigger {
+                occurred_at: keyboard_at.unwrap_or(now),
                 source: if keyboard_at.is_some() {
                     FrameSource::Keyboard
                 } else {
@@ -1438,6 +1479,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             return;
         }
         let now = Instant::now();
+        if let Err(error) = runtime.finish_synchronized_update_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.flush_pending_pty_resize(now) {
             self.fail(event_loop, error);
             return;
@@ -1457,6 +1502,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             runtime.ime_cursor_throttle.deadline(),
             runtime.pending_pty_resize.map(|pending| pending.deadline),
             runtime.session.resize_finish_deadline(),
+            runtime.session.synchronized_update_deadline(),
         ]
         .into_iter()
         .flatten()
@@ -1668,6 +1714,19 @@ fn nonzero_u32(value: u16) -> NonZeroU32 {
 fn frame_matches_grid(frame: &ViewportFrame, grid: GridSize) -> bool {
     frame.columns.get() == u32::from(grid.columns.get())
         && frame.rows.get() == u32::from(grid.rows.get())
+}
+
+fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
+    previous.columns == next.columns
+        && previous.rows == next.rows
+        && previous.cells == next.cells
+        && previous.cursor == next.cursor
+        && previous.cell_anchors == next.cell_anchors
+        && previous.selection_spans == next.selection_spans
+        && previous.status_text == next.status_text
+        && previous.viewport_origin == next.viewport_origin
+        && previous.scroll_offset_rows == next.scroll_offset_rows
+        && previous.layout_key == next.layout_key
 }
 
 fn pty_size(grid: GridSize, physical: PhysicalSize<u32>) -> PtySize {
@@ -1972,6 +2031,24 @@ mod tests {
         session.refresh_projection(&mut projection);
         let new_frame = session.viewport_frame(&mut projection).unwrap();
         assert!(frame_matches_grid(&new_frame, new_grid));
+    }
+
+    #[test]
+    fn pty_mode_only_update_is_presentation_equivalent_but_text_is_not() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(3).unwrap());
+        let mut projection = session.new_projection(session.layout_key());
+        let before = session.viewport_frame(&mut projection).unwrap();
+
+        session.feed(b"\x1b[?2004h").unwrap();
+        session.refresh_projection(&mut projection);
+        let mode_only = session.viewport_frame(&mut projection).unwrap();
+        assert!(presentation_equivalent(&before, &mode_only));
+
+        session.feed(b"visible").unwrap();
+        session.refresh_projection(&mut projection);
+        let text = session.viewport_frame(&mut projection).unwrap();
+        assert!(!presentation_equivalent(&mode_only, &text));
     }
 
     #[test]

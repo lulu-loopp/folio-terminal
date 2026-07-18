@@ -8,8 +8,11 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 bt-pty = { path = "../bt-pty" }
+bt-render = { path = "../bt-render" }
 bt-term = { path = "../bt-term" }
+bt-viewport = { path = "../bt-viewport" }
 portable-pty.workspace = true
+pollster.workspace = true
 thiserror.workspace = true
 vte.workspace = true
 

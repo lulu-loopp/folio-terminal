@@ -1,6 +1,7 @@
 use std::{
     num::NonZeroU32,
     sync::{Arc, Mutex, MutexGuard},
+    time::Instant,
 };
 
 use alacritty_terminal::{
@@ -264,6 +265,26 @@ impl TerminalAdapter {
             discard_listener_output(&canonical.listener);
         }
         self.observe_parser_boundary(bytes);
+        self.drain_transcript_events()
+    }
+
+    /// Deadline for a DEC 2026 synchronized update buffered by the parser.
+    pub fn synchronized_update_deadline(&self) -> Option<Instant> {
+        self.processor.sync_timeout().sync_timeout()
+    }
+
+    /// Commit a synchronized update whose ESU terminator did not arrive before its deadline.
+    pub fn finish_synchronized_update(&mut self) -> Vec<AdapterEvent> {
+        if self.synchronized_update_deadline().is_none() {
+            return Vec::new();
+        }
+        self.processor.stop_sync(&mut self.term);
+        if let Some(canonical) = self.resize_canonical.as_mut() {
+            canonical.processor.stop_sync(&mut canonical.term);
+            discard_listener_output(&canonical.listener);
+        }
+        self.parser_sync_active = false;
+        self.parser_tail.clear();
         self.drain_transcript_events()
     }
 
@@ -910,6 +931,31 @@ mod tests {
         assert!(storm.parser_tail.is_empty());
         assert_eq!(storm.visible_text(), direct.visible_text());
         assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    #[test]
+    fn synchronized_update_exposes_deadline_until_esu_commits_the_buffer() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(4));
+        terminal.feed(b"before\x1b[?2026h\rhidden");
+
+        assert!(terminal.synchronized_update_deadline().is_some());
+        assert_eq!(terminal.visible_text()[0], "before");
+
+        terminal.feed(b"-until-esu\x1b[?2026l");
+        assert!(terminal.synchronized_update_deadline().is_none());
+        assert_eq!(terminal.visible_text()[0], "hidden-until-esu");
+    }
+
+    #[test]
+    fn synchronized_update_timeout_commits_without_an_esu() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(4));
+        terminal.feed(b"before\x1b[?2026h\rtimeout");
+
+        assert!(terminal.synchronized_update_deadline().is_some());
+        terminal.finish_synchronized_update();
+
+        assert!(terminal.synchronized_update_deadline().is_none());
+        assert_eq!(terminal.visible_text()[0], "timeout");
     }
 
     #[test]

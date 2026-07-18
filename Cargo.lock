@@ -173,7 +173,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bt-pty",
+ "bt-render",
  "bt-term",
+ "bt-viewport",
+ "pollster",
  "portable-pty",
  "serde_json",
  "thiserror 2.0.18",
