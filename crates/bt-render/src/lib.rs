@@ -708,6 +708,7 @@ pub struct Renderer {
     narrow_shaping_cache: NarrowShapingCache,
     wide_shaping_cache: WideShapingCache,
     glyph_degraded_frames: u64,
+    window_focused: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -816,6 +817,7 @@ impl Renderer {
             narrow_shaping_cache: NarrowShapingCache::new(),
             wide_shaping_cache: WideShapingCache::new(),
             glyph_degraded_frames: 0,
+            window_focused: true,
         })
     }
 
@@ -836,6 +838,13 @@ impl Renderer {
             swapchain_size: (self.config.width, self.config.height),
             max_texture_dimension_2d: self.max_texture_dimension_2d,
         }
+    }
+
+    /// Select the cursor presentation without changing terminal DEC cursor visibility.
+    pub fn set_window_focused(&mut self, focused: bool) -> bool {
+        let changed = self.window_focused != focused;
+        self.window_focused = focused;
+        changed
     }
 
     pub fn resize(&mut self, width: u32, height: u32) -> Result<(), RenderError> {
@@ -1151,13 +1160,13 @@ impl Renderer {
             && frame.cursor.row < frame.rows.get()
             && frame.cursor.column < frame.columns.get()
         {
-            let (column, span) = cursor_cell_span(frame);
-            rects.push(self.cell_rect_span(
-                frame.cursor.row as usize,
-                column,
-                span,
-                DEFAULT_CURSOR_RGB,
-            ));
+            rects.extend(
+                cursor_pixel_bounds(self.metrics, frame, self.window_focused)
+                    .into_iter()
+                    .map(|[left, top, right, bottom]| {
+                        self.pixel_rect(left, top, right, bottom, DEFAULT_CURSOR_RGB)
+                    }),
+            );
         }
         for (index, cell) in frame.cells.iter().enumerate() {
             if cell.style.flags.contains(CellFlags::HIDDEN) {
@@ -1335,6 +1344,29 @@ fn cursor_cell_span(frame: &ViewportFrame) -> (usize, usize) {
     } else {
         (column, 1)
     }
+}
+
+fn cursor_pixel_bounds(
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    focused: bool,
+) -> Vec<[f32; 4]> {
+    let (column, span) = cursor_cell_span(frame);
+    let [left, top, _, bottom] = cell_bounds_px(metrics, frame.cursor.row as usize, column);
+    let right = left + span as f32 * metrics.cell_width_px;
+    if focused {
+        return vec![[left, top, right, bottom]];
+    }
+
+    // Match Windows Terminal's focus cue: retain a visible one-device-pixel hollow caret while
+    // allowing the cell contents to remain readable through its center.
+    let stroke = 1.0_f32.min((right - left) / 2.0).min((bottom - top) / 2.0);
+    vec![
+        [left, top, right, top + stroke],
+        [left, bottom - stroke, right, bottom],
+        [left, top + stroke, left + stroke, bottom - stroke],
+        [right - stroke, top + stroke, right, bottom - stroke],
+    ]
 }
 
 #[cfg(target_os = "windows")]
@@ -3201,6 +3233,49 @@ mod tests {
         assert_eq!(cursor_cell_span(&frame), (0, 2));
         frame.cursor.column = 1;
         assert_eq!(cursor_cell_span(&frame), (0, 2));
+    }
+
+    #[test]
+    fn unfocused_cursor_is_a_visible_hollow_outline_and_focus_restores_the_block() {
+        let metrics = CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 0.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        };
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(1).unwrap(),
+            rows: NonZeroU32::new(1).unwrap(),
+            cells: vec![CapturedCell::plain("x")],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(1),
+            selection_spans: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(1),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+
+        assert_eq!(
+            cursor_pixel_bounds(metrics, &frame, true),
+            vec![[4.0, 4.0, 12.0, 24.0]]
+        );
+        let outline = cursor_pixel_bounds(metrics, &frame, false);
+        assert_eq!(outline.len(), 4);
+        assert_eq!(outline[0], [4.0, 4.0, 12.0, 5.0]);
+        assert_eq!(outline[1], [4.0, 23.0, 12.0, 24.0]);
+        assert_eq!(outline[2], [4.0, 5.0, 5.0, 23.0]);
+        assert_eq!(outline[3], [11.0, 5.0, 12.0, 23.0]);
     }
 
     #[cfg(target_os = "windows")]

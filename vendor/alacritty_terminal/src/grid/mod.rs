@@ -178,6 +178,24 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         rows
     }
 
+    /// Restore an oldest-to-newest mutable tail previously returned by [`Grid::take_history`].
+    ///
+    /// BetterTerminal uses this only for the single unfinished logical-line candidate at the
+    /// start of the next resize transaction. Visible rows and cursor coordinates are unchanged;
+    /// a subsequent vendor resize can pull and reflow the restored rows through the normal native
+    /// history path.
+    pub fn restore_history(&mut self, rows: Vec<Row<T>>) {
+        debug_assert_eq!(self.history_size(), 0);
+        debug_assert!(rows.len() <= self.max_scroll_limit);
+        debug_assert!(rows.iter().all(|row| row.len() == self.columns));
+
+        let restored = rows.len();
+        self.raw.initialize(restored, self.columns);
+        for (index, row) in rows.into_iter().enumerate() {
+            self.raw[Line(index as i32 - restored as i32)] = row;
+        }
+    }
+
     pub fn scroll_display(&mut self, scroll: Scroll) {
         self.display_offset = match scroll {
             Scroll::Delta(count) => min(

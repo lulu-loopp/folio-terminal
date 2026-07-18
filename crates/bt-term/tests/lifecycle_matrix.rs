@@ -458,6 +458,7 @@ fn m1_8_r2_extreme_shrink_grow_and_csi_a_replay_has_no_frozen_live_seam() {
             history_after: 0,
             cursor_row: 3,
             cursor_column: 9,
+            cursor_visible: true,
         }
     )));
     assert!(first.iter().any(|event| matches!(
@@ -523,7 +524,7 @@ fn g3_vendor_wrapline_rejoins_rows_inside_one_harvest_batch() {
 }
 
 #[test]
-fn g3_narrow_harvest_widen_rejoins_every_wrapline_in_the_same_batch() {
+fn g3_active_narrow_harvest_widen_returns_every_wrapline_to_vendor() {
     let start = Instant::now();
     let logical = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd";
     let mut session = DualPlaneSession::new(nz32(42), nz32(1));
@@ -535,11 +536,9 @@ fn g3_narrow_harvest_widen_rejoins_every_wrapline_in_the_same_batch() {
     assert_eq!(session.terminal().resize_transaction_history_size(), 2);
     finish_resize_transaction(&mut session, start + Duration::from_millis(210));
 
-    let harvested = session.document().entries().values().collect::<Vec<_>>();
-    assert_eq!(harvested.len(), 1);
-    assert_eq!(harvested[0].line.text, &logical[..28]);
-    assert_eq!(harvested[0].line.fragments.len(), 2);
-    assert!(harvested[0].line.wrap_split);
+    assert!(session.document().entries().is_empty());
+    assert_eq!(staged_text(&session), [&logical[..14], &logical[14..28]]);
+    assert_eq!(session.terminal().resize_staging_candidate_rows(), 2);
     assert!(session.resize_trace().iter().any(|event| matches!(
         &event.kind,
         bt_term::ResizeTraceKind::Harvest {
@@ -550,9 +549,23 @@ fn g3_narrow_harvest_widen_rejoins_every_wrapline_in_the_same_batch() {
     )));
 
     session.resize(nz32(42), nz32(2)).unwrap();
+    assert!(session.document().entries().is_empty());
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.terminal().visible_text(), [logical, ""]);
+    assert_eq!(
+        session.terminal().cursor(),
+        bt_term::TerminalCursor {
+            row: 0,
+            column: logical.len() as u32,
+            visible: true,
+        }
+    );
+    assert!(session.resize_trace().iter().any(|event| matches!(
+        event.kind,
+        bt_term::ResizeTraceKind::VendorRestore { rows: 2 }
+    )));
+
     let mut projection = session.new_projection(session.layout_key());
-    let _ = session.viewport_frame(&mut projection).unwrap();
-    projection.scroll_by_rows(1);
     session.refresh_projection(&mut projection);
     let frame = session.viewport_frame(&mut projection).unwrap();
     let first_row = frame.cells[..42]
@@ -560,7 +573,66 @@ fn g3_narrow_harvest_widen_rejoins_every_wrapline_in_the_same_batch() {
         .filter(|cell| !cell.wide_spacer)
         .map(|cell| cell.text.as_str())
         .collect::<String>();
-    assert!(first_row.starts_with(&logical[..28]));
+    assert!(first_row.starts_with(logical));
+    assert!(frame.cursor.visible);
+}
+
+#[test]
+fn s9_separate_resize_transactions_return_the_active_prompt_to_vendor_reflow() {
+    let prompt = "(base) PS D:\\Developer\\BetterTerminal> ";
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(40), nz32(4));
+    session.feed_at(prompt.as_bytes(), start).unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+
+    session
+        .resize_at(nz32(10), nz32(3), start + Duration::from_millis(10))
+        .unwrap();
+    finish_resize_transaction(&mut session, start + Duration::from_millis(210));
+
+    assert!(session.document().entries().is_empty());
+    assert_eq!(session.transcript().staging_len(), 1);
+    assert_eq!(session.terminal().resize_staging_candidate_rows(), 1);
+    session.refresh_projection(&mut projection);
+    let tiny_settled = session.viewport_frame(&mut projection).unwrap();
+    tiny_settled.validate_shape().unwrap();
+    assert!(tiny_settled.cursor.visible);
+    session.record_published_frame(&tiny_settled, start + Duration::from_millis(410));
+
+    // The pause above closed the first transaction. Growing is deliberately a second gesture.
+    session
+        .resize_at(nz32(40), nz32(4), start + Duration::from_millis(1_000))
+        .unwrap();
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.terminal().resize_transaction_history_size(), 0);
+    assert_eq!(session.terminal().visible_text()[0], prompt.trim_end());
+
+    session.refresh_projection(&mut projection);
+    let grown = session.viewport_frame(&mut projection).unwrap();
+    grown.validate_shape().unwrap();
+    assert_eq!(
+        (grown.cursor.row, grown.cursor.column),
+        (0, prompt.len() as u32)
+    );
+    assert!(grown.cursor.visible);
+    session.record_published_frame(&grown, start + Duration::from_millis(1_000));
+
+    finish_resize_transaction(&mut session, start + Duration::from_millis(1_200));
+    session.feed(b"echo").unwrap();
+    let echoed = format!("{prompt}echo");
+    assert_eq!(
+        logical_content(&session).last().map(String::as_str),
+        Some(echoed.as_str())
+    );
+    assert!(session.resize_trace().iter().any(|event| matches!(
+        event.kind,
+        bt_term::ResizeTraceKind::VendorRestore { rows: 1 }
+    )));
+    assert!(session.resize_trace().iter().all(|event| match event.kind {
+        bt_term::ResizeTraceKind::VendorReconcile { cursor_visible, .. }
+        | bt_term::ResizeTraceKind::FramePublished { cursor_visible, .. } => cursor_visible,
+        _ => true,
+    }));
 }
 
 #[test]

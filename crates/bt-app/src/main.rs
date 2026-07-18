@@ -18,7 +18,7 @@ use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, Preedit, PresentOutcome,
     Renderer, background_rgb, compose_preedit,
 };
-use bt_term::{DualPlaneSession, MouseTracking};
+use bt_term::{DualPlaneSession, MouseTracking, TerminalModes};
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{ViewSelection, ViewportFrame, ViewportProjection};
 use winit::{
@@ -130,6 +130,67 @@ fn take_due_pty_resize(
 enum MouseRoute {
     Local(SelectionDrag),
     Forward(input::MouseProtocolButton),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum UserInputKind {
+    Keyboard,
+    Mouse,
+}
+
+impl UserInputKind {
+    fn returns_view_to_live(self) -> bool {
+        matches!(self, Self::Keyboard)
+    }
+}
+
+fn live_viewport_mouse_hit(
+    hit: bt_render::GridHit,
+    scroll_offset_rows: usize,
+) -> bt_render::GridHit {
+    let scroll_offset_rows = u32::try_from(scroll_offset_rows).unwrap_or(u32::MAX);
+    bt_render::GridHit {
+        // Windows Terminal translates from its visible buffer viewport to the mutable/live
+        // viewport, then clamps positions above the live viewport to its top row.
+        row: hit.row.saturating_sub(scroll_offset_rows),
+        column: hit.column,
+    }
+}
+
+fn route_forwarded_mouse_button(
+    route: &mut Option<MouseRoute>,
+    state: ElementState,
+    button: input::MouseProtocolButton,
+    hit: bt_render::GridHit,
+    modes: TerminalModes,
+    modifiers: ModifiersState,
+) -> Option<Vec<u8>> {
+    let forward = !modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off;
+    match state {
+        ElementState::Pressed if forward => {
+            *route = Some(MouseRoute::Forward(button));
+            Some(input::mouse_bytes(
+                modes.sgr_mouse,
+                button,
+                input::MouseProtocolEvent::Press,
+                hit.row,
+                hit.column,
+                modifiers,
+            ))
+        }
+        ElementState::Released if matches!(route, Some(MouseRoute::Forward(_))) => {
+            *route = None;
+            Some(input::mouse_bytes(
+                modes.sgr_mouse,
+                button,
+                input::MouseProtocolEvent::Release,
+                hit.row,
+                hit.column,
+                modifiers,
+            ))
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -575,8 +636,13 @@ impl Runtime {
         changed
     }
 
-    fn send_user_input(&mut self, bytes: &[u8], context: &'static str) -> Result<()> {
-        let view_changed = self.return_to_live_for_input();
+    fn send_user_input(
+        &mut self,
+        bytes: &[u8],
+        context: &'static str,
+        kind: UserInputKind,
+    ) -> Result<()> {
+        let view_changed = kind.returns_view_to_live() && self.return_to_live_for_input();
         self.pending_keyboard_at = Some(Instant::now());
         if let Some(pty) = self.pty.as_mut() {
             pty.write(bytes).with_context(|| context)?;
@@ -720,6 +786,12 @@ impl Runtime {
         if matches!(self.mouse_route, Some(MouseRoute::Local(_))) {
             return self.extend_local_selection(hit);
         }
+        let hit = live_viewport_mouse_hit(
+            hit,
+            self.last_presented_frame
+                .as_ref()
+                .map_or(0, |frame| frame.scroll_offset_rows),
+        );
         let modes = self.session.terminal_modes();
         if self.modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
             return Ok(());
@@ -741,7 +813,11 @@ impl Runtime {
             hit.column,
             self.modifiers,
         );
-        self.send_user_input(&bytes, "forward SGR mouse motion to PTY")
+        self.send_user_input(
+            &bytes,
+            "forward SGR mouse motion to PTY",
+            UserInputKind::Mouse,
+        )
     }
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
@@ -752,32 +828,26 @@ impl Runtime {
             return Ok(());
         };
         let modes = self.session.terminal_modes();
-        let forward = !self.modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off;
+        let scroll_offset_rows = self
+            .last_presented_frame
+            .as_ref()
+            .map_or(0, |frame| frame.scroll_offset_rows);
+        let forwarded_hit = live_viewport_mouse_hit(hit, scroll_offset_rows);
+        if let Some(bytes) = route_forwarded_mouse_button(
+            &mut self.mouse_route,
+            state,
+            protocol_button,
+            forwarded_hit,
+            modes,
+            self.modifiers,
+        ) {
+            return self.send_user_input(
+                &bytes,
+                "forward mouse button event to PTY",
+                UserInputKind::Mouse,
+            );
+        }
         match state {
-            ElementState::Pressed if forward => {
-                let bytes = input::mouse_bytes(
-                    modes.sgr_mouse,
-                    protocol_button,
-                    input::MouseProtocolEvent::Press,
-                    hit.row,
-                    hit.column,
-                    self.modifiers,
-                );
-                self.mouse_route = Some(MouseRoute::Forward(protocol_button));
-                self.send_user_input(&bytes, "forward SGR mouse press to PTY")
-            }
-            ElementState::Released if matches!(self.mouse_route, Some(MouseRoute::Forward(_))) => {
-                let bytes = input::mouse_bytes(
-                    modes.sgr_mouse,
-                    protocol_button,
-                    input::MouseProtocolEvent::Release,
-                    hit.row,
-                    hit.column,
-                    self.modifiers,
-                );
-                self.mouse_route = None;
-                self.send_user_input(&bytes, "forward SGR mouse release to PTY")
-            }
             ElementState::Pressed if button == MouseButton::Left => self.begin_local_selection(hit),
             ElementState::Released => {
                 self.extend_local_selection(hit)?;
@@ -834,6 +904,12 @@ impl Runtime {
             let Some(hit) = self.frame_hit() else {
                 return Ok(());
             };
+            let hit = live_viewport_mouse_hit(
+                hit,
+                self.last_presented_frame
+                    .as_ref()
+                    .map_or(0, |frame| frame.scroll_offset_rows),
+            );
             let button = if lines > 0 {
                 input::MouseProtocolButton::WheelUp
             } else {
@@ -850,13 +926,18 @@ impl Runtime {
             return self.send_user_input(
                 &one.repeat(lines.unsigned_abs() as usize),
                 "forward SGR mouse wheel to PTY",
+                UserInputKind::Mouse,
             );
         }
         if modes.alternate_screen {
             if !self.modifiers.shift_key() && modes.alternate_scroll {
                 let bytes =
                     input::alternate_scroll_bytes(lines, self.session.application_cursor_mode());
-                return self.send_user_input(&bytes, "forward alternate-screen wheel to PTY");
+                return self.send_user_input(
+                    &bytes,
+                    "forward alternate-screen wheel to PTY",
+                    UserInputKind::Mouse,
+                );
             }
             return Ok(());
         }
@@ -918,7 +999,11 @@ impl Runtime {
         else {
             return Ok(());
         };
-        self.send_user_input(&bytes, "write keyboard input to PTY")
+        self.send_user_input(
+            &bytes,
+            "write keyboard input to PTY",
+            UserInputKind::Keyboard,
+        )
     }
 
     fn paste_from_clipboard(&mut self) -> Result<()> {
@@ -1320,14 +1405,23 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 runtime.ime_active = false;
                 runtime.ime_cursor_throttle.reset();
                 runtime.ime_system_caret.destroy();
-                Ok(())
-            }
-            WindowEvent::Focused(true) | WindowEvent::Occluded(false) => {
+                runtime.renderer.set_window_focused(false);
                 runtime.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Expose,
                 })
             }
+            WindowEvent::Focused(true) => {
+                runtime.renderer.set_window_focused(true);
+                runtime.publish_frame(FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                })
+            }
+            WindowEvent::Occluded(false) => runtime.publish_frame(FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            }),
             _ => Ok(()),
         };
         if let Err(error) = result {
@@ -1726,6 +1820,24 @@ mod tests {
     }
 
     #[test]
+    fn bracketed_paste_follows_vendor_decset_and_normalizes_crlf() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(8).unwrap(), NonZeroU32::new(2).unwrap());
+
+        session.feed(b"\x1b[?2004h").unwrap();
+        assert_eq!(
+            input::paste_bytes("one\r\ntwo\n", session.bracketed_paste_mode()),
+            b"\x1b[200~one\rtwo\r\x1b[201~"
+        );
+
+        session.feed(b"\x1b[?2004l").unwrap();
+        assert_eq!(
+            input::paste_bytes("one\r\ntwo\n", session.bracketed_paste_mode()),
+            b"one\rtwo\r"
+        );
+    }
+
+    #[test]
     fn ime_cursor_area_throttle_coalesces_to_sixty_hz_and_flushes_the_last_area() {
         let start = Instant::now();
         let first = ImeCursorArea {
@@ -1860,6 +1972,100 @@ mod tests {
         session.refresh_projection(&mut projection);
         let new_frame = session.viewport_frame(&mut projection).unwrap();
         assert!(frame_matches_grid(&new_frame, new_grid));
+    }
+
+    #[test]
+    fn anchored_mouse_forwarding_uses_live_viewport_rows_and_clamps_frozen_rows() {
+        assert!(!UserInputKind::Mouse.returns_view_to_live());
+        assert!(UserInputKind::Keyboard.returns_view_to_live());
+
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session
+            .feed(b"zero\r\none\r\ntwo\r\nthree\r\nfour\r\nfive")
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let bottom_frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(bottom_frame.scroll_offset_rows, 0);
+
+        let physical_hit = bt_render::GridHit { row: 3, column: 5 };
+        assert_eq!(
+            live_viewport_mouse_hit(physical_hit, bottom_frame.scroll_offset_rows),
+            physical_hit
+        );
+
+        projection.scroll_by_rows(2);
+        session.refresh_projection(&mut projection);
+        let anchored_frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(anchored_frame.scroll_offset_rows, 2);
+
+        let live_hit = live_viewport_mouse_hit(physical_hit, anchored_frame.scroll_offset_rows);
+        assert_eq!(live_hit, bt_render::GridHit { row: 1, column: 5 });
+        assert_eq!(
+            input::mouse_bytes(
+                true,
+                input::MouseProtocolButton::Left,
+                input::MouseProtocolEvent::Press,
+                live_hit.row,
+                live_hit.column,
+                ModifiersState::empty(),
+            ),
+            b"\x1b[<0;6;2M"
+        );
+
+        assert_eq!(
+            live_viewport_mouse_hit(
+                bt_render::GridHit { row: 1, column: 5 },
+                anchored_frame.scroll_offset_rows,
+            ),
+            bt_render::GridHit { row: 0, column: 5 }
+        );
+    }
+
+    #[test]
+    fn stationary_double_click_stays_strictly_paired_across_tui_repaints() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(20).unwrap(), NonZeroU32::new(6).unwrap());
+        session.feed(b"\x1b[?1000h\x1b[?1006hready").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let hit = bt_render::GridHit { row: 3, column: 8 };
+        let mut route = None;
+        let mut captured_user_input = Vec::new();
+
+        for repaint in [
+            b"\x1b[Hfirst repaint\r\na\r\nb\r\nc\r\nd\r\ne\r\nf".as_slice(),
+            b"\x1b[Hsecond repaint\r\ng\r\nh\r\ni\r\nj\r\nk\r\nl",
+        ] {
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(frame.scroll_offset_rows, 0);
+            let live_hit = live_viewport_mouse_hit(hit, frame.scroll_offset_rows);
+            for state in [ElementState::Pressed, ElementState::Released] {
+                captured_user_input.push(
+                    route_forwarded_mouse_button(
+                        &mut route,
+                        state,
+                        input::MouseProtocolButton::Left,
+                        live_hit,
+                        session.terminal_modes(),
+                        ModifiersState::empty(),
+                    )
+                    .expect("tracked click must produce one PTY write per edge"),
+                );
+            }
+            assert!(route.is_none());
+            session.feed(repaint).unwrap();
+            session.refresh_projection(&mut projection);
+        }
+
+        assert_eq!(
+            captured_user_input,
+            [
+                b"\x1b[<0;9;4M".to_vec(),
+                b"\x1b[<0;9;4m".to_vec(),
+                b"\x1b[<0;9;4M".to_vec(),
+                b"\x1b[<0;9;4m".to_vec(),
+            ]
+        );
     }
 
     #[test]

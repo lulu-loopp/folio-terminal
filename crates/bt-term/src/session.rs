@@ -36,6 +36,7 @@ pub const SPIKE_CELL_HEIGHT_SUBPIXELS: NonZeroI64 = NonZeroI64::new(18 * SUBPIXE
 pub enum SessionError {
     InvalidSourceTransition(InvalidSourceTransition),
     MissingStagingSource(StagingId),
+    ResizeCandidateMismatch { vendor: usize, staging: usize },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,6 +66,10 @@ pub enum ResizeTraceKind {
         history_after: usize,
         cursor_row: u32,
         cursor_column: u32,
+        cursor_visible: bool,
+    },
+    VendorRestore {
+        rows: usize,
     },
     PtyChunkArrived {
         bytes: usize,
@@ -115,6 +120,10 @@ impl fmt::Display for SessionError {
                     id.0
                 )
             }
+            Self::ResizeCandidateMismatch { vendor, staging } => write!(
+                formatter,
+                "resize reverse-harvest mismatch: vendor has {vendor} rows, staging has {staging}"
+            ),
         }
     }
 }
@@ -440,6 +449,7 @@ impl DualPlaneSession {
                 history_after,
                 cursor_row: cursor.row,
                 cursor_column: cursor.column,
+                cursor_visible: cursor.visible,
             },
         );
         history_before != 0
@@ -699,16 +709,30 @@ impl DualPlaneSession {
             return Ok(());
         }
 
-        // A transaction starts with a clean ownership boundary: any pre-existing transcript
-        // staging is frozen once, then the vendor exclusively owns all subsequently mutable rows.
+        // A transaction starts with a clean ownership boundary. The sole unfinished resize
+        // candidate returns to native history; every other pre-existing staging source freezes.
+        // Already-finalized history never enters this reverse-harvest path.
         self.document.clear_selection();
+        let vendor_candidate_rows = self.terminal.resize_staging_candidate_rows();
+        let staging_candidate_rows = self.transcript.unclosed_candidate_len();
+        if vendor_candidate_rows != 0 && vendor_candidate_rows != staging_candidate_rows {
+            return Err(SessionError::ResizeCandidateMismatch {
+                vendor: vendor_candidate_rows,
+                staging: staging_candidate_rows,
+            });
+        }
+        if vendor_candidate_rows != 0 {
+            for staged in self.transcript.take_unclosed_candidate() {
+                self.staging_sources.remove(&staged.id);
+            }
+            self.active_staging_tail = None;
+        }
         let finalized = self.transcript.finalize_all_candidates();
         let evicted = self.transcript.take_evictions();
         for line in finalized {
             self.ingest_finalized(line)?;
         }
         self.delete_history(&evicted, false);
-        self.terminal.begin_resize_transaction();
 
         self.resize_trace.clear();
         self.resize_trace_transaction = self.resize_trace_transaction.wrapping_add(1);
@@ -722,6 +746,12 @@ impl DualPlaneSession {
                 columns: columns.get(),
                 rows: rows.get(),
             },
+        );
+        let restored = self.terminal.begin_resize_transaction();
+        debug_assert_eq!(restored, vendor_candidate_rows);
+        self.trace_resize_event(
+            observed_at,
+            ResizeTraceKind::VendorRestore { rows: restored },
         );
         Ok(())
     }
@@ -843,8 +873,8 @@ impl DualPlaneSession {
             // Rows returned by one `finish_resize_transaction` are an ordered snapshot of one
             // vendor-owned grid. Within that batch WRAPLINE is therefore a causal continuation
             // fact, so the normal capture path may reconstruct its logical line without guessing.
-            // The batch is force-finalized below: no WRAPLINE can ever cross the harvest boundary
-            // and weld content from a later transaction.
+            // A closed batch finalizes below. The sole trailing candidate which still wraps into
+            // live row zero remains staging and is the only row set eligible for reverse harvest.
             let result = self.transcript.capture(row);
             self.staging_sources
                 .insert(result.staging_id, SourceLifecycle::Live);
@@ -853,10 +883,15 @@ impl DualPlaneSession {
                 self.ingest_finalized(finalized)?;
             }
         }
-        for finalized in self.transcript.finalize_all_candidates() {
-            self.ingest_finalized(finalized)?;
+        let unclosed_candidate_rows = self.transcript.unclosed_candidate_len();
+        self.terminal
+            .retain_resize_staging_candidate_rows(unclosed_candidate_rows);
+        if unclosed_candidate_rows == 0 {
+            for finalized in self.transcript.finalize_all_candidates() {
+                self.ingest_finalized(finalized)?;
+            }
+            self.active_staging_tail = None;
         }
-        self.active_staging_tail = None;
         let evicted = self.transcript.take_evictions();
         self.delete_history(&evicted, false);
         Ok(())

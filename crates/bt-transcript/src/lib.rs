@@ -313,6 +313,29 @@ impl TranscriptStore {
             .and_then(|candidate| candidate.live_tail.as_ref())
     }
 
+    /// Number of physical rows in the sole candidate which still continues into live row zero.
+    pub fn unclosed_candidate_len(&self) -> usize {
+        self.staging
+            .back()
+            .filter(|candidate| candidate.rows.last().is_some_and(|row| row.row.continues))
+            .map_or(0, |candidate| candidate.rows.len())
+    }
+
+    /// Return the unfinished logical-line prefix to its vendor-native resize owner.
+    ///
+    /// This is the bounded inverse of a resize harvest. Finalized lines never enter this path.
+    pub fn take_unclosed_candidate(&mut self) -> Vec<StagedRow> {
+        if self.unclosed_candidate_len() == 0 {
+            return Vec::new();
+        }
+        let candidate = self
+            .staging
+            .pop_back()
+            .expect("an unclosed candidate was observed immediately before removal");
+        self.staging_rows -= candidate.rows.len();
+        candidate.rows
+    }
+
     pub fn evict_oldest(&mut self, count: usize) -> Vec<TranscriptId> {
         let mut removed = Vec::new();
         for _ in 0..count {
@@ -568,6 +591,29 @@ mod tests {
         let removed = store.evict_oldest(1);
         assert_eq!(removed, vec![finalized.line.id]);
         assert_eq!(store.tombstones(), removed);
+    }
+
+    #[test]
+    fn unfinished_candidate_can_return_to_vendor_without_thawing_frozen_lines() {
+        let mut store = TranscriptStore::new(nz(8));
+        let frozen = store.capture(CapturedRow::plain("closed", false));
+        assert_eq!(frozen.finalized.len(), 1);
+        let first = store.capture(CapturedRow::plain("active-1", true));
+        let second = store.capture(CapturedRow::plain("active-2", true));
+
+        assert_eq!(store.unclosed_candidate_len(), 2);
+        assert_eq!(
+            store
+                .take_unclosed_candidate()
+                .into_iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            [first.staging_id, second.staging_id]
+        );
+        assert_eq!(store.unclosed_candidate_len(), 0);
+        assert_eq!(store.staging_len(), 0);
+        assert_eq!(store.frozen().len(), 1);
+        assert_eq!(store.frozen()[0].text, "closed");
     }
 
     #[test]

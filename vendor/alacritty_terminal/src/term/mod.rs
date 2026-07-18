@@ -89,6 +89,23 @@ pub struct RemovedRow {
     pub cells: Vec<Cell>,
 }
 
+fn row_continues(row: &Row<Cell>) -> bool {
+    row.last()
+        .is_some_and(|cell| cell.flags.contains(Flags::WRAPLINE))
+}
+
+fn unfinished_resize_suffix(rows: &[Row<Cell>]) -> &[Row<Cell>] {
+    if !rows.last().is_some_and(row_continues) {
+        return &[];
+    }
+
+    let mut start = rows.len() - 1;
+    while start != 0 && row_continues(&rows[start - 1]) {
+        start -= 1;
+    }
+    &rows[start..]
+}
+
 /// Minimum number of columns.
 ///
 /// A minimum of 2 is necessary to hold fullwidth unicode characters.
@@ -410,6 +427,12 @@ pub struct Term<T> {
     /// resize tail. BetterTerminal harvests it exactly once when the transaction closes.
     resize_transaction: bool,
 
+    /// Vendor-native escrow for the one harvested logical-line prefix which still wraps into live
+    /// row zero. The transcript owns its visible staging representation between transactions;
+    /// these exact rows are retained only so the next transaction can reverse that harvest
+    /// without reconstructing cells or thawing finalized history.
+    resize_staging_candidate: Vec<Row<Cell>>,
+
     /// Current title of the window.
     title: Option<String>,
 
@@ -499,13 +522,20 @@ impl<T> Term<T> {
     }
 
     /// Give the primary grid exclusive ownership of scroll-out for a resize transaction.
-    pub fn begin_resize_transaction(&mut self) {
+    pub fn begin_resize_transaction(&mut self) -> usize {
         if self.resize_transaction {
-            return;
+            return 0;
         }
         self.resize_transaction = true;
-        self.primary_grid_mut()
-            .update_history(RESIZE_TRANSACTION_HISTORY_LIMIT);
+        let candidate = mem::take(&mut self.resize_staging_candidate);
+        let restored = candidate.len();
+        let grid = self.primary_grid_mut();
+        grid.update_history(RESIZE_TRANSACTION_HISTORY_LIMIT);
+        grid.restore_history(candidate);
+        if restored != 0 {
+            self.mark_fully_damaged();
+        }
+        restored
     }
 
     /// Atomically harvest the primary mutable tail and restore steady-state scrollback=0.
@@ -514,11 +544,25 @@ impl<T> Term<T> {
             return Vec::new();
         }
         self.resize_transaction = false;
-        self.primary_grid_mut().take_history(0)
+        let rows = self.primary_grid_mut().take_history(0);
+        self.resize_staging_candidate = unfinished_resize_suffix(&rows).to_vec();
+        rows
+    }
+
+    /// Match the native escrow to the staging rows retained by the external quota owner.
+    pub fn retain_resize_staging_candidate_rows(&mut self, rows: usize) {
+        let remove = self.resize_staging_candidate.len().saturating_sub(rows);
+        self.resize_staging_candidate.drain(..remove);
+        debug_assert_eq!(self.resize_staging_candidate.len(), rows);
+    }
+
+    pub fn resize_staging_candidate_rows(&self) -> usize {
+        self.resize_staging_candidate.len()
     }
 
     /// Clear transaction-owned history after ED3/reset without changing transaction ownership.
     pub fn clear_resize_transaction_history(&mut self) {
+        self.resize_staging_candidate.clear();
         if self.resize_transaction {
             self.primary_grid_mut().clear_history();
         }
@@ -623,6 +667,7 @@ impl<T> Term<T> {
             event_proxy,
             transcript_hook: None,
             resize_transaction: false,
+            resize_staging_candidate: Vec::new(),
             damage,
             config,
             grid,
@@ -1059,6 +1104,27 @@ impl<T> Term<T> {
         // Report that effective removal count instead of indexing beyond the region.
         let removed_lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
         if removed_lines != 0 {
+            let extends_resize_candidate = !self.resize_staging_candidate.is_empty()
+                && operation == ScrollOperation::Normal
+                && !self.mode.contains(TermMode::ALT_SCREEN)
+                && origin == Line(0)
+                && self.scroll_region.start == Line(0)
+                && self.scroll_region.end == Line(self.screen_lines() as i32);
+            if extends_resize_candidate {
+                let rows = (0..removed_lines)
+                    .map(|line| self.grid[Line(line as i32)].clone())
+                    .collect::<Vec<_>>();
+                for row in rows {
+                    if row_continues(&row) {
+                        self.resize_staging_candidate.push(row);
+                    } else {
+                        // The logical line is now closed. Its captured staging representation will
+                        // finalize normally, so no native reverse-harvest escrow remains valid.
+                        self.resize_staging_candidate.clear();
+                        break;
+                    }
+                }
+            }
             let rows = (0..removed_lines)
                 .map(|line| RemovedRow {
                     live_row: origin.0 as usize + line,
@@ -3162,6 +3228,40 @@ mod tests {
     use crate::term::cell::{Cell, Flags};
     use crate::term::test::TermSize;
     use crate::vte::ansi::{self, CharsetIndex, Handler, StandardCharset};
+
+    #[test]
+    fn unfinished_resize_harvest_returns_to_native_history_for_the_next_grow() {
+        let prompt = "(base) PS D:\\Developer\\BetterTerminal> ";
+        let config = Config {
+            scrolling_history: 0,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &TermSize::new(40, 4), VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        processor.advance(&mut term, prompt.as_bytes());
+
+        assert_eq!(term.begin_resize_transaction(), 0);
+        term.resize(TermSize::new(10, 3));
+        assert_eq!(term.reconcile_resize_transaction_to_viewport(), (3, 1));
+        let harvested = term.finish_resize_transaction();
+        assert_eq!(harvested.len(), 1);
+        assert!(row_continues(&harvested[0]));
+        assert_eq!(term.resize_staging_candidate_rows(), 1);
+        assert_eq!(term.history_size(), 0);
+
+        assert_eq!(term.begin_resize_transaction(), 1);
+        assert_eq!(term.history_size(), 1);
+        term.resize(TermSize::new(40, 4));
+        assert_eq!(term.history_size(), 0);
+        assert_eq!(
+            term.grid.cursor.point,
+            Point::new(Line(0), Column(prompt.len()))
+        );
+        let first_row = (0..40)
+            .map(|column| term.grid[Line(0)][Column(column)].c)
+            .collect::<String>();
+        assert_eq!(first_row.trim_end(), prompt.trim_end());
+    }
 
     #[test]
     fn late_wide_grapheme_at_right_margin_stays_narrow_without_decawm() {

@@ -189,8 +189,8 @@ impl TerminalAdapter {
         self.drain_transcript_events()
     }
 
-    pub fn begin_resize_transaction(&mut self) {
-        self.term.begin_resize_transaction();
+    pub fn begin_resize_transaction(&mut self) -> usize {
+        self.term.begin_resize_transaction()
     }
 
     pub fn finish_resize_transaction(&mut self) -> Vec<CapturedRow> {
@@ -207,6 +207,14 @@ impl TerminalAdapter {
 
     pub fn resize_transaction_history_size(&self) -> usize {
         self.term.resize_transaction_history_size()
+    }
+
+    pub fn retain_resize_staging_candidate_rows(&mut self, rows: usize) {
+        self.term.retain_resize_staging_candidate_rows(rows);
+    }
+
+    pub fn resize_staging_candidate_rows(&self) -> usize {
+        self.term.resize_staging_candidate_rows()
     }
 
     pub fn reconcile_resize_transaction_to_viewport(&mut self) -> (usize, usize) {
