@@ -1267,6 +1267,35 @@
   .cmdtick.sub { margin-right: 4px; }
   @keyframes cmdflash { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); } 100% { background: transparent; } }
   .term > div.cmd-jump { animation: cmdflash .95s ease; border-radius: 4px; }
+  /* ── command palette (P1-9, 2026-07-18) ── a floating intent box: no scrim
+     (the world stays visible — you are aiming, not modal-dialoguing), top
+     third so the eye's resting line isn't covered, one flat list of sessions
+     and actions. Keyboard is the primary instrument; the pointer is a guest. */
+  .palette {
+    position: absolute; top: 84px; left: 50%; transform: translateX(-50%);
+    width: 540px; max-width: calc(100% - 48px); z-index: 60;
+    background: var(--menu); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow); overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+  .palette[hidden] { display: none; }
+  .palette input {
+    border: none; outline: none; background: transparent; color: var(--ink);
+    font-size: 13.5px; padding: 12px 14px; border-bottom: 1px solid var(--border-soft);
+  }
+  .pal-list { max-height: 336px; overflow-y: auto; padding: 5px; }
+  .pal-item {
+    display: flex; align-items: center; gap: 9px;
+    padding: 7px 10px; border-radius: 7px; cursor: pointer;
+    font-size: 12.5px; color: var(--ink);
+  }
+  .pal-item.sel { background: var(--hover); }
+  .pal-item .pico { width: 16px; height: 16px; flex: none; display: grid; place-items: center; color: var(--ink2); }
+  .pal-item .pico svg { width: 14px; height: 14px; }
+  .pal-item .pal-hint { margin-left: auto; color: var(--ink3); font-size: 11px;
+    max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pal-item mark { background: none; color: var(--accent); font-weight: 600; }
+  .pal-empty { padding: 14px; color: var(--ink3); font-size: 12px; text-align: center; }
   /* the glance card: monospace one-liner, structurally non-interactive */
   #cmd-peek {
     position: absolute; z-index: 40; display: none;
@@ -2059,6 +2088,14 @@
   <div class="term-menu" id="pv-menu"></div>
   <div class="layout-peek" id="layout-peek"></div>
   <div id="cmd-peek"></div>
+
+  <!-- command palette (P1-9): intent navigation — type what you want, Enter.
+       Sessions and actions in one list; the fourth navigation primitive
+       beside tabs (space), the rail (time) and search (content). -->
+  <div class="palette" id="palette" hidden>
+    <input type="text" placeholder="Type a session or a command…" spellcheck="false">
+    <div class="pal-list"></div>
+  </div>
   <div class="file-peek" id="file-peek"></div>
 
   <div class="overlay" id="settings-overlay">
@@ -2429,6 +2466,146 @@
     }
   }
   $("attn-chip").addEventListener("click", jumpAttention);
+  /* ── command palette (P1-9, user-approved 2026-07-18) ──
+     Intent navigation: type what you want, Enter. One flat list, two
+     sources — sessions (go there) and actions (do this) — because the user
+     should not have to know which kind their intent is. Also the standing
+     debtor for §7.1.6's keyboard-entry debts: pin/unpin/close first live
+     here, and only graduate to dedicated keys via the P2-7 audit. */
+  const svgIcon = (id) => `<svg><use href="#${id}"/></svg>`;
+  function fuzzyScore(query, text) {
+    const q = query.toLowerCase(), t = text.toLowerCase();
+    if (!q) return { score: 0, idx: [] };
+    let ti = 0, score = 0, streak = 0;
+    const idx = [];
+    for (const ch of q) {
+      const found = t.indexOf(ch, ti);
+      if (found < 0) return null;   /* every query char must appear, in order */
+      streak = found === ti ? streak + 1 : 1;
+      score += streak * 2                                   /* runs beat scatter */
+        + (found === 0 || /[\s\-_:·]/.test(t[found - 1]) ? 3 : 0)   /* word starts count */
+        - Math.min(found - ti, 8) * 0.15;                   /* long gaps cost a little */
+      idx.push(found);
+      ti = found + 1;
+    }
+    return { score, idx };
+  }
+  function syncCombo(kind, v) {
+    const combo = document.querySelector(`.combo[data-combo="${kind}"]`);
+    if (!combo) return;
+    combo.querySelectorAll(".combo-item").forEach(x =>
+      x.classList.toggle("selected", x.dataset.v === String(v)));
+    const item = combo.querySelector(`.combo-item[data-v="${v}"]`);
+    if (item) combo.querySelector(".value").textContent = item.textContent.replace("✓", "").trim();
+  }
+  function paletteItems() {
+    const w = activeTab();
+    const items = [];
+    state.sessions.forEach(s => items.push({
+      icon: s.icon, label: displayName(s), hint: s.cwd,
+      run: () => focusSessionByUid(s.uid),
+    }));
+    const fl = w && focusedLeaf(w);
+    const termLeaf = fl && fl.kind === "term" ? fl : null;
+    PROFILES.forEach(p => items.push({
+      icon: p.icon, label: `New tab: ${p.title}`, run: () => newTab(p) }));
+    items.push({ icon: svgIcon(w && w.pinned ? "i-pinned" : "i-pin"),
+      label: w && w.pinned ? "Unpin this tab" : "Pin this tab",
+      run: () => togglePin(state.active) });
+    items.push({ icon: svgIcon("i-close"), label: "Close tab",
+      run: () => closeTab(state.active) });
+    if (termLeaf) {
+      items.push({ icon: svgIcon("i-refresh"), label: "Restart shell",
+        run: () => refreshTerminal(termLeaf.id) });
+      items.push({ icon: svgIcon("i-select"), label: "Find in terminal", hint: "Ctrl+F",
+        run: () => openSearch(termLeaf.id) });
+    }
+    if (awaitingQueue().length) items.push({ icon: svgIcon("i-app"),
+      label: "Jump to waiting session", hint: "Ctrl+Shift+A", run: jumpAttention });
+    ["light", "dark", "system"].forEach(v => items.push({
+      icon: svgIcon("i-eye"), label: `Theme: ${v[0].toUpperCase()}${v.slice(1)}`,
+      run: () => { state.theme = v; applyTheme(); syncCombo("theme", v); } }));
+    ["horizontal", "vertical"].forEach(v => items.push({
+      icon: svgIcon("i-panel"), label: `Tabs: ${v[0].toUpperCase()}${v.slice(1)}`,
+      run: () => { state.layoutMode = v; render(); syncCombo("layout", v); } }));
+    if (state.layoutMode === "vertical" && (termLeaf || (w && w.focusLeaf != null))
+        && termLeaves(w).length <= FOCUS_MAX)
+      items.push({ icon: svgIcon("i-max"),
+        label: w.focusLeaf != null ? "Exit focus mode" : "Enter focus mode",
+        run: () => { const before = snapshotPanes();
+          if (w.focusLeaf != null) exitFocus(w); else { w.focusLeaf = fl.id; w.focus = fl.id; }
+          renderWithPaneFlip(before); } });
+    items.push({ icon: svgIcon("i-gear"), label: "Settings",
+      run: () => $("settings-overlay").classList.add("show") });
+    return items;
+  }
+  let palSel = 0, palShown = [];
+  const paletteOpen = () => !$("palette").hidden;
+  function openPalette() {
+    const pal = $("palette");
+    pal.hidden = false;
+    const input = pal.querySelector("input");
+    input.value = ""; palSel = 0;
+    renderPalette("");
+    input.focus();
+  }
+  function closePalette() { $("palette").hidden = true; }
+  const palHighlight = (label, idx) => {
+    const set = new Set(idx);
+    return [...label].map((ch, i) => set.has(i) ? `<mark>${esc(ch)}</mark>` : esc(ch)).join("");
+  };
+  function renderPalette(query) {
+    const list = $("palette").querySelector(".pal-list");
+    const scored = [];
+    paletteItems().forEach(it => {
+      const m = fuzzyScore(query, it.label);
+      if (m) scored.push({ ...it, score: m.score, idx: m.idx });
+    });
+    scored.sort((a, b) => b.score - a.score);
+    palShown = scored.slice(0, 12);
+    palSel = Math.min(palSel, Math.max(0, palShown.length - 1));
+    list.innerHTML = palShown.length ? palShown.map((it, i) => `
+      <div class="pal-item ${i === palSel ? "sel" : ""}" data-i="${i}">
+        <span class="pico">${it.icon || ""}</span>
+        <span>${palHighlight(it.label, it.idx)}</span>
+        ${it.hint ? `<span class="pal-hint">${esc(it.hint)}</span>` : ""}
+      </div>`).join("") : `<div class="pal-empty">Nothing matches</div>`;
+  }
+  function palPaintSel() {
+    [...$("palette").querySelectorAll(".pal-item")].forEach((el, i) =>
+      el.classList.toggle("sel", i === palSel));
+  }
+  function palMove(d) {
+    if (!palShown.length) return;
+    palSel = (palSel + d + palShown.length) % palShown.length;
+    palPaintSel();
+    $("palette").querySelectorAll(".pal-item")[palSel]?.scrollIntoView({ block: "nearest" });
+  }
+  function palRun() {
+    const it = palShown[palSel];
+    if (!it) return;
+    closePalette();   /* close first: the action may open its own surface */
+    it.run();
+  }
+  {
+    const pal = $("palette"), palInput = pal.querySelector("input");
+    palInput.addEventListener("input", () => { palSel = 0; renderPalette(palInput.value.trim()); });
+    pal.addEventListener("keydown", (e) => {
+      e.stopPropagation();   /* palette keys are the palette's — nothing leaks to the terminal */
+      if (e.key === "ArrowDown") { e.preventDefault(); palMove(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); palMove(-1); }
+      else if (e.key === "Enter") { e.preventDefault(); palRun(); }
+      else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
+    });
+    pal.addEventListener("pointermove", (e) => {
+      const item = e.target.closest(".pal-item");
+      if (item && +item.dataset.i !== palSel) { palSel = +item.dataset.i; palPaintSel(); }
+    });
+    pal.addEventListener("click", (e) => { if (e.target.closest(".pal-item")) palRun(); });
+    document.addEventListener("pointerdown", (e) => {
+      if (paletteOpen() && !e.target.closest(".palette")) closePalette();
+    });
+  }
   const nameSource = (s) => s.name ? "manual" : s.progTitle ? "program" : "cwd";
   const NAME_SOURCE = { manual: "Named by you", program: "Set by the program", cwd: "Working folder" };
 
@@ -5229,6 +5406,13 @@
         return;
       }
     }
+    /* Ctrl+Shift+P — the command palette; same key toggles it shut */
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "p"
+        && !document.body.classList.contains("shut")) {
+      e.preventDefault();
+      if (paletteOpen()) closePalette(); else openPalette();
+      return;
+    }
     /* Ctrl+Shift+A — answer the longest-waiting session; repeat to walk the
        queue (P1-8; the binding is provisional pending the P2-7 audit) */
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "a"
@@ -5287,6 +5471,7 @@
          on pointerup. */
       if (drag) { cancelDrag(); return; }
       if (resize) { cancelResizeDrag(); return; }
+      if (paletteOpen()) { closePalette(); return; }
       if ($("pv-menu").classList.contains("show")) { closePvMenu(); return; }
       if ($("term-menu").classList.contains("show")) { $("term-menu").classList.remove("show"); return; }
       if ($("file-menu").classList.contains("show")) { $("file-menu").classList.remove("show"); return; }
@@ -5327,7 +5512,7 @@
     /* the focused pane might be a files tree, which handles its own keys (delegated
        on termhost). Only a terminal gets typed into. This is the kind check the
        real focus model would make; here it stands in for it. */
-    if (e.target.closest && e.target.closest(".files-tree, .pv-edit, .srchbar")) return;
+    if (e.target.closest && e.target.closest(".files-tree, .pv-edit, .srchbar, .palette")) return;
     const t = focusedSession();
     if (!t) return;   /* files pane focused: nothing to type into */
     if (e.key === "Enter") { e.preventDefault(); runCommand(); }
