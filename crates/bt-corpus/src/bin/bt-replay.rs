@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use bt_corpus::{Chunking, Corpus, EventKind};
 use bt_render::{HeadlessRenderProbe, RenderProbeSample};
 use bt_term::{DualPlaneSession, TerminalAdapter};
@@ -23,10 +23,15 @@ fn main() -> Result<()> {
     let mut args = env::args().skip(1);
     let first = args.next().context(
         "usage: bt-replay CORPUS.btcr [CHUNK_SIZE] [--render] | \
-         bt-replay --synthetic CASE MODE [FRAMES] [CHUNK_SIZE|frame] [frame|chunk]",
+         bt-replay --synthetic matrix | \
+         bt-replay --private-corpus-smoke | \
+         bt-replay --synthetic CASE MODE [FRAMES] [CHUNK_SIZE|frame] [frame|chunk|app] [UNIQUE_CJK]",
     )?;
     if first == "--synthetic" {
         return run_synthetic(args.collect());
+    }
+    if first == "--private-corpus-smoke" {
+        return smoke_private_corpus();
     }
 
     let mut render = false;
@@ -238,7 +243,7 @@ fn replay_with_render(corpus: &Corpus, chunking: Chunking) -> Result<()> {
         },
     )?;
     let state = state.into_inner();
-    state.totals.print("corpus", "recorded", "callback");
+    state.totals.print("corpus", "recorded", "callback", None);
     for line in state.session.terminal().visible_text() {
         println!("{line}");
     }
@@ -357,12 +362,18 @@ struct PerfTotals {
     unchanged_frames: u64,
     suppressed_frames: u64,
     rows_reshaped: u64,
+    row_cache_hits: u64,
+    row_cache_misses: u64,
+    row_cache_evictions: u64,
+    row_cache_resident_bytes: usize,
     narrow_hits: u64,
     narrow_misses: u64,
     narrow_evictions: u64,
     wide_hits: u64,
     wide_misses: u64,
     wide_evictions: u64,
+    narrow_resident_bytes: usize,
+    wide_resident_bytes: usize,
     render_samples_us: Vec<u128>,
 }
 
@@ -375,6 +386,14 @@ impl PerfTotals {
         self.encode_submit += sample.encode_submit;
         self.frames = self.frames.saturating_add(1);
         self.rows_reshaped = self.rows_reshaped.saturating_add(sample.rows_reshaped);
+        self.row_cache_hits = self.row_cache_hits.saturating_add(sample.row_cache_hits);
+        self.row_cache_misses = self
+            .row_cache_misses
+            .saturating_add(sample.row_cache_misses);
+        self.row_cache_evictions = self
+            .row_cache_evictions
+            .saturating_add(sample.row_cache_evictions);
+        self.row_cache_resident_bytes = sample.row_cache_resident_bytes;
         self.narrow_hits = self.narrow_hits.saturating_add(sample.narrow_hits);
         self.narrow_misses = self.narrow_misses.saturating_add(sample.narrow_misses);
         self.narrow_evictions = self
@@ -383,10 +402,12 @@ impl PerfTotals {
         self.wide_hits = self.wide_hits.saturating_add(sample.wide_hits);
         self.wide_misses = self.wide_misses.saturating_add(sample.wide_misses);
         self.wide_evictions = self.wide_evictions.saturating_add(sample.wide_evictions);
+        self.narrow_resident_bytes = sample.narrow_resident_bytes;
+        self.wide_resident_bytes = sample.wide_resident_bytes;
         self.render_samples_us.push(sample.total.as_micros());
         if env::var_os("BT_PERF_TRACE").is_some() {
             eprintln!(
-                "BT_REPLAY_FRAME frame={} total_us={} row_compose_us={} shape_miss_us={} atlas_prepare_upload_us={} encode_submit_us={} rows_reshaped={} narrow_hits={} narrow_misses={} narrow_evictions={} wide_hits={} wide_misses={} wide_evictions={} narrow_glyphs={} wide_glyphs={}",
+                "BT_REPLAY_FRAME frame={} total_us={} row_compose_us={} shape_miss_us={} atlas_prepare_upload_us={} encode_submit_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_hits={} atlas_misses={} atlas_grows={} atlas_evictions={} atlas_upload_bytes={} narrow_glyphs={} wide_glyphs={}",
                 self.frames,
                 sample.total.as_micros(),
                 sample.row_compose.as_micros(),
@@ -394,25 +415,37 @@ impl PerfTotals {
                 sample.atlas_prepare_upload.as_micros(),
                 sample.encode_submit.as_micros(),
                 sample.rows_reshaped,
+                sample.row_cache_hits,
+                sample.row_cache_misses,
+                sample.row_cache_evictions,
+                sample.row_cache_resident_bytes,
                 sample.narrow_hits,
                 sample.narrow_misses,
                 sample.narrow_evictions,
+                sample.narrow_resident_bytes,
                 sample.wide_hits,
                 sample.wide_misses,
                 sample.wide_evictions,
+                sample.wide_resident_bytes,
+                measurable_counter(sample.atlas_hits),
+                measurable_counter(sample.atlas_misses),
+                measurable_counter(sample.atlas_grows),
+                measurable_counter(sample.atlas_evictions),
+                measurable_counter(sample.atlas_upload_bytes),
                 sample.narrow_glyphs,
                 sample.wide_glyphs,
             );
         }
     }
 
-    fn print(&self, case: &str, mode: &str, present_policy: &str) {
+    fn print(&self, case: &str, mode: &str, present_policy: &str, unique_cjk: Option<usize>) {
         let mut samples = self.render_samples_us.clone();
         samples.sort_unstable();
         let p50 = percentile(&samples, 50);
         let p95 = percentile(&samples, 95);
         eprintln!(
-            "BT_REPLAY_PERF case={case} mode={mode} present_policy={present_policy} bytes={} feed_calls={} frames={} unchanged_frames={} suppressed_frames={} term_total_us={} term_per_feed_us={} projection_total_us={} render_total_us={} render_per_frame_us={} render_p50_us={} render_p95_us={} row_compose_total_us={} shape_miss_total_us={} atlas_prepare_upload_total_us={} encode_submit_total_us={} rows_reshaped={} narrow_hits={} narrow_misses={} narrow_evictions={} wide_hits={} wide_misses={} wide_evictions={} wall_accounted_us={}",
+            "BT_REPLAY_PERF case={case} mode={mode} present_policy={present_policy} unique_cjk={} bytes={} feed_calls={} frames={} unchanged_frames={} suppressed_frames={} term_total_us={} term_per_feed_us={} projection_total_us={} render_total_us={} render_per_frame_us={} render_p50_us={} render_p95_us={} row_compose_total_us={} shape_miss_total_us={} atlas_prepare_upload_total_us={} encode_submit_total_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 wall_accounted_us={}",
+            unique_cjk.map_or_else(|| "n/a".to_owned(), |value| value.to_string()),
             self.bytes,
             self.feed_calls,
             self.frames,
@@ -430,15 +463,28 @@ impl PerfTotals {
             self.atlas_prepare_upload.as_micros(),
             self.encode_submit.as_micros(),
             self.rows_reshaped,
+            self.row_cache_hits,
+            self.row_cache_misses,
+            self.row_cache_evictions,
+            self.row_cache_resident_bytes,
             self.narrow_hits,
             self.narrow_misses,
             self.narrow_evictions,
+            self.narrow_resident_bytes,
             self.wide_hits,
             self.wide_misses,
             self.wide_evictions,
+            self.wide_resident_bytes,
             (self.term + self.projection + self.render).as_micros(),
         );
     }
+}
+
+fn measurable_counter(value: Option<u64>) -> String {
+    value.map_or_else(
+        || "unmeasurable_glyphon_0_12".to_owned(),
+        |value| value.to_string(),
+    )
 }
 
 fn average_us(duration: Duration, count: u64) -> u128 {
@@ -547,6 +593,9 @@ impl PresentPolicy {
 }
 
 fn run_synthetic(args: Vec<String>) -> Result<()> {
+    if args.first().is_none_or(|argument| argument == "matrix") {
+        return run_synthetic_matrix();
+    }
     let case = SyntheticCase::parse(args.first().map_or("ascii", String::as_str))?;
     let mode = SyntheticMode::parse(args.get(1).map_or("full", String::as_str))?;
     let frames = args
@@ -579,6 +628,18 @@ fn run_synthetic(args: Vec<String>) -> Result<()> {
         bail!("UNIQUE_CJK must be non-zero");
     }
 
+    run_synthetic_once(case, mode, frames, chunk_size, present_policy, unique_cjk)?;
+    Ok(())
+}
+
+fn run_synthetic_once(
+    case: SyntheticCase,
+    mode: SyntheticMode,
+    frames: usize,
+    chunk_size: Option<usize>,
+    present_policy: PresentPolicy,
+    unique_cjk: usize,
+) -> Result<PerfTotals> {
     let columns = NonZeroU32::new(SYNTHETIC_COLUMNS).unwrap();
     let rows = NonZeroU32::new(SYNTHETIC_ROWS).unwrap();
     let session = DualPlaneSession::new(columns, rows);
@@ -605,7 +666,7 @@ fn run_synthetic(args: Vec<String>) -> Result<()> {
     replay.feed(&initial)?;
     replay.present()?;
     let cold = std::mem::take(&mut replay.totals);
-    cold.print(case.name(), "cold-fill", "frame");
+    cold.print(case.name(), "cold-fill", "frame", Some(unique_cjk));
     replay.reset_totals();
 
     let mut offset = 0_usize;
@@ -638,9 +699,118 @@ fn run_synthetic(args: Vec<String>) -> Result<()> {
         };
         feed_synthetic_payload(&mut replay, &payload, chunk_size, present_policy)?;
     }
-    replay
-        .totals
-        .print(case.name(), mode.name(), present_policy.name());
+    replay.totals.print(
+        case.name(),
+        mode.name(),
+        present_policy.name(),
+        Some(unique_cjk),
+    );
+    Ok(replay.totals)
+}
+
+const MATRIX_UNIQUE_CJK: [usize; 5] = [64, 256, 512, 1024, 2450];
+const MATRIX_MODES: [SyntheticMode; 5] = [
+    SyntheticMode::Same,
+    SyntheticMode::ScrollUp,
+    SyntheticMode::ScrollDown,
+    SyntheticMode::Replace,
+    SyntheticMode::Alternate,
+];
+const MATRIX_CHUNKS: [Option<usize>; 3] = [Some(1), Some(4096), None];
+const MATRIX_FRAMES: usize = 8;
+
+fn run_synthetic_matrix() -> Result<()> {
+    let mut scenarios = 0_usize;
+    for unique_cjk in MATRIX_UNIQUE_CJK {
+        for chunk_size in MATRIX_CHUNKS {
+            let baseline = run_synthetic_once(
+                SyntheticCase::Cjk,
+                SyntheticMode::Same,
+                MATRIX_FRAMES,
+                chunk_size,
+                PresentPolicy::Frame,
+                unique_cjk,
+            )?;
+            assert_matrix_evictions(unique_cjk, SyntheticMode::Same, chunk_size, &baseline)?;
+            let baseline_us = average_us(baseline.render, baseline.frames).max(1);
+            scenarios += 1;
+
+            for mode in MATRIX_MODES.into_iter().skip(1) {
+                let totals = run_synthetic_once(
+                    SyntheticCase::Cjk,
+                    mode,
+                    MATRIX_FRAMES,
+                    chunk_size,
+                    PresentPolicy::Frame,
+                    unique_cjk,
+                )?;
+                assert_matrix_evictions(unique_cjk, mode, chunk_size, &totals)?;
+                if unique_cjk >= 512
+                    && matches!(mode, SyntheticMode::ScrollUp | SyntheticMode::ScrollDown)
+                {
+                    let shifted_us = average_us(totals.render, totals.frames);
+                    ensure!(
+                        shifted_within_limit(baseline_us, shifted_us),
+                        "matrix regression: unique_cjk={unique_cjk} mode={} chunk={} shifted_us={shifted_us} baseline_us={baseline_us} ratio exceeds 3x",
+                        mode.name(),
+                        matrix_chunk_name(chunk_size),
+                    );
+                }
+                scenarios += 1;
+            }
+        }
+    }
+    ensure!(
+        scenarios == 75,
+        "synthetic matrix must contain exactly 75 scenarios"
+    );
+    eprintln!("BT_REPLAY_MATRIX scenarios={scenarios} assertions=passed");
+    smoke_private_corpus()?;
+    Ok(())
+}
+
+fn shifted_within_limit(baseline_us: u128, shifted_us: u128) -> bool {
+    shifted_us <= baseline_us.max(1).saturating_mul(3)
+}
+
+fn assert_matrix_evictions(
+    unique_cjk: usize,
+    mode: SyntheticMode,
+    chunk_size: Option<usize>,
+    totals: &PerfTotals,
+) -> Result<()> {
+    ensure!(
+        totals.wide_evictions == 0,
+        "matrix regression: byte-budgeted working set must fit without wide eviction: unique_cjk={unique_cjk} mode={} chunk={} evictions={}",
+        mode.name(),
+        matrix_chunk_name(chunk_size),
+        totals.wide_evictions,
+    );
+    Ok(())
+}
+
+fn matrix_chunk_name(chunk_size: Option<usize>) -> &'static str {
+    match chunk_size {
+        Some(1) => "1B",
+        Some(4096) => "4KiB",
+        None => "frame",
+        Some(_) => "custom",
+    }
+}
+
+fn smoke_private_corpus() -> Result<()> {
+    let Some(path) = env::var_os("BT_REPLAY_PRIVATE_CORPUS") else {
+        eprintln!("BT_REPLAY_PRIVATE_CORPUS status=skipped reason=environment_not_set");
+        return Ok(());
+    };
+    let corpus = Corpus::read_from(File::open(&path).with_context(|| {
+        format!(
+            "failed to open BT_REPLAY_PRIVATE_CORPUS at {}",
+            path.to_string_lossy()
+        )
+    })?)?;
+    replay_with_render(&corpus, Chunking::Recorded)?;
+    eprintln!("BT_REPLAY_PRIVATE_CORPUS status=passed");
     Ok(())
 }
 
@@ -772,4 +942,35 @@ fn scroll_down(top_line: &[u8]) -> Vec<u8> {
     payload.extend_from_slice(top_line);
     payload.extend_from_slice(b"\x1b[?2026l");
     payload
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixed_matrix_is_the_required_cartesian_product() {
+        assert_eq!(
+            MATRIX_UNIQUE_CJK.len() * MATRIX_MODES.len() * MATRIX_CHUNKS.len(),
+            75
+        );
+        assert_eq!(MATRIX_UNIQUE_CJK, [64, 256, 512, 1024, 2450]);
+        assert_eq!(MATRIX_CHUNKS, [Some(1), Some(4096), None]);
+        assert_eq!(
+            MATRIX_MODES,
+            [
+                SyntheticMode::Same,
+                SyntheticMode::ScrollUp,
+                SyntheticMode::ScrollDown,
+                SyntheticMode::Replace,
+                SyntheticMode::Alternate,
+            ]
+        );
+    }
+
+    #[test]
+    fn shift_gate_is_relative_and_inclusive_at_three_times_baseline() {
+        assert!(shifted_within_limit(2_000, 6_000));
+        assert!(!shifted_within_limit(2_000, 6_001));
+    }
 }

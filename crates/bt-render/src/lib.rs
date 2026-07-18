@@ -5,6 +5,8 @@ mod theme;
 
 use std::{
     collections::HashMap,
+    hash::{Hash, Hasher},
+    mem::size_of,
     num::{NonZeroI64, NonZeroU16, NonZeroU32},
     sync::Arc,
     time::{Duration, Instant},
@@ -32,8 +34,9 @@ use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
 const PADDING_LOGICAL_PX: f32 = 8.0;
-const NARROW_SHAPING_CACHE_CAPACITY: usize = 1024;
-const WIDE_SHAPING_CACHE_CAPACITY: usize = 256;
+const NARROW_SHAPING_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
+const WIDE_SHAPING_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
+const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 const PRIMARY_FONT_FAMILY: &str = "Consolas";
 const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
 const SEGOE_COLOR_EMOJI_FONT_FAMILY: &str = "Segoe UI Emoji";
@@ -405,16 +408,375 @@ struct RectInstance {
     color: [f32; 4],
 }
 
-struct TextRow {
-    cells: Vec<CapturedCell>,
+struct ComposedRow {
     narrow_glyphs: Vec<NarrowGlyph>,
     wide_glyphs: Vec<WideGlyph>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct RowMetricsKey {
+    cell_width_bits: u32,
+    cell_height_bits: u32,
+    font_size_bits: u32,
+    padding_bits: u32,
+    scale_factor_bits: u64,
+    ascii_baseline_bits: u32,
+    primary_advance_bits: u32,
+    primary_cap_height_bits: u32,
+    primary_cap_center_y_bits: u32,
+}
+
+impl From<CellMetrics> for RowMetricsKey {
+    fn from(metrics: CellMetrics) -> Self {
+        Self {
+            cell_width_bits: metrics.cell_width_px.to_bits(),
+            cell_height_bits: metrics.cell_height_px.to_bits(),
+            font_size_bits: metrics.font_size_px.to_bits(),
+            padding_bits: metrics.padding_px.to_bits(),
+            scale_factor_bits: metrics.scale_factor.to_bits(),
+            ascii_baseline_bits: metrics.ascii_baseline_px.to_bits(),
+            primary_advance_bits: metrics.primary_advance_px.to_bits(),
+            primary_cap_height_bits: metrics.primary_cap_height_px.to_bits(),
+            primary_cap_center_y_bits: metrics.primary_cap_center_y_px.to_bits(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ComposedRowKey {
+    cells: Vec<CapturedCell>,
+    metrics: RowMetricsKey,
+    font_revision: u64,
+    status_overlay: Option<String>,
+}
+
+impl Hash for ComposedRowKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.metrics.hash(state);
+        self.font_revision.hash(state);
+        self.status_overlay.hash(state);
+        self.cells.len().hash(state);
+        for cell in &self.cells {
+            cell.text.hash(state);
+            cell.style.flags.bits().hash(state);
+            hash_terminal_color(cell.style.foreground, state);
+            hash_terminal_color(cell.style.background, state);
+            cell.hyperlink.hash(state);
+            cell.wide_spacer.hash(state);
+        }
+    }
+}
+
+fn hash_terminal_color<H: Hasher>(color: TerminalColor, state: &mut H) {
+    match color {
+        TerminalColor::Named(value) => {
+            0_u8.hash(state);
+            value.hash(state);
+        }
+        TerminalColor::Indexed(value) => {
+            1_u8.hash(state);
+            value.hash(state);
+        }
+        TerminalColor::Rgb(red, green, blue) => {
+            2_u8.hash(state);
+            red.hash(state);
+            green.hash(state);
+            blue.hash(state);
+        }
+    }
+}
+
+struct LruNode<K, V> {
+    key: Arc<K>,
+    value: V,
+    resident_bytes: usize,
+    previous: Option<usize>,
+    next: Option<usize>,
+}
+
+/// Hash lookup plus an index-based intrusive list. Lookup, promotion, and one eviction are O(1)
+/// without unsafe pointers. The byte budget accounts for the node's owned key/value estimate;
+/// hash-table bucket slack and allocator headers are intentionally outside the approximation.
+struct ByteLru<K, V> {
+    indices: HashMap<Arc<K>, usize>,
+    nodes: Vec<Option<LruNode<K, V>>>,
+    free: Vec<usize>,
+    most_recent: Option<usize>,
+    least_recent: Option<usize>,
+    resident_bytes: usize,
+    budget_bytes: usize,
+}
+
+impl<K: Eq + Hash, V> ByteLru<K, V> {
+    fn new(budget_bytes: usize) -> Self {
+        Self {
+            indices: HashMap::new(),
+            nodes: Vec::new(),
+            free: Vec::new(),
+            most_recent: None,
+            least_recent: None,
+            resident_bytes: 0,
+            budget_bytes,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.indices.clear();
+        self.nodes.clear();
+        self.free.clear();
+        self.most_recent = None;
+        self.least_recent = None;
+        self.resident_bytes = 0;
+    }
+
+    fn get(&mut self, key: &K) -> Option<&V> {
+        let index = *self.indices.get(key)?;
+        self.promote(index);
+        Some(&self.nodes[index].as_ref().expect("LRU index is live").value)
+    }
+
+    fn insert(&mut self, key: K, value: V, resident_bytes: usize) -> (bool, u64) {
+        debug_assert!(!self.indices.contains_key(&key));
+        if resident_bytes > self.budget_bytes {
+            return (false, 0);
+        }
+
+        let mut evictions = 0_u64;
+        while self.resident_bytes.saturating_add(resident_bytes) > self.budget_bytes {
+            if !self.remove_least_recent() {
+                break;
+            }
+            evictions = evictions.saturating_add(1);
+        }
+
+        let key = Arc::new(key);
+        let index = self.free.pop().unwrap_or_else(|| {
+            self.nodes.push(None);
+            self.nodes.len() - 1
+        });
+        let old_head = self.most_recent;
+        self.nodes[index] = Some(LruNode {
+            key: Arc::clone(&key),
+            value,
+            resident_bytes,
+            previous: None,
+            next: old_head,
+        });
+        if let Some(old_head) = old_head {
+            self.nodes[old_head]
+                .as_mut()
+                .expect("LRU head is live")
+                .previous = Some(index);
+        } else {
+            self.least_recent = Some(index);
+        }
+        self.most_recent = Some(index);
+        self.resident_bytes = self.resident_bytes.saturating_add(resident_bytes);
+        self.indices.insert(key, index);
+        (true, evictions)
+    }
+
+    fn promote(&mut self, index: usize) {
+        if self.most_recent == Some(index) {
+            return;
+        }
+        let (previous, next) = {
+            let node = self.nodes[index].as_ref().expect("LRU index is live");
+            (node.previous, node.next)
+        };
+        if let Some(previous) = previous {
+            self.nodes[previous]
+                .as_mut()
+                .expect("LRU previous index is live")
+                .next = next;
+        }
+        if let Some(next) = next {
+            self.nodes[next]
+                .as_mut()
+                .expect("LRU next index is live")
+                .previous = previous;
+        } else {
+            self.least_recent = previous;
+        }
+        let old_head = self.most_recent;
+        let node = self.nodes[index].as_mut().expect("LRU index is live");
+        node.previous = None;
+        node.next = old_head;
+        if let Some(old_head) = old_head {
+            self.nodes[old_head]
+                .as_mut()
+                .expect("LRU head is live")
+                .previous = Some(index);
+        }
+        self.most_recent = Some(index);
+    }
+
+    fn remove_least_recent(&mut self) -> bool {
+        let Some(index) = self.least_recent else {
+            return false;
+        };
+        let node = self.nodes[index].take().expect("LRU tail is live");
+        self.least_recent = node.previous;
+        if let Some(previous) = node.previous {
+            self.nodes[previous]
+                .as_mut()
+                .expect("LRU previous index is live")
+                .next = None;
+        } else {
+            self.most_recent = None;
+        }
+        self.indices.remove(node.key.as_ref());
+        self.resident_bytes = self.resident_bytes.saturating_sub(node.resident_bytes);
+        self.free.push(index);
+        true
+    }
+
+    fn resident_bytes(&self) -> usize {
+        self.resident_bytes
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.indices.len()
+    }
+
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.indices.is_empty()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RowCacheCounters {
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+    resident_bytes: usize,
+}
+
+struct ComposedRowCache {
+    entries: ByteLru<ComposedRowKey, Arc<ComposedRow>>,
+    counters: RowCacheCounters,
+}
+
+impl ComposedRowCache {
+    fn new() -> Self {
+        Self {
+            entries: ByteLru::new(COMPOSED_ROW_CACHE_BUDGET_BYTES),
+            counters: RowCacheCounters::default(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.counters = RowCacheCounters::default();
+    }
+
+    fn get(&mut self, key: &ComposedRowKey) -> Option<Arc<ComposedRow>> {
+        let row = self.entries.get(key).map(Arc::clone);
+        if row.is_some() {
+            self.counters.hits = self.counters.hits.saturating_add(1);
+        } else {
+            self.counters.misses = self.counters.misses.saturating_add(1);
+        }
+        row
+    }
+
+    fn insert(&mut self, key: ComposedRowKey, row: Arc<ComposedRow>) {
+        let resident_bytes = composed_row_resident_bytes(&key, &row);
+        let (_, evictions) = self.entries.insert(key, row, resident_bytes);
+        self.counters.evictions = self.counters.evictions.saturating_add(evictions);
+        self.counters.resident_bytes = self.entries.resident_bytes();
+    }
+}
+
+/// Resident-byte approximation used for every cache budget and reported verbatim in perf traces.
+///
+/// cosmic-text does not expose the capacities of its internal shaping/layout caches. We charge the
+/// public `Buffer`/`BufferLine` values, UTF-8 text bytes, and one `LayoutGlyph` per visible layout
+/// glyph. Row entries additionally charge cell/string capacities and glyph-vector capacities.
+/// Each row glyph conservatively charges its referenced buffer in full, so shared `Arc<Buffer>`
+/// allocations are double-counted rather than silently omitted after the shape-cache entry is
+/// evicted. Hash bucket slack and allocator headers remain unmeasurable without a heap profiler.
+fn buffer_resident_bytes(buffer: &Buffer) -> usize {
+    let line_bytes = buffer
+        .lines
+        .iter()
+        .map(|line| size_of::<glyphon::cosmic_text::BufferLine>() + line.text().len())
+        .sum::<usize>();
+    let glyph_count = buffer
+        .layout_runs()
+        .map(|run| run.glyphs.len())
+        .sum::<usize>();
+    size_of::<Buffer>()
+        .saturating_add(line_bytes)
+        .saturating_add(glyph_count.saturating_mul(size_of::<glyphon::cosmic_text::LayoutGlyph>()))
+}
+
+fn shape_entry_resident_bytes(key: &ShapeKey, buffer: &Buffer, value_bytes: usize) -> usize {
+    size_of::<Arc<ShapeKey>>()
+        .saturating_add(3 * size_of::<usize>())
+        .saturating_add(size_of::<ShapeKey>())
+        .saturating_add(key.text.capacity())
+        .saturating_add(value_bytes)
+        .saturating_add(buffer_resident_bytes(buffer))
+}
+
+fn captured_cell_resident_bytes(cell: &CapturedCell) -> usize {
+    size_of::<CapturedCell>()
+        .saturating_add(cell.text.capacity())
+        .saturating_add(
+            cell.hyperlink
+                .as_ref()
+                .map_or(0, |hyperlink| hyperlink.capacity()),
+        )
+}
+
+fn composed_row_resident_bytes(key: &ComposedRowKey, row: &ComposedRow) -> usize {
+    let key_bytes = size_of::<ComposedRowKey>()
+        .saturating_add(
+            key.cells
+                .iter()
+                .map(captured_cell_resident_bytes)
+                .sum::<usize>(),
+        )
+        .saturating_add(
+            key.status_overlay
+                .as_ref()
+                .map_or(0, |status| status.capacity()),
+        );
+    let narrow_buffer_bytes = row
+        .narrow_glyphs
+        .iter()
+        .map(|glyph| buffer_resident_bytes(&glyph.buffer))
+        .sum::<usize>();
+    let wide_buffer_bytes = row
+        .wide_glyphs
+        .iter()
+        .map(|glyph| buffer_resident_bytes(&glyph.buffer))
+        .sum::<usize>();
+    size_of::<LruNode<ComposedRowKey, Arc<ComposedRow>>>()
+        .saturating_add(key_bytes)
+        .saturating_add(size_of::<ComposedRow>())
+        .saturating_add(
+            row.narrow_glyphs
+                .capacity()
+                .saturating_mul(size_of::<NarrowGlyph>()),
+        )
+        .saturating_add(
+            row.wide_glyphs
+                .capacity()
+                .saturating_mul(size_of::<WideGlyph>()),
+        )
+        .saturating_add(narrow_buffer_bytes)
+        .saturating_add(wide_buffer_bytes)
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct TextPreparationStats {
     elapsed: Duration,
     rows_reshaped: u64,
+    row_cache: RowCacheCounters,
     narrow: ShapeCacheCounters,
     wide: ShapeCacheCounters,
 }
@@ -445,7 +807,6 @@ struct CachedNarrowShape {
     buffer: Arc<Buffer>,
     left_offset_px: f32,
     top_offset_px: f32,
-    last_used: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -454,6 +815,7 @@ struct ShapeCacheCounters {
     misses: u64,
     evictions: u64,
     miss_time: Duration,
+    resident_bytes: usize,
 }
 
 impl ShapeCacheCounters {
@@ -463,13 +825,13 @@ impl ShapeCacheCounters {
             misses: self.misses.saturating_sub(earlier.misses),
             evictions: self.evictions.saturating_sub(earlier.evictions),
             miss_time: self.miss_time.saturating_sub(earlier.miss_time),
+            resident_bytes: self.resident_bytes,
         }
     }
 }
 
 struct NarrowShapingCache {
-    entries: HashMap<ShapeKey, CachedNarrowShape>,
-    access_clock: u64,
+    entries: ByteLru<ShapeKey, CachedNarrowShape>,
     track_perf: bool,
     counters: ShapeCacheCounters,
     #[cfg(test)]
@@ -484,8 +846,7 @@ impl NarrowShapingCache {
 
     fn with_perf_tracking(track_perf: bool) -> Self {
         Self {
-            entries: HashMap::new(),
-            access_clock: 0,
+            entries: ByteLru::new(NARROW_SHAPING_CACHE_BUDGET_BYTES),
             track_perf,
             counters: ShapeCacheCounters::default(),
             #[cfg(test)]
@@ -495,7 +856,6 @@ impl NarrowShapingCache {
 
     fn clear(&mut self) {
         self.entries.clear();
-        self.access_clock = 0;
         self.counters = ShapeCacheCounters::default();
         #[cfg(test)]
         {
@@ -510,13 +870,10 @@ impl NarrowShapingCache {
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
     ) -> (Arc<Buffer>, f32, f32) {
-        self.access_clock = self.access_clock.saturating_add(1);
-        let last_used = self.access_clock;
-        if let Some(cached) = self.entries.get_mut(&key) {
+        if let Some(cached) = self.entries.get(&key) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
-            cached.last_used = last_used;
             return (
                 Arc::clone(&cached.buffer),
                 cached.left_offset_px,
@@ -525,19 +882,6 @@ impl NarrowShapingCache {
         }
 
         let miss_started = self.track_perf.then(Instant::now);
-        if self.entries.len() >= NARROW_SHAPING_CACHE_CAPACITY
-            && let Some(lru_key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, cached)| cached.last_used)
-                .map(|(key, _)| key.clone())
-        {
-            self.entries.remove(&lru_key);
-            if self.track_perf {
-                self.counters.evictions = self.counters.evictions.saturating_add(1);
-            }
-        }
-
         let (mut buffer, family, size_policy) = shape_narrow_buffer_for_key(
             &key,
             font_system,
@@ -594,15 +938,19 @@ impl NarrowShapingCache {
             ),
         };
         let buffer = Arc::new(buffer);
-        self.entries.insert(
+        let resident_bytes =
+            shape_entry_resident_bytes(&key, &buffer, size_of::<CachedNarrowShape>());
+        let (_, evictions) = self.entries.insert(
             key,
             CachedNarrowShape {
                 buffer: Arc::clone(&buffer),
                 left_offset_px,
                 top_offset_px,
-                last_used,
             },
+            resident_bytes,
         );
+        self.counters.evictions = self.counters.evictions.saturating_add(evictions);
+        self.counters.resident_bytes = self.entries.resident_bytes();
         if let Some(miss_started) = miss_started {
             self.counters.misses = self.counters.misses.saturating_add(1);
             self.counters.miss_time = self
@@ -617,12 +965,10 @@ impl NarrowShapingCache {
 struct CachedWideShape {
     buffer: Arc<Buffer>,
     top_offset_px: f32,
-    last_used: u64,
 }
 
 struct WideShapingCache {
-    entries: HashMap<ShapeKey, CachedWideShape>,
-    access_clock: u64,
+    entries: ByteLru<ShapeKey, CachedWideShape>,
     track_perf: bool,
     counters: ShapeCacheCounters,
     #[cfg(test)]
@@ -637,8 +983,7 @@ impl WideShapingCache {
 
     fn with_perf_tracking(track_perf: bool) -> Self {
         Self {
-            entries: HashMap::new(),
-            access_clock: 0,
+            entries: ByteLru::new(WIDE_SHAPING_CACHE_BUDGET_BYTES),
             track_perf,
             counters: ShapeCacheCounters::default(),
             #[cfg(test)]
@@ -648,7 +993,6 @@ impl WideShapingCache {
 
     fn clear(&mut self) {
         self.entries.clear();
-        self.access_clock = 0;
         self.counters = ShapeCacheCounters::default();
         #[cfg(test)]
         {
@@ -663,30 +1007,14 @@ impl WideShapingCache {
         swash_cache: &mut SwashCache,
         metrics: CellMetrics,
     ) -> (Arc<Buffer>, f32) {
-        self.access_clock = self.access_clock.saturating_add(1);
-        let last_used = self.access_clock;
-        if let Some(cached) = self.entries.get_mut(&key) {
+        if let Some(cached) = self.entries.get(&key) {
             if self.track_perf {
                 self.counters.hits = self.counters.hits.saturating_add(1);
             }
-            cached.last_used = last_used;
             return (Arc::clone(&cached.buffer), cached.top_offset_px);
         }
 
         let miss_started = self.track_perf.then(Instant::now);
-        if self.entries.len() >= WIDE_SHAPING_CACHE_CAPACITY
-            && let Some(lru_key) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, cached)| cached.last_used)
-                .map(|(key, _)| key.clone())
-        {
-            self.entries.remove(&lru_key);
-            if self.track_perf {
-                self.counters.evictions = self.counters.evictions.saturating_add(1);
-            }
-        }
-
         let buffer = shape_wide_buffer_for_key(
             &key,
             font_system,
@@ -701,14 +1029,18 @@ impl WideShapingCache {
             .map_or(metrics.ascii_baseline_px, |run| run.line_y);
         let top_offset_px = baseline_offset_px(metrics.ascii_baseline_px, glyph_baseline_px);
         let buffer = Arc::new(buffer);
-        self.entries.insert(
+        let resident_bytes =
+            shape_entry_resident_bytes(&key, &buffer, size_of::<CachedWideShape>());
+        let (_, evictions) = self.entries.insert(
             key,
             CachedWideShape {
                 buffer: Arc::clone(&buffer),
                 top_offset_px,
-                last_used,
             },
+            resident_bytes,
         );
+        self.counters.evictions = self.counters.evictions.saturating_add(evictions);
+        self.counters.resident_bytes = self.entries.resident_bytes();
         if let Some(miss_started) = miss_started {
             self.counters.misses = self.counters.misses.saturating_add(1);
             self.counters.miss_time = self
@@ -783,7 +1115,9 @@ pub struct Renderer {
     rect_pipeline: wgpu::RenderPipeline,
     metrics: CellMetrics,
     init_timings: RendererInitTimings,
-    text_rows: Vec<TextRow>,
+    text_rows: Vec<Arc<ComposedRow>>,
+    composed_row_cache: ComposedRowCache,
+    font_revision: u64,
     narrow_shaping_cache: NarrowShapingCache,
     wide_shaping_cache: WideShapingCache,
     glyph_degraded_frames: u64,
@@ -821,12 +1155,25 @@ pub struct RenderProbeSample {
     pub atlas_prepare_upload: Duration,
     pub encode_submit: Duration,
     pub rows_reshaped: u64,
+    pub row_cache_hits: u64,
+    pub row_cache_misses: u64,
+    pub row_cache_evictions: u64,
+    pub row_cache_resident_bytes: usize,
     pub narrow_hits: u64,
     pub narrow_misses: u64,
     pub narrow_evictions: u64,
     pub wide_hits: u64,
     pub wide_misses: u64,
     pub wide_evictions: u64,
+    pub narrow_resident_bytes: usize,
+    pub wide_resident_bytes: usize,
+    /// glyphon 0.12 exposes no atlas occupancy or mutation counters. These remain `None` rather
+    /// than converting requested glyphs or elapsed time into invented hit/upload estimates.
+    pub atlas_hits: Option<u64>,
+    pub atlas_misses: Option<u64>,
+    pub atlas_grows: Option<u64>,
+    pub atlas_evictions: Option<u64>,
+    pub atlas_upload_bytes: Option<u64>,
     pub narrow_glyphs: u64,
     pub wide_glyphs: u64,
 }
@@ -842,7 +1189,9 @@ pub struct HeadlessRenderProbe {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     metrics: CellMetrics,
-    text_rows: Vec<TextRow>,
+    text_rows: Vec<Arc<ComposedRow>>,
+    composed_row_cache: ComposedRowCache,
+    font_revision: u64,
     narrow_shaping_cache: NarrowShapingCache,
     wide_shaping_cache: WideShapingCache,
     target: wgpu::Texture,
@@ -908,6 +1257,8 @@ impl HeadlessRenderProbe {
             text_renderer,
             metrics,
             text_rows: Vec::new(),
+            composed_row_cache: ComposedRowCache::new(),
+            font_revision: 1,
             narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(true),
             wide_shaping_cache: WideShapingCache::with_perf_tracking(true),
             target,
@@ -943,6 +1294,8 @@ impl HeadlessRenderProbe {
             frame,
             self.metrics,
             &mut self.text_rows,
+            &mut self.composed_row_cache,
+            self.font_revision,
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.narrow_shaping_cache,
@@ -997,12 +1350,23 @@ impl HeadlessRenderProbe {
             atlas_prepare_upload: atlas_prepared_at - rows_prepared_at,
             encode_submit: submitted_at - atlas_prepared_at,
             rows_reshaped: text_stats.rows_reshaped,
+            row_cache_hits: text_stats.row_cache.hits,
+            row_cache_misses: text_stats.row_cache.misses,
+            row_cache_evictions: text_stats.row_cache.evictions,
+            row_cache_resident_bytes: text_stats.row_cache.resident_bytes,
             narrow_hits: text_stats.narrow.hits,
             narrow_misses: text_stats.narrow.misses,
             narrow_evictions: text_stats.narrow.evictions,
             wide_hits: text_stats.wide.hits,
             wide_misses: text_stats.wide.misses,
             wide_evictions: text_stats.wide.evictions,
+            narrow_resident_bytes: text_stats.narrow.resident_bytes,
+            wide_resident_bytes: text_stats.wide.resident_bytes,
+            atlas_hits: None,
+            atlas_misses: None,
+            atlas_grows: None,
+            atlas_evictions: None,
+            atlas_upload_bytes: None,
             narrow_glyphs: self
                 .text_rows
                 .iter()
@@ -1103,6 +1467,8 @@ impl Renderer {
                 render_resources: render_resources_time,
             },
             text_rows: Vec::new(),
+            composed_row_cache: ComposedRowCache::new(),
+            font_revision: 1,
             narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(trace_perf),
             wide_shaping_cache: WideShapingCache::with_perf_tracking(trace_perf),
             glyph_degraded_frames: 0,
@@ -1151,6 +1517,8 @@ impl Renderer {
     pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
         self.metrics = CellMetrics::measure(&mut self.font_system, scale_factor)?;
         self.text_rows.clear();
+        self.composed_row_cache.clear();
+        self.font_revision = self.font_revision.saturating_add(1);
         self.narrow_shaping_cache.clear();
         self.wide_shaping_cache.clear();
         Ok(self.metrics)
@@ -1302,7 +1670,7 @@ impl Renderer {
         if self.trace_perf {
             self.perf_frame = self.perf_frame.saturating_add(1);
             eprintln!(
-                "BT_PERF_TRACE frame={} source={:?} cells={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} wide_hits={} wide_misses={} wide_evictions={} atlas_prepare_upload_us={} rectangles_us={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
+                "BT_PERF_TRACE frame={} source={:?} cells={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
                 self.perf_frame,
                 trigger.source,
                 frame.cells.len(),
@@ -1310,13 +1678,19 @@ impl Renderer {
                 (viewport_updated_at - validated_at).as_micros(),
                 text_stats.elapsed.as_micros(),
                 text_stats.rows_reshaped,
+                text_stats.row_cache.hits,
+                text_stats.row_cache.misses,
+                text_stats.row_cache.evictions,
+                text_stats.row_cache.resident_bytes,
                 (text_stats.narrow.miss_time + text_stats.wide.miss_time).as_micros(),
                 text_stats.narrow.hits,
                 text_stats.narrow.misses,
                 text_stats.narrow.evictions,
+                text_stats.narrow.resident_bytes,
                 text_stats.wide.hits,
                 text_stats.wide.misses,
                 text_stats.wide.evictions,
+                text_stats.wide.resident_bytes,
                 (atlas_prepared_at - rows_prepared_at).as_micros(),
                 (rectangles_prepared_at - atlas_prepared_at).as_micros(),
                 (surface_acquired_at - rectangles_prepared_at).as_micros(),
@@ -1336,6 +1710,8 @@ impl Renderer {
             frame,
             self.metrics,
             &mut self.text_rows,
+            &mut self.composed_row_cache,
+            self.font_revision,
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.narrow_shaping_cache,
@@ -1530,7 +1906,9 @@ impl Renderer {
 fn prepare_text_rows(
     frame: &ViewportFrame,
     metrics: CellMetrics,
-    text_rows: &mut Vec<TextRow>,
+    text_rows: &mut Vec<Arc<ComposedRow>>,
+    composed_row_cache: &mut ComposedRowCache,
+    font_revision: u64,
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     narrow_shaping_cache: &mut NarrowShapingCache,
@@ -1539,44 +1917,65 @@ fn prepare_text_rows(
     let started = Instant::now();
     let narrow_before = narrow_shaping_cache.counters;
     let wide_before = wide_shaping_cache.counters;
+    let row_before = composed_row_cache.counters;
     let mut rows_reshaped = 0_u64;
     let source_rows = text_row_cells(frame)?;
     let rows = frame.rows.get() as usize;
-    while text_rows.len() < rows {
-        text_rows.push(TextRow {
-            cells: Vec::new(),
-            narrow_glyphs: Vec::new(),
-            wide_glyphs: Vec::new(),
-        });
-    }
-    text_rows.truncate(rows);
+    let mut next_rows = Vec::with_capacity(rows);
 
-    for (row_index, (row, source_cells)) in text_rows.iter_mut().zip(source_rows).enumerate() {
-        let status_cells = (row_index + 1 == rows)
+    for (row_index, source_cells) in source_rows.enumerate() {
+        let status_overlay = (row_index + 1 == rows)
             .then_some(frame.status_text.as_deref())
-            .flatten()
-            .map(|status| status_row_cells(source_cells, status));
+            .flatten();
+        let status_cells = status_overlay.map(|status| status_row_cells(source_cells, status));
         let cells = status_cells.as_deref().unwrap_or(source_cells);
-        if !row_needs_reshaping(&row.cells, cells) {
+        let key = ComposedRowKey {
+            cells: cells.to_vec(),
+            metrics: metrics.into(),
+            font_revision,
+            status_overlay: status_overlay.map(str::to_owned),
+        };
+        if let Some(row) = composed_row_cache.get(&key) {
+            next_rows.push(row);
             continue;
         }
         rows_reshaped = rows_reshaped.saturating_add(1);
 
-        row.narrow_glyphs = shape_narrow_glyphs(
+        let narrow_glyphs = shape_narrow_glyphs(
             cells,
             font_system,
             swash_cache,
             metrics,
             narrow_shaping_cache,
         );
-        row.wide_glyphs =
+        let wide_glyphs =
             shape_wide_glyphs(cells, font_system, swash_cache, metrics, wide_shaping_cache);
-        row.cells.clear();
-        row.cells.extend_from_slice(cells);
+        let row = Arc::new(ComposedRow {
+            narrow_glyphs,
+            wide_glyphs,
+        });
+        composed_row_cache.insert(key, Arc::clone(&row));
+        next_rows.push(row);
     }
+    *text_rows = next_rows;
     Ok(TextPreparationStats {
         elapsed: started.elapsed(),
         rows_reshaped,
+        row_cache: RowCacheCounters {
+            hits: composed_row_cache
+                .counters
+                .hits
+                .saturating_sub(row_before.hits),
+            misses: composed_row_cache
+                .counters
+                .misses
+                .saturating_sub(row_before.misses),
+            evictions: composed_row_cache
+                .counters
+                .evictions
+                .saturating_sub(row_before.evictions),
+            resident_bytes: composed_row_cache.counters.resident_bytes,
+        },
         narrow: narrow_shaping_cache.counters.delta_since(narrow_before),
         wide: wide_shaping_cache.counters.delta_since(wide_before),
     })
@@ -1591,7 +1990,7 @@ fn prepare_text_atlas(
     atlas: &mut TextAtlas,
     viewport: &Viewport,
     swash_cache: &mut SwashCache,
-    text_rows: &[TextRow],
+    text_rows: &[Arc<ComposedRow>],
     metrics: CellMetrics,
     columns: NonZeroU32,
 ) -> Result<(), PrepareError> {
@@ -2204,10 +2603,6 @@ fn baseline_offset_px(reference_baseline_px: f32, glyph_baseline_px: f32) -> f32
 
 fn wide_slot_em_scale(metrics: CellMetrics) -> f32 {
     2.0 * metrics.cell_width_px / metrics.font_size_px
-}
-
-fn row_needs_reshaping(previous: &[CapturedCell], next: &[CapturedCell]) -> bool {
-    previous != next
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3342,51 +3737,159 @@ mod tests {
     }
 
     #[test]
-    fn text_cache_reshapes_rows_instead_of_cells_and_reuses_unchanged_rows() {
-        let columns = 80;
-        let rows = 24;
-        let frame = vec![CapturedCell::plain("x"); columns * rows];
-        let mut cached = vec![Vec::new(); rows];
+    fn content_addressed_rows_remap_arcs_after_screen_position_changes() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut swash_cache = SwashCache::new();
+        let mut narrow_cache = NarrowShapingCache::new();
+        let mut wide_cache = WideShapingCache::new();
+        let mut row_cache = ComposedRowCache::new();
+        let mut text_rows = Vec::new();
+        let mut frame = ViewportFrame {
+            columns: NonZeroU32::new(2).unwrap(),
+            rows: NonZeroU32::new(3).unwrap(),
+            cells: ["a", "b", "c"]
+                .into_iter()
+                .flat_map(|text| vec![CapturedCell::plain(text); 2])
+                .collect(),
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors(6),
+            selection_spans: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(2),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        let cold = prepare_text_rows(
+            &frame,
+            metrics,
+            &mut text_rows,
+            &mut row_cache,
+            1,
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        assert_eq!(cold.rows_reshaped, 3);
+        assert_eq!(cold.row_cache.misses, 3);
+        let original = text_rows.clone();
 
-        let initial_changed = cached
-            .iter()
-            .enumerate()
-            .filter(|(row, previous)| {
-                let start = row * columns;
-                row_needs_reshaping(previous, &frame[start..start + columns])
-            })
-            .count();
-        assert_eq!(initial_changed, rows);
-        assert_ne!(initial_changed, columns * rows);
+        frame.cells.rotate_left(2);
+        let shifted = prepare_text_rows(
+            &frame,
+            metrics,
+            &mut text_rows,
+            &mut row_cache,
+            1,
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        assert_eq!(shifted.rows_reshaped, 0);
+        assert_eq!(shifted.row_cache.hits, 3);
+        assert!(Arc::ptr_eq(&text_rows[0], &original[1]));
+        assert!(Arc::ptr_eq(&text_rows[1], &original[2]));
+        assert!(Arc::ptr_eq(&text_rows[2], &original[0]));
+        assert!(shifted.row_cache.resident_bytes > 0);
+    }
 
-        for (row, previous) in cached.iter_mut().enumerate() {
-            previous.extend_from_slice(&frame[row * columns..(row + 1) * columns]);
+    #[test]
+    fn row_cache_key_separates_style_metrics_revision_and_status_overlay() {
+        let mut base = CapturedCell::plain("x");
+        let metrics = RowMetricsKey::from(CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 16.0,
+            font_size_px: 14.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 12.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 8.0,
+        });
+        let key = ComposedRowKey {
+            cells: vec![base.clone()],
+            metrics,
+            font_revision: 7,
+            status_overlay: None,
+        };
+        let changed_cell_key = |cell| ComposedRowKey {
+            cells: vec![cell],
+            ..key.clone()
+        };
+        for flag in [
+            CellFlags::INVERSE,
+            CellFlags::BOLD,
+            CellFlags::ITALIC,
+            CellFlags::UNDERLINE,
+            CellFlags::DIM,
+            CellFlags::HIDDEN,
+            CellFlags::STRIKEOUT,
+            CellFlags::DOUBLE_UNDERLINE,
+            CellFlags::UNDERCURL,
+            CellFlags::DOTTED_UNDERLINE,
+            CellFlags::DASHED_UNDERLINE,
+            CellFlags::WIDE_CHAR,
+        ] {
+            let mut styled = base.clone();
+            styled.style.flags.insert(flag);
+            assert_ne!(key, changed_cell_key(styled), "flag {flag:?} must key rows");
         }
-        assert_eq!(
-            cached
-                .iter()
-                .enumerate()
-                .filter(|(row, previous)| {
-                    let start = row * columns;
-                    row_needs_reshaping(previous, &frame[start..start + columns])
-                })
-                .count(),
-            0
-        );
+        let mut changed_text = base.clone();
+        changed_text.text = "y".to_owned();
+        assert_ne!(key, changed_cell_key(changed_text));
+        let mut spacer = base.clone();
+        spacer.wide_spacer = true;
+        assert_ne!(key, changed_cell_key(spacer));
+        let mut foreground = base.clone();
+        foreground.style.foreground = TerminalColor::Rgb(1, 2, 3);
+        assert_ne!(key, changed_cell_key(foreground));
+        let mut background = base.clone();
+        background.style.background = TerminalColor::Indexed(42);
+        assert_ne!(key, changed_cell_key(background));
+        base.hyperlink = Some("https://example.invalid".to_owned());
+        assert_ne!(key, changed_cell_key(base));
 
-        let mut changed = frame;
-        changed[3 * columns + 7].text = "y".to_owned();
-        assert_eq!(
-            cached
-                .iter()
-                .enumerate()
-                .filter(|(row, previous)| {
-                    let start = row * columns;
-                    row_needs_reshaping(previous, &changed[start..start + columns])
-                })
-                .count(),
-            1
-        );
+        let scaled = ComposedRowKey {
+            metrics: RowMetricsKey {
+                scale_factor_bits: 2.0_f64.to_bits(),
+                ..metrics
+            },
+            ..key.clone()
+        };
+        let revised = ComposedRowKey {
+            font_revision: 8,
+            ..key.clone()
+        };
+        let status = ComposedRowKey {
+            status_overlay: Some("status".to_owned()),
+            ..key.clone()
+        };
+        assert_ne!(key, scaled);
+        assert_ne!(key, revised);
+        assert_ne!(key, status);
+    }
+
+    #[test]
+    fn byte_lru_promotes_and_evicts_the_tail_in_constant_time_links() {
+        let mut cache = ByteLru::new(2);
+        assert_eq!(cache.insert("a", 1, 1), (true, 0));
+        assert_eq!(cache.insert("b", 2, 1), (true, 0));
+        assert_eq!(cache.get(&"a"), Some(&1));
+        assert_eq!(cache.insert("c", 3, 1), (true, 1));
+        assert!(cache.get(&"b").is_none());
+        assert_eq!(cache.get(&"a"), Some(&1));
+        assert_eq!(cache.get(&"c"), Some(&3));
+        assert_eq!(cache.resident_bytes(), 2);
     }
 
     #[test]
