@@ -11,7 +11,7 @@ use alacritty_terminal::{
     term::{
         Config, ScrollOutCause, ScrollRegionScope, TermMode, TranscriptEvent, TranscriptScreen,
     },
-    vte::ansi::Processor,
+    vte::{Params, Parser, Perform, ansi::Processor},
 };
 use bt_transcript::CapturedRow;
 
@@ -134,14 +134,95 @@ fn lock_events(listener: &CaptureListener) -> MutexGuard<'_, Vec<TranscriptEvent
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn install_transcript_hook(term: &mut Term<CaptureListener>, listener: &CaptureListener) {
+    let transcript_events = listener.transcript_events.clone();
+    term.set_transcript_hook(Some(Arc::new(move |event| {
+        transcript_events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(event);
+    })));
+}
+
+fn discard_listener_output(listener: &CaptureListener) {
+    lock_events(listener).clear();
+    listener
+        .pty_writes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+}
+
 /// Vendor-facing terminal adapter. It translates upstream facts into stable BetterTerminal facts
 /// and never owns or mutates the canonical transcript.
 pub struct TerminalAdapter {
     term: Term<CaptureListener>,
     processor: Processor,
     listener: CaptureListener,
+    parser_boundary: Parser,
+    parser_tail: Vec<u8>,
+    parser_sync_active: bool,
+    parser_dcs_active: bool,
+    resize_canonical: Option<ResizeCanonical>,
     columns: NonZeroU32,
     rows: NonZeroU32,
+}
+
+struct ResizeCanonical {
+    term: Term<CaptureListener>,
+    processor: Processor,
+    listener: CaptureListener,
+}
+
+#[derive(Default)]
+struct BoundaryPerformer {
+    complete: bool,
+    execute_at_ground: bool,
+    sync_start: bool,
+    sync_end: bool,
+    dcs_hook: bool,
+    dcs_put: bool,
+}
+
+impl Perform for BoundaryPerformer {
+    fn print(&mut self, _character: char) {
+        self.complete = true;
+    }
+
+    fn execute(&mut self, byte: u8) {
+        self.complete = self.execute_at_ground || matches!(byte, 0x18 | 0x1a);
+    }
+
+    fn unhook(&mut self) {
+        self.complete = true;
+    }
+
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, _action: char) {
+        self.dcs_hook = true;
+    }
+
+    fn put(&mut self, _byte: u8) {
+        self.dcs_put = true;
+    }
+
+    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {
+        self.complete = true;
+    }
+
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        self.complete = true;
+        let sync_mode = intermediates == b"?"
+            && params
+                .iter()
+                .next()
+                .is_some_and(|parameter| parameter == [2026]);
+        self.sync_start = sync_mode && action == 'h';
+        self.sync_end = sync_mode && action == 'l';
+    }
+
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
+        self.complete = true;
+    }
 }
 
 impl TerminalAdapter {
@@ -152,18 +233,17 @@ impl TerminalAdapter {
         };
         let size = GridSize { columns, rows };
         let listener = CaptureListener::default();
-        let transcript_events = listener.transcript_events.clone();
         let mut term = Term::new(config, &size, listener.clone());
-        term.set_transcript_hook(Some(Arc::new(move |event| {
-            transcript_events
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(event);
-        })));
+        install_transcript_hook(&mut term, &listener);
         Self {
             term,
             processor: Processor::new(),
             listener,
+            parser_boundary: Parser::new(),
+            parser_tail: Vec::new(),
+            parser_sync_active: false,
+            parser_dcs_active: false,
+            resize_canonical: None,
             columns,
             rows,
         }
@@ -179,6 +259,11 @@ impl TerminalAdapter {
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<AdapterEvent> {
         self.processor.advance(&mut self.term, bytes);
+        if let Some(canonical) = self.resize_canonical.as_mut() {
+            canonical.processor.advance(&mut canonical.term, bytes);
+            discard_listener_output(&canonical.listener);
+        }
+        self.observe_parser_boundary(bytes);
         self.drain_transcript_events()
     }
 
@@ -190,10 +275,36 @@ impl TerminalAdapter {
     }
 
     pub fn begin_resize_transaction(&mut self) -> usize {
-        self.term.begin_resize_transaction()
+        if self.resize_canonical.is_some() {
+            return 0;
+        }
+
+        let restored = self.term.begin_resize_transaction();
+        let listener = CaptureListener::default();
+        let mut term = self.term.fork(listener.clone());
+        install_transcript_hook(&mut term, &listener);
+
+        // A transaction can begin between two bytes of a CSI/OSC/DCS/UTF-8 sequence or while a
+        // synchronized update is buffered. Seed a fresh processor with that exact uncommitted raw
+        // tail against a disposable fork; the canonical term already contains every committed
+        // semantic action and must not receive the tail twice.
+        let seed_listener = CaptureListener::default();
+        let mut seed_term = self.term.fork(seed_listener);
+        let mut processor = Processor::new();
+        processor.advance(&mut seed_term, &self.parser_tail);
+
+        self.resize_canonical = Some(ResizeCanonical {
+            term,
+            processor,
+            listener,
+        });
+        restored
     }
 
     pub fn finish_resize_transaction(&mut self) -> Vec<CapturedRow> {
+        // The normal final-size commit consumes the canonical branch first. This fallback only
+        // covers callers which abort a transaction without committing a pseudoconsole resize.
+        self.resize_canonical = None;
         self.term
             .finish_resize_transaction()
             .iter()
@@ -203,6 +314,9 @@ impl TerminalAdapter {
 
     pub fn clear_resize_transaction_history(&mut self) {
         self.term.clear_resize_transaction_history();
+        if let Some(canonical) = self.resize_canonical.as_mut() {
+            canonical.term.clear_resize_transaction_history();
+        }
     }
 
     pub fn resize_transaction_history_size(&self) -> usize {
@@ -218,7 +332,39 @@ impl TerminalAdapter {
     }
 
     pub fn reconcile_resize_transaction_to_viewport(&mut self) -> (usize, usize) {
-        self.term.reconcile_resize_transaction_to_viewport()
+        let history_before = self.term.resize_transaction_history_size();
+        let Some(mut canonical) = self.resize_canonical.take() else {
+            return self.term.reconcile_resize_transaction_to_viewport();
+        };
+
+        canonical.term.resize(GridSize {
+            columns: self.columns,
+            rows: self.rows,
+        });
+        discard_listener_output(&canonical.listener);
+        let (_, history_after) = canonical.term.reconcile_resize_transaction_to_viewport();
+        discard_listener_output(&canonical.listener);
+
+        // Only the displayed branch can own replies. Preserve any reply queued immediately before
+        // the atomic branch replacement; the canonical parser's duplicate replies were discarded.
+        let pending_writes = std::mem::take(
+            &mut *self
+                .listener
+                .pty_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        );
+        canonical
+            .listener
+            .pty_writes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .extend(pending_writes);
+
+        self.term = canonical.term;
+        self.processor = canonical.processor;
+        self.listener = canonical.listener;
+        (history_before, history_after)
     }
 
     pub fn visible_text(&self) -> Vec<String> {
@@ -313,6 +459,43 @@ impl TerminalAdapter {
                 TranscriptEvent::PrimaryRestored => AdapterEvent::PrimaryRestored,
             })
             .collect()
+    }
+
+    fn observe_parser_boundary(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            let execute_at_ground = self.parser_tail.is_empty() && !self.parser_sync_active;
+            self.parser_tail.push(byte);
+            let mut performer = BoundaryPerformer {
+                execute_at_ground,
+                ..BoundaryPerformer::default()
+            };
+            self.parser_boundary
+                .advance(&mut performer, std::slice::from_ref(&byte));
+
+            if performer.dcs_hook {
+                self.parser_dcs_active = true;
+            } else if performer.dcs_put && self.parser_dcs_active {
+                // Once the DCS hook has selected its handler, payload bytes do not affect parser
+                // state. The disposable seed term must only replay the introducer, not retain an
+                // unbounded sixel/image payload.
+                self.parser_tail.pop();
+            }
+
+            if performer.sync_start {
+                self.parser_sync_active = true;
+            } else if performer.sync_end {
+                self.parser_sync_active = false;
+                self.parser_tail.clear();
+            } else if performer.complete && !self.parser_sync_active {
+                self.parser_dcs_active = false;
+                self.parser_tail.clear();
+                // ESC can terminate OSC/DCS while simultaneously starting the ST escape. Keep it
+                // as the seed for the parser's new Escape state.
+                if byte == 0x1b {
+                    self.parser_tail.push(byte);
+                }
+            }
+        }
     }
 }
 
@@ -490,6 +673,26 @@ mod tests {
     }
 
     #[test]
+    fn explicit_screen_scroll_is_not_a_transcript_removal_fact() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(4));
+        terminal.feed(b"a\r\nb\r\nc\r\nd");
+
+        assert!(terminal.feed(b"\x1b[S").is_empty());
+        assert_eq!(terminal.visible_text(), ["b", "c", "d", ""]);
+
+        // LF at the bottom remains output scroll and still carries exact removed cells.
+        let output = terminal.feed(b"\x1b[4;1H\n");
+        assert_eq!(
+            removed_context(&output),
+            Some(RemovalContext {
+                cause: RemovalCause::NormalScroll,
+                screen: RemovalScreen::Primary,
+                scope: RemovalScope::FullScreen,
+            })
+        );
+    }
+
+    #[test]
     fn oversized_delete_lines_reports_only_rows_inside_the_remaining_region() {
         let mut terminal = TerminalAdapter::new(nz(8), nz(4));
         terminal.feed(b"a\r\nb\r\nc\r\nd");
@@ -565,6 +768,171 @@ mod tests {
         assert_eq!(reconciled.visible_text(), direct_rows);
         assert_eq!(reconciled.cursor(), direct_cursor);
         assert!(reconciled.finish_resize_transaction().is_empty());
+    }
+
+    #[test]
+    fn coalesced_final_resize_replaces_the_path_dependent_live_branch() {
+        let sizes = [
+            (111, 20),
+            (46, 7),
+            (12, 1),
+            (13, 2),
+            (28, 7),
+            (71, 15),
+            (79, 16),
+            (66, 14),
+            (22, 7),
+            (18, 6),
+            (42, 12),
+            (98, 21),
+            (60, 14),
+            (16, 6),
+            (27, 9),
+            (79, 17),
+            (89, 19),
+            (85, 18),
+            (25, 7),
+            (19, 7),
+            (51, 11),
+            (90, 16),
+            (53, 11),
+            (11, 5),
+            (42, 10),
+            (86, 15),
+            (85, 15),
+            (49, 10),
+            (31, 8),
+            (64, 13),
+            (104, 18),
+            (99, 17),
+            (46, 10),
+            (38, 9),
+            (59, 14),
+            (117, 21),
+            (118, 21),
+            (72, 13),
+            (33, 9),
+            (39, 10),
+            (79, 18),
+            (92, 20),
+            (95, 20),
+            (96, 20),
+        ];
+        // Deterministic reduction of the S12 mix: soft wraps, CUP, save/restore, erase, and cursor
+        // visibility. The transient storm finishes with no native history, but its cursor is still
+        // path-dependent; this is exactly the branch the old history-only reconcile skipped.
+        let mut state = 10u64;
+        let mut input = String::new();
+        for _ in 0..48 {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let row = 1 + ((state >> 8) % 22);
+            let column = 1 + ((state >> 16) % 118);
+            let length = 1 + ((state >> 24) % 180) as usize;
+            match state % 9 {
+                0 => input.push_str(&format!("\x1b[{row};{column}H")),
+                1 => input.push_str("\r\n"),
+                2 => input.push_str("\x1b[2K"),
+                3 => input.push_str("\x1b[K"),
+                4 => input.push_str("\x1b7"),
+                5 => input.push_str("\x1b8"),
+                6 => input.push_str(&"q".repeat(length)),
+                7 => input.push_str(&format!("\x1b[93m{}\x1b[0m", "p".repeat(length))),
+                _ => input.push_str("\x1b[?25l\x1b[?25h"),
+            }
+        }
+
+        let mut direct = TerminalAdapter::new(nz(119), nz(23));
+        direct.feed(input.as_bytes());
+        direct.begin_resize_transaction();
+        direct.resize(nz(96), nz(20));
+        direct.reconcile_resize_transaction_to_viewport();
+        let direct_cursor = direct.cursor();
+        let direct_rows = direct.visible_text();
+
+        let mut storm = TerminalAdapter::new(nz(119), nz(23));
+        storm.feed(input.as_bytes());
+        storm.begin_resize_transaction();
+        for (columns, rows) in sizes {
+            storm.resize(nz(columns), nz(rows));
+        }
+        assert_eq!(storm.resize_transaction_history_size(), 0);
+        assert_ne!(storm.cursor(), direct_cursor);
+
+        assert_eq!(storm.reconcile_resize_transaction_to_viewport(), (0, 0));
+        assert_eq!(storm.cursor(), direct_cursor);
+        assert_eq!(storm.visible_text(), direct_rows);
+    }
+
+    #[test]
+    fn canonical_resize_branch_inherits_a_split_parser_sequence() {
+        let mut direct = TerminalAdapter::new(nz(20), nz(4));
+        direct.feed(b"prompt> \x1b[");
+        direct.begin_resize_transaction();
+        direct.feed(b"93mhistory\x1b[0m");
+        direct.resize(nz(12), nz(4));
+        direct.reconcile_resize_transaction_to_viewport();
+
+        let mut storm = TerminalAdapter::new(nz(20), nz(4));
+        storm.feed(b"prompt> \x1b[");
+        storm.begin_resize_transaction();
+        storm.resize(nz(5), nz(2));
+        storm.feed(b"93mhistory\x1b[0m");
+        storm.resize(nz(12), nz(4));
+        storm.reconcile_resize_transaction_to_viewport();
+
+        assert_eq!(storm.visible_text(), direct.visible_text());
+        assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    #[test]
+    fn canonical_resize_branch_inherits_a_buffered_synchronized_update() {
+        let prefix = b"base\x1b[?2026h\x1b[93mheld";
+        let suffix = b"-until-end\x1b[0m\x1b[?2026l";
+
+        let mut direct = TerminalAdapter::new(nz(20), nz(4));
+        direct.feed(prefix);
+        assert!(!direct.parser_tail.is_empty());
+        direct.begin_resize_transaction();
+        direct.feed(suffix);
+        direct.resize(nz(12), nz(4));
+        direct.reconcile_resize_transaction_to_viewport();
+
+        let mut storm = TerminalAdapter::new(nz(20), nz(4));
+        storm.feed(prefix);
+        storm.begin_resize_transaction();
+        storm.resize(nz(5), nz(2));
+        storm.feed(suffix);
+        storm.resize(nz(12), nz(4));
+        storm.reconcile_resize_transaction_to_viewport();
+
+        assert!(storm.parser_tail.is_empty());
+        assert_eq!(storm.visible_text(), direct.visible_text());
+        assert_eq!(storm.cursor(), direct.cursor());
+    }
+
+    #[test]
+    fn canonical_parser_seed_does_not_retain_dcs_payload() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(4));
+        terminal.feed(b"\x1bPq");
+        terminal.feed(&vec![b'x'; 64 * 1024]);
+
+        assert!(terminal.parser_dcs_active);
+        assert_eq!(terminal.parser_tail, b"\x1bPq");
+        terminal.begin_resize_transaction();
+        terminal.resize(nz(12), nz(3));
+        terminal.feed(b"\x1b\\done");
+        terminal.reconcile_resize_transaction_to_viewport();
+
+        assert!(!terminal.parser_dcs_active);
+        assert!(terminal.parser_tail.is_empty());
+        assert!(
+            terminal
+                .visible_text()
+                .iter()
+                .any(|row| row.contains("done"))
+        );
     }
 
     #[test]

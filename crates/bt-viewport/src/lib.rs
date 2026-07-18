@@ -748,12 +748,18 @@ impl ViewportProjection {
             .map(|selection| selection_spans(&cell_anchors, column_count, expected_rows, selection))
             .transpose()?
             .unwrap_or_default();
+        let projected_cursor_row = live_base
+            .saturating_add(cursor.row as usize)
+            .checked_sub(window_start)
+            .filter(|row| *row < expected_rows)
+            .and_then(|row| u32::try_from(row).ok());
         let frame = ViewportFrame {
             columns,
             rows: self.live_rows,
             cells,
             cursor: GridCursor {
-                visible: cursor.visible && self.scroll_offset_rows == 0,
+                row: projected_cursor_row.unwrap_or(cursor.row),
+                visible: cursor.visible && projected_cursor_row.is_some(),
                 ..cursor
             },
             cell_anchors,
@@ -1797,6 +1803,65 @@ mod tests {
         assert_eq!(projection.unread_rows(), 1);
         assert_eq!(frame.status_text.as_deref(), Some("2 lines below"));
         assert!(!frame.cursor.visible);
+    }
+
+    #[test]
+    fn cursor_is_projected_into_every_continuous_window_that_contains_its_live_row() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        for row in [
+            "history-0 ",
+            "history-1 ",
+            "history-2 ",
+            "history-3 ",
+            "history-4 ",
+        ] {
+            let finalized = store.capture(CapturedRow::plain(row, false)).finalized;
+            document.finalize_transaction(finalized.into_iter().next().unwrap());
+        }
+        let live = || {
+            vec![
+                CapturedRow::plain("prompt>   ", false),
+                CapturedRow::plain("          ", false),
+                CapturedRow::plain("          ", false),
+                CapturedRow::plain("          ", false),
+                CapturedRow::plain("          ", false),
+            ]
+        };
+
+        for cursor_row in 0..5 {
+            for offset in 0..=5 {
+                let mut projection = ViewportProjection::new(
+                    key(10),
+                    DetectionRevision(1),
+                    nz32(5),
+                    cell_height(),
+                    store.source_generation(),
+                    GridGeneration(1),
+                );
+                projection.project(&document);
+                let cursor = GridCursor {
+                    row: cursor_row,
+                    column: 8,
+                    visible: true,
+                };
+                projection
+                    .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                    .unwrap();
+                projection.scroll_by_rows(offset as i32);
+                let frame = projection
+                    .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                    .unwrap();
+                let projected_row = cursor_row + offset;
+
+                assert_eq!(frame.scroll_offset_rows, offset as usize);
+                assert_eq!(frame.cursor.column, cursor.column);
+                assert_eq!(frame.cursor.visible, projected_row < 5);
+                if projected_row < 5 {
+                    assert_eq!(frame.cursor.row, projected_row);
+                }
+            }
+        }
     }
 
     #[test]

@@ -67,7 +67,8 @@ pub enum ScrollOutCause {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ScrollOperation {
-    Normal,
+    Output,
+    ExplicitScreen,
     DeleteLines,
 }
 
@@ -300,6 +301,7 @@ impl Iterator for TermDamageIterator<'_> {
 }
 
 /// State of the terminal damage.
+#[derive(Clone)]
 struct TermDamageState {
     /// Hint whether terminal should be damaged entirely regardless of the actual damage changes.
     full: bool,
@@ -311,7 +313,7 @@ struct TermDamageState {
     last_cursor: Point,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct GraphemeState {
     cluster: String,
     lead: Point,
@@ -373,6 +375,7 @@ impl TermDamageState {
     }
 }
 
+#[derive(Clone)]
 pub struct Term<T> {
     /// Terminal focus controlling the cursor shape.
     pub is_focused: bool,
@@ -519,6 +522,20 @@ impl<T> Term<T> {
         hook: Option<Arc<dyn Fn(TranscriptEvent) + Send + Sync>>,
     ) {
         self.transcript_hook = hook;
+    }
+
+    /// Clone protocol and grid state while replacing outbound event ownership.
+    ///
+    /// The fork cannot share reply or transcript queues with the displayed terminal. It is used
+    /// as the unresized canonical branch of a coalesced resize transaction.
+    pub fn fork(&self, event_proxy: T) -> Self
+    where
+        T: Clone,
+    {
+        let mut fork = self.clone();
+        fork.event_proxy = event_proxy;
+        fork.transcript_hook = None;
+        fork
     }
 
     /// Give the primary grid exclusive ownership of scroll-out for a resize transaction.
@@ -1105,7 +1122,7 @@ impl<T> Term<T> {
         let removed_lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
         if removed_lines != 0 {
             let extends_resize_candidate = !self.resize_staging_candidate.is_empty()
-                && operation == ScrollOperation::Normal
+                && operation == ScrollOperation::Output
                 && !self.mode.contains(TermMode::ALT_SCREEN)
                 && origin == Line(0)
                 && self.scroll_region.start == Line(0)
@@ -1125,17 +1142,22 @@ impl<T> Term<T> {
                     }
                 }
             }
-            let rows = (0..removed_lines)
-                .map(|line| RemovedRow {
-                    live_row: origin.0 as usize + line,
-                    cells: (0..self.columns())
-                        .map(|column| {
-                            self.grid[Line(origin.0 + line as i32)][Column(column)].clone()
-                        })
-                        .collect(),
-                })
-                .collect();
-            if let Some(hook) = &self.transcript_hook {
+            // CSI S is an explicit screen manipulation, not process output. TUI collapse/repaint
+            // loops can issue it every frame; cloning every removed cell into the transcript seam
+            // both pollutes canonical history and turns animation into an allocation hot path.
+            if operation != ScrollOperation::ExplicitScreen
+                && let Some(hook) = &self.transcript_hook
+            {
+                let rows = (0..removed_lines)
+                    .map(|line| RemovedRow {
+                        live_row: origin.0 as usize + line,
+                        cells: (0..self.columns())
+                            .map(|column| {
+                                self.grid[Line(origin.0 + line as i32)][Column(column)].clone()
+                            })
+                            .collect(),
+                    })
+                    .collect();
                 let screen = if self.mode.contains(TermMode::ALT_SCREEN) {
                     TranscriptScreen::Alternate
                 } else {
@@ -1151,10 +1173,11 @@ impl<T> Term<T> {
                 };
                 hook(TranscriptEvent::ScrollOut {
                     cause: match operation {
-                        ScrollOperation::Normal => ScrollOutCause::Normal { screen, scope },
+                        ScrollOperation::Output => ScrollOutCause::Normal { screen, scope },
                         ScrollOperation::DeleteLines => {
                             ScrollOutCause::DeleteLines { screen, scope }
                         }
+                        ScrollOperation::ExplicitScreen => unreachable!(),
                     },
                     rows,
                 });
@@ -2068,7 +2091,8 @@ impl<T: EventListener> Handler for Term<T> {
         trace!("Linefeed");
         let next = self.grid.cursor.point.line + 1;
         if next == self.scroll_region.end {
-            self.scroll_up(1);
+            let origin = self.scroll_region.start;
+            self.scroll_up_relative(origin, 1, ScrollOperation::Output);
         } else if next < self.screen_lines() {
             self.damage_cursor();
             self.grid.cursor.point.line += 1;
@@ -2128,7 +2152,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn scroll_up(&mut self, lines: usize) {
         let origin = self.scroll_region.start;
-        self.scroll_up_relative(origin, lines, ScrollOperation::Normal);
+        self.scroll_up_relative(origin, lines, ScrollOperation::ExplicitScreen);
     }
 
     #[inline]
@@ -3007,6 +3031,7 @@ pub enum ClipboardType {
     Selection,
 }
 
+#[derive(Clone)]
 struct TabStops {
     tabs: Vec<bool>,
 }
@@ -4250,7 +4275,7 @@ mod tests {
         assert!(term.damage.full);
         term.reset_damage();
 
-        term.scroll_up_relative(Line(3), 2, ScrollOperation::Normal);
+        term.scroll_up_relative(Line(3), 2, ScrollOperation::Output);
         assert!(term.damage.full);
         term.reset_damage();
 

@@ -403,20 +403,33 @@ mod tests {
     };
 
     use super::*;
-    use bt_term::TerminalAdapter;
+    use bt_term::{TerminalAdapter, TerminalCursor};
 
-    const ORACLE_PROMPT: &str = "BT_PROMPT> ";
-    const ORACLE_EMPTY_PROMPT_LINE: &str = "BT_PROMPT>";
+    const ORACLE_EMPTY_PROMPT_LINE: &str = concat!(
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+    );
+    const ORACLE_PROMPT: &str = concat!(
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        " ",
+    );
     const ORACLE_HISTORY_COMMAND: &str = "echo BTHT";
     const ORACLE_HISTORY_OUTPUT: &[u8] = b"BTHT";
+    const ORACLE_EDITING_PREFIX: &str = "typed_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+    const ORACLE_POST_RESIZE_INPUT: &str = "Z";
 
     #[derive(Debug)]
     struct CursorOracleEvidence {
         synchronization_dsr_requests: usize,
         synchronization_replies: String,
         synchronization_output: String,
+        typed_cursor: TerminalCursor,
+        typed_line: String,
+        recalled_cursor: TerminalCursor,
         recalled_line: String,
         cleared_line: String,
+        typed_screen: Vec<String>,
         recalled_screen: Vec<String>,
         cleared_screen: Vec<String>,
     }
@@ -430,15 +443,15 @@ mod tests {
 
     impl InteractiveOracle {
         fn spawn() -> Self {
-            let startup = r#"Set-PSReadLineOption -HistorySaveStyle SaveNothing; function global:prompt { 'BT_PROMPT> ' }"#;
+            let startup = r#"Set-PSReadLineOption -HistorySaveStyle SaveNothing; function global:prompt { Write-Host ('Q' * 110); (('P' * 81) + ' ') }"#;
             let command = PtyCommand::new("powershell.exe")
                 .arg("-NoLogo")
                 .arg("-NoProfile")
                 .arg("-NoExit")
                 .arg("-Command")
                 .arg(startup);
-            let session = PtySession::spawn(command, size(52, 9), no_wake()).unwrap();
-            let terminal = TerminalAdapter::new(nz32(52), nz32(9));
+            let session = PtySession::spawn(command, size(100, 18), no_wake()).unwrap();
+            let terminal = TerminalAdapter::new(nz32(100), nz32(18));
             Self {
                 session,
                 terminal,
@@ -583,41 +596,141 @@ mod tests {
         oracle.wait_for_output_since(flood_start, b"BT_FILL_080_XXXXXXXXXXXXXXXXXXXXXXXX");
         oracle.pump_until_quiet(Duration::from_secs(3));
         oracle.wait_for_current_line(ORACLE_EMPTY_PROMPT_LINE);
+        let synchronization_output_start = oracle.raw_output.len();
+        let synchronization_reply_start = oracle.pty_replies.len();
+        oracle.write_line("Start-Sleep -Seconds 2");
+        oracle.pump_for(Duration::from_millis(100));
+        let prior_resize_storm = [
+            (101, 19),
+            (109, 21),
+            (118, 23),
+            (124, 24),
+            (123, 23),
+            (99, 19),
+            (62, 12),
+            (53, 10),
+            (52, 10),
+            (61, 12),
+            (89, 17),
+            (96, 18),
+            (86, 15),
+            (42, 8),
+            (29, 7),
+            (32, 7),
+            (65, 12),
+            (83, 15),
+            (85, 15),
+            (71, 13),
+            (26, 6),
+            (20, 5),
+            (37, 8),
+            (98, 17),
+            (99, 17),
+            (57, 10),
+            (23, 6),
+            (26, 7),
+            (77, 14),
+            (104, 17),
+            (90, 16),
+            (61, 12),
+            (40, 9),
+            (46, 10),
+            (82, 17),
+            (114, 22),
+            (118, 23),
+            (119, 23),
+        ];
+        oracle.terminal.begin_resize_transaction();
+        for (columns, rows) in prior_resize_storm {
+            oracle.resize_terminal(columns, rows);
+            oracle.pump_for(Duration::from_millis(4));
+        }
+        oracle.resize_conpty(119, 23);
+        oracle.terminal.reconcile_resize_transaction_to_viewport();
+        oracle.pump_for(Duration::from_millis(500));
+        oracle.pump_until_quiet(Duration::from_secs(3));
+        oracle.terminal.finish_resize_transaction();
+        oracle.wait_for_current_line(ORACLE_EMPTY_PROMPT_LINE);
+        oracle.write_line("Clear-Host");
+        oracle.pump_until_quiet(Duration::from_secs(3));
+        oracle.wait_for_current_line(ORACLE_EMPTY_PROMPT_LINE);
+
         let history_start = oracle.raw_output.len();
         oracle.write_line(ORACLE_HISTORY_COMMAND);
         oracle.wait_for_output_since(history_start, ORACLE_HISTORY_OUTPUT);
         oracle.pump_until_quiet(Duration::from_secs(3));
         oracle.wait_for_current_line(ORACLE_EMPTY_PROMPT_LINE);
 
-        let synchronization_output_start = oracle.raw_output.len();
-        let synchronization_reply_start = oracle.pty_replies.len();
         let resize_storm = [
-            (31, 6),
-            (83, 12),
-            (37, 7),
-            (76, 11),
-            (29, 6),
-            (91, 13),
-            (43, 8),
-            (68, 10),
-            (34, 7),
-            (88, 12),
-            (40, 8),
-            (73, 11),
-            (22, 9),
+            (111, 20),
+            (46, 7),
+            (12, 1),
+            (13, 2),
+            (28, 7),
+            (71, 15),
+            (79, 16),
+            (66, 14),
+            (22, 7),
+            (18, 6),
+            (42, 12),
+            (98, 21),
+            (60, 14),
+            (16, 6),
+            (27, 9),
+            (79, 17),
+            (89, 19),
+            (85, 18),
+            (25, 7),
+            (19, 7),
+            (51, 11),
+            (90, 16),
+            (53, 11),
+            (11, 5),
+            (42, 10),
+            (86, 15),
+            (85, 15),
+            (49, 10),
+            (31, 8),
+            (64, 13),
+            (104, 18),
+            (99, 17),
+            (46, 10),
+            (38, 9),
+            (59, 14),
+            (117, 21),
+            (118, 21),
+            (72, 13),
+            (33, 9),
+            (39, 10),
+            (79, 18),
+            (92, 20),
+            (95, 20),
+            (96, 20),
         ];
-        for (columns, rows) in resize_storm {
-            oracle.resize_terminal(columns, rows);
-            oracle.pump_for(Duration::from_millis(4));
+        for (final_columns, final_rows) in [(96, 20)] {
+            oracle.terminal.begin_resize_transaction();
+            for (columns, rows) in resize_storm {
+                oracle.resize_terminal(columns, rows);
+                oracle.pump_for(Duration::from_millis(4));
+            }
+            oracle.resize_terminal(final_columns, final_rows);
+            oracle.resize_conpty(final_columns, final_rows);
+            oracle.terminal.reconcile_resize_transaction_to_viewport();
+            oracle.terminal.finish_resize_transaction();
         }
-        let (final_columns, final_rows) = resize_storm[resize_storm.len() - 1];
-        oracle.resize_conpty(final_columns, final_rows);
-        oracle.pump_for(Duration::from_millis(500));
-        oracle.pump_until_quiet(Duration::from_secs(3));
-        oracle.wait_for_current_line(ORACLE_EMPTY_PROMPT_LINE);
+
+        oracle
+            .session
+            .write(format!("{ORACLE_EDITING_PREFIX}{ORACLE_POST_RESIZE_INPUT}").as_bytes())
+            .unwrap();
+        oracle.pump_for(Duration::from_millis(300));
+        let typed_cursor = oracle.terminal.cursor();
+        let typed_line = oracle.current_prompt_text();
+        let typed_screen = oracle.terminal.visible_text();
 
         oracle.session.write(b"\x1b[A").unwrap();
         oracle.pump_for(Duration::from_millis(300));
+        let recalled_cursor = oracle.terminal.cursor();
         let recalled_line = oracle.current_prompt_text();
         let recalled_screen = oracle.terminal.visible_text();
 
@@ -642,8 +755,12 @@ mod tests {
             synchronization_dsr_requests,
             synchronization_replies,
             synchronization_output,
+            typed_cursor,
+            typed_line,
+            recalled_cursor,
             recalled_line,
             cleared_line,
+            typed_screen,
             recalled_screen,
             cleared_screen,
         }
@@ -735,12 +852,18 @@ mod tests {
         let evidence = run_resize_cursor_oracle();
         eprintln!("BT_CONPTY_ORACLE {source} evidence={evidence:?}");
         assert_eq!(
-            evidence.synchronization_dsr_requests, 1,
-            "pinned ConPTY preview must request one cursor synchronization after the committed resize: {evidence:?}"
+            evidence.synchronization_dsr_requests, 2,
+            "each of the two committed ConPTY resizes must request one cursor synchronization: {evidence:?}"
         );
         assert!(
             evidence.synchronization_replies.contains('R'),
             "terminal did not answer ConPTY's DSR with a CPR: {evidence:?}"
+        );
+        assert_eq!(
+            evidence.typed_line,
+            format!("{ORACLE_PROMPT}{ORACLE_EDITING_PREFIX}{ORACLE_POST_RESIZE_INPUT}"),
+            "post-resize relative input was not echoed on the current prompt; screen={:?}: {evidence:?}",
+            evidence.typed_screen
         );
         assert_eq!(
             evidence.recalled_line,
@@ -749,9 +872,27 @@ mod tests {
             evidence.recalled_screen,
             evidence.synchronization_output
         );
+        let typed_prompt_row = evidence
+            .typed_cursor
+            .row
+            .saturating_sub((evidence.typed_line.chars().count() / 96) as u32);
+        let recalled_prompt_row = evidence
+            .recalled_cursor
+            .row
+            .saturating_sub((evidence.recalled_line.chars().count() / 96) as u32);
         assert_eq!(
-            evidence.cleared_line, ORACLE_EMPTY_PROMPT_LINE,
-            "CSI B did not restore one clean empty prompt row; screen={:?}: {evidence:?}",
+            recalled_prompt_row, typed_prompt_row,
+            "history recall moved to a stale prompt row: {evidence:?}"
+        );
+        assert_eq!(
+            &evidence.recalled_screen[..typed_prompt_row as usize],
+            &evidence.typed_screen[..typed_prompt_row as usize],
+            "history recall overwrote content above the active prompt row: {evidence:?}"
+        );
+        assert_eq!(
+            evidence.cleared_line,
+            format!("{ORACLE_PROMPT}{ORACLE_EDITING_PREFIX}{ORACLE_POST_RESIZE_INPUT}"),
+            "CSI B did not restore the post-resize input on its prompt row; screen={:?}: {evidence:?}",
             evidence.cleared_screen
         );
     }

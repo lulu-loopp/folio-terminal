@@ -736,7 +736,7 @@ fn replay_resize_trace(start: Instant) -> Vec<bt_term::ResizeTraceEvent> {
 
     session.mark_pty_resize_requested_at(nz32(4), nz32(2), start + Duration::from_millis(210));
     session
-        .feed_at(b"\r\nx", start + Duration::from_millis(220))
+        .feed_at(b"\r\nx\x1b[A", start + Duration::from_millis(220))
         .unwrap();
     assert!(
         session
@@ -752,6 +752,9 @@ fn replay_resize_trace(start: Instant) -> Vec<bt_term::ResizeTraceEvent> {
     session.refresh_projection(&mut projection);
     let scrolled = session.viewport_frame(&mut projection).unwrap();
     scrolled.validate_shape().unwrap();
+    assert_eq!(scrolled.scroll_offset_rows, 1);
+    assert_eq!(scrolled.cursor.row, 1);
+    assert!(scrolled.cursor.visible);
     session.record_published_frame(&scrolled, start + Duration::from_millis(421));
     session.resize_trace().to_vec()
 }
@@ -782,7 +785,8 @@ fn g1_resize_trace_replay_is_deterministic_through_post_drag_wheel_frame() {
             layout_columns: 4,
             scroll_offset_rows: 1,
             anchored: true,
-            cursor_visible: false,
+            cursor_row: 1,
+            cursor_visible: true,
             ..
         })
     ));
@@ -1090,6 +1094,46 @@ fn g1_local_scroll_region_never_enters_history() {
     let before = session.document().entries().clone();
     session.feed(b"\x1b[2;3r\x1b[3;1Hlocal\nlocal\n").unwrap();
     assert_eq!(session.document().entries(), &before);
+}
+
+#[test]
+fn g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript() {
+    const CYCLES: usize = 512;
+    const BUDGET: Duration = Duration::from_millis(250);
+
+    let mut session = DualPlaneSession::new(nz32(120), nz32(40));
+    let initial = (0..40)
+        .map(|row| format!("frame-row-{row:02}"))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    session.feed(initial.as_bytes()).unwrap();
+    assert!(history_text(&session).is_empty());
+
+    let started = Instant::now();
+    for cycle in 0..CYCLES {
+        // CSI S is an explicit full-screen manipulation used to collapse/repaint an upward TUI.
+        // It is not a linefeed carrying new process output into canonical history.
+        session
+            .feed(format!("\x1b[S\x1b[40;1H\x1b[2Kframe-{cycle:03}").as_bytes())
+            .unwrap();
+    }
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed <= BUDGET,
+        "{CYCLES} explicit TUI scroll/repaint cycles took {elapsed:?}, budget {BUDGET:?}"
+    );
+    assert!(
+        history_text(&session).is_empty(),
+        "explicit TUI repaint polluted {} frozen rows in {elapsed:?}",
+        history_text(&session).len()
+    );
+    assert_eq!(session.transcript().staging_len(), 0);
+
+    // The exemption is specific to explicit screen manipulation; a bottom-edge linefeed remains
+    // genuine process output and must still enter the normal transcript path.
+    session.feed(b"\x1b[40;1H\r\nreal-output").unwrap();
+    assert_eq!(history_text(&session).len(), 1);
 }
 
 #[test]

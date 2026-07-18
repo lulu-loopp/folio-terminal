@@ -426,6 +426,7 @@ impl DualPlaneSession {
         rows: NonZeroU32,
         observed_at: Instant,
     ) -> bool {
+        let reconciled = self.resize_epoch.is_active();
         self.resize_epoch.final_request_sent(observed_at);
         self.trace_resize_event(
             observed_at,
@@ -436,7 +437,7 @@ impl DualPlaneSession {
         );
         let (history_before, history_after) =
             self.terminal.reconcile_resize_transaction_to_viewport();
-        if history_before != 0 {
+        if reconciled {
             self.grid_generation.0 += 1;
             self.document
                 .capture_rows_transaction(&[], self.grid_generation);
@@ -452,7 +453,7 @@ impl DualPlaneSession {
                 cursor_visible: cursor.visible,
             },
         );
-        history_before != 0
+        reconciled
     }
 
     /// Finish only after both resize and output have been silent for their configured intervals.
