@@ -468,6 +468,12 @@ impl Runtime {
     }
 
     fn publish_frame(&mut self, trigger: FrameTrigger) -> Result<()> {
+        let skip_unchanged = matches!(trigger.source, FrameSource::PtyOutput);
+        self.publish_frame_inner(trigger, skip_unchanged)
+            .map(|_| ())
+    }
+
+    fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
         self.session.refresh_projection(&mut self.projection);
         let terminal_frame = self
             .session
@@ -475,17 +481,17 @@ impl Runtime {
             .context("project terminal grid into viewport frame")?;
         let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
             .context("reject non-rectangular frame before IME composition")?;
-        if matches!(trigger.source, FrameSource::PtyOutput)
-            && self
-                .pending_frames
-                .pending_frame()
-                .or(self.last_presented_frame.as_ref())
-                .is_some_and(|previous| presentation_equivalent(previous, &composed.frame))
+        if skip_unchanged
+            && pty_frame_is_unchanged(
+                self.pending_frames.pending_frame(),
+                self.last_presented_frame.as_ref(),
+                &composed.frame,
+            )
         {
             if self.trace_perf {
                 eprintln!("BT_PERF_TRACE skip=unchanged source={:?}", trigger.source);
             }
-            return Ok(());
+            return Ok(false);
         }
         if self.ime_active {
             let area = self.renderer.ime_cursor_area(&composed.frame);
@@ -500,6 +506,28 @@ impl Runtime {
             .publish(composed.frame, trigger)
             .context("reject non-rectangular frame at publish boundary")?;
         self.window.request_redraw();
+        Ok(true)
+    }
+
+    fn publish_pty_drain_frame(&mut self, now: Instant) -> Result<()> {
+        let keyboard_at = self.pending_keyboard_at;
+        let published = self.publish_frame_inner(
+            FrameTrigger {
+                occurred_at: keyboard_at.unwrap_or(now),
+                source: if keyboard_at.is_some() {
+                    FrameSource::Keyboard
+                } else {
+                    FrameSource::PtyOutput
+                },
+            },
+            true,
+        )?;
+        let sync_open = self.session.synchronized_update_deadline().is_some();
+        if published || !sync_open {
+            self.pending_keyboard_at = None;
+        } else if self.trace_perf {
+            eprintln!("BT_PERF_TRACE defer=synchronized-update");
+        }
         Ok(())
     }
 
@@ -571,18 +599,12 @@ impl Runtime {
             }
             changed = true;
         }
-        if changed && self.session.synchronized_update_deadline().is_none() {
-            let keyboard_at = self.pending_keyboard_at.take();
-            self.publish_frame(FrameTrigger {
-                occurred_at: keyboard_at.unwrap_or_else(Instant::now),
-                source: if keyboard_at.is_some() {
-                    FrameSource::Keyboard
-                } else {
-                    FrameSource::PtyOutput
-                },
-            })?;
-        } else if changed && self.trace_perf {
-            eprintln!("BT_PERF_TRACE defer=synchronized-update");
+        if changed {
+            // The vendor parser withholds bytes inside an open DEC 2026 block, so projecting here
+            // cannot expose its intermediate state. It can expose ordinary output before a
+            // trailing BSU or a completed update before the next BSU; the unchanged-frame gate in
+            // publish_frame cheaply suppresses drains containing only still-buffered sync bytes.
+            self.publish_pty_drain_frame(Instant::now())?;
         }
         Ok(())
     }
@@ -598,15 +620,7 @@ impl Runtime {
                 .finish_synchronized_update(now)
                 .context("finish timed-out DEC 2026 synchronized update")?
         {
-            let keyboard_at = self.pending_keyboard_at.take();
-            self.publish_frame(FrameTrigger {
-                occurred_at: keyboard_at.unwrap_or(now),
-                source: if keyboard_at.is_some() {
-                    FrameSource::Keyboard
-                } else {
-                    FrameSource::PtyOutput
-                },
-            })?;
+            self.publish_pty_drain_frame(now)?;
         }
         Ok(())
     }
@@ -1729,6 +1743,16 @@ fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bo
         && previous.layout_key == next.layout_key
 }
 
+fn pty_frame_is_unchanged(
+    pending: Option<&ViewportFrame>,
+    last_presented: Option<&ViewportFrame>,
+    next: &ViewportFrame,
+) -> bool {
+    pending
+        .or(last_presented)
+        .is_some_and(|previous| presentation_equivalent(previous, next))
+}
+
 fn pty_size(grid: GridSize, physical: PhysicalSize<u32>) -> PtySize {
     PtySize {
         columns: grid.columns,
@@ -1794,6 +1818,84 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use winit::keyboard::{Key, NamedKey};
+
+    struct PtyPresentationHarness {
+        session: DualPlaneSession,
+        projection: ViewportProjection,
+        pending: LatestFrameSlot,
+        last_presented: Option<ViewportFrame>,
+        publications: usize,
+    }
+
+    impl PtyPresentationHarness {
+        fn new(columns: u32, rows: u32) -> Self {
+            let session = DualPlaneSession::new(
+                NonZeroU32::new(columns).unwrap(),
+                NonZeroU32::new(rows).unwrap(),
+            );
+            let projection = session.new_projection(session.layout_key());
+            Self {
+                session,
+                projection,
+                pending: LatestFrameSlot::default(),
+                last_presented: None,
+                publications: 0,
+            }
+        }
+
+        fn feed_drain(&mut self, bytes: &[u8]) -> bool {
+            self.session.feed(bytes).unwrap();
+            self.publish_pty_frame()
+        }
+
+        fn finish_synchronized_update(&mut self) -> (bool, bool) {
+            let finished = self
+                .session
+                .finish_synchronized_update(Instant::now())
+                .unwrap();
+            let published = finished && self.publish_pty_frame();
+            (finished, published)
+        }
+
+        fn publish_pty_frame(&mut self) -> bool {
+            self.session.refresh_projection(&mut self.projection);
+            let frame = self.session.viewport_frame(&mut self.projection).unwrap();
+            if pty_frame_is_unchanged(
+                self.pending.pending_frame(),
+                self.last_presented.as_ref(),
+                &frame,
+            ) {
+                return false;
+            }
+            self.pending
+                .publish(
+                    frame,
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::PtyOutput,
+                    },
+                )
+                .unwrap();
+            self.publications += 1;
+            true
+        }
+
+        fn present_pending(&mut self) -> bool {
+            let Some((frame, _)) = self.pending.take() else {
+                return false;
+            };
+            self.last_presented = Some(frame);
+            true
+        }
+    }
+
+    fn frame_row_text(frame: &ViewportFrame, row: usize) -> String {
+        let columns = frame.columns.get() as usize;
+        frame.cells[row * columns..(row + 1) * columns]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect()
+    }
 
     #[test]
     fn keyboard_mapping_is_ascii_only_and_preserves_terminal_controls() {
@@ -2052,6 +2154,106 @@ mod tests {
     }
 
     #[test]
+    fn content_before_trailing_bsu_is_published_and_survives_empty_sync_timeout() {
+        let mut harness = PtyPresentationHarness::new(20, 2);
+
+        assert!(harness.feed_drain(b"visible-before-bsu\x1b[?2026h"));
+        assert!(harness.session.synchronized_update_deadline().is_some());
+        assert_eq!(harness.publications, 1);
+        assert!(
+            frame_row_text(harness.pending.pending_frame().unwrap(), 0)
+                .contains("visible-before-bsu")
+        );
+
+        let (finished, republished) = harness.finish_synchronized_update();
+        assert!(finished);
+        assert!(
+            !republished,
+            "the already-pending visible frame is equivalent"
+        );
+        assert_eq!(harness.publications, 1);
+        assert!(
+            frame_row_text(harness.pending.pending_frame().unwrap(), 0)
+                .contains("visible-before-bsu")
+        );
+    }
+
+    #[test]
+    fn completed_sync_update_is_published_before_a_trailing_bsu_in_the_same_drain() {
+        let mut harness = PtyPresentationHarness::new(24, 2);
+
+        assert!(harness.feed_drain(b"\x1b[?2026h\x1b[H\x1b[2Kclosed-update\x1b[?2026l\x1b[?2026h"));
+        assert!(harness.session.synchronized_update_deadline().is_some());
+        assert_eq!(harness.publications, 1);
+        assert!(
+            frame_row_text(harness.pending.pending_frame().unwrap(), 0).contains("closed-update")
+        );
+    }
+
+    #[test]
+    fn open_synchronized_update_still_suppresses_its_intermediate_state() {
+        let mut harness = PtyPresentationHarness::new(24, 2);
+        assert!(harness.feed_drain(b"base"));
+        assert!(harness.present_pending());
+
+        assert!(!harness.feed_drain(b"\x1b[?2026h\rhidden-intermediate"));
+        assert!(harness.session.synchronized_update_deadline().is_some());
+        assert_eq!(harness.publications, 1);
+        assert!(harness.pending.pending_frame().is_none());
+        assert!(frame_row_text(harness.last_presented.as_ref().unwrap(), 0).contains("base"));
+
+        assert!(harness.feed_drain(b"\x1b[?2026l"));
+        assert!(harness.session.synchronized_update_deadline().is_none());
+        assert_eq!(harness.publications, 2);
+        assert!(
+            frame_row_text(harness.pending.pending_frame().unwrap(), 0)
+                .contains("hidden-intermediate")
+        );
+    }
+
+    #[test]
+    fn rapid_synchronized_update_chain_never_withholds_a_completed_frame() {
+        const UPDATE_COUNT: usize = 81;
+        let mut harness = PtyPresentationHarness::new(24, 2);
+
+        for update in 0..UPDATE_COUNT {
+            let prefix = if update == 0 { "\x1b[?2026h" } else { "" };
+            let bytes = format!("{prefix}\x1b[H\x1b[2Kframe-{update:02}\x1b[?2026l\x1b[?2026h");
+            assert!(
+                harness.feed_drain(bytes.as_bytes()),
+                "completed update {update} was not published"
+            );
+            assert!(harness.session.synchronized_update_deadline().is_some());
+            assert!(
+                frame_row_text(harness.pending.pending_frame().unwrap(), 0)
+                    .contains(&format!("frame-{update:02}"))
+            );
+        }
+
+        assert_eq!(harness.publications, UPDATE_COUNT);
+        assert!(!harness.feed_drain(b"\x1b[?2026l"));
+        assert!(harness.session.synchronized_update_deadline().is_none());
+        assert!(frame_row_text(harness.pending.pending_frame().unwrap(), 0).contains("frame-80"));
+        assert!(harness.present_pending());
+        assert!(harness.pending.pending_frame().is_none());
+    }
+
+    #[test]
+    fn pending_frame_is_the_a_b_a_equivalence_baseline() {
+        let mut harness = PtyPresentationHarness::new(4, 1);
+
+        assert!(harness.feed_drain(b"A"));
+        assert!(harness.present_pending());
+        assert!(frame_row_text(harness.last_presented.as_ref().unwrap(), 0).contains('A'));
+
+        assert!(harness.feed_drain(b"\rB"));
+        assert!(frame_row_text(harness.pending.pending_frame().unwrap(), 0).contains('B'));
+        assert!(harness.feed_drain(b"\rA"));
+        assert!(frame_row_text(harness.pending.pending_frame().unwrap(), 0).contains('A'));
+        assert_eq!(harness.publications, 3);
+    }
+
+    #[test]
     fn anchored_mouse_forwarding_uses_live_viewport_rows_and_clamps_frozen_rows() {
         assert!(!UserInputKind::Mouse.returns_view_to_live());
         assert!(UserInputKind::Keyboard.returns_view_to_live());
@@ -2096,6 +2298,43 @@ mod tests {
                 anchored_frame.scroll_offset_rows,
             ),
             bt_render::GridHit { row: 0, column: 5 }
+        );
+    }
+
+    #[test]
+    fn forwarded_mouse_hit_stays_bound_to_the_presented_frame_during_an_unpresented_shift() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(6).unwrap());
+        session
+            .feed(b"\x1b[?1003h\x1b[?1006ha\r\nb\r\nc\r\nheader\r\nx\r\ny")
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let presented = session.viewport_frame(&mut projection).unwrap();
+        assert!(frame_row_text(&presented, 3).contains("header"));
+
+        session.feed(b"\r\nexpanded-1\r\nexpanded-2").unwrap();
+        session.refresh_projection(&mut projection);
+        let unpresented = session.viewport_frame(&mut projection).unwrap();
+        assert!(frame_row_text(&unpresented, 1).contains("header"));
+        assert!(!frame_row_text(&unpresented, 3).contains("header"));
+
+        let stale_aim = bt_render::GridHit { row: 3, column: 0 };
+        let forwarded = live_viewport_mouse_hit(stale_aim, presented.scroll_offset_rows);
+        let mut route = None;
+        let bytes = route_forwarded_mouse_button(
+            &mut route,
+            ElementState::Pressed,
+            input::MouseProtocolButton::Left,
+            forwarded,
+            session.terminal_modes(),
+            ModifiersState::empty(),
+        )
+        .unwrap();
+
+        assert_eq!(bytes, b"\x1b[<0;1;4M");
+        assert_eq!(
+            forwarded.row, 3,
+            "the stale row correctly misses live row 1"
         );
     }
 

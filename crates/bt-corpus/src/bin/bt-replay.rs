@@ -65,6 +65,7 @@ struct SequencePerformer {
     ed: u64,
     bsu: u64,
     esu: u64,
+    mouse_motion_set: u64,
     sync_active: bool,
 }
 
@@ -85,6 +86,15 @@ impl Perform for SequencePerformer {
                 .iter()
                 .next()
                 .is_some_and(|parameter| parameter == [2026]);
+        let mouse_motion_set = intermediates == b"?"
+            && action == 'h'
+            && params
+                .iter()
+                .next()
+                .is_some_and(|parameter| parameter == [1003]);
+        self.mouse_motion_set = self
+            .mouse_motion_set
+            .saturating_add(u64::from(mouse_motion_set));
         if synchronized_update && action == 'h' {
             self.bsu = self.bsu.saturating_add(1);
             self.sync_active = true;
@@ -101,6 +111,8 @@ fn print_sequence_stats(corpus: &Corpus) {
     let mut output_events = 0_u64;
     let mut output_bytes = Vec::new();
     let mut sync_event_boundaries = 0_u64;
+    let mut sync_pair_output_events = 0_u64;
+    let mut max_sync_pairs_per_output_event = 0_u64;
     let mut previous_output_at = None;
     let mut intervals = Vec::new();
     for event in &corpus.events {
@@ -112,7 +124,15 @@ fn print_sequence_stats(corpus: &Corpus) {
             intervals.push(event.at_micros.saturating_sub(previous));
         }
         previous_output_at = Some(event.at_micros);
+        let bsu_before = performer.bsu;
+        let esu_before = performer.esu;
         parser.advance(&mut performer, bytes);
+        let event_bsu = performer.bsu.saturating_sub(bsu_before);
+        let event_esu = performer.esu.saturating_sub(esu_before);
+        if event_bsu > 0 && event_bsu == event_esu {
+            sync_pair_output_events = sync_pair_output_events.saturating_add(1);
+        }
+        max_sync_pairs_per_output_event = max_sync_pairs_per_output_event.max(event_bsu);
         if performer.sync_active {
             sync_event_boundaries = sync_event_boundaries.saturating_add(1);
         }
@@ -128,8 +148,12 @@ fn print_sequence_stats(corpus: &Corpus) {
             )
         })
         .count();
+    let immediate_esu_bsu = output_bytes
+        .windows(b"\x1b[?2026l\x1b[?2026h".len())
+        .filter(|window| *window == b"\x1b[?2026l\x1b[?2026h")
+        .count();
     eprintln!(
-        "BT_REPLAY_SEQUENCES output_events={} output_bytes={} cjk_scalars={} csi_s={} csi_t={} il={} dl={} cup={} el={} ed={} bsu={} esu={} sync_event_boundaries={} output_interval_p50_us={} output_interval_p95_us={}",
+        "BT_REPLAY_SEQUENCES output_events={} output_bytes={} cjk_scalars={} csi_s={} csi_t={} il={} dl={} cup={} el={} ed={} bsu={} esu={} mouse_motion_set={} sync_event_boundaries={} sync_pair_output_events={} max_sync_pairs_per_output_event={} immediate_esu_bsu={} output_interval_p50_us={} output_interval_p95_us={}",
         output_events,
         output_bytes.len(),
         cjk_scalars,
@@ -142,7 +166,11 @@ fn print_sequence_stats(corpus: &Corpus) {
         performer.ed,
         performer.bsu,
         performer.esu,
+        performer.mouse_motion_set,
         sync_event_boundaries,
+        sync_pair_output_events,
+        max_sync_pairs_per_output_event,
+        immediate_esu_bsu,
         percentile_u64(&intervals, 50),
         percentile_u64(&intervals, 95),
     );
