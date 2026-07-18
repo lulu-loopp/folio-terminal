@@ -134,15 +134,15 @@ impl WorkerScheduler {
         if let Some(index) = self
             .pending
             .iter()
-            .position(|queued| queued.transcript_id == task.transcript_id)
+            .position(|queued| queued.candidate_id == task.candidate_id)
         {
             self.pending.remove(index);
         }
         if self.pending.len() == WORKER_QUEUE_CAP {
-            self.retry_on_idle.insert(task.transcript_id);
+            self.retry_on_idle.insert(task.candidate_id);
             EnqueueOutcome::RetryOnIdle
         } else {
-            self.retry_on_idle.remove(&task.transcript_id);
+            self.retry_on_idle.remove(&task.candidate_id);
             self.pending.push_back(task);
             EnqueueOutcome::Queued
         }
@@ -150,7 +150,7 @@ impl WorkerScheduler {
 
     pub(crate) fn remove_sources(&mut self, removed: &BTreeSet<TranscriptId>) {
         self.pending
-            .retain(|task| !removed.contains(&task.transcript_id));
+            .retain(|task| !removed.contains(&task.candidate_id));
         self.retry_on_idle.retain(|id| !removed.contains(id));
     }
 }

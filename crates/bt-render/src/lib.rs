@@ -38,6 +38,7 @@ const PADDING_LOGICAL_PX: f32 = 8.0;
 const NARROW_SHAPING_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const WIDE_SHAPING_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+const MATH_TEXTURE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const PRIMARY_FONT_FAMILY: &str = "Consolas";
 const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
 const SEGOE_COLOR_EMOJI_FONT_FAMILY: &str = "Segoe UI Emoji";
@@ -482,6 +483,31 @@ pub enum PresentOutcome {
 struct RectInstance {
     rect: [f32; 4],
     color: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct MathVertex {
+    position: [f32; 2],
+    uv: [f32; 2],
+}
+
+struct MathTextureTile {
+    bind_group: wgpu::BindGroup,
+    x_px: u32,
+    y_px: u32,
+    width_px: u32,
+    height_px: u32,
+}
+
+struct CachedMathTexture {
+    tiles: Vec<MathTextureTile>,
+}
+
+struct MathDraw {
+    key: String,
+    tile_index: usize,
+    first_vertex: u32,
 }
 
 struct ComposedRow {
@@ -1189,6 +1215,11 @@ pub struct Renderer {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     rect_pipeline: wgpu::RenderPipeline,
+    math_pipeline: wgpu::RenderPipeline,
+    math_bind_group_layout: wgpu::BindGroupLayout,
+    math_sampler: wgpu::Sampler,
+    math_textures: ByteLru<String, CachedMathTexture>,
+    math_texture_evictions: u64,
     metrics: CellMetrics,
     init_timings: RendererInitTimings,
     text_rows: Vec<Arc<ComposedRow>>,
@@ -1518,6 +1549,8 @@ impl Renderer {
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rect_pipeline = create_rect_pipeline(&device, config.format);
+        let (math_pipeline, math_bind_group_layout, math_sampler) =
+            create_math_pipeline(&device, config.format);
         let render_resources_time = phase_started.elapsed();
         let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
         Ok(Self {
@@ -1533,6 +1566,11 @@ impl Renderer {
             atlas,
             text_renderer,
             rect_pipeline,
+            math_pipeline,
+            math_bind_group_layout,
+            math_sampler,
+            math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
+            math_texture_evictions: 0,
             metrics,
             init_timings: RendererInitTimings {
                 adapter: adapter_time,
@@ -1597,6 +1635,7 @@ impl Renderer {
         self.font_revision = self.font_revision.saturating_add(1);
         self.narrow_shaping_cache.clear();
         self.wide_shaping_cache.clear();
+        self.math_textures.clear();
         Ok(self.metrics)
     }
 
@@ -1666,6 +1705,16 @@ impl Renderer {
                 usage: wgpu::BufferUsages::VERTEX,
             });
         let rectangles_prepared_at = Instant::now();
+        let (math_draws, math_vertices) = self.prepare_math_draws(frame);
+        let math_vertex_buffer = (!math_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("visible math block vertices"),
+                    contents: bytemuck::cast_slice(&math_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let math_prepared_at = Instant::now();
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
         // both the default-black interval and DXGI's stretch of the old frame.
@@ -1726,6 +1775,18 @@ impl Renderer {
                 pass.set_vertex_buffer(0, rect_buffer.slice(..));
                 pass.draw(0..6, 0..rects.len() as u32);
             }
+            if let Some(vertex_buffer) = math_vertex_buffer.as_ref() {
+                pass.set_pipeline(&self.math_pipeline);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                for draw in &math_draws {
+                    if let Some(texture) = self.math_textures.get(&draw.key)
+                        && let Some(tile) = texture.tiles.get(draw.tile_index)
+                    {
+                        pass.set_bind_group(0, &tile.bind_group, &[]);
+                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                    }
+                }
+            }
             if text_prepared {
                 self.text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)
@@ -1751,7 +1812,7 @@ impl Renderer {
             let digest_elapsed = digest_started.elapsed();
             self.perf_frame = self.perf_frame.saturating_add(1);
             eprintln!(
-                "BT_PERF_TRACE frame={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
+                "BT_PERF_TRACE frame={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
                 self.perf_frame,
                 trigger.source,
                 frame.cells.len(),
@@ -1780,7 +1841,11 @@ impl Renderer {
                 text_stats.wide.resident_bytes,
                 (atlas_prepared_at - rows_prepared_at).as_micros(),
                 (rectangles_prepared_at - atlas_prepared_at).as_micros(),
-                (surface_acquired_at - rectangles_prepared_at).as_micros(),
+                (math_prepared_at - rectangles_prepared_at).as_micros(),
+                frame.math_blocks.len(),
+                self.math_texture_evictions,
+                self.math_textures.resident_bytes(),
+                (surface_acquired_at - math_prepared_at).as_micros(),
                 (encoded_at - surface_acquired_at).as_micros(),
                 (present_called_at - encoded_at).as_micros(),
                 total_elapsed.as_micros(),
@@ -1804,6 +1869,147 @@ impl Renderer {
             &mut self.narrow_shaping_cache,
             &mut self.wide_shaping_cache,
         )
+    }
+
+    fn prepare_math_draws(&mut self, frame: &ViewportFrame) -> (Vec<MathDraw>, Vec<MathVertex>) {
+        // UI-UX §7.5c, M1.9a ruling: do not invent automatic math line breaking. With terminal
+        // wrapping on (the current native default), the pane clips a left-aligned, max-content
+        // raster and therefore acts as the block's horizontal viewport. Scrolling controls are
+        // part of the M1.9b interaction slice; default blockMax is unlimited, so no vertical clamp
+        // is applied here.
+        let mut draws = Vec::new();
+        let mut vertices = Vec::new();
+        let pane_left = self.metrics.padding_px;
+        let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
+            .min(self.config.width as f32);
+        let pane_top = self.metrics.padding_px;
+        let pane_bottom = self.config.height as f32;
+
+        for placement in &frame.math_blocks {
+            let key = &placement.artifact.key;
+            if self.math_textures.get(key).is_none()
+                && let Some(texture) = self.upload_math_texture(&placement.artifact)
+            {
+                let (_, evictions) =
+                    self.math_textures
+                        .insert(key.clone(), texture, placement.artifact.rgba.len());
+                self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+            }
+            let Some(tile_geometry) = self.math_textures.get(key).map(|texture| {
+                texture
+                    .tiles
+                    .iter()
+                    .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
+                    .collect::<Vec<_>>()
+            }) else {
+                continue;
+            };
+            let block_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+            for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
+                tile_geometry.into_iter().enumerate()
+            {
+                let left = pane_left + tile_x as f32;
+                let top = block_top + tile_y as f32;
+                let right = left + tile_width as f32;
+                let bottom = top + tile_height as f32;
+                let visible_left = left.max(pane_left);
+                let visible_top = top.max(pane_top);
+                let visible_right = right.min(pane_right);
+                let visible_bottom = bottom.min(pane_bottom);
+                if visible_right <= visible_left || visible_bottom <= visible_top {
+                    continue;
+                }
+                let uv_left = (visible_left - left) / tile_width as f32;
+                let uv_top = (visible_top - top) / tile_height as f32;
+                let uv_right = (visible_right - left) / tile_width as f32;
+                let uv_bottom = (visible_bottom - top) / tile_height as f32;
+                let first_vertex = vertices.len() as u32;
+                vertices.extend(math_quad_vertices(
+                    visible_left,
+                    visible_top,
+                    visible_right,
+                    visible_bottom,
+                    uv_left,
+                    uv_top,
+                    uv_right,
+                    uv_bottom,
+                    self.config.width,
+                    self.config.height,
+                ));
+                draws.push(MathDraw {
+                    key: key.clone(),
+                    tile_index,
+                    first_vertex,
+                });
+            }
+        }
+        (draws, vertices)
+    }
+
+    fn upload_math_texture(
+        &self,
+        artifact: &bt_viewport::ProjectedMathArtifact,
+    ) -> Option<CachedMathTexture> {
+        let expected = artifact.width_px as usize * artifact.height_px as usize * 4;
+        if artifact.width_px == 0 || artifact.height_px == 0 || artifact.rgba.len() != expected {
+            return None;
+        }
+        let tile_limit = self.max_texture_dimension_2d.max(1);
+        let mut tiles = Vec::new();
+        for y in (0..artifact.height_px).step_by(tile_limit as usize) {
+            let height = (artifact.height_px - y).min(tile_limit);
+            for x in (0..artifact.width_px).step_by(tile_limit as usize) {
+                let width = (artifact.width_px - x).min(tile_limit);
+                let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+                for row in y..y + height {
+                    let start = (row as usize * artifact.width_px as usize + x as usize) * 4;
+                    let end = start + width as usize * 4;
+                    bytes.extend_from_slice(&artifact.rgba[start..end]);
+                }
+                let texture = self.device.create_texture_with_data(
+                    &self.queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("math block texture tile"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &bytes,
+                );
+                let view = texture.create_view(&Default::default());
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("math block texture bind group"),
+                    layout: &self.math_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.math_sampler),
+                        },
+                    ],
+                });
+                tiles.push(MathTextureTile {
+                    bind_group,
+                    x_px: x,
+                    y_px: y,
+                    width_px: width,
+                    height_px: height,
+                });
+            }
+        }
+        Some(CachedMathTexture { tiles })
     }
 
     fn handle_surface_failure(
@@ -2935,6 +3141,133 @@ fn create_rect_pipeline(
     })
 }
 
+fn create_math_pipeline(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout, wgpu::Sampler) {
+    let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("math block texture layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+        ],
+    });
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("math block exact-pixel sampler"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        ..Default::default()
+    });
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("math block shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("math.wgsl").into()),
+    });
+    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("math block pipeline layout"),
+        bind_group_layouts: &[Some(&bind_group_layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("math block pipeline"),
+        layout: Some(&layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vertex"),
+            buffers: &[Some(wgpu::VertexBufferLayout {
+                array_stride: size_of::<MathVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 0,
+                        shader_location: 0,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x2,
+                        offset: 8,
+                        shader_location: 1,
+                    },
+                ],
+            })],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fragment"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    (pipeline, bind_group_layout, sampler)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn math_quad_vertices(
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    uv_left: f32,
+    uv_top: f32,
+    uv_right: f32,
+    uv_bottom: f32,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> [MathVertex; 6] {
+    let width = viewport_width.max(1) as f32;
+    let height = viewport_height.max(1) as f32;
+    let position = |x: f32, y: f32| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0];
+    [
+        MathVertex {
+            position: position(left, top),
+            uv: [uv_left, uv_top],
+        },
+        MathVertex {
+            position: position(left, bottom),
+            uv: [uv_left, uv_bottom],
+        },
+        MathVertex {
+            position: position(right, bottom),
+            uv: [uv_right, uv_bottom],
+        },
+        MathVertex {
+            position: position(left, top),
+            uv: [uv_left, uv_top],
+        },
+        MathVertex {
+            position: position(right, bottom),
+            uv: [uv_right, uv_bottom],
+        },
+        MathVertex {
+            position: position(right, top),
+            uv: [uv_right, uv_top],
+        },
+    ]
+}
+
 fn default_foreground() -> [u8; 3] {
     DEFAULT_FOREGROUND_RGB
 }
@@ -3608,6 +3941,7 @@ mod tests {
             },
             cell_anchors: test_cell_anchors(1),
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -3641,6 +3975,7 @@ mod tests {
                 visible: true,
             },
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -3696,6 +4031,7 @@ mod tests {
             },
             cell_anchors: test_cell_anchors(4),
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -3901,6 +4237,7 @@ mod tests {
             },
             cell_anchors: test_cell_anchors(6),
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -4064,6 +4401,7 @@ mod tests {
             },
             cell_anchors: test_cell_anchors(16),
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -4107,6 +4445,7 @@ mod tests {
             },
             cell_anchors: test_cell_anchors(16),
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -4240,6 +4579,7 @@ mod tests {
             },
             cell_anchors: test_cell_anchors(3),
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -4275,6 +4615,7 @@ mod tests {
             },
             cell_anchors: test_cell_anchors(1),
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,

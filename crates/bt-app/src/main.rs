@@ -5,7 +5,8 @@ use std::{
     num::{NonZeroU32, NonZeroUsize},
     panic,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, mpsc},
+    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -13,12 +14,15 @@ mod input;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
+use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_pty::{OutputWake, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, Preedit, PresentOutcome,
     Renderer, background_rgb, compose_preedit, frame_content_digest, frame_is_alternate_screen,
 };
-use bt_term::{DualPlaneSession, MouseTracking, TerminalModes};
+use bt_term::{
+    DetectionTask, DualPlaneSession, MouseTracking, TerminalModes, render_detection_task,
+};
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{ViewSelection, ViewportFrame, ViewportProjection};
 use winit::{
@@ -49,6 +53,41 @@ const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
     PtyOutput,
+    MathReady,
+}
+
+struct MathWorkerResult {
+    task: DetectionTask,
+    result: std::result::Result<MathRaster, MathRenderError>,
+}
+
+struct MathWorker {
+    tasks: mpsc::Sender<DetectionTask>,
+    results: mpsc::Receiver<MathWorkerResult>,
+}
+
+impl MathWorker {
+    fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
+        let (task_tx, task_rx) = mpsc::channel::<DetectionTask>();
+        let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
+        thread::Builder::new()
+            .name("bt-math-worker".to_owned())
+            .spawn(move || {
+                let engine = MathEngine::new();
+                while let Ok(mut task) = task_rx.recv() {
+                    let result = render_detection_task(&engine, &mut task);
+                    if result_tx.send(MathWorkerResult { task, result }).is_err() {
+                        break;
+                    }
+                    let _ = proxy.send_event(AppEvent::MathReady);
+                }
+            })
+            .context("spawn math rendering worker")?;
+        Ok(Self {
+            tasks: task_tx,
+            results: result_rx,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -63,6 +102,7 @@ struct Runtime {
     renderer: Renderer,
     pty: Option<PtySession>,
     session: DualPlaneSession,
+    math_worker: MathWorker,
     projection: ViewportProjection,
     pending_frames: LatestFrameSlot,
     grid: GridSize,
@@ -345,8 +385,9 @@ impl Runtime {
             .metrics()
             .grid_for_pixels(render_physical.width, render_physical.height);
         let probe_input = load_probe_input()?;
+        let pty_proxy = proxy.clone();
         let wake: OutputWake = Arc::new(move || {
-            let _ = proxy.send_event(AppEvent::PtyOutput);
+            let _ = pty_proxy.send_event(AppEvent::PtyOutput);
         });
         let phase_started = Instant::now();
         let pty = if probe_input.is_none() {
@@ -386,10 +427,12 @@ impl Runtime {
                 .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
         }
         let projection = session.new_projection(session.layout_key());
+        let math_worker = MathWorker::spawn(proxy)?;
         let mut runtime = Self {
             renderer,
             pty,
             session,
+            math_worker,
             projection,
             pending_frames: LatestFrameSlot::default(),
             grid,
@@ -474,6 +517,7 @@ impl Runtime {
     }
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
+        self.dispatch_math_tasks()?;
         self.session.refresh_projection(&mut self.projection);
         let terminal_frame = self
             .session
@@ -517,6 +561,33 @@ impl Runtime {
             .context("reject non-rectangular frame at publish boundary")?;
         self.window.request_redraw();
         Ok(true)
+    }
+
+    fn dispatch_math_tasks(&mut self) -> Result<()> {
+        while let Some(task) = self.session.take_worker_task() {
+            self.math_worker
+                .tasks
+                .send(task)
+                .map_err(|_| anyhow!("math rendering worker stopped"))?;
+        }
+        Ok(())
+    }
+
+    fn apply_math_results(&mut self) -> Result<()> {
+        let mut changed = false;
+        while let Ok(completion) = self.math_worker.results.try_recv() {
+            changed |= self
+                .session
+                .complete_worker_result(completion.task, completion.result);
+        }
+        self.dispatch_math_tasks()?;
+        if changed {
+            self.publish_frame(FrameTrigger {
+                occurred_at: Instant::now(),
+                source: FrameSource::Expose,
+            })?;
+        }
+        Ok(())
     }
 
     fn publish_pty_drain_frame(&mut self, now: Instant) -> Result<()> {
@@ -1430,6 +1501,13 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                     self.fail(event_loop, error);
                 }
             }
+            AppEvent::MathReady => {
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.apply_math_results()
+                {
+                    self.fail(event_loop, error);
+                }
+            }
         }
     }
 
@@ -1747,6 +1825,7 @@ fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bo
         && previous.cursor == next.cursor
         && previous.cell_anchors == next.cell_anchors
         && previous.selection_spans == next.selection_spans
+        && previous.math_blocks == next.math_blocks
         && previous.status_text == next.status_text
         && previous.viewport_origin == next.viewport_origin
         && previous.scroll_offset_rows == next.scroll_offset_rows

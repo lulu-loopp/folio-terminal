@@ -258,7 +258,7 @@ fn m1_8f_collapse_lifecycle_matrix_has_no_projection_holes_or_anchor_drift() {
 }
 
 #[test]
-fn g1_scroll_out_stages_finalizes_decorates_and_observes_tail_rewrite() {
+fn g1_scroll_out_tail_rewrite_with_inline_prose_stays_plain() {
     let mut session = DualPlaneSession::new(nz32(8), nz32(2));
     session.feed(b"$$abcdef$$Z\r\n").unwrap();
     assert!(session.document().entries().is_empty());
@@ -268,16 +268,19 @@ fn g1_scroll_out_stages_finalizes_decorates_and_observes_tail_rewrite() {
     let (id, entry) = session.document().entries().first_key_value().unwrap();
     let id = *id;
     assert_eq!(entry.line.text, "$$abcdef$$Z !");
-    assert!(matches!(entry.decoration, DecorationIntent::Math { .. }));
+    assert_eq!(entry.decoration, DecorationIntent::Plain);
     assert_eq!(
         session.decoration(id).unwrap().decoration,
         DecorationLifecycle::Pending
     );
-
     session.run_workers();
     assert_eq!(
         session.decoration(id).unwrap().decoration,
-        DecorationLifecycle::Ready
+        DecorationLifecycle::Suppressed
+    );
+    assert_eq!(
+        session.document().entries().get(&id).unwrap().decoration,
+        DecorationIntent::Plain
     );
 }
 

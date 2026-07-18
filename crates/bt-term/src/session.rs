@@ -2,26 +2,30 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt,
+    hash::{DefaultHasher, Hash, Hasher},
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
+    sync::Arc,
     time::Instant,
 };
 
 use bt_detect::{
-    DecorationRecord, DetectionTask, detect_block_math, redetect_document, render_placeholder,
+    DecorationRecord, DetectionInput, DetectionTask, PlaceholderArtifact, resolve_detection_task,
 };
 use bt_doc::{
-    AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DetectionRevision,
-    GridGeneration, GridPoint, HistoryDocument, InvalidSourceTransition, LayoutKey, LiveRowRemoval,
-    SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp, ViewGeneration, compare_anchors,
+    AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DecorationLifecycle,
+    DetectionRevision, GridGeneration, GridPoint, HistoryDocument, InvalidSourceTransition,
+    LayoutKey, LiveRowRemoval, SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp,
+    ViewGeneration, compare_anchors,
 };
+use bt_math::{MathEngine, MathRaster, MathRenderError, MathRenderKey};
 use bt_transcript::{
     CaptureResult, CapturedRow, DEFAULT_STAGING_QUOTA, FinalizedLine, GraphemeOffset,
     SPIKE_DEFAULT_FROZEN_QUOTA, SourceGeneration, StagedRow, StagingId, TranscriptId,
     TranscriptStore,
 };
 use bt_viewport::{
-    FrameProjectionError, FrameViewportOrigin, GridCursor, ViewSelection, ViewportFrame,
-    ViewportProjection,
+    FrameProjectionError, FrameViewportOrigin, GridCursor, ProjectedMathArtifact, ViewSelection,
+    ViewportFrame, ViewportProjection,
 };
 
 use crate::{
@@ -545,15 +549,135 @@ impl DualPlaneSession {
     }
 
     pub fn complete_worker_task(&mut self, task: DetectionTask) -> bool {
-        let artifact = render_placeholder(&task);
-        let accepted = self
-            .decorations
-            .get_mut(&task.transcript_id)
-            .is_some_and(|record| record.complete(&task, artifact));
+        if !self.worker_task_is_current(&task) {
+            self.stale_results += 1;
+            return false;
+        }
+        let mut task = task;
+        if !resolve_detection_task(&mut task) {
+            return self.complete_worker_result(task, Err(MathRenderError::NotDetected));
+        }
+        let placeholder = bt_detect::render_placeholder(&task);
+        let accepted = self.apply_worker_completion(task, Some(placeholder));
         if !accepted {
             self.stale_results += 1;
         }
         accepted
+    }
+
+    pub fn complete_worker_result(
+        &mut self,
+        task: DetectionTask,
+        result: Result<MathRaster, MathRenderError>,
+    ) -> bool {
+        let render_error = result.as_ref().err().map(ToString::to_string);
+        let render_time = result.as_ref().ok().map(|raster| raster.render_time);
+        let artifact = result
+            .ok()
+            .map(|raster| artifact_from_raster(&task, raster));
+        let accepted = self.apply_worker_completion(task.clone(), artifact);
+        if !accepted {
+            self.stale_results += 1;
+        } else if std::env::var_os("BT_PERF_TRACE").is_some() {
+            if let Some(elapsed) = render_time {
+                eprintln!(
+                    "BT_PERF_TRACE math_render_us={} source={} resident_bytes={}",
+                    elapsed.as_micros(),
+                    task.transcript_id.0,
+                    self.math_resident_bytes(),
+                );
+            } else if let Some(error) = render_error {
+                eprintln!(
+                    "BT_PERF_TRACE math_render_failed source={} error={error:?}",
+                    task.transcript_id.0,
+                );
+            }
+        }
+        accepted
+    }
+
+    fn apply_worker_completion(
+        &mut self,
+        task: DetectionTask,
+        artifact: Option<PlaceholderArtifact>,
+    ) -> bool {
+        if !self.worker_task_is_current(&task) {
+            return false;
+        }
+        if !task.resolved {
+            return self
+                .decorations
+                .get_mut(&task.candidate_id)
+                .is_some_and(|record| record.fail(&task));
+        }
+        let block_is_current = task.inputs.iter().all(|input| {
+            self.document
+                .entries()
+                .get(&input.id)
+                .is_some_and(|entry| entry.line.text == input.text)
+        });
+        if !block_is_current {
+            return false;
+        }
+        if task.candidate_id != task.transcript_id
+            && let Some(candidate) = self.decorations.get_mut(&task.candidate_id)
+        {
+            candidate.decoration = DecorationLifecycle::None;
+            candidate.artifact = None;
+        }
+        let Some(record) = self.decorations.get_mut(&task.transcript_id) else {
+            return false;
+        };
+        if record.source != SourceLifecycle::Frozen
+            || record.versions.detection != task.versions.detection
+            || record.versions.layout != task.versions.layout
+            || record.versions.view != task.versions.view
+        {
+            return false;
+        }
+        record.decoration = DecorationLifecycle::None;
+        record.artifact = None;
+        let Some(resolved_task) =
+            record.schedule(task.transcript_id, task.block_end, task.span.clone())
+        else {
+            return false;
+        };
+        match artifact {
+            Some(artifact) => {
+                self.document.set_decoration(
+                    task.transcript_id,
+                    DecorationIntent::Math {
+                        byte_start: task.span.byte_start,
+                        byte_end: task.span.byte_end,
+                        detection_revision: task.versions.detection,
+                    },
+                );
+                record.complete(&resolved_task, artifact)
+            }
+            None => {
+                self.document
+                    .set_decoration(task.transcript_id, DecorationIntent::Plain);
+                record.fail(&resolved_task)
+            }
+        }
+    }
+
+    fn worker_task_is_current(&self, task: &DetectionTask) -> bool {
+        self.decorations
+            .get(&task.candidate_id)
+            .is_some_and(|record| {
+                record.source == SourceLifecycle::Frozen
+                    && record.decoration == bt_doc::DecorationLifecycle::Pending
+                    && record.versions == task.versions
+            })
+    }
+
+    pub fn math_resident_bytes(&self) -> usize {
+        self.decorations
+            .values()
+            .filter_map(|record| record.artifact.as_ref())
+            .map(|artifact| artifact.rgba.len())
+            .sum()
     }
 
     pub fn redetect(&mut self, revision: DetectionRevision) {
@@ -564,16 +688,8 @@ impl DualPlaneSession {
         for record in self.decorations.values_mut() {
             record.detector_changed(revision);
         }
-        let detected = redetect_document(&mut self.document, revision);
-        for (id, span) in detected {
-            if let Some(record) = self.decorations.get_mut(&id)
-                && !self.primary_parked
-                && self.resize_epoch.decorations_allowed()
-                && let Some(task) = record.schedule(id, span)
-            {
-                self.enqueue_task(task);
-            }
-        }
+        self.document.clear_decorations();
+        self.schedule_existing_artifacts();
     }
 
     pub fn new_projection(&self, layout_key: LayoutKey) -> ViewportProjection {
@@ -705,11 +821,20 @@ impl DualPlaneSession {
             self.grid_generation,
         );
         projection.set_selection(self.view_selection());
-        projection.sync_artifact_heights(self.decorations.iter().filter_map(|(id, record)| {
-            record
-                .artifact
-                .as_ref()
-                .map(|artifact| (*id, artifact.height_subpixels))
+        projection.sync_math_artifacts(self.decorations.iter().filter_map(|(id, record)| {
+            record.artifact.as_ref().map(|artifact| {
+                (
+                    *id,
+                    ProjectedMathArtifact {
+                        key: artifact.key.clone(),
+                        end: artifact.block_end,
+                        rgba: Arc::clone(&artifact.rgba),
+                        width_px: artifact.width_px,
+                        height_px: artifact.height_px,
+                        height_subpixels: artifact.height_subpixels,
+                    },
+                )
+            })
         }));
         projection.apply_detection_revision(self.detection_revision, &self.document);
         projection.project(&self.document);
@@ -991,32 +1116,21 @@ impl DualPlaneSession {
         let Some(entry) = self.document.entries().get(&id) else {
             return;
         };
-        let source_generation = entry.line.source_generation;
-        let span = detect_block_math(&entry.line.text).into_iter().next();
         let versions = VersionStamp {
-            source: source_generation,
+            source: entry.line.source_generation,
             detection: self.detection_revision,
             layout: self.layout_key,
             view: self.view_generation,
         };
-        let mut record = DecorationRecord::frozen(versions);
-        let mut task = None;
-        if let Some(span) = span {
-            self.document.set_decoration(
-                id,
-                DecorationIntent::Math {
-                    byte_start: span.byte_start,
-                    byte_end: span.byte_end,
-                    detection_revision: self.detection_revision,
-                },
-            );
-            if !self.primary_parked && self.resize_epoch.decorations_allowed() {
-                task = record.schedule(id, span);
-            }
+        self.decorations
+            .insert(id, DecorationRecord::frozen(versions));
+        // Ordinary frozen lines take only the allocation-free delimiter prefilter. A candidate
+        // snapshots immutable source here; the worker owns fence/pairing/escape/size detection.
+        if !entry.line.text.contains("$$") {
+            return;
         }
-        self.decorations.insert(id, record);
-        if let Some(task) = task {
-            self.enqueue_task(task);
+        if !self.primary_parked && self.resize_epoch.decorations_allowed() {
+            self.schedule_scan(id);
         }
     }
 
@@ -1045,34 +1159,39 @@ impl DualPlaneSession {
         if self.primary_parked || !self.resize_epoch.decorations_allowed() {
             return;
         }
-        let math = self
+        let candidates = self
             .document
             .entries()
             .iter()
-            .filter_map(|(id, entry)| {
-                matches!(entry.decoration, DecorationIntent::Math { .. })
-                    .then(|| {
-                        detect_block_math(&entry.line.text)
-                            .into_iter()
-                            .next()
-                            .map(|span| (*id, span))
-                    })
-                    .flatten()
-            })
+            .filter_map(|(id, entry)| entry.line.text.contains("$$").then_some(*id))
             .collect::<Vec<_>>();
-        for (id, span) in math {
-            if let Some(task) = self
-                .decorations
-                .get_mut(&id)
-                .and_then(|record| record.schedule(id, span))
-            {
-                self.enqueue_task(task);
-            }
+        for id in candidates {
+            self.schedule_scan(id);
         }
     }
 
+    fn schedule_scan(&mut self, candidate_id: TranscriptId) {
+        let inputs = self
+            .document
+            .entries()
+            .iter()
+            .map(|(id, entry)| DetectionInput {
+                id: *id,
+                text: entry.line.text.clone(),
+            })
+            .collect::<Vec<_>>();
+        let Some(task) = self
+            .decorations
+            .get_mut(&candidate_id)
+            .and_then(|record| record.schedule_scan(candidate_id, Arc::from(inputs)))
+        else {
+            return;
+        };
+        self.enqueue_task(task);
+    }
+
     fn enqueue_task(&mut self, task: DetectionTask) {
-        let transcript_id = task.transcript_id;
+        let transcript_id = task.candidate_id;
         if self.scheduler.enqueue(task) == EnqueueOutcome::RetryOnIdle
             && let Some(record) = self.decorations.get_mut(&transcript_id)
         {
@@ -1213,6 +1332,40 @@ fn copy_row_from_cells(
     }
 }
 
+pub fn render_detection_task(
+    engine: &MathEngine,
+    task: &mut DetectionTask,
+) -> Result<MathRaster, MathRenderError> {
+    if !resolve_detection_task(task) {
+        return Err(MathRenderError::NotDetected);
+    }
+    engine.render(
+        &task.span.source,
+        MathRenderKey {
+            dpi_milli: task.versions.layout.dpi_milli,
+            font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
+            foreground_rgb: [224, 224, 224],
+        },
+    )
+}
+
+fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> PlaceholderArtifact {
+    let mut hasher = DefaultHasher::new();
+    task.span.source.hash(&mut hasher);
+    task.versions.layout.hash(&mut hasher);
+    task.versions.detection.hash(&mut hasher);
+    let height_subpixels = i64::from(raster.height_px).saturating_mul(SUBPIXELS_PER_PX);
+    PlaceholderArtifact {
+        key: format!("math:{:016x}", hasher.finish()),
+        block_end: task.block_end,
+        height_subpixels,
+        width_px: raster.width_px,
+        height_px: raster.height_px,
+        rgba: Arc::from(raster.rgba),
+        render_time: raster.render_time,
+    }
+}
+
 fn ordered_selection(selection: &ViewSelection) -> Option<(&ContentAnchor, &ContentAnchor)> {
     match compare_selection_anchors(&selection.start, &selection.end)? {
         std::cmp::Ordering::Greater => Some((&selection.end, &selection.start)),
@@ -1287,6 +1440,104 @@ mod tests {
         assert!(session.document().entries().iter().all(|(id, _)| {
             session.decoration(*id).unwrap().decoration == DecorationLifecycle::Ready
         }));
+    }
+
+    fn synthetic_raster(width_px: u32, height_px: u32) -> MathRaster {
+        MathRaster {
+            rgba: vec![255; width_px as usize * height_px as usize * 4],
+            width_px,
+            height_px,
+            content_height_px: height_px.saturating_sub(16),
+            ascent_px: 12.0,
+            descent_px: 4.0,
+            render_time: std::time::Duration::from_millis(3),
+        }
+    }
+
+    #[test]
+    fn math_worker_intermediate_success_failure_and_layout_invalidation_are_projectable() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
+        let mut task = session.take_worker_task().unwrap();
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        let pending = session.viewport_frame(&mut projection).unwrap();
+        assert!(pending.math_blocks.is_empty());
+        assert!(pending.cells.iter().any(|cell| cell.text == "$"));
+
+        assert!(resolve_detection_task(&mut task));
+        assert!(session.complete_worker_result(task, Ok(synthetic_raster(24, 35))));
+        session.refresh_projection(&mut projection);
+        projection.scroll_to_bottom();
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let ready = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(ready.math_blocks.len(), 1);
+        assert_eq!(projection.heights().get(0), Some(35 * SUBPIXELS_PER_PX));
+        assert!(!ready.cells.iter().any(|cell| cell.text == "$"));
+
+        session.set_layout_key(LayoutKey {
+            dpi_milli: NonZeroU32::new(1250).unwrap(),
+            ..session.layout_key()
+        });
+        session.refresh_projection(&mut projection);
+        projection.scroll_to_bottom();
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let invalidated = session.viewport_frame(&mut projection).unwrap();
+        assert!(invalidated.math_blocks.is_empty());
+        assert!(invalidated.cells.iter().any(|cell| cell.text == "$"));
+        assert_eq!(session.pending_tasks(), 1);
+
+        let mut failed = DualPlaneSession::new(nz(16), nz(2));
+        failed.feed(b"$$bad$$\r\nnext\r\ntail").unwrap();
+        let mut task = failed.take_worker_task().unwrap();
+        assert!(resolve_detection_task(&mut task));
+        assert!(failed.complete_worker_result(task, Err(MathRenderError::InvalidDimensions)));
+        assert_eq!(
+            failed.decorations.values().next().unwrap().decoration,
+            DecorationLifecycle::Suppressed
+        );
+        let mut projection = failed.new_projection(failed.layout_key());
+        failed.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        failed.refresh_projection(&mut projection);
+        let fallback = failed.viewport_frame(&mut projection).unwrap();
+        assert!(fallback.math_blocks.is_empty());
+        assert!(fallback.cells.iter().any(|cell| cell.text == "$"));
+    }
+
+    #[test]
+    fn ed3_discards_ready_math_artifacts_from_the_viewport_and_resident_budget() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
+        let mut task = session.take_worker_task().unwrap();
+        assert!(resolve_detection_task(&mut task));
+        assert!(session.complete_worker_result(task, Ok(synthetic_raster(24, 35))));
+        assert!(session.math_resident_bytes() > 0);
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        assert_eq!(
+            session
+                .viewport_frame(&mut projection)
+                .unwrap()
+                .math_blocks
+                .len(),
+            1
+        );
+
+        session.feed(b"\x1b[3J").unwrap();
+        session.refresh_projection(&mut projection);
+        let cleared = session.viewport_frame(&mut projection).unwrap();
+        assert!(cleared.math_blocks.is_empty());
+        assert_eq!(session.math_resident_bytes(), 0);
+        assert!(session.decorations.is_empty());
     }
 
     #[test]

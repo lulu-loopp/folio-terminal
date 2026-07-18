@@ -1,0 +1,23 @@
+[package]
+name = "bt-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mitex.workspace = true
+mitex-spec-gen.workspace = true
+resvg.workspace = true
+thiserror.workspace = true
+typst-as-lib.workspace = true
+typst-layout.workspace = true
+typst-library.workspace = true
+typst-svg.workspace = true
+
+[dev-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

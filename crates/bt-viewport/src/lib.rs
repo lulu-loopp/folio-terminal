@@ -7,6 +7,7 @@ use std::{
     error::Error,
     fmt,
     num::{NonZeroI64, NonZeroU32},
+    sync::Arc,
 };
 
 use bt_doc::{
@@ -82,6 +83,27 @@ pub struct SelectionSpan {
     pub end_column: u32,
 }
 
+/// Immutable CPU raster produced off the presentation thread. The renderer owns the independent
+/// GPU texture cache; carrying pixels here keeps viewport projection deterministic and device-free.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectedMathArtifact {
+    pub key: String,
+    pub end: TranscriptId,
+    pub rgba: Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub height_subpixels: i64,
+}
+
+/// A visible math block replaces its complete source span. `top_subpixels` may be negative when
+/// an anchored viewport starts inside a tall block; the renderer clips it to the pane.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathBlockPlacement {
+    pub start: TranscriptId,
+    pub artifact: ProjectedMathArtifact,
+    pub top_subpixels: i64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FrameViewportOrigin {
     Bottom,
@@ -97,6 +119,7 @@ pub struct ViewportFrame {
     pub cursor: GridCursor,
     pub cell_anchors: Vec<CellAnchor>,
     pub selection_spans: Vec<SelectionSpan>,
+    pub math_blocks: Vec<MathBlockPlacement>,
     pub status_text: Option<String>,
     pub viewport_origin: FrameViewportOrigin,
     pub scroll_offset_rows: usize,
@@ -315,6 +338,7 @@ pub struct ViewportProjection {
     detection_rev: DetectionRevision,
     cache: HashMap<LayoutCacheKey, MeasuredLayout>,
     artifact_heights: HashMap<TranscriptId, i64>,
+    math_artifacts: HashMap<TranscriptId, ProjectedMathArtifact>,
     ordered_ids: Vec<TranscriptId>,
     visual_rows: Vec<usize>,
     visual_row_heights: HeightTree,
@@ -350,6 +374,7 @@ impl ViewportProjection {
             detection_rev,
             cache: HashMap::new(),
             artifact_heights: HashMap::new(),
+            math_artifacts: HashMap::new(),
             ordered_ids: Vec::new(),
             visual_rows: Vec::new(),
             visual_row_heights: HeightTree::default(),
@@ -508,6 +533,7 @@ impl ViewportProjection {
             cursor,
             cell_anchors,
             selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -651,6 +677,7 @@ impl ViewportProjection {
             .scroll_offset_rows
             .saturating_sub(blank_live_rows_below);
         let mut visible = Vec::with_capacity(expected_rows);
+        let mut math_blocks = Vec::new();
 
         if primary && window_start < history_rows {
             let first_index = self
@@ -665,7 +692,33 @@ impl ViewportProjection {
                     && row_base < window_end
                     && let Some(entry) = document.entries().get(id)
                 {
-                    let laid_out = layout_frozen_line(&entry.line, column_count);
+                    let laid_out = if let Some(artifact) = self.math_artifacts.get(id) {
+                        let max_offset =
+                            entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
+                        let local_start = window_start.saturating_sub(row_base);
+                        math_blocks.push(MathBlockPlacement {
+                            start: *id,
+                            artifact: artifact.clone(),
+                            top_subpixels: visible.len() as i64 * self.cell_height_subpixels.get()
+                                - local_start as i64 * self.cell_height_subpixels.get(),
+                        });
+                        (0..line_rows)
+                            .map(|_| {
+                                blank_visual_row(column_count, |_, bias| ContentAnchor::History {
+                                    id: *id,
+                                    offset: if bias == Bias::Before {
+                                        GraphemeOffset(0)
+                                    } else {
+                                        GraphemeOffset(max_offset)
+                                    },
+                                    bias,
+                                    generation: entry.line.source_generation,
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    } else {
+                        layout_frozen_line(&entry.line, column_count)
+                    };
                     for (local_row, row) in laid_out.iter().enumerate() {
                         validate_visual_row(row, column_count, "history", row_base + local_row)?;
                     }
@@ -764,6 +817,7 @@ impl ViewportProjection {
             },
             cell_anchors,
             selection_spans,
+            math_blocks,
             status_text: (content_rows_below != 0)
                 .then(|| format!("{content_rows_below} lines below")),
             viewport_origin: match &self.scroll_state {
@@ -841,13 +895,13 @@ impl ViewportProjection {
                 generation,
                 ..
             } => {
-                let index = self
-                    .ordered_ids
-                    .iter()
-                    .position(|candidate| candidate == id)?;
+                let (index, projected_id) = self.projected_history_index(*id)?;
                 let entry = document.entries().get(id)?;
                 if *generation != entry.line.source_generation {
                     return None;
+                }
+                if self.math_artifacts.contains_key(&projected_id) {
+                    return Some(self.visual_row_heights.prefix_sum(index) as usize);
                 }
                 let rows =
                     layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize);
@@ -925,6 +979,29 @@ impl ViewportProjection {
         }
         self.artifact_heights = next;
     }
+    pub fn sync_math_artifacts(
+        &mut self,
+        artifacts: impl IntoIterator<Item = (TranscriptId, ProjectedMathArtifact)>,
+    ) {
+        let next = artifacts.into_iter().collect::<HashMap<_, _>>();
+        let changed = self
+            .math_artifacts
+            .keys()
+            .chain(next.keys())
+            .copied()
+            .filter(|id| self.math_artifacts.get(id) != next.get(id))
+            .collect::<HashSet<_>>();
+        if !changed.is_empty() {
+            self.cache
+                .retain(|key, _| !changed.contains(&key.span.start));
+            self.projection_dirty = true;
+        }
+        self.artifact_heights = next
+            .iter()
+            .map(|(id, artifact)| (*id, artifact.height_subpixels))
+            .collect();
+        self.math_artifacts = next;
+    }
     pub fn set_live_state(
         &mut self,
         live_rows: NonZeroU32,
@@ -940,7 +1017,15 @@ impl ViewportProjection {
     }
 
     pub fn project(&mut self, document: &HistoryDocument) {
-        let next_ids = document.entries().keys().copied().collect::<Vec<_>>();
+        let mut next_ids = Vec::new();
+        let mut suppressed_through = None;
+        for id in document.entries().keys().copied() {
+            if suppressed_through.is_some_and(|end| id <= end) {
+                continue;
+            }
+            next_ids.push(id);
+            suppressed_through = self.math_artifacts.get(&id).map(|artifact| artifact.end);
+        }
         let append_only = !self.projection_dirty
             && self.ordered_ids.len() <= next_ids.len()
             && self.ordered_ids == next_ids[..self.ordered_ids.len()];
@@ -961,7 +1046,10 @@ impl ViewportProjection {
             let cache_key = LayoutCacheKey {
                 span: TranscriptSpan {
                     start: *id,
-                    end: *id,
+                    end: self
+                        .math_artifacts
+                        .get(id)
+                        .map_or(*id, |artifact| artifact.end),
                 },
                 source_gen: entry.line.source_generation,
                 detection_rev: self.detection_rev,
@@ -973,8 +1061,12 @@ impl ViewportProjection {
                 self.cache_misses += 1;
                 let measured = {
                     if let Some(height) = self.artifact_heights.get(id).copied() {
+                        let visual_lines = height
+                            .max(1)
+                            .saturating_add(self.cell_height_subpixels.get() - 1)
+                            / self.cell_height_subpixels.get();
                         MeasuredLayout {
-                            visual_lines: 1,
+                            visual_lines: u32::try_from(visual_lines).unwrap_or(u32::MAX),
                             height,
                         }
                     } else {
@@ -1015,10 +1107,8 @@ impl ViewportProjection {
                 generation,
                 ..
             } => {
-                let index = self
-                    .ordered_ids
-                    .iter()
-                    .position(|candidate| candidate == id)
+                let (index, projected_id) = self
+                    .projected_history_index(*id)
                     .ok_or(AnchorError::UnknownAnchor)?;
                 let entry = document
                     .entries()
@@ -1028,7 +1118,7 @@ impl ViewportProjection {
                     return Err(AnchorError::StaleGeneration);
                 }
                 let max_offset = entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
-                let local_y = if self.artifact_heights.contains_key(id) {
+                let local_y = if self.math_artifacts.contains_key(&projected_id) {
                     0
                 } else {
                     let row = offset.0.min(max_offset) / self.layout_key.width_cells.get();
@@ -1061,6 +1151,20 @@ impl ViewportProjection {
                 ..
             } => Err(AnchorError::IsolatedScreen),
         }
+    }
+
+    fn projected_history_index(&self, id: TranscriptId) -> Option<(usize, TranscriptId)> {
+        self.ordered_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .find(|(_, start)| {
+                *start == id
+                    || self
+                        .math_artifacts
+                        .get(start)
+                        .is_some_and(|artifact| *start <= id && id <= artifact.end)
+            })
     }
 
     pub fn scroll_y(&self, document: &HistoryDocument) -> Result<Option<i64>, AnchorError> {
@@ -1609,6 +1713,88 @@ mod tests {
         let misses_after_new_width = narrow.cache_misses();
         narrow.relayout(key(4), &document);
         assert_eq!(narrow.cache_misses(), misses_after_new_width);
+    }
+
+    #[test]
+    fn math_block_replaces_a_multi_line_span_in_two_projections_at_free_pixel_height() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
+        let mut document = HistoryDocument::default();
+        let mut ids = Vec::new();
+        for text in ["$$", "x^2 + y^2", "$$"] {
+            let finalized = store
+                .capture(CapturedRow::plain(text, false))
+                .finalized
+                .remove(0);
+            ids.push(finalized.line.id);
+            document.finalize_transaction(finalized);
+        }
+        let artifact = ProjectedMathArtifact {
+            key: "math:test".to_owned(),
+            end: ids[2],
+            rgba: Arc::from(vec![255; 4]),
+            width_px: 1,
+            height_px: 1,
+            height_subpixels: 35 * SUBPIXELS_PER_PX,
+        };
+        let make_projection = |width| {
+            let mut projection = ViewportProjection::new(
+                key(width),
+                DetectionRevision(1),
+                nz32(4),
+                cell_height(),
+                store.source_generation(),
+                GridGeneration(1),
+            );
+            projection.sync_math_artifacts([(ids[0], artifact.clone())]);
+            projection.project(&document);
+            projection
+        };
+        let mut narrow = make_projection(4);
+        let wide = make_projection(20);
+        assert_eq!(narrow.heights().get(0), Some(35 * SUBPIXELS_PER_PX));
+        assert_eq!(wide.heights().get(0), Some(35 * SUBPIXELS_PER_PX));
+
+        let middle = &document.entries()[&ids[1]].line;
+        let middle_anchor = ContentAnchor::History {
+            id: ids[1],
+            offset: GraphemeOffset(3),
+            bias: Bias::Before,
+            generation: middle.source_generation,
+        };
+        assert_eq!(narrow.anchor_y(&document, &middle_anchor), Ok(0));
+        assert_eq!(wide.anchor_y(&document, &middle_anchor), Ok(0));
+
+        let live = || vec![CapturedRow::plain("    ", false); 4];
+        narrow
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        narrow.scroll_to_top();
+        let frame = narrow
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert_eq!(frame.math_blocks.len(), 1);
+        assert_eq!(frame.math_blocks[0].artifact.end, ids[2]);
+        assert!(frame.cells.iter().all(|cell| cell.text.trim().is_empty()));
     }
 
     #[test]

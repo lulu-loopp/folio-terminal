@@ -155,10 +155,19 @@ fn g3_stale_worker_result_is_rejected_after_each_public_version_boundary() {
 }
 
 #[test]
-fn g3_redetection_rebuilds_document_intent_before_projection_consumes_revision() {
+fn g3_redetection_rebuilds_document_intent_after_the_worker_accepts_the_revision() {
     let mut session = DualPlaneSession::new(nz(16), nz(2));
     session.feed(b"$$x$$\r\nnext\r\ntail").unwrap();
     session.redetect(DetectionRevision(7));
+    assert!(
+        !session
+            .document()
+            .entries()
+            .values()
+            .any(|entry| matches!(entry.decoration, DecorationIntent::Math { .. }))
+    );
+    assert!(session.pending_tasks() > 0);
+    session.run_workers();
     assert!(session.document().entries().values().any(|entry| matches!(
         entry.decoration,
         DecorationIntent::Math {
