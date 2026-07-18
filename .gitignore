@@ -6,3 +6,4 @@
 *.png
 !design/assets/*.png
 !docs/spikes/artifacts/03-visual/comparison.png
+dist/
