@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>BetterTerminal — 分层侧栏 / 聚焦态 demo</title>
+<style>
+  :root {
+    --bg: #1b2026; --panel: #232a32; --panel-2: #2a323c; --edge: #39434f;
+    --text: #cdd6e0; --dim: #7d8a99; --accent: #4da3ff; --green: #4ec98c;
+    --amber: #ffb84d; --font: "Cascadia Mono", Consolas, monospace;
+    --cols: 55%; --rows: 55%;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text); font-family: var(--font);
+    font-size: 13px; display: flex; flex-direction: column; overflow: hidden;
+  }
+
+  /* ── top bar ─────────────────────────────────────── */
+  #topbar {
+    height: 40px; flex: none; display: flex; align-items: center; gap: 12px;
+    padding: 0 14px; background: var(--panel); border-bottom: 1px solid var(--edge);
+  }
+  #topbar .title { color: var(--dim); }
+  #modeBtn {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--edge);
+    border-radius: 6px; padding: 4px 12px; font: inherit; cursor: pointer;
+  }
+  #modeBtn:hover { border-color: var(--accent); }
+  #hint { color: var(--dim); font-size: 11px; margin-left: auto; }
+
+  /* ── layout ─────────────────────────────────────── */
+  #app { flex: 1; display: flex; min-height: 0; }
+
+  /* sidebar */
+  #sidebar {
+    width: 232px; flex: none; background: var(--panel);
+    border-right: 1px solid var(--edge); display: flex; flex-direction: column;
+    overflow-y: auto; padding: 8px 0;
+  }
+  .tabrow {
+    display: flex; align-items: center; gap: 8px; padding: 7px 14px;
+    color: var(--dim); cursor: default; user-select: none;
+  }
+  .tabrow.current { color: var(--text); background: var(--panel-2); }
+  .tabrow .caret { width: 10px; font-size: 10px; }
+  .tabrow .name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .dot.running { background: var(--accent); animation: breathe 2s infinite; }
+  .dot.done { background: var(--green); }
+  .dot.attention { background: var(--amber); animation: pulse .9s infinite; }
+  .dot.idle { background: var(--edge); }
+  @keyframes breathe { 50% { opacity: .45; } }
+  @keyframes pulse { 50% { transform: scale(1.55); } }
+
+  /* focus mode: vivo-style immersion — other tabs recede, cards float */
+  body.focus-mode .tabrow:not(.current) { padding: 3px 14px; font-size: 10px; opacity: .5; }
+  body.focus-mode .tabrow:not(.current) .caret { display: none; }
+  body.focus-mode .tabrow.current { background: none; }
+
+  /* live cards (focus mode only) */
+  #cards { display: none; flex-direction: column; gap: 10px; padding: 6px 12px 10px 18px; }
+  body.focus-mode #cards { display: flex; }
+  .card {
+    background: #161b20; border: 1px solid transparent; border-radius: 12px;
+    overflow: hidden; cursor: pointer; animation: cardIn .28s ease both;
+    transition: border-color .15s, transform .15s; box-shadow: 0 2px 10px rgb(0 0 0 / .35);
+  }
+  .card:hover { border-color: var(--accent); transform: translateX(2px); }
+  .card.attention { border-color: var(--amber); }
+  #cardAdd {
+    border: 1px dashed var(--edge); border-radius: 12px; color: var(--dim);
+    text-align: center; padding: 8px; cursor: pointer; font-size: 15px;
+  }
+  #cardAdd:hover { color: var(--text); border-color: var(--accent); }
+  @keyframes cardIn { from { opacity: 0; transform: translateX(-14px); } }
+  .card .meta {
+    display: flex; align-items: center; gap: 6px; padding: 5px 8px;
+    background: var(--panel-2); font-size: 11px;
+  }
+  .card .meta .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .meta .badge {
+    font-size: 10px; color: #1b2026; background: var(--amber); border-radius: 4px;
+    padding: 0 5px; display: none;
+  }
+  .card.attention .meta .badge { display: inline; }
+  .card .mini {
+    font-size: 9px; line-height: 1.45; padding: 6px 8px; height: 76px;
+    overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end;
+    color: #9fb0c0; white-space: pre;
+  }
+  .card .path { color: var(--dim); font-size: 10px; padding: 0 8px 5px; }
+
+  /* main area */
+  #main { flex: 1; position: relative; min-width: 0; padding: 10px; }
+  #grid {
+    display: grid; height: 100%; gap: 8px;
+    grid-template-columns: var(--cols) 1fr; grid-template-rows: var(--rows) 1fr;
+    grid-auto-rows: 1fr;   /* “+” 加出的第 5 个起自动换行 */
+  }
+  body.focus-mode #grid { display: block; }
+  body.focus-mode #grid .pane { display: none; height: 100%; }
+  body.focus-mode #grid .pane.focused { display: flex; animation: paneIn .22s ease both; }
+  @keyframes paneIn { from { opacity: .4; transform: scale(.985); } }
+
+  .pane {
+    background: #12161b; border: 1px solid var(--edge); border-radius: 8px;
+    display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden;
+  }
+  .pane header {
+    flex: none; display: flex; align-items: center; gap: 8px; padding: 5px 10px;
+    background: var(--panel); font-size: 11px; color: var(--dim); cursor: pointer;
+  }
+  .pane header .name { color: var(--text); }
+  .pane header .focus-btn {
+    margin-left: auto; background: none; border: 1px solid var(--edge); color: var(--dim);
+    border-radius: 4px; font: inherit; font-size: 10px; padding: 1px 7px; cursor: pointer;
+  }
+  .pane header .focus-btn:hover { color: var(--text); border-color: var(--accent); }
+  .pane .term {
+    flex: 1; padding: 8px 10px; overflow: hidden; white-space: pre; line-height: 1.5;
+    display: flex; flex-direction: column; justify-content: flex-end; font-size: 12px;
+  }
+  .term .ln-warn { color: var(--amber); }
+  .term .ln-ok { color: var(--green); }
+  .term .ln-dim { color: var(--dim); }
+
+  /* crosshair resizer (parallel mode) */
+  #crosshair {
+    position: absolute; width: 18px; height: 18px; border-radius: 50%;
+    background: var(--panel-2); border: 2px solid var(--accent);
+    transform: translate(-50%, -50%); cursor: move; z-index: 5; opacity: .35;
+    transition: opacity .15s;
+  }
+  #crosshair:hover, #crosshair.dragging { opacity: 1; }
+  body.focus-mode #crosshair { display: none; }
+
+  #legend {
+    flex: none; padding: 6px 14px; background: var(--panel); color: var(--dim);
+    font-size: 11px; border-top: 1px solid var(--edge);
+  }
+  #legend b { color: var(--text); font-weight: normal; }
+</style>
+</head>
+<body>
+<div id="topbar">
+  <span class="title">BetterTerminal · 分层侧栏 / 聚焦态 demo</span>
+  <button id="modeBtn">⊞ 并行态</button>
+  <span id="hint">双击 pane 标题 = 聚焦它 · Esc = 回并行 · 拖动圆点 = 交汇点调节</span>
+</div>
+<div id="app">
+  <nav id="sidebar">
+    <div class="tabrow"><span class="caret">▸</span><span class="name">api-server</span><span class="dot done"></span></div>
+    <div class="tabrow current"><span class="caret" id="curCaret">▸</span><span class="name">宽度验收(当前)</span><span class="dot running"></span></div>
+    <div id="cards"></div>
+    <div class="tabrow"><span class="caret">▸</span><span class="name">写作</span><span class="dot idle"></span></div>
+  </nav>
+  <div id="main">
+    <div id="grid"></div>
+    <div id="crosshair"></div>
+  </div>
+</div>
+<div id="legend">
+  <b>串行态</b>里侧栏卡片是活的迷你投影(最后几行真实内容,非缩略图),黄框「等你」= 注意力队列;
+  点卡片与聚焦 pane <b>换位</b>。其它 tab 保持细行——这就是「同一条导航栏的两种密度」。
+</div>
+
+<script>
+"use strict";
+// ── fake sessions ───────────────────────────────────────────
+const rnd = a => a[Math.floor(Math.random() * a.length)];
+const sessions = [
+  { id: "build", name: "cargo build", cwd: "~/bt", branch: "m1-width", status: "running",
+    lines: [], step: 0,
+    gen() {
+      const crates = ["bt-unicode", "bt-term", "bt-render", "bt-pty", "bt-app", "vendor/alacritty"];
+      this.step++;
+      if (this.step % 9 === 8) return { t: "ok", s: "    Finished dev [unoptimized] in 14.2s" };
+      if (this.step % 9 === 0) return { t: "dim", s: "   Compiling bt-platform v0.1.0" };
+      return { t: "", s: "   Compiling " + rnd(crates) + " v0.1.0" };
+    } },
+  { id: "serve", name: "api-server", cwd: "~/bt/svc", branch: "main", status: "running",
+    lines: [],
+    gen() {
+      const p = rnd(["/api/sessions", "/api/panes/7", "/healthz", "/api/width/oracle"]);
+      const code = Math.random() < .93 ? 200 : 500;
+      const now = new Date().toTimeString().slice(0, 8);
+      return { t: code === 500 ? "warn" : "", s: `[${now}] GET ${p} ${code} ${(Math.random() * 9).toFixed(1)}ms` };
+    } },
+  { id: "test", name: "cargo test", cwd: "~/bt", branch: "m1-width", status: "running",
+    lines: [], step: 0,
+    gen() {
+      this.step++;
+      if (this.status !== "running") return null;
+      if (this.step === 22) {
+        this.status = "attention";               // finished while unattended → 等你
+        return { t: "ok", s: "test result: ok. 182 passed; 0 failed" };
+      }
+      const t = rnd(["width::cluster", "grid::resize", "vt::mode_2027", "damage::rows"]);
+      return { t: "dim", s: `test ${t}_${this.step} ... ok` };
+    } },
+  { id: "logs", name: "tail -f app.log", cwd: "~/bt", branch: "—", status: "running",
+    lines: [],
+    gen() {
+      const m = rnd(["frame published in 2.1ms", "BT_DPI hwnd=1.5 monitor=1.5", "pty read 4096B",
+                     "reshape row 12 (damage)", "swapchain resize 1946x1271"]);
+      return { t: "dim", s: "[trace] " + m };
+    } },
+];
+const byId = id => sessions.find(s => s.id === id);
+
+// ── state ───────────────────────────────────────────────────
+let focusMode = false;
+let focusedId = "build";
+const paneOrder = ["build", "serve", "test", "logs"];   // grid slots (2×2)
+
+// ── render: panes ───────────────────────────────────────────
+const grid = document.getElementById("grid");
+function buildPanes() {
+  grid.innerHTML = "";
+  for (const id of paneOrder) {
+    const s = byId(id);
+    const pane = document.createElement("div");
+    pane.className = "pane" + (id === focusedId ? " focused" : "");
+    pane.dataset.id = id;
+    pane.innerHTML =
+      `<header><span class="dot ${s.status}"></span><span class="name">${s.name}</span>` +
+      `<span>${s.cwd} · ${s.branch}</span>` +
+      `<button class="focus-btn">${id === focusedId && focusMode ? "还原 Esc" : "聚焦 ⏎"}</button></header>` +
+      `<div class="term"></div>`;
+    pane.querySelector("header").addEventListener("dblclick", () => enterFocus(id));
+    pane.querySelector(".focus-btn").addEventListener("click", e => {
+      e.stopPropagation();
+      focusMode && id === focusedId ? exitFocus() : enterFocus(id);
+    });
+    grid.appendChild(pane);
+  }
+  paintAll();
+}
+
+function lineHtml(l) { return `<span class="ln-${l.t}">${l.s}</span>`; }
+
+function paintAll() {
+  for (const pane of grid.children) {
+    const s = byId(pane.dataset.id);
+    pane.querySelector(".term").innerHTML = s.lines.slice(-40).map(lineHtml).join("\n");
+    pane.querySelector(".dot").className = "dot " + s.status;
+  }
+  paintCards();
+  // current-tab dot mirrors the "worst" state of its sessions
+  const cur = document.querySelector(".tabrow.current .dot");
+  cur.className = "dot " + (sessions.some(s => s.status === "attention") ? "attention"
+    : sessions.some(s => s.status === "running") ? "running" : "done");
+}
+
+// ── render: sidebar cards (focus mode) ─────────────────────
+const cardsBox = document.getElementById("cards");
+function buildCards() {
+  cardsBox.innerHTML = "";
+  if (!focusMode) return;
+  for (const s of sessions) {
+    if (s.id === focusedId) continue;
+    const card = document.createElement("div");
+    card.className = "card" + (s.status === "attention" ? " attention" : "");
+    card.dataset.id = s.id;
+    card.innerHTML =
+      `<div class="meta"><span class="dot ${s.status}"></span><span class="name">${s.name}</span>` +
+      `<span class="badge">等你</span></div>` +
+      `<div class="mini"></div><div class="path">${s.cwd} · ${s.branch}</div>`;
+    card.addEventListener("click", () => swapWithFocused(s.id));
+    cardsBox.appendChild(card);
+  }
+  const add = document.createElement("div");
+  add.id = "cardAdd"; add.textContent = "+"; add.title = "新建待命会话";
+  add.addEventListener("click", spawnSession);
+  cardsBox.appendChild(add);
+  paintCards();
+}
+
+const sessionPool = [
+  { name: "npm run dev", cwd: "~/web", branch: "main",
+    gen() { return { t: "dim", s: rnd(["[vite] hmr update /src/App.tsx", "[vite] page reload", "GET / 200"]) }; } },
+  { name: "ssh prod", cwd: "prod:/var/log", branch: "—",
+    gen() { return { t: Math.random() < .1 ? "warn" : "dim", s: rnd(["systemd[1]: bt.service ok", "kernel: eth0 up", "sshd: session opened"]) }; } },
+  { name: "htop", cwd: "~", branch: "—",
+    gen() { return { t: "", s: `CPU ${Math.floor(Math.random()*60+5)}%  MEM 4.${Math.floor(Math.random()*9)}G / 32G` }; } },
+];
+function spawnSession() {
+  const proto = sessionPool[(sessions.length - 4) % sessionPool.length];
+  const s = { id: "s" + sessions.length, name: proto.name, cwd: proto.cwd, branch: proto.branch,
+              status: "running", lines: [{ t: "dim", s: "$ " + proto.name }], gen: proto.gen };
+  sessions.push(s); paneOrder.push(s.id);
+  const tick = () => {
+    const l = s.gen();
+    if (l) { s.lines.push(l); if (s.lines.length > 200) s.lines.shift(); }
+    paintAll();
+    setTimeout(tick, 350 + Math.random() * 650);
+  };
+  setTimeout(tick, 300);
+  buildPanes(); buildCards();
+}
+function paintCards() {
+  for (const card of cardsBox.querySelectorAll(".card")) {
+    const s = byId(card.dataset.id);
+    card.querySelector(".mini").innerHTML = s.lines.slice(-6).map(lineHtml).join("\n");
+    card.querySelector(".dot").className = "dot " + s.status;
+    card.classList.toggle("attention", s.status === "attention");
+  }
+}
+
+// ── mode transitions ───────────────────────────────────────
+const modeBtn = document.getElementById("modeBtn");
+function syncMode() {
+  document.body.classList.toggle("focus-mode", focusMode);
+  document.getElementById("curCaret").textContent = focusMode ? "▾" : "▸";
+  modeBtn.textContent = focusMode ? "▣ 串行态(聚焦)" : "⊞ 并行态";
+  buildPanes(); buildCards();
+}
+function enterFocus(id) {
+  focusedId = id; focusMode = true;
+  if (byId(id).status === "attention") byId(id).status = "done";   // 被看到 = 消费注意力
+  syncMode();
+}
+function exitFocus() { focusMode = false; syncMode(); }             // 树形原样恢复:布局变量从未动过
+function swapWithFocused(id) {
+  const i = paneOrder.indexOf(focusedId), j = paneOrder.indexOf(id);
+  [paneOrder[i], paneOrder[j]] = [paneOrder[j], paneOrder[i]];
+  enterFocus(id);
+}
+modeBtn.addEventListener("click", () => focusMode ? exitFocus() : enterFocus(focusedId));
+document.addEventListener("keydown", e => { if (e.key === "Escape" && focusMode) exitFocus(); });
+
+// ── crosshair resizer ──────────────────────────────────────
+const main = document.getElementById("main");
+const cross = document.getElementById("crosshair");
+function placeCross() {
+  const r = main.getBoundingClientRect();
+  const cols = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--cols"));
+  const rows = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--rows"));
+  cross.style.left = (r.width * cols / 100) + 6 + "px";
+  cross.style.top = (r.height * rows / 100) + 6 + "px";
+}
+let dragging = false;
+cross.addEventListener("pointerdown", e => { dragging = true; cross.classList.add("dragging"); cross.setPointerCapture(e.pointerId); });
+cross.addEventListener("pointermove", e => {
+  if (!dragging) return;
+  const r = main.getBoundingClientRect();
+  const c = Math.min(80, Math.max(20, (e.clientX - r.left) / r.width * 100));
+  const w = Math.min(80, Math.max(20, (e.clientY - r.top) / r.height * 100));
+  document.documentElement.style.setProperty("--cols", c + "%");
+  document.documentElement.style.setProperty("--rows", w + "%");
+  placeCross();
+});
+cross.addEventListener("pointerup", e => { dragging = false; cross.classList.remove("dragging"); cross.releasePointerCapture(e.pointerId); });
+window.addEventListener("resize", placeCross);
+
+// ── heartbeat ──────────────────────────────────────────────
+for (const s of sessions) {
+  s.lines.push({ t: "dim", s: "$ " + s.name });
+  const tick = () => {
+    const l = s.gen();
+    if (l) { s.lines.push(l); if (s.lines.length > 200) s.lines.shift(); }
+    paintAll();
+    setTimeout(tick, 350 + Math.random() * 650);
+  };
+  setTimeout(tick, Math.random() * 500);
+}
+
+buildPanes(); syncMode(); placeCross();
+</script>
+</body>
+</html>

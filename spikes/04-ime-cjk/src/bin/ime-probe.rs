@@ -475,6 +475,18 @@ impl ApplicationHandler for App {
                 }
                 redraw = true;
             }
+            /* Checklist item 8's failure criterion literally reads "丢焦点", and
+               the log had no way to say it: losing focus and switching IME both
+               surface as ime_disabled plus a commit of whatever was pending, and
+               nothing distinguished them. So a raw pinyin string committing on
+               alt-tab — real IMM32 behaviour, and worth knowing for a terminal
+               where a stray commit lands on a shell prompt — arrived in the
+               evidence with no recorded cause. */
+            WindowEvent::Focused(focused) => {
+                if let Err(error) = self.logger.emit("focus", json!({"focused": focused})) {
+                    self.failure = Some(error);
+                }
+            }
             _ => {}
         }
         if let Some(reason) = area_reason
@@ -519,10 +531,28 @@ fn handle_key(
     area_reason: &mut Option<&'static str>,
     redraw: &mut bool,
 ) -> Result<()> {
+    /* physical_key is not decoration — without it this log cannot tell one
+       IME-consumed key from another. Windows sends VK_PROCESSKEY for anything the
+       IME eats, so Backspace and Esc during composition BOTH arrive as
+       `logical_key: Named(Process)` and were logged identically. Item 4's evidence
+       had to be reconstructed by behavioural signature (preedit cleared with no
+       commit) — that is detective work, not evidence.
+       It is also the measurement winit #4508 needs (open, filed against 0.30.13 on
+       this exact Windows build): the app still gets KeyboardInput during
+       composition, and the rule for M0's keyboard layer is **filter on
+       logical_key == Process, never dispatch on physical_key while composing** —
+       or the shell eats a real Backspace while the IME deletes a pinyin letter.
+       That rule cannot be shown to hold from a log that omits the field it is
+       about.
+       `state` and `repeat` are here for the same reason: an unfalsifiable log is
+       one you have to trust. */
     logger.emit(
         "keyboard_input",
         json!({
             "logical_key": format!("{:?}", event.logical_key),
+            "physical_key": format!("{:?}", event.physical_key),
+            "state": format!("{:?}", event.state),
+            "repeat": event.repeat,
             "text": event.text.as_deref(),
             "preedit_active": !state.preedit.is_empty()
         }),

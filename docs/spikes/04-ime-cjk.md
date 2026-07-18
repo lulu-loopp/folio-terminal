@@ -2,6 +2,12 @@
 
 ## 结论
 
+**（2026-07-16 更新）真人证据已到齐，改判 `go-with-caveats` —— 详见 [`04-ime-cjk-manual-results.md`](04-ime-cjk-manual-results.md)。** 三家（微软拼音 / 微信 / 搜狗）× 10 项全部实测：输入正确性全 PASS，发现的问题均可定位可修、不构成技术性否决。**M0 可从 winit IME 起步**，携带三条 caveat：① 微软拼音连续跟随需 system caret 补丁（照 Chromium）；② 搜狗不上报预编辑，终端只能拿最终结果；③ 键盘层须按 `logical==Process` 过滤、`set_ime_cursor_area` 须节流。
+
+---
+
+以下为 04b 交付时的原结论（**no-go，等待真人证据**），保留存档：
+
 **no-go（等待真人 IME 证据；winit 尚未被技术性否决）**。
 
 原报告关于人工门的判定规则保持不变：三家核心项全 PASS 才能改判 go-with-caveats；协议级失败转向直接 TSF；少于三家或缺肉眼结果维持 no-go。没有用 `SendInput`，没有把未测项写成“应该可用”。
