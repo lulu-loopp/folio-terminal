@@ -6,12 +6,120 @@ const BRACKETED_PASTE_END: &str = "\x1b[201~";
 
 pub(crate) const PASTE_WRITE_CHUNK_BYTES: usize = 16 * 1024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MouseProtocolButton {
+    Left,
+    Middle,
+    Right,
+    None,
+    WheelUp,
+    WheelDown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MouseProtocolEvent {
+    Press,
+    Release,
+    Motion,
+}
+
 pub(crate) fn is_paste_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
     let ctrl_v = modifiers == ModifiersState::CONTROL
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"));
     let shift_insert =
         modifiers == ModifiersState::SHIFT && matches!(key, Key::Named(NamedKey::Insert));
     ctrl_v || shift_insert
+}
+
+pub(crate) fn is_copy_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
+    modifiers.control_key() && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("c"))
+}
+
+pub(crate) fn should_copy_selection(
+    key: &Key,
+    modifiers: ModifiersState,
+    has_selection: bool,
+) -> bool {
+    is_copy_shortcut(key, modifiers) && (modifiers.shift_key() || has_selection)
+}
+
+pub(crate) fn sgr_mouse_bytes(
+    button: MouseProtocolButton,
+    event: MouseProtocolEvent,
+    row: u32,
+    column: u32,
+    modifiers: ModifiersState,
+) -> Vec<u8> {
+    let mut code = match button {
+        MouseProtocolButton::Left => 0,
+        MouseProtocolButton::Middle => 1,
+        MouseProtocolButton::Right => 2,
+        MouseProtocolButton::None => 3,
+        MouseProtocolButton::WheelUp => 64,
+        MouseProtocolButton::WheelDown => 65,
+    };
+    code += 4 * u8::from(modifiers.shift_key())
+        + 8 * u8::from(modifiers.alt_key())
+        + 16 * u8::from(modifiers.control_key());
+    if event == MouseProtocolEvent::Motion {
+        code += 32;
+    }
+    let suffix = if event == MouseProtocolEvent::Release {
+        'm'
+    } else {
+        'M'
+    };
+    format!("\x1b[<{code};{};{}{suffix}", column + 1, row + 1).into_bytes()
+}
+
+pub(crate) fn mouse_bytes(
+    sgr: bool,
+    button: MouseProtocolButton,
+    event: MouseProtocolEvent,
+    row: u32,
+    column: u32,
+    modifiers: ModifiersState,
+) -> Vec<u8> {
+    if sgr {
+        return sgr_mouse_bytes(button, event, row, column, modifiers);
+    }
+    let mut code = if event == MouseProtocolEvent::Release {
+        3
+    } else {
+        match button {
+            MouseProtocolButton::Left => 0,
+            MouseProtocolButton::Middle => 1,
+            MouseProtocolButton::Right => 2,
+            MouseProtocolButton::None => 3,
+            MouseProtocolButton::WheelUp => 64,
+            MouseProtocolButton::WheelDown => 65,
+        }
+    };
+    code += 4 * u8::from(modifiers.shift_key())
+        + 8 * u8::from(modifiers.alt_key())
+        + 16 * u8::from(modifiers.control_key());
+    if event == MouseProtocolEvent::Motion {
+        code += 32;
+    }
+    // X10 coordinates are byte-limited; SGR 1006 is used whenever the application requests it.
+    let x = column.saturating_add(1).min(223) as u8 + 32;
+    let y = row.saturating_add(1).min(223) as u8 + 32;
+    vec![0x1b, b'[', b'M', code + 32, x, y]
+}
+
+pub(crate) fn alternate_scroll_bytes(lines: i32, application_cursor_mode: bool) -> Vec<u8> {
+    let key = if lines >= 0 {
+        NamedKey::ArrowUp
+    } else {
+        NamedKey::ArrowDown
+    };
+    let one = keyboard_bytes(
+        &Key::Named(key),
+        ModifiersState::empty(),
+        application_cursor_mode,
+    )
+    .expect("arrow keys always encode");
+    one.repeat(lines.unsigned_abs() as usize)
 }
 
 pub(crate) fn is_ime_owned_key(key: &Key, modifiers: ModifiersState) -> bool {
@@ -315,5 +423,76 @@ mod tests {
             b"\x1b[200~one\rtwo\x1b[201~"
         );
         assert_eq!(paste_bytes("one\n", false), b"one\r");
+    }
+
+    #[test]
+    fn sgr_mouse_encodes_one_based_coordinates_modifiers_motion_and_release() {
+        assert_eq!(
+            sgr_mouse_bytes(
+                MouseProtocolButton::Left,
+                MouseProtocolEvent::Press,
+                2,
+                4,
+                ModifiersState::empty(),
+            ),
+            b"\x1b[<0;5;3M"
+        );
+        assert_eq!(
+            sgr_mouse_bytes(
+                MouseProtocolButton::Right,
+                MouseProtocolEvent::Motion,
+                0,
+                0,
+                ModifiersState::SHIFT.union(ModifiersState::CONTROL),
+            ),
+            b"\x1b[<54;1;1M"
+        );
+        assert_eq!(
+            sgr_mouse_bytes(
+                MouseProtocolButton::Middle,
+                MouseProtocolEvent::Release,
+                9,
+                7,
+                ModifiersState::ALT,
+            ),
+            b"\x1b[<9;8;10m"
+        );
+    }
+
+    #[test]
+    fn legacy_mouse_fallback_keeps_non_sgr_mouse_modes_operable() {
+        assert_eq!(
+            mouse_bytes(
+                false,
+                MouseProtocolButton::Left,
+                MouseProtocolEvent::Press,
+                2,
+                4,
+                ModifiersState::empty(),
+            ),
+            vec![0x1b, b'[', b'M', 32, 37, 35]
+        );
+    }
+
+    #[test]
+    fn alternate_screen_wheel_uses_cursor_mode_arrow_bytes() {
+        assert_eq!(alternate_scroll_bytes(2, false), b"\x1b[A\x1b[A");
+        assert_eq!(alternate_scroll_bytes(-1, true), b"\x1bOB");
+    }
+
+    #[test]
+    fn ctrl_c_is_interrupt_without_selection_but_copy_with_selection_or_shift() {
+        let key = Key::Character("c".into());
+        assert!(!should_copy_selection(&key, ModifiersState::CONTROL, false));
+        assert!(should_copy_selection(&key, ModifiersState::CONTROL, true));
+        assert!(should_copy_selection(
+            &key,
+            ModifiersState::CONTROL.union(ModifiersState::SHIFT),
+            false,
+        ));
+        assert_eq!(
+            keyboard_bytes(&key, ModifiersState::CONTROL, false),
+            Some(vec![0x03])
+        );
     }
 }

@@ -1,10 +1,11 @@
 //! Executable DESIGN.md §3.1 policy.
 //!
-//! The adapter supplies terminal facts. This module decides which removed rows enter staging,
-//! which resize requests force a staging split, and which semantic terminal events mutate the
-//! transcript. Soft-wrap completion and the 4K staging bound remain enforced by `TranscriptStore`;
-//! viewport-only scrolling and an unterminated live last line produce no adapter event and therefore
-//! cannot enter this policy pipeline.
+//! The adapter supplies terminal facts. This module decides which steady-state removed rows enter
+//! transcript staging and which semantic terminal events mutate the transcript. During a resize
+//! transaction the session uses these row directives only to rebase live anchors; vendor history is
+//! the sole mutable-tail owner. Soft-wrap completion and the 4K staging bound remain enforced by
+//! `TranscriptStore`; viewport-only scrolling and an unterminated live last line produce no adapter
+//! event and therefore cannot enter this policy pipeline.
 
 use std::num::NonZeroU32;
 
@@ -107,7 +108,7 @@ pub enum RowDirective {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleDirective {
-    RowsRemoved(Vec<RowDirective>),
+    RowsRemoved { rows: Vec<RowDirective> },
     ClearHistoryAndStaging,
     InvalidateStaging,
     ParkPrimary,
@@ -116,15 +117,13 @@ pub enum LifecycleDirective {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResizePlan {
-    pub begin_cooldown: bool,
-    pub finalize_staging: bool,
+    pub begin_transaction: bool,
 }
 
 /// DESIGN.md §3.1 resize policy derived only from old/new terminal facts.
 pub fn plan_resize(old: (NonZeroU32, NonZeroU32), new: (NonZeroU32, NonZeroU32)) -> ResizePlan {
     ResizePlan {
-        begin_cooldown: old != new,
-        finalize_staging: old.0 != new.0,
+        begin_transaction: old != new,
     }
 }
 
@@ -133,11 +132,12 @@ pub fn plan_resize(old: (NonZeroU32, NonZeroU32), new: (NonZeroU32, NonZeroU32))
 /// representable.
 pub fn classify(event: AdapterEvent) -> LifecycleDirective {
     match event {
-        AdapterEvent::RowsRemoved { context, rows } => LifecycleDirective::RowsRemoved(
-            rows.into_iter()
+        AdapterEvent::RowsRemoved { context, rows } => LifecycleDirective::RowsRemoved {
+            rows: rows
+                .into_iter()
                 .map(|row| classify_row(context, row))
                 .collect(),
-        ),
+        },
         AdapterEvent::ClearHistory => LifecycleDirective::ClearHistoryAndStaging,
         AdapterEvent::Reset | AdapterEvent::Deccolm => LifecycleDirective::InvalidateStaging,
         AdapterEvent::PrimaryParked => LifecycleDirective::ParkPrimary,
@@ -251,10 +251,10 @@ mod tests {
     }
 
     #[test]
-    fn width_change_forces_staging_finalize_but_height_only_change_does_not() {
+    fn any_dimension_change_begins_a_vendor_owned_resize_transaction() {
         let nz = |value| NonZeroU32::new(value).unwrap();
-        assert!(plan_resize((nz(80), nz(24)), (nz(100), nz(30))).finalize_staging);
-        assert!(!plan_resize((nz(80), nz(24)), (nz(80), nz(30))).finalize_staging);
-        assert!(!plan_resize((nz(80), nz(24)), (nz(80), nz(24))).begin_cooldown);
+        assert!(plan_resize((nz(80), nz(24)), (nz(100), nz(30))).begin_transaction);
+        assert!(plan_resize((nz(80), nz(24)), (nz(80), nz(30))).begin_transaction);
+        assert!(!plan_resize((nz(80), nz(24)), (nz(80), nz(24))).begin_transaction);
     }
 }

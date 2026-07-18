@@ -30,7 +30,7 @@
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("launch", "type", "key", "capture", "close")]
+  [ValidateSet("launch", "type", "key", "capture", "close", "wheel", "resize")]
   [string]$Cmd,
   [int]$ProcId = 0,
   [string]$Text = "",
@@ -38,6 +38,9 @@ param(
   [string]$Out = "$env:TEMP\ui-probe.png",
   [int]$Margin = 0,
   [int]$WaitSeconds = 15,
+  [int]$Delta = 3,
+  [int]$W = 0,
+  [int]$H = 0,
   [switch]$TraceDpi
 )
 
@@ -107,6 +110,19 @@ public class Probe {
     var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = 0, dwFlags = KEYEVENTF_KEYUP };
     SendInput(2, new INPUT[] { down, up }, Marshal.SizeOf(typeof(INPUT)));
   }
+  /* Discovered 2026-07-17: unlike synthetic KEYBOARD events, synthetic mouse
+     WHEEL events DO reach winit — scrollback can be driven autonomously. Same
+     safety law as typing: foreground-verified before anything is sent. */
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, int data, UIntPtr extra);
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+  public static void Wheel(int notches) {
+    int dir = notches < 0 ? -120 : 120;
+    for (int i = 0; i < System.Math.Abs(notches); i++) {
+      mouse_event(0x0800, 0, 0, dir, UIntPtr.Zero);
+      System.Threading.Thread.Sleep(60);
+    }
+  }
+  [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
 }
 '@
 
@@ -154,6 +170,25 @@ switch ($Cmd) {
     $g.CopyFromScreen($x, $y, 0, 0, $bmp.Size)
     $bmp.Save($Out); $g.Dispose(); $bmp.Dispose()
     "captured ${w}x${hh} (margin $Margin) -> $Out"
+  }
+  "wheel" {
+    $h = Get-AppWindow $ProcId
+    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not scrolling blind" }
+    $r = New-Object PRECT
+    [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+    [Probe]::SetCursorPos([int](($r.L + $r.R) / 2), [int](($r.T + $r.B) / 2)) | Out-Null
+    Start-Sleep -Milliseconds 150
+    [Probe]::Wheel($Delta)   # positive = scroll up (into history), negative = down
+    "wheeled $Delta notches on pid=$ProcId (foreground verified)"
+  }
+  "resize" {
+    # NOT $h: PowerShell variables are case-INsensitive, so $h would overwrite
+    # the -H height parameter with the HWND (real incident 2026-07-18: resized
+    # a window to 65595px tall and took the app down with it).
+    $hwndR = Get-AppWindow $ProcId
+    if ($W -le 0 -or $H -le 0) { throw "resize needs -W and -H" }
+    [Probe]::SetWindowPos($hwndR, [IntPtr]::Zero, 60, 60, $W, $H, 0x0004) | Out-Null
+    "resized pid=$ProcId to ${W}x${H}"
   }
   "close" {
     try { Stop-Process -Id $ProcId -Force -ErrorAction Stop } catch {}

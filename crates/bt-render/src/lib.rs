@@ -12,7 +12,7 @@ use std::{
 
 use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
 use bt_unicode::{cluster_width, graphemes};
-use bt_viewport::{SUBPIXELS_PER_PX, ViewportFrame};
+use bt_viewport::{FrameShapeError, SUBPIXELS_PER_PX, ViewportFrame};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
@@ -23,8 +23,9 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
-pub use theme::DEFAULT_BACKGROUND_RGB;
 use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB, DEFAULT_FOREGROUND_RGB};
+pub use theme::{DEFAULT_BACKGROUND_RGB, background_rgb};
+use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
 
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
@@ -123,6 +124,25 @@ impl CellMetrics {
             .clamp(1.0, u32::MAX as f64);
         NonZeroU32::new(value as u32).expect("DPI scale is clamped above zero")
     }
+
+    /// Reusable physical-pixel to terminal-cell hit test. Padding is excluded and callers supply
+    /// the currently displayed grid bounds, so the result is safe for selection and hyperlinks.
+    pub fn hit_test(&self, x: f64, y: f64, columns: u32, rows: u32) -> Option<GridHit> {
+        let x = x as f32 - self.padding_px;
+        let y = y as f32 - self.padding_px;
+        if x < 0.0 || y < 0.0 {
+            return None;
+        }
+        let column = (x / self.cell_width_px).floor() as u32;
+        let row = (y / self.cell_height_px).floor() as u32;
+        (column < columns && row < rows).then_some(GridHit { row, column })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GridHit {
+    pub row: u32,
+    pub column: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -156,12 +176,17 @@ pub struct ComposedFrame {
 ///
 /// The terminal grid remains the sole authority for committed cell width. Preedit is transient UI,
 /// but it consumes the same grapheme width oracle so its caret does not jump when text commits.
-pub fn compose_preedit(frame: &ViewportFrame, preedit: Option<&Preedit>) -> ComposedFrame {
-    let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty()) else {
-        return ComposedFrame {
+pub fn compose_preedit(
+    frame: &ViewportFrame,
+    preedit: Option<&Preedit>,
+) -> Result<ComposedFrame, FrameShapeError> {
+    frame.validate_shape()?;
+    let Some(preedit) = preedit.filter(|preedit| !preedit.text.is_empty() && frame.cursor.visible)
+    else {
+        return Ok(ComposedFrame {
             frame: frame.clone(),
             ime_caret: frame.cursor,
-        };
+        });
     };
 
     let mut composed = frame.clone();
@@ -177,10 +202,10 @@ pub fn compose_preedit(frame: &ViewportFrame, preedit: Option<&Preedit>) -> Comp
     );
     overlay_preedit_cells(&mut composed, preedit);
     composed.cursor = ime_caret;
-    ComposedFrame {
+    Ok(ComposedFrame {
         frame: composed,
         ime_caret,
-    }
+    })
 }
 
 fn valid_cursor_byte(text: &str, requested: usize) -> usize {
@@ -327,8 +352,14 @@ pub struct LatestFrameSlot {
 }
 
 impl LatestFrameSlot {
-    pub fn publish(&mut self, frame: ViewportFrame, trigger: FrameTrigger) {
+    pub fn publish(
+        &mut self,
+        frame: ViewportFrame,
+        trigger: FrameTrigger,
+    ) -> Result<(), FrameShapeError> {
+        frame.validate_shape()?;
         self.overwrites += u64::from(self.pending.replace((frame, trigger)).is_some());
+        Ok(())
     }
 
     pub fn take(&mut self) -> Option<(ViewportFrame, FrameTrigger)> {
@@ -342,6 +373,8 @@ impl LatestFrameSlot {
 
 #[derive(Debug, Error)]
 pub enum RenderError {
+    #[error("non-rectangular frame: {0}")]
+    FrameShape(#[from] FrameShapeError),
     #[error("wgpu error: {0}")]
     Wgpu(String),
     #[error("glyph rendering failed: {0}")]
@@ -659,6 +692,7 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    max_texture_dimension_2d: u32,
     configured_size: (u32, u32),
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -676,8 +710,10 @@ pub struct Renderer {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PresentationGeometry {
-    /// Physical pixel size requested by the current surface configuration.
+    /// Effective physical pixel size used by the current surface configuration.
     pub swapchain_size: (u32, u32),
+    /// Per-axis device limit applied to the swapchain size.
+    pub max_texture_dimension_2d: u32,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -722,7 +758,8 @@ impl Renderer {
             .map_err(|error| RenderError::Wgpu(error.to_string()))?;
         let device_time = phase_started.elapsed();
         let phase_started = Instant::now();
-        let swapchain_size = physical_client_size(width, height);
+        let max_texture_dimension_2d = device.limits().max_texture_dimension_2d;
+        let swapchain_size = surface_config_size(width, height, max_texture_dimension_2d);
         let mut config = surface
             .get_default_config(&adapter, swapchain_size.0, swapchain_size.1)
             .ok_or_else(|| RenderError::Wgpu("surface has no default configuration".to_owned()))?;
@@ -756,6 +793,7 @@ impl Renderer {
             device,
             queue,
             config,
+            max_texture_dimension_2d,
             configured_size: swapchain_size,
             font_system,
             swash_cache,
@@ -794,6 +832,7 @@ impl Renderer {
     pub fn presentation_geometry(&self) -> PresentationGeometry {
         PresentationGeometry {
             swapchain_size: (self.config.width, self.config.height),
+            max_texture_dimension_2d: self.max_texture_dimension_2d,
         }
     }
 
@@ -801,7 +840,7 @@ impl Renderer {
         if width == 0 || height == 0 {
             return Ok(());
         }
-        let swapchain_size = physical_client_size(width, height);
+        let swapchain_size = surface_config_size(width, height, self.max_texture_dimension_2d);
         self.config.width = swapchain_size.0;
         self.config.height = swapchain_size.1;
         Ok(())
@@ -820,6 +859,7 @@ impl Renderer {
         frame: &ViewportFrame,
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
+        frame.validate_shape()?;
         self.viewport.update(
             &self.queue,
             Resolution {
@@ -827,7 +867,7 @@ impl Renderer {
                 height: self.config.height,
             },
         );
-        self.prepare_text_rows(frame);
+        self.prepare_text_rows(frame)?;
         let padding = self.metrics.padding_px;
         let metrics = self.metrics;
         let text_right =
@@ -1000,8 +1040,8 @@ impl Renderer {
         Ok(PresentOutcome::Presented(receipt))
     }
 
-    fn prepare_text_rows(&mut self, frame: &ViewportFrame) {
-        let columns = frame.columns.get() as usize;
+    fn prepare_text_rows(&mut self, frame: &ViewportFrame) -> Result<(), RenderError> {
+        let source_rows = text_row_cells(frame)?;
         let rows = frame.rows.get() as usize;
         let metrics = self.metrics;
         while self.text_rows.len() < rows {
@@ -1013,9 +1053,14 @@ impl Renderer {
         }
         self.text_rows.truncate(rows);
 
-        for (row_index, row) in self.text_rows.iter_mut().enumerate() {
-            let start = row_index * columns;
-            let cells = &frame.cells[start..start + columns];
+        for (row_index, (row, source_cells)) in
+            self.text_rows.iter_mut().zip(source_rows).enumerate()
+        {
+            let status_cells = (row_index + 1 == rows)
+                .then_some(frame.status_text.as_deref())
+                .flatten()
+                .map(|status| status_row_cells(source_cells, status));
+            let cells = status_cells.as_deref().unwrap_or(source_cells);
             if !row_needs_reshaping(&row.cells, cells) {
                 continue;
             }
@@ -1037,6 +1082,7 @@ impl Renderer {
             row.cells.clear();
             row.cells.extend_from_slice(cells);
         }
+        Ok(())
     }
 
     fn handle_surface_failure(
@@ -1074,6 +1120,29 @@ impl Renderer {
             let (_, background) = resolve_colors(&cell.style);
             if background != default_background() {
                 rects.push(self.cell_rect(index / columns, index % columns, background));
+            }
+        }
+        for span in &frame.selection_spans {
+            let start = span.start_column.min(frame.columns.get()) as usize;
+            let end = span.end_column.min(frame.columns.get()) as usize;
+            if end > start && span.row < frame.rows.get() {
+                rects.push(self.cell_rect_span(
+                    span.row as usize,
+                    start,
+                    end - start,
+                    DEFAULT_SELECTION_BACKGROUND_RGB,
+                ));
+            }
+        }
+        if let Some(status) = frame.status_text.as_deref() {
+            let width = status.chars().count().min(columns);
+            if width != 0 {
+                rects.push(self.cell_rect_span(
+                    frame.rows.get() as usize - 1,
+                    columns - width,
+                    width,
+                    DEFAULT_STATUS_BACKGROUND_RGB,
+                ));
             }
         }
         if frame.cursor.visible
@@ -1197,6 +1266,31 @@ impl Renderer {
             color: rect_gpu_color_with_coverage(color, coverage),
         }
     }
+}
+
+/// Validate the complete render frame before exposing exact terminal rows to text shaping.
+///
+/// This is the shared slice boundary used by `Renderer::prepare_text_rows` and deterministic
+/// resize replay tests. `chunks_exact` is only constructed after the rectangularity proof.
+pub fn text_row_cells(
+    frame: &ViewportFrame,
+) -> Result<std::slice::ChunksExact<'_, CapturedCell>, FrameShapeError> {
+    frame.validate_shape()?;
+    Ok(frame.cells.chunks_exact(frame.columns.get() as usize))
+}
+
+fn status_row_cells(cells: &[CapturedCell], status: &str) -> Vec<CapturedCell> {
+    let mut displayed = cells.to_vec();
+    let characters = status.chars().collect::<Vec<_>>();
+    let shown = characters.len().min(displayed.len());
+    let start = displayed.len() - shown;
+    for (cell, character) in displayed[start..]
+        .iter_mut()
+        .zip(characters[characters.len() - shown..].iter())
+    {
+        *cell = CapturedCell::plain(character.to_string());
+    }
+    displayed
 }
 
 fn cell_bounds_px(metrics: CellMetrics, row: usize, column: usize) -> [f32; 4] {
@@ -1961,11 +2055,12 @@ fn default_foreground() -> [u8; 3] {
 }
 
 fn default_background() -> [u8; 3] {
-    DEFAULT_BACKGROUND_RGB
+    background_rgb()
 }
 
-fn physical_client_size(width: u32, height: u32) -> (u32, u32) {
-    (width.max(1), height.max(1))
+fn surface_config_size(width: u32, height: u32, max_texture_dimension_2d: u32) -> (u32, u32) {
+    let limit = max_texture_dimension_2d.max(1);
+    (width.max(1).min(limit), height.max(1).min(limit))
 }
 
 fn resolve_colors(style: &CellStyle) -> ([u8; 3], [u8; 3]) {
@@ -2017,6 +2112,26 @@ fn indexed_color(index: u8) -> [u8; 3] {
 mod tests {
     use super::*;
     use bt_transcript::CapturedCell;
+
+    fn test_cell_anchors(count: usize) -> Vec<bt_viewport::CellAnchor> {
+        (0..count)
+            .map(|column| {
+                let anchor = bt_doc::ContentAnchor::Live {
+                    screen: bt_doc::ScreenId::Primary,
+                    point: bt_doc::GridPoint {
+                        row: 0,
+                        column: column as u32,
+                    },
+                    bias: bt_doc::Bias::Before,
+                    generation: bt_doc::GridGeneration(1),
+                };
+                bt_viewport::CellAnchor {
+                    start: anchor.clone(),
+                    end: anchor,
+                }
+            })
+            .collect()
+    }
 
     fn shape_narrow_for_test(
         cells: &[CapturedCell],
@@ -2537,6 +2652,33 @@ mod tests {
             }
         );
         assert_eq!(metrics.grid_for_pixels(0, 0).columns.get(), 1);
+        assert_eq!(
+            metrics.hit_test(8.0, 8.0, 80, 24),
+            Some(GridHit { row: 0, column: 0 })
+        );
+        assert_eq!(
+            metrics.hit_test(14.9, 24.9, 80, 24),
+            Some(GridHit { row: 0, column: 0 })
+        );
+        assert_eq!(
+            metrics.hit_test(15.0, 25.0, 80, 24),
+            Some(GridHit { row: 1, column: 1 })
+        );
+        assert_eq!(metrics.hit_test(4.9, 8.0, 80, 24), None);
+    }
+
+    #[test]
+    fn status_overlay_is_right_aligned_without_mutating_source_cells() {
+        let source = vec![CapturedCell::plain("x"); 6];
+        let displayed = status_row_cells(&source, "3 below");
+        assert_eq!(
+            displayed
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>(),
+            " below"
+        );
+        assert_eq!(source[0].text, "x");
     }
 
     #[test]
@@ -2579,6 +2721,9 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cell_anchors: test_cell_anchors(1),
+            selection_spans: Vec::new(),
+            status_text: None,
             layout_key: bt_doc_layout_key(),
             view_generation: bt_doc::ViewGeneration(1),
         };
@@ -2587,11 +2732,49 @@ mod tests {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         };
-        slot.publish(frame.clone(), trigger);
-        slot.publish(frame, trigger);
+        slot.publish(frame.clone(), trigger).unwrap();
+        slot.publish(frame, trigger).unwrap();
         assert_eq!(slot.overwrites(), 1);
         assert!(slot.take().is_some());
         assert!(slot.take().is_none());
+    }
+
+    #[test]
+    fn publish_composition_and_text_row_boundary_reject_non_rectangular_frames() {
+        let mut frame = ViewportFrame {
+            columns: NonZeroU32::new(2).unwrap(),
+            rows: NonZeroU32::new(2).unwrap(),
+            cells: vec![CapturedCell::plain(""); 4],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(4),
+            selection_spans: Vec::new(),
+            status_text: None,
+            layout_key: bt_doc_layout_key(),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        frame.cells.pop();
+        let trigger = FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Resize,
+        };
+
+        assert!(
+            LatestFrameSlot::default()
+                .publish(frame.clone(), trigger)
+                .is_err()
+        );
+        assert!(compose_preedit(&frame, None).is_err());
+        assert!(matches!(
+            text_row_cells(&frame),
+            Err(FrameShapeError::CellCount {
+                expected: 4,
+                actual: 3,
+            })
+        ));
     }
 
     fn bt_doc_layout_key() -> bt_doc::LayoutKey {
@@ -2630,7 +2813,19 @@ mod tests {
 
     #[test]
     fn campbell_defaults_and_explicit_ansi_palette_keep_distinct_color_paths() {
-        assert_eq!(default_background(), [0x0c, 0x0c, 0x0c]);
+        assert_eq!(
+            theme::parse_background_rgb("#123aBC"),
+            Some([0x12, 0x3a, 0xbc])
+        );
+        for invalid in ["123abc", "#123ab", "#123abcd", "#12xz89", "＃123abc"] {
+            assert_eq!(theme::parse_background_rgb(invalid), None);
+        }
+        assert_eq!(DEFAULT_BACKGROUND_RGB, [0x0c, 0x0c, 0x0c]);
+        let expected_background = std::env::var("BT_BG")
+            .ok()
+            .and_then(|value| theme::parse_background_rgb(&value))
+            .unwrap_or(DEFAULT_BACKGROUND_RGB);
+        assert_eq!(default_background(), expected_background);
         assert_eq!(default_foreground(), [0xcc, 0xcc, 0xcc]);
         assert_eq!(DEFAULT_CURSOR_RGB, [0xff, 0xff, 0xff]);
         assert_eq!(
@@ -2716,15 +2911,15 @@ mod tests {
     }
 
     #[test]
-    fn swapchain_size_is_always_exactly_the_physical_client_size() {
-        for physical_client in [(960, 600), (1440, 900), (1920, 1200), (2560, 1440)] {
+    fn surface_config_size_clamps_each_axis_to_the_device_limit() {
+        const LIMIT: u32 = 8192;
+        for (requested, expected) in [(0, 1), (1, 1), (8192, 8192), (8193, 8192), (65_464, 8192)] {
             assert_eq!(
-                physical_client_size(physical_client.0, physical_client.1),
-                physical_client
+                surface_config_size(requested, requested, LIMIT),
+                (expected, expected)
             );
         }
-        assert_eq!(physical_client_size(0, 0), (1, 1));
-        assert_ne!(physical_client_size(1920, 1200), (3840, 2160));
+        assert_eq!(surface_config_size(534, 65_464, LIMIT), (534, 8192));
     }
 
     #[test]
@@ -2803,6 +2998,9 @@ mod tests {
                 column: 2,
                 visible: true,
             },
+            cell_anchors: test_cell_anchors(16),
+            selection_spans: Vec::new(),
+            status_text: None,
             layout_key: bt_doc_layout_key(),
             view_generation: bt_doc::ViewGeneration(1),
         };
@@ -2812,7 +3010,8 @@ mod tests {
                 text: "nihao".to_owned(),
                 cursor_byte: Some(2),
             }),
-        );
+        )
+        .unwrap();
 
         assert_eq!(composed.ime_caret.column, 4);
         assert_eq!(composed.frame.cursor, composed.ime_caret);
@@ -2840,6 +3039,9 @@ mod tests {
                 column: 1,
                 visible: true,
             },
+            cell_anchors: test_cell_anchors(16),
+            selection_spans: Vec::new(),
+            status_text: None,
             layout_key: bt_doc_layout_key(),
             view_generation: bt_doc::ViewGeneration(1),
         };
@@ -2850,7 +3052,8 @@ mod tests {
                 text: text.to_owned(),
                 cursor_byte: Some(text.len()),
             }),
-        );
+        )
+        .unwrap();
 
         assert_eq!(composed.ime_caret.column, 6);
         assert_eq!(composed.frame.cells[1].text, "👨‍👩‍👧‍👦");
@@ -2967,6 +3170,9 @@ mod tests {
                 column: 0,
                 visible: true,
             },
+            cell_anchors: test_cell_anchors(3),
+            selection_spans: Vec::new(),
+            status_text: None,
             layout_key: bt_doc_layout_key(),
             view_generation: bt_doc::ViewGeneration(1),
         };

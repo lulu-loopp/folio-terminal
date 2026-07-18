@@ -166,12 +166,6 @@ pub struct CaptureResult {
     pub finalized: Vec<FinalizedLine>,
 }
 
-/// External event that requires every mutable logical-line candidate to freeze.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FinalizeReason {
-    WidthResize,
-}
-
 /// The only owner and quota authority for frozen terminal history.
 #[derive(Clone, Debug)]
 pub struct TranscriptStore {
@@ -219,6 +213,13 @@ impl TranscriptStore {
     pub fn frozen(&self) -> &VecDeque<FrozenLine> {
         &self.frozen
     }
+    /// Mutable scroll-out rows in capture order. Viewports may window these rows, but must never
+    /// treat them as frozen source or mutate them outside the transcript owner.
+    pub fn staged_rows(&self) -> impl Iterator<Item = &StagedRow> {
+        self.staging
+            .iter()
+            .flat_map(|candidate| candidate.rows.iter())
+    }
     pub fn tombstones(&self) -> &[TranscriptId] {
         &self.tombstones
     }
@@ -255,13 +256,7 @@ impl TranscriptStore {
             self.staging_rows -= candidate.rows.len();
             finalized.push(self.finalize(candidate, false));
         }
-        while self.staging_rows > self.staging_quota {
-            let Some(candidate) = self.staging.pop_front() else {
-                break;
-            };
-            self.staging_rows -= candidate.rows.len();
-            finalized.push(self.finalize(candidate, true));
-        }
+        finalized.extend(self.enforce_staging_quota());
 
         CaptureResult {
             staging_id: id,
@@ -269,14 +264,35 @@ impl TranscriptStore {
         }
     }
 
+    /// Freeze one harvested physical row as an independent wrap-split candidate.
+    ///
+    /// Resize-transaction harvest cannot prove whether a native `WRAPLINE` belongs to the next
+    /// repainted row. Keeping the original row flag preserves every boundary cell, while forcing a
+    /// candidate boundary prevents an observationally unrelated next row from being welded on.
+    pub fn capture_wrap_split(&mut self, row: CapturedRow) -> CaptureResult {
+        let id = StagingId(self.next_staging);
+        self.next_staging += 1;
+        let candidate = FreezeCandidate {
+            rows: vec![StagedRow { id, row }],
+            live_tail: None,
+        };
+        let finalized = vec![self.finalize(candidate, true)];
+        CaptureResult {
+            staging_id: id,
+            finalized,
+        }
+    }
+
     /// A width change never joins a staged head with a live-grid tail.
-    pub fn finalize_all_candidates(&mut self, reason: FinalizeReason) -> Vec<FinalizedLine> {
+    pub fn finalize_all_candidates(&mut self) -> Vec<FinalizedLine> {
         let candidates = self.staging.drain(..).collect::<Vec<_>>();
-        self.staging_rows = 0;
-        let wrap_split = matches!(reason, FinalizeReason::WidthResize);
+        self.staging_rows -= candidates
+            .iter()
+            .map(|candidate| candidate.rows.len())
+            .sum::<usize>();
         candidates
             .into_iter()
-            .map(|candidate| self.finalize(candidate, wrap_split))
+            .map(|candidate| self.finalize(candidate, true))
             .collect()
     }
 
@@ -348,6 +364,19 @@ impl TranscriptStore {
         }
         FinalizedLine { line, mappings }
     }
+
+    fn enforce_staging_quota(&mut self) -> Vec<FinalizedLine> {
+        let mut finalized = Vec::new();
+        while self.staging_rows > self.staging_quota {
+            let Some(candidate) = self.staging.pop_front() else {
+                break;
+            };
+            self.staging_rows -= candidate.rows.len();
+            let wrap_split = candidate.rows.last().is_some_and(|row| row.row.continues);
+            finalized.push(self.finalize(candidate, wrap_split));
+        }
+        finalized
+    }
 }
 
 fn normalize(
@@ -370,16 +399,25 @@ fn normalize(
             transcript_id: id,
             grapheme_base: GraphemeOffset(grapheme_base),
         });
-        if let Some(mark) = staged.row.shell_mark {
+        let CapturedRow {
+            mut cells,
+            continues,
+            shell_mark,
+        } = staged.row;
+        if let Some(mark) = shell_mark {
             shell_marks.push((fragment_start, mark));
         }
 
-        let mut cells = staged.row.cells;
-        while cells
-            .last()
-            .is_some_and(|c| !c.wide_spacer && c.text.chars().all(char::is_whitespace))
-        {
-            cells.pop();
+        // A WRAPLINE fragment owns every cell through its wrap boundary.  In particular a space
+        // in the final column is source text, not padding; trimming it turns "find path" into
+        // "findpath" when logical rows are later rejoined.  Only hard line ends trim padding.
+        if !continues {
+            while cells
+                .last()
+                .is_some_and(|c| !c.wide_spacer && c.text.chars().all(char::is_whitespace))
+            {
+                cells.pop();
+            }
         }
         for cell in cells.into_iter().filter(|c| !c.wide_spacer) {
             let start = text.len() as u32;
@@ -401,7 +439,7 @@ fn normalize(
         fragments.push(PhysicalFragment {
             byte_start: fragment_start,
             byte_end: text.len() as u32,
-            soft_wrapped: staged.row.continues,
+            soft_wrapped: continues,
         });
     }
 
@@ -440,8 +478,28 @@ mod tests {
         let first = store.capture(CapturedRow::plain("ab  ", true));
         assert!(first.finalized.is_empty());
         let second = store.capture(CapturedRow::plain("c", false));
-        assert_eq!(second.finalized[0].line.text, "abc");
+        assert_eq!(second.finalized[0].line.text, "ab  c");
         assert_eq!(second.finalized[0].line.fragments.len(), 2);
+    }
+
+    #[test]
+    fn soft_wrap_preserves_a_boundary_space_while_hard_end_trims_padding() {
+        let mut store = TranscriptStore::new(nz(8));
+        store.capture(CapturedRow::plain("find ", true));
+        let finalized = store.capture(CapturedRow::plain("path   ", false));
+        assert_eq!(finalized.finalized[0].line.text, "find path");
+    }
+
+    #[test]
+    fn harvested_wrap_split_preserves_boundary_cells_without_joining_the_next_row() {
+        let mut store = TranscriptStore::new(nz(8));
+        let first = store.capture_wrap_split(CapturedRow::plain("find ", true));
+        let second = store.capture_wrap_split(CapturedRow::plain("path", false));
+
+        assert_eq!(first.finalized[0].line.text, "find ");
+        assert!(first.finalized[0].line.wrap_split);
+        assert_eq!(second.finalized[0].line.text, "path");
+        assert_eq!(store.frozen().len(), 2);
     }
 
     #[test]
@@ -453,11 +511,7 @@ mod tests {
         assert!(overflow.finalized[0].line.wrap_split);
 
         store.capture(CapturedRow::plain("again", true));
-        assert!(
-            store.finalize_all_candidates(FinalizeReason::WidthResize)[0]
-                .line
-                .wrap_split
-        );
+        assert!(store.finalize_all_candidates()[0].line.wrap_split);
     }
 
     #[test]
@@ -496,9 +550,7 @@ mod tests {
             store.staged_tail(staged.staging_id),
             Some(&CapturedRow::plain("new", true))
         );
-        let finalized = store
-            .finalize_all_candidates(FinalizeReason::WidthResize)
-            .remove(0);
+        let finalized = store.finalize_all_candidates().remove(0);
         assert_eq!(finalized.line.text, "old");
         let removed = store.evict_oldest(1);
         assert_eq!(removed, vec![finalized.line.id]);

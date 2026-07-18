@@ -53,7 +53,9 @@ bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
 pollster = "0.4"
-portable-pty = "0.9"
+# Exact because a newer crates.io 0.9.x would otherwise out-resolve the local
+# loader patch and silently drop BetterTerminal's strict ConPTY sidecar policy.
+portable-pty = "=0.9.0"
 thiserror = "2"
 unicode-segmentation = "1"
 unicode-properties = { version = "0.1", default-features = false, features = ["emoji"] }
@@ -67,3 +69,4 @@ opt-level = 1
 
 [patch.crates-io]
 alacritty_terminal = { path = "vendor/alacritty_terminal" }
+portable-pty = { path = "vendor/conpty/portable-pty" }

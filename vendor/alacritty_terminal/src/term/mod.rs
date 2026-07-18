@@ -15,7 +15,7 @@ use log::{debug, trace};
 use unicode_width::UnicodeWidthChar;
 
 use crate::event::{Event, EventListener};
-use crate::grid::{Dimensions, Grid, GridIterator, Scroll};
+use crate::grid::{Dimensions, Grid, GridIterator, Row, Scroll};
 use crate::index::{self, Boundary, Column, Direction, Line, Point, Side};
 use crate::selection::{Selection, SelectionRange, SelectionType};
 use crate::term::cell::{Cell, Flags, LineLength};
@@ -30,6 +30,10 @@ use crate::vte::ansi::{
 pub mod cell;
 pub mod color;
 pub mod search;
+
+/// Native line indices are signed 32-bit. This is the largest transaction tail the grid can
+/// address without overflow; it is grown lazily and is not allocated up front.
+const RESIZE_TRANSACTION_HISTORY_LIMIT: usize = i32::MAX as usize;
 
 /// Events required by BetterTerminal's external transcript owner.
 ///
@@ -402,6 +406,10 @@ pub struct Term<T> {
     /// BetterTerminal M-1 hook for structured transcript lifecycle events.
     transcript_hook: Option<Arc<dyn Fn(TranscriptEvent) + Send + Sync>>,
 
+    /// While true, the primary grid's native scrollback is the sole owner of the complete mutable
+    /// resize tail. BetterTerminal harvests it exactly once when the transaction closes.
+    resize_transaction: bool,
+
     /// Current title of the window.
     title: Option<String>,
 
@@ -490,6 +498,55 @@ impl<T> Term<T> {
         self.transcript_hook = hook;
     }
 
+    /// Give the primary grid exclusive ownership of scroll-out for a resize transaction.
+    pub fn begin_resize_transaction(&mut self) {
+        if self.resize_transaction {
+            return;
+        }
+        self.resize_transaction = true;
+        self.primary_grid_mut()
+            .update_history(RESIZE_TRANSACTION_HISTORY_LIMIT);
+    }
+
+    /// Atomically harvest the primary mutable tail and restore steady-state scrollback=0.
+    pub fn finish_resize_transaction(&mut self) -> Vec<Row<Cell>> {
+        if !self.resize_transaction {
+            return Vec::new();
+        }
+        self.resize_transaction = false;
+        self.primary_grid_mut().take_history(0)
+    }
+
+    /// Clear transaction-owned history after ED3/reset without changing transaction ownership.
+    pub fn clear_resize_transaction_history(&mut self) {
+        if self.resize_transaction {
+            self.primary_grid_mut().clear_history();
+        }
+    }
+
+    pub fn resize_transaction_history_size(&self) -> usize {
+        if !self.resize_transaction {
+            return 0;
+        }
+        self.primary_grid().history_size()
+    }
+
+    fn primary_grid(&self) -> &Grid<Cell> {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            &self.inactive_grid
+        } else {
+            &self.grid
+        }
+    }
+
+    fn primary_grid_mut(&mut self) -> &mut Grid<Cell> {
+        if self.mode.contains(TermMode::ALT_SCREEN) {
+            &mut self.inactive_grid
+        } else {
+            &mut self.grid
+        }
+    }
+
     #[inline]
     pub fn scroll_display(&mut self, scroll: Scroll)
     where
@@ -532,6 +589,7 @@ impl<T> Term<T> {
             scroll_region,
             event_proxy,
             transcript_hook: None,
+            resize_transaction: false,
             damage,
             config,
             grid,
@@ -800,7 +858,7 @@ impl<T> Term<T> {
 
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
 
-        // Move vi mode cursor with the content.
+        // Move vi mode cursor with the active content.
         let history_size = self.history_size();
         let mut delta = num_lines as i32 - old_lines as i32;
         let min_delta = cmp::min(0, num_lines as i32 - self.grid.cursor.point.line.0 - 1);
@@ -810,7 +868,9 @@ impl<T> Term<T> {
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
 
         if !is_alt && num_lines < old_lines {
-            // Mirror `Grid::shrink_lines`: only rows above the cursor are removed.
+            // Mirror `Grid::shrink_lines`: only rows above the cursor are removed. During a resize
+            // transaction these cells remain owned by native history; the event is just the
+            // ephemeral anchor-rebase fact and is never a second persistent representation.
             let removed_count =
                 (self.grid.cursor.point.line.0 as usize + 1).saturating_sub(num_lines);
             if removed_count > 0 {

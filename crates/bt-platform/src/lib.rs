@@ -10,33 +10,65 @@ pub struct WindowRect {
     pub bottom: i32,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WheelScrollAmount {
+    Lines(u32),
+    Page,
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use std::{ffi::c_void, sync::OnceLock};
 
     use windows::Win32::{
-        Foundation::{COLORREF, GetLastError, HGLOBAL, HWND, RECT, SetLastError, WIN32_ERROR},
+        Foundation::{
+            COLORREF, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, RECT, SetLastError,
+            WIN32_ERROR,
+        },
         Graphics::Gdi::{CreateSolidBrush, DeleteObject, HGDIOBJ},
         System::{
             DataExchange::{
-                CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+                CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+                OpenClipboard, SetClipboardData,
             },
-            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         },
         UI::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::GetKeyboardLayout,
             WindowsAndMessaging::{
-                CreateCaret, DestroyCaret, GCLP_HBRBACKGROUND, GetWindowRect, SetCaretPos,
-                SetClassLongPtrW,
+                CreateCaret, DestroyCaret, GCLP_HBRBACKGROUND, GetWindowRect,
+                SPI_GETWHEELSCROLLLINES, SetCaretPos, SetClassLongPtrW, SystemParametersInfoW,
             },
         },
     };
 
-    use super::{NonZeroIsize, WindowRect};
+    use super::{NonZeroIsize, WheelScrollAmount, WindowRect};
 
     static WINDOW_CLASS_BACKGROUND: OnceLock<Result<(), String>> = OnceLock::new();
     const CF_UNICODETEXT: u32 = 13;
+    const WHEEL_PAGESCROLL: u32 = u32::MAX;
+
+    pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
+        let mut lines = 0u32;
+        // SAFETY: SPI_GETWHEELSCROLLLINES writes one u32 to the provided live stack pointer.
+        unsafe {
+            SystemParametersInfoW(
+                SPI_GETWHEELSCROLLLINES,
+                0,
+                Some((&mut lines as *mut u32).cast()),
+                Default::default(),
+            )
+        }
+        .map_err(|error| {
+            format!("SystemParametersInfoW(SPI_GETWHEELSCROLLLINES) failed: {error}")
+        })?;
+        Ok(if lines == WHEEL_PAGESCROLL {
+            WheelScrollAmount::Page
+        } else {
+            WheelScrollAmount::Lines(lines)
+        })
+    }
 
     pub fn clipboard_text(hwnd: NonZeroIsize) -> Result<String, String> {
         let hwnd = HWND(hwnd.get() as *mut c_void);
@@ -78,6 +110,42 @@ mod windows_impl {
             match (result, close) {
                 (Ok(text), Ok(())) => Ok(text),
                 (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            }
+        }
+    }
+
+    pub fn set_clipboard_text(hwnd: NonZeroIsize, text: &str) -> Result<(), String> {
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let mut units = text.encode_utf16().collect::<Vec<_>>();
+        units.push(0);
+        // SAFETY: the event-loop thread owns the clipboard for this transaction. The movable
+        // allocation is locked only while copying the NUL-terminated UTF-16 payload. After a
+        // successful SetClipboardData Windows owns it; every earlier failure frees it locally.
+        unsafe {
+            OpenClipboard(Some(hwnd)).map_err(|error| format!("OpenClipboard failed: {error}"))?;
+            let result = (|| {
+                EmptyClipboard().map_err(|error| format!("EmptyClipboard failed: {error}"))?;
+                let byte_len = units.len() * size_of::<u16>();
+                let global = GlobalAlloc(GMEM_MOVEABLE, byte_len)
+                    .map_err(|error| format!("GlobalAlloc(clipboard text) failed: {error}"))?;
+                let pointer = GlobalLock(global).cast::<u16>();
+                if pointer.is_null() {
+                    let error = GetLastError().0;
+                    let _ = GlobalFree(Some(global));
+                    return Err(format!("GlobalLock(clipboard text) failed: {error}"));
+                }
+                std::ptr::copy_nonoverlapping(units.as_ptr(), pointer, units.len());
+                let _ = GlobalUnlock(global);
+                if let Err(error) = SetClipboardData(CF_UNICODETEXT, Some(HANDLE(global.0))) {
+                    let _ = GlobalFree(Some(global));
+                    return Err(format!("SetClipboardData(CF_UNICODETEXT) failed: {error}"));
+                }
+                Ok(())
+            })();
+            let close = CloseClipboard().map_err(|error| format!("CloseClipboard failed: {error}"));
+            match (result, close) {
+                (Ok(()), Ok(())) => Ok(()),
+                (Err(error), _) | (Ok(()), Err(error)) => Err(error),
             }
         }
     }
@@ -229,5 +297,5 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     ImeSystemCaret, clipboard_text, get_dpi_for_window, get_window_rect,
-    install_window_class_background,
+    install_window_class_background, set_clipboard_text, wheel_scroll_amount,
 };

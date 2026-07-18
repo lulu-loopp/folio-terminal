@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 bt-doc = { path = "../bt-doc" }
 bt-transcript = { path = "../bt-transcript" }
+bt-unicode = { path = "../bt-unicode" }
 
 [lints]
 workspace = true

@@ -9,10 +9,12 @@ use crate::{
     ScreenId, Selection,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveRowRemoval {
     pub row: u32,
     pub staging: Option<(StagingId, SourceGeneration)>,
+    /// Terminal cell column to source-grapheme offset. Wide spacers repeat their lead offset.
+    pub grapheme_offsets: Vec<GraphemeOffset>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -58,6 +60,24 @@ impl HistoryDocument {
         self.selection = Some(Selection { start, end });
     }
 
+    pub fn clear_selection(&mut self) {
+        if let Some(selection) = self.selection.take() {
+            self.anchors.remove(&selection.start);
+            self.anchors.remove(&selection.end);
+        }
+    }
+
+    pub fn replace_selection(&mut self, start: ContentAnchor, end: ContentAnchor) {
+        if let Some(selection) = &self.selection {
+            self.anchors.insert(selection.start, start);
+            self.anchors.insert(selection.end, end);
+        } else {
+            let start = self.register_anchor(start);
+            let end = self.register_anchor(end);
+            self.selection = Some(Selection { start, end });
+        }
+    }
+
     /// DESIGN.md §3.2 capture transaction: migrate removed rows and rebase survivors atomically.
     pub fn capture_rows_transaction(
         &mut self,
@@ -84,7 +104,11 @@ impl HistoryDocument {
                             },
                             |(staging_id, source_gen)| ContentAnchor::Staging {
                                 id: staging_id,
-                                offset: GraphemeOffset(point.column),
+                                offset: removal
+                                    .grapheme_offsets
+                                    .get(point.column as usize)
+                                    .copied()
+                                    .unwrap_or(GraphemeOffset(point.column)),
                                 bias: *bias,
                                 generation: source_gen,
                             },
@@ -200,7 +224,7 @@ impl HistoryDocument {
 
         if self.selection.as_ref().is_some_and(|selection| {
             deleted_anchors.contains_key(&selection.start)
-                && deleted_anchors.contains_key(&selection.end)
+                || deleted_anchors.contains_key(&selection.end)
         }) {
             self.selection = None;
         }
@@ -265,10 +289,12 @@ mod tests {
                 LiveRowRemoval {
                     row: 0,
                     staging: Some((StagingId(10), SourceGeneration(2))),
+                    grapheme_offsets: vec![GraphemeOffset(0); 8],
                 },
                 LiveRowRemoval {
                     row: 1,
                     staging: Some((StagingId(11), SourceGeneration(2))),
+                    grapheme_offsets: (0..8).map(GraphemeOffset).collect(),
                 },
             ],
             GridGeneration(3),

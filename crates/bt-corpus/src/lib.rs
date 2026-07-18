@@ -7,12 +7,15 @@ use std::{
 
 use thiserror::Error;
 
-const MAGIC: &[u8; 8] = b"BTCRP001";
+const MAGIC_V1: &[u8; 8] = b"BTCRP001";
+const MAGIC_V2: &[u8; 8] = b"BTCRP002";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Corpus {
     pub initial_cols: u16,
     pub initial_rows: u16,
+    /// Exact PTY implementation selected while recording; absent in legacy BTCRP001 files.
+    pub conpty_source: Option<String>,
     pub events: Vec<CorpusEvent>,
 }
 
@@ -48,13 +51,21 @@ pub enum CorpusError {
     ZeroChunk,
     #[error("corpus contains a zero terminal dimension")]
     ZeroDimension,
+    #[error("corpus ConPTY source metadata is too large")]
+    MetadataTooLarge,
+    #[error("corpus ConPTY source metadata is not UTF-8: {0}")]
+    BadMetadata(#[from] std::string::FromUtf8Error),
 }
 
 impl Corpus {
     pub fn write_to(&self, mut output: impl Write) -> Result<(), CorpusError> {
-        output.write_all(MAGIC)?;
+        output.write_all(MAGIC_V2)?;
         output.write_all(&self.initial_cols.to_le_bytes())?;
         output.write_all(&self.initial_rows.to_le_bytes())?;
+        let source = self.conpty_source.as_deref().unwrap_or_default().as_bytes();
+        let source_len = u32::try_from(source.len()).map_err(|_| CorpusError::MetadataTooLarge)?;
+        output.write_all(&source_len.to_le_bytes())?;
+        output.write_all(source)?;
         output.write_all(&(self.events.len() as u64).to_le_bytes())?;
         for event in &self.events {
             output.write_all(&event.at_micros.to_le_bytes())?;
@@ -81,11 +92,25 @@ impl Corpus {
     pub fn read_from(mut input: impl Read) -> Result<Self, CorpusError> {
         let mut magic = [0; 8];
         input.read_exact(&mut magic)?;
-        if &magic != MAGIC {
-            return Err(CorpusError::BadMagic);
-        }
+        let version = match &magic {
+            MAGIC_V1 => 1,
+            MAGIC_V2 => 2,
+            _ => return Err(CorpusError::BadMagic),
+        };
         let initial_cols = read_u16(&mut input)?;
         let initial_rows = read_u16(&mut input)?;
+        let conpty_source = if version == 2 {
+            let len = read_u32(&mut input)? as usize;
+            let mut source = vec![0; len];
+            input.read_exact(&mut source)?;
+            if source.is_empty() {
+                None
+            } else {
+                Some(String::from_utf8(source)?)
+            }
+        } else {
+            None
+        };
         let event_count = read_u64(&mut input)?;
         let mut events = Vec::with_capacity(event_count as usize);
         for _ in 0..event_count {
@@ -113,6 +138,7 @@ impl Corpus {
         Ok(Self {
             initial_cols,
             initial_rows,
+            conpty_source,
             events,
         })
     }
@@ -186,6 +212,9 @@ mod tests {
         Corpus {
             initial_cols: 80,
             initial_rows: 24,
+            conpty_source: Some(
+                "source=sidecar version=1.25.260710002-preview dll=test/conpty.dll".to_string(),
+            ),
             events: vec![
                 CorpusEvent {
                     at_micros: 2,
@@ -216,6 +245,19 @@ mod tests {
         let mut bytes = Vec::new();
         corpus.write_to(&mut bytes).unwrap();
         assert_eq!(Corpus::read_from(bytes.as_slice()).unwrap(), corpus);
+    }
+
+    #[test]
+    fn legacy_v1_corpus_reads_without_source_metadata() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC_V1);
+        bytes.extend_from_slice(&80_u16.to_le_bytes());
+        bytes.extend_from_slice(&24_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u64.to_le_bytes());
+
+        let corpus = Corpus::read_from(bytes.as_slice()).unwrap();
+        assert_eq!(corpus.conpty_source, None);
+        assert!(corpus.events.is_empty());
     }
 
     #[test]

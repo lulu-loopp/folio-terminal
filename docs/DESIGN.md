@@ -1,4 +1,24 @@
-# BetterTerminal 技术方案 v3.3（五轮 Codex 审核后）
+# BetterTerminal 技术方案 v3.7（M1.7 resize 单一所有权修订）
+
+> v3.7（M1.7 六轮、用户裁决）：撤销 v3.5/v3.6 的「resize 历史严格净零」产品承诺。
+> ConPTY 的公开 resize 面没有 repaint begin/end、request ID 或输出批次身份；逐 cell 完全相同的
+> 真输出与 repaint 在 VT 事实层不可区分，因此「repaint 全去除 + 真输出零丢失 + 真重复保留」
+> 信息论上不能同时保证。新硬边界是：**不崩、不焊接、不静默丢真实输出**。接受 WT 级结果：
+> 一次快速拖拽结束后可残留 0～几行由 vendor 原生 reflow 排整齐的干净内容副本。
+>
+> v3.7 采用单一所有权：resize 事务期间 vendor 原生 scrollback 独占完整可变尾部，事务结束
+> 一次性收割进转录；删除 v3.5/v3.6 的 reversible resize staging、settlement 与内容去重账本。
+> 本地 surface/live grid 逐个窗口事件跟随；winit 0.30.13 没有 enter/exit-size-move 事件，故以
+> 200ms `Resized` 静默提交唯一最终 ConPTY 尺寸，再等 PTY 输出静默 200ms 后收割。
+
+> v3.6（M1.7 四轮返工，**已被 v3.7 推翻，保留演进史**）：本地 PTY resize 打开静默事务；最后一次 resize 后 1200ms
+> 且最后一批输出后 200ms 才结算。事务内 full-screen scroll 不定稿；结算按逻辑行将
+> 待定稿尾部与 live 顶部去重，真输出保序入历史。补齐 clear 行位置过滤与 reflow 可证上界。
+
+> v3.5（M1.7 用户实测返工，**已被 v3.7 推翻，保留演进史**）：resize 驱逐改为可逆 staging；grow 从 staging 拉回
+> live，稳态 shrink-grow 不再冻结历史。resize staging 与 live 由 vendor 的原生 grid
+> reflow 联合重排，WRAPLINE 边界空格保留；空白几何行丢弃；resize 行数变化不参与
+> viewport 的“新内容到达”offset 补偿。冻结历史仍严格单向，不发生 History→Live thaw。
 
 > v3.3（回应第五轮）：消除三处规格矛盾——① 删除"冻结历史占据新增视觉空间"的残留表述
 > （变高=live 屏自身变大，可见历史量不变）；② 变矮的淘汰顺序以 alacritty 实际报告为准并给出
@@ -8,7 +28,7 @@
 > 审核记录：`docs/reviews/codex-review-design-v1.md` ~ `-v4.md`。
 > v3.1 要点：scrollback 所有权落定（alacritty=0，转录层唯一）、删除 thaw、ContentAnchor
 > 全序/affinity/降级、DetectionRevision 独立、背压容量契约、BlockSource 快照策略。
-> v3.2 修订要点（回应第四轮）：① **resize-grow 语义如实落定**——不回填历史，live 屏底部加
+> v3.2 修订要点（回应第四轮；其中 resize-grow 决策已由 v3.5 用户实测推翻）：① resize-grow 当时落定为不回填历史，live 屏底部加
 > 空行（alacritty 无历史语义，**不是 tmux 语义**，v3.1 表述有误）；回填/thaw 作为 post-M0
 > 可选增强单独立项；② staging 补 StagingId/跨界 resize 强制拆分/超限强制定稿；③ ContentAnchor
 > 增 Staging 变体、按 Screen 分命名空间的全序；④ worker 溢出/最低份额/按数量限流；⑤ G1/G3 补 oracle。
@@ -18,7 +38,7 @@
 ### 1.1 核心设计不变量
 
 1. **Canonical Transcript 是真相（对已冻结内容）**：冻结时构建规范转录（逻辑行文本 + soft-wrap 层次 + 样式/超链接 span + generation）。富内容是转录区间上的可撤销**装饰**。活动网格内容的真相是 grid 本身——两者由统一 `ContentAnchor` 桥接（§3.2）。
-2. **双平面 + 单向冻结 + 历史所有权唯一**：alacritty 的内部 scrollback 设为 **0**，适配层在行滚出可寻址区时捕获进转录暂存区——**转录层是历史的唯一所有者、唯一配额权威**。冻结严格单向（Live → Frozen，无 thaw）。**resize 变高不回填历史**（v3.2 如实落定）：live 屏在底部增加空行（与 alacritty 无历史时的行为一致；ConPTY 上报的完整尺寸与实际可寻址缓冲严格一致），提示符会离开窗口底部直到新输出填充——这**不是 tmux 语义**（tmux 会把历史拉回可寻址屏），是本设计接受的 UX 取舍；视口保持底部锚定，**变高后新增的视口空间由变大的 live 屏自身占据（含其底部空行），可见历史量不变**。若 dogfood 证明该取舍不可接受，"受控回填"（等价 thaw 的所有权迁移，走 §3.2 的反向锚点迁移协议）作为 **post-M0 可选增强**单独立项，不进入 M-1 范围。活动平面固定行高，只允许等高装饰（§4.3）。
+2. **双平面 + 单向冻结 + 可变尾部单一所有者**：稳态 alacritty scrollback=**0**，正常上滚由转录 staging/冻结历史拥有；resize 事务开始时先以 `wrap-split` 冻结既有 normal staging，再把 primary 原生 history limit 打开，此后直到事务结束，resize 驱逐与期间真实输出都只由 vendor scrollback 持有，转录中没有 snapshot/settlement 镜像。结束时 vendor history 按当前宽度一次性移交转录并立即恢复 scrollback=0。Frozen 仍严格 Live→Frozen、无 thaw，且始终是已冻结历史的唯一所有者/配额权威。活动平面固定行高，只允许等高装饰（§4.3）。
 3. **文档与投影分离**：`HistoryDocument`（转录+语义块+装饰意图，无布局）；每视口一份 `ViewportProjection`（布局、每视口高度树、滚动锚、选区、折叠）。
 4. **核心逻辑与 GUI 解耦**：纯 crate + 语料回放；核心只持 `ArtifactKey` 与测量值。
 5. **Damage 驱动调度，完整帧合成**：同 v3（present mode 探测、全事件源触发、`desired_maximum_frame_latency`）。
@@ -39,32 +59,70 @@
 
 同 v3（cell 宽度权威在 bt-term；延迟指标事件→present 提交，60/120/144Hz 分测，洪水注入法；M-1 做一次光子侧基线校准）。
 
+### 2.1 Unicode cell 宽度（M1 裁决）
+
+- **单一 oracle**：字符、extended grapheme cluster 与 IME preedit 的 cell 宽度全部由 `bt-unicode` 判定；renderer 对 committed 内容只消费 grid 的 `WIDE_CHAR` lead + spacer，不重算宽度。East Asian Ambiguous 默认窄；P2-7 若公开配置，只能切换同一 oracle 的 policy，禁止复制表或另起算法。
+- **聚类模式**：DEC private mode 2027 开启 UAX #29 extended grapheme clustering（`DECSET 2027`），`DECRST 2027` 恢复逐 scalar 兼容档，`DECRQM CSI ? 2027 $ p` 按标准分别回报 set/reset。单簇宽度由 `unicode-width 0.2` 的字符串规则判定并钳制到最多 2 cells；VS15/VS16、emoji modifier、ZWJ 与 regional-indicator 序列走同一路径。
+- **默认档（ConPTY 实测裁决，2026-07-17）**：默认关闭 2027。Windows 10.0.26200.8875 / system ConPTY 的原始 UTF-8 转发完整，但 Console cursor 簿记对 family ZWJ 为 11、skin tone 为 4、combining 为 2、flag 为 4；发送 2027 后簿记不变，同时 `CSI ? 2027 h/l` 会原样转发。因此 BetterTerminal 保持 legacy 默认，协商成功的程序显式开启聚类，避免未协商程序与 ConPTY 再增加一种默认差异。证据与复现见 `docs/M1-width-correctness.md`。
+
 ## 3. 内容模型
 
-### 3.1 内容生命周期事件表（v3.2：单向冻结版）
+### 3.1 内容生命周期事件表（v3.7：单一所有权版）
 
-冻结唯一路径：**primary screen 全屏正常上滚**使行离开可寻址区，适配层捕获该行进入**转录暂存区（staging）**；逻辑行（soft-wrap 链）在暂存区等待其全部物理片段离开可寻址区后，整条定稿冻结。
+稳态冻结路径不变：primary full-screen normal scroll 把物理行交给 bt-transcript 的 normal
+staging；soft-wrap 铭完整后定稿，4K staging 配额超限时最老候选以 `wrap-split` 强制定稿。
+改变的是 resize 期间的可变段归属：**同一可变物理行任何时刻只能有一个持久 owner**。
 
-**Staging 规格（v3.2 补全）**：staging 属 bt-transcript，配额 4K 物理行，是 FreezeCandidate 的存放位置。每条暂存行持有 `StagingId`（捕获序单调）+ 捕获时的完整 cell 数据（样式、wrap 标记）+ 与 grid 尾部的续接关系；定稿时记录 `StagingId → (TranscriptId, offset)` 映射供锚点迁移。两条强制规则消除跨界不确定性：
-- **跨界逻辑行遇宽度 resize → 强制拆分**：已移出片段立即定稿为独立逻辑行（带 `wrap-split` 标记），grid 内尾部成为新逻辑行的开头——staging 片段与 grid 尾部**永不联合 reflow**（stock alacritty 做不了联合 reflow，规则化比补丁化可靠；代价是横跨拆分点的公式不装饰，罕见可接受）。
-- **staging 超限 → 强制定稿**：最老暂存行即使逻辑行不完整也定稿（同 `wrap-split` 标记），配额永不阻塞捕获。
+**事务开始**：第一次实际 grid 尺寸变化清除 mutable selection，把已有 normal staging 以
+`wrap-split` 冻结，随后打开 primary vendor grid 的原生 history（惰性增长；上限取原生
+`Line=i32` 可寻址上限）。从此 resize 驱逐和 full-screen output scroll 只留在 vendor history；
+adapter 的 removed-row 副本只是一次性的 anchor-rebase 事实，不写入 snapshot、settlement 或
+transcript。alt screen 活跃时 owner 仍是停放的 primary grid。
 
-| 事件 | 动作 |
+**窗口/ConPTY coalescing**：winit 0.30.13 只提供 `WindowEvent::Resized`，没有 Win32
+`WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE` 等价的公开事件。每个事件都立即 resize swapchain 与本地
+Term grid，保证 surface/live 视觉跟随；App 仅保存最后 `(cols, rows, pixels)`。连续 200ms
+没有新 `Resized` 后才向 ConPTY 发这一个最终尺寸。若提交前又来事件，deadline 与最终值一起
+覆盖。§3.3 pane divider 的 debounce 由此推广到窗口级。
+
+**事务结束与收割**：最终 ConPTY 请求发出后，最后一批非空 PTY chunk 再静默 200ms 才结束；
+新 resize 会撤销“已到最终请求”状态并继续同一 owner 事务。结束时按 oldest→newest 一次性取出
+vendor history、恢复 history limit=0，再逐行移交 normal transcript 管线。由于 WRAPLINE 只是
+几何事实、不能证明 repaint 因果身份，收割时把每个物理行设为独立 `wrap-split` candidate；原始
+WRAPLINE 仍留在 fragment 上以保住末列 cell，但禁止与下一收割行合并。故可能拆开一条 soft line，
+却绝不拿旧 wrapped head 与另一真实 hard line拼接。全程不做
+文本/样式/时间去重，因此真实重复输出必保留，repaint 也可能形成 0～几行干净重复副本。
+
+**三条发布硬不变量**：
+
+1. frame builder 对 history、normal staging、live、padding 每一平面检查 `row.cells == columns`
+   且最终检查 `cells.len == anchors.len == columns*rows`；异宽行以 `FrameProjectionError` 排除。
+2. mutable row 的 owner 只能在 `transcript normal staging ↔ vendor native history` 边界转移，
+   禁止 backing/snapshot/settlement 并存。
+3. `LatestFrameSlot::publish`、IME composition、renderer `prepare_text_rows`、anchor/word/line
+   selection 都先校验矩形并返回可恢复错误；禁止用 slice panic 表达坏输入。
+
+**Trace/oracle**：每个事务按 ordinal + monotonic offset 记录 begin、本地 resize、最终 ConPTY
+request、PTY chunk、adapter 行原因与物理宽度、vendor tail 行数、harvest 宽度、每次 publish 的
+`columns/rows/cells/anchors`、end。确定性回放必须逐事件相等，并覆盖“多轮模态拖拽 → 最终 repaint
+scroll → 收割 → 滚轮上翻 → frame/selection/renderer 边界”。
+
+| 事件 | v3.7 动作 |
 |---|---|
-| 全屏正常上滚移出行 | 捕获 → staging；逻辑行完整后定稿冻结入转录 |
-| 逻辑行部分移出（soft-wrap 跨界） | 已移出片段留 staging **不定稿、不装饰**，直到尾部片段也移出；若尾部被改写，staging 片段随之更新（staging 仍属"可变"） |
-| 滚动区域（DECSTBM）IL/DL/上滚 | 掉出行**不捕获**（与 VT 语义一致），直接丢弃 |
-| 用户向上滚动 | 只动 viewport，绝不触发冻结/定稿 |
-| resize 变宽/变窄 | 转录不变（投影重算）；活动网格由 alacritty reflow；staging 内片段按捕获时数据保持，跨界逻辑行按强制拆分规则处理；**历史无回流** |
-| resize 变高 | **不回填**：live 屏底部加空行（alacritty 无历史语义；ConPTY 上报尺寸=实际可寻址缓冲），提示符暂离窗口底部属接受的取舍；视口底部锚定，可见历史量不变；受控回填为 post-M0 可选增强 |
-| resize 变矮 | **以 alacritty 实际报告的移除集合为准**：光标下方空行被裁剪时直接丢弃（不捕获）；自顶部上滚移出的非空行捕获进 staging。G1 oracle：被捕获集合 ≡ 视觉上从顶部消失的非空行集合 |
-| 反复 resize 抖动 | staging 定稿有 debounce 冷却；装饰任务在冷却内不启动 |
-| ED3（清 scrollback） | 原子删除转录+staging+块+索引+缓存；锚点按 §3.2 降级；留 tombstone |
-| 配额淘汰 | 与 ED3 同一删除管线（转录层是唯一配额，无双配额漂移） |
-| 进入 alt screen | primary 停放（park），staging 冻结计时暂停，检测任务暂停 |
-| 退出 alt screen | 恢复 primary generation；暂停任务 generation 校验后恢复或作废 |
-| RIS / DECCOLM | 活动屏与 staging 候选作废；已冻结历史保留（可配置） |
-| 无换行的最后一行 | 永不冻结；仅命令边界闭合后允许等高 inline 检测 |
+| 稳态 full-screen normal scroll | 捕获到 normal staging；逻辑行闭合定稿，未闭合片段保持可变；4K 超限 `wrap-split` |
+| resize 事务开始 | 冻结既有 normal staging；vendor primary native history 成为完整可变尾部唯一 owner |
+| 事务中的 local resize | 只 resize surface/Term，vendor 原生 reflow history+live；不写转录 |
+| `Resized` 静默 200ms | 只向 ConPTY 提交最后尺寸，并开始等待输出静默 |
+| 事务中的 full-screen output scroll | vendor history 保存真实终端事实；adapter event 只重定位 live anchor |
+| 最终请求及 PTY 输出静默 200ms | 一次收割 vendor history；逐物理行独立 wrap-split（保留 fragment WRAPLINE/cells）移交转录；恢复 vendor scrollback=0 |
+| 快速 shrink→grow 同一事务 | vendor 可从自身 history 拉回并重排；若最终 history 空则收割为空 |
+| 多次独立手势/ConPTY repaint | 不承诺历史净零；允许每手势 0～几行干净重复，断言无跨行焊接、无字符丢失 |
+| 滚动区域 IL/DL/局部上滚、alt screen scroll | 不进入 canonical primary history |
+| 用户滚轮上翻 | 只动 viewport；frame/selection/render 三层都执行矩形门禁 |
+| ED3 | 清 frozen + normal staging + 事务 vendor history；块/索引/缓存/锚点走同一删除降级管线 |
+| RIS / DECCOLM | 清 normal staging 与事务 vendor history；已冻结历史按既定配置保留 |
+| 配额淘汰 | 只由转录层执行，与 ED3 共用 tombstone/anchor 降级管线 |
+| 无换行的最后一行 | 稳态留 live；事务期随 vendor tail；不凭 resize 猜测定稿 |
 
 ### 3.2 统一坐标：ContentAnchor（v3.2 补全）
 
@@ -79,6 +137,7 @@ enum ContentAnchor {
 - **命名空间与全序（v3.2 修订）**：锚点按 Screen 分命名空间——只有 **primary screen** 参与文档全序：`History（转录文档序）< Staging（StagingId 捕获序）< Live(primary)（row, col）`；alt screen 的 Live 锚是独立命名空间，**不与文档序可比**（选区/搜索不跨 primary/alt）。跨平面比较即按此序。staging 定稿时 Staging 锚随映射表迁移为 History 锚（与持久锚点原子迁移同一事务）。
 - **Affinity**：边界锚带 `Bias::Before | After`（行尾/块边界的粘性），选区端点、滚动锚均携带。
 - **原子迁移：两步事务（v3.3 统一）**：**捕获时** Term actor 在捕获事务内重写持久锚点 Live→Staging；**定稿时**在定稿事务内重写 Staging→History（携带 §3.1 的映射表）。持久锚点 = 选区端点、滚动锚、无障碍节点、书签。**运行中的 worker 任务不重写**——任务携带 generation，完成时校验不匹配即丢弃（唯一机制，无同步重写承诺）。
+- **resize 事务例外（v3.7）**：vendor-owned tail 没有并行的 `Staging` 表示。adapter 报出的物理移除只把受影响的 `Live` 锚重定位到当前 grid generation；事务结束收割时才创建新的 `StagingId`，随后沿正常定稿映射迁入 `History`。因此锚点迁移不会暗中构造第二份 mutable owner。
 - **删除降级规则**：锚点所在区间被删（ED3/淘汰）→ 迁至**文档序上最近的后继**锚位（`bias=Before`）；无后继 → live screen 原点 `(0,0, Before)`。选区两端同时被删 → 选区清空。
 - 转录规范化同 v3（trailing blank 截断、wide spacer、grapheme 边界表、OSC 8/shell mark 随冻结保留、逻辑行→物理片段层次）。
 
@@ -94,7 +153,7 @@ DetectionRevision                                        // 解析器/检测器�
 LayoutCache 键控 (span, source_gen, detection_rev, LayoutKey)
 ```
 
-Pane/PTY 所有权同 v3：一 session 一可输入 live viewport（owner 决定 ConPTY 尺寸，拖分隔线 debounce 发 resize），其余投影只读；IME/鼠标/焦点/damage 按 ViewportId 归属；`PaneContent = TerminalViewport | NativeHostedPanel` day-1 预留。
+Pane/PTY 所有权同 v3：一 session 一可输入 live viewport（owner 决定 ConPTY 尺寸），其余投影只读；IME/鼠标/焦点/damage 按 ViewportId 归属；`PaneContent = TerminalViewport | NativeHostedPanel` day-1 预留。pane divider 与 OS 窗口 resize 共用 §3.1 的语义：本地投影逐帧跟随，ConPTY 只在 200ms 静默边界接收最终尺寸；新事件覆盖待发送值与 deadline。
 
 ### 3.4 块来源抽象（v3.1 定策略）
 
@@ -122,7 +181,7 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 ### 4.2 识别策略 / 4.3 等高 overlay 合成 / 4.4 测试策略
 
-同 v3（LaTeX 默认块级强定界；CommonMark 真解析；overlay 裁剪+pointer-transparent+相交让位原文+无障碍暴露原文）。测试新增：反复 resize 抖动、配额淘汰、RIS/DECCOLM、最后一行、staging 部分定稿等生命周期矩阵项（对齐 G1）。
+同 v3（LaTeX 默认块级强定界；CommonMark 真解析；overlay 裁剪+pointer-transparent+相交让位原文+无障碍暴露原文）。测试新增：反复 resize 抖动与人类节奏多手势 coalescing、vendor-tail 单 owner、收割 hard boundary、无焊接/无真实输出丢失/每手势有界干净重复、全平面矩形门禁、坏 frame 的 publish/selection/render 可恢复错误、trace 确定性回放、收割后滚轮上翻直达 renderer，以及配额淘汰、RIS/DECCOLM、alt、最后一行等生命周期矩阵项（对齐 G1）。
 
 ## 5. 数学渲染管线（M-1 spike）
 
@@ -136,15 +195,43 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 同 v3（布局三档手动固定 + 渐进披露默认；分屏 = 多投影 + 单 owner；egui/AccessKit/M2 去留门）。WebView2 补充（第三轮 MAJOR）：**external protocol 一律禁用**（`msteams:` 等弹确认都不给，直接拦截）；**web message bridge 默认关闭**（预览面板与终端无 JS 通信通道）；导航白名单默认仅 `http://localhost:*` 与 `http://127.0.0.1:*`，跳转其他 origin 需显式确认；下载/新窗口/权限请求默认拦截。
 
+### 7.0 内容 × 形态模型（2026-07-17 用户提出并共同定稿——本节是 §7.1 全部碎片裁决的总纲）
+
+**两条正交的轴。轴一:内容(是什么),三类一等公民,彼此平级**——**会话** Session(身份=profile+cwd+进程;状态=转录/live 网格/输入行)、**缓冲** Buffer(身份=文件路径 **或 无题(转录锚点)**——流式创生、尚无路径的内容即无题缓冲,「保存」=授予路径,同编辑器 untitled 传统;状态=内容/脏标/视图位置;含文本与图片,**终端里渲染的图片与预览里的同路径图片是同一份缓冲**,用户裁决勘误:不设独立"工件"类,内联是形态不是内容)、**场所** Folder(身份=root;状态=展开/选中/滚动)。**轴二:形态(装在哪),七级容器,彼此平级,按承诺递增**:瞬态面(hover)→ **内联锚定**(转录输出流里,跟随滚动;由输出流创生,不可拖入)→ 小窗(同窗口浮层,§7.1.2 模型)→ pane(树上座位)→ tab(工作区)→ 卡片(聚焦态待命密度)→ OS 窗口(M2+ 平台项)。
+
+**三条法则(对所有内容×形态成立)**:① **状态属于内容,随行不分叉**——容器不持有状态(缓冲池/待命池/flyout 携带全套状态,皆此法则实例);② **拖拽换容器,落点定容器**——载荷=内容身份;边缘=pane、标签条=tab、拖出主窗=OS 窗(M2)、文件夹=存副本(即授予/复制路径);③ **一切限制是政策不是结构**——任何内容进任何形态在模型上可行,不开放的组合是显式政策记录(可翻案)。当前政策位:**会话的小窗形态默认关**(用户裁决;开启场景=P1-9 Quake、盯 agent 置顶小窗),缓冲/无题缓冲的小窗形态为**已知缺口待补**;会话恒只有一个可输入视图(§3.3),多投影只读。flyout 的 peek→pin→dock 三级 = 形态梯度「瞬态→小窗→pane」的通用晋升路径,非 files 专利。特有性质:会话——输入所有权/IME/进程生死/注意力;缓冲——脏与保存生命周期、一 tab 一文件一份、干净逐出;场所——无保存概念。
+
+**压测补遗(2026-07-17 二轮,网页/视频/未来物候压测)**。分类判据一句话:**会吃输入、自己会动的=会话族;不吃输入、被动被看的=缓冲;用来找别的东西的=场所**。① **会话是族不是单类**:shell 会话、web 会话(活 WebView,受 v3.1 三禁约束)、AI 对话(P1-14)、直播/摄像头流皆族员,共享输入所有权/注意力/生命周期/卡片活内容;网页静态快照与 reader 渲染=缓冲(身份=URL);**视频文件=只读媒体缓冲,播放进度是内容状态随行不归零**(换形态接着放;同缓冲双视图=同一播放),直播流=会话族。② **所有权三层级**:内容属于 tab(现状,池随 tab)之上预留 **app 级全局宿主**(全局池)——AI 助手对话跨 tab 跟人走的归宿,P1-14 落地时拨开关不改架构。③ 总览/命令面板/通知中心**不是内容**,是观察模型本身的 chrome,不进矩阵(分界而非漏洞)。④ **界外清单(已知装不下,记档不设计)**:复合视图(diff 双缓冲一视图,元组身份破"一座位一内容")、内联交互组件(输出流里的可点组件使会话反成容器,内容套内容递归)、外部 HWND 嵌入(模型可算外来宿主会话,平台深水区)、多输入广播(跨内容动词,动词集无位)。
+
+### 7.1 UI 状态与交互规格（v3.4 新增，原型已验证）
+
+来源：`design/ui-mockup.html` 高保真原型 + 实现者视角审核（`docs/reviews/ui-mockup-review-2026-07-16.md`）+ 27 项逻辑排雷（`docs/reviews/ui-mockup-bughunt-2026-07-16.md`）。**本节是权威；原型是非规范性示例，两者有差异时以本节为准。** 所有数值为 DPI 无关逻辑像素（divider 视觉线为 1 逻辑像素,允许实现取整到物理像素以保锐利）。四条贯穿性纪律，写成行为不变量而非浏览器机制（每条都是原型里真实 bug 的墓志铭）：① **预览与提交共用同一个布局求解器**——蓝框展示的必须是松手后的真实矩形，两套几何必然漂移；② **手势期间命中目标保持身份、未变化的状态不得丢失**（选中/重命名/滚动位置不因无关重绘蒸发）；③ **弹出浮层由集中控制器互斥**——由打开方负责关闭其余，不依赖任何事件路由巧合；④ **实现为独立纯布局求解器,不模拟 CSS flex**（输入树+可用矩形+DPI+最小尺寸,输出叶子矩形）。指针流异常终止（pointer-cancel、失焦）时，进行中的拖拽/divider 调整必须无副作用回滚。⑤ **hover 原则**（用户裁决 2026-07-17,同日二次升格为产品核心差异点）：hover 不只是加速器,是本产品效率身份的一部分——多窗人人都有,把高频信息挂上滑动路径没人做。理论依据(KLM):交互成本的大头是操作**类型切换**处的心理准备(M≈1.35s),不是点击本身;hover 查询是单一动作块零边界,且**查询免提交**(无状态变更、无撤销负担,移开即散)故可自由探索。两条可执行细则:**a. 查询 hover 化、提交必点击**——一切"看"(预览/状态/布局示意)尽量 hover 可达,一切"改"(关闭/保存/换位)必须显式点击,提交摩擦是特性;**b. 交互成本预算**——高频任务 ≤ 2 次滑动 + 2 次点击,滑动/点击模式交替 ≤ 1 次,新功能入规格须自报预算账。约束不变:hover 无法被键盘替代,**任何信息或操作不得只经 hover 可达**,每个 hover 面必须有点击/键盘等价路径;hover 面自身守「意图延迟 + 不可交互 + 离开即散」。
+
+**7.1.1 分屏布局。** 二叉树 `split{dir,ratio}|leaf`。常数：`MIN_PANE_W=260`、`MIN_PANE_H=120`、`FILES_W=240`、`FILES_W_MIN=170`、divider 视觉 1px/命中 7px、根 rim 48px、pane 边缘区 35%。**固定列语义**：files 叶按像素宽参与布局（不占比例份额）；row 内全固定子树 = 宽度求和+divider；**col 内全固定子树 = 成员最大宽**（纵向堆叠不丢固定性）；双固定 row 的尾侧吸收盈余（消灭死白，与预览同语义）。**Files 可拖到任意方向**（用户裁决）：处于 col 切分的纵向槽位时占满该槽全宽，固定宽只在 row 轴成立。divider 拖拽的夹取下限 = 两侧**子树需求**（同向求和+divider、异向取 max），不是单 pane 最小值。run 加入/离开成员时按 demand 重新均分（i3/Zellij 语义，如实承认覆盖手拖比例）。中心 drop：pane 拖拽 = 双向 swap、tab 拖拽 = replace（被替者回标签条），**蓝框内显示文字「Swap panes / Replace pane」**；整 tab 拖拽的预览画整棵子树的真实脚印。不可满足让步顺序：files 240→170 → 窗口最小宽由布局树需求决定 → OS 强制更小时保 focused pane、其余折叠占位，不静默销毁树。**文件拖出**（用户裁决 2026-07-17 两轮定稿,原型已验证）:文件树/浮窗的文件行是拖拽源,**载荷=文件身份(路径),内部拖拽只讲「视图」动词**——任意 pane 边缘/根 rim=按既有 split 语义裂出预览 pane(共享池缓冲,已开文件带着未保存修改到达,绝不分叉);预览 pane 中心=在该 pane 打开;**其余中心(含终端)一律诚实拒绝**。首版曾做「终端中心=插路径」,用户裁决砍除:pane/tab 拖拽的语言是「中心=此位置内容变化」,文本动词混进来使同一手势语义分叉。**插路径改由文件行右键菜单承载**(Open preview / Copy path / Insert path into terminal——插入带引号路径到焦点终端输入),显式、可发现、可键盘化。OS 资源管理器**外部拖入**终端时保留业界约定的插路径(与内部拖拽语言不冲突,M2+ 平台项,OLE 拖出同记);P1-14 AI 助手面是第三落点(**附内容**,如 Claude Code 粘图之于模型通道——PTY 只载文本,模型通道载内容,用户裁决确认 agent 时代必须有)。Esc 中途取消零副作用;目录行暂不作拖拽源(目录动词矩阵未裁决)。**两条补充裁决(2026-07-17 用户实测追加)**:① 文件/图片拖到**标签条 = 成为新 tab**(新工作区含单个预览 pane,缓冲生于新 tab 自己的池,插位钳在 pinned 分区之后);② 终端来源的拖拽有**「原地」取消区**——指针悬回来源图片的矩形时不出任何分屏 zone,松手即放回(否则源 pane 自己的边缘会截胡"算了"的松手)。**终端内联图片**(媒体交互原型,用户需求 2026-07-17):终端输出里的图片是**带路径身份的工件**——点击=开预览(入共享池);拖出=与文件行同一套视图动词,**另加一个动词:files pane 中心=「存入该文件夹」**(仍是空间动词,不破坏"中心=内容变化"语言);右键=文件菜单+Save as…。原生图片协议片(排在滚动/复制之后)照此交互规格实现,图片锚定在转录行上随内容滚动。
+
+**7.1.2 文件树浮层（三级升级）。** hover 瞬态 peek（intent 180ms；离开宽限 220ms、左侧 420ms；命中容差 8px；触发器→浮层间距 6px；视口安全边距 8px；不抢键盘焦点、不切 tab、自动消散）→ 点击撕下为 pinned 浮窗（可拖拽/缩放，最小 200×150，默认宽 264 × 高 min(主窗口可用内容高的 62%, 460)；**只被 ×/Esc(顶层时)/Dock/再点触发器关闭**，切 tab、关无关 tab、新建 tab 均不动它；主窗口缩小自动重钳位——平移回视口、尺寸不变，与最小尺寸冲突时允许临时小于 200×150）→ Dock 成面板。**全窗口单例**：同时至多一个浮层；对另一触发器的操作重定向既有浮层。root 在召出时从**该触发器所属终端的 cwd** 捕获；撕下后浮窗与来源叶完全独立（来源 pane/tab 消失不影响它）。**Dock 落当前正在看的 tab**（用户裁决 2026-07-17：浮窗悬在哪就落哪，不跳回出生 tab）。Dock/pop-out 双向携带 root/展开集/选中/列宽/**滚动位置**。**首版窗口模型 = 同窗口合成层**，不出主窗口边界；系统子窗口留待真实需求证明。进出动画 120ms，reduced-motion 下关闭。
+
+**7.1.3 文件树。** root 在打开时显式捕获，此后绝不自动跟随 cwd（生态共识：自动重根是最惊吓的行为）。键盘 = VS Code tree 契约（↑↓ 移动、→ 展开/进入、← 折叠/回父、Enter/Space 动作）。**文件上 Enter/双击 = 打开预览**（用户裁决）；预览的最小契约先钉死：**tab 内单实例 preview pane 复用**（再开另一文件换内容不增殖）、打开时键盘焦点不离开树（浏览连续性）、二进制/超大文件/网络路径显示「无预览」卡片而非尝试加载（网络路径默认不自动预览,同 §3.4 的附件纪律）。**文本类预览可就地轻编辑**（用户裁决 2026-07-17）：定位 = quick edit,**不是 IDE**——纯文本编辑、显式保存（Ctrl+S/按钮,原子写）、脏标记;不做 LSP/多光标/跨文件操作,复杂编辑走「在外部编辑器打开」;产品端需处理磁盘并发修改（编辑期间文件被改 → 提示）与超大文件只读降级。**多文件模型 = tab 级共享缓冲池,pane 是视图**（用户裁决 2026-07-17,推翻同日早先的「编辑即转正」,并把缓冲归属从 pane 上移到 tab）：**缓冲属于文件**——每个 tab 一个池,一个文件恰好一份缓冲;所有预览 pane 的文件名切换器（下拉,带各自脏点与开合箭头）列出同一份历史;**同一文件在两个 pane 打开即同一份缓冲**,编辑不可能分叉;未保存修改跨切换保留、**切换零提示零打断**。池是「带活缓冲的历史」而非第二套标签系统:干净且未被任何 pane 显示的缓冲有上限（原型 8）自动逐出、按需再生,脏缓冲与在显缓冲永不逐出。**pane 增殖只经显式图钉**（编辑不改变 pane 生命周期）。**hover 一瞥卡**（用户裁决 2026-07-17,原型已验证）:悬停文件行 350ms(与 tab hover 同常数)出只读一瞥卡——**构造上不可交互**(pointer-events 穿透,杜绝闪烁与指针劫持;想交互 = Enter/双击进真预览 pane 的信号);类型判定与拒绝规则**完全复用预览 pane**(unknown/二进制出「无预览」、网络路径不读);**文件已在共享池中打开时显示池缓冲**(含未保存修改+脏点——一瞥不说谎);离开/按下/滚动/拖拽即散,视口 8px 钳位、右侧放不下翻左侧;产品端 = 异步可取消的 ≤64KB 头部读取。目录行不弹。键盘入口(选中按 Space peek)**暂不做**——现行 Space 已绑打开动作,改绑需动已决项,留待裁决。**脏缓冲的三道确认门**:关闭 tab 内最后一个预览 pane、关闭 tab、关闭应用,均按名列出全部脏缓冲确认——隐藏状态不得无声蒸发。跨 tab 移动:pane 拆出/被顶出时携带其当前缓冲（同一对象）,若是原 tab 最后一个预览 pane 则整池随行;整 tab 合并时两池按「一文件一缓冲、脏者胜」归并。共享范围到 tab 为止,同文件跨 tab 的并发编辑留给产品端磁盘冲突检测。原生实现：虚拟化扁平列表从第一版就上（无阈值切换双实现）、目录枚举异步可取消（loading/permission-denied/已删除/root 不可达四种状态都有对应显示）、节点稳定 ID（重命名/目录删除后选中与展开按 ID 尽力恢复,失败则就近降级）、watcher 溢出重扫、UNC 枚举有超时。
+
+**7.1.4 会话生命周期与持久化。** 恢复 = 位置+布局，**不存输出、不恢复进程**。序列化面（原型已验证对称性）：split{dir,ratio}（id 复活时重铸）、term 叶 seed{**稳定 profile_id**（不是标题、不是展示对象）,cwd,手动名}、files 叶{root,open,sel,width}、pinned、**active tab、focusIndex**；**未提交的重命名在序列化前提交**（blur 语义,输入到一半关窗不丢新名字）。Recent 条目 = 终端 seed **或 files 场所**（关闭纯 files tab 同样可撤销）,**去重键 = profile_id+cwd+手动名**（同位置不同名的 agent 保持独立条目）,含时间戳（P1-13 的 "N 分钟前"）。三扇门一个库：pin 自动回、unpinned 进 restore 提示（非模态、不倒计时自动恢复、窗口先可用）、Ctrl+Shift+T 撤销关闭。**restore 提示未答复时再关窗：未答复计划并回 lastSession**，不得丢失。**Pin 随内容迁移三规则**（P1-11 原文入格）：src 并入 tgt → tgt 继承 pin；pane 被中心 drop 顶回标签条 → 顶出者保留原 tab 的 pin 覆盖；**显式拖出成新 tab → 不继承**（新 tab 未被许诺过）。最后一个 pane 关闭 = 关闭该 tab；最后一个 tab 拒绝关闭（窗口关闭走 shut 流程）；无 pinned 可恢复时以默认 profile 的占位 shell 起步,restore 接受后占位（未被使用时）移除；纯 files tab pop-out 且它是最后一个 tab 时同样以占位 shell 补位。Restart shell（右键菜单）：杀进程原地重启（先温和退出、超时强杀整棵进程树,阈值实现定并写明）,保**最后一次可信上报的 cwd**（OSC 7;无上报则初始 cwd,再退 HOME——不承诺读活进程的真实 cwd）与手动名；busy 判定无 OSC 133 时保守视为 busy；**新进程环境按 P2-12 在 spawn 前从注册表重建**,不继承终端启动时的旧环境块;旧进程的挂起输出以 generation token 作废;重启前的转录保留、插入一条重启边界记录。「↑ 历史不丢」的 UI 文案**仅限检测到 PSReadLine 且其持久历史启用的 profile**,对 cmd/bash 不许诺。原生补充：版本化 schema、临时文件+原子替换、**写盘失败显式告警**（不假装 pin 成功）、正常退出/崩溃/系统关机三条路径区分（崩溃恢复的提示措辞不暗示进程还活着）、**逐叶降级**（未知 profile→默认；无效 cwd→HOME+提示；未知 leaf kind→占位 pane；非法 ratio→clamp；整树不因单叶损坏而丢）。
+
+**7.1.5 焦点与命令路由。** 窗口级键盘焦点有唯一 `InputOwner = Terminal(viewport)|FilesTree|Rename|Menu|Dialog|None`（P2-5;Menu 涵盖右键/弹出菜单/combo,Dialog 涵盖设置/确认框/restore 提示）,不是全局键盘钩子+豁免表。**它与 §3.3 的「session 可输入投影 owner」是两个概念**：前者答「窗口里谁收键盘」,后者答「一个 session 的多个投影里哪个可输入」;字符只有在前者=Terminal 时才进入后者指定的投影。**Owner 迁移规则**：新建/恢复/合并产生的终端立即成为 owner（P2-5 的本体）;关闭 owner 所在 pane/tab → owner 移交给新的 focused pane;Menu/Dialog 打开即接管、关闭即归还打开前的 owner;Rename 提交/取消同理;窗口失焦不改 owner(回焦即恢复)。**IME 只绑定 owner=Terminal 时的可输入 viewport**。**Esc 分层路由，每按一次只处理最上一层**：进行中的拖拽/divider（取消，不提交 drop）→ Menu → Dialog → pinned 浮窗 → **owner=Terminal 时**原样透传 PTY（vim/fzf 不可破坏）;owner 为 FilesTree/Rename/None 时 Esc 由该 owner 消费或忽略,**绝不进 PTY**。菜单开启期间拥有键盘（字符不得漏进终端）；模态遮罩 z-order 高于一切弹出层与浮窗,且模态期间布局快捷键失效。快捷键绑定（含 Ctrl+B 与 tmux 前缀冲突）**留待统一快捷键审计**（P2-7,按 profile 可覆盖）。
+
+**7.1.6 菜单与杂项。** **tab 溢出**(用户报 2026-07-18 两轮):横条窄档分两级(均为测量事实非数量启发式)——**tight(<140px)**:hover 控件(pin/files)退场、close 仅活动 tab,标题保住地盘(否则一 hover 三控件把标题挤成 0 宽,图标泄露);**常规宽度下 hover 控件静止时零占位**(用户三轮勘误 2026-07-18,推翻同日的 order 换位方案):DOM/阅读顺序保持 标题·徽标·files·pin·×,隐藏控件宽度收为 0(徽标自然贴 ×,无死空隙),hover 时按宽度动画滑入、徽标被连续推开(.16s ease,reduced-motion 关);pin.on(钉住态)常驻不收;**squeezed(<90px)**:收拢为居中图标;到 46px 地板后**条内横向滚动**,永不侵入标题栏按钮。竖栏 tab 行高**定死 30px flex:none**(列表滚动,行永不压缩——flex-shrink 默认值曾让行先被压矮到极限才轮到滚动),「New tab」行 sticky 钉底随时可及;卡片迷你体 pointer-events:none(嵌入内容的 tooltip/点击不得外泄——卡片是表面不是文档)。**tab 激活时机 = 按下即激活,带 ~180ms 宽限**(用户裁决 2026-07-18 两轮,Edge 同款+勘误,原型已验证):左键按下后 180ms 落定切换;宽限内拖出条外去分屏则**全程不切页**(旧的立即切换让瞄准目标闪失一瞬);按住不动或条内重排即提交激活(重排=对条上下文的承诺,无论计时器是否已到);快速点击松手即切,无感知损失。两条配套规则:**a. 离栏回切**——拖着已激活的 tab 离开标签条去瞄准布局时,视图切回出发时所在的 tab(按下说「选 A」,离栏说「把 A 放进我刚才那个布局」),合屏/替换手势因此保住目标;回栏再切回、取消拖拽守按下的承诺(激活停在被按的 tab)。**b. 聚焦态例外**——聚焦态中侧栏 tab 按下不激活(按下可能是入组拖拽的起手,先切走会拆掉它要瞄准的舞台),松手不拖才是点击切换。终端右键菜单序：Copy、Paste、Select all、──、Clear screen、Clear scrollback…、Restart shell…（高频无害在前,破坏性沉底带省略号）。**Clear screen ≠ Clear scrollback**：前者 = **终端本地执行 ED2+光标归位**（不向 PTY 注入任何输入、不触碰转录与 staging、清除 live 选区——被清的行走正常 scroll-out 进转录,之后仍可上滚/搜索）；后者 = **完整的 §3.1 ED3 删除管线**（转录、staging、块、索引、缓存、锚点降级、tombstone,一个都不少）,影响全局搜索,需确认。pinned tab 防误关是特性（先 unpin 再关）,可发现性靠图钉 tooltip 与右键菜单文案,且 pin/unpin/close 须有纯键盘入口（命令面板/快捷键,不能只活在 hover 上）。tab hover 350ms 出**布局示意图**（按 ratio 画的结构示意,明确非实时终端快照——无离屏纹理、无隐私泄漏）,在指针离开/拖拽开始/该 tab 关闭/窗口失焦时消散。拖拽预览的 refused 态（虚线灰框）表示布局放不下,drop 无副作用。主题 System/Light/Dark 跟随系统,高对比度模式跟随系统调色,首版不做整窗主题切换动画。
+
+**7.1.6b 串行/并行聚焦态（2026-07-17 方向已定,待原型上手确认后转正;demo=design/sidebar-focus-demo.html）。** 来源:折叠屏多窗口调研(vivo 串行/并行双注意力形态)+ 用户五问裁决。同一工作区(tab)的两种注意力形态:**并行态** = 现有分屏树全可见;**串行态(聚焦态)** = 一个 pane 撑满,其余成为左缘一列**实时卡片**(迷你真投影:按卡片宽度重投影转录尾部若干行,依托 §3.3 多投影;damage 驱动节流,不可见卡片暂停投影)——卡片保留名字/状态/实时内容,不做纯缩略图(终端会话视觉同质,纯缩略图不可辨认)。裁决五条:① **聚焦态是竖直文字侧栏模式的专属能力**(用户二次裁决 2026-07-17,推翻同日早先的"三布局各给一列":临时悬浮列是"没有固定住址的 UI 元素",与拖拽动词简化同一病;侧栏是会话导航唯一的家,聚焦态只是它的展开密度)——卡片列**嵌入侧栏当前 tab 之下**;horizontal/icon/收起模式下不可进入;**存续宽于进入**(用户勘误 2026-07-18):聚焦中**收起侧栏不退出**——收起是"给舞台腾地方",卡片随栏隐身、展开随栏归位,待命池原样存活;切到 horizontal/icon 布局才自动退出(家具没了,模式随之退场)。富内容行(公式/图片)在卡片里**摘要化为标签片**而非缩放(可读性是卡片的全部价值,压扁的公式是噪声,「∑ 公式」是信息)。单 pane tab 允许进聚焦(卡片列仅「+」)。原型已实证(2026-07-17):进出资格门、rail 内嵌锚定、树零变形、待命池跨进出持久、富内容摘要片。② **串行与并行是同一组 ≤4 窗口的两种看法**(用户三次裁决 2026-07-17,推翻"无上限待命池隐身存活"——隐藏状态违背本 UI 的一贯品味):聚焦态总窗口数(台上+卡片)**上限 4**,「+」到 4 禁用;**树上 pane >4 的 tab 不可进入聚焦**;**退出聚焦时「+」生的会话全部物化上树**(自动落座:最大 pane 沿较宽轴分裂,四座自然成 2×2),待命池清空——**没有任何东西在并行态隐身**。4 的依据=最小 pane 尺寸下典型屏的 2×2 诚实容量;要盯更多 agent 用更多 tab(tab 本为此设)。§7.0「会话属于 tab」作为架构保留(聚焦态内的待命即其实例),隐身持久化政策废止(法则三:限制是政策)。原型已实证:封顶/禁用/拒入/物化/清空全链路。③ **其它 tab 的卡片:手动展开可以,自动不展开**——点其它 tab 行箭头展开其卡片以监视,**展开≠切换**(Stage Manager 教训),注意力徽标仍在细行常驻。④ **files/预览 pane 不特殊化**:聚焦态下同为卡片(预览卡=文件名+脏标,files 卡=目录名),点卡换位规则一致;既有 flyout 通道(Ctrl+E 等)在聚焦态照常工作。⑤ 进出聚焦态:双击 pane 标题/快捷键(键位归 P2-7 审计);退出时并行树**原样恢复**(布局参数在聚焦期间不被触碰)。注意力队列(P1-8)的物理形态 = 卡片/细行上的「等你」徽标,聚焦该会话即消费。交汇点无极调节(并行态,拖动 divider 交点同时调双轴)一并纳入。⑥ **聚焦态的拖拽语法**(用户裁决 2026-07-18,原型已验证):**舞台拒收空间动词**——聚焦态右侧是「当前卡片的投影舞台」不是树,tab/文件拖上去分屏 = 在投影上做树变更且要等退出才物化,是隔空改状态,一律诚实拒绝(refused 蒙层 + 文字指路);**卡片列是聚焦集的容器**(§7.0 落点定容器):拖 tab 入卡片列 = 该 tab 的会话入组为待命卡(与「+」同一法则:限 4、满员 deny、退出物化上树;pin 随内容归并;仅全终端 tab 可入——卡片是终端,含 files/预览 pane 的 tab 半入即撕裂,拒);**卡片拖出列 = 退组自成 tab**(入退同一动词:leaf 卡走 extractPaneToTab 从停放树取出,待命卡直接成新 tab;退组不退聚焦,舞台不受扰)。呈现细则(用户勘误 2026-07-18 二轮):**入组预览 = 列尾虚线替身卡**(所见即将得,一会话一卡),不给整列描框,舞台拒收蒙层的指路也用替身卡;**悬停「+」时按钮自身亮起**(它就是入口,替身卡叠上去反而话多),落「+」= 同一入组动作;**悬停卡片区时浮动芯片隐藏、被抓的 tab 归位槽内**——替身卡/亮起的加号就是「手中之物」,芯片再跟着是重影(用户报 2026-07-18);满员才用列级 deny 描边+4/4 转醒目;**卡片头部佩会话图标**(与 tab 同源 stateIcon,busy/unread 随行),不用抽象圆点——卡片是小号 tab,穿 tab 的衣服;**拖出预览槽位钳在卡片列之下**(卡片挂在其 tab 正下方,槽位不得插进 tab 与自家卡片之间),strip 预览用 stateIcon+标题的正装。⑦ **待命池收预览内容**(用户需求 2026-07-18 三轮,§7.1.6b ④「预览不特殊化」的推论):终端图片/文件拖到卡片列 = **以预览卡入组**(缓冲入 tab 共享池,待命项从纯会话 uid 扩为「会话|预览缓冲」两型),容量同 4 之门;退出聚焦时预览待命**物化为预览 pane**(与会话同法则);预览卡拖出列 = 自成预览 tab(缓冲对象随迁,编辑随行);**点击预览卡仅当舞台是预览位时换内容**(缓冲对调),终端舞台无它的座——闪烁拒绝而非无声。两处配套修正:**舞台在单叶树下必须保留 panehead**(头部承载身份与双击退出,树只剩一叶其余全待命时曾消失——multi 判定补 focusLeaf);**dock-preview 淡出期间保留 refused 灰色**(hidePreview 立刻摘类曾让残影闪回蓝色)。⑨ **容量按内容类分层 4+1+1**(用户提议+协调者背书 2026-07-18 五轮,细化②的一刀切 4):**终端 4 席**(2×2 诚实容量的本义就是终端 pane 的几何账;fc-cap「4/4」与「+」禁用只看终端席);**files 1 席**——固定 240px 列不占比例份额,聚焦中 Dock 文件树 = 落进该席,已占则**替换视图**(顺带堵死 Dock 绕过上限的漏洞:旧逻辑无条件 split 停放树);**预览 1 席单例**——继承 §7.1.3「tab 内单实例复用」:席空则入组,已占则**替换内容**(悬停时高亮占位卡示意"将被替换",不出替身卡),退出物化时优先复用树上的单例预览 pane 而非新增比例座位;进入门槛同步改为「树上**终端** pane >4 不可进入」。**卡片皆可关**(用户报"小窗关不掉"):卡头 hover 出 × ,动词=关内容(与 pane/tab 的 × 同语言)——leaf 卡=closePane、待命会话=杀会话(busy 确认)、待命预览=弃卡(脏确认;干净且无 pane 引用的缓冲随卡离池)。⑧ **卡片列三则**(用户裁决 2026-07-18 四轮):**列内拖动 = 仅换位**——绝不切台(与「展开≠切换」同族;拖完的 click 被吞,不误触换台);排位跨渲染持久(cardSeq),**退出物化按卡序落座**——你摆的列就是座次表;**换位是 tab 式跟手**(用户勘误 2026-07-18 三轮):被抓的卡贴着光标走(基线=按下点,不吃拖拽阈值),邻居在被压过一半时滑开(FLIP),拖拽期间零重渲染、DOM 即真序;**入组替身卡可站任意槽位**(指针命中处,不只列尾),落地按替身卡站的位置入 cardSeq;**卡片默认高度一律 72px**(终端/预览/files 同高,一列同刻度才是一件仪器);**files 卡有身子**——迷你树(复用 filesVisibleRows 前 4 行,app 字体、浅底,区别于终端卡的深底等宽),此前只有头(用户报)。
+
+**7.1.7 规格债（M2 原生 UI 开工前必须闭合,承载于专门的 UI-SPEC 文档）。** 本节裁决了方向与语义;以下形式化工作有意后置——原型仍在演化（文件预览特性将再动树 schema）,现在穷举会返工：① 布局求解器的输入/输出与不变量级形式规格（fixed/flex 混合 row 的完整分配公式、含 fixed 子树的 rebalance 算法、ratio 序列化精度与 clamp、rim/edge 重叠优先级与角落选边、高度方向的让步链、「折叠占位」的几何/命中/焦点/展开条件）;② 持久化 schema v1 全字段定义（顶层版本、tab 顺序、类型与缺省、未知字段策略、open/sel 的稳定 ID 格式）;③ Restart shell 的完整进程契约（elevation/token 处理——最可能被平台收窄的承诺,见审核记录）;④ 极小窗口下浮窗约束冲突的完整优先级表。审核依据：`docs/reviews/`（2026-07-16/17 两轮）。
+
 ## 8. 依赖策略
 
-同 v3 表格，关键修订：**alacritty_terminal 配置 scrollback=0**，不使用、不依赖其 history/pull/reflow-history 行为；适配层捕获上滚移出行（评估现有 API/事件是否足够，不足则 vendor 补丁，补丁面=捕获钩子一处）；该行为契约用生命周期矩阵钉死，升级必须全过。
+同 v3 表格，关键修订：**alacritty_terminal 稳态配置 scrollback=0**。vendor seam 包含既有上滚事件钩子，以及四个窄事务操作：打开 primary native history、查询行数、一次性 `take_history(oldest→newest)`、清空并恢复 limit=0；没有 transcript snapshot/backing 镜像，也不复制 reflow 算法。事务期 vendor grid 是 mutable tail 唯一权威，收割后转录层重新成为 staging ID/配额/定稿权威。升级必须 diff `grid/resize.rs`/history 语义，跑 vendor 181 项与完整生命周期矩阵。
 
 ## 9. 里程碑
 
 同 v3 的 M-1→M5+ 结构，三道退出门按 v3.1 修订：
 
-- **G1 生命周期回放矩阵**（v3.2 扩）：`scroll-out→staging→定稿→decorate→rewrite 检验`、变宽/变窄/变高 reflow、**变高后 ConPTY 全尺寸可寻址性**（CUI 程序在新尺寸下全屏绘制正确）、**变矮的实际淘汰分支**、反复 resize 抖动、**跨界逻辑行 resize 强制拆分**、**staging 超限强制定稿**、ED3、配额淘汰、alt 进/出、滚动区域、RIS/DECCOLM、最后一行——全过。
+- **G1 生命周期回放矩阵**（v3.7）：`scroll-out→normal staging→定稿→decorate→rewrite`、vendor-tail 单 owner、窗口/pane 最终尺寸 coalescing、变宽/变窄/变高原生 reflow、**变高后 ConPTY 全尺寸可寻址性**、变矮收割、连续真实输出守恒、六段 resize 风暴与多轮人类节奏手势。硬断言是**不崩、不焊接、不静默丢真实输出、frame 恒矩形**；允许每个独立手势 0～几行 vendor 排整齐的干净重复，不再断言 frozen 净增长 0。另含 WRAPLINE 边界空格、底部跟随、正常 staging 配额强制定稿、ED3、淘汰、alt 进/出、滚动区域、RIS/DECCOLM、最后一行、trace 双次确定性回放、收割后滚轮上翻直达 publish/selection/renderer——全过。
 - **G2 多投影一致性**：同一转录在两个不同宽度视口同时显示，高度树/选区/滚动锚各自独立且正确。
 - **G3 锚点与版本协议**（v3.3 统一术语）：持久锚点两步原子迁移（捕获时 Live→Staging，定稿时 Staging→History）+ ED3/淘汰降级正确；**Staging 锚定稿迁移**、**primary/alt 命名空间隔离**（跨屏比较被拒绝）验证；worker 任务 generation 失效丢弃零泄漏；四版本失效边界行为正确。
 
@@ -152,8 +239,8 @@ DecorationLifecycle: None → Pending → Ready | Failed | Suppressed
 
 ## 10. 风险登记
 
-v3 表保留，修订：~~R11 thaw 抖动~~ → **R11' 上滚捕获依赖 alacritty 内部行为**（scrollback=0 下移出行的捕获钩子可能需 vendor 补丁并随上游演进维护）——缓解：钩子面最小化 + 行为测试钉死。新增 **R13 staging 语义复杂度**（部分定稿/改写更新）——缓解：staging 逻辑纯函数化，语料矩阵覆盖。
+v3 表保留，v3.7 重写 resize 风险：**R11' vendor native-history 依赖**——升级可能改变 reflow/history 顺序；vendor 面仅限事务开/取/清与事件钩子，不复制算法，升级强制 diff `grid/resize.rs` 并跑 181 项 vendor 测试和 G1。**R13' ConPTY 不可判定 repaint**——公开字节流没有“重画身份”，不得以内容相等去重；以逐物理行独立 wrap-split harvest boundary 防焊接并接受每手势有界干净重复。**R14 窗口模态边界不可见**——winit 0.30.13 无 enter/exit resize 信号，以 200ms quiet coalescing 代替，真实多轮拖拽为终审 oracle。**R15 长事务内存**——vendor history 受 native `Line=i32` 可寻址上限保护，持续输出会增长；final request + output quiet 保证正常手势及时收割，trace 记录 tail 行数。**R16 非矩形纵深失败**——builder、publish、composition、selection、renderer 五层均返回可恢复错误并有坏输入测试。
 
 ## 11. 已决问题（累计）
 
-v1 Q1-Q4、v3 各决策（alt=停放、一 session 一可输入视口、折叠属视口、overlay 让位、任务栏聚合）、v3.1 决策（scrollback 所有权=转录层唯一；原子迁移仅持久锚点；DetectionRevision 独立；Attachment=快照+显式刷新；WebView2 三禁），v3.2 新决：**resize 变高=底部加空行不回填（非 tmux 语义，如实承认；受控回填为 post-M0 可选增强）**；**staging 跨界 resize 强制拆分、超限强制定稿**；**锚点按 Screen 分命名空间，Staging 为独立锚变体**；**worker 溢出=替换→拒绝+retry-on-idle，渲染任务按数量限流**。
+v1 Q1-Q4、v3 各决策（alt=停放、一 session 一可输入视口、折叠属视口、overlay 让位、任务栏聚合）、v3.1 决策（稳态 scrollback 所有权=转录层；原子迁移仅持久锚点；DetectionRevision 独立；Attachment=快照+显式刷新；WebView2 三禁）、v3.2 除 resize-grow 外的决策及 v3.4 UI 决策继续有效。演进史保留：v3.5 曾以用户实测推翻“不回填”，选择 reversible staging + live 联合 reflow；v3.6 又加入静默 settlement/内容判等以追求 resize 历史严格净零。**v3.7 用户裁决明确推翻这两版的净零承诺及三账本机制**：在 ConPTY 公开接口上，“真实输出零丢失 + 真实重复保留 + repaint 严格净零”信息论不可兼得；产品目标改为不崩、不焊接、不静默丢真实输出，事务期 vendor 单 owner，最终尺寸 coalescing，一次收割，允许每手势 0～几行干净重复。

@@ -19,6 +19,10 @@ fn main() -> Result<()> {
         .transpose()?
         .unwrap_or(Chunking::Recorded);
     let corpus = Corpus::read_from(File::open(path)?)?;
+    eprintln!(
+        "BT_REPLAY conpty_source={:?}",
+        corpus.conpty_source.as_deref().unwrap_or("legacy-unknown")
+    );
     let columns = NonZeroU32::new(u32::from(corpus.initial_cols))
         .context("corpus initial columns must be non-zero")?;
     let rows = NonZeroU32::new(u32::from(corpus.initial_rows))

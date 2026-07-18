@@ -7,12 +7,15 @@ mod scheduling;
 mod session;
 
 pub use adapter::{
-    AdapterEvent, RemovalCause, RemovalContext, RemovalScope, RemovalScreen, RemovedLiveRow,
-    SCROLLBACK_LINES, TerminalAdapter, TerminalCursor,
+    AdapterEvent, MouseTracking, RemovalCause, RemovalContext, RemovalScope, RemovalScreen,
+    RemovedLiveRow, SCROLLBACK_LINES, TerminalAdapter, TerminalCursor, TerminalModes,
 };
 pub use lifecycle::{
     LIFECYCLE_RULES, LifecycleDirective, LifecycleRule, MatchValue, ResizePlan, RowAction,
     RowDirective, RowShape, classify, plan_resize,
 };
-pub use scheduling::{PARSE_QUANTUM, WORKER_QUEUE_CAP};
-pub use session::{DualPlaneSession, SPIKE_CELL_HEIGHT_SUBPIXELS, SessionError};
+pub use scheduling::{PARSE_QUANTUM, RESIZE_REQUEST_QUIET, WORKER_QUEUE_CAP};
+pub use session::{
+    DualPlaneSession, ResizeTraceEvent, ResizeTraceKind, ResizeTraceRowOrigin,
+    SPIKE_CELL_HEIGHT_SUBPIXELS, SessionError,
+};

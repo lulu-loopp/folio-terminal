@@ -20,6 +20,7 @@ fn recorded_width_corpus_drives_legacy_and_mode_2027_oracles_byte_by_byte() {
         let corpus = Corpus {
             initial_cols: 40,
             initial_rows: 4,
+            conpty_source: None,
             events: vec![CorpusEvent {
                 at_micros: 1,
                 kind: EventKind::Output(text.as_bytes().to_vec()),
@@ -60,6 +61,7 @@ fn replayed_resize_keeps_a_completed_cluster_in_one_lead_spacer_pair() {
     let corpus = Corpus {
         initial_cols: 4,
         initial_rows: 3,
+        conpty_source: None,
         events: vec![
             CorpusEvent {
                 at_micros: 1,

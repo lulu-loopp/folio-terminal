@@ -84,6 +84,14 @@ fn main() -> Result<()> {
     resizes.sort_by_key(|resize| resize.at_ms);
     input_plan.sort_by_key(|input| input.at_ms);
 
+    #[cfg(windows)]
+    let conpty_source = Some(bt_pty::conpty_source().to_string());
+    #[cfg(not(windows))]
+    let conpty_source = None;
+    eprintln!(
+        "BT_RECORD conpty_source={:?}",
+        conpty_source.as_deref().unwrap_or("not-windows")
+    );
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(PtySize {
         rows,
@@ -195,6 +203,7 @@ fn main() -> Result<()> {
     Corpus {
         initial_cols: cols,
         initial_rows: rows,
+        conpty_source,
         events,
     }
     .write_to(fs::File::create(&output).with_context(|| format!("create {output}"))?)?;

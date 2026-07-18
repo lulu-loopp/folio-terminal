@@ -10,10 +10,14 @@ use std::{
 };
 
 use bt_doc::{
-    AnchorError, ContentAnchor, DetectionRevision, GridGeneration, HistoryDocument, LayoutKey,
-    ScreenId, ViewGeneration,
+    AnchorError, Bias, ContentAnchor, DetectionRevision, GridGeneration, GridPoint,
+    HistoryDocument, LayoutKey, ScreenId, ViewGeneration, compare_anchors,
 };
-use bt_transcript::{CapturedCell, CapturedRow, SourceGeneration, TranscriptId};
+use bt_transcript::{
+    CapturedCell, CapturedRow, CellFlags, FrozenLine, GraphemeOffset, SourceGeneration, StagedRow,
+    TranscriptId,
+};
+use bt_unicode::{cluster_width, graphemes};
 
 pub use bt_doc::SUBPIXELS_PER_PX;
 pub use height_tree::HeightTree;
@@ -57,6 +61,19 @@ pub struct GridCursor {
     pub visible: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CellAnchor {
+    pub start: ContentAnchor,
+    pub end: ContentAnchor,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SelectionSpan {
+    pub row: u32,
+    pub start_column: u32,
+    pub end_column: u32,
+}
+
 /// Stable render input owned by the viewport layer. Renderers never inspect the upstream grid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewportFrame {
@@ -64,8 +81,151 @@ pub struct ViewportFrame {
     pub rows: NonZeroU32,
     pub cells: Vec<CapturedCell>,
     pub cursor: GridCursor,
+    pub cell_anchors: Vec<CellAnchor>,
+    pub selection_spans: Vec<SelectionSpan>,
+    pub status_text: Option<String>,
     pub layout_key: LayoutKey,
     pub view_generation: ViewGeneration,
+}
+
+impl ViewportFrame {
+    pub fn validate_shape(&self) -> Result<(), FrameShapeError> {
+        let expected = (self.columns.get() as usize)
+            .checked_mul(self.rows.get() as usize)
+            .ok_or(FrameShapeError::CellCount {
+                expected: usize::MAX,
+                actual: self.cells.len(),
+            })?;
+        if self.cells.len() != expected {
+            return Err(FrameShapeError::CellCount {
+                expected,
+                actual: self.cells.len(),
+            });
+        }
+        if self.cell_anchors.len() != expected {
+            return Err(FrameShapeError::AnchorCount {
+                expected,
+                actual: self.cell_anchors.len(),
+            });
+        }
+        Ok(())
+    }
+
+    pub fn anchor_at(
+        &self,
+        row: u32,
+        column: u32,
+        bias: Bias,
+    ) -> Result<Option<ContentAnchor>, FrameShapeError> {
+        self.validate_shape()?;
+        if row >= self.rows.get() || column >= self.columns.get() {
+            return Ok(None);
+        }
+        let index = row as usize * self.columns.get() as usize + column as usize;
+        let Some(anchors) = self.cell_anchors.get(index) else {
+            return Ok(None);
+        };
+        Ok(Some(match bias {
+            Bias::Before => anchors.start.clone(),
+            Bias::After => anchors.end.clone(),
+        }))
+    }
+
+    /// Expand a cell hit to a word using the terminal selection delimiter policy. Whitespace and
+    /// shell punctuation delimit words; every other grapheme (including emoji clusters) stays in
+    /// the same run. Wide spacers share their lead cell's anchors and can never split a cluster.
+    pub fn word_selection(
+        &self,
+        row: u32,
+        column: u32,
+    ) -> Result<Option<ViewSelection>, FrameShapeError> {
+        self.validate_shape()?;
+        let columns = self.columns.get() as usize;
+        let row = row as usize;
+        let mut column = column as usize;
+        if row >= self.rows.get() as usize || column >= columns {
+            return Ok(None);
+        }
+        let cells = &self.cells[row * columns..(row + 1) * columns];
+        while column > 0 && cells[column].wide_spacer {
+            column -= 1;
+        }
+        let class = word_class(&cells[column]);
+        let mut first = column;
+        while first > 0 && word_class(&cells[first - 1]) == class {
+            first -= 1;
+        }
+        let mut last = column + 1;
+        while last < columns && word_class(&cells[last]) == class {
+            last += 1;
+        }
+        let Some(start) = self.anchor_at(row as u32, first as u32, Bias::Before)? else {
+            return Ok(None);
+        };
+        let Some(end) = self.anchor_at(row as u32, (last - 1) as u32, Bias::After)? else {
+            return Ok(None);
+        };
+        Ok(Some(ViewSelection { start, end }))
+    }
+
+    pub fn line_selection(&self, row: u32) -> Result<Option<ViewSelection>, FrameShapeError> {
+        self.validate_shape()?;
+        let Some(last) = self.columns.get().checked_sub(1) else {
+            return Ok(None);
+        };
+        let Some(start) = self.anchor_at(row, 0, Bias::Before)? else {
+            return Ok(None);
+        };
+        let Some(end) = self.anchor_at(row, last, Bias::After)? else {
+            return Ok(None);
+        };
+        Ok(Some(ViewSelection { start, end }))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FrameShapeError {
+    CellCount { expected: usize, actual: usize },
+    AnchorCount { expected: usize, actual: usize },
+}
+
+impl fmt::Display for FrameShapeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::CellCount { expected, actual } => {
+                write!(formatter, "frame requires {expected} cells, got {actual}")
+            }
+            Self::AnchorCount { expected, actual } => {
+                write!(formatter, "frame requires {expected} anchors, got {actual}")
+            }
+        }
+    }
+}
+
+impl Error for FrameShapeError {}
+
+#[derive(Clone, Debug)]
+struct VisualRow {
+    cells: Vec<CapturedCell>,
+    anchors: Vec<CellAnchor>,
+}
+
+fn validate_visual_row(
+    row: &VisualRow,
+    expected: usize,
+    plane: &'static str,
+    row_index: usize,
+) -> Result<(), FrameProjectionError> {
+    if row.cells.len() != expected || row.anchors.len() != expected {
+        return Err(FrameProjectionError::PlaneShape {
+            plane,
+            row: row_index,
+            expected,
+            actual_cells: row.cells.len(),
+            actual_anchors: row.anchors.len(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -79,6 +239,14 @@ pub enum FrameProjectionError {
         expected: usize,
         actual: usize,
     },
+    PlaneShape {
+        plane: &'static str,
+        row: usize,
+        expected: usize,
+        actual_cells: usize,
+        actual_anchors: usize,
+    },
+    FrameShape(FrameShapeError),
 }
 
 impl fmt::Display for FrameProjectionError {
@@ -95,6 +263,17 @@ impl fmt::Display for FrameProjectionError {
                 formatter,
                 "expected {expected} cells in live row {row}, got {actual}"
             ),
+            Self::PlaneShape {
+                plane,
+                row,
+                expected,
+                actual_cells,
+                actual_anchors,
+            } => write!(
+                formatter,
+                "expected {expected} cells and anchors in {plane} row {row}, got {actual_cells} cells and {actual_anchors} anchors"
+            ),
+            Self::FrameShape(error) => error.fmt(formatter),
         }
     }
 }
@@ -108,6 +287,8 @@ pub struct ViewportProjection {
     cache: HashMap<LayoutCacheKey, MeasuredLayout>,
     artifact_heights: HashMap<TranscriptId, i64>,
     ordered_ids: Vec<TranscriptId>,
+    visual_rows: Vec<usize>,
+    visual_row_heights: HeightTree,
     heights: HeightTree,
     scroll_anchor: Option<ScrollAnchor>,
     selection: Option<ViewSelection>,
@@ -117,6 +298,12 @@ pub struct ViewportProjection {
     source_generation: SourceGeneration,
     grid_generation: GridGeneration,
     cache_misses: u64,
+    scroll_offset_rows: usize,
+    unread_rows: usize,
+    last_total_rows: usize,
+    /// Resize/reflow changes visual row counts without appending terminal content.
+    suppress_next_growth_compensation: bool,
+    projection_dirty: bool,
 }
 
 impl ViewportProjection {
@@ -134,6 +321,8 @@ impl ViewportProjection {
             cache: HashMap::new(),
             artifact_heights: HashMap::new(),
             ordered_ids: Vec::new(),
+            visual_rows: Vec::new(),
+            visual_row_heights: HeightTree::default(),
             heights: HeightTree::default(),
             scroll_anchor: None,
             selection: None,
@@ -143,6 +332,11 @@ impl ViewportProjection {
             source_generation,
             grid_generation,
             cache_misses: 0,
+            scroll_offset_rows: 0,
+            unread_rows: 0,
+            last_total_rows: 0,
+            suppress_next_growth_compensation: false,
+            projection_dirty: true,
         }
     }
 
@@ -171,6 +365,54 @@ impl ViewportProjection {
         self.detection_rev
     }
 
+    pub fn scroll_offset_rows(&self) -> usize {
+        self.scroll_offset_rows
+    }
+
+    pub fn unread_rows(&self) -> usize {
+        self.unread_rows
+    }
+
+    pub fn is_scrolled(&self) -> bool {
+        self.scroll_offset_rows != 0
+    }
+
+    /// Positive rows move into history; negative rows move toward the live bottom.
+    pub fn scroll_by_rows(&mut self, rows: i32) {
+        let max = self
+            .last_total_rows
+            .saturating_sub(self.live_rows.get() as usize);
+        if rows >= 0 {
+            self.scroll_offset_rows = self
+                .scroll_offset_rows
+                .saturating_add(rows as usize)
+                .min(max);
+        } else {
+            self.scroll_offset_rows = self
+                .scroll_offset_rows
+                .saturating_sub(rows.unsigned_abs() as usize);
+        }
+        if self.scroll_offset_rows == 0 {
+            self.unread_rows = 0;
+        }
+        self.view_generation.0 += 1;
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_offset_rows = self
+            .last_total_rows
+            .saturating_sub(self.live_rows.get() as usize);
+        self.view_generation.0 += 1;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        if self.scroll_offset_rows != 0 || self.unread_rows != 0 {
+            self.scroll_offset_rows = 0;
+            self.unread_rows = 0;
+            self.view_generation.0 += 1;
+        }
+    }
+
     /// Compose the live terminal grid into a viewport-owned frame consumed by bt-render.
     pub fn live_frame(
         &self,
@@ -187,6 +429,7 @@ impl ViewportProjection {
         }
         let expected_columns = columns.get() as usize;
         let mut cells = Vec::with_capacity(expected_rows.saturating_mul(expected_columns));
+        let mut cell_anchors = Vec::with_capacity(expected_rows.saturating_mul(expected_columns));
         for (row_index, row) in rows.into_iter().enumerate() {
             if row.cells.len() != expected_columns {
                 return Err(FrameProjectionError::ColumnCount {
@@ -195,16 +438,225 @@ impl ViewportProjection {
                     actual: row.cells.len(),
                 });
             }
-            cells.extend(row.cells);
+            let visual =
+                captured_visual_row(&row, expected_columns, |column, bias| ContentAnchor::Live {
+                    screen: ScreenId::Primary,
+                    point: GridPoint {
+                        row: row_index as u32,
+                        column: column as u32,
+                    },
+                    bias,
+                    generation: self.grid_generation,
+                });
+            cells.extend(visual.cells);
+            cell_anchors.extend(visual.anchors);
         }
-        Ok(ViewportFrame {
+        let frame = ViewportFrame {
             columns,
             rows: self.live_rows,
             cells,
             cursor,
+            cell_anchors,
+            selection_spans: Vec::new(),
+            status_text: None,
             layout_key: self.layout_key,
             view_generation: self.view_generation,
-        })
+        };
+        frame
+            .validate_shape()
+            .map_err(FrameProjectionError::FrameShape)?;
+        Ok(frame)
+    }
+
+    /// Window the continuous primary `history + staging + live` row space. Only frozen logical
+    /// lines intersecting the viewport are materialized; the height/index cache supplies offsets.
+    pub fn continuous_frame(
+        &mut self,
+        document: &HistoryDocument,
+        staged_rows: &[StagedRow],
+        live_rows: Vec<CapturedRow>,
+        cursor: GridCursor,
+        screen: ScreenId,
+    ) -> Result<ViewportFrame, FrameProjectionError> {
+        let expected_rows = self.live_rows.get() as usize;
+        if live_rows.len() != expected_rows {
+            return Err(FrameProjectionError::RowCount {
+                expected: expected_rows,
+                actual: live_rows.len(),
+            });
+        }
+        let columns = self.layout_key.width_cells;
+        let column_count = columns.get() as usize;
+        for (row_index, row) in live_rows.iter().enumerate() {
+            if row.cells.len() != column_count {
+                return Err(FrameProjectionError::ColumnCount {
+                    row: row_index,
+                    expected: column_count,
+                    actual: row.cells.len(),
+                });
+            }
+        }
+        for (row_index, staged) in staged_rows.iter().enumerate() {
+            if staged.row.cells.len() != column_count {
+                return Err(FrameProjectionError::PlaneShape {
+                    plane: "staging",
+                    row: row_index,
+                    expected: column_count,
+                    actual_cells: staged.row.cells.len(),
+                    actual_anchors: staged.row.cells.len(),
+                });
+            }
+        }
+
+        let primary = screen == ScreenId::Primary;
+        let history_rows = if primary {
+            usize::try_from(self.visual_row_heights.total())
+                .expect("visual row height totals are non-negative")
+        } else {
+            0
+        };
+        let staging_rows = if primary { staged_rows.len() } else { 0 };
+        let total_rows = history_rows + staging_rows + expected_rows;
+        if !self.suppress_next_growth_compensation
+            && self.scroll_offset_rows != 0
+            && self.last_total_rows != 0
+            && total_rows > self.last_total_rows
+        {
+            let added = total_rows - self.last_total_rows;
+            self.scroll_offset_rows = self.scroll_offset_rows.saturating_add(added);
+            self.unread_rows = self.unread_rows.saturating_add(added);
+        }
+        self.suppress_next_growth_compensation = false;
+        self.last_total_rows = total_rows;
+        let max_offset = total_rows.saturating_sub(expected_rows);
+        self.scroll_offset_rows = self.scroll_offset_rows.min(max_offset);
+        if !primary {
+            self.scroll_offset_rows = 0;
+            self.unread_rows = 0;
+        }
+        let window_start = total_rows
+            .saturating_sub(expected_rows)
+            .saturating_sub(self.scroll_offset_rows);
+        let window_end = (window_start + expected_rows).min(total_rows);
+        let mut visible = Vec::with_capacity(expected_rows);
+
+        if primary && window_start < history_rows {
+            let first_index = self
+                .visual_row_heights
+                .index_at_offset(window_start as i64)
+                .unwrap_or(0);
+            let mut row_base = self.visual_row_heights.prefix_sum(first_index) as usize;
+            for (index, id) in self.ordered_ids.iter().enumerate().skip(first_index) {
+                let line_rows = self.visual_rows[index];
+                let line_end = row_base + line_rows;
+                if line_end > window_start
+                    && row_base < window_end
+                    && let Some(entry) = document.entries().get(id)
+                {
+                    let laid_out = layout_frozen_line(&entry.line, column_count);
+                    for (local_row, row) in laid_out.iter().enumerate() {
+                        validate_visual_row(row, column_count, "history", row_base + local_row)?;
+                    }
+                    let local_start = window_start.saturating_sub(row_base);
+                    let local_end = window_end.saturating_sub(row_base).min(laid_out.len());
+                    visible.extend(laid_out[local_start..local_end].iter().cloned());
+                }
+                row_base = line_end;
+                if row_base >= window_end {
+                    break;
+                }
+            }
+        }
+
+        let staging_base = history_rows;
+        if primary && window_end > staging_base && window_start < staging_base + staging_rows {
+            let first = window_start.saturating_sub(staging_base);
+            let last = window_end
+                .saturating_sub(staging_base)
+                .min(staged_rows.len());
+            for (offset, staged) in staged_rows[first..last].iter().enumerate() {
+                let row = captured_staged_visual_row(staged, column_count, self.source_generation);
+                validate_visual_row(&row, column_count, "staging", first + offset)?;
+                visible.push(row);
+            }
+        }
+
+        let live_base = history_rows + staging_rows;
+        if window_end > live_base && window_start < live_base + expected_rows {
+            let first = window_start.saturating_sub(live_base);
+            let last = window_end.saturating_sub(live_base).min(live_rows.len());
+            visible.extend(
+                live_rows[first..last]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, row)| {
+                        let live_row = first + offset;
+                        captured_visual_row(row, column_count, |column, bias| ContentAnchor::Live {
+                            screen,
+                            point: GridPoint {
+                                row: live_row as u32,
+                                column: column as u32,
+                            },
+                            bias,
+                            generation: self.grid_generation,
+                        })
+                    }),
+            );
+        }
+
+        while visible.len() < expected_rows {
+            let row = visible.len() as u32;
+            visible.push(blank_visual_row(column_count, |column, bias| {
+                ContentAnchor::Live {
+                    screen,
+                    point: GridPoint {
+                        row,
+                        column: column as u32,
+                    },
+                    bias,
+                    generation: self.grid_generation,
+                }
+            }));
+        }
+        visible.truncate(expected_rows);
+        for (row_index, row) in visible.iter().enumerate() {
+            validate_visual_row(row, column_count, "visible", row_index)?;
+        }
+
+        let cells = visible
+            .iter()
+            .flat_map(|row| row.cells.iter().cloned())
+            .collect();
+        let cell_anchors = visible
+            .into_iter()
+            .flat_map(|row| row.anchors)
+            .collect::<Vec<_>>();
+        let selection_spans = self
+            .selection
+            .as_ref()
+            .map(|selection| selection_spans(&cell_anchors, column_count, expected_rows, selection))
+            .transpose()?
+            .unwrap_or_default();
+        let frame = ViewportFrame {
+            columns,
+            rows: self.live_rows,
+            cells,
+            cursor: GridCursor {
+                visible: cursor.visible && self.scroll_offset_rows == 0,
+                ..cursor
+            },
+            cell_anchors,
+            selection_spans,
+            status_text: self
+                .is_scrolled()
+                .then(|| format!("{} lines below", self.scroll_offset_rows)),
+            layout_key: self.layout_key,
+            view_generation: self.view_generation,
+        };
+        frame
+            .validate_shape()
+            .map_err(FrameProjectionError::FrameShape)?;
+        Ok(frame)
     }
 
     pub fn set_selection(&mut self, selection: Option<ViewSelection>) {
@@ -216,6 +668,7 @@ impl ViewportProjection {
     pub fn set_artifact_height(&mut self, id: TranscriptId, height_subpixels: i64) {
         if self.artifact_heights.insert(id, height_subpixels) != Some(height_subpixels) {
             self.cache.retain(|key, _| key.span.start != id);
+            self.projection_dirty = true;
         }
     }
     pub fn sync_artifact_heights(
@@ -233,6 +686,7 @@ impl ViewportProjection {
         if !changed.is_empty() {
             self.cache
                 .retain(|key, _| !changed.contains(&key.span.start));
+            self.projection_dirty = true;
         }
         self.artifact_heights = next;
     }
@@ -242,15 +696,32 @@ impl ViewportProjection {
         source_generation: SourceGeneration,
         grid_generation: GridGeneration,
     ) {
+        if self.live_rows != live_rows {
+            self.suppress_next_growth_compensation = true;
+        }
         self.live_rows = live_rows;
         self.source_generation = source_generation;
         self.grid_generation = grid_generation;
     }
 
     pub fn project(&mut self, document: &HistoryDocument) {
-        self.ordered_ids.clear();
-        let mut heights = Vec::new();
-        for (id, entry) in document.entries() {
+        let next_ids = document.entries().keys().copied().collect::<Vec<_>>();
+        let append_only = !self.projection_dirty
+            && self.ordered_ids.len() <= next_ids.len()
+            && self.ordered_ids == next_ids[..self.ordered_ids.len()];
+        let start = if append_only {
+            self.ordered_ids.len()
+        } else {
+            0
+        };
+        if !append_only {
+            self.ordered_ids.clear();
+            self.visual_rows.clear();
+            self.visual_row_heights.rebuild([]);
+            self.heights.rebuild([]);
+        }
+        for id in next_ids.iter().skip(start) {
+            let entry = &document.entries()[id];
             self.ordered_ids.push(*id);
             let cache_key = LayoutCacheKey {
                 span: TranscriptSpan {
@@ -272,10 +743,10 @@ impl ViewportProjection {
                             height,
                         }
                     } else {
-                        let graphemes =
-                            entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
-                        let visual_lines =
-                            graphemes.max(1).div_ceil(self.layout_key.width_cells.get());
+                        let visual_lines = frozen_visual_line_count(
+                            &entry.line.text,
+                            self.layout_key.width_cells.get() as usize,
+                        ) as u32;
                         MeasuredLayout {
                             visual_lines,
                             height: visual_lines as i64 * self.cell_height_subpixels.get(),
@@ -285,10 +756,15 @@ impl ViewportProjection {
                 self.cache.insert(cache_key, measured);
                 measured
             };
-            heights.push(measured.height);
+            self.visual_rows.push(measured.visual_lines as usize);
+            self.visual_row_heights
+                .push(i64::from(measured.visual_lines));
+            self.heights.push(measured.height);
         }
-        self.heights.rebuild(heights);
-        self.view_generation.0 += 1;
+        if start != next_ids.len() || !append_only {
+            self.view_generation.0 += 1;
+        }
+        self.projection_dirty = false;
     }
 
     /// Project a semantic anchor through this viewport's independent width/height tree.
@@ -380,7 +856,9 @@ impl ViewportProjection {
     /// Layout changes preserve the semantic scroll anchor; only its pixel projection changes.
     pub fn relayout(&mut self, layout_key: LayoutKey, document: &HistoryDocument) {
         if self.layout_key != layout_key {
+            self.suppress_next_growth_compensation = true;
             self.layout_key = layout_key;
+            self.projection_dirty = true;
             self.project(document);
         }
     }
@@ -393,8 +871,278 @@ impl ViewportProjection {
     ) {
         if self.detection_rev != revision {
             self.detection_rev = revision;
+            self.projection_dirty = true;
             self.project(document);
         }
+    }
+}
+
+fn endpoint(anchor: &ContentAnchor, bias: Bias) -> ContentAnchor {
+    let mut anchor = anchor.clone();
+    match &mut anchor {
+        ContentAnchor::History { bias: side, .. }
+        | ContentAnchor::Staging { bias: side, .. }
+        | ContentAnchor::Live { bias: side, .. } => *side = bias,
+    }
+    anchor
+}
+
+fn blank_visual_row(columns: usize, anchor: impl Fn(usize, Bias) -> ContentAnchor) -> VisualRow {
+    VisualRow {
+        cells: vec![CapturedCell::default(); columns],
+        anchors: (0..columns)
+            .map(|column| CellAnchor {
+                start: anchor(column, Bias::Before),
+                end: anchor(column, Bias::After),
+            })
+            .collect(),
+    }
+}
+
+fn captured_visual_row(
+    row: &CapturedRow,
+    columns: usize,
+    anchor: impl Fn(usize, Bias) -> ContentAnchor,
+) -> VisualRow {
+    let mut anchors = Vec::with_capacity(columns);
+    let mut lead = 0usize;
+    for (column, cell) in row.cells.iter().enumerate() {
+        if !cell.wide_spacer {
+            lead = column;
+        }
+        anchors.push(CellAnchor {
+            start: anchor(lead, Bias::Before),
+            end: anchor(lead, Bias::After),
+        });
+    }
+    VisualRow {
+        cells: row.cells.clone(),
+        anchors,
+    }
+}
+
+fn captured_staged_visual_row(
+    staged: &StagedRow,
+    columns: usize,
+    generation: SourceGeneration,
+) -> VisualRow {
+    let mut anchors = Vec::with_capacity(columns);
+    let mut grapheme_offset = 0u32;
+    let mut lead_offset = 0u32;
+    for cell in &staged.row.cells {
+        if !cell.wide_spacer {
+            lead_offset = grapheme_offset;
+            grapheme_offset += u32::from(!cell.text.is_empty());
+        }
+        let anchor = |bias| ContentAnchor::Staging {
+            id: staged.id,
+            offset: GraphemeOffset(lead_offset),
+            bias,
+            generation,
+        };
+        anchors.push(CellAnchor {
+            start: anchor(Bias::Before),
+            end: anchor(Bias::After),
+        });
+    }
+    VisualRow {
+        cells: staged.row.cells.clone(),
+        anchors,
+    }
+}
+
+fn frozen_visual_line_count(text: &str, columns: usize) -> usize {
+    let mut rows = 1usize;
+    let mut used = 0usize;
+    for cluster in graphemes(text) {
+        let width = cluster_width(cluster);
+        if width == 0 {
+            continue;
+        }
+        if used != 0 && used + width > columns {
+            rows += 1;
+            used = 0;
+        }
+        used += width.min(columns);
+    }
+    rows
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum WordClass {
+    Space,
+    Delimiter,
+    Word,
+}
+
+fn word_class(cell: &CapturedCell) -> WordClass {
+    if cell.wide_spacer {
+        return WordClass::Word;
+    }
+    if cell.text.is_empty() || cell.text.chars().all(char::is_whitespace) {
+        return WordClass::Space;
+    }
+    // Stable xterm-style shell delimiters. Configuration belongs to the later settings slice.
+    const DELIMITERS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
+    if cell
+        .text
+        .chars()
+        .all(|character| DELIMITERS.contains(character))
+    {
+        WordClass::Delimiter
+    } else {
+        WordClass::Word
+    }
+}
+
+fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
+    let mut rows = vec![VisualRow {
+        cells: Vec::with_capacity(columns),
+        anchors: Vec::with_capacity(columns),
+    }];
+    for (grapheme_index, cluster) in graphemes(&line.text).enumerate() {
+        let width = cluster_width(cluster).min(columns);
+        if width == 0 {
+            if let Some(cell) = rows.last_mut().and_then(|row| row.cells.last_mut()) {
+                cell.text.push_str(cluster);
+            }
+            continue;
+        }
+        if rows
+            .last()
+            .is_some_and(|row| !row.cells.is_empty() && row.cells.len() + width > columns)
+        {
+            pad_frozen_row(rows.last_mut().unwrap(), line, columns, grapheme_index);
+            rows.push(VisualRow {
+                cells: Vec::with_capacity(columns),
+                anchors: Vec::with_capacity(columns),
+            });
+        }
+        let byte_start = line.grapheme_boundaries[grapheme_index];
+        let span = line
+            .styles
+            .iter()
+            .find(|span| span.byte_start <= byte_start && byte_start < span.byte_end);
+        let mut cell = CapturedCell::plain(cluster);
+        if let Some(span) = span {
+            cell.style = span.style.clone();
+            cell.hyperlink.clone_from(&span.hyperlink);
+        }
+        if width == 2 {
+            cell.style.flags.insert(CellFlags::WIDE_CHAR);
+        }
+        let start = ContentAnchor::History {
+            id: line.id,
+            offset: GraphemeOffset(grapheme_index as u32),
+            bias: Bias::Before,
+            generation: line.source_generation,
+        };
+        let end = endpoint(&start, Bias::After);
+        let row = rows.last_mut().unwrap();
+        row.cells.push(cell);
+        row.anchors.push(CellAnchor {
+            start: start.clone(),
+            end: end.clone(),
+        });
+        if width == 2 {
+            let spacer = CapturedCell {
+                wide_spacer: true,
+                ..CapturedCell::default()
+            };
+            row.cells.push(spacer);
+            row.anchors.push(CellAnchor { start, end });
+        }
+    }
+    let end_offset = line.grapheme_boundaries.len().saturating_sub(1);
+    pad_frozen_row(rows.last_mut().unwrap(), line, columns, end_offset);
+    rows
+}
+
+fn pad_frozen_row(row: &mut VisualRow, line: &FrozenLine, columns: usize, offset: usize) {
+    let start = ContentAnchor::History {
+        id: line.id,
+        offset: GraphemeOffset(offset as u32),
+        bias: Bias::Before,
+        generation: line.source_generation,
+    };
+    let end = endpoint(&start, Bias::After);
+    while row.cells.len() < columns {
+        row.cells.push(CapturedCell::default());
+        row.anchors.push(CellAnchor {
+            start: start.clone(),
+            end: end.clone(),
+        });
+    }
+}
+
+fn selection_spans(
+    anchors: &[CellAnchor],
+    columns: usize,
+    rows: usize,
+    selection: &ViewSelection,
+) -> Result<Vec<SelectionSpan>, FrameProjectionError> {
+    let expected = columns.saturating_mul(rows);
+    if anchors.len() != expected {
+        return Err(FrameProjectionError::FrameShape(
+            FrameShapeError::AnchorCount {
+                expected,
+                actual: anchors.len(),
+            },
+        ));
+    }
+    let (start, end) = match compare_visible_anchors(&selection.start, &selection.end) {
+        Ok(std::cmp::Ordering::Greater) => (&selection.end, &selection.start),
+        Ok(_) => (&selection.start, &selection.end),
+        Err(_) => return Ok(Vec::new()),
+    };
+    let selected = |cell: &CellAnchor| {
+        compare_visible_anchors(&cell.start, end)
+            .is_ok_and(|order| order == std::cmp::Ordering::Less)
+            && compare_visible_anchors(&cell.end, start)
+                .is_ok_and(|order| order == std::cmp::Ordering::Greater)
+    };
+    let mut spans = Vec::new();
+    for (row, row_anchors) in anchors.chunks(columns).enumerate() {
+        let mut column = 0usize;
+        while column < columns {
+            if !selected(&row_anchors[column]) {
+                column += 1;
+                continue;
+            }
+            let start_column = column;
+            while column < columns && selected(&row_anchors[column]) {
+                column += 1;
+            }
+            spans.push(SelectionSpan {
+                row: row as u32,
+                start_column: start_column as u32,
+                end_column: column as u32,
+            });
+        }
+    }
+    Ok(spans)
+}
+
+fn compare_visible_anchors(
+    left: &ContentAnchor,
+    right: &ContentAnchor,
+) -> Result<std::cmp::Ordering, AnchorError> {
+    match (left, right) {
+        (
+            ContentAnchor::Live {
+                screen: ScreenId::Alternate,
+                point: left_point,
+                bias: left_bias,
+                ..
+            },
+            ContentAnchor::Live {
+                screen: ScreenId::Alternate,
+                point: right_point,
+                bias: right_bias,
+                ..
+            },
+        ) => Ok((left_point, left_bias).cmp(&(right_point, right_bias))),
+        _ => compare_anchors(left, right),
     }
 }
 
@@ -476,6 +1224,92 @@ mod tests {
             Err(FrameProjectionError::RowCount {
                 expected: 2,
                 actual: 1,
+            })
+        );
+    }
+
+    #[test]
+    fn continuous_frame_rejects_a_wrong_width_staging_plane_before_flattening() {
+        let mut projection = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let staged = [StagedRow {
+            id: bt_transcript::StagingId(1),
+            row: CapturedRow::plain("xx", false),
+        }];
+        projection.scroll_offset_rows = 1;
+        let error = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &staged,
+                vec![
+                    CapturedRow::plain("live", false),
+                    CapturedRow::plain("grid", false),
+                ],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            FrameProjectionError::PlaneShape {
+                plane: "staging",
+                expected: 4,
+                actual_cells: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn frame_consumers_recover_from_non_rectangular_cells_and_anchors() {
+        let projection = ViewportProjection::new(
+            key(2),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut frame = projection
+            .live_frame(
+                nz32(2),
+                vec![
+                    CapturedRow::plain("ab", false),
+                    CapturedRow::plain("cd", false),
+                ],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+            )
+            .unwrap();
+        frame.cells.pop();
+        assert_eq!(
+            frame.word_selection(0, 0),
+            Err(FrameShapeError::CellCount {
+                expected: 4,
+                actual: 3,
+            })
+        );
+
+        frame.cells.push(CapturedCell::default());
+        frame.cell_anchors.pop();
+        assert_eq!(
+            frame.line_selection(0),
+            Err(FrameShapeError::AnchorCount {
+                expected: 4,
+                actual: 3,
             })
         );
     }
@@ -643,5 +1477,234 @@ mod tests {
             projection.anchor_y(&document, &stale_staging),
             Err(AnchorError::StaleGeneration)
         );
+    }
+
+    #[test]
+    fn continuous_scroll_clamps_and_new_rows_preserve_the_frozen_window() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        for text in ["one", "two"] {
+            document.finalize_transaction(
+                store
+                    .capture(CapturedRow::plain(text, false))
+                    .finalized
+                    .remove(0),
+            );
+        }
+        let mut projection = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let live = || {
+            vec![
+                CapturedRow::plain("aaaa", false),
+                CapturedRow::plain("bbbb", false),
+            ]
+        };
+        projection
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        projection.scroll_by_rows(99);
+        assert_eq!(projection.scroll_offset_rows(), 2);
+        projection.scroll_by_rows(-1);
+        assert_eq!(projection.scroll_offset_rows(), 1);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert_eq!(frame.status_text.as_deref(), Some("1 lines below"));
+
+        document.finalize_transaction(
+            store
+                .capture(CapturedRow::plain("tri", false))
+                .finalized
+                .remove(0),
+        );
+        projection.project(&document);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert_eq!(projection.scroll_offset_rows(), 2);
+        assert_eq!(projection.unread_rows(), 1);
+        assert_eq!(frame.status_text.as_deref(), Some("2 lines below"));
+        assert!(!frame.cursor.visible);
+    }
+
+    #[test]
+    fn resize_reflow_does_not_masquerade_as_unread_content() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        document.finalize_transaction(
+            store
+                .capture(CapturedRow::plain("abcdefgh", false))
+                .finalized
+                .remove(0),
+        );
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let wide_live = || {
+            vec![
+                CapturedRow::plain("live    ", false),
+                CapturedRow::plain("tail    ", false),
+            ]
+        };
+        projection
+            .continuous_frame(
+                &document,
+                &[],
+                wide_live(),
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        projection.scroll_by_rows(1);
+        assert_eq!(projection.scroll_offset_rows(), 1);
+
+        projection.relayout(key(2), &document);
+        let narrow_live = vec![
+            CapturedRow::plain("li", false),
+            CapturedRow::plain("ta", false),
+        ];
+        projection
+            .continuous_frame(
+                &document,
+                &[],
+                narrow_live,
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert_eq!(projection.scroll_offset_rows(), 1);
+        assert_eq!(projection.unread_rows(), 0);
+    }
+
+    #[test]
+    fn word_and_line_selection_keep_wide_clusters_indivisible() {
+        let mut wide = CapturedCell::plain("中");
+        wide.style.flags.insert(CellFlags::WIDE_CHAR);
+        let spacer = CapturedCell {
+            wide_spacer: true,
+            ..CapturedCell::default()
+        };
+        let row = CapturedRow {
+            cells: vec![
+                CapturedCell::plain("!"),
+                wide,
+                spacer,
+                CapturedCell::plain("?"),
+            ],
+            continues: false,
+            shell_mark: None,
+        };
+        let document = HistoryDocument::default();
+        let mut projection = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(1),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &[],
+                vec![row],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert_eq!(frame.word_selection(0, 1), frame.word_selection(0, 2));
+        let selection = frame.word_selection(0, 2).unwrap().unwrap();
+        projection.set_selection(Some(selection));
+        let selected = projection
+            .continuous_frame(
+                &document,
+                &[],
+                vec![CapturedRow {
+                    cells: frame.cells.clone(),
+                    continues: false,
+                    shell_mark: None,
+                }],
+                frame.cursor,
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert_eq!(
+            selected.selection_spans,
+            vec![SelectionSpan {
+                row: 0,
+                start_column: 1,
+                end_column: 3,
+            }]
+        );
+        let line = frame.line_selection(0).unwrap().unwrap();
+        assert_eq!(
+            line.start,
+            frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap()
+        );
+        assert_eq!(
+            line.end,
+            frame.anchor_at(0, 3, Bias::After).unwrap().unwrap()
+        );
+    }
+
+    #[test]
+    fn frozen_wrap_count_respects_cluster_boundaries_instead_of_dividing_total_width() {
+        assert_eq!(frozen_visual_line_count("中中中", 3), 3);
+        assert_eq!(frozen_visual_line_count("a中", 3), 1);
     }
 }

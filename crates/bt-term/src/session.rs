@@ -3,6 +3,7 @@ use std::{
     error::Error,
     fmt,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
+    time::Instant,
 };
 
 use bt_detect::{
@@ -11,16 +12,19 @@ use bt_detect::{
 use bt_doc::{
     AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DetectionRevision,
     GridGeneration, GridPoint, HistoryDocument, InvalidSourceTransition, LayoutKey, LiveRowRemoval,
-    SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp, ViewGeneration,
+    SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp, ViewGeneration, compare_anchors,
 };
 use bt_transcript::{
-    CaptureResult, DEFAULT_STAGING_QUOTA, FinalizeReason, FinalizedLine,
-    SPIKE_DEFAULT_FROZEN_QUOTA, StagingId, TranscriptId, TranscriptStore,
+    CaptureResult, CapturedRow, DEFAULT_STAGING_QUOTA, FinalizedLine, GraphemeOffset,
+    SPIKE_DEFAULT_FROZEN_QUOTA, SourceGeneration, StagedRow, StagingId, TranscriptId,
+    TranscriptStore,
 };
-use bt_viewport::{FrameProjectionError, GridCursor, ViewportFrame, ViewportProjection};
+use bt_viewport::{
+    FrameProjectionError, GridCursor, ViewSelection, ViewportFrame, ViewportProjection,
+};
 
 use crate::{
-    adapter::{AdapterEvent, TerminalAdapter},
+    adapter::{AdapterEvent, TerminalAdapter, TerminalModes},
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WorkerScheduler},
 };
@@ -31,6 +35,59 @@ pub const SPIKE_CELL_HEIGHT_SUBPIXELS: NonZeroI64 = NonZeroI64::new(18 * SUBPIXE
 pub enum SessionError {
     InvalidSourceTransition(InvalidSourceTransition),
     MissingStagingSource(StagingId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResizeTraceRowOrigin {
+    NormalScroll,
+    Resize,
+    DeleteLines,
+    VendorHarvest,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResizeTraceKind {
+    TransactionBegin {
+        columns: u32,
+        rows: u32,
+    },
+    LocalResizeRequest {
+        columns: u32,
+        rows: u32,
+    },
+    PtyResizeRequest {
+        columns: u32,
+        rows: u32,
+    },
+    PtyChunkArrived {
+        bytes: usize,
+    },
+    AdapterRows {
+        origin: ResizeTraceRowOrigin,
+        widths: Vec<usize>,
+    },
+    VendorTail {
+        rows: usize,
+    },
+    Harvest {
+        origin: ResizeTraceRowOrigin,
+        widths: Vec<usize>,
+    },
+    FramePublished {
+        columns: u32,
+        rows: u32,
+        cells: usize,
+        anchors: usize,
+    },
+    TransactionEnd,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResizeTraceEvent {
+    pub transaction: u64,
+    pub ordinal: u64,
+    pub elapsed_micros: u64,
+    pub kind: ResizeTraceKind,
 }
 
 impl fmt::Display for SessionError {
@@ -65,6 +122,11 @@ pub struct DualPlaneSession {
     decorations: BTreeMap<TranscriptId, DecorationRecord>,
     scheduler: WorkerScheduler,
     resize_epoch: ResizeEpoch,
+    resize_trace_transaction: u64,
+    resize_trace_started: Option<Instant>,
+    resize_trace_next_ordinal: u64,
+    resize_trace_post_end_frames_remaining: Option<u8>,
+    resize_trace: Vec<ResizeTraceEvent>,
     staging_sources: BTreeMap<StagingId, SourceLifecycle>,
     active_staging_tail: Option<StagingId>,
     detection_revision: DetectionRevision,
@@ -141,6 +203,11 @@ impl DualPlaneSession {
             decorations: BTreeMap::new(),
             scheduler: WorkerScheduler::default(),
             resize_epoch: ResizeEpoch::default(),
+            resize_trace_transaction: 0,
+            resize_trace_started: None,
+            resize_trace_next_ordinal: 0,
+            resize_trace_post_end_frames_remaining: None,
+            resize_trace: Vec::new(),
             staging_sources: BTreeMap::new(),
             active_staging_tail: None,
             detection_revision: DetectionRevision(1),
@@ -168,6 +235,10 @@ impl DualPlaneSession {
 
     pub fn bracketed_paste_mode(&self) -> bool {
         self.terminal.bracketed_paste_mode()
+    }
+
+    pub fn terminal_modes(&self) -> TerminalModes {
+        self.terminal.modes()
     }
 
     /// Protocol replies are returned to the owning app, which is the only PTY writer.
@@ -231,32 +302,75 @@ impl DualPlaneSession {
 
     /// The actor quantum is observable here; parser calls receive whole slices, never bytes.
     pub fn feed(&mut self, bytes: &[u8]) -> Result<(), SessionError> {
+        self.feed_at(bytes, Instant::now())
+    }
+
+    /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
+    /// can supply a monotonic timestamp without sleeping through the resize silence window.
+    pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
+        // Frozen history is immutable. Staging/live selections are conservatively invalidated by
+        // output because the parser may rewrite a selected row without emitting a removal fact.
+        if !bytes.is_empty() && self.selection_touches_mutable_source() {
+            self.document.clear_selection();
+        }
+        if !bytes.is_empty() {
+            self.resize_epoch.observe_output(observed_at);
+            if self.resize_epoch.is_active() {
+                self.trace_resize_event(
+                    observed_at,
+                    ResizeTraceKind::PtyChunkArrived { bytes: bytes.len() },
+                );
+            }
+        }
         for chunk in bytes.chunks(PARSE_QUANTUM) {
             let events = self.terminal.feed(chunk);
-            self.apply_events(events)?;
+            self.apply_events(events, observed_at)?;
             self.sync_staging_tail();
         }
         Ok(())
     }
 
+    fn selection_touches_mutable_source(&self) -> bool {
+        self.view_selection().is_some_and(|selection| {
+            !matches!(selection.start, ContentAnchor::History { .. })
+                || !matches!(selection.end, ContentAnchor::History { .. })
+        })
+    }
+
     pub fn resize(&mut self, columns: NonZeroU32, rows: NonZeroU32) -> Result<(), SessionError> {
+        self.resize_at(columns, rows, Instant::now())
+    }
+
+    /// Deterministic replay counterpart to `resize`.
+    pub fn resize_at(
+        &mut self,
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        observed_at: Instant,
+    ) -> Result<(), SessionError> {
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
-        if plan.begin_cooldown {
-            self.resize_epoch.changed();
+        if plan.begin_transaction {
+            self.begin_resize_transaction(observed_at)?;
+            self.resize_epoch.changed(observed_at);
             self.grid_generation.0 += 1;
-        }
-        if plan.finalize_staging {
-            let finalized = self
-                .transcript
-                .finalize_all_candidates(FinalizeReason::WidthResize);
-            let evicted = self.transcript.take_evictions();
-            for line in finalized {
-                self.ingest_finalized(line)?;
-            }
-            self.delete_history(&evicted, false);
+            self.trace_resize_event(
+                observed_at,
+                ResizeTraceKind::LocalResizeRequest {
+                    columns: columns.get(),
+                    rows: rows.get(),
+                },
+            );
         }
         let events = self.terminal.resize(columns, rows);
-        self.apply_events(events)?;
+        self.apply_events(events, observed_at)?;
+        if plan.begin_transaction {
+            self.trace_resize_event(
+                observed_at,
+                ResizeTraceKind::VendorTail {
+                    rows: self.terminal.resize_transaction_history_size(),
+                },
+            );
+        }
         // A grow or width-only resize can change the generation without removing rows.
         self.document
             .capture_rows_transaction(&[], self.grid_generation);
@@ -275,9 +389,73 @@ impl DualPlaneSession {
         }
     }
 
-    pub fn mark_resize_quiescent(&mut self) {
+    pub fn resize_finish_deadline(&self) -> Option<Instant> {
+        self.resize_epoch.quiescence_deadline()
+    }
+
+    pub fn resize_request_deadline(&self) -> Option<Instant> {
+        self.resize_epoch.request_deadline()
+    }
+
+    pub fn mark_pty_resize_requested_at(
+        &mut self,
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        observed_at: Instant,
+    ) {
+        self.resize_epoch.final_request_sent(observed_at);
+        self.trace_resize_event(
+            observed_at,
+            ResizeTraceKind::PtyResizeRequest {
+                columns: columns.get(),
+                rows: rows.get(),
+            },
+        );
+    }
+
+    /// Finish only after both resize and output have been silent for their configured intervals.
+    /// Returns true when this call closed a resize transaction.
+    pub fn finish_resize_if_quiescent(
+        &mut self,
+        observed_at: Instant,
+    ) -> Result<bool, SessionError> {
+        if !self.resize_epoch.is_quiescent_at(observed_at) {
+            return Ok(false);
+        }
+        self.harvest_resize_transaction(observed_at)?;
+        self.trace_resize_event(observed_at, ResizeTraceKind::TransactionEnd);
+        // Retain a short post-transaction window so a real wheel-up oracle is represented without
+        // tracing every unrelated frame for the remainder of the session.
+        self.resize_trace_post_end_frames_remaining = Some(16);
         self.resize_epoch.mark_quiescent();
         self.schedule_existing_artifacts();
+        Ok(true)
+    }
+
+    pub fn resize_trace(&self) -> &[ResizeTraceEvent] {
+        &self.resize_trace
+    }
+
+    pub fn resize_trace_transaction(&self) -> u64 {
+        self.resize_trace_transaction
+    }
+
+    pub fn record_published_frame(&mut self, frame: &ViewportFrame, observed_at: Instant) {
+        self.trace_resize_event(
+            observed_at,
+            ResizeTraceKind::FramePublished {
+                columns: frame.columns.get(),
+                rows: frame.rows.get(),
+                cells: frame.cells.len(),
+                anchors: frame.cell_anchors.len(),
+            },
+        );
+        if let Some(remaining) = self.resize_trace_post_end_frames_remaining.as_mut() {
+            *remaining = remaining.saturating_sub(1);
+            if *remaining == 0 {
+                self.resize_trace_started = None;
+            }
+        }
     }
 
     pub fn run_workers(&mut self) {
@@ -340,36 +518,126 @@ impl DualPlaneSession {
             self.transcript.source_generation(),
             self.grid_generation,
         );
-        self.refresh_projection(&mut projection);
+        self.sync_projection_state(&mut projection);
         projection
     }
 
     pub fn viewport_frame(
         &self,
-        projection: &ViewportProjection,
+        projection: &mut ViewportProjection,
     ) -> Result<ViewportFrame, FrameProjectionError> {
-        let (columns, rows) = self.terminal.dimensions();
+        let (_, rows) = self.terminal.dimensions();
         let visible_rows = (0..rows.get())
             .filter_map(|row| self.terminal.visible_row(row))
             .collect::<Vec<_>>();
         let cursor = self.terminal.cursor();
-        projection.live_frame(
-            columns,
+        let staged = self.transcript.staged_rows().cloned().collect::<Vec<_>>();
+        let terminal_modes = self.terminal.modes();
+        projection.continuous_frame(
+            &self.document,
+            &staged,
             visible_rows,
             GridCursor {
                 row: cursor.row,
                 column: cursor.column,
                 visible: cursor.visible,
             },
+            if terminal_modes.alternate_screen {
+                ScreenId::Alternate
+            } else {
+                ScreenId::Primary
+            },
         )
     }
 
+    pub fn set_view_selection(&mut self, selection: Option<ViewSelection>) {
+        if let Some(selection) = selection {
+            self.document
+                .replace_selection(selection.start, selection.end);
+        } else {
+            self.document.clear_selection();
+        }
+    }
+
+    pub fn view_selection(&self) -> Option<ViewSelection> {
+        let selection = self.document.selection()?;
+        Some(ViewSelection {
+            start: self.document.anchor(selection.start).ok()?.clone(),
+            end: self.document.anchor(selection.end).ok()?.clone(),
+        })
+    }
+
+    /// Extract the current semantic selection. Viewport-only reflow is intentionally absent from
+    /// this walk: soft physical wraps concatenate, while hard logical boundaries become CRLF.
+    /// Spaces and tabs at every copied hard-line end (and the final end) are trimmed.
+    pub fn selection_text(&self) -> Option<String> {
+        let selection = self.view_selection()?;
+        let (start, end) = ordered_selection(&selection)?;
+        let screen = if self.terminal.modes().alternate_screen {
+            ScreenId::Alternate
+        } else {
+            ScreenId::Primary
+        };
+        let mut rows = Vec::new();
+        if screen == ScreenId::Primary {
+            rows.extend(
+                self.document
+                    .entries()
+                    .values()
+                    .map(|entry| copy_row_from_history(&entry.line)),
+            );
+            rows.extend(
+                self.transcript
+                    .staged_rows()
+                    .map(|row| copy_row_from_staging(row, self.transcript.source_generation())),
+            );
+        }
+        let (_, live_rows) = self.terminal.dimensions();
+        rows.extend((0..live_rows.get()).filter_map(|row| {
+            self.terminal
+                .visible_row(row)
+                .map(|cells| copy_row_from_live(&cells, row, screen, self.grid_generation))
+        }));
+
+        let mut output = String::new();
+        let mut copied_any_row = false;
+        let mut hard_break_pending = false;
+        for row in rows {
+            let overlaps = selection_overlaps(&row.start, &row.end, start, end);
+            if !overlaps {
+                continue;
+            }
+            if copied_any_row && hard_break_pending {
+                trim_copy_line_end(&mut output);
+                output.push_str("\r\n");
+            }
+            for cell in row.cells {
+                if selection_overlaps(&cell.start, &cell.end, start, end) {
+                    output.push_str(&cell.text);
+                }
+            }
+            copied_any_row = true;
+            hard_break_pending = row.hard_break_after;
+        }
+        if !copied_any_row {
+            return None;
+        }
+        trim_copy_line_end(&mut output);
+        Some(output)
+    }
+
     pub fn refresh_projection(&self, projection: &mut ViewportProjection) {
+        projection.relayout(self.layout_key, &self.document);
+        self.sync_projection_state(projection);
+    }
+
+    fn sync_projection_state(&self, projection: &mut ViewportProjection) {
         projection.set_live_state(
             self.terminal.dimensions().1,
             self.transcript.source_generation(),
             self.grid_generation,
         );
+        projection.set_selection(self.view_selection());
         projection.sync_artifact_heights(self.decorations.iter().filter_map(|(id, record)| {
             record
                 .artifact
@@ -388,15 +656,98 @@ impl DualPlaneSession {
         self.schedule_existing_artifacts();
     }
 
-    fn apply_events(&mut self, events: Vec<AdapterEvent>) -> Result<(), SessionError> {
+    fn begin_resize_transaction(&mut self, observed_at: Instant) -> Result<(), SessionError> {
+        if self.resize_epoch.is_active() {
+            return Ok(());
+        }
+
+        // A transaction starts with a clean ownership boundary: any pre-existing transcript
+        // staging is frozen once, then the vendor exclusively owns all subsequently mutable rows.
+        self.document.clear_selection();
+        let finalized = self.transcript.finalize_all_candidates();
+        let evicted = self.transcript.take_evictions();
+        for line in finalized {
+            self.ingest_finalized(line)?;
+        }
+        self.delete_history(&evicted, false);
+        self.terminal.begin_resize_transaction();
+
+        self.resize_trace.clear();
+        self.resize_trace_transaction = self.resize_trace_transaction.wrapping_add(1);
+        self.resize_trace_started = Some(observed_at);
+        self.resize_trace_next_ordinal = 0;
+        self.resize_trace_post_end_frames_remaining = None;
+        let (columns, rows) = self.terminal.dimensions();
+        self.trace_resize_event(
+            observed_at,
+            ResizeTraceKind::TransactionBegin {
+                columns: columns.get(),
+                rows: rows.get(),
+            },
+        );
+        Ok(())
+    }
+
+    fn trace_resize_event(&mut self, observed_at: Instant, kind: ResizeTraceKind) {
+        let Some(started) = self.resize_trace_started else {
+            return;
+        };
+        let elapsed_micros = observed_at
+            .saturating_duration_since(started)
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64;
+        self.resize_trace.push(ResizeTraceEvent {
+            transaction: self.resize_trace_transaction,
+            ordinal: self.resize_trace_next_ordinal,
+            elapsed_micros,
+            kind,
+        });
+        self.resize_trace_next_ordinal = self.resize_trace_next_ordinal.wrapping_add(1);
+    }
+
+    fn trace_adapter_event(&mut self, event: &AdapterEvent, observed_at: Instant) {
+        if !self.resize_epoch.is_active() {
+            return;
+        }
+        let AdapterEvent::RowsRemoved { context, rows } = event else {
+            return;
+        };
+        let origin = match context.cause {
+            crate::adapter::RemovalCause::NormalScroll => ResizeTraceRowOrigin::NormalScroll,
+            crate::adapter::RemovalCause::Resize => ResizeTraceRowOrigin::Resize,
+            crate::adapter::RemovalCause::DeleteLines => ResizeTraceRowOrigin::DeleteLines,
+        };
+        self.trace_resize_event(
+            observed_at,
+            ResizeTraceKind::AdapterRows {
+                origin,
+                widths: rows.iter().map(|row| row.row.cells.len()).collect(),
+            },
+        );
+    }
+
+    fn apply_events(
+        &mut self,
+        events: Vec<AdapterEvent>,
+        observed_at: Instant,
+    ) -> Result<(), SessionError> {
         for event in events {
+            self.trace_adapter_event(&event, observed_at);
             match classify(event) {
-                LifecycleDirective::RowsRemoved(rows) => self.apply_removed_rows(rows)?,
+                LifecycleDirective::RowsRemoved { rows } => {
+                    if self.resize_epoch.is_active() {
+                        self.rebase_vendor_owned_rows(rows);
+                    } else {
+                        self.apply_removed_rows(rows)?;
+                    }
+                }
                 LifecycleDirective::ClearHistoryAndStaging => {
+                    self.terminal.clear_resize_transaction_history();
                     let removed = self.transcript.clear_history();
                     self.delete_history(&removed, true);
                 }
                 LifecycleDirective::InvalidateStaging => {
+                    self.terminal.clear_resize_transaction_history();
                     self.transcript.invalidate_staging();
                     self.staging_sources.clear();
                     self.active_staging_tail = None;
@@ -419,24 +770,78 @@ impl DualPlaneSession {
         Ok(())
     }
 
+    fn rebase_vendor_owned_rows(&mut self, rows: Vec<RowDirective>) {
+        let removals = rows
+            .into_iter()
+            .filter_map(|row| match row {
+                RowDirective::Capture { live_row, .. }
+                | RowDirective::DiscardFromTop { live_row } => Some(LiveRowRemoval {
+                    row: live_row,
+                    staging: None,
+                    grapheme_offsets: Vec::new(),
+                }),
+                RowDirective::Ignore => None,
+            })
+            .collect::<Vec<_>>();
+        if removals.is_empty() {
+            return;
+        }
+        self.grid_generation.0 += 1;
+        self.document
+            .capture_rows_transaction(&removals, self.grid_generation);
+    }
+
+    fn harvest_resize_transaction(&mut self, observed_at: Instant) -> Result<(), SessionError> {
+        let rows = self.terminal.finish_resize_transaction();
+        self.trace_resize_event(
+            observed_at,
+            ResizeTraceKind::Harvest {
+                origin: ResizeTraceRowOrigin::VendorHarvest,
+                widths: rows.iter().map(|row| row.cells.len()).collect(),
+            },
+        );
+        for row in rows {
+            // Native WRAPLINE is a geometry fact, not a causal repaint identity. At the harvest
+            // seam an old wrapped head and a repainted hard line are observationally ambiguous;
+            // freezing physical rows as independent wrap-split candidates is the conservative
+            // no-weld policy. The original WRAPLINE flag remains on the fragment so every boundary
+            // cell survives normalization, but it can never splice two real rows together.
+            let result = self.transcript.capture_wrap_split(row);
+            self.staging_sources
+                .insert(result.staging_id, SourceLifecycle::Live);
+            self.active_staging_tail = result.finalized.is_empty().then_some(result.staging_id);
+            for finalized in result.finalized {
+                self.ingest_finalized(finalized)?;
+            }
+        }
+        let evicted = self.transcript.take_evictions();
+        self.delete_history(&evicted, false);
+        Ok(())
+    }
+
     fn apply_removed_rows(&mut self, rows: Vec<RowDirective>) -> Result<(), SessionError> {
         let mut removals = Vec::new();
         let mut captured = Vec::<CaptureResult>::new();
         for row in rows {
             match row {
                 RowDirective::Capture { live_row, row } => {
+                    let grapheme_offsets = captured_grapheme_offsets(&row);
                     let result = self.transcript.capture(row);
                     let generation = self.transcript.source_generation();
                     removals.push(LiveRowRemoval {
                         row: live_row,
                         staging: Some((result.staging_id, generation)),
+                        grapheme_offsets,
                     });
                     captured.push(result);
                 }
-                RowDirective::DiscardFromTop { live_row } => removals.push(LiveRowRemoval {
-                    row: live_row,
-                    staging: None,
-                }),
+                RowDirective::DiscardFromTop { live_row } => {
+                    removals.push(LiveRowRemoval {
+                        row: live_row,
+                        staging: None,
+                        grapheme_offsets: Vec::new(),
+                    });
+                }
                 RowDirective::Ignore => {}
             }
         }
@@ -591,6 +996,172 @@ impl DualPlaneSession {
     }
 }
 
+#[derive(Clone)]
+struct CopyCell {
+    start: ContentAnchor,
+    end: ContentAnchor,
+    text: String,
+}
+
+struct CopyRow {
+    start: ContentAnchor,
+    end: ContentAnchor,
+    cells: Vec<CopyCell>,
+    hard_break_after: bool,
+}
+
+fn captured_grapheme_offsets(row: &CapturedRow) -> Vec<GraphemeOffset> {
+    let mut next = 0u32;
+    let mut lead = 0u32;
+    row.cells
+        .iter()
+        .map(|cell| {
+            if !cell.wide_spacer {
+                lead = next;
+                next += u32::from(!cell.text.is_empty());
+            }
+            GraphemeOffset(lead)
+        })
+        .collect()
+}
+
+fn copy_row_from_history(line: &bt_transcript::FrozenLine) -> CopyRow {
+    let anchor = |offset, bias| ContentAnchor::History {
+        id: line.id,
+        offset: GraphemeOffset(offset),
+        bias,
+        generation: line.source_generation,
+    };
+    let cells = line
+        .grapheme_boundaries
+        .windows(2)
+        .enumerate()
+        .map(|(index, bytes)| CopyCell {
+            start: anchor(index as u32, Bias::Before),
+            end: anchor(index as u32, Bias::After),
+            text: line.text[bytes[0] as usize..bytes[1] as usize].to_owned(),
+        })
+        .collect();
+    let end = line.grapheme_boundaries.len().saturating_sub(1) as u32;
+    CopyRow {
+        start: anchor(0, Bias::Before),
+        end: anchor(end, Bias::After),
+        cells,
+        hard_break_after: true,
+    }
+}
+
+fn copy_row_from_staging(row: &StagedRow, generation: SourceGeneration) -> CopyRow {
+    let offsets = captured_grapheme_offsets(&row.row);
+    let anchor = |offset: GraphemeOffset, bias| ContentAnchor::Staging {
+        id: row.id,
+        offset,
+        bias,
+        generation,
+    };
+    copy_row_from_cells(
+        &row.row,
+        |column, bias| anchor(offsets[column], bias),
+        !row.row.continues,
+    )
+}
+
+fn copy_row_from_live(
+    row: &CapturedRow,
+    row_index: u32,
+    screen: ScreenId,
+    generation: GridGeneration,
+) -> CopyRow {
+    copy_row_from_cells(
+        row,
+        |column, bias| ContentAnchor::Live {
+            screen,
+            point: GridPoint {
+                row: row_index,
+                column: column as u32,
+            },
+            bias,
+            generation,
+        },
+        !row.continues,
+    )
+}
+
+fn copy_row_from_cells(
+    row: &CapturedRow,
+    anchor: impl Fn(usize, Bias) -> ContentAnchor,
+    hard_break_after: bool,
+) -> CopyRow {
+    let last = row.cells.len().saturating_sub(1);
+    let mut cells = Vec::new();
+    for (column, cell) in row.cells.iter().enumerate() {
+        if cell.wide_spacer {
+            continue;
+        }
+        cells.push(CopyCell {
+            start: anchor(column, Bias::Before),
+            end: anchor(column, Bias::After),
+            text: if cell.text.is_empty() {
+                " ".to_owned()
+            } else {
+                cell.text.clone()
+            },
+        });
+    }
+    CopyRow {
+        start: anchor(0, Bias::Before),
+        end: anchor(last, Bias::After),
+        cells,
+        hard_break_after,
+    }
+}
+
+fn ordered_selection(selection: &ViewSelection) -> Option<(&ContentAnchor, &ContentAnchor)> {
+    match compare_selection_anchors(&selection.start, &selection.end)? {
+        std::cmp::Ordering::Greater => Some((&selection.end, &selection.start)),
+        _ => Some((&selection.start, &selection.end)),
+    }
+}
+
+fn compare_selection_anchors(
+    left: &ContentAnchor,
+    right: &ContentAnchor,
+) -> Option<std::cmp::Ordering> {
+    match (left, right) {
+        (
+            ContentAnchor::Live {
+                screen: ScreenId::Alternate,
+                point: left_point,
+                bias: left_bias,
+                ..
+            },
+            ContentAnchor::Live {
+                screen: ScreenId::Alternate,
+                point: right_point,
+                bias: right_bias,
+                ..
+            },
+        ) => Some((left_point, left_bias).cmp(&(right_point, right_bias))),
+        _ => compare_anchors(left, right).ok(),
+    }
+}
+
+fn selection_overlaps(
+    item_start: &ContentAnchor,
+    item_end: &ContentAnchor,
+    selection_start: &ContentAnchor,
+    selection_end: &ContentAnchor,
+) -> bool {
+    compare_selection_anchors(item_start, selection_end)
+        .is_some_and(|order| order == std::cmp::Ordering::Less)
+        && compare_selection_anchors(item_end, selection_start)
+            .is_some_and(|order| order == std::cmp::Ordering::Greater)
+}
+
+fn trim_copy_line_end(text: &mut String) {
+    text.truncate(text.trim_end_matches([' ', '\t']).len());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -625,8 +1196,8 @@ mod tests {
     fn byte_driven_terminal_state_projects_through_the_viewport_frame_boundary() {
         let mut session = DualPlaneSession::new(nz(4), nz(2));
         session.feed(b"\x1b[31mA").unwrap();
-        let projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&projection).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
 
         assert_eq!((frame.columns.get(), frame.rows.get()), (4, 2));
         assert_eq!(frame.cells.len(), 8);
@@ -639,8 +1210,8 @@ mod tests {
     fn byte_driven_prompt_cursor_is_the_cell_after_typed_text_and_ignores_prediction() {
         let mut session = DualPlaneSession::new(nz(32), nz(2));
         session.feed(b"PS> carg").unwrap();
-        let projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&projection).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
         let typed_end = frame.cells[..32]
             .iter()
             .rposition(|cell| !cell.text.chars().all(char::is_whitespace))
@@ -652,8 +1223,8 @@ mod tests {
         // PSReadLine paints inline prediction after saving the input cursor, then restores it.
         // Prediction cells remain visible but must not participate in the cursor column.
         session.feed(b"o\x1b7 --version\x1b8").unwrap();
-        let projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&projection).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(frame.cursor.column, "PS> cargo".len() as u32);
         assert!(
             frame.cells[..32]
@@ -662,6 +1233,44 @@ mod tests {
                 .collect::<String>()
                 .contains("cargo --version")
         );
+    }
+
+    #[test]
+    fn selection_copy_rejoins_soft_wraps_and_uses_crlf_for_hard_rows() {
+        let mut soft = DualPlaneSession::new(nz(4), nz(2));
+        soft.feed(b"abcdef").unwrap();
+        let mut projection = soft.new_projection(soft.layout_key());
+        let frame = soft.viewport_frame(&mut projection).unwrap();
+        soft.set_view_selection(Some(ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(1, 1, Bias::After).unwrap().unwrap(),
+        }));
+        assert_eq!(soft.selection_text().as_deref(), Some("abcdef"));
+
+        let mut hard = DualPlaneSession::new(nz(4), nz(2));
+        hard.feed(b"ab\r\ncd").unwrap();
+        let mut projection = hard.new_projection(hard.layout_key());
+        let frame = hard.viewport_frame(&mut projection).unwrap();
+        hard.set_view_selection(Some(ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(1, 1, Bias::After).unwrap().unwrap(),
+        }));
+        assert_eq!(hard.selection_text().as_deref(), Some("ab\r\ncd"));
+    }
+
+    #[test]
+    fn selecting_a_wide_spacer_copies_the_whole_cluster_and_output_clears_live_selection() {
+        let mut session = DualPlaneSession::new(nz(4), nz(2));
+        session.feed("中".as_bytes()).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        session.set_view_selection(Some(ViewSelection {
+            start: frame.anchor_at(0, 1, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(0, 1, Bias::After).unwrap().unwrap(),
+        }));
+        assert_eq!(session.selection_text().as_deref(), Some("中"));
+        session.feed(b"x").unwrap();
+        assert!(session.view_selection().is_none());
     }
 
     proptest! {

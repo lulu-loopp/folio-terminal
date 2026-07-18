@@ -1,8 +1,12 @@
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::{
+    num::{NonZeroU32, NonZeroUsize},
+    time::{Duration, Instant},
+};
 
 use bt_doc::{DecorationIntent, DecorationLifecycle};
 use bt_term::DualPlaneSession;
 use bt_transcript::{CellFlags, TerminalColor};
+use proptest::prelude::*;
 
 fn nz32(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).unwrap()
@@ -19,6 +23,76 @@ fn history_text(session: &DualPlaneSession) -> Vec<&str> {
         .values()
         .map(|entry| entry.line.text.as_str())
         .collect()
+}
+
+fn staged_text(session: &DualPlaneSession) -> Vec<String> {
+    session
+        .transcript()
+        .staged_rows()
+        .map(|staged| {
+            staged
+                .row
+                .cells
+                .iter()
+                .filter(|cell| !cell.wide_spacer)
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+        .collect()
+}
+
+fn repaint_rows<T: AsRef<str>>(rows: &[T]) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for (row, text) in rows.iter().enumerate() {
+        bytes.extend_from_slice(format!("\x1b[{};1H\x1b[2K{}", row + 1, text.as_ref()).as_bytes());
+    }
+    bytes
+}
+
+fn finish_resize_transaction(session: &mut DualPlaneSession, request_at: Instant) {
+    let (columns, rows) = session.terminal().dimensions();
+    session.mark_pty_resize_requested_at(columns, rows, request_at);
+    assert!(
+        session
+            .finish_resize_if_quiescent(request_at + Duration::from_millis(200))
+            .unwrap()
+    );
+}
+
+fn logical_content(session: &DualPlaneSession) -> Vec<String> {
+    let mut logical = history_text(session)
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let staged = session
+        .transcript()
+        .staged_rows()
+        .map(|row| row.row.clone());
+    let (_, live_rows) = session.terminal().dimensions();
+    let live = (0..live_rows.get()).filter_map(|row| session.terminal().visible_row(row));
+    let mut current = String::new();
+    for row in staged.chain(live) {
+        current.extend(
+            row.cells
+                .iter()
+                .filter(|cell| !cell.wide_spacer)
+                .map(|cell| cell.text.as_str()),
+        );
+        if !row.continues {
+            let trimmed = current.trim_end();
+            if !trimmed.is_empty() {
+                logical.push(trimmed.to_owned());
+            }
+            current.clear();
+        }
+    }
+    let trimmed = current.trim_end();
+    if !trimmed.is_empty() {
+        logical.push(trimmed.to_owned());
+    }
+    logical
 }
 
 #[test]
@@ -56,12 +130,60 @@ fn g1_resize_grow_makes_the_entire_new_grid_addressable() {
 }
 
 #[test]
-fn g1_resize_shrink_captures_exactly_nonblank_rows_removed_from_the_top() {
+fn reused_projection_refreshes_layout_before_framing_a_width_resize() {
+    let mut session = DualPlaneSession::new(nz32(8), nz32(2));
+    let mut projection = session.new_projection(session.layout_key());
+    let initial = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!((initial.columns.get(), initial.cells.len()), (8, 16));
+
+    session.resize(nz32(20), nz32(2)).unwrap();
+    session.refresh_projection(&mut projection);
+    let resized = session.viewport_frame(&mut projection).unwrap();
+
+    assert_eq!(projection.layout_key(), session.layout_key());
+    assert_eq!((resized.columns.get(), resized.cells.len()), (20, 40));
+}
+
+#[test]
+fn g1_vendor_tail_owns_nonblank_shrink_rows_until_grow_restores_them() {
     let mut session = DualPlaneSession::new(nz32(8), nz32(4));
     session.feed(b"r1\r\nr2\r\nr3\r\nr4").unwrap();
-    session.resize(nz32(6), nz32(2)).unwrap();
-    assert_eq!(history_text(&session), vec!["r1", "r2"]);
+    session.resize(nz32(8), nz32(2)).unwrap();
+    assert!(history_text(&session).is_empty());
+    assert!(staged_text(&session).is_empty());
+    assert_eq!(session.terminal().resize_transaction_history_size(), 2);
     assert_eq!(session.terminal().visible_text(), vec!["r3", "r4"]);
+
+    session.resize(nz32(8), nz32(4)).unwrap();
+    assert!(history_text(&session).is_empty());
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(
+        session.terminal().visible_text(),
+        vec!["r1", "r2", "r3", "r4"]
+    );
+}
+
+#[test]
+fn g1_vendor_tail_harvests_once_at_transaction_finish() {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(8), nz32(4));
+    session.feed_at(b"r1\r\nr2\r\nr3\r\nr4", start).unwrap();
+    session
+        .resize_at(nz32(8), nz32(2), start + Duration::from_millis(10))
+        .unwrap();
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.terminal().resize_transaction_history_size(), 2);
+
+    session
+        .feed_at(b"\r\nnew", start + Duration::from_millis(20))
+        .unwrap();
+    assert!(history_text(&session).is_empty());
+    finish_resize_transaction(&mut session, start + Duration::from_millis(210));
+    assert_eq!(history_text(&session), vec!["r1", "r2", "r3"]);
+    assert_eq!(session.transcript().staging_len(), 0);
+
+    session.resize(nz32(8), nz32(4)).unwrap();
+    assert_eq!(session.terminal().visible_text(), vec!["r4", "new", "", ""]);
 }
 
 #[test]
@@ -86,19 +208,387 @@ fn g1_width_reflow_never_rewrites_frozen_source() {
 }
 
 #[test]
-fn g1_resize_jitter_does_not_duplicate_captured_rows() {
+fn g1_no_output_resize_jitter_does_not_duplicate_captured_rows() {
     let mut session = DualPlaneSession::new(nz32(8), nz32(4));
     session.feed(b"r1\r\nr2\r\nr3\r\nr4").unwrap();
     session.resize(nz32(7), nz32(2)).unwrap();
     session.resize(nz32(9), nz32(5)).unwrap();
     session.resize(nz32(6), nz32(2)).unwrap();
-    let text = history_text(&session);
-    assert_eq!(text.iter().filter(|line| **line == "r1").count(), 1);
-    assert_eq!(text.iter().filter(|line| **line == "r2").count(), 1);
+    session.resize(nz32(8), nz32(4)).unwrap();
+    assert!(history_text(&session).is_empty());
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(
+        session.terminal().visible_text(),
+        vec!["r1", "r2", "r3", "r4"]
+    );
 }
 
 #[test]
-fn g1_width_resize_forces_a_cross_boundary_logical_line_split() {
+fn g1_no_output_shrink_grow_storm_harvests_no_history_and_keeps_bottom_following() {
+    const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal>";
+    let mut session = DualPlaneSession::new(nz32(64), nz32(8));
+    session
+        .feed(
+            format!(
+                "Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\
+                 alpha\r\nbeta\r\ngamma\r\ndelta\r\nepsilon\r\n{PROMPT}"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    assert!(history_text(&session).is_empty());
+    let initial = session.terminal().visible_text();
+    let mut projection = session.new_projection(session.layout_key());
+
+    let storm = [(64, 8), (10, 2), (36, 3), (8, 7), (12, 2), (64, 8)];
+    for _ in 0..6 {
+        for (columns, rows) in storm {
+            session.resize(nz32(columns), nz32(rows)).unwrap();
+            session.refresh_projection(&mut projection);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(frame.cells.len(), columns as usize * rows as usize);
+            assert_eq!(projection.scroll_offset_rows(), 0);
+            assert_eq!(frame.status_text, None);
+            assert!(history_text(&session).is_empty());
+        }
+    }
+
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.terminal().visible_text(), initial);
+    assert!(
+        session
+            .terminal()
+            .visible_text()
+            .iter()
+            .all(|line| line.trim() != "Terminal>")
+    );
+    assert!(
+        session
+            .terminal()
+            .visible_text()
+            .iter()
+            .any(|line| line == PROMPT)
+    );
+    assert!(
+        session
+            .terminal()
+            .visible_text()
+            .iter()
+            .any(|line| line == "Did not find path entry D:\\App\\Base\\anaconda3\\bin")
+    );
+}
+
+#[test]
+fn g1_resize_repaint_never_welds_a_stale_wrapped_head_to_the_next_hard_line() {
+    let start = Instant::now();
+    let line_a = "A-0123456789AB";
+    let line_b = "B-complete";
+    let mut session = DualPlaneSession::new(nz32(20), nz32(2));
+    session
+        .feed_at(format!("{line_a}\r\n{line_b}").as_bytes(), start)
+        .unwrap();
+    assert_eq!(logical_content(&session), [line_a, line_b]);
+
+    session
+        .resize_at(nz32(10), nz32(2), start + Duration::from_millis(12))
+        .unwrap();
+    assert_eq!(session.terminal().resize_transaction_history_size(), 1);
+
+    // Model a stale ConPTY repaint: row 1 is rewritten before a bottom-edge linefeed scrolls it
+    // out, then the final cursor-addressed repaint restores the expected live screen.
+    let line_a_tail = &line_a[10..];
+    session.mark_pty_resize_requested_at(nz32(10), nz32(2), start + Duration::from_millis(212));
+    session
+        .feed_at(
+            format!(
+                "\x1b[1;1H\x1b[2K{line_b}\x1b[2;1H\r\n\
+                 \x1b[1;1H\x1b[2K{line_a_tail}\x1b[2;1H\x1b[2K{line_b}"
+            )
+            .as_bytes(),
+            start + Duration::from_millis(226),
+        )
+        .unwrap();
+    assert!(
+        session
+            .finish_resize_if_quiescent(start + Duration::from_millis(426))
+            .unwrap()
+    );
+
+    let actual = logical_content(&session);
+    assert_eq!(actual, ["A-01234567", line_b, "89AB", line_b]);
+    assert!(
+        actual
+            .iter()
+            .all(|line| { !(line.contains("A-01234567") && line.contains(line_b)) })
+    );
+}
+
+#[test]
+fn g1_modal_pixel_resize_timing_preserves_content_and_rectangular_scroll_frames() {
+    let expected = [
+        "resize-line-00",
+        "resize-line-01",
+        "resize-line-02",
+        "resize-line-03",
+        "resize-line-04",
+        "resize-line-05",
+        "(base) PS BT>",
+    ]
+    .map(str::to_owned);
+    let start = Instant::now();
+    let mut now = start;
+    let mut session = DualPlaneSession::new(nz32(54), nz32(7));
+    session
+        .feed_at(expected.join("\r\n").as_bytes(), now)
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+
+    for step in 0..180_u32 {
+        now += Duration::from_millis(u64::from(12 + step % 15));
+        let phase = step % 72;
+        let columns = if phase < 36 {
+            54 - phase
+        } else {
+            18 + phase - 36
+        };
+        let row_phase = step % 8;
+        let rows = if row_phase < 4 {
+            7 - row_phase
+        } else {
+            3 + row_phase - 4
+        };
+        session.resize_at(nz32(columns), nz32(rows), now).unwrap();
+
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        frame.validate_shape().unwrap();
+        session.record_published_frame(&frame, now);
+        assert_eq!(projection.scroll_offset_rows(), 0);
+        assert_eq!(frame.status_text, None);
+    }
+
+    now += Duration::from_millis(10);
+    session.resize_at(nz32(54), nz32(7), now).unwrap();
+    let request_at = now + Duration::from_millis(200);
+    session.mark_pty_resize_requested_at(nz32(54), nz32(7), request_at);
+    let mut final_repaint = format!("\x1b[{};1H\r\n", expected.len()).into_bytes();
+    final_repaint.extend_from_slice(&repaint_rows(&expected));
+    session
+        .feed_at(&final_repaint, request_at + Duration::from_millis(10))
+        .unwrap();
+    assert!(
+        session
+            .finish_resize_if_quiescent(request_at + Duration::from_millis(210))
+            .unwrap()
+    );
+
+    let actual = logical_content(&session);
+    assert!(actual.ends_with(&expected));
+    assert!(actual.len() <= expected.len() + 1);
+    assert!(actual.iter().all(|line| expected.contains(line)));
+    session.refresh_projection(&mut projection);
+    let bottom = session.viewport_frame(&mut projection).unwrap();
+    bottom.validate_shape().unwrap();
+    session.record_published_frame(&bottom, request_at + Duration::from_millis(211));
+    projection.scroll_by_rows(3);
+    session.refresh_projection(&mut projection);
+    let scrolled = session.viewport_frame(&mut projection).unwrap();
+    scrolled.validate_shape().unwrap();
+    session.record_published_frame(&scrolled, request_at + Duration::from_millis(220));
+    let _ = scrolled.word_selection(0, 0).unwrap();
+    assert_eq!(projection.scroll_offset_rows(), 1);
+    assert!(
+        session
+            .resize_trace()
+            .iter()
+            .any(|event| matches!(event.kind, bt_term::ResizeTraceKind::PtyChunkArrived { .. }))
+    );
+    assert!(
+        session
+            .resize_trace()
+            .iter()
+            .any(|event| matches!(event.kind, bt_term::ResizeTraceKind::Harvest { .. }))
+    );
+}
+
+fn replay_resize_trace(start: Instant) -> Vec<bt_term::ResizeTraceEvent> {
+    let mut session = DualPlaneSession::new(nz32(8), nz32(3));
+    session.feed_at(b"a\r\nb\r\nc", start).unwrap();
+    session
+        .resize_at(nz32(4), nz32(2), start + Duration::from_millis(10))
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let live = session.viewport_frame(&mut projection).unwrap();
+    live.validate_shape().unwrap();
+    session.record_published_frame(&live, start + Duration::from_millis(10));
+
+    session.mark_pty_resize_requested_at(nz32(4), nz32(2), start + Duration::from_millis(210));
+    session
+        .feed_at(b"\r\nx", start + Duration::from_millis(220))
+        .unwrap();
+    assert!(
+        session
+            .finish_resize_if_quiescent(start + Duration::from_millis(420))
+            .unwrap()
+    );
+
+    projection.scroll_by_rows(1);
+    session.refresh_projection(&mut projection);
+    let scrolled = session.viewport_frame(&mut projection).unwrap();
+    scrolled.validate_shape().unwrap();
+    session.record_published_frame(&scrolled, start + Duration::from_millis(421));
+    session.resize_trace().to_vec()
+}
+
+#[test]
+fn g1_resize_trace_replay_is_deterministic_through_post_drag_wheel_frame() {
+    let start = Instant::now();
+    let first = replay_resize_trace(start);
+    let second = replay_resize_trace(start + Duration::from_secs(10));
+
+    assert_eq!(first, second);
+    assert!(
+        first
+            .iter()
+            .enumerate()
+            .all(|(index, event)| { event.ordinal == index as u64 })
+    );
+    assert!(
+        first
+            .iter()
+            .any(|event| matches!(event.kind, bt_term::ResizeTraceKind::AdapterRows { .. }))
+    );
+    assert!(matches!(
+        first.last().map(|event| &event.kind),
+        Some(bt_term::ResizeTraceKind::FramePublished {
+            cells: 8,
+            anchors: 8,
+            ..
+        })
+    ));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 384,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn g1_arbitrary_resize_sequences_preserve_the_logical_content_set(
+        sizes in prop::collection::vec((6_u32..72, 2_u32..12), 8..80),
+    ) {
+        let expected = vec![
+            "Did not find path entry D:\\App\\Base\\anaconda3\\bin".to_owned(),
+            "same-prefix-but-a-hard-line".to_owned(),
+            "same-prefix-but-a-second-hard-line".to_owned(),
+            "spaces inside this logical line stay intact".to_owned(),
+            "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_owned(),
+            "(base) PS D:\\Developer\\BetterTerminal>".to_owned(),
+        ];
+        let mut session = DualPlaneSession::new(nz32(72), nz32(12));
+        session.feed(expected.join("\r\n").as_bytes()).unwrap();
+        prop_assert_eq!(logical_content(&session), expected.clone());
+
+        for (columns, rows) in sizes {
+            session.resize(nz32(columns), nz32(rows)).unwrap();
+            prop_assert!(history_text(&session).is_empty());
+        }
+
+        session.resize(nz32(72), nz32(12)).unwrap();
+        finish_resize_transaction(&mut session, Instant::now());
+        prop_assert_eq!(logical_content(&session), expected.clone());
+        prop_assert!(history_text(&session).is_empty());
+        prop_assert_eq!(session.transcript().staging_len(), 0);
+    }
+}
+
+#[test]
+fn g1_human_paced_resize_redraw_cycles_allow_only_clean_bounded_growth() {
+    // The coordinator's pixel recipe mapped through a 10x20 test cell: (1400,900), (260,180),
+    // (1100,300), (240,650), (1400,900).
+    let mut expected = (0..45)
+        .map(|row| format!("row-{row:02}"))
+        .collect::<Vec<_>>();
+    expected[0] = "Did not find path".into();
+    expected[44] = "BetterTerminal>".into();
+    let start = Instant::now();
+    let mut now = start;
+    let mut session = DualPlaneSession::new(nz32(140), nz32(45));
+    session
+        .feed_at(expected.join("\r\n").as_bytes(), now)
+        .unwrap();
+
+    let recipe = [
+        (140, 45, 30),
+        (26, 9, 90),
+        (110, 15, 45),
+        (24, 32, 80),
+        (140, 45, 130),
+    ];
+    for gesture in 0..4 {
+        for (columns, rows, pause_ms) in recipe {
+            now += Duration::from_millis(pause_ms);
+            session.resize_at(nz32(columns), nz32(rows), now).unwrap();
+        }
+
+        let request_at = now + Duration::from_millis(200);
+        session.mark_pty_resize_requested_at(nz32(140), nz32(45), request_at);
+        let mut redraw = format!("\x1b[{};1H\r\n", expected.len()).into_bytes();
+        redraw.extend_from_slice(&repaint_rows(&expected));
+        session
+            .feed_at(&redraw, request_at + Duration::from_millis(20))
+            .unwrap();
+        now = request_at + Duration::from_millis(220);
+        assert!(session.finish_resize_if_quiescent(now).unwrap());
+
+        let actual = logical_content(&session);
+        assert!(actual.ends_with(&expected));
+        assert!(
+            actual.len() <= expected.len() + gesture + 1,
+            "unexpected resize growth: {actual:?}"
+        );
+        assert!(actual.iter().all(|line| expected.contains(line)));
+        assert_eq!(session.terminal().visible_text(), expected);
+    }
+}
+
+#[test]
+fn g1_resize_silence_delays_but_never_drops_continuous_true_output() {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(8), nz32(3));
+    session.feed_at(b"a\r\nb\r\nc", start).unwrap();
+    session
+        .resize_at(nz32(8), nz32(2), start + Duration::from_millis(10))
+        .unwrap();
+
+    for (index, text) in ["n1", "n2", "n3", "n4"].into_iter().enumerate() {
+        let at = start + Duration::from_millis(100 + index as u64 * 100);
+        session
+            .feed_at(format!("\r\n{text}").as_bytes(), at)
+            .unwrap();
+        if index == 1 {
+            session.mark_pty_resize_requested_at(
+                nz32(8),
+                nz32(2),
+                start + Duration::from_millis(210),
+            );
+        }
+        assert!(!session.finish_resize_if_quiescent(at).unwrap());
+    }
+
+    assert!(
+        session
+            .finish_resize_if_quiescent(start + Duration::from_millis(600))
+            .unwrap()
+    );
+    assert_eq!(history_text(&session), vec!["a", "b", "c", "n1", "n2"]);
+    assert_eq!(session.terminal().visible_text(), vec!["n3", "n4"]);
+}
+
+#[test]
+fn g1_transaction_begin_wrap_splits_preexisting_normal_staging() {
     let mut session = DualPlaneSession::new(nz32(4), nz32(2));
     session.feed(b"abcde\r\n").unwrap();
     assert_eq!(session.transcript().staging_len(), 1);
@@ -120,6 +610,21 @@ fn g1_staging_quota_forces_a_split_instead_of_growing_without_bound() {
             .values()
             .any(|entry| entry.line.wrap_split)
     );
+}
+
+#[test]
+fn g1_harvested_resize_rows_never_move_back_from_frozen_history() {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::with_quotas(nz32(8), nz32(4), nz_size(1), nz_size(32));
+    session.feed(b"r1\r\nr2\r\nr3\r\nr4").unwrap();
+    session.resize_at(nz32(8), nz32(2), start).unwrap();
+    finish_resize_transaction(&mut session, start + Duration::from_millis(200));
+    assert_eq!(history_text(&session), vec!["r1", "r2"]);
+
+    session.resize(nz32(8), nz32(4)).unwrap();
+    assert_eq!(history_text(&session), vec!["r1", "r2"]);
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.terminal().visible_text(), vec!["r3", "r4", "", ""]);
 }
 
 #[test]
@@ -158,6 +663,28 @@ fn g1_alternate_screen_never_enters_primary_history() {
         .feed(b"\x1b[?1049h1\r\n2\r\n3\r\n4\r\n5\x1b[?1049l")
         .unwrap();
     assert_eq!(session.document().entries(), &before);
+}
+
+#[test]
+fn g1_vendor_resize_tail_reflows_with_the_primary_while_it_is_parked() {
+    let mut session = DualPlaneSession::new(nz32(8), nz32(4));
+    session.feed(b"r1\r\nr2\r\nr3\r\nr4").unwrap();
+    session.resize(nz32(8), nz32(2)).unwrap();
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.terminal().resize_transaction_history_size(), 2);
+
+    session.feed(b"\x1b[?1049h").unwrap();
+    session.resize(nz32(4), nz32(3)).unwrap();
+    session.feed(b"\x1b[?1049l").unwrap();
+    session.resize(nz32(8), nz32(4)).unwrap();
+    finish_resize_transaction(&mut session, Instant::now());
+
+    assert!(history_text(&session).is_empty());
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(
+        session.terminal().visible_text(),
+        vec!["r1", "r2", "r3", "r4"]
+    );
 }
 
 #[test]

@@ -1,28 +1,32 @@
 use std::{
+    backtrace::Backtrace,
+    fs::OpenOptions,
+    io::Write,
     num::{NonZeroU32, NonZeroUsize},
+    panic,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 mod input;
 
 use anyhow::{Context, Result, anyhow, ensure};
-use bt_doc::LayoutKey;
+use bt_doc::{Bias, LayoutKey};
 use bt_pty::{OutputWake, PtySession, PtySize};
 use bt_render::{
-    DEFAULT_BACKGROUND_RGB, FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot,
-    Preedit, PresentOutcome, Renderer, compose_preedit,
+    FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, Preedit, PresentOutcome,
+    Renderer, background_rgb, compose_preedit,
 };
-use bt_term::DualPlaneSession;
+use bt_term::{DualPlaneSession, MouseTracking};
 use bt_transcript::DEFAULT_STAGING_QUOTA;
-use bt_viewport::{ViewportFrame, ViewportProjection};
+use bt_viewport::{ViewSelection, ViewportFrame, ViewportProjection};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
-    event::{ElementState, Ime, KeyEvent, WindowEvent},
+    event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    keyboard::ModifiersState,
+    keyboard::{Key, ModifiersState, NamedKey},
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{Window, WindowId},
 };
@@ -34,8 +38,13 @@ const WIN32_DEFAULT_DPI: f64 = 96.0;
 const STARTUP_PTY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 /// One 60 Hz frame: coalesce cursor-area churn without leaving the final position unsent.
 const IME_CURSOR_AREA_INTERVAL: Duration = Duration::from_millis(16);
+/// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
+/// silence interval while the local surface and terminal grid continue to follow every event.
+const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
 /// M0-alpha's single-session frozen-line budget; later configuration work may expose it.
 const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
+const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
 
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
@@ -62,6 +71,9 @@ struct Runtime {
     window: Arc<Window>,
     startup_started: Instant,
     trace_startup: bool,
+    trace_resize: bool,
+    resize_trace_logged_transaction: u64,
+    resize_trace_logged_events: usize,
     background_visible: Option<Duration>,
     first_text_visible: Option<Duration>,
     window_shown: bool,
@@ -72,6 +84,90 @@ struct Runtime {
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
     ime_system_caret: bt_platform::ImeSystemCaret,
+    pointer_position: Option<PhysicalPosition<f64>>,
+    mouse_route: Option<MouseRoute>,
+    click_tracker: ClickTracker,
+    line_wheel_remainder: f64,
+    pixel_wheel_remainder: f64,
+    pending_pty_resize: Option<PendingPtyResize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingPtyResize {
+    grid: GridSize,
+    physical: PhysicalSize<u32>,
+    deadline: Instant,
+}
+
+fn coalesce_pty_resize(
+    pending: &mut Option<PendingPtyResize>,
+    grid: GridSize,
+    physical: PhysicalSize<u32>,
+    observed_at: Instant,
+) {
+    *pending = Some(PendingPtyResize {
+        grid,
+        physical,
+        deadline: observed_at + WINDOW_RESIZE_QUIET,
+    });
+}
+
+fn take_due_pty_resize(
+    pending: &mut Option<PendingPtyResize>,
+    now: Instant,
+) -> Option<PendingPtyResize> {
+    pending
+        .is_some_and(|resize| now >= resize.deadline)
+        .then(|| {
+            pending
+                .take()
+                .expect("due resize was present immediately before take")
+        })
+}
+
+#[derive(Clone)]
+enum MouseRoute {
+    Local(SelectionDrag),
+    Forward(input::MouseProtocolButton),
+}
+
+#[derive(Clone)]
+struct SelectionDrag {
+    mode: SelectionDragMode,
+    origin_row: u32,
+    origin_column: u32,
+    origin: ViewSelection,
+}
+
+#[derive(Clone, Copy)]
+enum SelectionDragMode {
+    Linear,
+    Word,
+    Line,
+}
+
+#[derive(Default)]
+struct ClickTracker {
+    last_at: Option<Instant>,
+    last_cell: Option<(u32, u32)>,
+    count: u8,
+}
+
+impl ClickTracker {
+    fn register(&mut self, row: u32, column: u32, now: Instant) -> u8 {
+        if self.last_cell == Some((row, column))
+            && self
+                .last_at
+                .is_some_and(|last| now.saturating_duration_since(last) <= MULTI_CLICK_INTERVAL)
+        {
+            self.count = self.count % 3 + 1;
+        } else {
+            self.count = 1;
+        }
+        self.last_at = Some(now);
+        self.last_cell = Some((row, column));
+        self.count
+    }
 }
 
 #[derive(Debug, Default)]
@@ -133,6 +229,7 @@ impl Runtime {
         startup_started: Instant,
     ) -> Result<Self> {
         let trace_startup = std::env::var_os("BT_STARTUP_TRACE").is_some();
+        let trace_resize = std::env::var_os("BT_RESIZE_TRACE").is_some();
         let phase_started = Instant::now();
         let attributes = Window::default_attributes()
             .with_title(WINDOW_TITLE)
@@ -164,6 +261,12 @@ impl Runtime {
             renderer.metrics().scale_factor,
             startup_scale_factor,
         )?;
+        trace_surface_size_clamp(
+            trace_startup || trace_resize,
+            "BT_STARTUP",
+            physical,
+            renderer.presentation_geometry(),
+        );
         ensure_swapchain_matches_inner(&renderer, physical)?;
         log_dpi_snapshot(
             "create",
@@ -173,9 +276,10 @@ impl Runtime {
             physical,
         );
         let renderer_time = phase_started.elapsed();
+        let render_physical = presentation_physical_size(renderer.presentation_geometry());
         let grid = renderer
             .metrics()
-            .grid_for_pixels(physical.width, physical.height);
+            .grid_for_pixels(render_physical.width, render_physical.height);
         let probe_input = load_probe_input()?;
         let wake: OutputWake = Arc::new(move || {
             let _ = proxy.send_event(AppEvent::PtyOutput);
@@ -183,12 +287,19 @@ impl Runtime {
         let phase_started = Instant::now();
         let pty = if probe_input.is_none() {
             Some(
-                PtySession::spawn_default(pty_size(grid, physical), wake)
+                PtySession::spawn_default(pty_size(grid, render_physical), wake)
                     .context("spawn default PowerShell in ConPTY")?,
             )
         } else {
             None
         };
+        let conpty_source = pty
+            .as_ref()
+            .map(|pty| pty.conpty_source().to_string())
+            .unwrap_or_else(|| "direct-input".to_string());
+        if trace_startup || trace_resize {
+            eprintln!("BT_CONPTY_SOURCE source={conpty_source:?}");
+        }
         let pty_time = phase_started.elapsed();
         let columns = nonzero_u32(grid.columns.get());
         let rows = nonzero_u32(grid.rows.get());
@@ -223,6 +334,9 @@ impl Runtime {
             window,
             startup_started,
             trace_startup,
+            trace_resize,
+            resize_trace_logged_transaction: 0,
+            resize_trace_logged_events: 0,
             background_visible: None,
             first_text_visible: None,
             window_shown: false,
@@ -233,11 +347,17 @@ impl Runtime {
             ime_active: false,
             ime_cursor_throttle: ImeCursorThrottle::default(),
             ime_system_caret,
+            pointer_position: None,
+            mouse_route: None,
+            click_tracker: ClickTracker::default(),
+            line_wheel_remainder: 0.0,
+            pixel_wheel_remainder: 0.0,
+            pending_pty_resize: None,
         };
         if trace_startup {
             let renderer_phases = runtime.renderer.init_timings();
             eprintln!(
-                "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} runtime_ready={}ms",
+                "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_source={conpty_source:?} runtime_ready={}ms",
                 window_time.as_millis(),
                 renderer_phases.adapter.as_millis(),
                 renderer_phases.device.as_millis(),
@@ -285,18 +405,45 @@ impl Runtime {
         self.session.refresh_projection(&mut self.projection);
         let terminal_frame = self
             .session
-            .viewport_frame(&self.projection)
+            .viewport_frame(&mut self.projection)
             .context("project terminal grid into viewport frame")?;
-        let composed = compose_preedit(&terminal_frame, self.preedit.as_ref());
+        let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
+            .context("reject non-rectangular frame before IME composition")?;
         if self.ime_active {
             let area = self.renderer.ime_cursor_area(&composed.frame);
             if let Some(area) = self.ime_cursor_throttle.offer(area, Instant::now()) {
                 self.apply_ime_cursor_area(area)?;
             }
         }
-        self.pending_frames.publish(composed.frame, trigger);
+        self.session
+            .record_published_frame(&composed.frame, trigger.occurred_at);
+        self.flush_resize_trace();
+        self.pending_frames
+            .publish(composed.frame, trigger)
+            .context("reject non-rectangular frame at publish boundary")?;
         self.window.request_redraw();
         Ok(())
+    }
+
+    fn flush_resize_trace(&mut self) {
+        if !self.trace_resize {
+            return;
+        }
+        let transaction = self.session.resize_trace_transaction();
+        if transaction != self.resize_trace_logged_transaction {
+            self.resize_trace_logged_transaction = transaction;
+            self.resize_trace_logged_events = 0;
+        }
+        let trace = self.session.resize_trace();
+        let conpty_source = self
+            .pty
+            .as_ref()
+            .map(|pty| pty.conpty_source().to_string())
+            .unwrap_or_else(|| "direct-input".to_string());
+        for event in &trace[self.resize_trace_logged_events.min(trace.len())..] {
+            eprintln!("BT_RESIZE_TRACE conpty_source={conpty_source:?} {event:?}");
+        }
+        self.resize_trace_logged_events = trace.len();
     }
 
     fn apply_ime_cursor_area(&mut self, area: ImeCursorArea) -> Result<()> {
@@ -334,7 +481,9 @@ impl Runtime {
                 break;
             }
             debug_assert!(bytes.len() <= bt_pty::TERM_READ_QUANTUM.get());
-            self.session.feed(&bytes).context("apply PTY output")?;
+            self.session
+                .feed_at(&bytes, Instant::now())
+                .context("apply PTY output")?;
             for reply in self.session.take_pty_writes() {
                 self.pty
                     .as_mut()
@@ -358,6 +507,354 @@ impl Runtime {
         Ok(())
     }
 
+    fn finish_resize_if_quiescent(&mut self, now: Instant) -> Result<()> {
+        if self
+            .session
+            .finish_resize_if_quiescent(now)
+            .context("finish ConPTY resize transaction")?
+        {
+            self.publish_frame(FrameTrigger {
+                occurred_at: now,
+                source: FrameSource::Expose,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<()> {
+        let Some(pending) = take_due_pty_resize(&mut self.pending_pty_resize, now) else {
+            return Ok(());
+        };
+        if let Some(pty) = self.pty.as_ref() {
+            pty.resize(pty_size(pending.grid, pending.physical))
+                .context("commit coalesced final ConPTY resize")?;
+        }
+        self.session.mark_pty_resize_requested_at(
+            nonzero_u32(pending.grid.columns.get()),
+            nonzero_u32(pending.grid.rows.get()),
+            now,
+        );
+        Ok(())
+    }
+
+    fn frame_hit(&self) -> Option<bt_render::GridHit> {
+        let position = self.pointer_position?;
+        let frame = self.last_presented_frame.as_ref()?;
+        self.renderer.metrics().hit_test(
+            position.x,
+            position.y,
+            frame.columns.get(),
+            frame.rows.get(),
+        )
+    }
+
+    fn publish_interaction_frame(&mut self) -> Result<()> {
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })
+    }
+
+    fn clear_selection(&mut self) {
+        self.session.set_view_selection(None);
+        self.projection.set_selection(None);
+    }
+
+    fn return_to_live_for_input(&mut self) -> bool {
+        let changed = self.session.view_selection().is_some() || self.projection.is_scrolled();
+        self.clear_selection();
+        self.projection.scroll_to_bottom();
+        changed
+    }
+
+    fn send_user_input(&mut self, bytes: &[u8], context: &'static str) -> Result<()> {
+        let view_changed = self.return_to_live_for_input();
+        self.pending_keyboard_at = Some(Instant::now());
+        if let Some(pty) = self.pty.as_mut() {
+            pty.write(bytes).with_context(|| context)?;
+        }
+        if view_changed {
+            self.publish_frame(FrameTrigger {
+                occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
+                source: FrameSource::Keyboard,
+            })?;
+        }
+        Ok(())
+    }
+
+    fn copy_selection(&mut self) -> Result<()> {
+        let Some(text) = self.session.selection_text() else {
+            return Ok(());
+        };
+        let hwnd = window_hwnd(&self.window)?;
+        bt_platform::set_clipboard_text(hwnd, &text)
+            .map_err(|error| anyhow!(error))
+            .context("write terminal selection to clipboard")?;
+        self.clear_selection();
+        self.publish_interaction_frame()
+    }
+
+    fn scroll_view(&mut self, rows: i32) -> Result<()> {
+        self.projection.scroll_by_rows(rows);
+        self.publish_interaction_frame()
+    }
+
+    fn begin_local_selection(&mut self, hit: bt_render::GridHit) -> Result<()> {
+        let count = self
+            .click_tracker
+            .register(hit.row, hit.column, Instant::now());
+        let frame = self
+            .last_presented_frame
+            .as_ref()
+            .context("missing frame for mouse hit")?;
+        // Local hits are clamped to a continuous frame, which supplies anchors for every grid cell.
+        let (mode, origin, initial) = match count {
+            2 => {
+                let selection = frame
+                    .word_selection(hit.row, hit.column)
+                    .context("reject non-rectangular frame during word selection")?
+                    .context("word selection hit has no anchor")?;
+                (SelectionDragMode::Word, selection.clone(), selection)
+            }
+            3 => {
+                let selection = frame
+                    .line_selection(hit.row)
+                    .context("reject non-rectangular frame during line selection")?
+                    .context("line selection hit has no anchor")?;
+                (SelectionDragMode::Line, selection.clone(), selection)
+            }
+            _ => {
+                let start = frame
+                    .anchor_at(hit.row, hit.column, Bias::Before)
+                    .context("reject non-rectangular frame during anchor lookup")?
+                    .context("selection hit has no start anchor")?;
+                let end = frame
+                    .anchor_at(hit.row, hit.column, Bias::After)
+                    .context("reject non-rectangular frame during anchor lookup")?
+                    .context("selection hit has no end anchor")?;
+                (
+                    SelectionDragMode::Linear,
+                    ViewSelection {
+                        start: start.clone(),
+                        end,
+                    },
+                    ViewSelection {
+                        start: start.clone(),
+                        end: start,
+                    },
+                )
+            }
+        };
+        self.session.set_view_selection(Some(initial));
+        self.mouse_route = Some(MouseRoute::Local(SelectionDrag {
+            mode,
+            origin_row: hit.row,
+            origin_column: hit.column,
+            origin,
+        }));
+        self.publish_interaction_frame()
+    }
+
+    fn extend_local_selection(&mut self, hit: bt_render::GridHit) -> Result<()> {
+        let Some(MouseRoute::Local(drag)) = self.mouse_route.as_ref().cloned() else {
+            return Ok(());
+        };
+        if matches!(drag.mode, SelectionDragMode::Linear)
+            && hit.row == drag.origin_row
+            && hit.column == drag.origin_column
+        {
+            return Ok(());
+        }
+        let frame = self
+            .last_presented_frame
+            .as_ref()
+            .context("missing frame for mouse drag")?;
+        let current = match drag.mode {
+            SelectionDragMode::Linear => ViewSelection {
+                start: frame
+                    .anchor_at(hit.row, hit.column, Bias::Before)
+                    .context("reject non-rectangular frame during drag anchor lookup")?
+                    .context("drag hit has no start anchor")?,
+                end: frame
+                    .anchor_at(hit.row, hit.column, Bias::After)
+                    .context("reject non-rectangular frame during drag anchor lookup")?
+                    .context("drag hit has no end anchor")?,
+            },
+            SelectionDragMode::Word => frame
+                .word_selection(hit.row, hit.column)
+                .context("reject non-rectangular frame during word drag")?
+                .context("word drag hit has no anchor")?,
+            SelectionDragMode::Line => frame
+                .line_selection(hit.row)
+                .context("reject non-rectangular frame during line drag")?
+                .context("line drag hit has no anchor")?,
+        };
+        let after_origin = (hit.row, hit.column) >= (drag.origin_row, drag.origin_column);
+        self.session.set_view_selection(Some(if after_origin {
+            ViewSelection {
+                start: drag.origin.start,
+                end: current.end,
+            }
+        } else {
+            ViewSelection {
+                start: current.start,
+                end: drag.origin.end,
+            }
+        }));
+        self.publish_interaction_frame()
+    }
+
+    fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        self.pointer_position = Some(position);
+        let Some(hit) = self.frame_hit() else {
+            return Ok(());
+        };
+        if matches!(self.mouse_route, Some(MouseRoute::Local(_))) {
+            return self.extend_local_selection(hit);
+        }
+        let modes = self.session.terminal_modes();
+        if self.modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
+            return Ok(());
+        }
+        let button = match self.mouse_route {
+            Some(MouseRoute::Forward(button)) if modes.mouse_tracking != MouseTracking::Click => {
+                button
+            }
+            None if modes.mouse_tracking == MouseTracking::Motion => {
+                input::MouseProtocolButton::None
+            }
+            _ => return Ok(()),
+        };
+        let bytes = input::mouse_bytes(
+            modes.sgr_mouse,
+            button,
+            input::MouseProtocolEvent::Motion,
+            hit.row,
+            hit.column,
+            self.modifiers,
+        );
+        self.send_user_input(&bytes, "forward SGR mouse motion to PTY")
+    }
+
+    fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
+        let Some(hit) = self.frame_hit() else {
+            return Ok(());
+        };
+        let Some(protocol_button) = protocol_mouse_button(button) else {
+            return Ok(());
+        };
+        let modes = self.session.terminal_modes();
+        let forward = !self.modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off;
+        match state {
+            ElementState::Pressed if forward => {
+                let bytes = input::mouse_bytes(
+                    modes.sgr_mouse,
+                    protocol_button,
+                    input::MouseProtocolEvent::Press,
+                    hit.row,
+                    hit.column,
+                    self.modifiers,
+                );
+                self.mouse_route = Some(MouseRoute::Forward(protocol_button));
+                self.send_user_input(&bytes, "forward SGR mouse press to PTY")
+            }
+            ElementState::Released if matches!(self.mouse_route, Some(MouseRoute::Forward(_))) => {
+                let bytes = input::mouse_bytes(
+                    modes.sgr_mouse,
+                    protocol_button,
+                    input::MouseProtocolEvent::Release,
+                    hit.row,
+                    hit.column,
+                    self.modifiers,
+                );
+                self.mouse_route = None;
+                self.send_user_input(&bytes, "forward SGR mouse release to PTY")
+            }
+            ElementState::Pressed if button == MouseButton::Left => self.begin_local_selection(hit),
+            ElementState::Released => {
+                self.extend_local_selection(hit)?;
+                let single_click = matches!(
+                    self.mouse_route,
+                    Some(MouseRoute::Local(SelectionDrag {
+                        mode: SelectionDragMode::Linear,
+                        origin_row,
+                        origin_column,
+                        ..
+                    })) if (origin_row, origin_column) == (hit.row, hit.column)
+                );
+                self.mouse_route = None;
+                if single_click {
+                    self.clear_selection();
+                    self.publish_interaction_frame()?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => {
+                let multiplier = match bt_platform::wheel_scroll_amount()
+                    .map_err(|error| anyhow!(error))
+                    .context("read system wheel scroll-line setting")?
+                {
+                    bt_platform::WheelScrollAmount::Lines(lines) => lines as f64,
+                    bt_platform::WheelScrollAmount::Page => self.grid.rows.get() as f64,
+                };
+                self.line_wheel_remainder += f64::from(y) * multiplier;
+                let lines = self.line_wheel_remainder.trunc() as i32;
+                self.line_wheel_remainder -= f64::from(lines);
+                lines
+            }
+            MouseScrollDelta::PixelDelta(position) => {
+                self.pixel_wheel_remainder += position.y;
+                let lines = (self.pixel_wheel_remainder
+                    / self.renderer.metrics().cell_height_px as f64)
+                    .trunc() as i32;
+                self.pixel_wheel_remainder -=
+                    lines as f64 * self.renderer.metrics().cell_height_px as f64;
+                lines
+            }
+        };
+        if lines == 0 {
+            return Ok(());
+        }
+        let modes = self.session.terminal_modes();
+        if !self.modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off {
+            let Some(hit) = self.frame_hit() else {
+                return Ok(());
+            };
+            let button = if lines > 0 {
+                input::MouseProtocolButton::WheelUp
+            } else {
+                input::MouseProtocolButton::WheelDown
+            };
+            let one = input::mouse_bytes(
+                modes.sgr_mouse,
+                button,
+                input::MouseProtocolEvent::Press,
+                hit.row,
+                hit.column,
+                self.modifiers,
+            );
+            return self.send_user_input(
+                &one.repeat(lines.unsigned_abs() as usize),
+                "forward SGR mouse wheel to PTY",
+            );
+        }
+        if modes.alternate_screen {
+            if !self.modifiers.shift_key() && modes.alternate_scroll {
+                let bytes =
+                    input::alternate_scroll_bytes(lines, self.session.application_cursor_mode());
+                return self.send_user_input(&bytes, "forward alternate-screen wheel to PTY");
+            }
+            return Ok(());
+        }
+        self.scroll_view(lines)
+    }
+
     fn keyboard_input(&mut self, event: &KeyEvent) -> Result<()> {
         if event.state != ElementState::Pressed {
             return Ok(());
@@ -369,11 +866,42 @@ impl Runtime {
         if self.preedit.is_some() && input::is_ime_owned_key(&event.logical_key, self.modifiers) {
             return Ok(());
         }
+        if input::should_copy_selection(
+            &event.logical_key,
+            self.modifiers,
+            self.session.view_selection().is_some(),
+        ) {
+            if !event.repeat {
+                self.copy_selection()?;
+            }
+            return Ok(());
+        }
         if input::is_paste_shortcut(&event.logical_key, self.modifiers) {
             if !event.repeat {
                 self.paste_from_clipboard()?;
             }
             return Ok(());
+        }
+
+        if !self.session.terminal_modes().alternate_screen {
+            let page = self.grid.rows.get() as i32;
+            match &event.logical_key {
+                Key::Named(NamedKey::PageUp) if self.modifiers == ModifiersState::SHIFT => {
+                    return self.scroll_view(page);
+                }
+                Key::Named(NamedKey::PageDown) if self.modifiers == ModifiersState::SHIFT => {
+                    return self.scroll_view(-page);
+                }
+                Key::Named(NamedKey::Home) if self.modifiers == ModifiersState::CONTROL => {
+                    self.projection.scroll_to_top();
+                    return self.publish_interaction_frame();
+                }
+                Key::Named(NamedKey::End) if self.modifiers == ModifiersState::CONTROL => {
+                    self.projection.scroll_to_bottom();
+                    return self.publish_interaction_frame();
+                }
+                _ => {}
+            }
         }
 
         let application_cursor_mode = self.session.application_cursor_mode();
@@ -382,11 +910,7 @@ impl Runtime {
         else {
             return Ok(());
         };
-        self.pending_keyboard_at = Some(Instant::now());
-        match self.pty.as_mut() {
-            Some(pty) => pty.write(&bytes).context("write keyboard input to PTY"),
-            None => Ok(()),
-        }
+        self.send_user_input(&bytes, "write keyboard input to PTY")
     }
 
     fn paste_from_clipboard(&mut self) -> Result<()> {
@@ -399,6 +923,7 @@ impl Runtime {
             }
         };
         let bytes = input::paste_bytes(&text, self.session.bracketed_paste_mode());
+        self.return_to_live_for_input();
         self.pending_keyboard_at = Some(Instant::now());
         if let Some(pty) = self.pty.as_mut() {
             // Keep paste on the sole synchronous PTY writer. Fixed-size writes let ConPTY's
@@ -407,7 +932,10 @@ impl Runtime {
                 pty.write(chunk).context("write clipboard paste to PTY")?;
             }
         }
-        Ok(())
+        self.publish_frame(FrameTrigger {
+            occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
+            source: FrameSource::Keyboard,
+        })
     }
 
     fn ime_input(&mut self, event: Ime) -> Result<()> {
@@ -434,6 +962,7 @@ impl Runtime {
             }
             Ime::Commit(text) => {
                 self.preedit = None;
+                self.return_to_live_for_input();
                 self.pending_keyboard_at = Some(Instant::now());
                 // IMM32 also emits this commit when focus/layout changes mid-composition. M0-beta
                 // deliberately accepts it exactly like Windows Terminal: every commit reaches PTY.
@@ -469,10 +998,18 @@ impl Runtime {
             .resize(physical.width, physical.height)
             .context("synchronize renderer swapchain with resized physical client")?;
         self.reconcile_authoritative_dpi("resized")?;
-        let physical = self.window.inner_size();
-        if physical.width == 0 || physical.height == 0 {
+        let requested_physical = self.window.inner_size();
+        if requested_physical.width == 0 || requested_physical.height == 0 {
             return Ok(());
         }
+        let presentation = self.renderer.presentation_geometry();
+        trace_surface_size_clamp(
+            self.trace_resize,
+            "BT_RESIZE_TRACE",
+            requested_physical,
+            presentation,
+        );
+        let render_physical = presentation_physical_size(presentation);
         let resize_trigger = FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Resize,
@@ -480,7 +1017,7 @@ impl Runtime {
         let next_grid = self
             .renderer
             .metrics()
-            .grid_for_pixels(physical.width, physical.height);
+            .grid_for_pixels(render_physical.width, render_physical.height);
         // ResizeBuffers discards the DXGI back buffers. Re-present the last complete frame before
         // ConPTY/grid reflow so the replacement swapchain is immediately theme-filled and the
         // existing text stays at its old top-left pixel origin during the resize transaction.
@@ -494,14 +1031,17 @@ impl Runtime {
         } else {
             false
         };
+        let observed_at = Instant::now();
+        coalesce_pty_resize(
+            &mut self.pending_pty_resize,
+            next_grid,
+            render_physical,
+            observed_at,
+        );
         if next_grid == self.grid && stabilized {
             return Ok(());
         }
         if next_grid != self.grid {
-            if let Some(pty) = self.pty.as_ref() {
-                pty.resize(pty_size(next_grid, physical))
-                    .context("resize ConPTY")?;
-            }
             self.session
                 .resize(
                     nonzero_u32(next_grid.columns.get()),
@@ -536,6 +1076,7 @@ impl Runtime {
                 .context("reconcile swapchain with physical client size")?;
             ensure_swapchain_matches_inner(&self.renderer, physical)?;
         }
+        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
         let snapshot = dpi_snapshot(&self.window)?;
         log_dpi_snapshot(
             stage,
@@ -557,12 +1098,8 @@ impl Runtime {
             let next_grid = self
                 .renderer
                 .metrics()
-                .grid_for_pixels(physical.width, physical.height);
+                .grid_for_pixels(render_physical.width, render_physical.height);
             if next_grid != self.grid {
-                if let Some(pty) = self.pty.as_ref() {
-                    pty.resize(pty_size(next_grid, physical))
-                        .context("resize ConPTY after authoritative DPI correction")?;
-                }
                 self.session
                     .resize(
                         nonzero_u32(next_grid.columns.get()),
@@ -570,6 +1107,12 @@ impl Runtime {
                     )
                     .context("rebuild terminal grid after authoritative DPI correction")?;
                 self.grid = next_grid;
+                coalesce_pty_resize(
+                    &mut self.pending_pty_resize,
+                    next_grid,
+                    render_physical,
+                    Instant::now(),
+                );
             }
         }
         self.session.set_layout_key(LayoutKey {
@@ -651,7 +1194,9 @@ impl Runtime {
                 self.last_presented_frame = Some(frame);
             }
             PresentOutcome::Skipped | PresentOutcome::Reconfigure => {
-                self.pending_frames.publish(frame, trigger);
+                self.pending_frames
+                    .publish(frame, trigger)
+                    .context("reject non-rectangular frame during redraw retry")?;
                 self.window.request_redraw();
             }
         }
@@ -757,6 +1302,9 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 runtime.modifiers = modifiers.state();
                 Ok(())
             }
+            WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
+            WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
+            WindowEvent::MouseWheel { delta, .. } => runtime.mouse_wheel(delta),
             WindowEvent::Resized(size) => runtime.resize(size),
             WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
             WindowEvent::RedrawRequested => runtime.redraw(),
@@ -790,16 +1338,29 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             return;
         }
         let now = Instant::now();
+        if let Err(error) = runtime.flush_pending_pty_resize(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.flush_ime_cursor_area(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        if let Err(error) = runtime.finish_resize_if_quiescent(now) {
             self.fail(event_loop, error);
             return;
         }
         let startup_deadline =
             startup_poll_delay(runtime.first_text_presented).map(|delay| now + delay);
-        let wake_deadline = match (startup_deadline, runtime.ime_cursor_throttle.deadline()) {
-            (Some(left), Some(right)) => Some(left.min(right)),
-            (left, right) => left.or(right),
-        };
+        let wake_deadline = [
+            startup_deadline,
+            runtime.ime_cursor_throttle.deadline(),
+            runtime.pending_pty_resize.map(|pending| pending.deadline),
+            runtime.session.resize_finish_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         let Some(pty) = runtime.pty.as_mut() else {
@@ -830,6 +1391,15 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
 
 fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
+}
+
+fn protocol_mouse_button(button: MouseButton) -> Option<input::MouseProtocolButton> {
+    match button {
+        MouseButton::Left => Some(input::MouseProtocolButton::Left),
+        MouseButton::Middle => Some(input::MouseProtocolButton::Middle),
+        MouseButton::Right => Some(input::MouseProtocolButton::Right),
+        MouseButton::Back | MouseButton::Forward | MouseButton::Other(_) => None,
+    }
 }
 
 fn startup_poll_delay(first_text_presented: bool) -> Option<std::time::Duration> {
@@ -920,24 +1490,65 @@ fn ensure_swapchain_matches_inner(
     renderer: &Renderer,
     inner_size: PhysicalSize<u32>,
 ) -> Result<()> {
-    let swapchain_size = renderer.presentation_geometry().swapchain_size;
+    let presentation = renderer.presentation_geometry();
+    let swapchain_size = presentation.swapchain_size;
     ensure!(
-        swapchain_size_matches_inner(swapchain_size, inner_size),
-        "swapchain size {}x{} does not match winit physical inner size {}x{}",
+        swapchain_size_matches_inner(
+            swapchain_size,
+            inner_size,
+            presentation.max_texture_dimension_2d,
+        ),
+        "swapchain size {}x{} does not match clamped winit physical inner size {}x{} (device limit {})",
         swapchain_size.0,
         swapchain_size.1,
         inner_size.width,
         inner_size.height,
+        presentation.max_texture_dimension_2d,
     );
     Ok(())
 }
 
-fn swapchain_size_matches_inner(swapchain_size: (u32, u32), inner_size: PhysicalSize<u32>) -> bool {
-    swapchain_size == (inner_size.width, inner_size.height)
+fn swapchain_size_matches_inner(
+    swapchain_size: (u32, u32),
+    inner_size: PhysicalSize<u32>,
+    max_texture_dimension_2d: u32,
+) -> bool {
+    let limit = max_texture_dimension_2d.max(1);
+    swapchain_size
+        == (
+            inner_size.width.max(1).min(limit),
+            inner_size.height.max(1).min(limit),
+        )
+}
+
+fn presentation_physical_size(presentation: bt_render::PresentationGeometry) -> PhysicalSize<u32> {
+    PhysicalSize::new(presentation.swapchain_size.0, presentation.swapchain_size.1)
+}
+
+fn trace_surface_size_clamp(
+    enabled: bool,
+    prefix: &str,
+    requested: PhysicalSize<u32>,
+    presentation: bt_render::PresentationGeometry,
+) {
+    if !enabled
+        || (requested.width <= presentation.swapchain_size.0
+            && requested.height <= presentation.swapchain_size.1)
+    {
+        return;
+    }
+    eprintln!(
+        "{prefix} surface_size_clamped requested={}x{} configured={}x{} max_texture_dimension_2d={}",
+        requested.width,
+        requested.height,
+        presentation.swapchain_size.0,
+        presentation.swapchain_size.1,
+        presentation.max_texture_dimension_2d,
+    );
 }
 
 fn install_theme_class_background(window: &Window) -> Result<()> {
-    bt_platform::install_window_class_background(window_hwnd(window)?, DEFAULT_BACKGROUND_RGB)
+    bt_platform::install_window_class_background(window_hwnd(window)?, background_rgb())
         .map_err(|error| anyhow!(error))
         .context("install theme-colored winit class background brush")
 }
@@ -973,7 +1584,38 @@ fn load_probe_input() -> Result<Option<Vec<u8>>> {
         .map(Some)
 }
 
+fn install_panic_log_hook() {
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        let timestamp_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let thread = std::thread::current();
+        let thread_name = thread.name().unwrap_or("unnamed");
+        let report = format!(
+            "unix_ms={timestamp_ms} thread={thread_name}\npanic: {info}\nbacktrace:\n{}\n",
+            Backtrace::force_capture()
+        );
+        let path = panic_log_path();
+        if let Err(error) = append_panic_report(&path, &report) {
+            eprintln!("failed to write panic report {}: {error}", path.display());
+        }
+        previous(info);
+    }));
+}
+
+fn panic_log_path() -> PathBuf {
+    std::env::temp_dir().join(PANIC_LOG_FILENAME)
+}
+
+fn append_panic_report(path: &std::path::Path, report: &str) -> std::io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{report}")
+}
+
 fn main() -> Result<()> {
+    install_panic_log_hook();
     let event_loop = EventLoop::<AppEvent>::with_user_event()
         .build()
         .context("create winit event loop")?;
@@ -1057,8 +1699,8 @@ mod tests {
             std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
         session.feed(&ime_commit_bytes("A你B")).unwrap();
-        let projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&projection).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
 
         assert_eq!(frame.cells[0].text, "A");
         assert_eq!(frame.cells[1].text, "你");
@@ -1123,7 +1765,8 @@ mod tests {
     }
 
     #[test]
-    fn recorded_swapchain_size_matches_physical_inner_after_every_reconcile_size() {
+    fn recorded_swapchain_size_matches_clamped_physical_inner_after_every_reconcile_size() {
+        const LIMIT: u32 = 8192;
         for inner_size in [
             PhysicalSize::new(960, 600),
             PhysicalSize::new(1440, 900),
@@ -1132,12 +1775,19 @@ mod tests {
         ] {
             assert!(swapchain_size_matches_inner(
                 (inner_size.width, inner_size.height),
-                inner_size
+                inner_size,
+                LIMIT,
             ));
         }
+        assert!(swapchain_size_matches_inner(
+            (534, LIMIT),
+            PhysicalSize::new(534, 65_464),
+            LIMIT,
+        ));
         assert!(!swapchain_size_matches_inner(
             (3840, 2160),
-            PhysicalSize::new(1920, 1200)
+            PhysicalSize::new(1920, 1200),
+            LIMIT,
         ));
     }
 
@@ -1151,6 +1801,101 @@ mod tests {
             PhysicalSize::new(100_000, 80_000),
         );
         assert_eq!((size.pixel_width, size.pixel_height), (u16::MAX, u16::MAX));
+    }
+
+    #[test]
+    fn window_resize_coalescer_keeps_only_the_last_size_and_resets_quiet_deadline() {
+        let start = Instant::now();
+        let first = GridSize {
+            columns: std::num::NonZeroU16::new(80).unwrap(),
+            rows: std::num::NonZeroU16::new(24).unwrap(),
+        };
+        let final_grid = GridSize {
+            columns: std::num::NonZeroU16::new(112).unwrap(),
+            rows: std::num::NonZeroU16::new(31).unwrap(),
+        };
+        let mut pending = None;
+        coalesce_pty_resize(&mut pending, first, PhysicalSize::new(960, 600), start);
+        coalesce_pty_resize(
+            &mut pending,
+            final_grid,
+            PhysicalSize::new(1440, 900),
+            start + Duration::from_millis(150),
+        );
+
+        assert!(take_due_pty_resize(&mut pending, start + Duration::from_millis(349)).is_none());
+        let committed =
+            take_due_pty_resize(&mut pending, start + Duration::from_millis(350)).unwrap();
+        assert_eq!(committed.grid, final_grid);
+        assert_eq!(committed.physical, PhysicalSize::new(1440, 900));
+        assert!(pending.is_none());
+    }
+
+    #[test]
+    fn post_drag_wheel_frame_reaches_the_renderer_text_row_slice_boundary() {
+        let start = Instant::now();
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(8).unwrap(), NonZeroU32::new(3).unwrap());
+        session.feed_at(b"a\r\nb\r\nc", start).unwrap();
+        session
+            .resize_at(
+                NonZeroU32::new(4).unwrap(),
+                NonZeroU32::new(2).unwrap(),
+                start + Duration::from_millis(10),
+            )
+            .unwrap();
+        session.mark_pty_resize_requested_at(
+            NonZeroU32::new(4).unwrap(),
+            NonZeroU32::new(2).unwrap(),
+            start + Duration::from_millis(210),
+        );
+        session
+            .feed_at(b"\r\nx", start + Duration::from_millis(220))
+            .unwrap();
+        assert!(
+            session
+                .finish_resize_if_quiescent(start + Duration::from_millis(420))
+                .unwrap()
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        projection.scroll_by_rows(1);
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        session.record_published_frame(&frame, start + Duration::from_millis(421));
+        let render_rows = bt_render::text_row_cells(&frame)
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert_eq!(render_rows.len(), 2);
+        assert!(render_rows.iter().all(|row| row.len() == 4));
+    }
+
+    #[test]
+    fn panic_log_uses_the_process_temp_directory_without_requiring_stderr() {
+        assert_eq!(
+            panic_log_path(),
+            std::env::temp_dir().join("bt-app-panic.log")
+        );
+    }
+
+    #[test]
+    fn one_cell_terminal_and_zero_pixel_transition_are_defended() {
+        let one = std::num::NonZeroU16::new(1).unwrap();
+        let grid = GridSize {
+            columns: one,
+            rows: one,
+        };
+        let backend = pty_size(grid, PhysicalSize::new(0, 0));
+        assert_eq!((backend.columns.get(), backend.rows.get()), (1, 1));
+        assert_eq!((backend.pixel_width, backend.pixel_height), (0, 0));
+
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(1).unwrap(), NonZeroU32::new(1).unwrap());
+        session.feed(b"A").unwrap();
+        session
+            .resize(NonZeroU32::new(1).unwrap(), NonZeroU32::new(1).unwrap())
+            .unwrap();
+        assert_eq!(session.terminal().visible_text(), ["A"]);
     }
 
     #[test]
@@ -1275,8 +2020,8 @@ mod tests {
             "PowerShell never completed its terminal handshake"
         );
         assert!(output_seen, "PowerShell command output never reached Term");
-        let projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&projection).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
         let rendered_text = frame
             .cells
             .iter()

@@ -160,6 +160,24 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         self.max_scroll_limit = history_size;
     }
 
+    /// Transfer the complete native history out in oldest-to-newest order.
+    ///
+    /// BetterTerminal uses this only at a resize transaction boundary. While the transaction is
+    /// open the grid is the sole owner of this mutable tail; this method atomically hands ownership
+    /// back to the external transcript and restores the steady-state scrollback limit.
+    pub fn take_history(&mut self, next_history_limit: usize) -> Vec<Row<T>>
+    where
+        T: Clone,
+    {
+        let history_size = self.history_size();
+        let rows = (-(history_size as i32)..0)
+            .map(|line| self.raw[Line(line)].clone())
+            .collect();
+        self.clear_history();
+        self.max_scroll_limit = next_history_limit;
+        rows
+    }
+
     pub fn scroll_display(&mut self, scroll: Scroll) {
         self.display_offset = match scroll {
             Scroll::Delta(count) => min(
