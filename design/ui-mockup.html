@@ -1270,6 +1270,76 @@
   .cmdtick.sub { margin-right: 4px; }
   @keyframes cmdflash { 0% { background: color-mix(in srgb, var(--accent) 22%, transparent); } 100% { background: transparent; } }
   .term > div.cmd-jump { animation: cmdflash .95s ease; border-radius: 4px; }
+  /* ── picture-in-picture terminal ── a corner instrument: dark like a
+     terminal (it IS one), floating like a card, never modal. [hidden] stated
+     explicitly — the display:flex lesson is fresh. */
+  .pip {
+    position: absolute; right: 18px; bottom: 18px; width: 360px; z-index: 55;
+    background: var(--menu); border: 1px solid var(--border); border-radius: 10px;
+    box-shadow: var(--shadow); overflow: hidden;
+    display: flex; flex-direction: column;
+    /* theme-following (user correction 2026-07-18: a dark island on a light
+       window read as foreign — the card family speaks one colour language) */
+  }
+  .pip[hidden] { display: none; }
+  .pip-head {
+    display: flex; align-items: center; gap: 7px; padding: 7px 8px 7px 11px;
+    color: var(--ink2); font-size: 11.5px; font-weight: 500;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .pip-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+  .pip-key { margin-left: auto; color: var(--ink3); font: 10px var(--mono); }
+  .pip-close { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 5px;
+    color: var(--ink3); cursor: pointer; font-size: 13px; }
+  .pip-close:hover { background: var(--hover); color: var(--ink); }
+  .pip-body { padding: 10px 12px 12px; font: 11px var(--mono); color: var(--ink2); }
+  .pip-row { display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+  .pip-row .lbl { flex: none; width: 34px; color: var(--ink3); }
+  .pip-row .val { flex: none; width: 38px; text-align: right; color: var(--ink2); }
+  .pip-bar { flex: 1; height: 5px; border-radius: 3px; background: var(--active); overflow: hidden; }
+  .pip-bar i { display: block; height: 100%; border-radius: 3px; background: var(--accent);
+    transition: width .6s ease; }
+  .pip-bar i.hot { background: var(--warn); }
+  .pip-bar i.crit { background: var(--err); }
+  /* ── automation panel + toasts ── */
+  .auto-intro { color: var(--ink3); font-size: 12px; line-height: 1.55; margin: 2px 0 14px; }
+  .arule { border: 1px solid var(--border-soft); border-radius: 10px; margin-bottom: 10px; }
+  .arule-head { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; }
+  .asum { flex: 1; font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .aswitch { flex: none; width: 30px; height: 18px; border: none; border-radius: 9px;
+    background: var(--active); cursor: pointer; position: relative; padding: 0; transition: background .15s ease; }
+  .aswitch i { position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--menu); box-shadow: 0 1px 3px rgba(0,0,0,.25); transition: left .15s ease; }
+  .aswitch.on { background: var(--accent); }
+  .aswitch.on i { left: 14px; }
+  .adel, .adorm { flex: none; width: 20px; height: 20px; display: grid; place-items: center;
+    border-radius: 5px; color: var(--ink3); cursor: pointer; }
+  .adel:hover, .adorm:hover { background: var(--hover); color: var(--ink); }
+  .adel svg, .adorm svg { width: 9px; height: 9px; }
+  .aedit { border-top: 1px solid var(--border-soft); padding: 11px 12px 12px;
+    display: flex; flex-direction: column; gap: 8px; }
+  .arow { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink2); }
+  .alab { flex: none; width: 34px; color: var(--ink3); font-size: 11px; text-align: right; }
+  .aedit select, .aedit input {
+    border: 1px solid var(--border); border-radius: 7px; background: var(--menu);
+    color: var(--ink); font-size: 12px; padding: 4px 8px; outline: none;
+  }
+  .aedit select:focus-visible, .aedit input:focus-visible { border-color: var(--accent); }
+  .aedit input[type="number"] { width: 58px; }
+  .aedit input[type="text"] { flex: 1; font-family: var(--mono); }
+  .aadd, .anew { align-self: flex-start; border: none; background: none; cursor: pointer;
+    color: var(--accent); font-size: 12px; padding: 4px 6px; border-radius: 6px; }
+  .aadd:hover, .anew:hover { background: var(--hover); }
+  .anew { margin-top: 2px; }
+  #toast-host { position: absolute; top: 44px; right: 16px; z-index: 80;
+    display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+  .toast { display: flex; align-items: center; gap: 8px;
+    background: var(--menu); border: 1px solid var(--border); border-radius: 9px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.18); padding: 8px 13px;
+    font-size: 12px; color: var(--ink);
+    opacity: 0; transform: translateY(-6px); transition: opacity .22s ease, transform .22s ease; }
+  .toast.show { opacity: 1; transform: none; }
+  .toast .tdot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
   /* ── command palette (P1-9, 2026-07-18) ── a floating intent box: no scrim
      (the world stays visible — you are aiming, not modal-dialoguing), top
      third so the eye's resting line isn't covered, one flat list of sessions
@@ -2197,6 +2267,17 @@
   <div class="layout-peek" id="layout-peek"></div>
   <div id="cmd-peek"></div>
 
+  <!-- picture-in-picture terminal (user + classmate need, 2026-07-18): a
+       persistent preset session in a corner float — summon/hide on one key,
+       the process keeps running while hidden. An instrument, not a workspace:
+       never in the tab tree, never takes a seat. -->
+  <div class="pip" id="pip" hidden>
+    <div class="pip-head"><span class="pip-dot"></span>System monitor · btop
+      <span class="pip-key">F9</span>
+      <span class="pip-close" title="Hide — the process keeps running (F9 to bring it back)">×</span></div>
+    <div class="pip-body"></div>
+  </div>
+
   <!-- command palette (P1-9): intent navigation — type what you want, Enter.
        Sessions and actions in one list; the fourth navigation primitive
        beside tabs (space), the rail (time) and search (content). -->
@@ -2205,6 +2286,20 @@
     <div class="pal-list"></div>
   </div>
   <div class="file-peek" id="file-peek"></div>
+
+  <!-- automation (user direction 2026-07-18, iOS-Shortcuts-shaped): rules the
+       USER composes over our primitives — we ship the harness, never the
+       functions (§8.5.3). A rule reads as a sentence: When … → do …  -->
+  <div class="overlay" id="auto-overlay">
+    <div class="settings" role="dialog" aria-label="Automation">
+      <header>
+        <h1>Automation</h1>
+        <button class="dlg-close" id="btn-close-auto" title="Close" aria-label="Close automation"><svg><use href="#i-close"/></svg></button>
+      </header>
+      <div class="content" id="auto-content"></div>
+    </div>
+  </div>
+  <div id="toast-host"></div>
 
   <div class="overlay" id="settings-overlay">
     <div class="settings" role="dialog" aria-label="Settings">
@@ -2517,7 +2612,7 @@
      at a blocked agent does not unblock it. */
   let attnSeq = 1;
   function setAwaiting(s, on) {
-    if (on && !s.awaiting) s.awaitingAt = attnSeq++;
+    if (on && !s.awaiting) { s.awaitingAt = attnSeq++; autoFire("awaiting", { s }); }
     if (!on) delete s.awaitingAt;
     s.awaiting = on;
   }
@@ -2575,6 +2670,190 @@
     }
   }
   $("attn-chip").addEventListener("click", jumpAttention);
+  /* ── picture-in-picture terminal ── the preset session is born once and
+     never dies on hide: the walk below keeps ticking whether the panel shows
+     or not, so reopening lands on CURRENT truth — the persistence is the
+     feature (classmate's need: glance at CPU without leaving the tab, without
+     retyping, without the monitor forgetting anything). */
+  const pipState = {
+    visible: false,
+    cores: Array.from({ length: 8 }, () => 15 + Math.random() * 45),
+    mem: 62,
+  };
+  const pipWalk = (v, lo, hi) => Math.max(lo, Math.min(hi, v + (Math.random() - 0.48) * 14));
+  function paintPip() {
+    const bar = (label, v) => `
+      <div class="pip-row"><span class="lbl">${label}</span>
+        <span class="pip-bar"><i class="${v > 85 ? "crit" : v > 60 ? "hot" : ""}" style="width:${v.toFixed(0)}%"></i></span>
+        <span class="val">${v.toFixed(0)}%</span></div>`;
+    const total = pipState.cores.reduce((a, b) => a + b, 0) / pipState.cores.length;
+    $("pip").querySelector(".pip-body").innerHTML =
+      bar("CPU", total)
+      + pipState.cores.map((v, i) => bar(`c${i}`, v)).join("")
+      + bar("MEM", pipState.mem);
+  }
+  setInterval(() => {
+    pipState.cores = pipState.cores.map(v => pipWalk(v, 3, 98));
+    pipState.mem = pipWalk(pipState.mem, 40, 92);
+    if (pipState.visible) paintPip();
+  }, 900);
+  function togglePip() {
+    pipState.visible = !pipState.visible;
+    $("pip").hidden = !pipState.visible;
+    if (pipState.visible) paintPip();
+  }
+  $("pip").querySelector(".pip-close").addEventListener("click", togglePip);
+  /* ── automation (§8.5.3: we ship the harness, the user ships the function) ──
+     A rule is a sentence over our primitives. The bus is real in the mock:
+     fake commands finishing, sessions starting to wait — they fire rules. */
+  const AUTO_WHEN = {
+    "cmd-fail": { label: "a command fails" },
+    "cmd-done": { label: "a command finishes" },
+    "awaiting": { label: "a session waits for you" },
+    "bell": { label: "a session rings the bell" },
+    "timer": { label: "every N minutes", param: "minutes" },
+  };
+  const AUTO_DO = {
+    notify: { label: "show a notification" },
+    pip: { label: "summon the monitor panel" },
+    jump: { label: "jump to that session" },
+    run: { label: "run a command there", param: "command" },
+  };
+  function notifyToast(text) {
+    const t = document.createElement("div");
+    t.className = "toast";
+    t.innerHTML = `<span class="tdot"></span>${esc(text)}`;
+    $("toast-host").appendChild(t);
+    requestAnimationFrame(() => t.classList.add("show"));
+    setTimeout(() => { t.classList.remove("show"); setTimeout(() => t.remove(), 260); }, 3400);
+  }
+  const autoToastText = (rule, ctx) => {
+    const name = ctx.s ? displayName(ctx.s) : "";
+    return rule.when.type === "cmd-fail" ? `${name}: command failed`
+      : rule.when.type === "cmd-done" ? `${name}: command finished`
+      : rule.when.type === "awaiting" ? `${name} is waiting for you`
+      : rule.when.type === "bell" ? `${name}: bell`
+      : "Automation ran";
+  };
+  function autoAct(act, ctx, rule) {
+    if (act.type === "notify") notifyToast(autoToastText(rule, ctx));
+    else if (act.type === "pip") { if (!pipState.visible) togglePip(); }
+    else if (act.type === "jump" && ctx.s) focusSessionByUid(ctx.s.uid);
+    else if (act.type === "run" && ctx.s && act.command) {
+      /* mock-run: the command lands in that session's transcript with fake
+         output — the native line writes to the real PTY */
+      const s = ctx.s;
+      s.lines.push(s.prompt + esc(act.command), ...fakeOutput(act.command));
+      render();
+    }
+  }
+  function autoFire(type, ctx = {}) {
+    for (const rule of state.autos) {
+      if (!rule.on || rule.when.type !== type) continue;
+      if (rule.scope && (!ctx.s || ctx.s.cwd !== rule.scope)) continue;   /* place rules stay home */
+      for (const act of rule.dos) autoAct(act, ctx, rule);
+    }
+  }
+  /* the timer trigger ticks for real: one minute of mock time per minute */
+  setInterval(() => {
+    for (const rule of state.autos) {
+      if (!rule.on || rule.when.type !== "timer") continue;
+      rule._t = (rule._t || 0) + 1;
+      if (rule._t >= (rule.when.minutes || 30)) {
+        rule._t = 0;
+        for (const act of rule.dos) autoAct(act, { s: focusedSession() }, rule);
+      }
+    }
+  }, 60000);
+  /* ── the panel ── */
+  let autoExpanded = null;
+  /* scope: a rule about YOU is global; a rule about a PROJECT belongs to its
+     place (user ruling 2026-07-18 — the native line stores place rules with
+     the project, VSCode-tasks style, so rituals travel with the clone) */
+  const autoScopes = () => [...new Set(state.sessions.map(s => s.cwd))];
+  const scopeLeaf = (p) => p.split(/[\\/]/).filter(Boolean).pop();
+  const autoSummary = (r) => {
+    const w = AUTO_WHEN[r.when.type].label.replace("N", r.when.minutes || "N");
+    const d = r.dos.map(a => AUTO_DO[a.type].label).join(" · ");
+    return `When ${w}${r.scope ? ` in ${scopeLeaf(r.scope)}` : ""} → ${d || "…"}`;
+  };
+  function renderAutos() {
+    $("auto-content").innerHTML = `
+      <div class="auto-intro">Rules are sentences over what the terminal already knows —
+        exit codes, waiting agents, bells, time. BetterTerminal ships the harness;
+        the functions are yours.</div>
+      ${state.autos.map(r => `
+        <div class="arule" data-id="${r.id}">
+          <div class="arule-head">
+            <button class="aswitch ${r.on ? "on" : ""}" title="${r.on ? "On" : "Off"}"><i></i></button>
+            <span class="asum">${esc(autoSummary(r))}</span>
+            <span class="adel" title="Delete rule">${closeSvg}</span>
+          </div>
+          ${autoExpanded === r.id ? `
+          <div class="aedit">
+            <div class="arow"><span class="alab">When</span>
+              <select class="asel-when">${Object.entries(AUTO_WHEN).map(([k, v]) =>
+                `<option value="${k}" ${r.when.type === k ? "selected" : ""}>${v.label}</option>`).join("")}</select>
+              ${r.when.type === "timer" ? `<input class="aparam-when" type="number" min="1" value="${r.when.minutes || 30}"> min` : ""}
+              <span class="alab">in</span>
+              <select class="asel-scope">
+                <option value="" ${!r.scope ? "selected" : ""}>anywhere</option>
+                ${autoScopes().map(p => `<option value="${escAttr(p)}" ${r.scope === p ? "selected" : ""}>${esc(scopeLeaf(p))}</option>`).join("")}
+              </select>
+            </div>
+            ${r.dos.map((a, i) => `
+            <div class="arow"><span class="alab">${i === 0 ? "Do" : "and"}</span>
+              <select class="asel-do" data-i="${i}">${Object.entries(AUTO_DO).map(([k, v]) =>
+                `<option value="${k}" ${a.type === k ? "selected" : ""}>${v.label}</option>`).join("")}</select>
+              ${a.type === "run" ? `<input class="aparam-do" data-i="${i}" type="text" placeholder="command" value="${escAttr(a.command || "")}">` : ""}
+              ${r.dos.length > 1 ? `<span class="adorm" data-i="${i}" title="Remove action">${closeSvg}</span>` : ""}
+            </div>`).join("")}
+            <button class="aadd">+ Add action</button>
+          </div>` : ""}
+        </div>`).join("")}
+      <button class="anew">+ New automation</button>`;
+  }
+  function openAutomation() { renderAutos(); $("auto-overlay").classList.add("show"); }
+  $("btn-close-auto").addEventListener("click", () => $("auto-overlay").classList.remove("show"));
+  $("auto-content" ).addEventListener("change", (e) => {
+    const card = e.target.closest(".arule");
+    if (!card) return;
+    const r = state.autos.find(x => x.id === +card.dataset.id);
+    if (e.target.classList.contains("asel-when")) {
+      r.when = { type: e.target.value };
+      if (r.when.type === "timer") r.when.minutes = 30;
+    } else if (e.target.classList.contains("asel-do")) {
+      r.dos[+e.target.dataset.i] = { type: e.target.value };
+    } else if (e.target.classList.contains("aparam-when")) {
+      r.when.minutes = Math.max(1, +e.target.value || 30);
+    } else if (e.target.classList.contains("asel-scope")) {
+      r.scope = e.target.value || null;
+    } else if (e.target.classList.contains("aparam-do")) {
+      r.dos[+e.target.dataset.i].command = e.target.value;
+    }
+    renderAutos();
+  });
+  $("auto-content").addEventListener("click", (e) => {
+    const nw = e.target.closest(".anew");
+    if (nw) {
+      const id = state.autoSeq++;
+      state.autos.push({ id, on: true, when: { type: "cmd-done" }, dos: [{ type: "notify" }] });
+      autoExpanded = id;
+      renderAutos();
+      return;
+    }
+    const card = e.target.closest(".arule");
+    if (!card) return;
+    const r = state.autos.find(x => x.id === +card.dataset.id);
+    if (e.target.closest(".aswitch")) { r.on = !r.on; renderAutos(); return; }
+    if (e.target.closest(".adel")) { state.autos = state.autos.filter(x => x !== r); renderAutos(); return; }
+    if (e.target.closest(".adorm")) { r.dos.splice(+e.target.closest(".adorm").dataset.i, 1); renderAutos(); return; }
+    if (e.target.closest(".aadd")) { r.dos.push({ type: "notify" }); renderAutos(); return; }
+    if (e.target.closest(".arule-head")) {
+      autoExpanded = autoExpanded === r.id ? null : r.id;
+      renderAutos();
+    }
+  });
   /* ── command palette (P1-9, user-approved 2026-07-18) ──
      Intent navigation: type what you want, Enter. One flat list, two
      sources — sessions (go there) and actions (do this) — because the user
@@ -2650,6 +2929,9 @@
         if (!l) { addFilesPane(); l = leavesOf(activeTab().tree).find(isFilesLeaf); }
         if (l) { l.files.view = "git"; activeTab().focus = l.id; render(); }
       } });
+    items.push({ icon: svgIcon("i-float"), label: "System monitor", hint: "F9",
+      run: togglePip });
+    items.push({ icon: svgIcon("i-refresh"), label: "Automation", run: openAutomation });
     items.push({ icon: svgIcon("i-app"), label: "Git graph",
       run: () => openGitGraph(
         leavesOf(activeTab().tree).find(isFilesLeaf)?.files.root
@@ -2886,6 +3168,13 @@
     blockMax: 0,             // px ceiling on a rendered block; 0 means none
     wrap: true,              // fold long lines (P2-9); rendered blocks follow it
     attnChip: true,          // the waiting badge UI (P1-8); off hides the pill, the jump key stays
+    /* automation rules (§8.5.3): user-composed sentences over our primitives */
+    autos: [
+      { id: 1, on: true, when: { type: "cmd-fail" }, dos: [{ type: "notify" }, { type: "jump" }] },
+      { id: 2, on: true, when: { type: "awaiting" }, dos: [{ type: "notify" }] },
+      { id: 3, on: false, when: { type: "timer", minutes: 30 }, dos: [{ type: "run", command: "git fetch" }] },
+    ],
+    autoSeq: 4,
     recent: [],              // [{seed, at}] — places, never output (P1-13)
     lastSession: [],         // every tab's plan at shutdown, pin flag and all
   };
@@ -5636,6 +5925,10 @@
       t.busy = false;
       t.lines.push(...fakeOutput(cmd));
       if (!isVisible(t.uid)) t.unread = true;     /* finished off-screen → unread */
+      /* demo exit codes: a command with "fail" in it fails — enough to drive
+         the automation bus honestly (native: real OSC 133 exit codes) */
+      t.lastExit = /fail|error/i.test(cmd) ? "err" : "ok";
+      autoFire(t.lastExit === "err" ? "cmd-fail" : "cmd-done", { s: t });
       render();
     }, 1600);
   }
@@ -5682,6 +5975,15 @@
         jumpPrompt(leaf.id, e.key === "ArrowUp" ? -1 : 1);
         return;
       }
+    }
+    /* F9 — the picture-in-picture terminal. Ctrl+` was taken on the user's
+       machine (2026-07-18) — which is the real lesson: summon keys MUST be
+       per-slot configurable (P2-7); F9 is only the prototype's default. */
+    if (e.key === "F9" && !e.ctrlKey && !e.shiftKey && !e.altKey
+        && !document.body.classList.contains("shut")) {
+      e.preventDefault();
+      togglePip();
+      return;
     }
     /* Ctrl+Shift+P — the command palette; same key toggles it shut */
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "p"
@@ -5756,6 +6058,7 @@
       if ($("profile-menu").classList.contains("show")) { closeProfileMenu(); return; }
       const openCombo = document.querySelector(".combo.open");
       if (openCombo) { openCombo.classList.remove("open"); return; }
+      if ($("auto-overlay").classList.contains("show")) { $("auto-overlay").classList.remove("show"); return; }
       if ($("settings-overlay").classList.contains("show")) { $("settings-overlay").classList.remove("show"); return; }
       if (pvFloatState) { closePvFloat(); return; }
       if (flyoutState) { closeFlyout(); return; }
