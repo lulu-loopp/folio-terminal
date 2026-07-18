@@ -90,6 +90,7 @@ struct Runtime {
     line_wheel_remainder: f64,
     pixel_wheel_remainder: f64,
     pending_pty_resize: Option<PendingPtyResize>,
+    pending_resize_present: Option<GridSize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -353,6 +354,7 @@ impl Runtime {
             line_wheel_remainder: 0.0,
             pixel_wheel_remainder: 0.0,
             pending_pty_resize: None,
+            pending_resize_present: None,
         };
         if trace_startup {
             let renderer_phases = runtime.renderer.init_timings();
@@ -529,11 +531,17 @@ impl Runtime {
             pty.resize(pty_size(pending.grid, pending.physical))
                 .context("commit coalesced final ConPTY resize")?;
         }
-        self.session.mark_pty_resize_requested_at(
+        let reconciled = self.session.mark_pty_resize_requested_at(
             nonzero_u32(pending.grid.columns.get()),
             nonzero_u32(pending.grid.rows.get()),
             now,
         );
+        if reconciled {
+            self.publish_frame(FrameTrigger {
+                occurred_at: now,
+                source: FrameSource::Resize,
+            })?;
+        }
         Ok(())
     }
 
@@ -1018,19 +1026,6 @@ impl Runtime {
             .renderer
             .metrics()
             .grid_for_pixels(render_physical.width, render_physical.height);
-        // ResizeBuffers discards the DXGI back buffers. Re-present the last complete frame before
-        // ConPTY/grid reflow so the replacement swapchain is immediately theme-filled and the
-        // existing text stays at its old top-left pixel origin during the resize transaction.
-        let stabilized = if let Some(frame) = self.last_presented_frame.as_ref() {
-            matches!(
-                self.renderer
-                    .present(frame, resize_trigger)
-                    .context("stabilize resized swapchain with the last complete frame")?,
-                PresentOutcome::Presented(_)
-            )
-        } else {
-            false
-        };
         let observed_at = Instant::now();
         coalesce_pty_resize(
             &mut self.pending_pty_resize,
@@ -1038,9 +1033,6 @@ impl Runtime {
             render_physical,
             observed_at,
         );
-        if next_grid == self.grid && stabilized {
-            return Ok(());
-        }
         if next_grid != self.grid {
             self.session
                 .resize(
@@ -1056,10 +1048,13 @@ impl Runtime {
             font_rev: 1,
             theme_rev: 1,
         });
+        self.pending_resize_present = Some(next_grid);
         self.publish_frame(resize_trigger)?;
-        // Windows dispatches Resized from its modal move/size loop. Present before returning so
-        // the compositor spends the shortest possible interval stretching an old grid or showing
-        // a just-resized swapchain before its theme clear.
+        // Windows dispatches Resized from its modal move/size loop. `Renderer::resize` only records
+        // the requested swapchain geometry; `present` prepares this newly projected frame first,
+        // then performs ResizeBuffers immediately before acquire/submit. Thus the handler exposes
+        // no intermediate "new surface + old grid" frame. Until this callback completes, DWM may
+        // scale the previous complete back buffer as one image, which is the all-frame fallback.
         self.redraw()
     }
 
@@ -1154,6 +1149,16 @@ impl Runtime {
         let Some((frame, trigger)) = self.pending_frames.take() else {
             return Ok(());
         };
+        if let Some(expected) = self.pending_resize_present {
+            ensure!(
+                frame_matches_grid(&frame, expected),
+                "resize presentation requires the newly projected grid: expected {}x{}, got {}x{}",
+                expected.columns,
+                expected.rows,
+                frame.columns,
+                frame.rows
+            );
+        }
         let has_text = frame.cells.iter().any(|cell| !cell.text.trim().is_empty());
         match self
             .renderer
@@ -1192,6 +1197,7 @@ impl Runtime {
                     }
                 }
                 self.last_presented_frame = Some(frame);
+                self.pending_resize_present = None;
             }
             PresentOutcome::Skipped | PresentOutcome::Reconfigure => {
                 self.pending_frames
@@ -1565,6 +1571,11 @@ fn nonzero_u32(value: u16) -> NonZeroU32 {
     NonZeroU32::new(u32::from(value)).expect("grid dimensions originate from NonZeroU16")
 }
 
+fn frame_matches_grid(frame: &ViewportFrame, grid: GridSize) -> bool {
+    frame.columns.get() == u32::from(grid.columns.get())
+        && frame.rows.get() == u32::from(grid.rows.get())
+}
+
 fn pty_size(grid: GridSize, physical: PhysicalSize<u32>) -> PtySize {
     PtySize {
         columns: grid.columns,
@@ -1829,6 +1840,26 @@ mod tests {
         assert_eq!(committed.grid, final_grid);
         assert_eq!(committed.physical, PhysicalSize::new(1440, 900));
         assert!(pending.is_none());
+    }
+
+    #[test]
+    fn resize_atomic_present_gate_rejects_the_previous_grid_frame() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(80).unwrap(), NonZeroU32::new(24).unwrap());
+        let mut projection = session.new_projection(session.layout_key());
+        let old_frame = session.viewport_frame(&mut projection).unwrap();
+        let new_grid = GridSize {
+            columns: std::num::NonZeroU16::new(42).unwrap(),
+            rows: std::num::NonZeroU16::new(12).unwrap(),
+        };
+        assert!(!frame_matches_grid(&old_frame, new_grid));
+
+        session
+            .resize(NonZeroU32::new(42).unwrap(), NonZeroU32::new(12).unwrap())
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let new_frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(frame_matches_grid(&new_frame, new_grid));
     }
 
     #[test]

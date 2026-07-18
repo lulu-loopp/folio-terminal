@@ -12,6 +12,8 @@ use std::{
 
 use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
 use bt_unicode::{cluster_width, graphemes};
+#[cfg(test)]
+use bt_viewport::FrameViewportOrigin;
 use bt_viewport::{FrameShapeError, SUBPIXELS_PER_PX, ViewportFrame};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
@@ -2724,7 +2726,9 @@ mod tests {
             cell_anchors: test_cell_anchors(1),
             selection_spans: Vec::new(),
             status_text: None,
-            layout_key: bt_doc_layout_key(),
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(1),
             view_generation: bt_doc::ViewGeneration(1),
         };
         let mut slot = LatestFrameSlot::default();
@@ -2753,7 +2757,9 @@ mod tests {
             cell_anchors: test_cell_anchors(4),
             selection_spans: Vec::new(),
             status_text: None,
-            layout_key: bt_doc_layout_key(),
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(2),
             view_generation: bt_doc::ViewGeneration(1),
         };
         frame.cells.pop();
@@ -2775,11 +2781,21 @@ mod tests {
                 actual: 3,
             })
         ));
+
+        frame.cells.push(CapturedCell::plain(""));
+        frame.layout_key = bt_doc_layout_key(1);
+        assert!(matches!(
+            text_row_cells(&frame),
+            Err(FrameShapeError::LayoutWidth {
+                frame: 2,
+                layout: 1,
+            })
+        ));
     }
 
-    fn bt_doc_layout_key() -> bt_doc::LayoutKey {
+    fn bt_doc_layout_key(width_cells: u32) -> bt_doc::LayoutKey {
         bt_doc::LayoutKey {
-            width_cells: NonZeroU32::new(1).unwrap(),
+            width_cells: NonZeroU32::new(width_cells).unwrap(),
             dpi_milli: NonZeroU32::new(1000).unwrap(),
             font_rev: 1,
             theme_rev: 1,
@@ -3001,7 +3017,9 @@ mod tests {
             cell_anchors: test_cell_anchors(16),
             selection_spans: Vec::new(),
             status_text: None,
-            layout_key: bt_doc_layout_key(),
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(8),
             view_generation: bt_doc::ViewGeneration(1),
         };
         let composed = compose_preedit(
@@ -3042,7 +3060,9 @@ mod tests {
             cell_anchors: test_cell_anchors(16),
             selection_spans: Vec::new(),
             status_text: None,
-            layout_key: bt_doc_layout_key(),
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(8),
             view_generation: bt_doc::ViewGeneration(1),
         };
         let text = "👨‍👩‍👧‍👦☆中";
@@ -3173,7 +3193,9 @@ mod tests {
             cell_anchors: test_cell_anchors(3),
             selection_spans: Vec::new(),
             status_text: None,
-            layout_key: bt_doc_layout_key(),
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(3),
             view_generation: bt_doc::ViewGeneration(1),
         };
         assert_eq!(cursor_cell_span(&frame), (0, 2));

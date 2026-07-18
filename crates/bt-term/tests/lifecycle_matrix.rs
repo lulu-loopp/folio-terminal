@@ -279,7 +279,203 @@ fn g1_no_output_shrink_grow_storm_harvests_no_history_and_keeps_bottom_following
 }
 
 #[test]
-fn g1_resize_repaint_never_welds_a_stale_wrapped_head_to_the_next_hard_line() {
+fn m1_8_six_line_resize_can_never_manufacture_five_lines_below() {
+    let start = Instant::now();
+    let content = ["one", "two", "three", "four", "five", "Terminal>"];
+    let mut session = DualPlaneSession::new(nz32(40), nz32(6));
+    session
+        .feed_at(content.join("\r\n").as_bytes(), start)
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let initial = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(initial.status_text, None);
+
+    session
+        .resize_at(nz32(18), nz32(2), start + Duration::from_millis(10))
+        .unwrap();
+    session.refresh_projection(&mut projection);
+    let narrow = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(projection.scroll_offset_rows(), 0);
+    assert_eq!(narrow.status_text, None);
+    assert!(matches!(
+        projection.scroll_state(),
+        bt_viewport::ViewportScrollState::Bottom
+    ));
+
+    finish_resize_transaction(&mut session, start + Duration::from_millis(210));
+    session.refresh_projection(&mut projection);
+    let harvested = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(projection.scroll_offset_rows(), 0);
+    assert_eq!(harvested.status_text, None);
+
+    session.resize(nz32(40), nz32(6)).unwrap();
+    session.refresh_projection(&mut projection);
+    let wide = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(projection.scroll_offset_rows(), 0);
+    assert_eq!(wide.status_text, None);
+    assert!(matches!(
+        projection.scroll_state(),
+        bt_viewport::ViewportScrollState::Bottom
+    ));
+}
+
+fn replay_r2_extreme_shrink_grow_and_recall(start: Instant) -> Vec<bt_term::ResizeTraceEvent> {
+    const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal> ";
+    const RECALL: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
+    let mut session = DualPlaneSession::new(nz32(104), nz32(26));
+    session
+        .feed_at(format!("{WARNING}\r\n{PROMPT}").as_bytes(), start)
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+
+    let trace_sizes = [
+        (95, 24),
+        (62, 16),
+        (48, 12),
+        (38, 10),
+        (28, 8),
+        (25, 8),
+        (23, 7),
+        (20, 7),
+        (18, 6),
+        (16, 6),
+        (16, 5),
+        (16, 6),
+        (19, 7),
+        (23, 8),
+        (26, 8),
+        (29, 9),
+        (36, 11),
+        (41, 12),
+        (46, 14),
+        (49, 14),
+        (52, 15),
+        (56, 16),
+        (61, 17),
+        (66, 17),
+        (71, 18),
+        (77, 20),
+        (85, 21),
+        (78, 19),
+        (66, 17),
+        (60, 16),
+        (52, 14),
+        (25, 9),
+        (13, 6),
+        (12, 6),
+        (15, 7),
+        (33, 10),
+        (51, 13),
+        (60, 15),
+        (61, 15),
+        (47, 12),
+        (23, 7),
+        (11, 3),
+        (11, 4),
+        (11, 6),
+        (22, 8),
+        (30, 9),
+        (34, 10),
+        (37, 10),
+        (38, 10),
+        (38, 11),
+        (38, 10),
+        (26, 8),
+        (12, 6),
+        (11, 5),
+        (13, 6),
+        (35, 10),
+        (46, 12),
+        (49, 12),
+        (43, 10),
+        (39, 10),
+        (38, 10),
+        (37, 10),
+        (35, 9),
+        (34, 9),
+        (31, 9),
+        (30, 9),
+    ];
+    for (index, (columns, rows)) in trace_sizes.into_iter().enumerate() {
+        session
+            .resize_at(
+                nz32(columns),
+                nz32(rows),
+                start + Duration::from_millis(index as u64 + 10),
+            )
+            .unwrap();
+    }
+    assert_eq!(session.terminal().resize_transaction_history_size(), 2);
+
+    session.mark_pty_resize_requested_at(nz32(30), nz32(9), start + Duration::from_millis(220));
+    assert_eq!(session.terminal().resize_transaction_history_size(), 0);
+    assert_eq!(logical_content(&session), [WARNING, PROMPT.trim_end()]);
+    assert!(
+        session
+            .finish_resize_if_quiescent(start + Duration::from_millis(420))
+            .unwrap()
+    );
+    assert!(session.document().entries().is_empty());
+    assert_eq!(session.transcript().staging_len(), 0);
+
+    session.refresh_projection(&mut projection);
+    let settled = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(settled.status_text, None);
+    assert_eq!(settled.scroll_offset_rows, 0);
+    session.record_published_frame(&settled, start + Duration::from_millis(420));
+
+    // A CSI A keyboard round-trip returns the viewport to Bottom before PowerShell emits the
+    // recalled command. Model those two observable actor-side effects deterministically.
+    projection.scroll_to_bottom();
+    session
+        .feed_at(RECALL.as_bytes(), start + Duration::from_millis(430))
+        .unwrap();
+    session.refresh_projection(&mut projection);
+    let recalled = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(recalled.status_text, None);
+    assert_eq!(recalled.scroll_offset_rows, 0);
+    assert!(recalled.cursor.visible);
+    assert_eq!(
+        logical_content(&session),
+        [WARNING.to_owned(), format!("{PROMPT}{RECALL}")]
+    );
+    session.record_published_frame(&recalled, start + Duration::from_millis(430));
+
+    session.resize_trace().to_vec()
+}
+
+#[test]
+fn m1_8_r2_extreme_shrink_grow_and_csi_a_replay_has_no_frozen_live_seam() {
+    let start = Instant::now();
+    let first = replay_r2_extreme_shrink_grow_and_recall(start);
+    let second = replay_r2_extreme_shrink_grow_and_recall(start + Duration::from_secs(10));
+    assert_eq!(first, second);
+    assert!(first.iter().any(|event| matches!(
+        event.kind,
+        bt_term::ResizeTraceKind::VendorReconcile {
+            history_before: 2,
+            history_after: 0,
+            cursor_row: 3,
+            cursor_column: 9,
+        }
+    )));
+    assert!(first.iter().any(|event| matches!(
+        &event.kind,
+        bt_term::ResizeTraceKind::Harvest { widths, .. } if widths.is_empty()
+    )));
+    assert!(first.iter().all(|event| match &event.kind {
+        bt_term::ResizeTraceKind::FramePublished {
+            scroll_offset_rows,
+            anchored,
+            ..
+        } => *scroll_offset_rows == 0 && !anchored,
+        _ => true,
+    }));
+}
+
+#[test]
+fn g3_vendor_wrapline_rejoins_rows_inside_one_harvest_batch() {
     let start = Instant::now();
     let line_a = "A-0123456789AB";
     let line_b = "B-complete";
@@ -315,12 +511,56 @@ fn g1_resize_repaint_never_welds_a_stale_wrapped_head_to_the_next_hard_line() {
     );
 
     let actual = logical_content(&session);
-    assert_eq!(actual, ["A-01234567", line_b, "89AB", line_b]);
+    // M1.8 makes a narrower claim than the old per-row split policy: within this single vendor
+    // harvest, WRAPLINE is the authoritative causal continuation. The batch boundary below remains
+    // the no-weld boundary for later transactions.
+    assert_eq!(actual, ["A-01234567B-complete", "89AB", line_b]);
     assert!(
         actual
             .iter()
-            .all(|line| { !(line.contains("A-01234567") && line.contains(line_b)) })
+            .all(|line| !(line.contains("89AB") && line.contains(line_b)))
     );
+}
+
+#[test]
+fn g3_narrow_harvest_widen_rejoins_every_wrapline_in_the_same_batch() {
+    let start = Instant::now();
+    let logical = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcd";
+    let mut session = DualPlaneSession::new(nz32(42), nz32(1));
+    session.feed_at(logical.as_bytes(), start).unwrap();
+
+    session
+        .resize_at(nz32(14), nz32(1), start + Duration::from_millis(10))
+        .unwrap();
+    assert_eq!(session.terminal().resize_transaction_history_size(), 2);
+    finish_resize_transaction(&mut session, start + Duration::from_millis(210));
+
+    let harvested = session.document().entries().values().collect::<Vec<_>>();
+    assert_eq!(harvested.len(), 1);
+    assert_eq!(harvested[0].line.text, &logical[..28]);
+    assert_eq!(harvested[0].line.fragments.len(), 2);
+    assert!(harvested[0].line.wrap_split);
+    assert!(session.resize_trace().iter().any(|event| matches!(
+        &event.kind,
+        bt_term::ResizeTraceKind::Harvest {
+            widths,
+            continues,
+            ..
+        } if widths == &[14, 14] && continues == &[true, true]
+    )));
+
+    session.resize(nz32(42), nz32(2)).unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let _ = session.viewport_frame(&mut projection).unwrap();
+    projection.scroll_by_rows(1);
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let first_row = frame.cells[..42]
+        .iter()
+        .filter(|cell| !cell.wide_spacer)
+        .map(|cell| cell.text.as_str())
+        .collect::<String>();
+    assert!(first_row.starts_with(&logical[..28]));
 }
 
 #[test]
@@ -432,6 +672,10 @@ fn replay_resize_trace(start: Instant) -> Vec<bt_term::ResizeTraceEvent> {
             .unwrap()
     );
 
+    session.refresh_projection(&mut projection);
+    let settled = session.viewport_frame(&mut projection).unwrap();
+    settled.validate_shape().unwrap();
+    session.record_published_frame(&settled, start + Duration::from_millis(420));
     projection.scroll_by_rows(1);
     session.refresh_projection(&mut projection);
     let scrolled = session.viewport_frame(&mut projection).unwrap();
@@ -463,8 +707,68 @@ fn g1_resize_trace_replay_is_deterministic_through_post_drag_wheel_frame() {
         Some(bt_term::ResizeTraceKind::FramePublished {
             cells: 8,
             anchors: 8,
+            layout_columns: 4,
+            scroll_offset_rows: 1,
+            anchored: true,
+            cursor_visible: false,
             ..
         })
+    ));
+    assert!(first.iter().all(|event| match &event.kind {
+        bt_term::ResizeTraceKind::FramePublished {
+            columns,
+            layout_columns,
+            ..
+        } => columns == layout_columns,
+        _ => true,
+    }));
+}
+
+#[test]
+fn m1_8_prompt_echo_cursor_and_composition_share_one_post_harvest_width() {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(40), nz32(4));
+    session
+        .feed_at(b"one\r\ntwo\r\nthree\r\nfour", start)
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let _ = session.viewport_frame(&mut projection).unwrap();
+
+    session
+        .resize_at(nz32(20), nz32(2), start + Duration::from_millis(10))
+        .unwrap();
+    finish_resize_transaction(&mut session, start + Duration::from_millis(210));
+    assert!(!session.document().entries().is_empty());
+
+    session.resize(nz32(40), nz32(4)).unwrap();
+    let echo = "Terminal> cargo test";
+    session
+        .feed(format!("\x1b[1;1H\x1b[2K{echo}").as_bytes())
+        .unwrap();
+    session.refresh_projection(&mut projection);
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    frame.validate_shape().unwrap();
+
+    let first_row = frame.cells[..40]
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect::<String>();
+    assert!(first_row.starts_with(echo));
+    assert_eq!(frame.cursor.row, 0);
+    assert_eq!(frame.cursor.column, echo.len() as u32);
+    let cursor_index = frame.cursor.column as usize;
+    assert!(matches!(
+        &frame.cell_anchors[cursor_index].start,
+        bt_doc::ContentAnchor::Live {
+            point: bt_doc::GridPoint { row: 0, column },
+            ..
+        } if *column == echo.len() as u32
+    ));
+    assert_eq!(frame.layout_key.width_cells, frame.columns);
+    assert_eq!(frame.scroll_offset_rows, 0);
+    assert!(matches!(
+        frame.viewport_origin,
+        bt_viewport::FrameViewportOrigin::Bottom
     ));
 }
 

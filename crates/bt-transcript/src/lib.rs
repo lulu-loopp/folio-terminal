@@ -503,6 +503,19 @@ mod tests {
     }
 
     #[test]
+    fn harvest_batch_boundary_prevents_wrapline_from_joining_the_next_batch() {
+        let mut store = TranscriptStore::new(nz(8));
+        store.capture(CapturedRow::plain("batch-one", true));
+        let first = store.finalize_all_candidates();
+        let second = store.capture(CapturedRow::plain("batch-two", false));
+
+        assert_eq!(first[0].line.text, "batch-one");
+        assert!(first[0].line.wrap_split);
+        assert_eq!(second.finalized[0].line.text, "batch-two");
+        assert_eq!(store.frozen().len(), 2);
+    }
+
+    #[test]
     fn resize_and_quota_force_wrap_split() {
         let mut store = TranscriptStore::new(nz(1));
         let first = store.capture(CapturedRow::plain("head", true));

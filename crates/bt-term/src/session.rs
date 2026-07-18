@@ -20,7 +20,8 @@ use bt_transcript::{
     TranscriptStore,
 };
 use bt_viewport::{
-    FrameProjectionError, GridCursor, ViewSelection, ViewportFrame, ViewportProjection,
+    FrameProjectionError, FrameViewportOrigin, GridCursor, ViewSelection, ViewportFrame,
+    ViewportProjection,
 };
 
 use crate::{
@@ -59,6 +60,12 @@ pub enum ResizeTraceKind {
         columns: u32,
         rows: u32,
     },
+    VendorReconcile {
+        history_before: usize,
+        history_after: usize,
+        cursor_row: u32,
+        cursor_column: u32,
+    },
     PtyChunkArrived {
         bytes: usize,
     },
@@ -72,12 +79,19 @@ pub enum ResizeTraceKind {
     Harvest {
         origin: ResizeTraceRowOrigin,
         widths: Vec<usize>,
+        continues: Vec<bool>,
     },
     FramePublished {
         columns: u32,
         rows: u32,
+        layout_columns: u32,
         cells: usize,
         anchors: usize,
+        scroll_offset_rows: usize,
+        anchored: bool,
+        cursor_row: u32,
+        cursor_column: u32,
+        cursor_visible: bool,
     },
     TransactionEnd,
 }
@@ -402,7 +416,7 @@ impl DualPlaneSession {
         columns: NonZeroU32,
         rows: NonZeroU32,
         observed_at: Instant,
-    ) {
+    ) -> bool {
         self.resize_epoch.final_request_sent(observed_at);
         self.trace_resize_event(
             observed_at,
@@ -411,6 +425,24 @@ impl DualPlaneSession {
                 rows: rows.get(),
             },
         );
+        let (history_before, history_after) =
+            self.terminal.reconcile_resize_transaction_to_viewport();
+        if history_before != 0 {
+            self.grid_generation.0 += 1;
+            self.document
+                .capture_rows_transaction(&[], self.grid_generation);
+        }
+        let cursor = self.terminal.cursor();
+        self.trace_resize_event(
+            observed_at,
+            ResizeTraceKind::VendorReconcile {
+                history_before,
+                history_after,
+                cursor_row: cursor.row,
+                cursor_column: cursor.column,
+            },
+        );
+        history_before != 0
     }
 
     /// Finish only after both resize and output have been silent for their configured intervals.
@@ -446,8 +478,14 @@ impl DualPlaneSession {
             ResizeTraceKind::FramePublished {
                 columns: frame.columns.get(),
                 rows: frame.rows.get(),
+                layout_columns: frame.layout_key.width_cells.get(),
                 cells: frame.cells.len(),
                 anchors: frame.cell_anchors.len(),
+                scroll_offset_rows: frame.scroll_offset_rows,
+                anchored: matches!(&frame.viewport_origin, FrameViewportOrigin::Anchored(_)),
+                cursor_row: frame.cursor.row,
+                cursor_column: frame.cursor.column,
+                cursor_visible: frame.cursor.visible,
             },
         );
         if let Some(remaining) = self.resize_trace_post_end_frames_remaining.as_mut() {
@@ -798,15 +836,16 @@ impl DualPlaneSession {
             ResizeTraceKind::Harvest {
                 origin: ResizeTraceRowOrigin::VendorHarvest,
                 widths: rows.iter().map(|row| row.cells.len()).collect(),
+                continues: rows.iter().map(|row| row.continues).collect(),
             },
         );
         for row in rows {
-            // Native WRAPLINE is a geometry fact, not a causal repaint identity. At the harvest
-            // seam an old wrapped head and a repainted hard line are observationally ambiguous;
-            // freezing physical rows as independent wrap-split candidates is the conservative
-            // no-weld policy. The original WRAPLINE flag remains on the fragment so every boundary
-            // cell survives normalization, but it can never splice two real rows together.
-            let result = self.transcript.capture_wrap_split(row);
+            // Rows returned by one `finish_resize_transaction` are an ordered snapshot of one
+            // vendor-owned grid. Within that batch WRAPLINE is therefore a causal continuation
+            // fact, so the normal capture path may reconstruct its logical line without guessing.
+            // The batch is force-finalized below: no WRAPLINE can ever cross the harvest boundary
+            // and weld content from a later transaction.
+            let result = self.transcript.capture(row);
             self.staging_sources
                 .insert(result.staging_id, SourceLifecycle::Live);
             self.active_staging_tail = result.finalized.is_empty().then_some(result.staging_id);
@@ -814,6 +853,10 @@ impl DualPlaneSession {
                 self.ingest_finalized(finalized)?;
             }
         }
+        for finalized in self.transcript.finalize_all_candidates() {
+            self.ingest_finalized(finalized)?;
+        }
+        self.active_staging_tail = None;
         let evicted = self.transcript.take_evictions();
         self.delete_history(&evicted, false);
         Ok(())

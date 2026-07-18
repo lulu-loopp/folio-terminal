@@ -209,6 +209,10 @@ impl TerminalAdapter {
         self.term.resize_transaction_history_size()
     }
 
+    pub fn reconcile_resize_transaction_to_viewport(&mut self) -> (usize, usize) {
+        self.term.reconcile_resize_transaction_to_viewport()
+    }
+
     pub fn visible_text(&self) -> Vec<String> {
         snapshot(&self.term)
             .iter()
@@ -340,6 +344,80 @@ mod tests {
         NonZeroU32::new(value).unwrap()
     }
 
+    fn apply_r2_extreme_resize_trace(terminal: &mut TerminalAdapter) {
+        let sizes = [
+            (95, 24),
+            (62, 16),
+            (48, 12),
+            (38, 10),
+            (28, 8),
+            (25, 8),
+            (23, 7),
+            (20, 7),
+            (18, 6),
+            (16, 6),
+            (16, 5),
+            (16, 6),
+            (19, 7),
+            (23, 8),
+            (26, 8),
+            (29, 9),
+            (36, 11),
+            (41, 12),
+            (46, 14),
+            (49, 14),
+            (52, 15),
+            (56, 16),
+            (61, 17),
+            (66, 17),
+            (71, 18),
+            (77, 20),
+            (85, 21),
+            (78, 19),
+            (66, 17),
+            (60, 16),
+            (52, 14),
+            (25, 9),
+            (13, 6),
+            (12, 6),
+            (15, 7),
+            (33, 10),
+            (51, 13),
+            (60, 15),
+            (61, 15),
+            (47, 12),
+            (23, 7),
+            (11, 3),
+            (11, 4),
+            (11, 6),
+            (22, 8),
+            (30, 9),
+            (34, 10),
+            (37, 10),
+            (38, 10),
+            (38, 11),
+            (38, 10),
+            (26, 8),
+            (12, 6),
+            (11, 5),
+            (13, 6),
+            (35, 10),
+            (46, 12),
+            (49, 12),
+            (43, 10),
+            (39, 10),
+            (38, 10),
+            (37, 10),
+            (35, 9),
+            (34, 9),
+            (31, 9),
+            (30, 9),
+        ];
+        for (columns, rows) in sizes {
+            terminal.resize(nz(columns), nz(rows));
+        }
+    }
+
     fn removed_context(events: &[AdapterEvent]) -> Option<RemovalContext> {
         events.iter().find_map(|event| match event {
             AdapterEvent::RowsRemoved { context, .. } => Some(*context),
@@ -428,6 +506,57 @@ mod tests {
         assert!(terminal.finish_resize_transaction().is_empty());
         assert_eq!(terminal.visible_text(), vec!["a", "b", "c", "d"]);
         assert_eq!(terminal.alacritty_history_size(), 0);
+    }
+
+    #[test]
+    fn r2_extreme_local_path_reconciles_to_the_coalesced_conpty_viewport() {
+        const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+        const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal> ";
+        let input = format!("{WARNING}\r\n{PROMPT}");
+
+        let mut direct = TerminalAdapter::new(nz(104), nz(26));
+        direct.feed(input.as_bytes());
+        direct.begin_resize_transaction();
+        direct.resize(nz(30), nz(9));
+        assert_eq!(direct.reconcile_resize_transaction_to_viewport(), (2, 0));
+        let direct_rows = direct.visible_text();
+        let direct_cursor = direct.cursor();
+        assert_eq!((direct_cursor.row, direct_cursor.column), (3, 9));
+
+        let mut unreconciled = TerminalAdapter::new(nz(104), nz(26));
+        unreconciled.feed(input.as_bytes());
+        unreconciled.begin_resize_transaction();
+        apply_r2_extreme_resize_trace(&mut unreconciled);
+        assert_eq!(unreconciled.resize_transaction_history_size(), 2);
+        let harvested = unreconciled.finish_resize_transaction();
+        let harvested_text = harvested
+            .iter()
+            .map(|row| {
+                row.cells
+                    .iter()
+                    .filter(|cell| !cell.wide_spacer)
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            harvested_text,
+            ["Did not find path entry D:\\App", "\\Base\\anaconda3\\bin",]
+        );
+
+        let mut reconciled = TerminalAdapter::new(nz(104), nz(26));
+        reconciled.feed(input.as_bytes());
+        reconciled.begin_resize_transaction();
+        apply_r2_extreme_resize_trace(&mut reconciled);
+        assert_eq!(
+            reconciled.reconcile_resize_transaction_to_viewport(),
+            (2, 0)
+        );
+        assert_eq!(reconciled.visible_text(), direct_rows);
+        assert_eq!(reconciled.cursor(), direct_cursor);
+        assert!(reconciled.finish_resize_transaction().is_empty());
     }
 
     #[test]

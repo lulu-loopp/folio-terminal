@@ -531,6 +531,39 @@ impl<T> Term<T> {
         self.primary_grid().history_size()
     }
 
+    /// Reconcile the locally reflowed grid with the single final viewport size sent to ConPTY.
+    ///
+    /// BetterTerminal projects every interactive window resize immediately, while the actual
+    /// pseudoconsole receives only the coalesced final size. A transient tiny local viewport, and
+    /// the vendor's height-before-width reflow order, can therefore leave rows in transaction-owned
+    /// history even though they fit at the final width and height. Pulling the complete mutable tail
+    /// back into an enlarged viewport and then shrinking once re-evaluates height after final-width
+    /// reflow using only vendor-owned rows, WRAPLINE flags, and the cursor. Rows which still do not
+    /// fit remain in history for the normal transaction harvest.
+    pub fn reconcile_resize_transaction_to_viewport(&mut self) -> (usize, usize) {
+        if !self.resize_transaction {
+            return (0, 0);
+        }
+
+        let (history_before, screen_lines, columns) = {
+            let grid = self.primary_grid();
+            (grid.history_size(), grid.screen_lines(), grid.columns())
+        };
+        if history_before == 0 {
+            return (0, 0);
+        }
+
+        let expanded_lines = screen_lines
+            .saturating_add(history_before)
+            .min(i32::MAX as usize);
+        let grid = self.primary_grid_mut();
+        grid.resize(true, expanded_lines, columns);
+        grid.resize(true, screen_lines, columns);
+        let history_after = grid.history_size();
+        self.mark_fully_damaged();
+        (history_before, history_after)
+    }
+
     fn primary_grid(&self) -> &Grid<Cell> {
         if self.mode.contains(TermMode::ALT_SCREEN) {
             &self.inactive_grid

@@ -27,9 +27,17 @@ pub struct HistoryEntry {
 pub struct HistoryDocument {
     entries: BTreeMap<TranscriptId, HistoryEntry>,
     anchors: BTreeMap<AnchorId, ContentAnchor>,
+    staging_relocations: BTreeMap<StagingId, StagingRelocation>,
     selection: Option<Selection>,
     next_anchor: u64,
     tombstones: Vec<TranscriptId>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StagingRelocation {
+    transcript_id: TranscriptId,
+    grapheme_base: GraphemeOffset,
+    generation: SourceGeneration,
 }
 
 impl HistoryDocument {
@@ -54,6 +62,27 @@ impl HistoryDocument {
 
     pub fn anchor(&self, id: AnchorId) -> Result<&ContentAnchor, AnchorError> {
         self.anchors.get(&id).ok_or(AnchorError::UnknownAnchor)
+    }
+
+    /// Resolve a viewport-owned staging coordinate through the same causal mapping used to migrate
+    /// registered persistent anchors. This keeps scroll anchors semantic without making every
+    /// viewport anchor part of the document's persistent anchor registry.
+    pub fn resolve_anchor(&self, anchor: &ContentAnchor) -> ContentAnchor {
+        let ContentAnchor::Staging {
+            id, offset, bias, ..
+        } = anchor
+        else {
+            return anchor.clone();
+        };
+        self.staging_relocations.get(id).map_or_else(
+            || anchor.clone(),
+            |relocation| ContentAnchor::History {
+                id: relocation.transcript_id,
+                offset: GraphemeOffset(relocation.grapheme_base.0.saturating_add(offset.0)),
+                bias: *bias,
+                generation: relocation.generation,
+            },
+        )
     }
 
     pub fn set_selection(&mut self, start: AnchorId, end: AnchorId) {
@@ -144,6 +173,16 @@ impl HistoryDocument {
     pub fn finalize_transaction(&mut self, finalized: FinalizedLine) {
         let generation = finalized.line.source_generation;
         let transcript_id = finalized.line.id;
+        for mapping in &finalized.mappings {
+            self.staging_relocations.insert(
+                mapping.staging_id,
+                StagingRelocation {
+                    transcript_id: mapping.transcript_id,
+                    grapheme_base: mapping.grapheme_base,
+                    generation,
+                },
+            );
+        }
         let replacements = self
             .anchors
             .iter()
@@ -210,6 +249,8 @@ impl HistoryDocument {
                 self.tombstones.push(entry.line.id);
             }
         }
+        self.staging_relocations
+            .retain(|_, relocation| !removed_set.contains(&relocation.transcript_id));
         let deleted_anchors = self
             .anchors
             .iter()

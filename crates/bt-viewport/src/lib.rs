@@ -48,6 +48,14 @@ pub struct ScrollAnchor {
     pub local_offset: i64,
 }
 
+/// A viewport follows the live bottom until an explicit user scroll installs a semantic anchor.
+/// Resize and reflow may reproject an anchor, but they never create one or replace its source.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ViewportScrollState {
+    Bottom,
+    Anchored(ScrollAnchor),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewSelection {
     pub start: ContentAnchor,
@@ -74,6 +82,12 @@ pub struct SelectionSpan {
     pub end_column: u32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FrameViewportOrigin {
+    Bottom,
+    Anchored(ScrollAnchor),
+}
+
 /// Stable render input owned by the viewport layer. Renderers never inspect the upstream grid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewportFrame {
@@ -84,12 +98,20 @@ pub struct ViewportFrame {
     pub cell_anchors: Vec<CellAnchor>,
     pub selection_spans: Vec<SelectionSpan>,
     pub status_text: Option<String>,
+    pub viewport_origin: FrameViewportOrigin,
+    pub scroll_offset_rows: usize,
     pub layout_key: LayoutKey,
     pub view_generation: ViewGeneration,
 }
 
 impl ViewportFrame {
     pub fn validate_shape(&self) -> Result<(), FrameShapeError> {
+        if self.layout_key.width_cells != self.columns {
+            return Err(FrameShapeError::LayoutWidth {
+                frame: self.columns.get(),
+                layout: self.layout_key.width_cells.get(),
+            });
+        }
         let expected = (self.columns.get() as usize)
             .checked_mul(self.rows.get() as usize)
             .ok_or(FrameShapeError::CellCount {
@@ -185,6 +207,7 @@ impl ViewportFrame {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameShapeError {
+    LayoutWidth { frame: u32, layout: u32 },
     CellCount { expected: usize, actual: usize },
     AnchorCount { expected: usize, actual: usize },
 }
@@ -192,6 +215,12 @@ pub enum FrameShapeError {
 impl fmt::Display for FrameShapeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::LayoutWidth { frame, layout } => {
+                write!(
+                    formatter,
+                    "frame width is {frame} cells, layout width is {layout}"
+                )
+            }
             Self::CellCount { expected, actual } => {
                 write!(formatter, "frame requires {expected} cells, got {actual}")
             }
@@ -290,7 +319,7 @@ pub struct ViewportProjection {
     visual_rows: Vec<usize>,
     visual_row_heights: HeightTree,
     heights: HeightTree,
-    scroll_anchor: Option<ScrollAnchor>,
+    scroll_state: ViewportScrollState,
     selection: Option<ViewSelection>,
     view_generation: ViewGeneration,
     live_rows: NonZeroU32,
@@ -299,6 +328,7 @@ pub struct ViewportProjection {
     grid_generation: GridGeneration,
     cache_misses: u64,
     scroll_offset_rows: usize,
+    pending_scroll_offset_rows: Option<usize>,
     unread_rows: usize,
     last_total_rows: usize,
     /// Resize/reflow changes visual row counts without appending terminal content.
@@ -324,7 +354,7 @@ impl ViewportProjection {
             visual_rows: Vec::new(),
             visual_row_heights: HeightTree::default(),
             heights: HeightTree::default(),
-            scroll_anchor: None,
+            scroll_state: ViewportScrollState::Bottom,
             selection: None,
             view_generation: ViewGeneration(1),
             live_rows,
@@ -333,6 +363,7 @@ impl ViewportProjection {
             grid_generation,
             cache_misses: 0,
             scroll_offset_rows: 0,
+            pending_scroll_offset_rows: None,
             unread_rows: 0,
             last_total_rows: 0,
             suppress_next_growth_compensation: false,
@@ -350,7 +381,13 @@ impl ViewportProjection {
         self.cache_misses
     }
     pub fn scroll_anchor(&self) -> Option<&ScrollAnchor> {
-        self.scroll_anchor.as_ref()
+        match &self.scroll_state {
+            ViewportScrollState::Bottom => None,
+            ViewportScrollState::Anchored(anchor) => Some(anchor),
+        }
+    }
+    pub fn scroll_state(&self) -> &ViewportScrollState {
+        &self.scroll_state
     }
     pub fn selection(&self) -> Option<&ViewSelection> {
         self.selection.as_ref()
@@ -366,7 +403,8 @@ impl ViewportProjection {
     }
 
     pub fn scroll_offset_rows(&self) -> usize {
-        self.scroll_offset_rows
+        self.pending_scroll_offset_rows
+            .unwrap_or(self.scroll_offset_rows)
     }
 
     pub fn unread_rows(&self) -> usize {
@@ -374,7 +412,9 @@ impl ViewportProjection {
     }
 
     pub fn is_scrolled(&self) -> bool {
-        self.scroll_offset_rows != 0
+        self.pending_scroll_offset_rows
+            .unwrap_or(self.scroll_offset_rows)
+            != 0
     }
 
     /// Positive rows move into history; negative rows move toward the live bottom.
@@ -382,32 +422,42 @@ impl ViewportProjection {
         let max = self
             .last_total_rows
             .saturating_sub(self.live_rows.get() as usize);
-        if rows >= 0 {
-            self.scroll_offset_rows = self
-                .scroll_offset_rows
-                .saturating_add(rows as usize)
-                .min(max);
+        let current = self
+            .pending_scroll_offset_rows
+            .unwrap_or(self.scroll_offset_rows);
+        let next = if rows >= 0 {
+            current.saturating_add(rows as usize).min(max)
         } else {
-            self.scroll_offset_rows = self
-                .scroll_offset_rows
-                .saturating_sub(rows.unsigned_abs() as usize);
-        }
-        if self.scroll_offset_rows == 0 {
+            current.saturating_sub(rows.unsigned_abs() as usize)
+        };
+        self.pending_scroll_offset_rows = Some(next);
+        if next == 0 {
+            self.scroll_state = ViewportScrollState::Bottom;
+            self.scroll_offset_rows = 0;
             self.unread_rows = 0;
         }
         self.view_generation.0 += 1;
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.scroll_offset_rows = self
+        let offset = self
             .last_total_rows
             .saturating_sub(self.live_rows.get() as usize);
+        self.pending_scroll_offset_rows = Some(offset);
+        if offset == 0 {
+            self.scroll_state = ViewportScrollState::Bottom;
+        }
         self.view_generation.0 += 1;
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        if self.scroll_offset_rows != 0 || self.unread_rows != 0 {
+        if self.is_scrolled()
+            || !matches!(self.scroll_state, ViewportScrollState::Bottom)
+            || self.unread_rows != 0
+        {
+            self.scroll_state = ViewportScrollState::Bottom;
             self.scroll_offset_rows = 0;
+            self.pending_scroll_offset_rows = None;
             self.unread_rows = 0;
             self.view_generation.0 += 1;
         }
@@ -459,6 +509,8 @@ impl ViewportProjection {
             cell_anchors,
             selection_spans: Vec::new(),
             status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
             layout_key: self.layout_key,
             view_generation: self.view_generation,
         };
@@ -517,27 +569,87 @@ impl ViewportProjection {
         };
         let staging_rows = if primary { staged_rows.len() } else { 0 };
         let total_rows = history_rows + staging_rows + expected_rows;
+        let was_scrolled = self.is_scrolled();
         if !self.suppress_next_growth_compensation
-            && self.scroll_offset_rows != 0
+            && was_scrolled
             && self.last_total_rows != 0
             && total_rows > self.last_total_rows
         {
             let added = total_rows - self.last_total_rows;
-            self.scroll_offset_rows = self.scroll_offset_rows.saturating_add(added);
             self.unread_rows = self.unread_rows.saturating_add(added);
         }
         self.suppress_next_growth_compensation = false;
         self.last_total_rows = total_rows;
         let max_offset = total_rows.saturating_sub(expected_rows);
-        self.scroll_offset_rows = self.scroll_offset_rows.min(max_offset);
+        let bottom_start = max_offset;
         if !primary {
+            self.scroll_state = ViewportScrollState::Bottom;
+            self.pending_scroll_offset_rows = None;
+            self.scroll_offset_rows = 0;
+            self.unread_rows = 0;
+        } else if let Some(requested_offset) = self.pending_scroll_offset_rows.take() {
+            let offset = requested_offset.min(max_offset);
+            if offset == 0 {
+                self.scroll_state = ViewportScrollState::Bottom;
+            } else {
+                let target_row = bottom_start.saturating_sub(offset);
+                self.scroll_state = self
+                    .anchor_at_absolute_row(document, staged_rows, history_rows, target_row, screen)
+                    .map_or(ViewportScrollState::Bottom, |source| {
+                        ViewportScrollState::Anchored(ScrollAnchor {
+                            source,
+                            local_offset: 0,
+                        })
+                    });
+            }
+        }
+
+        let mut window_start = bottom_start;
+        if let ViewportScrollState::Anchored(mut anchor) = self.scroll_state.clone() {
+            anchor.source = document.resolve_anchor(&anchor.source);
+            if let Some(anchor_row) = self.absolute_row_for_anchor(
+                document,
+                staged_rows,
+                history_rows,
+                &anchor.source,
+                screen,
+            ) {
+                let local_rows = anchor
+                    .local_offset
+                    .max(0)
+                    .div_euclid(self.cell_height_subpixels.get())
+                    as usize;
+                window_start = anchor_row.saturating_add(local_rows).min(bottom_start);
+                if window_start < bottom_start {
+                    self.scroll_state = ViewportScrollState::Anchored(anchor);
+                } else {
+                    self.scroll_state = ViewportScrollState::Bottom;
+                }
+            } else {
+                self.scroll_state = ViewportScrollState::Bottom;
+            }
+        }
+        self.scroll_offset_rows = bottom_start.saturating_sub(window_start);
+        if matches!(self.scroll_state, ViewportScrollState::Bottom) {
+            window_start = bottom_start;
             self.scroll_offset_rows = 0;
             self.unread_rows = 0;
         }
-        let window_start = total_rows
-            .saturating_sub(expected_rows)
-            .saturating_sub(self.scroll_offset_rows);
+        let live_base = history_rows + staging_rows;
         let window_end = (window_start + expected_rows).min(total_rows);
+        // The live plane is always rectangular, but blank rows at its tail are presentation
+        // capacity rather than unread content. If an anchored frame displaces only those rows,
+        // reporting `N lines below` would claim hidden content even though every meaningful row
+        // already fits in the viewport.
+        let first_live_row_below = window_end.saturating_sub(live_base).min(live_rows.len());
+        let blank_live_rows_below = live_rows[first_live_row_below..]
+            .iter()
+            .rev()
+            .take_while(|row| captured_row_is_blank(row))
+            .count();
+        let content_rows_below = self
+            .scroll_offset_rows
+            .saturating_sub(blank_live_rows_below);
         let mut visible = Vec::with_capacity(expected_rows);
 
         if primary && window_start < history_rows {
@@ -581,7 +693,6 @@ impl ViewportProjection {
             }
         }
 
-        let live_base = history_rows + staging_rows;
         if window_end > live_base && window_start < live_base + expected_rows {
             let first = window_start.saturating_sub(live_base);
             let last = window_end.saturating_sub(live_base).min(live_rows.len());
@@ -647,9 +758,15 @@ impl ViewportProjection {
             },
             cell_anchors,
             selection_spans,
-            status_text: self
-                .is_scrolled()
-                .then(|| format!("{} lines below", self.scroll_offset_rows)),
+            status_text: (content_rows_below != 0)
+                .then(|| format!("{content_rows_below} lines below")),
+            viewport_origin: match &self.scroll_state {
+                ViewportScrollState::Bottom => FrameViewportOrigin::Bottom,
+                ViewportScrollState::Anchored(anchor) => {
+                    FrameViewportOrigin::Anchored(anchor.clone())
+                }
+            },
+            scroll_offset_rows: self.scroll_offset_rows,
             layout_key: self.layout_key,
             view_generation: self.view_generation,
         };
@@ -659,11 +776,123 @@ impl ViewportProjection {
         Ok(frame)
     }
 
+    fn anchor_at_absolute_row(
+        &self,
+        document: &HistoryDocument,
+        staged_rows: &[StagedRow],
+        history_rows: usize,
+        absolute_row: usize,
+        screen: ScreenId,
+    ) -> Option<ContentAnchor> {
+        if absolute_row < history_rows {
+            let index = self
+                .visual_row_heights
+                .index_at_offset(absolute_row as i64)?;
+            let row_base = self.visual_row_heights.prefix_sum(index) as usize;
+            let id = self.ordered_ids.get(index)?;
+            let entry = document.entries().get(id)?;
+            return layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize)
+                .get(absolute_row.saturating_sub(row_base))?
+                .anchors
+                .first()
+                .map(|anchor| anchor.start.clone());
+        }
+
+        let staging_row = absolute_row.saturating_sub(history_rows);
+        if let Some(staged) = staged_rows.get(staging_row) {
+            return Some(ContentAnchor::Staging {
+                id: staged.id,
+                offset: GraphemeOffset(0),
+                bias: Bias::Before,
+                generation: self.source_generation,
+            });
+        }
+
+        let live_row = staging_row.saturating_sub(staged_rows.len());
+        (live_row < self.live_rows.get() as usize).then_some(ContentAnchor::Live {
+            screen,
+            point: GridPoint {
+                row: live_row as u32,
+                column: 0,
+            },
+            bias: Bias::Before,
+            generation: self.grid_generation,
+        })
+    }
+
+    fn absolute_row_for_anchor(
+        &self,
+        document: &HistoryDocument,
+        staged_rows: &[StagedRow],
+        history_rows: usize,
+        anchor: &ContentAnchor,
+        screen: ScreenId,
+    ) -> Option<usize> {
+        match anchor {
+            ContentAnchor::History {
+                id,
+                offset,
+                generation,
+                ..
+            } => {
+                let index = self
+                    .ordered_ids
+                    .iter()
+                    .position(|candidate| candidate == id)?;
+                let entry = document.entries().get(id)?;
+                if *generation != entry.line.source_generation {
+                    return None;
+                }
+                let rows =
+                    layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize);
+                let local_row = rows
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(row, visual)| {
+                        let ContentAnchor::History {
+                            offset: row_offset, ..
+                        } = &visual.anchors.first()?.start
+                        else {
+                            return None;
+                        };
+                        (row_offset.0 <= offset.0).then_some(row)
+                    })
+                    .next_back()?;
+                Some(self.visual_row_heights.prefix_sum(index) as usize + local_row)
+            }
+            ContentAnchor::Staging { id, generation, .. } => {
+                if *generation != self.source_generation {
+                    return None;
+                }
+                staged_rows
+                    .iter()
+                    .position(|staged| staged.id == *id)
+                    .map(|row| history_rows + row)
+            }
+            ContentAnchor::Live {
+                screen: anchor_screen,
+                point,
+                generation,
+                ..
+            } => {
+                if *anchor_screen != screen
+                    || *generation != self.grid_generation
+                    || point.row >= self.live_rows.get()
+                {
+                    return None;
+                }
+                Some(history_rows + staged_rows.len() + point.row as usize)
+            }
+        }
+    }
+
     pub fn set_selection(&mut self, selection: Option<ViewSelection>) {
         self.selection = selection;
     }
     pub fn set_scroll_anchor(&mut self, anchor: Option<ScrollAnchor>) {
-        self.scroll_anchor = anchor;
+        self.pending_scroll_offset_rows = None;
+        self.scroll_state =
+            anchor.map_or(ViewportScrollState::Bottom, ViewportScrollState::Anchored);
     }
     pub fn set_artifact_height(&mut self, id: TranscriptId, height_subpixels: i64) {
         if self.artifact_heights.insert(id, height_subpixels) != Some(height_subpixels) {
@@ -829,8 +1058,7 @@ impl ViewportProjection {
     }
 
     pub fn scroll_y(&self, document: &HistoryDocument) -> Result<Option<i64>, AnchorError> {
-        self.scroll_anchor
-            .as_ref()
+        self.scroll_anchor()
             .map(|anchor| {
                 self.anchor_y(document, &anchor.source)
                     .map(|y| y + anchor.local_offset)
@@ -897,6 +1125,13 @@ fn blank_visual_row(columns: usize, anchor: impl Fn(usize, Bias) -> ContentAncho
             })
             .collect(),
     }
+}
+
+fn captured_row_is_blank(row: &CapturedRow) -> bool {
+    row.cells
+        .iter()
+        .filter(|cell| !cell.wide_spacer)
+        .all(|cell| cell.text.chars().all(char::is_whitespace))
 }
 
 fn captured_visual_row(
@@ -1565,6 +1800,137 @@ mod tests {
     }
 
     #[test]
+    fn blank_live_capacity_is_never_reported_as_lines_below() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        for text in ["frozen-a", "frozen-b"] {
+            document.finalize_transaction(
+                store
+                    .capture(CapturedRow::plain(text, false))
+                    .finalized
+                    .remove(0),
+            );
+        }
+        let mut projection = ViewportProjection::new(
+            key(10),
+            DetectionRevision(1),
+            nz32(4),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let live = || {
+            vec![
+                CapturedRow::plain("live      ", false),
+                CapturedRow::plain("tail      ", false),
+                CapturedRow::plain("          ", false),
+                CapturedRow::plain("          ", false),
+            ]
+        };
+        projection
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 1,
+                    column: 4,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        projection.scroll_by_rows(2);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 1,
+                    column: 4,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+
+        assert_eq!(frame.scroll_offset_rows, 2);
+        assert!(matches!(
+            frame.viewport_origin,
+            FrameViewportOrigin::Anchored(_)
+        ));
+        assert_eq!(frame.status_text, None);
+    }
+
+    #[test]
+    fn internal_blank_live_row_is_reported_but_tail_capacity_is_not() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        for text in ["frozen-a", "frozen-b", "frozen-c", "frozen-d"] {
+            document.finalize_transaction(
+                store
+                    .capture(CapturedRow::plain(text, false))
+                    .finalized
+                    .remove(0),
+            );
+        }
+        let mut projection = ViewportProjection::new(
+            key(10),
+            DetectionRevision(1),
+            nz32(5),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let live = || {
+            vec![
+                CapturedRow::plain("live-a    ", false),
+                CapturedRow::plain("          ", false),
+                CapturedRow::plain("live-b    ", false),
+                CapturedRow::plain("          ", false),
+                CapturedRow::plain("          ", false),
+            ]
+        };
+        projection
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 2,
+                    column: 6,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        projection.scroll_by_rows(4);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 2,
+                    column: 6,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+
+        assert_eq!(frame.scroll_offset_rows, 4);
+        assert!(matches!(
+            frame.viewport_origin,
+            FrameViewportOrigin::Anchored(_)
+        ));
+        assert_eq!(frame.status_text.as_deref(), Some("2 lines below"));
+    }
+
+    #[test]
     fn resize_reflow_does_not_masquerade_as_unread_content() {
         let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
         let mut document = HistoryDocument::default();
@@ -1625,6 +1991,181 @@ mod tests {
             .unwrap();
         assert_eq!(projection.scroll_offset_rows(), 1);
         assert_eq!(projection.unread_rows(), 0);
+    }
+
+    #[test]
+    fn anchored_reflow_pins_the_same_logical_offset_to_the_top_visual_row() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        document.finalize_transaction(
+            store
+                .capture(CapturedRow::plain("abcdefghijkl", false))
+                .finalized
+                .remove(0),
+        );
+        let mut projection = ViewportProjection::new(
+            key(6),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let wide_live = vec![
+            CapturedRow::plain("live  ", false),
+            CapturedRow::plain("tail  ", false),
+        ];
+        projection
+            .continuous_frame(
+                &document,
+                &[],
+                wide_live,
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        projection.scroll_by_rows(1);
+        let anchored = projection
+            .continuous_frame(
+                &document,
+                &[],
+                vec![
+                    CapturedRow::plain("live  ", false),
+                    CapturedRow::plain("tail  ", false),
+                ],
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        let anchor_before = projection.scroll_anchor().unwrap().source.clone();
+        assert!(matches!(
+            anchor_before,
+            ContentAnchor::History {
+                offset: GraphemeOffset(6),
+                ..
+            }
+        ));
+        assert!(anchored.cell_anchors[..6].iter().any(|cell| {
+            matches!(
+                cell.start,
+                ContentAnchor::History {
+                    offset: GraphemeOffset(6),
+                    ..
+                }
+            )
+        }));
+
+        projection.relayout(key(4), &document);
+        let narrow = projection
+            .continuous_frame(
+                &document,
+                &[],
+                vec![
+                    CapturedRow::plain("live", false),
+                    CapturedRow::plain("tail", false),
+                ],
+                GridCursor {
+                    row: 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert_eq!(projection.scroll_anchor().unwrap().source, anchor_before);
+        assert!(narrow.cell_anchors[..4].iter().any(|cell| {
+            matches!(
+                cell.start,
+                ContentAnchor::History {
+                    offset: GraphemeOffset(6),
+                    ..
+                }
+            )
+        }));
+    }
+
+    #[test]
+    fn staging_scroll_anchor_uses_the_g3_mapping_when_the_row_freezes() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        store.capture(CapturedRow::plain("head", true));
+        let staged = store.staged_rows().cloned().collect::<Vec<_>>();
+        let mut document = HistoryDocument::default();
+        let mut projection = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(1),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let live = || vec![CapturedRow::plain("tail", false)];
+        projection
+            .continuous_frame(
+                &document,
+                &staged,
+                live(),
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        projection.scroll_by_rows(1);
+        projection
+            .continuous_frame(
+                &document,
+                &staged,
+                live(),
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert!(matches!(
+            projection.scroll_anchor().map(|anchor| &anchor.source),
+            Some(ContentAnchor::Staging { .. })
+        ));
+
+        let finalized = store.finalize_all_candidates().remove(0);
+        let frozen_id = finalized.line.id;
+        document.finalize_transaction(finalized);
+        projection.project(&document);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &[],
+                live(),
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert!(matches!(
+            projection.scroll_anchor().map(|anchor| &anchor.source),
+            Some(ContentAnchor::History { id, .. }) if *id == frozen_id
+        ));
+        assert!(matches!(
+            &frame.viewport_origin,
+            FrameViewportOrigin::Anchored(_)
+        ));
     }
 
     #[test]
