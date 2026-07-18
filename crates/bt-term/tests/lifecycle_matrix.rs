@@ -3,9 +3,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bt_doc::{DecorationIntent, DecorationLifecycle};
+use bt_doc::{ContentAnchor, DecorationIntent, DecorationLifecycle};
 use bt_term::DualPlaneSession;
 use bt_transcript::{CellFlags, TerminalColor};
+use bt_viewport::{FrameViewportOrigin, ViewportFrame};
 use proptest::prelude::*;
 
 fn nz32(value: u32) -> NonZeroU32 {
@@ -93,6 +94,167 @@ fn logical_content(session: &DualPlaneSession) -> Vec<String> {
         logical.push(trimmed.to_owned());
     }
     logical
+}
+
+fn frame_row_text(frame: &ViewportFrame, row: usize) -> String {
+    let columns = frame.columns.get() as usize;
+    frame.cells[row * columns..(row + 1) * columns]
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect()
+}
+
+fn captured_row_text(row: &bt_transcript::CapturedRow) -> String {
+    row.cells.iter().map(|cell| cell.text.as_str()).collect()
+}
+
+fn assert_frame_rows_come_from_real_sources(session: &DualPlaneSession, frame: &ViewportFrame) {
+    let columns = frame.columns.get() as usize;
+    for row in 0..frame.rows.get() as usize {
+        let source = &frame.cell_anchors[row * columns].start;
+        let expected = match source {
+            ContentAnchor::History { id, offset, .. } => {
+                assert_eq!(offset.0, 0, "fixture history rows never wrap");
+                session.document().entries()[id].line.text.clone()
+            }
+            ContentAnchor::Staging { id, offset, .. } => {
+                assert_eq!(offset.0, 0, "fixture staging rows never wrap");
+                captured_row_text(
+                    &session
+                        .transcript()
+                        .staged_rows()
+                        .find(|staged| staged.id == *id)
+                        .expect("visible staging anchor has a source row")
+                        .row,
+                )
+            }
+            ContentAnchor::Live { point, .. } => captured_row_text(
+                &session
+                    .terminal()
+                    .visible_row(point.row)
+                    .expect("visible live anchor has a source row"),
+            ),
+        };
+        assert_eq!(
+            frame_row_text(frame, row),
+            expected,
+            "composed row {row} must be the exact source row, including intentional erasure"
+        );
+    }
+}
+
+fn collapse_blocks(block_count: usize, rows: usize) -> Vec<Vec<u8>> {
+    (0..block_count)
+        .map(|block| {
+            let first = block * rows / block_count;
+            let last = (block + 1) * rows / block_count;
+            let mut bytes = b"\x1b[?2026h".to_vec();
+            for row in first..last {
+                bytes.extend_from_slice(format!("\x1b[{};1H\x1b[2K", row + 1).as_bytes());
+                if row % 3 != 1 {
+                    bytes.extend_from_slice(format!("collapsed-{row:02}").as_bytes());
+                }
+            }
+            bytes.extend_from_slice(b"\x1b[?2026l");
+            bytes
+        })
+        .collect()
+}
+
+#[test]
+fn m1_8f_collapse_lifecycle_matrix_has_no_projection_holes_or_anchor_drift() {
+    const COLUMNS: u32 = 20;
+    const ROWS: u32 = 8;
+    const ESU_LEN: usize = b"\x1b[?2026l".len();
+    let mut scenarios = 0;
+    let mut published_frames = 0;
+
+    for scrolled_out in [4_usize, 12] {
+        for block_count in [1_usize, 4] {
+            for anchored in [false, true] {
+                for timeout_commit in [false, true] {
+                    scenarios += 1;
+                    let seed = (0..scrolled_out + ROWS as usize)
+                        .map(|row| format!("seed-{row:02}"))
+                        .collect::<Vec<_>>()
+                        .join("\r\n");
+                    let blocks = collapse_blocks(block_count, ROWS as usize);
+
+                    let mut session = DualPlaneSession::new(nz32(COLUMNS), nz32(ROWS));
+                    session.feed(seed.as_bytes()).unwrap();
+                    let mut projection = session.new_projection(session.layout_key());
+                    let bottom = session.viewport_frame(&mut projection).unwrap();
+                    assert_frame_rows_come_from_real_sources(&session, &bottom);
+                    if anchored {
+                        projection.scroll_by_rows(3);
+                    }
+                    session.refresh_projection(&mut projection);
+                    let initial = session.viewport_frame(&mut projection).unwrap();
+                    assert_frame_rows_come_from_real_sources(&session, &initial);
+                    let pinned_top = frame_row_text(&initial, 0);
+                    if anchored {
+                        assert!(matches!(
+                            initial.viewport_origin,
+                            FrameViewportOrigin::Anchored(_)
+                        ));
+                    }
+
+                    for (index, block) in blocks.iter().enumerate() {
+                        if timeout_commit && index == block_count / 2 {
+                            session.feed(&block[..block.len() - ESU_LEN]).unwrap();
+                            assert!(session.synchronized_update_deadline().is_some());
+                            assert!(session.finish_synchronized_update(Instant::now()).unwrap());
+                        } else {
+                            session.feed(block).unwrap();
+                        }
+                        session.refresh_projection(&mut projection);
+                        let frame = session.viewport_frame(&mut projection).unwrap();
+                        frame.validate_shape().unwrap();
+                        assert_frame_rows_come_from_real_sources(&session, &frame);
+                        if anchored {
+                            assert!(matches!(
+                                frame.viewport_origin,
+                                FrameViewportOrigin::Anchored(_)
+                            ));
+                            assert_eq!(frame_row_text(&frame, 0), pinned_top);
+                        }
+                        published_frames += 1;
+                    }
+
+                    let split_final = session.viewport_frame(&mut projection).unwrap();
+                    let mut direct = DualPlaneSession::new(nz32(COLUMNS), nz32(ROWS));
+                    direct.feed(seed.as_bytes()).unwrap();
+                    let mut direct_projection = direct.new_projection(direct.layout_key());
+                    let _ = direct.viewport_frame(&mut direct_projection).unwrap();
+                    if anchored {
+                        direct_projection.scroll_by_rows(3);
+                    }
+                    direct
+                        .feed(&blocks.iter().flatten().copied().collect::<Vec<_>>())
+                        .unwrap();
+                    direct.refresh_projection(&mut direct_projection);
+                    let direct_final = direct.viewport_frame(&mut direct_projection).unwrap();
+
+                    assert_eq!(
+                        session.terminal().visible_text(),
+                        direct.terminal().visible_text()
+                    );
+                    assert_eq!(split_final.cells, direct_final.cells);
+                    assert_eq!(
+                        split_final.scroll_offset_rows,
+                        direct_final.scroll_offset_rows
+                    );
+                    assert_eq!(
+                        frame_row_text(&split_final, 0),
+                        frame_row_text(&direct_final, 0)
+                    );
+                }
+            }
+        }
+    }
+
+    assert_eq!(scenarios, 16);
+    assert_eq!(published_frames, 40);
 }
 
 #[test]
