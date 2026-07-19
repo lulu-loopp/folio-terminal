@@ -18,12 +18,15 @@ pub enum WheelScrollAmount {
 
 #[cfg(windows)]
 mod windows_impl {
-    use std::{ffi::c_void, sync::OnceLock};
+    use std::{
+        ffi::c_void,
+        sync::{Arc, Mutex, OnceLock},
+    };
 
     use windows::Win32::{
         Foundation::{
-            COLORREF, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, RECT, SetLastError,
-            WIN32_ERROR,
+            COLORREF, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT,
+            RECT, SetLastError, WIN32_ERROR, WPARAM,
         },
         Graphics::Gdi::{CreateSolidBrush, DeleteObject, HGDIOBJ},
         System::{
@@ -36,9 +39,12 @@ mod windows_impl {
         UI::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::GetKeyboardLayout,
+            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             WindowsAndMessaging::{
-                CreateCaret, DestroyCaret, GCLP_HBRBACKGROUND, GetWindowRect,
+                AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
+                GCLP_HBRBACKGROUND, GetCursorPos, GetWindowRect, MF_STRING, PostMessageW,
                 SPI_GETWHEELSCROLLLINES, SetCaretPos, SetClassLongPtrW, SystemParametersInfoW,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
             },
         },
     };
@@ -48,6 +54,8 @@ mod windows_impl {
     static WINDOW_CLASS_BACKGROUND: OnceLock<Result<(), String>> = OnceLock::new();
     const CF_UNICODETEXT: u32 = 13;
     const WHEEL_PAGESCROLL: u32 = u32::MAX;
+    const DEFERRED_MATH_MENU_MESSAGE: u32 = WM_APP + 0x4b7;
+    const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
 
     pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
         let mut lines = 0u32;
@@ -146,6 +154,201 @@ mod windows_impl {
             match (result, close) {
                 (Ok(()), Ok(())) => Ok(()),
                 (Err(error), _) | (Ok(()), Err(error)) => Err(error),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    enum DeferredMenuPhase {
+        Idle,
+        Posted,
+        Showing,
+        Complete(Result<bool, String>),
+    }
+
+    #[derive(Debug)]
+    struct DeferredMenuState {
+        phase: Mutex<DeferredMenuPhase>,
+    }
+
+    impl DeferredMenuState {
+        fn new() -> Self {
+            Self {
+                phase: Mutex::new(DeferredMenuPhase::Idle),
+            }
+        }
+
+        fn begin_request(&self) -> Result<(), String> {
+            let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
+            if !matches!(*phase, DeferredMenuPhase::Idle) {
+                return Err("formula context menu request is already pending".to_owned());
+            }
+            *phase = DeferredMenuPhase::Posted;
+            Ok(())
+        }
+
+        fn cancel_request(&self) {
+            let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
+            if matches!(*phase, DeferredMenuPhase::Posted) {
+                *phase = DeferredMenuPhase::Idle;
+            }
+        }
+
+        fn begin_showing(&self) -> bool {
+            let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
+            if !matches!(*phase, DeferredMenuPhase::Posted) {
+                return false;
+            }
+            *phase = DeferredMenuPhase::Showing;
+            true
+        }
+
+        fn complete(&self, result: Result<bool, String>) {
+            let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
+            if matches!(*phase, DeferredMenuPhase::Showing) {
+                *phase = DeferredMenuPhase::Complete(result);
+            }
+        }
+
+        fn take_result(&self) -> Option<Result<bool, String>> {
+            let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
+            let DeferredMenuPhase::Complete(_) = &*phase else {
+                return None;
+            };
+            let DeferredMenuPhase::Complete(result) =
+                std::mem::replace(&mut *phase, DeferredMenuPhase::Idle)
+            else {
+                unreachable!("phase was matched as complete immediately before replacement")
+            };
+            Some(result)
+        }
+    }
+
+    /// Formula context-menu bridge whose nested native message pump never starts inside a winit
+    /// application callback. `request` only posts a private window message. The subclass receives
+    /// it after the current `DispatchMessageW`/winit callback has returned, so any RedrawRequested
+    /// emitted by TrackPopupMenu's nested pump finds winit's event-handler slot restored.
+    pub struct MathContextMenu {
+        hwnd: HWND,
+        state: Arc<DeferredMenuState>,
+    }
+
+    impl MathContextMenu {
+        pub fn new(hwnd: NonZeroIsize) -> Result<Self, String> {
+            let hwnd = HWND(hwnd.get() as *mut c_void);
+            let state = Arc::new(DeferredMenuState::new());
+            // SAFETY: installation and removal occur on the HWND's event-loop thread. The Arc
+            // keeps dwRefData live for the full installed interval; the callback takes its own
+            // temporary strong reference before entering the nested menu loop.
+            let installed = unsafe {
+                SetWindowSubclass(
+                    hwnd,
+                    Some(math_context_menu_subclass),
+                    MATH_MENU_SUBCLASS_ID,
+                    Arc::as_ptr(&state) as usize,
+                )
+            };
+            if !installed.as_bool() {
+                return Err(format!("SetWindowSubclass(math menu) failed: {}", unsafe {
+                    GetLastError().0
+                }));
+            }
+            Ok(Self { hwnd, state })
+        }
+
+        pub fn request(&self) -> Result<(), String> {
+            self.state.begin_request()?;
+            // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
+            // and never dispatches the subclass synchronously on this callback stack.
+            if let Err(error) = unsafe {
+                PostMessageW(
+                    Some(self.hwnd),
+                    DEFERRED_MATH_MENU_MESSAGE,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            } {
+                self.state.cancel_request();
+                return Err(format!("PostMessageW(math menu) failed: {error}"));
+            }
+            Ok(())
+        }
+
+        pub fn take_result(&self) -> Option<Result<bool, String>> {
+            self.state.take_result()
+        }
+    }
+
+    impl Drop for MathContextMenu {
+        fn drop(&mut self) {
+            // SAFETY: this object is dropped on the same event-loop thread that installed the
+            // subclass. A callback already inside TrackPopupMenu owns a temporary Arc, so nested
+            // CloseRequested teardown cannot invalidate its state.
+            let _ = unsafe {
+                RemoveWindowSubclass(
+                    self.hwnd,
+                    Some(math_context_menu_subclass),
+                    MATH_MENU_SUBCLASS_ID,
+                )
+            };
+        }
+    }
+
+    unsafe extern "system" fn math_context_menu_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        reference_data: usize,
+    ) -> LRESULT {
+        if message != DEFERRED_MATH_MENU_MESSAGE {
+            // SAFETY: forwarding untouched messages is the required subclass contract.
+            return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+        }
+        let state_pointer = reference_data as *const DeferredMenuState;
+        if state_pointer.is_null() {
+            return LRESULT(0);
+        }
+        // SAFETY: the installed MathContextMenu owns one Arc at callback entry. Incrementing before
+        // constructing the temporary Arc keeps state alive even if a nested CloseRequested drops
+        // the Runtime while TrackPopupMenu is open.
+        unsafe { Arc::increment_strong_count(state_pointer) };
+        // SAFETY: the increment immediately above created the strong reference consumed here.
+        let state = unsafe { Arc::from_raw(state_pointer) };
+        if state.begin_showing() {
+            state.complete(track_math_context_menu(hwnd));
+        }
+        LRESULT(0)
+    }
+
+    fn track_math_context_menu(hwnd: HWND) -> Result<bool, String> {
+        // SAFETY: the HWND and menu belong to the current GUI thread. This function is reached only
+        // from the posted-message subclass, after winit's initiating callback has returned.
+        unsafe {
+            let menu =
+                CreatePopupMenu().map_err(|error| format!("CreatePopupMenu failed: {error}"))?;
+            let result = (|| {
+                AppendMenuW(menu, MF_STRING, 1, windows::core::w!("Copy LaTeX"))
+                    .map_err(|error| format!("AppendMenuW(Copy LaTeX) failed: {error}"))?;
+                let mut cursor = POINT::default();
+                GetCursorPos(&mut cursor)
+                    .map_err(|error| format!("GetCursorPos failed: {error}"))?;
+                let command = TrackPopupMenu(
+                    menu,
+                    TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                    cursor.x,
+                    cursor.y,
+                    None,
+                    hwnd,
+                    None,
+                );
+                Ok(command.0 as usize == 1)
+            })();
+            let destroy = DestroyMenu(menu).map_err(|error| format!("DestroyMenu failed: {error}"));
+            match (result, destroy) {
+                (Ok(selected), Ok(())) => Ok(selected),
+                (Err(error), _) | (Ok(_), Err(error)) => Err(error),
             }
         }
     }
@@ -283,7 +486,7 @@ mod windows_impl {
 
     #[cfg(test)]
     mod tests {
-        use super::primary_language_id;
+        use super::{DeferredMenuState, primary_language_id};
 
         #[test]
         fn chinese_system_caret_gate_uses_primary_language_bits() {
@@ -291,11 +494,25 @@ mod windows_impl {
             assert_eq!(primary_language_id(0x0404), 0x0004);
             assert_ne!(primary_language_id(0x0409), 0x0004);
         }
+
+        #[test]
+        fn deferred_menu_state_requires_posted_dispatch_before_showing() {
+            let state = DeferredMenuState::new();
+            assert_eq!(state.take_result(), None);
+            state.begin_request().unwrap();
+            assert!(state.begin_request().is_err());
+            assert_eq!(state.take_result(), None);
+            assert!(state.begin_showing());
+            assert!(!state.begin_showing());
+            state.complete(Ok(true));
+            assert_eq!(state.take_result(), Some(Ok(true)));
+            state.begin_request().unwrap();
+        }
     }
 }
 
 #[cfg(windows)]
 pub use windows_impl::{
-    ImeSystemCaret, clipboard_text, get_dpi_for_window, get_window_rect,
+    ImeSystemCaret, MathContextMenu, clipboard_text, get_dpi_for_window, get_window_rect,
     install_window_class_background, set_clipboard_text, wheel_scroll_amount,
 };

@@ -17,7 +17,10 @@ use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
 use bt_unicode::{cluster_width, graphemes};
 #[cfg(test)]
 use bt_viewport::FrameViewportOrigin;
-use bt_viewport::{FrameShapeError, SUBPIXELS_PER_PX, ViewportFrame};
+use bt_viewport::{
+    FrameShapeError, MathBlockAnchor, MathBlockDisplay, MathBlockPlacement, SUBPIXELS_PER_PX,
+    ViewportFrame,
+};
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
@@ -38,6 +41,36 @@ const PADDING_LOGICAL_PX: f32 = 8.0;
 const NARROW_SHAPING_CACHE_BUDGET_BYTES: usize = 8 * 1024 * 1024;
 const WIDE_SHAPING_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
+const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
+const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
+
+fn math_toolbar_vertical_bounds(visible_top: f32, visible_bottom: f32, scale: f32) -> (f32, f32) {
+    let band_height = (visible_bottom - visible_top).max(0.0);
+    let button = (MATH_TOOL_BUTTON_LOGICAL_PX * scale).min(band_height);
+    let top = visible_top + (band_height - button) / 2.0;
+    (top, top + button)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MathHitTarget {
+    Block,
+    ToggleSource,
+    CopyLatex,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathHit {
+    pub anchor: MathBlockAnchor,
+    pub target: MathHitTarget,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MathBlockGeometry {
+    block: [f32; 4],
+    clip: [f32; 4],
+    eye: Option<[f32; 4]>,
+    copy: Option<[f32; 4]>,
+}
 const MATH_TEXTURE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const PRIMARY_FONT_FAMILY: &str = "Consolas";
 const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
@@ -1604,6 +1637,26 @@ impl Renderer {
         ime_cursor_area_for_metrics(self.metrics, frame.cursor)
     }
 
+    pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
+        let point = [x as f32, y as f32];
+        frame.math_blocks.iter().rev().find_map(|placement| {
+            let geometry = self.math_block_geometry(frame, placement)?;
+            let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
+                MathHitTarget::ToggleSource
+            } else if geometry.copy.is_some_and(|rect| point_in_rect(point, rect)) {
+                MathHitTarget::CopyLatex
+            } else if point_in_rect(point, geometry.block) {
+                MathHitTarget::Block
+            } else {
+                return None;
+            };
+            Some(MathHit {
+                anchor: placement.anchor.clone(),
+                target,
+            })
+        })
+    }
+
     pub fn presentation_geometry(&self) -> PresentationGeometry {
         PresentationGeometry {
             swapchain_size: (self.config.width, self.config.height),
@@ -1704,6 +1757,19 @@ impl Renderer {
                 contents: bytemuck::cast_slice(rect_data),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        let math_overlays = self.math_overlay_rectangles(frame);
+        let overlay_data = if math_overlays.is_empty() {
+            empty_rect.as_slice()
+        } else {
+            math_overlays.as_slice()
+        };
+        let math_overlay_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("math toolbar overlay rectangles"),
+                    contents: bytemuck::cast_slice(overlay_data),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
         let rectangles_prepared_at = Instant::now();
         let (math_draws, math_vertices) = self.prepare_math_draws(frame);
         let math_vertex_buffer = (!math_vertices.is_empty()).then(|| {
@@ -1791,6 +1857,11 @@ impl Renderer {
                 self.text_renderer
                     .render(&self.atlas, &self.viewport, &mut pass)
                     .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            }
+            if !math_overlays.is_empty() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, math_overlay_buffer.slice(..));
+                pass.draw(0..6, 0..math_overlays.len() as u32);
             }
         }
         let encoded_at = Instant::now();
@@ -1886,6 +1957,9 @@ impl Renderer {
         let pane_bottom = self.config.height as f32;
 
         for placement in &frame.math_blocks {
+            if placement.display == MathBlockDisplay::Source {
+                continue;
+            }
             let key = &placement.artifact.key;
             if self.math_textures.get(key).is_none()
                 && let Some(texture) = self.upload_math_texture(&placement.artifact)
@@ -1904,25 +1978,30 @@ impl Renderer {
             }) else {
                 continue;
             };
+            let Some(geometry) = self.math_block_geometry(frame, placement) else {
+                continue;
+            };
+            let scale = placement.artifact.render_scale_milli as f32 / 1000.0;
             let block_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
             for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
                 tile_geometry.into_iter().enumerate()
             {
-                let left = pane_left + tile_x as f32;
-                let top = block_top + tile_y as f32;
-                let right = left + tile_width as f32;
-                let bottom = top + tile_height as f32;
-                let visible_left = left.max(pane_left);
-                let visible_top = top.max(pane_top);
-                let visible_right = right.min(pane_right);
-                let visible_bottom = bottom.min(pane_bottom);
+                let left =
+                    pane_left + tile_x as f32 * scale - placement.horizontal_scroll_px as f32;
+                let top = block_top + tile_y as f32 * scale - placement.vertical_scroll_px as f32;
+                let right = left + tile_width as f32 * scale;
+                let bottom = top + tile_height as f32 * scale;
+                let visible_left = left.max(geometry.clip[0]).max(pane_left);
+                let visible_top = top.max(geometry.clip[1]).max(pane_top);
+                let visible_right = right.min(geometry.clip[2]).min(pane_right);
+                let visible_bottom = bottom.min(geometry.clip[3]).min(pane_bottom);
                 if visible_right <= visible_left || visible_bottom <= visible_top {
                     continue;
                 }
-                let uv_left = (visible_left - left) / tile_width as f32;
-                let uv_top = (visible_top - top) / tile_height as f32;
-                let uv_right = (visible_right - left) / tile_width as f32;
-                let uv_bottom = (visible_bottom - top) / tile_height as f32;
+                let uv_left = (visible_left - left) / (tile_width as f32 * scale);
+                let uv_top = (visible_top - top) / (tile_height as f32 * scale);
+                let uv_right = (visible_right - left) / (tile_width as f32 * scale);
+                let uv_bottom = (visible_bottom - top) / (tile_height as f32 * scale);
                 let first_vertex = vertices.len() as u32;
                 vertices.extend(math_quad_vertices(
                     visible_left,
@@ -1944,6 +2023,77 @@ impl Renderer {
             }
         }
         (draws, vertices)
+    }
+
+    fn math_block_geometry(
+        &self,
+        frame: &ViewportFrame,
+        placement: &MathBlockPlacement,
+    ) -> Option<MathBlockGeometry> {
+        let pane_left = self.metrics.padding_px;
+        let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
+            .min(self.config.width as f32);
+        let pane_top = self.metrics.padding_px;
+        let pane_bottom = self.config.height as f32;
+        let top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+        let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
+        let scaled_width = if placement.display == MathBlockDisplay::Source {
+            placement
+                .source
+                .lines()
+                .map(|line| line.chars().count() + 4)
+                .max()
+                .unwrap_or(4) as f32
+                * self.metrics.cell_width_px
+        } else {
+            placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32
+                / 1000.0
+        };
+        let scaled_height = if placement.display == MathBlockDisplay::Source {
+            clip_height
+        } else {
+            placement.artifact.height_px as f32 * placement.artifact.render_scale_milli as f32
+                / 1000.0
+        };
+        let visible_top = top.max(pane_top);
+        let visible_bottom = (top + scaled_height.min(clip_height)).min(pane_bottom);
+        let visible_right = (pane_left + scaled_width).min(pane_right);
+        if visible_right <= pane_left || visible_bottom <= visible_top {
+            return None;
+        }
+        let block = [pane_left, visible_top, visible_right, visible_bottom];
+        let clip = [
+            pane_left,
+            top.max(pane_top),
+            pane_right,
+            (top + clip_height).min(pane_bottom),
+        ];
+        let (eye, copy) = if placement.toolbar_visible {
+            let scale = self.metrics.scale_factor as f32;
+            let (toolbar_top, toolbar_bottom) =
+                math_toolbar_vertical_bounds(visible_top, visible_bottom, scale);
+            let button = toolbar_bottom - toolbar_top;
+            let gap = MATH_TOOL_GAP_LOGICAL_PX * scale;
+            let total = button * 2.0 + gap;
+            let left = visible_right.min(pane_right - total).max(pane_left);
+            (
+                Some([left, toolbar_top, left + button, toolbar_bottom]),
+                Some([
+                    left + button + gap,
+                    toolbar_top,
+                    left + total,
+                    toolbar_bottom,
+                ]),
+            )
+        } else {
+            (None, None)
+        };
+        Some(MathBlockGeometry {
+            block,
+            clip,
+            eye,
+            copy,
+        })
     }
 
     fn upload_math_texture(
@@ -2061,6 +2211,20 @@ impl Renderer {
                 ));
             }
         }
+        for placement in &frame.math_blocks {
+            if placement.toolbar_visible
+                && let Some(geometry) = self.math_block_geometry(frame, placement)
+            {
+                rects.push(self.pixel_rect_with_coverage(
+                    geometry.block[0],
+                    geometry.block[1],
+                    geometry.block[2],
+                    geometry.block[3],
+                    DEFAULT_STATUS_BACKGROUND_RGB,
+                    0.45,
+                ));
+            }
+        }
         if let Some(status) = frame.status_text.as_deref() {
             let width = status.chars().count().min(columns);
             if width != 0 {
@@ -2133,6 +2297,78 @@ impl Renderer {
                     bottom,
                     foreground,
                 ));
+            }
+        }
+        rects
+    }
+
+    fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
+        let mut rects = Vec::new();
+        let ink = foreground_rgb();
+        let unit = self.metrics.scale_factor as f32;
+        for placement in &frame.math_blocks {
+            let Some(geometry) = self.math_block_geometry(frame, placement) else {
+                continue;
+            };
+            let (Some(eye), Some(copy)) = (geometry.eye, geometry.copy) else {
+                continue;
+            };
+            for button in [eye, copy] {
+                rects.push(self.pixel_rect(
+                    button[0],
+                    button[1],
+                    button[2],
+                    button[3],
+                    DEFAULT_STATUS_BACKGROUND_RGB,
+                ));
+            }
+            let eye_mid_x = (eye[0] + eye[2]) / 2.0;
+            let eye_mid_y = (eye[1] + eye[3]) / 2.0;
+            let eye_half_w = (eye[2] - eye[0]) * 0.29;
+            let eye_half_h = (eye[3] - eye[1]) * 0.18;
+            rects.extend([
+                self.pixel_rect(
+                    eye_mid_x - eye_half_w,
+                    eye_mid_y - eye_half_h,
+                    eye_mid_x + eye_half_w,
+                    eye_mid_y - eye_half_h + unit,
+                    ink,
+                ),
+                self.pixel_rect(
+                    eye_mid_x - eye_half_w,
+                    eye_mid_y + eye_half_h - unit,
+                    eye_mid_x + eye_half_w,
+                    eye_mid_y + eye_half_h,
+                    ink,
+                ),
+                self.pixel_rect(
+                    eye_mid_x - unit,
+                    eye_mid_y - unit,
+                    eye_mid_x + unit,
+                    eye_mid_y + unit,
+                    ink,
+                ),
+            ]);
+            let copy_inset = (copy[2] - copy[0]) * 0.27;
+            let first = [
+                copy[0] + copy_inset - 2.0 * unit,
+                copy[1] + copy_inset - 2.0 * unit,
+                copy[2] - copy_inset,
+                copy[3] - copy_inset,
+            ];
+            let second = [
+                copy[0] + copy_inset,
+                copy[1] + copy_inset,
+                copy[2] - copy_inset + 2.0 * unit,
+                copy[3] - copy_inset + 2.0 * unit,
+            ];
+            for outline in [first, second] {
+                rects.extend([
+                    self.pixel_rect(outline[0], outline[1], outline[2], outline[1] + unit, ink),
+                    self.pixel_rect(outline[0], outline[3] - unit, outline[2], outline[3], ink),
+                    self.pixel_rect(outline[0], outline[1], outline[0] + unit, outline[3], ink),
+                    self.pixel_rect(outline[2] - unit, outline[1], outline[2], outline[3], ink),
+                ]);
             }
         }
         rects
@@ -3167,9 +3403,12 @@ fn create_math_pipeline(
         ],
     });
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-        label: Some("math block exact-pixel sampler"),
-        mag_filter: wgpu::FilterMode::Nearest,
-        min_filter: wgpu::FilterMode::Nearest,
+        label: Some("math block scaled sampler"),
+        // Live row-band fitting and same-content DPI relayout both deliberately scale an existing
+        // raster. Linear filtering makes that brief/adaptive preview readable until fresh pixels
+        // atomically replace it.
+        mag_filter: wgpu::FilterMode::Linear,
+        min_filter: wgpu::FilterMode::Linear,
         ..Default::default()
     });
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3271,6 +3510,10 @@ fn math_quad_vertices(
     ]
 }
 
+fn point_in_rect([x, y]: [f32; 2], [left, top, right, bottom]: [f32; 4]) -> bool {
+    x >= left && x < right && y >= top && y < bottom
+}
+
 fn default_foreground() -> [u8; 3] {
     foreground_rgb()
 }
@@ -3352,6 +3595,21 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn math_toolbar_shrinks_to_the_visible_source_row_band() {
+        for (scale, top, bottom) in [(1.0, 8.0, 26.0), (1.25, 10.0, 32.5)] {
+            let (button_top, button_bottom) = math_toolbar_vertical_bounds(top, bottom, scale);
+            assert!(button_top >= top);
+            assert!(button_bottom <= bottom);
+            assert_eq!(button_bottom - button_top, bottom - top);
+        }
+        assert_eq!(
+            math_toolbar_vertical_bounds(5.0, 35.0, 1.0),
+            (9.0, 31.0),
+            "a taller block keeps the intended 22px control"
+        );
     }
 
     fn shape_narrow_for_test(

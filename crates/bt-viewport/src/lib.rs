@@ -23,6 +23,8 @@ use bt_unicode::{cluster_width, graphemes};
 pub use bt_doc::SUBPIXELS_PER_PX;
 pub use height_tree::HeightTree;
 
+pub const LIVE_MATH_READABLE_SCALE_MILLI: u32 = 650;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TranscriptSpan {
     pub start: TranscriptId,
@@ -93,6 +95,47 @@ pub struct ProjectedMathArtifact {
     pub width_px: u32,
     pub height_px: u32,
     pub height_subpixels: i64,
+    /// Presentation scale for a same-source stale raster. Fresh artifacts use 1000.
+    pub render_scale_milli: u32,
+    pub source: String,
+}
+
+/// A rendered artifact tied to transient grid coordinates. Unlike history artifacts, this does
+/// not participate in document height or reflow; it is projected only over its fixed live row
+/// band while the screen and grid generation still match.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectedLiveMathArtifact {
+    pub screen: ScreenId,
+    pub start: GridPoint,
+    pub end: GridPoint,
+    pub generation: GridGeneration,
+    pub artifact: ProjectedMathArtifact,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum MathBlockAnchor {
+    History {
+        start: TranscriptId,
+        end: TranscriptId,
+    },
+    Live {
+        screen: ScreenId,
+        start: GridPoint,
+        end: GridPoint,
+        generation: GridGeneration,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MathBlockDisplay {
+    Rendered,
+    Source,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HorizontalOverflowOwner {
+    Block,
+    Pane,
 }
 
 /// A visible math block replaces its complete source span. `top_subpixels` may be negative when
@@ -100,8 +143,18 @@ pub struct ProjectedMathArtifact {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MathBlockPlacement {
     pub start: TranscriptId,
+    pub anchor: MathBlockAnchor,
+    pub source: String,
     pub artifact: ProjectedMathArtifact,
     pub top_subpixels: i64,
+    /// Clip height is part of the block itself (live row band or configured blockMax). The pane
+    /// clip remains an independent outer bound in the renderer.
+    pub clip_height_subpixels: i64,
+    pub display: MathBlockDisplay,
+    pub horizontal_overflow: HorizontalOverflowOwner,
+    pub horizontal_scroll_px: u32,
+    pub vertical_scroll_px: u32,
+    pub toolbar_visible: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -339,6 +392,7 @@ pub struct ViewportProjection {
     cache: HashMap<LayoutCacheKey, MeasuredLayout>,
     artifact_heights: HashMap<TranscriptId, i64>,
     math_artifacts: HashMap<TranscriptId, ProjectedMathArtifact>,
+    live_math_artifacts: Vec<ProjectedLiveMathArtifact>,
     ordered_ids: Vec<TranscriptId>,
     visual_rows: Vec<usize>,
     visual_row_heights: HeightTree,
@@ -375,6 +429,7 @@ impl ViewportProjection {
             cache: HashMap::new(),
             artifact_heights: HashMap::new(),
             math_artifacts: HashMap::new(),
+            live_math_artifacts: Vec::new(),
             ordered_ids: Vec::new(),
             visual_rows: Vec::new(),
             visual_row_heights: HeightTree::default(),
@@ -699,9 +754,20 @@ impl ViewportProjection {
                         let local_start = window_start.saturating_sub(row_base);
                         math_blocks.push(MathBlockPlacement {
                             start: *id,
+                            anchor: MathBlockAnchor::History {
+                                start: *id,
+                                end: artifact.end,
+                            },
+                            source: artifact.source.clone(),
                             artifact: artifact.clone(),
                             top_subpixels: visible.len() as i64 * self.cell_height_subpixels.get()
                                 - local_start as i64 * self.cell_height_subpixels.get(),
+                            clip_height_subpixels: artifact.height_subpixels,
+                            display: MathBlockDisplay::Rendered,
+                            horizontal_overflow: HorizontalOverflowOwner::Block,
+                            horizontal_scroll_px: 0,
+                            vertical_scroll_px: 0,
+                            toolbar_visible: false,
                         });
                         (0..line_rows)
                             .map(|_| {
@@ -750,6 +816,7 @@ impl ViewportProjection {
         if window_end > live_base && window_start < live_base + expected_rows {
             let first = window_start.saturating_sub(live_base);
             let last = window_end.saturating_sub(live_base).min(live_rows.len());
+            let visible_live_start = visible.len();
             visible.extend(
                 live_rows[first..last]
                     .iter()
@@ -767,6 +834,86 @@ impl ViewportProjection {
                         })
                     }),
             );
+
+            for live_math in &self.live_math_artifacts {
+                if live_math.screen != screen
+                    || live_math.generation != self.grid_generation
+                    || live_math.start.row > live_math.end.row
+                    || live_math.end.row >= self.live_rows.get()
+                {
+                    continue;
+                }
+                let block_first = live_math.start.row as usize;
+                let block_last = live_math.end.row as usize;
+                if block_last < first || block_first >= last {
+                    continue;
+                }
+
+                let row_count = live_math.end.row.saturating_sub(live_math.start.row) + 1;
+                let band_height =
+                    i64::from(row_count).saturating_mul(self.cell_height_subpixels.get());
+                let fit_scale_milli = if live_math.artifact.height_subpixels <= band_height {
+                    1000
+                } else {
+                    u32::try_from(
+                        band_height
+                            .saturating_mul(1000)
+                            .div_euclid(live_math.artifact.height_subpixels.max(1)),
+                    )
+                    .unwrap_or(u32::MAX)
+                };
+                let render_scale_milli = live_math
+                    .artifact
+                    .render_scale_milli
+                    .saturating_mul(fit_scale_milli)
+                    / 1000;
+                if render_scale_milli < LIVE_MATH_READABLE_SCALE_MILLI {
+                    continue;
+                }
+
+                let mut artifact = live_math.artifact.clone();
+                artifact.render_scale_milli = render_scale_milli;
+                artifact.height_subpixels = artifact
+                    .height_subpixels
+                    .saturating_mul(i64::from(fit_scale_milli))
+                    / 1000;
+                let absolute_start = live_base.saturating_add(block_first);
+                let top_rows = i64::try_from(absolute_start)
+                    .unwrap_or(i64::MAX)
+                    .saturating_sub(i64::try_from(window_start).unwrap_or(i64::MAX));
+                math_blocks.push(MathBlockPlacement {
+                    start: TranscriptId(0),
+                    anchor: MathBlockAnchor::Live {
+                        screen: live_math.screen,
+                        start: live_math.start,
+                        end: live_math.end,
+                        generation: live_math.generation,
+                    },
+                    source: artifact.source.clone(),
+                    artifact,
+                    top_subpixels: top_rows.saturating_mul(self.cell_height_subpixels.get()),
+                    // The live block owns exactly its source row band. Pane clipping is a
+                    // separate renderer bound, so neither a tall raster nor a partial viewport
+                    // intersection can cover a neighboring terminal row.
+                    clip_height_subpixels: band_height,
+                    display: MathBlockDisplay::Rendered,
+                    horizontal_overflow: HorizontalOverflowOwner::Block,
+                    horizontal_scroll_px: 0,
+                    vertical_scroll_px: 0,
+                    toolbar_visible: false,
+                });
+
+                let visible_first = block_first.max(first);
+                let visible_last = block_last.min(last.saturating_sub(1));
+                for live_row in visible_first..=visible_last {
+                    let row = &mut visible[visible_live_start + live_row - first];
+                    for cell in &mut row.cells {
+                        cell.text.clear();
+                        cell.wide_spacer = false;
+                        cell.style.flags.remove(CellFlags::WIDE_CHAR);
+                    }
+                }
+            }
         }
 
         while visible.len() < expected_rows {
@@ -807,13 +954,27 @@ impl ViewportProjection {
             .checked_sub(window_start)
             .filter(|row| *row < expected_rows)
             .and_then(|row| u32::try_from(row).ok());
+        let cursor_hidden_by_math = math_blocks.iter().any(|placement| {
+            matches!(
+                placement.anchor,
+                MathBlockAnchor::Live {
+                    screen: anchor_screen,
+                    start,
+                    end,
+                    generation,
+                } if anchor_screen == screen
+                    && generation == self.grid_generation
+                    && start.row <= cursor.row
+                    && cursor.row <= end.row
+            )
+        });
         let frame = ViewportFrame {
             columns,
             rows: self.live_rows,
             cells,
             cursor: GridCursor {
                 row: projected_cursor_row.unwrap_or(cursor.row),
-                visible: cursor.visible && projected_cursor_row.is_some(),
+                visible: cursor.visible && projected_cursor_row.is_some() && !cursor_hidden_by_math,
                 ..cursor
             },
             cell_anchors,
@@ -1024,6 +1185,12 @@ impl ViewportProjection {
             .map(|(id, artifact)| (*id, artifact.height_subpixels))
             .collect();
         self.math_artifacts = next;
+    }
+    pub fn sync_live_math_artifacts(
+        &mut self,
+        artifacts: impl IntoIterator<Item = ProjectedLiveMathArtifact>,
+    ) {
+        self.live_math_artifacts = artifacts.into_iter().collect();
     }
     pub fn set_live_state(
         &mut self,
@@ -1758,6 +1925,8 @@ mod tests {
             width_px: 1,
             height_px: 1,
             height_subpixels: 35 * SUBPIXELS_PER_PX,
+            render_scale_milli: 1000,
+            source: "x^2 + y^2".to_owned(),
         };
         let make_projection = |width| {
             let mut projection = ViewportProjection::new(

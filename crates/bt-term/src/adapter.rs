@@ -10,7 +10,8 @@ use alacritty_terminal::{
     grid::Dimensions,
     index::{Column, Line},
     term::{
-        Config, ScrollOutCause, ScrollRegionScope, TermMode, TranscriptEvent, TranscriptScreen,
+        Config, ScrollOutCause, ScrollRegionScope, TermDamage, TermMode, TranscriptEvent,
+        TranscriptScreen,
     },
     vte::{Params, Parser, Perform, ansi::Processor},
 };
@@ -109,6 +110,15 @@ pub enum AdapterEvent {
     Deccolm,
     PrimaryParked,
     PrimaryRestored,
+}
+
+/// Stable, vendor-free damage fact consumed by the live decoration lifecycle. Column bounds are
+/// intentionally omitted: a formula owns complete grid rows and any mutation in one of them must
+/// invalidate the transient block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TerminalDamage {
+    Full,
+    Rows(Vec<u32>),
 }
 
 #[derive(Clone, Default)]
@@ -266,6 +276,21 @@ impl TerminalAdapter {
         }
         self.observe_parser_boundary(bytes);
         self.drain_transcript_events()
+    }
+
+    /// Consume damage exactly once after a parser/resize action. `Term::damage` also accounts for
+    /// cursor movement; treating that as damage is deliberately conservative for a live overlay.
+    pub fn take_damage(&mut self) -> TerminalDamage {
+        let damage = match self.term.damage() {
+            TermDamage::Full => TerminalDamage::Full,
+            TermDamage::Partial(lines) => TerminalDamage::Rows(
+                lines
+                    .filter_map(|line| u32::try_from(line.line).ok())
+                    .collect(),
+            ),
+        };
+        self.term.reset_damage();
+        damage
     }
 
     /// Deadline for a DEC 2026 synchronized update buffered by the parser.

@@ -8,7 +8,8 @@ mod session;
 
 pub use adapter::{
     AdapterEvent, MouseTracking, RemovalCause, RemovalContext, RemovalScope, RemovalScreen,
-    RemovedLiveRow, SCROLLBACK_LINES, TerminalAdapter, TerminalCursor, TerminalModes,
+    RemovedLiveRow, SCROLLBACK_LINES, TerminalAdapter, TerminalCursor, TerminalDamage,
+    TerminalModes,
 };
 pub use bt_detect::DetectionTask;
 pub use lifecycle::{
@@ -17,6 +18,7 @@ pub use lifecycle::{
 };
 pub use scheduling::{PARSE_QUANTUM, RESIZE_REQUEST_QUIET, WORKER_QUEUE_CAP};
 pub use session::{
-    DualPlaneSession, ResizeTraceEvent, ResizeTraceKind, ResizeTraceRowOrigin,
-    SPIKE_CELL_HEIGHT_SUBPIXELS, SessionError, render_detection_task,
+    DualPlaneSession, LIVE_MATH_READABLE_SCALE_MILLI, LIVE_MATH_STABLE_INTERVAL, MathLayoutOptions,
+    ResizeTraceEvent, ResizeTraceKind, ResizeTraceRowOrigin, SPIKE_CELL_HEIGHT_SUBPIXELS,
+    SessionError, SessionMathTask, render_detection_task, render_live_detection_task,
 };

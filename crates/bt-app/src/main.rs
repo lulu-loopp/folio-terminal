@@ -2,7 +2,7 @@ use std::{
     backtrace::Backtrace,
     fs::OpenOptions,
     io::Write,
-    num::{NonZeroU32, NonZeroUsize},
+    num::{NonZeroI64, NonZeroU32, NonZeroUsize},
     panic,
     path::PathBuf,
     sync::{Arc, mpsc},
@@ -17,15 +17,16 @@ use bt_doc::{Bias, LayoutKey};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_pty::{OutputWake, PtySession, PtySize};
 use bt_render::{
-    FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, Preedit, PresentOutcome,
-    Renderer, background_rgb, compose_preedit, foreground_rgb, frame_content_digest,
-    frame_is_alternate_screen, theme_revision,
+    FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit, MathHitTarget,
+    Preedit, PresentOutcome, Renderer, background_rgb, compose_preedit, foreground_rgb,
+    frame_content_digest, frame_is_alternate_screen, theme_revision,
 };
 use bt_term::{
-    DetectionTask, DualPlaneSession, MouseTracking, TerminalModes, render_detection_task,
+    DualPlaneSession, MouseTracking, SessionMathTask, TerminalModes, render_detection_task,
+    render_live_detection_task,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
-use bt_viewport::{ViewSelection, ViewportFrame, ViewportProjection};
+use bt_viewport::{MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
@@ -58,12 +59,12 @@ enum AppEvent {
 }
 
 struct MathWorkerResult {
-    task: DetectionTask,
+    task: SessionMathTask,
     result: std::result::Result<MathRaster, MathRenderError>,
 }
 
 struct MathWorkerTask {
-    task: DetectionTask,
+    task: SessionMathTask,
     foreground_rgb: [u8; 3],
 }
 
@@ -82,10 +83,20 @@ impl MathWorker {
                 let engine = MathEngine::new();
                 while let Ok(work) = task_rx.recv() {
                     let MathWorkerTask {
-                        mut task,
+                        task,
                         foreground_rgb,
                     } = work;
-                    let result = render_detection_task(&engine, &mut task, foreground_rgb);
+                    let (task, result) = match task {
+                        SessionMathTask::Frozen(mut task) => {
+                            let result = render_detection_task(&engine, &mut task, foreground_rgb);
+                            (SessionMathTask::Frozen(task), result)
+                        }
+                        SessionMathTask::Live(mut task) => {
+                            let result =
+                                render_live_detection_task(&engine, &mut task, foreground_rgb);
+                            (SessionMathTask::Live(task), result)
+                        }
+                    };
                     if result_tx.send(MathWorkerResult { task, result }).is_err() {
                         break;
                     }
@@ -118,6 +129,7 @@ struct Runtime {
     grid: GridSize,
     modifiers: ModifiersState,
     pending_keyboard_at: Option<Instant>,
+    math_context_menu: bt_platform::MathContextMenu,
     window: Arc<Window>,
     startup_started: Instant,
     trace_startup: bool,
@@ -142,6 +154,9 @@ struct Runtime {
     pixel_wheel_remainder: f64,
     pending_pty_resize: Option<PendingPtyResize>,
     pending_resize_present: Option<GridSize>,
+    math_hover_anchor: Option<MathBlockAnchor>,
+    math_hover_clear_at: Option<Instant>,
+    pending_math_context_anchor: Option<MathBlockAnchor>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -181,6 +196,7 @@ fn take_due_pty_resize(
 enum MouseRoute {
     Local(SelectionDrag),
     Forward(input::MouseProtocolButton),
+    MathBlock,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -359,6 +375,9 @@ impl Runtime {
         window.set_ime_allowed(true);
         let hwnd = window_hwnd(&window)?;
         let ime_system_caret = bt_platform::ImeSystemCaret::new(hwnd);
+        let math_context_menu = bt_platform::MathContextMenu::new(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("install deferred formula context menu")?;
         let window_time = phase_started.elapsed();
         let physical = window.inner_size();
         let startup_dpi = dpi_snapshot(&window)?;
@@ -425,6 +444,7 @@ impl Runtime {
             M0_FROZEN_LINE_QUOTA,
             renderer.metrics().cell_height_subpixels(),
         );
+        session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
         session.set_layout_key(LayoutKey {
             width_cells: columns,
             dpi_milli: renderer.metrics().dpi_milli(),
@@ -448,6 +468,7 @@ impl Runtime {
             grid,
             modifiers: ModifiersState::default(),
             pending_keyboard_at: None,
+            math_context_menu,
             window,
             startup_started,
             trace_startup,
@@ -472,6 +493,9 @@ impl Runtime {
             pixel_wheel_remainder: 0.0,
             pending_pty_resize: None,
             pending_resize_present: None,
+            math_hover_anchor: None,
+            math_hover_clear_at: None,
+            pending_math_context_anchor: None,
         };
         if trace_startup {
             let renderer_phases = runtime.renderer.init_timings();
@@ -574,7 +598,7 @@ impl Runtime {
     }
 
     fn dispatch_math_tasks(&mut self) -> Result<()> {
-        while let Some(task) = self.session.take_worker_task() {
+        while let Some(task) = self.session.take_math_worker_task() {
             self.math_worker
                 .tasks
                 .send(MathWorkerTask {
@@ -589,9 +613,14 @@ impl Runtime {
     fn apply_math_results(&mut self) -> Result<()> {
         let mut changed = false;
         while let Ok(completion) = self.math_worker.results.try_recv() {
-            changed |= self
-                .session
-                .complete_worker_result(completion.task, completion.result);
+            changed |= match completion.task {
+                SessionMathTask::Frozen(task) => {
+                    self.session.complete_worker_result(task, completion.result)
+                }
+                SessionMathTask::Live(task) => self
+                    .session
+                    .complete_live_worker_result(task, completion.result),
+            };
         }
         self.dispatch_math_tasks()?;
         if changed {
@@ -599,6 +628,18 @@ impl Runtime {
                 occurred_at: Instant::now(),
                 source: FrameSource::Expose,
             })?;
+        }
+        Ok(())
+    }
+
+    fn advance_live_math_if_due(&mut self, now: Instant) -> Result<()> {
+        if self
+            .session
+            .live_stability_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.session.advance_live_stability(now);
+            self.dispatch_math_tasks()?;
         }
         Ok(())
     }
@@ -766,6 +807,69 @@ impl Runtime {
         )
     }
 
+    fn math_hit(&self) -> Option<MathHit> {
+        let position = self.pointer_position?;
+        let frame = self.last_presented_frame.as_ref()?;
+        self.renderer.math_hit_test(frame, position.x, position.y)
+    }
+
+    fn update_math_hover(&mut self, now: Instant) -> Result<Option<MathHit>> {
+        let hit = self.math_hit();
+        if let Some(hit) = hit.as_ref() {
+            self.math_hover_clear_at = None;
+            if self.math_hover_anchor.as_ref() != Some(&hit.anchor) {
+                self.math_hover_anchor = Some(hit.anchor.clone());
+                if self.session.set_math_hover(Some(&hit.anchor)) {
+                    self.publish_interaction_frame()?;
+                }
+            }
+        } else if self.math_hover_anchor.is_some() && self.math_hover_clear_at.is_none() {
+            self.math_hover_clear_at = Some(now + Duration::from_millis(500));
+        }
+        Ok(hit)
+    }
+
+    fn clear_math_hover_if_due(&mut self, now: Instant) -> Result<()> {
+        if self
+            .math_hover_clear_at
+            .is_none_or(|deadline| now < deadline)
+        {
+            return Ok(());
+        }
+        self.math_hover_clear_at = None;
+        self.math_hover_anchor = None;
+        if self.session.set_math_hover(None) {
+            self.publish_interaction_frame()?;
+        }
+        Ok(())
+    }
+
+    fn copy_math_latex(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
+        let Some(source) = self.session.math_source(anchor) else {
+            return Ok(());
+        };
+        let hwnd = window_hwnd(&self.window)?;
+        bt_platform::set_clipboard_text(hwnd, source)
+            .map_err(|error| anyhow!(error))
+            .context("copy original LaTeX source to clipboard")
+    }
+
+    fn apply_math_context_menu_result(&mut self) -> Result<()> {
+        let Some(result) = self.math_context_menu.take_result() else {
+            return Ok(());
+        };
+        let anchor = self.pending_math_context_anchor.take();
+        self.mouse_route = None;
+        let selected = result
+            .map_err(|error| anyhow!(error))
+            .context("show formula context menu")?;
+        if selected {
+            let anchor = anchor.context("formula context-menu result has no pending anchor")?;
+            self.copy_math_latex(&anchor)?;
+        }
+        Ok(())
+    }
+
     fn publish_interaction_frame(&mut self) -> Result<()> {
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
@@ -929,9 +1033,13 @@ impl Runtime {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.pointer_position = Some(position);
+        let math_hit = self.update_math_hover(Instant::now())?;
         let Some(hit) = self.frame_hit() else {
             return Ok(());
         };
+        if math_hit.is_some() || matches!(self.mouse_route, Some(MouseRoute::MathBlock)) {
+            return Ok(());
+        }
         if matches!(self.mouse_route, Some(MouseRoute::Local(_))) {
             return self.extend_local_selection(hit);
         }
@@ -970,6 +1078,47 @@ impl Runtime {
     }
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
+        if state == ElementState::Released
+            && matches!(self.mouse_route, Some(MouseRoute::MathBlock))
+        {
+            self.mouse_route = None;
+            return Ok(());
+        }
+        if state == ElementState::Pressed
+            && let Some(math_hit) = self.math_hit()
+            && matches!(button, MouseButton::Left | MouseButton::Right)
+        {
+            // Formula pixels are one indivisible presentation object in this slice. Swallowing the
+            // complete press/release pair intentionally prevents half-source selections and keeps
+            // both local selection and application mouse reporting from seeing synthetic cells.
+            self.mouse_route = Some(MouseRoute::MathBlock);
+            match (button, math_hit.target) {
+                (MouseButton::Left, MathHitTarget::ToggleSource) => {
+                    if self.session.toggle_math_source(&math_hit.anchor) {
+                        self.clear_selection();
+                        self.publish_interaction_frame()?;
+                    }
+                }
+                (MouseButton::Left, MathHitTarget::CopyLatex) => {
+                    self.copy_math_latex(&math_hit.anchor)?;
+                }
+                (MouseButton::Right, _) => {
+                    self.math_context_menu
+                        .request()
+                        .map_err(|error| anyhow!(error))
+                        .context("queue formula context menu")?;
+                    self.pending_math_context_anchor = Some(math_hit.anchor.clone());
+                }
+                (MouseButton::Left, MathHitTarget::Block) => {
+                    if self.session.view_selection().is_some() {
+                        self.clear_selection();
+                        self.publish_interaction_frame()?;
+                    }
+                }
+                _ => {}
+            }
+            return Ok(());
+        }
         let Some(hit) = self.frame_hit() else {
             return Ok(());
         };
@@ -1047,6 +1196,17 @@ impl Runtime {
         };
         if lines == 0 {
             return Ok(());
+        }
+        if let Some(math_hit) = self.math_hit() {
+            let delta = -lines.saturating_mul(self.renderer.metrics().cell_height_px as i32);
+            let horizontal = if self.modifiers.shift_key() { delta } else { 0 };
+            let vertical = if self.modifiers.shift_key() { 0 } else { delta };
+            if self
+                .session
+                .scroll_math_block(&math_hit.anchor, horizontal, vertical)
+            {
+                return self.publish_interaction_frame();
+            }
         }
         let modes = self.session.terminal_modes();
         if !self.modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off {
@@ -1276,12 +1436,7 @@ impl Runtime {
                 .context("resize terminal actor")?;
             self.grid = next_grid;
         }
-        self.session.set_layout_key(LayoutKey {
-            width_cells: nonzero_u32(self.grid.columns.get()),
-            dpi_milli: self.renderer.metrics().dpi_milli(),
-            font_rev: 1,
-            theme_rev: theme_revision(),
-        });
+        self.sync_math_layout_key();
         self.pending_resize_present = Some(next_grid);
         self.publish_frame(resize_trigger)?;
         // Windows dispatches Resized from its modal move/size loop. `Renderer::resize` only records
@@ -1344,12 +1499,7 @@ impl Runtime {
                 );
             }
         }
-        self.session.set_layout_key(LayoutKey {
-            width_cells: nonzero_u32(self.grid.columns.get()),
-            dpi_milli: self.renderer.metrics().dpi_milli(),
-            font_rev: 1,
-            theme_rev: theme_revision(),
-        });
+        self.sync_math_layout_key();
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -1368,6 +1518,19 @@ impl Runtime {
         self.window.set_title(&title);
     }
 
+    fn sync_math_layout_key(&mut self) {
+        // Future runtime theme switching has one required hook: update renderer theme colors, then
+        // call this method. `LayoutKey` contains `theme_rev`, so a theme change must invalidate old
+        // textures; the revision enters both the worker gate and GPU texture identity. The session
+        // keeps same-source old pixels only while the replacement is pending.
+        self.session.set_layout_key(LayoutKey {
+            width_cells: nonzero_u32(self.grid.columns.get()),
+            dpi_milli: self.renderer.metrics().dpi_milli(),
+            font_rev: 1,
+            theme_rev: theme_revision(),
+        });
+    }
+
     fn apply_scale_factor(&mut self, scale_factor: f64) -> Result<()> {
         let metrics = self
             .renderer
@@ -1376,6 +1539,8 @@ impl Runtime {
         ensure_metrics_match_authoritative_scale(metrics.scale_factor, scale_factor)?;
         self.session
             .set_cell_height_subpixels(metrics.cell_height_subpixels());
+        self.session
+            .set_cell_width_subpixels(cell_width_subpixels(metrics));
         Ok(())
     }
 
@@ -1550,6 +1715,13 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 Ok(())
             }
             WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
+            WindowEvent::CursorLeft { .. } => {
+                runtime.pointer_position = None;
+                if runtime.math_hover_anchor.is_some() {
+                    runtime.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
+                }
+                Ok(())
+            }
             WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
             WindowEvent::MouseWheel { delta, .. } => runtime.mouse_wheel(delta),
             WindowEvent::Resized(size) => runtime.resize(size),
@@ -1589,6 +1761,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
+        if let Err(error) = runtime.apply_math_context_menu_result() {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.drain_pty() {
             self.fail(event_loop, error);
             return;
@@ -1610,6 +1786,14 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        if let Err(error) = runtime.advance_live_math_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        if let Err(error) = runtime.clear_math_hover_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         let startup_deadline =
             startup_poll_delay(runtime.first_text_presented).map(|delay| now + delay);
         let wake_deadline = [
@@ -1618,6 +1802,8 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             runtime.pending_pty_resize.map(|pending| pending.deadline),
             runtime.session.resize_finish_deadline(),
             runtime.session.synchronized_update_deadline(),
+            runtime.session.live_stability_deadline(),
+            runtime.math_hover_clear_at,
         ]
         .into_iter()
         .flatten()
@@ -1820,6 +2006,11 @@ fn window_hwnd(window: &Window) -> Result<std::num::NonZeroIsize> {
         return Err(anyhow!("bt-app requires a Win32 window handle"));
     };
     Ok(handle.hwnd)
+}
+
+fn cell_width_subpixels(metrics: bt_render::CellMetrics) -> NonZeroI64 {
+    let value = (metrics.cell_width_px * bt_viewport::SUBPIXELS_PER_PX as f32).round() as i64;
+    NonZeroI64::new(value.max(1)).expect("cell width is clamped above zero")
 }
 
 fn nonzero_u32(value: u16) -> NonZeroU32 {

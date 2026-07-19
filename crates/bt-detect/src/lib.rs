@@ -4,8 +4,8 @@ use std::{sync::Arc, time::Duration};
 
 use bt_doc::{DecorationIntent, HistoryDocument};
 pub use bt_doc::{
-    DecorationLifecycle, DetectionRevision, LayoutKey, SUBPIXELS_PER_PX, SourceLifecycle,
-    VersionStamp, ViewGeneration,
+    DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint, LayoutKey, SUBPIXELS_PER_PX,
+    ScreenId, SourceLifecycle, VersionStamp, ViewGeneration,
 };
 use bt_transcript::{SourceGeneration, TranscriptId};
 
@@ -30,6 +30,12 @@ pub struct PlaceholderArtifact {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StaleArtifact {
+    pub artifact: PlaceholderArtifact,
+    pub rendered_layout: LayoutKey,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetectionTask {
     /// The newly frozen line which caused this scan. This remains stable after worker detection
     /// resolves a multi-line block to its opening line.
@@ -48,6 +54,35 @@ pub struct DetectionInput {
     pub text: String,
 }
 
+/// A worker-owned snapshot of one stable live-grid run. Row numbers are grid coordinates, never
+/// transcript identities; the authoritative detector maps them to temporary IDs only for the
+/// duration of the shared `detect_math_blocks` call.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum LiveDetectionSource {
+    History { id: TranscriptId },
+    Grid { row: u32, revision: u64 },
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct LiveDetectionInput {
+    pub source: LiveDetectionSource,
+    pub text: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiveDetectionTask {
+    pub candidate_row: u32,
+    pub screen: ScreenId,
+    pub grid_generation: GridGeneration,
+    pub detection_revision: DetectionRevision,
+    pub layout: LayoutKey,
+    pub inputs: Arc<[LiveDetectionInput]>,
+    pub start: GridPoint,
+    pub end: GridPoint,
+    pub span: MathSpan,
+    pub resolved: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetectedMathBlock {
     pub start: TranscriptId,
@@ -61,6 +96,15 @@ pub struct DecorationRecord {
     pub decoration: DecorationLifecycle,
     pub versions: VersionStamp,
     pub artifact: Option<PlaceholderArtifact>,
+    /// Old pixels are presentation-only while the same source is being laid out for a new DPI or
+    /// width. Source/detector invalidation clears this slot immediately.
+    pub stale_artifact: Option<StaleArtifact>,
+    pub block_end: Option<TranscriptId>,
+    pub span: Option<MathSpan>,
+    pub show_source: bool,
+    pub hovered: bool,
+    pub horizontal_scroll_px: u32,
+    pub vertical_scroll_px: u32,
 }
 
 impl DecorationRecord {
@@ -70,6 +114,13 @@ impl DecorationRecord {
             decoration: DecorationLifecycle::None,
             versions,
             artifact: None,
+            stale_artifact: None,
+            block_end: None,
+            span: None,
+            show_source: false,
+            hovered: false,
+            horizontal_scroll_px: 0,
+            vertical_scroll_px: 0,
         }
     }
 
@@ -127,25 +178,34 @@ impl DecorationRecord {
             return false;
         }
         self.artifact = Some(artifact);
+        self.stale_artifact = None;
+        self.block_end = Some(task.block_end);
+        self.span = Some(task.span.clone());
         self.decoration = DecorationLifecycle::Ready;
         true
     }
 
     pub fn source_changed(&mut self, generation: SourceGeneration) {
         self.versions.source = generation;
-        self.artifact = None;
+        self.clear_content_dependent_state();
         self.decoration = DecorationLifecycle::None;
     }
 
     pub fn detector_changed(&mut self, revision: DetectionRevision) {
         self.versions.detection = revision;
-        self.artifact = None;
+        self.clear_content_dependent_state();
         self.decoration = DecorationLifecycle::None;
     }
 
     pub fn layout_changed(&mut self, layout: LayoutKey) {
+        let rendered_layout = self.versions.layout;
         self.versions.layout = layout;
-        self.artifact = None;
+        if let Some(artifact) = self.artifact.take() {
+            self.stale_artifact = Some(StaleArtifact {
+                artifact,
+                rendered_layout,
+            });
+        }
         if self.decoration != DecorationLifecycle::Suppressed {
             self.decoration = DecorationLifecycle::None;
         }
@@ -162,6 +222,7 @@ impl DecorationRecord {
         if self.source == SourceLifecycle::Frozen {
             self.decoration = DecorationLifecycle::Suppressed;
             self.artifact = None;
+            self.stale_artifact = None;
         }
     }
 
@@ -173,8 +234,30 @@ impl DecorationRecord {
             return false;
         }
         self.artifact = None;
+        self.stale_artifact = None;
         self.decoration = DecorationLifecycle::Suppressed;
         true
+    }
+
+    pub fn toggle_source(&mut self) -> bool {
+        if self.artifact.is_none() && self.stale_artifact.is_none() {
+            return false;
+        }
+        self.show_source = !self.show_source;
+        self.horizontal_scroll_px = 0;
+        self.vertical_scroll_px = 0;
+        true
+    }
+
+    fn clear_content_dependent_state(&mut self) {
+        self.artifact = None;
+        self.stale_artifact = None;
+        self.block_end = None;
+        self.span = None;
+        self.show_source = false;
+        self.hovered = false;
+        self.horizontal_scroll_px = 0;
+        self.vertical_scroll_px = 0;
     }
 }
 
@@ -317,6 +400,80 @@ pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
     true
 }
 
+/// Resolve a live-grid candidate through the exact same conservative detector as frozen history.
+/// Temporary transcript IDs are a detector-local indexing device; they never escape as anchors.
+pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
+    if task.resolved {
+        return true;
+    }
+    let Some(candidate_index) = task.inputs.iter().position(|input| {
+        matches!(
+            input.source,
+            LiveDetectionSource::Grid { row, .. } if row == task.candidate_row
+        )
+    }) else {
+        return false;
+    };
+    let Some(candidate_id) = live_temporary_id(candidate_index) else {
+        return false;
+    };
+    let detected =
+        detect_math_blocks(task.inputs.iter().enumerate().filter_map(|(index, input)| {
+            live_temporary_id(index).map(|id| (id, input.text.as_str()))
+        }))
+        .into_iter()
+        .find(|block| block.end == candidate_id);
+    let Some(block) = detected else {
+        return false;
+    };
+    let Some(start_index) = block
+        .start
+        .0
+        .checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+    else {
+        return false;
+    };
+    let Some(end_index) = block
+        .end
+        .0
+        .checked_sub(1)
+        .and_then(|index| usize::try_from(index).ok())
+    else {
+        return false;
+    };
+    let Some(LiveDetectionInput {
+        source: LiveDetectionSource::Grid { row: start_row, .. },
+        ..
+    }) = task.inputs.get(start_index)
+    else {
+        // A block that begins in frozen history cannot be represented by a live-grid anchor.
+        return false;
+    };
+    let Some(LiveDetectionInput {
+        source: LiveDetectionSource::Grid { row: end_row, .. },
+        text: end_text,
+    }) = task.inputs.get(end_index)
+    else {
+        return false;
+    };
+    task.start = GridPoint {
+        row: *start_row,
+        column: 0,
+    };
+    task.end = GridPoint {
+        row: *end_row,
+        column: u32::try_from(end_text.len()).unwrap_or(u32::MAX),
+    };
+    task.span = block.span;
+    task.resolved = true;
+    true
+}
+
+fn live_temporary_id(index: usize) -> Option<TranscriptId> {
+    u64::try_from(index).ok()?.checked_add(1).map(TranscriptId)
+}
+
 fn delimiter_is_escaped(text: &str, byte: usize) -> bool {
     text[..byte]
         .bytes()
@@ -401,6 +558,72 @@ mod tests {
                 "unexpected match: {text}"
             );
         }
+    }
+
+    fn live_task(lines: &[&str], candidate_row: u32) -> LiveDetectionTask {
+        LiveDetectionTask {
+            candidate_row,
+            screen: ScreenId::Alternate,
+            grid_generation: GridGeneration(7),
+            detection_revision: DetectionRevision(1),
+            layout: stamp().layout,
+            inputs: Arc::from(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(row, text)| LiveDetectionInput {
+                        source: LiveDetectionSource::Grid {
+                            row: row as u32,
+                            revision: 1,
+                        },
+                        text: (*text).to_owned(),
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            start: GridPoint {
+                row: candidate_row,
+                column: 0,
+            },
+            end: GridPoint {
+                row: candidate_row,
+                column: 0,
+            },
+            span: MathSpan {
+                byte_start: 0,
+                byte_end: 0,
+                source: String::new(),
+            },
+            resolved: false,
+        }
+    }
+
+    #[test]
+    fn live_path_reuses_all_nine_zero_tolerance_false_positive_disciplines() {
+        let huge = "x".repeat(MAX_MATH_SOURCE_BYTES + 1);
+        let cases = [
+            (vec!["echo $$"], 0, "shell echo"),
+            (vec!["pid=$$"], 0, "shell pid"),
+            (vec!["+ $$x^2$$"], 0, "diff line"),
+            (vec!["2026-07-18 log: $$x^2$$"], 0, "log prose"),
+            (vec![r"\$$x^2$$"], 0, "escaped delimiter"),
+            (vec!["prefix $$x^2$$ suffix"], 0, "inline prose"),
+            (vec!["$$broken"], 0, "unclosed single line"),
+            (vec!["```sh", "$$x$$", "```"], 1, "code fence"),
+            (vec!["$$", huge.as_str(), "$$"], 2, "over-size block"),
+        ];
+        for (lines, candidate, name) in cases {
+            let mut task = live_task(&lines, candidate);
+            assert!(!resolve_live_detection_task(&mut task), "{name}");
+        }
+    }
+
+    #[test]
+    fn live_detector_resolves_grid_points_without_transcript_anchor_escape() {
+        let mut task = live_task(&["$$", "x + y", "$$"], 2);
+        assert!(resolve_live_detection_task(&mut task));
+        assert_eq!(task.start, GridPoint { row: 0, column: 0 });
+        assert_eq!(task.end, GridPoint { row: 2, column: 2 });
+        assert_eq!(task.span.source, "x + y");
     }
 
     #[test]
@@ -509,6 +732,8 @@ mod tests {
         });
         assert_eq!(record.versions.source, source_before);
         assert_eq!(record.decoration, DecorationLifecycle::None);
+        assert!(record.artifact.is_none());
+        assert!(record.stale_artifact.is_some());
 
         let old_detection_task = record
             .schedule(TranscriptId(1), TranscriptId(1), span.clone())
@@ -516,6 +741,7 @@ mod tests {
         record.detector_changed(DetectionRevision(2));
         assert!(!record.complete(&old_detection_task, render_placeholder(&old_detection_task)));
         assert_eq!(record.decoration, DecorationLifecycle::None);
+        assert!(record.stale_artifact.is_none());
 
         let view_task = record
             .schedule(TranscriptId(1), TranscriptId(1), span)

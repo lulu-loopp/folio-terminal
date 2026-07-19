@@ -210,11 +210,30 @@ fn rasterize_svg(
     let scale = key.dpi_milli.get() as f32 / 1000.0 * 96.0 / 72.0;
     let source_size = tree.size();
     let width_px = (source_size.width() * scale).ceil().max(1.0) as u32;
-    let content_height_px = (source_size.height() * scale).ceil().max(1.0) as u32;
+    let source_height_px = (source_size.height() * scale).ceil().max(1.0) as u32;
     let padding_px =
         ((VERTICAL_PADDING_LOGICAL_PX as f32) * key.dpi_milli.get() as f32 / 1000.0).ceil() as u32;
-    // UI-UX §7.5b, M1.9a ruling: keep the TeX box plus equal padding at free-pixel height.
-    // Do not quantize this value to terminal row height; revisit only with SourceMap work.
+    let source_resident_bytes = (width_px as usize)
+        .checked_mul(source_height_px as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(MathRenderError::InvalidDimensions)?;
+    if width_px > 131_072 || source_height_px > 16_384 || source_resident_bytes > MAX_RASTER_BYTES {
+        return Err(MathRenderError::InvalidDimensions);
+    }
+    let mut source_pixmap = resvg::tiny_skia::Pixmap::new(width_px, source_height_px)
+        .ok_or(MathRenderError::InvalidDimensions)?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::from_scale(scale, scale),
+        &mut source_pixmap.as_mut(),
+    );
+    let source_rgba = source_pixmap.take();
+    // Typst's auto page is a layout frame, not an alpha-tight raster box. Crop its vertical blank
+    // rows before adding our padding; otherwise internal descent slack is counted a second time and
+    // presents as the user-observed thick lower margin.
+    let (first_ink_row, last_ink_row) =
+        vertical_alpha_bounds(&source_rgba, width_px).ok_or(MathRenderError::InvalidDimensions)?;
+    let content_height_px = last_ink_row - first_ink_row;
     let height_px = content_height_px
         .checked_add(padding_px.saturating_mul(2))
         .ok_or(MathRenderError::InvalidDimensions)?;
@@ -225,12 +244,15 @@ fn rasterize_svg(
     if width_px > 131_072 || height_px > 16_384 || resident_bytes > MAX_RASTER_BYTES {
         return Err(MathRenderError::InvalidDimensions);
     }
-    let mut pixmap = resvg::tiny_skia::Pixmap::new(width_px, height_px)
-        .ok_or(MathRenderError::InvalidDimensions)?;
-    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale)
-        .post_translate(0.0, padding_px as f32 / scale);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-    let mut rgba = pixmap.take();
+    let mut rgba = vec![0; resident_bytes];
+    let row_bytes = width_px as usize * 4;
+    for source_row in first_ink_row..last_ink_row {
+        let source_start = source_row as usize * row_bytes;
+        let destination_row = padding_px + source_row - first_ink_row;
+        let destination_start = destination_row as usize * row_bytes;
+        rgba[destination_start..destination_start + row_bytes]
+            .copy_from_slice(&source_rgba[source_start..source_start + row_bytes]);
+    }
     unpremultiply_srgb_rgba(&mut rgba);
     Ok(MathRaster {
         rgba,
@@ -241,6 +263,22 @@ fn rasterize_svg(
         descent_px: (descent_pt as f32 * scale),
         render_time: elapsed,
     })
+}
+
+fn vertical_alpha_bounds(rgba: &[u8], width_px: u32) -> Option<(u32, u32)> {
+    let row_bytes = width_px as usize * 4;
+    if row_bytes == 0 || !rgba.len().is_multiple_of(row_bytes) {
+        return None;
+    }
+    let rows = rgba.len() / row_bytes;
+    let row_has_ink = |row: usize| {
+        rgba[row * row_bytes..(row + 1) * row_bytes]
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] != 0)
+    };
+    let first = (0..rows).find(|row| row_has_ink(*row))?;
+    let last = (first..rows).rev().find(|row| row_has_ink(*row))? + 1;
+    Some((first as u32, last as u32))
 }
 
 /// tiny-skia exposes premultiplied sRGB bytes. The renderer uploads to an sRGB texture and uses
@@ -284,6 +322,27 @@ mod tests {
             raster.width_px as usize * raster.height_px as usize * 4
         );
         assert!(raster.ascent_px > 0.0);
+    }
+
+    #[test]
+    fn tight_box_has_symmetric_top_and_bottom_raster_margins() {
+        let engine = MathEngine::new();
+        for source in [
+            r"e^{i\pi}+1=0",
+            r"\frac{1}{2}+\sqrt{x}",
+            r"\int_{-\infty}^{\infty} e^{-x^2}\,dx",
+            r"\sum_{k=0}^{42} k^2",
+        ] {
+            let raster = engine.render(source, key()).unwrap();
+            let (first, last) = vertical_alpha_bounds(&raster.rgba, raster.width_px).unwrap();
+            let top = first;
+            let bottom = raster.height_px - last;
+            assert!(
+                top.abs_diff(bottom) <= 1,
+                "asymmetric margins for {source}: top={top}px bottom={bottom}px"
+            );
+            assert_eq!(last - first, raster.content_height_px);
+        }
     }
 
     #[test]
