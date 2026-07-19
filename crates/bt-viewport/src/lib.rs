@@ -12,7 +12,7 @@ use std::{
 
 use bt_doc::{
     AnchorError, Bias, ContentAnchor, DetectionRevision, GridGeneration, GridPoint,
-    HistoryDocument, LayoutKey, ScreenId, ViewGeneration, compare_anchors,
+    HistoryDocument, LayoutKey, MathMode, ScreenId, ViewGeneration, compare_anchors,
 };
 use bt_transcript::{
     CapturedCell, CapturedRow, CellFlags, FrozenLine, GraphemeOffset, SourceGeneration, StagedRow,
@@ -109,6 +109,8 @@ pub struct ProjectedMathArtifact {
     pub width_px: u32,
     pub height_px: u32,
     pub height_subpixels: i64,
+    pub baseline_subpixels: i64,
+    pub mode: MathMode,
     /// Symmetric presentation breathing outside the alpha-tight texture. This is lifecycle-scale
     /// geometry, not part of the shared RGBA artifact.
     pub vertical_padding_subpixels: i64,
@@ -168,6 +170,7 @@ pub struct MathBlockPlacement {
     pub source: String,
     pub artifact: ProjectedMathArtifact,
     pub top_subpixels: i64,
+    pub left_subpixels: i64,
     /// Offset of rendered pixels within the owned row band. Live artifacts use this to distribute
     /// spare vertical space evenly without moving the band's clip or cleared terminal rows.
     pub content_offset_subpixels: i64,
@@ -179,6 +182,13 @@ pub struct MathBlockPlacement {
     pub horizontal_scroll_px: u32,
     pub vertical_scroll_px: u32,
     pub toolbar_visible: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathFailurePlacement {
+    pub anchor: MathBlockAnchor,
+    pub top_subpixels: i64,
+    pub height_subpixels: i64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -203,6 +213,7 @@ pub struct ViewportFrame {
     pub row_map: Vec<FrameVisualRow>,
     pub selection_spans: Vec<SelectionSpan>,
     pub math_blocks: Vec<MathBlockPlacement>,
+    pub math_failures: Vec<MathFailurePlacement>,
     pub status_text: Option<String>,
     pub viewport_origin: FrameViewportOrigin,
     pub scroll_offset_rows: usize,
@@ -845,6 +856,7 @@ impl ViewportProjection {
                 .collect(),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -1063,6 +1075,7 @@ impl ViewportProjection {
                             artifact: artifact.clone(),
                             top_subpixels: visible.len() as i64 * self.cell_height_subpixels.get()
                                 - local_start as i64 * self.cell_height_subpixels.get(),
+                            left_subpixels: 0,
                             content_offset_subpixels: artifact.vertical_padding_subpixels,
                             clip_height_subpixels: artifact.height_subpixels,
                             display: MathBlockDisplay::Rendered,
@@ -1186,6 +1199,7 @@ impl ViewportProjection {
                     source: artifact.source.clone(),
                     artifact,
                     top_subpixels,
+                    left_subpixels: 0,
                     content_offset_subpixels,
                     // The shared live prefix map expands this owned band before all following
                     // logical rows. It never paints into a neighbour's fixed terminal row.
@@ -1307,6 +1321,7 @@ impl ViewportProjection {
             row_map,
             selection_spans,
             math_blocks,
+            math_failures: Vec::new(),
             status_text: if rows_above != 0 {
                 Some(format!("{rows_above} rows above"))
             } else if content_rows_below != 0 {
@@ -2258,6 +2273,8 @@ mod tests {
                         width_px: 1,
                         height_px: 50,
                         height_subpixels: 50 * SUBPIXELS_PER_PX,
+                        baseline_subpixels: 0,
+                        mode: MathMode::Display,
                         vertical_padding_subpixels: 0,
                         render_scale_milli: 1000,
                         source: "x".to_owned(),
@@ -2347,6 +2364,8 @@ mod tests {
                 width_px: 1,
                 height_px: 50,
                 height_subpixels: 50 * SUBPIXELS_PER_PX,
+                baseline_subpixels: 0,
+                mode: MathMode::Display,
                 vertical_padding_subpixels: 0,
                 render_scale_milli: 1000,
                 source: "x".to_owned(),
@@ -2589,6 +2608,8 @@ mod tests {
             width_px: 1,
             height_px: 1,
             height_subpixels: 35 * SUBPIXELS_PER_PX,
+            baseline_subpixels: 0,
+            mode: MathMode::Display,
             vertical_padding_subpixels: 0,
             render_scale_milli: 1000,
             source: "x^2 + y^2".to_owned(),

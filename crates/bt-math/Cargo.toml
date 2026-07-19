@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+bt-doc = { path = "../bt-doc" }
 mitex.workspace = true
 mitex-spec-gen.workspace = true
 resvg.workspace = true

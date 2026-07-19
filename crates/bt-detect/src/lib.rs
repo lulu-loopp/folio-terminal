@@ -4,8 +4,8 @@ use std::{sync::Arc, time::Duration};
 
 use bt_doc::{DecorationIntent, HistoryDocument};
 pub use bt_doc::{
-    DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint, LayoutKey, SUBPIXELS_PER_PX,
-    ScreenId, SourceLifecycle, VersionStamp, ViewGeneration,
+    DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint, LayoutKey, MathMode,
+    SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp, ViewGeneration,
 };
 use bt_transcript::{SourceGeneration, TranscriptId};
 
@@ -13,6 +13,15 @@ pub const MAX_MATH_SOURCE_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MathSpan {
+    pub byte_start: u32,
+    pub byte_end: u32,
+    pub source: String,
+    pub mode: MathMode,
+    pub inline_runs: Vec<InlineMathRun>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlineMathRun {
     pub byte_start: u32,
     pub byte_end: u32,
     pub source: String,
@@ -26,6 +35,8 @@ pub struct PlaceholderArtifact {
     pub rgba: Arc<[u8]>,
     pub width_px: u32,
     pub height_px: u32,
+    pub baseline_subpixels: i64,
+    pub mode: MathMode,
     pub render_time: Duration,
 }
 
@@ -44,6 +55,8 @@ pub struct DetectionTask {
     pub block_end: TranscriptId,
     pub span: MathSpan,
     pub versions: VersionStamp,
+    pub cell_width_subpixels: i64,
+    pub cell_height_subpixels: i64,
     pub inputs: Arc<[DetectionInput]>,
     pub resolved: bool,
 }
@@ -76,6 +89,8 @@ pub struct LiveDetectionTask {
     pub grid_generation: GridGeneration,
     pub detection_revision: DetectionRevision,
     pub layout: LayoutKey,
+    pub cell_width_subpixels: i64,
+    pub cell_height_subpixels: i64,
     pub inputs: Arc<[LiveDetectionInput]>,
     pub start: GridPoint,
     pub end: GridPoint,
@@ -109,6 +124,7 @@ pub struct DecorationRecord {
     pub hovered: bool,
     pub horizontal_scroll_px: u32,
     pub vertical_scroll_px: u32,
+    pub failure_reason: Option<String>,
 }
 
 impl DecorationRecord {
@@ -125,6 +141,7 @@ impl DecorationRecord {
             hovered: false,
             horizontal_scroll_px: 0,
             vertical_scroll_px: 0,
+            failure_reason: None,
         }
     }
 
@@ -144,6 +161,8 @@ impl DecorationRecord {
             block_end,
             span,
             versions: self.versions,
+            cell_width_subpixels: SUBPIXELS_PER_PX,
+            cell_height_subpixels: SUBPIXELS_PER_PX,
             inputs: Arc::from([]),
             resolved: true,
         })
@@ -166,8 +185,12 @@ impl DecorationRecord {
                 byte_start: 0,
                 byte_end: 0,
                 source: String::new(),
+                mode: MathMode::Display,
+                inline_runs: Vec::new(),
             },
             versions: self.versions,
+            cell_width_subpixels: SUBPIXELS_PER_PX,
+            cell_height_subpixels: SUBPIXELS_PER_PX,
             inputs,
             resolved: false,
         })
@@ -186,6 +209,7 @@ impl DecorationRecord {
         self.block_end = Some(task.block_end);
         self.span = Some(task.span.clone());
         self.decoration = DecorationLifecycle::Ready;
+        self.failure_reason = None;
         true
     }
 
@@ -230,7 +254,7 @@ impl DecorationRecord {
         }
     }
 
-    pub fn fail(&mut self, task: &DetectionTask) -> bool {
+    pub fn fail(&mut self, task: &DetectionTask, reason: Option<String>) -> bool {
         if self.source != SourceLifecycle::Frozen
             || self.decoration != DecorationLifecycle::Pending
             || task.versions != self.versions
@@ -239,7 +263,14 @@ impl DecorationRecord {
         }
         self.artifact = None;
         self.stale_artifact = None;
-        self.decoration = DecorationLifecycle::Suppressed;
+        self.block_end = Some(task.block_end);
+        self.span = Some(task.span.clone());
+        self.failure_reason = reason;
+        self.decoration = if self.failure_reason.is_some() {
+            DecorationLifecycle::Failed
+        } else {
+            DecorationLifecycle::Suppressed
+        };
         true
     }
 
@@ -250,6 +281,7 @@ impl DecorationRecord {
         self.show_source = !self.show_source;
         self.horizontal_scroll_px = 0;
         self.vertical_scroll_px = 0;
+        self.failure_reason = None;
         true
     }
 
@@ -283,6 +315,7 @@ pub fn redetect_document(
             DecorationIntent::Math {
                 byte_start: block.span.byte_start,
                 byte_end: block.span.byte_end,
+                mode: block.span.mode,
                 detection_revision: revision,
             },
         );
@@ -313,7 +346,139 @@ pub fn detect_block_math(text: &str) -> Vec<MathSpan> {
         byte_start: leading as u32,
         byte_end: (leading + trimmed.len()) as u32,
         source: source.to_owned(),
+        mode: MathMode::Display,
+        inline_runs: Vec::new(),
     }]
+}
+
+/// Conservatively detect one or more `$...$` runs on a single logical line. A run needs an
+/// explicit math signal; currency, shell variables and identifier-like code remain native text.
+/// Inline `$...$` detection is DISABLED pending a sound disambiguator (M1.9g).
+///
+/// Independent review measured the current heuristic against 18 lines of ordinary terminal text
+/// and found 6 false positives - `PATH=$HOME/bin:$PATH` rendered `HOME/bin:`, `WHERE a=$1 AND
+/// b=$2` rendered `1 AND b=`, `Cost $5+$10` rendered `5+` - because any of `/ + - = >` inside the
+/// candidate counted as a mathematical signal. The suite that passed had selection bias (it only
+/// sampled space-separated currency and `echo`-prefixed lines), and the live oracle passed for the
+/// same accidental reason: its probe began with `echo `.
+///
+/// A terminal that renders your literal text has failed as a terminal, and that outranks the
+/// convenience of inline rendering. Display `$$...$$` detection is unaffected: its paired
+/// whole-line delimiters carry orders of magnitude more signal than a lone `$`.
+pub fn detect_inline_math(text: &str) -> Vec<InlineMathRun> {
+    let _ = text;
+    return Vec::new();
+    #[allow(unreachable_code)]
+    if inline_line_is_code_like(text) || text.len() > MAX_MATH_SOURCE_BYTES {
+        return Vec::new();
+    }
+    let dollars = text
+        .char_indices()
+        .filter_map(|(byte, character)| (character == '$').then_some(byte))
+        .collect::<Vec<_>>();
+    let mut runs = Vec::new();
+    let mut index = 0usize;
+    while index < dollars.len() {
+        let open = dollars[index];
+        if delimiter_is_escaped(text, open)
+            || text.as_bytes().get(open + 1) == Some(&b'$')
+            || open
+                .checked_sub(1)
+                .is_some_and(|before| text.as_bytes().get(before) == Some(&b'$'))
+        {
+            index += 1;
+            continue;
+        }
+        let Some(close_index) = (index + 1..dollars.len()).find(|candidate| {
+            let close = dollars[*candidate];
+            !delimiter_is_escaped(text, close)
+                && text.as_bytes().get(close + 1) != Some(&b'$')
+                && close
+                    .checked_sub(1)
+                    .is_none_or(|before| text.as_bytes().get(before) != Some(&b'$'))
+        }) else {
+            break;
+        };
+        let close = dollars[close_index];
+        let source = &text[open + 1..close];
+        if !source.is_empty()
+            && !source.starts_with(char::is_whitespace)
+            && !source.ends_with(char::is_whitespace)
+            && inline_source_is_math(source)
+        {
+            runs.push(InlineMathRun {
+                byte_start: open as u32,
+                byte_end: (close + 1) as u32,
+                source: source.to_owned(),
+            });
+        }
+        index = close_index + 1;
+    }
+    runs
+}
+
+fn inline_line_is_code_like(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    let diff = trimmed.starts_with("+ ") || trimmed.starts_with("- ");
+    let dated_log = trimmed.len() >= 11
+        && trimmed.as_bytes().get(4) == Some(&b'-')
+        && trimmed.as_bytes().get(7) == Some(&b'-')
+        && trimmed
+            .as_bytes()
+            .get(10)
+            .is_some_and(u8::is_ascii_whitespace);
+    let shell = trimmed.starts_with("$ ")
+        || trimmed.starts_with("echo ")
+        || trimmed.starts_with("export ")
+        || trimmed.starts_with("set ");
+    diff || dated_log || shell || text.contains('`')
+}
+
+fn inline_source_is_math(source: &str) -> bool {
+    let mut characters = source.chars();
+    let first = characters.next();
+    if first.is_some_and(char::is_alphabetic) && characters.next().is_none() {
+        return true;
+    }
+    source.contains('\\')
+        || source.chars().any(|character| {
+            matches!(
+                character,
+                '^' | '_'
+                    | '='
+                    | '+'
+                    | '-'
+                    | '*'
+                    | '/'
+                    | '<'
+                    | '>'
+                    | '{'
+                    | '}'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+            )
+        })
+        || source
+            .chars()
+            .any(|character| ('\u{0370}'..='\u{03ff}').contains(&character))
+}
+
+fn inline_group(runs: Vec<InlineMathRun>) -> Option<MathSpan> {
+    let first = runs.first()?;
+    let last = runs.last()?;
+    Some(MathSpan {
+        byte_start: first.byte_start,
+        byte_end: last.byte_end,
+        source: runs
+            .iter()
+            .map(|run| run.source.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
+        mode: MathMode::Inline,
+        inline_runs: runs,
+    })
 }
 
 /// Detect conservative block-level math over already-frozen logical lines. Fences are tracked
@@ -350,6 +515,17 @@ pub fn detect_math_blocks<'a>(
             opening = None;
             continue;
         }
+        if opening.is_none()
+            && let Some(span) = inline_group(detect_inline_math(text))
+        {
+            let id = lines[index].0;
+            blocks.push(DetectedMathBlock {
+                start: id,
+                end: id,
+                span,
+            });
+            continue;
+        }
         if trimmed != "$$" {
             continue;
         }
@@ -372,6 +548,8 @@ pub fn detect_math_blocks<'a>(
                     byte_start: 0,
                     byte_end: text.len() as u32,
                     source,
+                    mode: MathMode::Display,
+                    inline_runs: Vec::new(),
                 },
             });
         } else {
@@ -513,6 +691,8 @@ pub fn render_placeholder(task: &DetectionTask) -> PlaceholderArtifact {
         rgba: Arc::from(vec![0; 4]),
         width_px: 1,
         height_px: 1,
+        baseline_subpixels: 0,
+        mode: task.span.mode,
         render_time: Duration::ZERO,
     }
 }
@@ -566,6 +746,49 @@ mod tests {
         }
     }
 
+    #[test]
+    fn inline_detection_stays_disabled_until_disambiguation_is_sound() {
+        // The machinery below is retained for M1.9g, but must not decorate anything while the
+        // disambiguator lets `PATH=$HOME/bin:$PATH` through. Genuine inline math is therefore
+        // expected to stay source too: silence on both sides is the honest state, and this
+        // assertion is what will fail (loudly, in the right direction) when inline is re-enabled.
+        let text = "能量 $E = mc^2$，并且 $a_1+b_1=c_1$。";
+        assert!(
+            detect_math_blocks([(TranscriptId(1), text)]).is_empty(),
+            "inline detection must stay off until its false-positive set is honest"
+        );
+        assert!(detect_inline_math(text).is_empty());
+    }
+
+    #[test]
+    fn inline_false_positive_set_stays_native() {
+        for text in [
+            "$5 和 $10",
+            "价格是 $5$",
+            "echo $PATH",
+            "echo $1",
+            "literal $PATH$ token",
+            "`const x = $value`",
+            "+ 文档里有 $x^2$",
+            "2026-07-19 log $x^2$",
+            r"escaped \$x^2$",
+            "unclosed $x^2",
+        ] {
+            assert!(
+                detect_inline_math(text).is_empty(),
+                "unexpected match: {text}"
+            );
+        }
+        assert!(
+            detect_math_blocks([
+                (TranscriptId(1), "```text"),
+                (TranscriptId(2), "code $x^2$"),
+                (TranscriptId(3), "```"),
+            ])
+            .is_empty()
+        );
+    }
+
     fn live_task(lines: &[&str], candidate_row: u32) -> LiveDetectionTask {
         LiveDetectionTask {
             candidate_row,
@@ -573,6 +796,8 @@ mod tests {
             grid_generation: GridGeneration(7),
             detection_revision: DetectionRevision(1),
             layout: stamp().layout,
+            cell_width_subpixels: 9 * SUBPIXELS_PER_PX,
+            cell_height_subpixels: 18 * SUBPIXELS_PER_PX,
             inputs: Arc::from(
                 lines
                     .iter()
@@ -600,6 +825,8 @@ mod tests {
                 byte_start: 0,
                 byte_end: 0,
                 source: String::new(),
+                mode: MathMode::Display,
+                inline_runs: Vec::new(),
             },
             resolved: false,
         }

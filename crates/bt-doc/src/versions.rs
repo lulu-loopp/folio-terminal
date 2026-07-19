@@ -6,6 +6,12 @@ use thiserror::Error;
 /// Fixed-point denominator shared by detection artifacts and viewport layout.
 pub const SUBPIXELS_PER_PX: i64 = 1024;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MathMode {
+    Display,
+    Inline,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceLifecycle {
     Live,
@@ -38,6 +44,7 @@ pub enum DecorationIntent {
     Math {
         byte_start: u32,
         byte_end: u32,
+        mode: MathMode,
         detection_revision: DetectionRevision,
     },
 }

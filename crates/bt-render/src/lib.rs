@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use bt_doc::{ContentAnchor, ScreenId};
+use bt_doc::{ContentAnchor, MathMode, ScreenId};
 use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
 use bt_unicode::{cluster_width, graphemes};
 #[cfg(test)]
@@ -56,6 +56,7 @@ pub enum MathHitTarget {
     Block,
     ToggleSource,
     CopyLatex,
+    Failure,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1681,6 +1682,15 @@ impl Renderer {
 
     pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
         let point = [x as f32, y as f32];
+        if let Some(failure) = frame.math_failures.iter().rev().find(|failure| {
+            self.math_failure_geometry(frame, failure)
+                .is_some_and(|(_, hit)| point_in_rect(point, hit))
+        }) {
+            return Some(MathHit {
+                anchor: failure.anchor.clone(),
+                target: MathHitTarget::Failure,
+            });
+        }
         frame.math_blocks.iter().rev().find_map(|placement| {
             let geometry = self.math_block_geometry(frame, placement)?;
             let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
@@ -2077,16 +2087,26 @@ impl Renderer {
                 continue;
             };
             let scale = placement.artifact.render_scale_milli as f32 / 1000.0;
-            let block_top = pane_top
-                + placement
-                    .top_subpixels
-                    .saturating_add(placement.content_offset_subpixels) as f32
-                    / SUBPIXELS_PER_PX as f32;
+            let block_top = if placement.artifact.mode == MathMode::Inline {
+                pane_top
+                    + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32
+                    + self.metrics.ascii_baseline_px
+                    - placement.artifact.baseline_subpixels as f32 / SUBPIXELS_PER_PX as f32
+            } else {
+                pane_top
+                    + placement
+                        .top_subpixels
+                        .saturating_add(placement.content_offset_subpixels)
+                        as f32
+                        / SUBPIXELS_PER_PX as f32
+            };
             for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
                 tile_geometry.into_iter().enumerate()
             {
-                let left =
-                    pane_left + tile_x as f32 * scale - placement.horizontal_scroll_px as f32;
+                let left = pane_left
+                    + placement.left_subpixels as f32 / SUBPIXELS_PER_PX as f32
+                    + tile_x as f32 * scale
+                    - placement.horizontal_scroll_px as f32;
                 let top = block_top + tile_y as f32 * scale - placement.vertical_scroll_px as f32;
                 let right = left + tile_width as f32 * scale;
                 let bottom = top + tile_height as f32 * scale;
@@ -2135,7 +2155,13 @@ impl Renderer {
         let pane_top = self.metrics.padding_px;
         let pane_bottom = self.config.height as f32;
         let band_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
-        let top = band_top + placement.content_offset_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+        let block_left = pane_left + placement.left_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+        let top = if placement.artifact.mode == MathMode::Inline {
+            band_top + self.metrics.ascii_baseline_px
+                - placement.artifact.baseline_subpixels as f32 / SUBPIXELS_PER_PX as f32
+        } else {
+            band_top + placement.content_offset_subpixels as f32 / SUBPIXELS_PER_PX as f32
+        };
         let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
         let scaled_width = if placement.display == MathBlockDisplay::Source {
             placement
@@ -2157,13 +2183,14 @@ impl Renderer {
         };
         let visible_top = top.max(pane_top);
         let visible_bottom = (top + scaled_height.min(clip_height)).min(pane_bottom);
-        let visible_right = (pane_left + scaled_width).min(pane_right);
-        if visible_right <= pane_left || visible_bottom <= visible_top {
+        let visible_left = block_left.max(pane_left);
+        let visible_right = (block_left + scaled_width).min(pane_right);
+        if visible_right <= visible_left || visible_bottom <= visible_top {
             return None;
         }
-        let block = [pane_left, visible_top, visible_right, visible_bottom];
+        let block = [visible_left, visible_top, visible_right, visible_bottom];
         let clip = [
-            pane_left,
+            visible_left,
             band_top.max(pane_top),
             pane_right,
             (band_top + clip_height).min(pane_bottom),
@@ -2194,6 +2221,37 @@ impl Renderer {
             eye,
             copy,
         })
+    }
+
+    fn math_failure_geometry(
+        &self,
+        frame: &ViewportFrame,
+        placement: &bt_viewport::MathFailurePlacement,
+    ) -> Option<([f32; 4], [f32; 4])> {
+        let pane_left = self.metrics.padding_px;
+        let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
+            .min(self.config.width as f32);
+        let pane_top = self.metrics.padding_px;
+        let pane_bottom = self.config.height as f32;
+        let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+        let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+        let top = raw_top.max(pane_top);
+        let bottom = raw_bottom.min(pane_bottom);
+        if bottom <= top || pane_right <= pane_left {
+            return None;
+        }
+        let scale = self.metrics.scale_factor as f32;
+        let marker_right = pane_right - scale;
+        let marker_left = (marker_right - 2.0 * scale).max(pane_left);
+        let inset = (4.0 * scale).min((bottom - top) / 3.0);
+        let marker = [marker_left, top + inset, marker_right, bottom - inset];
+        let hit = [
+            (pane_right - 14.0 * scale).max(pane_left),
+            top,
+            pane_right,
+            bottom,
+        ];
+        Some((marker, hit))
     }
 
     fn upload_math_texture(
@@ -2323,6 +2381,18 @@ impl Renderer {
                     geometry.block[3],
                     DEFAULT_STATUS_BACKGROUND_RGB,
                     0.45,
+                ));
+            }
+        }
+        for failure in &frame.math_failures {
+            if let Some((marker, _)) = self.math_failure_geometry(frame, failure) {
+                rects.push(self.pixel_rect_with_coverage(
+                    marker[0],
+                    marker[1],
+                    marker[2],
+                    marker[3],
+                    DEFAULT_DIM_FOREGROUND_RGB,
+                    0.65,
                 ));
             }
         }
@@ -4458,6 +4528,7 @@ mod tests {
             row_map: test_row_map(rows as u32),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -4563,6 +4634,7 @@ mod tests {
                 row_map: test_row_map_for_metrics(3, metrics),
                 selection_spans: Vec::new(),
                 math_blocks: Vec::new(),
+                math_failures: Vec::new(),
                 status_text: None,
                 viewport_origin: FrameViewportOrigin::Bottom,
                 scroll_offset_rows: 0,
@@ -4630,6 +4702,7 @@ mod tests {
                 end_column: 2,
             }],
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -4685,6 +4758,7 @@ mod tests {
             content_height_px: 24,
             ascent_px: 20.0,
             descent_px: 4.0,
+            baseline_px: 20.0,
             render_time: std::time::Duration::from_millis(1),
         };
         let mut completed = 0;
@@ -4801,6 +4875,7 @@ mod tests {
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -4836,6 +4911,7 @@ mod tests {
             },
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -4893,6 +4969,7 @@ mod tests {
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -5101,6 +5178,7 @@ mod tests {
             row_map: test_row_map(3),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -5296,6 +5374,7 @@ mod tests {
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -5341,6 +5420,7 @@ mod tests {
             row_map: test_row_map(2),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -5476,6 +5556,7 @@ mod tests {
             row_map: test_row_map(1),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,
@@ -5513,6 +5594,7 @@ mod tests {
             row_map: test_row_map_for_metrics(1, metrics),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
+            math_failures: Vec::new(),
             status_text: None,
             viewport_origin: FrameViewportOrigin::Bottom,
             scroll_offset_rows: 0,

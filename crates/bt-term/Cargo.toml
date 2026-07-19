@@ -12,6 +12,7 @@ bt-doc = { path = "../bt-doc" }
 bt-detect = { path = "../bt-detect" }
 bt-math = { path = "../bt-math" }
 bt-viewport = { path = "../bt-viewport" }
+unicode-width.workspace = true
 
 [dev-dependencies]
 proptest = "1"

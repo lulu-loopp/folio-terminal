@@ -301,6 +301,7 @@ dependencies = [
 name = "bt-math"
 version = "0.0.0"
 dependencies = [
+ "bt-doc",
  "mitex",
  "mitex-spec-gen",
  "resvg",
@@ -359,6 +360,7 @@ dependencies = [
  "bt-transcript",
  "bt-viewport",
  "proptest",
+ "unicode-width",
 ]
 
 [[package]]

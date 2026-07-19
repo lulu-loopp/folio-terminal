@@ -2,6 +2,7 @@
 
 use std::{num::NonZeroU32, sync::OnceLock, time::Duration};
 
+pub use bt_doc::MathMode;
 use mitex_spec_gen::DEFAULT_SPEC;
 use thiserror::Error;
 use typst_as_lib::{TypstEngine, typst_kit_options::TypstKitFontOptions};
@@ -18,18 +19,20 @@ pub const VERTICAL_PADDING_LOGICAL_PX: u32 = 8;
 pub const MAX_RASTER_BYTES: usize = 64 * 1024 * 1024;
 
 const TYPST_TEMPLATE: &str = r#"
-#import "specs/mod.typ": mitex-scope
+#import "specs/mod.typ": mitex-scope as base-mitex-scope
 #set page(width: auto, height: auto, margin: 0pt, fill: none)
 #set text(size: sys.inputs.font_size * 1pt, fill: rgb(sys.inputs.red, sys.inputs.green, sys.inputs.blue))
-#let converted = eval("$" + sys.inputs.source + "$", scope: mitex-scope)
-#math.equation(block: sys.inputs.display, converted)
-"#;
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub enum MathMode {
-    Display,
-    Inline,
+#let mitex-scope = base-mitex-scope + (
+  diff: math.partial,
+  sect: math.inter,
+)
+#let source = if sys.inputs.display {
+  "$ " + sys.inputs.source + " $"
+} else {
+  "$" + sys.inputs.source + "$"
 }
+#eval(source, scope: mitex-scope)
+"#;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MathRenderKey {
@@ -47,6 +50,8 @@ pub struct MathRaster {
     pub content_height_px: u32,
     pub ascent_px: f32,
     pub descent_px: f32,
+    /// Math baseline measured from the top of the alpha-tight raster.
+    pub baseline_px: f32,
     pub render_time: Duration,
 }
 
@@ -76,6 +81,30 @@ pub enum MathRenderError {
     Svg(String),
     #[error("raster dimensions are invalid or too large")]
     InvalidDimensions,
+    #[error("inline math does not fit its terminal line box")]
+    InlineGeometry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MathFailureStage {
+    Validate,
+    Convert,
+    Compile,
+}
+
+impl MathRenderError {
+    pub fn failure_stage(&self) -> Option<MathFailureStage> {
+        match self {
+            Self::SourceTooLong | Self::UnsafeCommand | Self::NestingTooDeep => {
+                Some(MathFailureStage::Validate)
+            }
+            Self::Convert(_) => Some(MathFailureStage::Convert),
+            Self::Compile(_) | Self::NoPage | Self::Svg(_) | Self::InvalidDimensions => {
+                Some(MathFailureStage::Compile)
+            }
+            Self::NotDetected | Self::InlineGeometry => None,
+        }
+    }
 }
 
 pub struct MathEngine {
@@ -240,7 +269,7 @@ fn rasterize_svg(
     // Typst's auto page is a layout frame, not an alpha-tight raster box. The shared artifact owns
     // ink only; transcript and live projections add their scale-appropriate symmetric breathing
     // outside these pixels. This also lets live->frozen handoff reuse the exact same RGBA bytes.
-    let (mut rgba, content_height_px) =
+    let (mut rgba, content_height_px, content_top_px) =
         crop_vertical_alpha(&source_rgba, width_px).ok_or(MathRenderError::InvalidDimensions)?;
     let height_px = content_height_px;
     let resident_bytes = rgba.len();
@@ -255,6 +284,8 @@ fn rasterize_svg(
         content_height_px,
         ascent_px: (ascent_pt as f32 * scale),
         descent_px: (descent_pt as f32 * scale),
+        baseline_px: (ascent_pt as f32 * scale - content_top_px as f32)
+            .clamp(0.0, content_height_px as f32),
         render_time: elapsed,
     })
 }
@@ -275,12 +306,12 @@ fn vertical_alpha_bounds(rgba: &[u8], width_px: u32) -> Option<(u32, u32)> {
     Some((first as u32, last as u32))
 }
 
-fn crop_vertical_alpha(rgba: &[u8], width_px: u32) -> Option<(Vec<u8>, u32)> {
+fn crop_vertical_alpha(rgba: &[u8], width_px: u32) -> Option<(Vec<u8>, u32, u32)> {
     let (first, last) = vertical_alpha_bounds(rgba, width_px)?;
     let row_bytes = width_px as usize * 4;
     let start = first as usize * row_bytes;
     let end = last as usize * row_bytes;
-    Some((rgba.get(start..end)?.to_vec(), last - first))
+    Some((rgba.get(start..end)?.to_vec(), last - first, first))
 }
 
 /// tiny-skia exposes premultiplied sRGB bytes. The renderer uploads to an sRGB texture and uses
@@ -313,6 +344,27 @@ mod tests {
         }
     }
 
+    fn ink_row_runs(raster: &MathRaster, left: u32, right: u32) -> usize {
+        let left = left.min(raster.width_px) as usize;
+        let right = right.min(raster.width_px).max(left as u32) as usize;
+        let minimum_ink = ((right.saturating_sub(left)) / 10).max(3);
+        let row_bytes = raster.width_px as usize * 4;
+        raster
+            .rgba
+            .chunks_exact(row_bytes)
+            .map(|row| {
+                row[left * 4..right * 4]
+                    .chunks_exact(4)
+                    .filter(|pixel| pixel[3] != 0)
+                    .count()
+                    >= minimum_ink
+            })
+            .fold((0, false), |(runs, previous), ink| {
+                (runs + usize::from(ink && !previous), ink)
+            })
+            .0
+    }
+
     #[test]
     fn renders_native_rgba_with_free_pixel_height() {
         let raster = MathEngine::new()
@@ -328,6 +380,93 @@ mod tests {
     }
 
     #[test]
+    fn display_environments_remain_multiline_with_bounded_width() {
+        let engine = MathEngine::new();
+        let single = engine.render("x + y", key()).unwrap();
+        let samples = [
+            (
+                "cases",
+                r"\operatorname{sgn}(x)=\begin{cases}+1 & x>0\\0 & x=0\\-1 & x<0\end{cases}",
+                3,
+            ),
+            (
+                "pmatrix",
+                r"A=\begin{pmatrix}a_{11}&a_{12}&a_{13}\\a_{21}&a_{22}&a_{23}\\a_{31}&a_{32}&a_{33}\end{pmatrix}",
+                3,
+            ),
+            (
+                "bmatrix",
+                r"\begin{bmatrix}1&0\\0&1\end{bmatrix}\begin{bmatrix}x\\y\end{bmatrix}=\begin{bmatrix}x\\y\end{bmatrix}",
+                2,
+            ),
+            (
+                "aligned",
+                r"\begin{aligned}a&=b+c\\d&=e+f\\g&=h+i\end{aligned}",
+                3,
+            ),
+            (
+                "align",
+                r"\begin{align}(a+b)^2&=a^2+2ab+b^2\\(a-b)^2&=a^2-2ab+b^2\\(a+b)(a-b)&=a^2-b^2\end{align}",
+                3,
+            ),
+        ];
+        for (name, source, expected_rows) in samples {
+            let raster = engine
+                .render(source, key())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(
+                raster.height_px > single.height_px.saturating_mul(2),
+                "{name} collapsed: {}x{} vs single {}x{}",
+                raster.width_px,
+                raster.height_px,
+                single.width_px,
+                single.height_px,
+            );
+            assert!(raster.width_px < 4096, "{name} width is abnormal");
+            let margin = raster.width_px / 8;
+            assert!(
+                ink_row_runs(&raster, margin, raster.width_px - margin) >= expected_rows,
+                "{name} did not preserve approximately {expected_rows} ink rows"
+            );
+        }
+    }
+
+    #[test]
+    fn delimiter_mode_controls_the_eval_equation_without_a_second_wrapper() {
+        let engine = MathEngine::new();
+        let mut inline = key();
+        inline.mode = MathMode::Inline;
+        let display = engine.render(r"\sum_{i=1}^n i", key()).unwrap();
+        let inline = engine.render(r"\sum_{i=1}^n i", inline).unwrap();
+        assert!(display.height_px > inline.height_px);
+        assert!(display.baseline_px > 0.0 && inline.baseline_px > 0.0);
+    }
+
+    #[test]
+    fn user_reported_partial_and_intersection_formulas_compile() {
+        let engine = MathEngine::new();
+        for (name, source) in [
+            (
+                "residue",
+                r"f(z) = \frac{1}{2\pi i} \oint_{\gamma} \frac{f(\zeta)}{\zeta - z}\,\mathrm{d}\zeta, \quad \left| \frac{\partial^2 u}{\partial x^2} + \frac{\partial^2 u}{\partial y^2} \right| \leq \epsilon",
+            ),
+            (
+                "maxwell",
+                r"\begin{aligned} \nabla \cdot \mathbf{E} &= \frac{\rho}{\varepsilon_0} \\ \nabla \cdot \mathbf{B} &= 0 \\ \nabla \times \mathbf{E} &= -\frac{\partial \mathbf{B}}{\partial t} \\ \nabla \times \mathbf{B} &= \mu_0\mathbf{J} + \mu_0\varepsilon_0\frac{\partial \mathbf{E}}{\partial t} \end{aligned}",
+            ),
+            (
+                "symbols",
+                r"\alpha \beta \gamma \delta ; \Gamma \Delta \Theta \Lambda ; \aleph_0 \in \mathbb{R} \subseteq \mathbb{C}, \quad A \cup B, ; A \cap B, ; \varnothing",
+            ),
+        ] {
+            let raster = engine
+                .render(source, key())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(raster.width_px > 1 && raster.height_px > 1);
+        }
+    }
+
+    #[test]
     fn vertical_crop_removes_known_transparent_source_margins() {
         let width = 2_u32;
         let row_bytes = width as usize * 4;
@@ -336,8 +475,9 @@ mod tests {
         source[row_bytes * 3..row_bytes * 4].copy_from_slice(&[0, 0, 0, 0, 40, 50, 60, 128]);
 
         assert_eq!(vertical_alpha_bounds(&source, width), Some((2, 4)));
-        let (cropped, height) = crop_vertical_alpha(&source, width).unwrap();
+        let (cropped, height, top) = crop_vertical_alpha(&source, width).unwrap();
         assert_eq!(height, 2);
+        assert_eq!(top, 2);
         assert_eq!(cropped.len(), row_bytes * 2);
         assert!(cropped.len() < source.len());
         assert_eq!(cropped, source[row_bytes * 2..row_bytes * 4]);
@@ -403,15 +543,28 @@ mod tests {
         assert_eq!(samples.len(), 310);
         let sample_count = samples.len();
         let engine = MathEngine::new();
+        let mut dimensions_fnv = 0xcbf29ce484222325_u64;
+        let mut multiline_samples = 0usize;
         for sample in samples {
             let raster = engine
                 .render(&sample.latex, key())
                 .unwrap_or_else(|error| panic!("{}: {error}", sample.id));
             assert!(raster.ascent_px > 0.0);
             assert!(raster.height_px > 0);
+            multiline_samples +=
+                usize::from(sample.latex.contains(r"\begin") && sample.latex.contains(r"\\"));
+            for byte in sample
+                .id
+                .bytes()
+                .chain(raster.width_px.to_le_bytes())
+                .chain(raster.height_px.to_le_bytes())
+            {
+                dimensions_fnv ^= u64::from(byte);
+                dimensions_fnv = dimensions_fnv.wrapping_mul(0x100000001b3);
+            }
         }
         eprintln!(
-            "math corpus gate: {sample_count}/{sample_count} valid samples produced metrics and pixels"
+            "math corpus gate: {sample_count}/{sample_count} valid samples produced metrics and pixels; multiline_samples={multiline_samples}; dimensions_fnv={dimensions_fnv:016x}"
         );
     }
 

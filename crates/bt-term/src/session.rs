@@ -19,17 +19,19 @@ use bt_doc::{
     LayoutKey, LiveRowRemoval, SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp,
     ViewGeneration, compare_anchors,
 };
-use bt_math::{MathEngine, MathMode, MathRaster, MathRenderError, MathRenderKey};
+use bt_math::{MathEngine, MathFailureStage, MathMode, MathRaster, MathRenderError, MathRenderKey};
 use bt_transcript::{
-    CaptureResult, CapturedRow, DEFAULT_STAGING_QUOTA, FinalizedLine, GraphemeOffset,
+    CaptureResult, CapturedRow, DEFAULT_STAGING_QUOTA, FinalizedLine, FrozenLine, GraphemeOffset,
     SPIKE_DEFAULT_FROZEN_QUOTA, SourceGeneration, StagedRow, StagingId, TranscriptId,
     TranscriptStore,
 };
 use bt_viewport::{
     FrameProjectionError, FrameViewportOrigin, GridCursor, HorizontalOverflowOwner,
-    MathBlockAnchor, MathBlockDisplay, MathBlockPlacement, ProjectedLiveMathArtifact,
-    ProjectedMathArtifact, ViewSelection, ViewportFrame, ViewportProjection,
+    MathBlockAnchor, MathBlockDisplay, MathBlockPlacement, MathFailurePlacement,
+    ProjectedLiveMathArtifact, ProjectedMathArtifact, ViewSelection, ViewportFrame,
+    ViewportProjection,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     adapter::{AdapterEvent, TerminalAdapter, TerminalDamage, TerminalModes},
@@ -102,6 +104,7 @@ struct LiveDecorationRecord {
     hovered: bool,
     horizontal_scroll_px: u32,
     vertical_scroll_px: u32,
+    failure_reason: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -251,6 +254,9 @@ pub struct DualPlaneSession {
     pending_live_handoffs: Vec<PendingLiveArtifactHandoff>,
     live_detection_count: u64,
     live_invalidation_count: u64,
+    math_failure_validate_count: u64,
+    math_failure_convert_count: u64,
+    math_failure_compile_count: u64,
 }
 
 impl DualPlaneSession {
@@ -346,6 +352,9 @@ impl DualPlaneSession {
             pending_live_handoffs: Vec::new(),
             live_detection_count: 0,
             live_invalidation_count: 0,
+            math_failure_validate_count: 0,
+            math_failure_convert_count: 0,
+            math_failure_compile_count: 0,
         }
     }
 
@@ -507,7 +516,20 @@ impl DualPlaneSession {
         let _ = self.terminal.take_damage();
         self.invalidate_all_live_decorations();
         self.pending_live_handoffs.clear();
-        self.live_rows = vec![LiveRowStability::default(); rows.get() as usize];
+        // Seed the damage clock instead of leaving it None: stability is judged by
+        // `last_damage_at.is_some_and(elapsed >= INTERVAL)`, so a None row is never stable and
+        // never re-detected. A resize rebuilds every row, so leaving them None meant formulas
+        // stayed source forever after any window resize - until unrelated output happened to
+        // touch that row (user report 2026-07-19). Seeding with the resize instant makes each row
+        // settle one stable interval later, which is also the honest reading: the grid just
+        // changed, so it is not yet quiet.
+        self.live_rows = vec![
+            LiveRowStability {
+                last_damage_at: Some(observed_at),
+                ..LiveRowStability::default()
+            };
+            rows.get() as usize
+        ];
         self.apply_events(events, observed_at)?;
         if plan.begin_transaction {
             self.trace_resize_event(
@@ -694,7 +716,7 @@ impl DualPlaneSession {
             .filter_map(|input| match input.source {
                 LiveDetectionSource::Grid { row, .. }
                     if stable.get(row as usize).copied().unwrap_or(false)
-                        && input.text.contains("$$") =>
+                        && input.text.contains('$') =>
                 {
                     Some(row)
                 }
@@ -715,6 +737,8 @@ impl DualPlaneSession {
                 grid_generation: self.grid_generation,
                 detection_revision: self.detection_revision,
                 layout: self.layout_key,
+                cell_width_subpixels: self.cell_width_subpixels.get(),
+                cell_height_subpixels: self.cell_height_subpixels.get(),
                 inputs: Arc::clone(&inputs),
                 start: GridPoint {
                     row: candidate_row,
@@ -730,6 +754,8 @@ impl DualPlaneSession {
                     byte_start: 0,
                     byte_end: 0,
                     source: String::new(),
+                    mode: MathMode::Display,
+                    inline_runs: Vec::new(),
                 },
                 resolved: false,
             };
@@ -893,7 +919,7 @@ impl DualPlaneSession {
                                 self.cell_height_subpixels.get(),
                                 &occupied,
                             );
-                            self.apply_live_worker_completion(task, Some(artifact));
+                            self.apply_live_worker_completion(task, Some(artifact), None);
                         }
                     }
                 }
@@ -932,7 +958,7 @@ impl DualPlaneSession {
             return self.complete_worker_result(task, Err(MathRenderError::NotDetected));
         }
         let placeholder = bt_detect::render_placeholder(&task);
-        let accepted = self.apply_worker_completion(task, Some(placeholder));
+        let accepted = self.apply_worker_completion(task, Some(placeholder), None);
         if !accepted {
             self.stale_results += 1;
         }
@@ -944,12 +970,15 @@ impl DualPlaneSession {
         task: DetectionTask,
         result: Result<MathRaster, MathRenderError>,
     ) -> bool {
-        let render_error = result.as_ref().err().map(ToString::to_string);
+        let render_error = result.as_ref().err().cloned();
+        let failure_reason = render_error
+            .as_ref()
+            .and_then(|error| error.failure_stage().map(|_| error.to_string()));
         let render_time = result.as_ref().ok().map(|raster| raster.render_time);
         let artifact = result
             .ok()
             .map(|raster| artifact_from_raster(&task, raster));
-        let accepted = self.apply_worker_completion(task.clone(), artifact);
+        let accepted = self.apply_worker_completion(task.clone(), artifact, failure_reason);
         if !accepted {
             self.stale_results += 1;
         } else if std::env::var_os("BT_PERF_TRACE").is_some() {
@@ -960,12 +989,15 @@ impl DualPlaneSession {
                     task.transcript_id.0,
                     self.math_resident_bytes(),
                 );
-            } else if let Some(error) = render_error {
+            } else if let Some(error) = render_error.as_ref() {
                 eprintln!(
                     "BT_PERF_TRACE math_render_failed source={} error={error:?}",
                     task.transcript_id.0,
                 );
             }
+        }
+        if accepted && let Some(error) = render_error.as_ref() {
+            self.record_math_failure(error);
         }
         accepted
     }
@@ -979,10 +1011,16 @@ impl DualPlaneSession {
             extend_live_task_band(&mut task);
         }
         let render_time = result.as_ref().ok().map(|raster| raster.render_time);
+        let render_error = result.as_ref().err().cloned();
+        let failure_reason = render_error
+            .as_ref()
+            .and_then(|error| error.failure_stage().map(|_| error.to_string()));
         let artifact = result
             .ok()
             .map(|raster| artifact_from_live_raster(&task, raster));
-        if let Some(artifact) = artifact.as_ref() {
+        if task.span.mode == MathMode::Display
+            && let Some(artifact) = artifact.as_ref()
+        {
             let occupied = self.occupied_live_band_rows(task.start.row);
             size_live_task_band_for_artifact(
                 &mut task,
@@ -997,7 +1035,7 @@ impl DualPlaneSession {
             task.band_start_row = task.start.row;
             task.band_end_row = task.end.row;
         }
-        let accepted = self.apply_live_worker_completion(task.clone(), artifact);
+        let accepted = self.apply_live_worker_completion(task.clone(), artifact, failure_reason);
         if !accepted {
             self.stale_results = self.stale_results.saturating_add(1);
         } else if std::env::var_os("BT_PERF_TRACE").is_some()
@@ -1010,7 +1048,34 @@ impl DualPlaneSession {
                 self.math_resident_bytes(),
             );
         }
+        if accepted && let Some(error) = render_error.as_ref() {
+            self.record_math_failure(error);
+        }
         accepted
+    }
+
+    fn record_math_failure(&mut self, error: &MathRenderError) {
+        match error.failure_stage() {
+            Some(MathFailureStage::Validate) => {
+                self.math_failure_validate_count =
+                    self.math_failure_validate_count.saturating_add(1);
+            }
+            Some(MathFailureStage::Convert) => {
+                self.math_failure_convert_count = self.math_failure_convert_count.saturating_add(1);
+            }
+            Some(MathFailureStage::Compile) => {
+                self.math_failure_compile_count = self.math_failure_compile_count.saturating_add(1);
+            }
+            None => return,
+        }
+        if std::env::var_os("BT_PERF_TRACE").is_some() {
+            eprintln!(
+                "BT_PERF_TRACE math_failures_validate={} math_failures_convert={} math_failures_compile={}",
+                self.math_failure_validate_count,
+                self.math_failure_convert_count,
+                self.math_failure_compile_count,
+            );
+        }
     }
 
     fn occupied_live_band_rows(&self, replacing_start: u32) -> BTreeSet<u32> {
@@ -1025,6 +1090,7 @@ impl DualPlaneSession {
         &mut self,
         task: LiveDetectionTask,
         artifact: Option<PlaceholderArtifact>,
+        failure_reason: Option<String>,
     ) -> bool {
         if task.screen != self.live_screen
             || task.grid_generation != self.grid_generation
@@ -1046,10 +1112,10 @@ impl DualPlaneSession {
             });
             return true;
         }
-        let Some(artifact) = artifact else {
+        if artifact.is_none() && failure_reason.is_none() {
             self.live_decorations.remove(&task.start.row);
             return true;
-        };
+        }
         let remembered = self.live_decorations.get(&task.start.row).map(|record| {
             (
                 record.show_source,
@@ -1084,12 +1150,13 @@ impl DualPlaneSession {
                 rendered_layout: task.layout,
                 inputs: Arc::clone(&task.inputs),
                 span: task.span,
-                artifact: Some(artifact),
+                artifact,
                 stale_artifact: None,
                 show_source,
                 hovered,
                 horizontal_scroll_px,
                 vertical_scroll_px,
+                failure_reason,
             },
         );
         true
@@ -1099,6 +1166,7 @@ impl DualPlaneSession {
         &mut self,
         task: DetectionTask,
         artifact: Option<PlaceholderArtifact>,
+        failure_reason: Option<String>,
     ) -> bool {
         if !self.worker_task_is_current(&task) {
             return false;
@@ -1107,7 +1175,7 @@ impl DualPlaneSession {
             return self
                 .decorations
                 .get_mut(&task.candidate_id)
-                .is_some_and(|record| record.fail(&task));
+                .is_some_and(|record| record.fail(&task, None));
         }
         let block_is_current = task.inputs.iter().all(|input| {
             self.document
@@ -1148,6 +1216,7 @@ impl DualPlaneSession {
                     DecorationIntent::Math {
                         byte_start: task.span.byte_start,
                         byte_end: task.span.byte_end,
+                        mode: task.span.mode,
                         detection_revision: task.versions.detection,
                     },
                 );
@@ -1156,7 +1225,7 @@ impl DualPlaneSession {
             None => {
                 self.document
                     .set_decoration(task.transcript_id, DecorationIntent::Plain);
-                record.fail(&resolved_task)
+                record.fail(&resolved_task, failure_reason)
             }
         }
     }
@@ -1545,10 +1614,14 @@ impl DualPlaneSession {
         );
         projection.set_selection(self.view_selection());
         projection.sync_math_artifacts(self.decorations.iter().filter_map(|(id, record)| {
-            (!record.show_source)
-                .then(|| projected_frozen_artifact(record))
-                .flatten()
-                .map(|artifact| (*id, artifact))
+            (!record.show_source
+                && record
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span.mode == MathMode::Display))
+            .then(|| projected_frozen_artifact(record))
+            .flatten()
+            .map(|artifact| (*id, artifact))
         }));
         self.sync_live_projection_artifacts(projection);
         projection.apply_detection_revision(self.detection_revision, &self.document);
@@ -1559,7 +1632,7 @@ impl DualPlaneSession {
         projection.sync_live_math_artifacts(
             self.live_screen,
             self.live_decorations.values().filter_map(|record| {
-                (!record.show_source)
+                (!record.show_source && record.span.mode == MathMode::Display)
                     .then(|| {
                         projected_live_artifact(
                             record,
@@ -1673,6 +1746,7 @@ impl DualPlaneSession {
                     .map_or_else(String::new, |span| span.source.clone()),
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
+                left_subpixels: 0,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: last_mapped
                     .top_subpixels
@@ -1733,6 +1807,7 @@ impl DualPlaneSession {
                 source: record.span.source.clone(),
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
+                left_subpixels: 0,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
@@ -1746,12 +1821,199 @@ impl DualPlaneSession {
                 toolbar_visible: record.hovered,
             });
         }
+
+        for (start, record) in &self.decorations {
+            let Some(span) = record
+                .span
+                .as_ref()
+                .filter(|span| span.mode == MathMode::Inline)
+            else {
+                continue;
+            };
+            if record.show_source || record.failure_reason.is_some() {
+                continue;
+            }
+            let Some(artifact) = projected_frozen_artifact(record) else {
+                continue;
+            };
+            let Some(entry) = self.document.entries().get(start) else {
+                continue;
+            };
+            let Some((row, left_column, cells)) =
+                frozen_inline_cells(frame, *start, &entry.line, span)
+            else {
+                continue;
+            };
+            let Some((top_subpixels, row_height_subpixels)) = frame
+                .row_map
+                .get(row as usize)
+                .map(|mapped| (mapped.top_subpixels, mapped.height_subpixels))
+            else {
+                continue;
+            };
+            for index in cells {
+                if let Some(cell) = frame.cells.get_mut(index) {
+                    cell.text.clear();
+                    cell.wide_spacer = false;
+                }
+            }
+            frame.math_blocks.push(MathBlockPlacement {
+                start: *start,
+                anchor: MathBlockAnchor::History {
+                    start: *start,
+                    end: *start,
+                },
+                source: span.source.clone(),
+                artifact,
+                top_subpixels,
+                left_subpixels: i64::from(left_column)
+                    .saturating_mul(self.cell_width_subpixels.get()),
+                content_offset_subpixels: 0,
+                clip_height_subpixels: row_height_subpixels,
+                display: MathBlockDisplay::Rendered,
+                horizontal_overflow: HorizontalOverflowOwner::Pane,
+                horizontal_scroll_px: 0,
+                vertical_scroll_px: 0,
+                toolbar_visible: false,
+            });
+        }
+
+        for record in self.live_decorations.values() {
+            if record.screen != self.live_screen
+                || record.generation != self.grid_generation
+                || record.span.mode != MathMode::Inline
+                || record.show_source
+                || record.failure_reason.is_some()
+            {
+                continue;
+            }
+            let Some(artifact) =
+                projected_live_artifact(record, self.layout_key, self.cell_height_subpixels.get())
+            else {
+                continue;
+            };
+            let Some(text) =
+                live_grid_input(&record.inputs, record.start.row).map(|input| input.text.as_str())
+            else {
+                continue;
+            };
+            let Some((row, left_column, cells)) =
+                live_inline_cells(frame, record.start.row, text, &record.span)
+            else {
+                continue;
+            };
+            let Some((top_subpixels, row_height_subpixels)) = frame
+                .row_map
+                .get(row as usize)
+                .map(|mapped| (mapped.top_subpixels, mapped.height_subpixels))
+            else {
+                continue;
+            };
+            for index in cells {
+                if let Some(cell) = frame.cells.get_mut(index) {
+                    cell.text.clear();
+                    cell.wide_spacer = false;
+                }
+            }
+            frame.math_blocks.push(MathBlockPlacement {
+                start: TranscriptId(0),
+                anchor: MathBlockAnchor::Live {
+                    screen: record.screen,
+                    start: record.start,
+                    end: record.end,
+                    band_start_row: record.start.row,
+                    band_end_row: record.end.row,
+                    generation: record.generation,
+                },
+                source: record.span.source.clone(),
+                artifact,
+                top_subpixels,
+                left_subpixels: i64::from(left_column)
+                    .saturating_mul(self.cell_width_subpixels.get()),
+                content_offset_subpixels: 0,
+                clip_height_subpixels: row_height_subpixels,
+                display: MathBlockDisplay::Rendered,
+                horizontal_overflow: HorizontalOverflowOwner::Pane,
+                horizontal_scroll_px: 0,
+                vertical_scroll_px: 0,
+                toolbar_visible: false,
+            });
+        }
+
+        for (start, record) in &self.decorations {
+            let Some(reason) = record.failure_reason.as_ref() else {
+                continue;
+            };
+            let Some(first_row) = frame_row_for_history(frame, *start) else {
+                continue;
+            };
+            let end = record.block_end.unwrap_or(*start);
+            let last_row = (first_row..frame.rows.get())
+                .take_while(|row| frame_row_history_id(frame, *row).is_some_and(|id| id <= end))
+                .last()
+                .unwrap_or(first_row);
+            let (Some(first), Some(last)) = (
+                frame.row_map.get(first_row as usize),
+                frame.row_map.get(last_row as usize),
+            ) else {
+                continue;
+            };
+            frame.math_failures.push(MathFailurePlacement {
+                anchor: MathBlockAnchor::History { start: *start, end },
+                top_subpixels: first.top_subpixels,
+                height_subpixels: last
+                    .top_subpixels
+                    .saturating_add(last.height_subpixels)
+                    .saturating_sub(first.top_subpixels),
+            });
+            if record.hovered {
+                frame.status_text = Some(format!("Formula not rendered: {reason}"));
+            }
+        }
+
+        for record in self.live_decorations.values() {
+            let Some(reason) = record.failure_reason.as_ref() else {
+                continue;
+            };
+            let Some((first_row, _)) =
+                frame_row_for_live_range(frame, record.screen, record.start.row, record.end.row)
+            else {
+                continue;
+            };
+            let Some(first) = frame.row_map.get(first_row as usize) else {
+                continue;
+            };
+            let Some(last) = frame.row_map.iter().rfind(|mapped| {
+                mapped
+                    .live_grid_row
+                    .is_some_and(|row| (record.start.row..=record.end.row).contains(&row))
+            }) else {
+                continue;
+            };
+            frame.math_failures.push(MathFailurePlacement {
+                anchor: MathBlockAnchor::Live {
+                    screen: record.screen,
+                    start: record.start,
+                    end: record.end,
+                    band_start_row: record.start.row,
+                    band_end_row: record.end.row,
+                    generation: record.generation,
+                },
+                top_subpixels: first.top_subpixels,
+                height_subpixels: last
+                    .top_subpixels
+                    .saturating_add(last.height_subpixels)
+                    .saturating_sub(first.top_subpixels),
+            });
+            if record.hovered {
+                frame.status_text = Some(format!("Formula not rendered: {reason}"));
+            }
+        }
         let mut rendered_rows = BTreeSet::new();
-        for placement in frame
-            .math_blocks
-            .iter()
-            .filter(|placement| placement.display == MathBlockDisplay::Rendered)
-        {
+        for placement in frame.math_blocks.iter().filter(|placement| {
+            placement.display == MathBlockDisplay::Rendered
+                && placement.artifact.mode == MathMode::Display
+        }) {
             match placement.anchor {
                 MathBlockAnchor::History { start, end } => {
                     rendered_rows.extend((0..frame.rows.get()).filter(|row| {
@@ -2193,6 +2455,7 @@ impl DualPlaneSession {
             DecorationIntent::Math {
                 byte_start: block.span.byte_start,
                 byte_end: block.span.byte_end,
+                mode: block.span.mode,
                 detection_revision: self.detection_revision,
             },
         );
@@ -2218,7 +2481,7 @@ impl DualPlaneSession {
             .insert(id, DecorationRecord::frozen(versions));
         // Ordinary frozen lines take only the allocation-free delimiter prefilter. A candidate
         // snapshots immutable source here; the worker owns fence/pairing/escape/size detection.
-        if !entry.line.text.contains("$$") {
+        if !entry.line.text.contains('$') {
             return;
         }
         if !self.primary_parked && self.resize_epoch.decorations_allowed() {
@@ -2260,6 +2523,8 @@ impl DualPlaneSession {
                 grid_generation: record.generation,
                 detection_revision: record.detection_revision,
                 layout: self.layout_key,
+                cell_width_subpixels: self.cell_width_subpixels.get(),
+                cell_height_subpixels: self.cell_height_subpixels.get(),
                 inputs: Arc::clone(&record.inputs),
                 start: record.start,
                 end: record.end,
@@ -2272,6 +2537,16 @@ impl DualPlaneSession {
         for task in live_relayouts {
             self.enqueue_live_task(task);
         }
+        // A relayout requeued above carries the record's ORIGINAL grid generation, and a resize
+        // bumps that generation - so every one of those results is rejected on arrival as stale
+        // (`complete_live_worker_result`). The stability pass would normally re-detect, but its
+        // per-row signature gate skips rows whose CONTENT is unchanged, and a resize changes the
+        // layout, not the text. Both locks together left formulas as source forever after any
+        // window resize (user report 2026-07-19). Clearing the signatures is what lets the next
+        // stability pass re-schedule with the CURRENT generation.
+        for row in &mut self.live_rows {
+            row.candidate_signature = None;
+        }
         self.schedule_existing_artifacts();
     }
 
@@ -2283,7 +2558,7 @@ impl DualPlaneSession {
             .document
             .entries()
             .iter()
-            .filter_map(|(id, entry)| entry.line.text.contains("$$").then_some(*id))
+            .filter_map(|(id, entry)| entry.line.text.contains('$').then_some(*id))
             .collect::<Vec<_>>();
         for id in candidates {
             self.schedule_scan(id);
@@ -2300,13 +2575,15 @@ impl DualPlaneSession {
                 text: entry.line.text.clone(),
             })
             .collect::<Vec<_>>();
-        let Some(task) = self
+        let Some(mut task) = self
             .decorations
             .get_mut(&candidate_id)
             .and_then(|record| record.schedule_scan(candidate_id, Arc::from(inputs)))
         else {
             return;
         };
+        task.cell_width_subpixels = self.cell_width_subpixels.get();
+        task.cell_height_subpixels = self.cell_height_subpixels.get();
         self.enqueue_task(task);
     }
 
@@ -2460,13 +2737,22 @@ pub fn render_detection_task(
     if !resolve_detection_task(task) {
         return Err(MathRenderError::NotDetected);
     }
-    engine.render(
-        &task.span.source,
+    let line = task
+        .inputs
+        .iter()
+        .find(|input| input.id == task.transcript_id)
+        .map_or("", |input| input.text.as_str());
+    render_task_math(
+        engine,
+        &task.span,
+        line,
+        task.cell_width_subpixels,
+        task.cell_height_subpixels,
         MathRenderKey {
             dpi_milli: task.versions.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
             foreground_rgb,
-            mode: MathMode::Display,
+            mode: task.span.mode,
         },
     )
 }
@@ -2480,22 +2766,121 @@ pub fn render_live_detection_task(
         return Err(MathRenderError::NotDetected);
     }
     extend_live_task_band(task);
-    engine.render(
-        &task.span.source,
+    let line =
+        live_grid_input(&task.inputs, task.start.row).map_or("", |input| input.text.as_str());
+    render_task_math(
+        engine,
+        &task.span,
+        line,
+        task.cell_width_subpixels,
+        task.cell_height_subpixels,
         MathRenderKey {
             dpi_milli: task.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
             foreground_rgb,
-            mode: MathMode::Display,
+            mode: task.span.mode,
         },
     )
+}
+
+fn render_task_math(
+    engine: &MathEngine,
+    span: &MathSpan,
+    line: &str,
+    cell_width_subpixels: i64,
+    cell_height_subpixels: i64,
+    key: MathRenderKey,
+) -> Result<MathRaster, MathRenderError> {
+    if span.mode == MathMode::Display {
+        return engine.render(&span.source, key);
+    }
+    let Some(first) = span.inline_runs.first() else {
+        return Err(MathRenderError::NotDetected);
+    };
+    let first_byte =
+        usize::try_from(first.byte_start).map_err(|_| MathRenderError::InlineGeometry)?;
+    let Some(prefix) = line.get(..first_byte) else {
+        return Err(MathRenderError::InlineGeometry);
+    };
+    let base_column = UnicodeWidthStr::width(prefix);
+    let cell_width_px = (cell_width_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32).max(1.0);
+    let line_height_px = u32::try_from(
+        cell_height_subpixels
+            .max(1)
+            .saturating_add(SUBPIXELS_PER_PX - 1)
+            .div_euclid(SUBPIXELS_PER_PX),
+    )
+    .unwrap_or(u32::MAX);
+    let mut rendered = Vec::with_capacity(span.inline_runs.len());
+    let mut baseline_px = 0_u32;
+    let mut render_time = Duration::ZERO;
+    for run in &span.inline_runs {
+        let start = usize::try_from(run.byte_start).map_err(|_| MathRenderError::InlineGeometry)?;
+        let end = usize::try_from(run.byte_end).map_err(|_| MathRenderError::InlineGeometry)?;
+        let (Some(before), Some(delimited)) = (line.get(..start), line.get(start..end)) else {
+            return Err(MathRenderError::InlineGeometry);
+        };
+        let column = UnicodeWidthStr::width(before).saturating_sub(base_column);
+        let available_px =
+            (UnicodeWidthStr::width(delimited) as f32 * cell_width_px).floor() as u32;
+        let raster = engine.render(&run.source, key)?;
+        if raster.height_px > line_height_px || raster.width_px > available_px.max(1) {
+            return Err(MathRenderError::InlineGeometry);
+        }
+        baseline_px = baseline_px.max(raster.baseline_px.ceil().max(0.0) as u32);
+        render_time = render_time.saturating_add(raster.render_time);
+        let x = (column as f32 * cell_width_px).round().max(0.0) as u32;
+        rendered.push((x, raster));
+    }
+    let width_px = rendered
+        .iter()
+        .map(|(x, raster)| x.saturating_add(raster.width_px))
+        .max()
+        .ok_or(MathRenderError::InlineGeometry)?;
+    let height_px = rendered
+        .iter()
+        .map(|(_, raster)| {
+            baseline_px
+                .saturating_sub(raster.baseline_px.ceil().max(0.0) as u32)
+                .saturating_add(raster.height_px)
+        })
+        .max()
+        .ok_or(MathRenderError::InlineGeometry)?;
+    if height_px > line_height_px {
+        return Err(MathRenderError::InlineGeometry);
+    }
+    let len = (width_px as usize)
+        .checked_mul(height_px as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(MathRenderError::InvalidDimensions)?;
+    let mut rgba = vec![0_u8; len];
+    for (x, raster) in rendered {
+        let y = baseline_px.saturating_sub(raster.baseline_px.ceil().max(0.0) as u32);
+        for row in 0..raster.height_px {
+            let source_start = row as usize * raster.width_px as usize * 4;
+            let source_end = source_start + raster.width_px as usize * 4;
+            let target_start = ((y + row) as usize * width_px as usize + x as usize) * 4;
+            let target_end = target_start + raster.width_px as usize * 4;
+            rgba[target_start..target_end].copy_from_slice(&raster.rgba[source_start..source_end]);
+        }
+    }
+    Ok(MathRaster {
+        rgba,
+        width_px,
+        height_px,
+        content_height_px: height_px,
+        ascent_px: baseline_px as f32,
+        descent_px: height_px.saturating_sub(baseline_px) as f32,
+        baseline_px: baseline_px as f32,
+        render_time,
+    })
 }
 
 fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> PlaceholderArtifact {
     let height_subpixels = i64::from(raster.height_px).saturating_mul(SUBPIXELS_PER_PX);
     PlaceholderArtifact {
         key: shared_math_artifact_key(
-            MathMode::Display,
+            task.span.mode,
             &task.span.source,
             task.versions.layout,
             task.versions.detection,
@@ -2504,6 +2889,8 @@ fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> Placeholder
         height_subpixels,
         width_px: raster.width_px,
         height_px: raster.height_px,
+        baseline_subpixels: (raster.baseline_px * SUBPIXELS_PER_PX as f32).round() as i64,
+        mode: task.span.mode,
         rgba: Arc::from(raster.rgba),
         render_time: raster.render_time,
     }
@@ -2513,7 +2900,7 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
     let height_subpixels = i64::from(raster.height_px).saturating_mul(SUBPIXELS_PER_PX);
     PlaceholderArtifact {
         key: shared_math_artifact_key(
-            MathMode::Display,
+            task.span.mode,
             &task.span.source,
             task.layout,
             task.detection_revision,
@@ -2522,6 +2909,8 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
         height_subpixels,
         width_px: raster.width_px,
         height_px: raster.height_px,
+        baseline_subpixels: (raster.baseline_px * SUBPIXELS_PER_PX as f32).round() as i64,
+        mode: task.span.mode,
         rgba: Arc::from(raster.rgba),
         render_time: raster.render_time,
     }
@@ -2544,7 +2933,7 @@ fn shared_math_artifact_key(
 fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
     PlaceholderArtifact {
         key: shared_math_artifact_key(
-            MathMode::Display,
+            task.span.mode,
             &task.span.source,
             task.layout,
             task.detection_revision,
@@ -2553,6 +2942,8 @@ fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
         height_subpixels: SUBPIXELS_PER_PX,
         width_px: 1,
         height_px: 1,
+        baseline_subpixels: 0,
+        mode: task.span.mode,
         rgba: Arc::from(vec![0; 4]),
         render_time: Duration::ZERO,
     }
@@ -2579,7 +2970,11 @@ fn project_artifact(
         artifact,
         scale_milli,
         source,
-        transcript_vertical_padding_subpixels(current_layout),
+        if artifact.mode == MathMode::Inline {
+            0
+        } else {
+            transcript_vertical_padding_subpixels(current_layout)
+        },
     )
 }
 
@@ -2601,6 +2996,11 @@ fn project_artifact_at_scale(
         height_px: artifact.height_px,
         height_subpixels: tight_height_subpixels
             .saturating_add(vertical_padding_subpixels.saturating_mul(2)),
+        baseline_subpixels: artifact
+            .baseline_subpixels
+            .saturating_mul(i64::from(scale_milli))
+            / 1000,
+        mode: artifact.mode,
         vertical_padding_subpixels,
         render_scale_milli: scale_milli,
         source,
@@ -2661,7 +3061,11 @@ fn projected_live_artifact(
         artifact,
         scale_milli,
         record.span.source.clone(),
-        cell_height_subpixels.div_euclid(LIVE_MATH_BREATHING_DENOMINATOR),
+        if artifact.mode == MathMode::Inline {
+            0
+        } else {
+            cell_height_subpixels.div_euclid(LIVE_MATH_BREATHING_DENOMINATOR)
+        },
     ))
 }
 
@@ -2695,6 +3099,9 @@ fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetec
 fn extend_live_task_band(task: &mut LiveDetectionTask) {
     task.band_start_row = task.start.row;
     task.band_end_row = task.end.row;
+    if task.span.mode == MathMode::Inline {
+        return;
+    }
     let mut borrowed = 0;
     for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS {
         let Some(row) = task.end.row.checked_add(offset) else {
@@ -2844,6 +3251,8 @@ fn live_task_is_current(
         byte_start: 0,
         byte_end: 0,
         source: String::new(),
+        mode: MathMode::Display,
+        inline_runs: Vec::new(),
     };
     current_task.resolved = false;
     let resolves_now = resolve_live_detection_task(&mut current_task);
@@ -2882,6 +3291,86 @@ fn frame_row_history_id(frame: &ViewportFrame, row: u32) -> Option<TranscriptId>
 
 fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32> {
     (0..frame.rows.get()).find(|row| frame_row_history_id(frame, *row) == Some(id))
+}
+
+fn frozen_inline_cells(
+    frame: &ViewportFrame,
+    id: TranscriptId,
+    line: &FrozenLine,
+    span: &MathSpan,
+) -> Option<(u32, u32, Vec<usize>)> {
+    let columns = frame.columns.get() as usize;
+    let mut row = None;
+    let mut left = u32::MAX;
+    let mut cells = Vec::new();
+    for run in &span.inline_runs {
+        let start = u32::try_from(
+            line.grapheme_boundaries
+                .binary_search(&run.byte_start)
+                .ok()?,
+        )
+        .ok()?;
+        let end =
+            u32::try_from(line.grapheme_boundaries.binary_search(&run.byte_end).ok()?).ok()?;
+        let mut found = false;
+        for (index, anchors) in frame.cell_anchors.iter().enumerate() {
+            let ContentAnchor::History {
+                id: anchor_id,
+                offset,
+                ..
+            } = &anchors.start
+            else {
+                continue;
+            };
+            if *anchor_id != id || offset.0 < start || offset.0 >= end {
+                continue;
+            }
+            let cell_row = u32::try_from(index / columns).ok()?;
+            let cell_column = u32::try_from(index % columns).ok()?;
+            if row.is_some_and(|current| current != cell_row) {
+                return None;
+            }
+            row = Some(cell_row);
+            left = left.min(cell_column);
+            cells.push(index);
+            found = true;
+        }
+        if !found {
+            return None;
+        }
+    }
+    Some((row?, left, cells))
+}
+
+fn live_inline_cells(
+    frame: &ViewportFrame,
+    live_row: u32,
+    text: &str,
+    span: &MathSpan,
+) -> Option<(u32, u32, Vec<usize>)> {
+    let frame_row = frame
+        .row_map
+        .iter()
+        .position(|mapped| mapped.live_grid_row == Some(live_row))?;
+    let columns = frame.columns.get() as usize;
+    let mut left = usize::MAX;
+    let mut cells = Vec::new();
+    for run in &span.inline_runs {
+        let start = usize::try_from(run.byte_start).ok()?;
+        let end = usize::try_from(run.byte_end).ok()?;
+        let start_column = UnicodeWidthStr::width(text.get(..start)?);
+        let end_column = start_column.saturating_add(UnicodeWidthStr::width(text.get(start..end)?));
+        if start_column >= end_column || end_column > columns {
+            return None;
+        }
+        left = left.min(start_column);
+        cells.extend((start_column..end_column).map(|column| frame_row * columns + column));
+    }
+    Some((
+        u32::try_from(frame_row).ok()?,
+        u32::try_from(left).ok()?,
+        cells,
+    ))
 }
 
 fn frame_row_for_live_range(
@@ -3136,6 +3625,7 @@ mod tests {
             content_height_px: height_px.saturating_sub(16),
             ascent_px: 12.0,
             descent_px: 4.0,
+            baseline_px: 12.0,
             render_time: std::time::Duration::from_millis(3),
         }
     }
@@ -3152,6 +3642,101 @@ mod tests {
             shared_math_artifact_key(MathMode::Display, "x", layout, DetectionRevision(1)),
             shared_math_artifact_key(MathMode::Inline, "x", layout, DetectionRevision(1)),
         );
+    }
+
+    #[test]
+    fn inline_candidates_produce_no_work_while_detection_is_disabled() {
+        // Inline `$...$` is off until its disambiguator is sound (see detect_inline_math).
+        // Both of these lines - genuine inline math, and a shell line that the old heuristic
+        // mis-rendered - must now behave identically: no task, no decoration, source intact.
+        for source in [
+            "中文 $E = mc^2$ and $a_1+b_1$ end",
+            "PATH=$HOME/bin:$PATH",
+            "WHERE a=$1 AND b=$2",
+        ] {
+            let mut session = DualPlaneSession::new(nz(80), nz(2));
+            session
+                .feed(format!("{source}\r\nnext\r\ntail").as_bytes())
+                .unwrap();
+            // Scheduling is a coarse "contains $" prescreen; detection is what decides. So a task
+            // may be enqueued, but it must resolve to nothing.
+            if let Some(mut task) = session.take_worker_task() {
+                assert!(
+                    !resolve_detection_task(&mut task),
+                    "{source}: inline detection must not resolve a block while disabled"
+                );
+            }
+            let mut projection = session.new_projection(session.layout_key());
+            session.viewport_frame(&mut projection).unwrap();
+            projection.scroll_to_top();
+            session.refresh_projection(&mut projection);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert!(frame.math_blocks.is_empty(), "{source}");
+            assert!(frame.math_failures.is_empty(), "{source}");
+            assert!(
+                frame.cells.iter().any(|cell| cell.text == "$"),
+                "{source}: the literal text must survive untouched"
+            );
+        }
+    }
+
+    #[test]
+    fn render_failures_are_marked_and_counted_by_stage() {
+        let mut session = DualPlaneSession::new(nz(40), nz(2));
+        session
+            .feed(b"$$a$$\r\n$$b$$\r\n$$c$$\r\none\r\ntwo\r\ntail")
+            .unwrap();
+        let mut tasks = Vec::new();
+        while let Some(task) = session.take_worker_task() {
+            tasks.push(task);
+        }
+        assert_eq!(tasks.len(), 3);
+        for task in &mut tasks {
+            assert!(resolve_detection_task(task));
+        }
+        assert!(
+            session.complete_worker_result(tasks.remove(0), Err(MathRenderError::UnsafeCommand))
+        );
+        assert!(session.complete_worker_result(
+            tasks.remove(0),
+            Err(MathRenderError::Convert("unsupported".to_owned()))
+        ));
+        assert!(session.complete_worker_result(
+            tasks.remove(0),
+            Err(MathRenderError::Compile("unknown variable".to_owned()))
+        ));
+        assert_eq!(session.math_failure_validate_count, 1);
+        assert_eq!(session.math_failure_convert_count, 1);
+        assert_eq!(session.math_failure_compile_count, 1);
+
+        let failed = session
+            .decorations
+            .iter()
+            .find(|(_, record)| record.failure_reason.is_some())
+            .map(|(id, record)| (*id, record.block_end.unwrap()))
+            .unwrap();
+        let anchor = MathBlockAnchor::History {
+            start: failed.0,
+            end: failed.1,
+        };
+        assert!(session.set_math_hover(Some(&anchor)));
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            frame.math_failures.len(),
+            2,
+            "each visible failed source line is marked"
+        );
+        assert!(
+            frame
+                .status_text
+                .as_deref()
+                .is_some_and(|status| status.starts_with("Formula not rendered:"))
+        );
+        assert!(frame.cells.iter().any(|cell| cell.text == "$"));
     }
 
     #[test]
@@ -3201,9 +3786,14 @@ mod tests {
         let mut task = failed.take_worker_task().unwrap();
         assert!(resolve_detection_task(&mut task));
         assert!(failed.complete_worker_result(task, Err(MathRenderError::InvalidDimensions)));
-        assert_eq!(
-            failed.decorations.values().next().unwrap().decoration,
-            DecorationLifecycle::Suppressed
+        // A render that FAILED is distinguishable from one we chose not to decorate: the former
+        // carries a reason and becomes visible to the user (M1.9f), the latter stays silent.
+        // Without the distinction a broken formula is indistinguishable from a literal one.
+        let failed_decoration = failed.decorations.values().next().unwrap();
+        assert_eq!(failed_decoration.decoration, DecorationLifecycle::Failed);
+        assert!(
+            failed_decoration.failure_reason.is_some(),
+            "a failed render must keep its reason so the surface can explain itself"
         );
         let mut projection = failed.new_projection(failed.layout_key());
         failed.viewport_frame(&mut projection).unwrap();
@@ -4387,6 +4977,28 @@ mod tests {
             live_artifact.rgba.as_ref(),
             "live and frozen frame artifacts are byte-identical"
         );
+        assert!(Arc::ptr_eq(
+            &frozen.math_blocks[0].artifact.rgba,
+            &live_artifact.rgba
+        ));
+        let detections = session.live_detection_count;
+        let invalidations = session.live_invalidation_count;
+        for _ in 0..8 {
+            projection.scroll_to_bottom();
+            session.refresh_projection(&mut projection);
+            session.viewport_frame(&mut projection).unwrap();
+            projection.scroll_to_top();
+            session.refresh_projection(&mut projection);
+            let reviewed = session.viewport_frame(&mut projection).unwrap();
+            assert_eq!(reviewed.math_blocks.len(), 1);
+            assert!(Arc::ptr_eq(
+                &reviewed.math_blocks[0].artifact.rgba,
+                &live_artifact.rgba
+            ));
+            assert!(session.take_math_worker_task().is_none());
+        }
+        assert_eq!(session.live_detection_count, detections);
+        assert_eq!(session.live_invalidation_count, invalidations);
     }
 
     #[test]
