@@ -108,6 +108,8 @@ pub struct ProjectedLiveMathArtifact {
     pub screen: ScreenId,
     pub start: GridPoint,
     pub end: GridPoint,
+    pub band_start_row: u32,
+    pub band_end_row: u32,
     pub generation: GridGeneration,
     pub artifact: ProjectedMathArtifact,
 }
@@ -147,6 +149,9 @@ pub struct MathBlockPlacement {
     pub source: String,
     pub artifact: ProjectedMathArtifact,
     pub top_subpixels: i64,
+    /// Offset of rendered pixels within the owned row band. Live artifacts use this to distribute
+    /// spare vertical space evenly without moving the band's clip or cleared terminal rows.
+    pub content_offset_subpixels: i64,
     /// Clip height is part of the block itself (live row band or configured blockMax). The pane
     /// clip remains an independent outer bound in the renderer.
     pub clip_height_subpixels: i64,
@@ -762,6 +767,7 @@ impl ViewportProjection {
                             artifact: artifact.clone(),
                             top_subpixels: visible.len() as i64 * self.cell_height_subpixels.get()
                                 - local_start as i64 * self.cell_height_subpixels.get(),
+                            content_offset_subpixels: 0,
                             clip_height_subpixels: artifact.height_subpixels,
                             display: MathBlockDisplay::Rendered,
                             horizontal_overflow: HorizontalOverflowOwner::Block,
@@ -840,16 +846,22 @@ impl ViewportProjection {
                     || live_math.generation != self.grid_generation
                     || live_math.start.row > live_math.end.row
                     || live_math.end.row >= self.live_rows.get()
+                    || live_math.band_start_row > live_math.start.row
+                    || live_math.band_end_row < live_math.end.row
+                    || live_math.band_end_row >= self.live_rows.get()
                 {
                     continue;
                 }
-                let block_first = live_math.start.row as usize;
-                let block_last = live_math.end.row as usize;
+                let block_first = live_math.band_start_row as usize;
+                let block_last = live_math.band_end_row as usize;
                 if block_last < first || block_first >= last {
                     continue;
                 }
 
-                let row_count = live_math.end.row.saturating_sub(live_math.start.row) + 1;
+                let row_count = live_math
+                    .band_end_row
+                    .saturating_sub(live_math.band_start_row)
+                    + 1;
                 let band_height =
                     i64::from(row_count).saturating_mul(self.cell_height_subpixels.get());
                 let fit_scale_milli = if live_math.artifact.height_subpixels <= band_height {
@@ -877,6 +889,8 @@ impl ViewportProjection {
                     .height_subpixels
                     .saturating_mul(i64::from(fit_scale_milli))
                     / 1000;
+                let content_offset_subpixels =
+                    band_height.saturating_sub(artifact.height_subpixels) / 2;
                 let absolute_start = live_base.saturating_add(block_first);
                 let top_rows = i64::try_from(absolute_start)
                     .unwrap_or(i64::MAX)
@@ -892,9 +906,9 @@ impl ViewportProjection {
                     source: artifact.source.clone(),
                     artifact,
                     top_subpixels: top_rows.saturating_mul(self.cell_height_subpixels.get()),
-                    // The live block owns exactly its source row band. Pane clipping is a
-                    // separate renderer bound, so neither a tall raster nor a partial viewport
-                    // intersection can cover a neighboring terminal row.
+                    content_offset_subpixels,
+                    // The live block owns its source rows plus at most the explicitly borrowed
+                    // blank rows. Pane clipping remains an independent renderer bound.
                     clip_height_subpixels: band_height,
                     display: MathBlockDisplay::Rendered,
                     horizontal_overflow: HorizontalOverflowOwner::Block,

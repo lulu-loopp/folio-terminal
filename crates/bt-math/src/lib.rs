@@ -409,6 +409,7 @@ mod tests {
             .filter(|sample| sample.expected_valid)
             .collect::<Vec<_>>();
         assert_eq!(samples.len(), 310);
+        let sample_count = samples.len();
         let engine = MathEngine::new();
         for sample in samples {
             let raster = engine
@@ -417,6 +418,9 @@ mod tests {
             assert!(raster.ascent_px > 0.0);
             assert!(raster.height_px > 0);
         }
+        eprintln!(
+            "math corpus gate: {sample_count}/{sample_count} valid samples produced metrics and pixels"
+        );
     }
 
     #[test]

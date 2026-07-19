@@ -43,6 +43,9 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// than forty conventional 24-row terminal screens while bounding each shared worker snapshot.
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
+/// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
+/// math while preventing a single formula from consuming an arbitrarily large blank separator.
+const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
 pub const LIVE_MATH_READABLE_SCALE_MILLI: u32 = bt_viewport::LIVE_MATH_READABLE_SCALE_MILLI;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,6 +83,8 @@ struct LiveDecorationRecord {
     generation: GridGeneration,
     start: GridPoint,
     end: GridPoint,
+    band_start_row: u32,
+    band_end_row: u32,
     detection_revision: DetectionRevision,
     layout: LayoutKey,
     rendered_layout: LayoutKey,
@@ -701,6 +706,8 @@ impl DualPlaneSession {
                     row: candidate_row,
                     column: 0,
                 },
+                band_start_row: candidate_row,
+                band_end_row: candidate_row,
                 span: MathSpan {
                     byte_start: 0,
                     byte_end: 0,
@@ -792,7 +799,7 @@ impl DualPlaneSession {
         let removed = self
             .live_decorations
             .iter()
-            .filter(|(_, record)| record.start.row <= row && row <= record.end.row)
+            .filter(|(_, record)| record.band_start_row <= row && row <= record.band_end_row)
             .map(|(start, _)| *start)
             .collect::<Vec<_>>();
         self.live_invalidation_count = self
@@ -844,6 +851,7 @@ impl DualPlaneSession {
                     }
                     SessionMathTask::Live(mut task) => {
                         if resolve_live_detection_task(&mut task) {
+                            extend_live_task_band(&mut task);
                             let artifact = live_placeholder(&task);
                             self.apply_live_worker_completion(task, Some(artifact));
                         }
@@ -924,13 +932,26 @@ impl DualPlaneSession {
 
     pub fn complete_live_worker_result(
         &mut self,
-        task: LiveDetectionTask,
+        mut task: LiveDetectionTask,
         result: Result<MathRaster, MathRenderError>,
     ) -> bool {
+        if task.resolved {
+            extend_live_task_band(&mut task);
+        }
         let render_time = result.as_ref().ok().map(|raster| raster.render_time);
         let artifact = result
             .ok()
             .map(|raster| artifact_from_live_raster(&task, raster));
+        if let Some(artifact) = artifact.as_ref() {
+            fit_live_task_band_to_artifact(
+                &mut task,
+                artifact.height_subpixels,
+                self.cell_height_subpixels.get(),
+            );
+        } else {
+            task.band_start_row = task.start.row;
+            task.band_end_row = task.end.row;
+        }
         let accepted = self.apply_live_worker_completion(task.clone(), artifact);
         if !accepted {
             self.stale_results = self.stale_results.saturating_add(1);
@@ -959,23 +980,11 @@ impl DualPlaneSession {
         {
             return false;
         }
-        let inputs_are_current = task.inputs.iter().all(|input| match input.source {
-            LiveDetectionSource::History { id } => self
-                .document
-                .entries()
-                .get(&id)
-                .is_some_and(|entry| entry.line.text == input.text),
-            LiveDetectionSource::Grid { row, revision } => {
-                self.live_rows
-                    .get(row as usize)
-                    .is_some_and(|state| state.revision == revision)
-                    && self
-                        .terminal
-                        .visible_row(row)
-                        .is_some_and(|captured| captured_row_text(&captured) == input.text)
-            }
-        });
-        if !inputs_are_current {
+        // Only the source rows and borrowed row band are byte/revision dependencies. The rest of
+        // the 1,024-line detector snapshot is semantic context: rerunning detection below catches
+        // fence/delimiter state changes without rejecting ordinary spinner or status-line churn.
+        let current_inputs = self.live_detection_context();
+        if !live_task_is_current(&task, current_inputs) {
             return false;
         }
         if !task.resolved {
@@ -1004,6 +1013,8 @@ impl DualPlaneSession {
                 generation: task.grid_generation,
                 start: task.start,
                 end: task.end,
+                band_start_row: task.band_start_row,
+                band_end_row: task.band_end_row,
                 detection_revision: task.detection_revision,
                 layout: task.layout,
                 rendered_layout: task.layout,
@@ -1495,6 +1506,8 @@ impl DualPlaneSession {
                     screen: record.screen,
                     start: record.start,
                     end: record.end,
+                    band_start_row: record.band_start_row,
+                    band_end_row: record.band_end_row,
                     generation: record.generation,
                     artifact,
                 })
@@ -1583,6 +1596,7 @@ impl DualPlaneSession {
                     .map_or_else(String::new, |span| span.source.clone()),
                 artifact,
                 top_subpixels: i64::from(first_row) * self.cell_height_subpixels.get(),
+                content_offset_subpixels: 0,
                 clip_height_subpixels: i64::from(last_row - first_row + 1)
                     * self.cell_height_subpixels.get(),
                 display: MathBlockDisplay::Source,
@@ -1603,15 +1617,18 @@ impl DualPlaneSession {
             let Some(artifact) = projected_live_artifact(record, self.layout_key) else {
                 continue;
             };
-            let row_count = record.end.row.saturating_sub(record.start.row) + 1;
+            let row_count = record.band_end_row.saturating_sub(record.band_start_row) + 1;
             let band_height = i64::from(row_count).saturating_mul(self.cell_height_subpixels.get());
-            let Some((visible_row, source_row)) =
-                frame_row_for_live_range(frame, record.screen, record.start.row, record.end.row)
-            else {
+            let Some((visible_row, source_row)) = frame_row_for_live_range(
+                frame,
+                record.screen,
+                record.band_start_row,
+                record.band_end_row,
+            ) else {
                 continue;
             };
             let top_subpixels = i64::from(visible_row) * self.cell_height_subpixels.get()
-                - i64::from(source_row - record.start.row) * self.cell_height_subpixels.get();
+                - i64::from(source_row - record.band_start_row) * self.cell_height_subpixels.get();
             frame.math_blocks.push(MathBlockPlacement {
                 start: TranscriptId(0),
                 anchor: MathBlockAnchor::Live {
@@ -1623,6 +1640,7 @@ impl DualPlaneSession {
                 source: record.span.source.clone(),
                 artifact,
                 top_subpixels,
+                content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
                 horizontal_overflow: overflow,
@@ -1995,6 +2013,8 @@ impl DualPlaneSession {
                 inputs: Arc::clone(&record.inputs),
                 start: record.start,
                 end: record.end,
+                band_start_row: record.band_start_row,
+                band_end_row: record.band_end_row,
                 span: record.span.clone(),
                 resolved: true,
             });
@@ -2208,6 +2228,7 @@ pub fn render_live_detection_task(
     if !resolve_live_detection_task(task) {
         return Err(MathRenderError::NotDetected);
     }
+    extend_live_task_band(task);
     engine.render(
         &task.span.source,
         MathRenderKey {
@@ -2372,6 +2393,117 @@ fn projected_live_artifact(
         scale_milli,
         record.span.source.clone(),
     ))
+}
+
+fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetectionInput> {
+    inputs.iter().find(|input| {
+        matches!(input.source, LiveDetectionSource::Grid { row: input_row, .. } if input_row == row)
+    })
+}
+
+fn extend_live_task_band(task: &mut LiveDetectionTask) {
+    task.band_start_row = task.start.row;
+    task.band_end_row = task.end.row;
+    for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS {
+        let Some(row) = task.end.row.checked_add(offset) else {
+            break;
+        };
+        let Some(input) = live_grid_input(&task.inputs, row) else {
+            break;
+        };
+        if !input.text.chars().all(char::is_whitespace) {
+            break;
+        }
+        task.band_end_row = row;
+    }
+}
+
+fn fit_live_task_band_to_artifact(
+    task: &mut LiveDetectionTask,
+    artifact_height_subpixels: i64,
+    cell_height_subpixels: i64,
+) {
+    let source_rows = task.end.row.saturating_sub(task.start.row) + 1;
+    let available_rows = task
+        .band_end_row
+        .saturating_sub(task.band_start_row)
+        .saturating_add(1);
+    let height = artifact_height_subpixels.max(1);
+    let required_height = height
+        .saturating_mul(i64::from(LIVE_MATH_READABLE_SCALE_MILLI))
+        .saturating_add(999)
+        / 1000;
+    let required_rows = u32::try_from(
+        required_height
+            .saturating_add(cell_height_subpixels - 1)
+            .div_euclid(cell_height_subpixels),
+    )
+    .unwrap_or(u32::MAX);
+    let selected_rows = required_rows.max(source_rows).min(available_rows);
+    let selected_height = i64::from(selected_rows).saturating_mul(cell_height_subpixels);
+    let selected_scale = if height <= selected_height {
+        1000
+    } else {
+        u32::try_from(selected_height.saturating_mul(1000).div_euclid(height)).unwrap_or(u32::MAX)
+    };
+    let owned_rows = if selected_scale >= LIVE_MATH_READABLE_SCALE_MILLI {
+        selected_rows
+    } else {
+        source_rows
+    };
+    task.band_start_row = task.start.row;
+    task.band_end_row = task.start.row.saturating_add(owned_rows.saturating_sub(1));
+}
+
+fn live_task_is_current(
+    task: &LiveDetectionTask,
+    current_inputs: Arc<[LiveDetectionInput]>,
+) -> bool {
+    let dependency_start = if task.resolved {
+        task.band_start_row
+    } else {
+        task.candidate_row
+    };
+    let dependency_end = if task.resolved {
+        task.band_end_row
+    } else {
+        task.candidate_row
+    };
+    for row in dependency_start..=dependency_end {
+        let Some(snapshot) = live_grid_input(&task.inputs, row) else {
+            return false;
+        };
+        let Some(current) = live_grid_input(&current_inputs, row) else {
+            return false;
+        };
+        if snapshot != current {
+            return false;
+        }
+    }
+
+    let mut current_task = task.clone();
+    current_task.inputs = current_inputs;
+    current_task.start = GridPoint {
+        row: task.candidate_row,
+        column: 0,
+    };
+    current_task.end = current_task.start;
+    current_task.band_start_row = task.candidate_row;
+    current_task.band_end_row = task.candidate_row;
+    current_task.span = MathSpan {
+        byte_start: 0,
+        byte_end: 0,
+        source: String::new(),
+    };
+    current_task.resolved = false;
+    let resolves_now = resolve_live_detection_task(&mut current_task);
+    if !task.resolved {
+        return !resolves_now;
+    }
+    resolves_now
+        && current_task.start == task.start
+        && current_task.end == task.end
+        && current_task.span == task.span
 }
 
 fn captured_row_text(row: &CapturedRow) -> String {
@@ -2993,6 +3125,178 @@ mod tests {
     }
 
     #[test]
+    fn completed_live_raster_ignores_spinner_churn_but_rejects_source_or_fence_changes() {
+        let start = Instant::now();
+        let mut spinner = DualPlaneSession::new(nz(40), nz(3));
+        spinner.feed_at(b"$$x$$\r\nspin-0", start).unwrap();
+        spinner.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        let mut task = spinner.take_live_worker_task().unwrap();
+        assert!(resolve_live_detection_task(&mut task));
+        spinner
+            .feed_at(b"\r\x1b[2Kspin-1", start + Duration::from_millis(250))
+            .unwrap();
+        assert!(spinner.complete_live_worker_result(task, Ok(synthetic_raster(32, 18))));
+        assert_eq!(spinner.stale_results(), 0);
+        assert_eq!(spinner.live_detection_count(), 1);
+        let mut projection = spinner.new_projection(spinner.layout_key());
+        assert_eq!(
+            spinner
+                .viewport_frame(&mut projection)
+                .unwrap()
+                .math_blocks
+                .len(),
+            1,
+            "an unrelated 100 ms spinner update does not discard or retry the raster"
+        );
+
+        let mut changed = DualPlaneSession::new(nz(40), nz(2));
+        changed.feed_at(b"$$x$$\r\nused", start).unwrap();
+        changed.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        let mut task = changed.take_live_worker_task().unwrap();
+        assert!(resolve_live_detection_task(&mut task));
+        changed
+            .feed_at(b"\x1b[1;1H\x1b[2K$$y$$", start + Duration::from_millis(250))
+            .unwrap();
+        assert!(!changed.complete_live_worker_result(task, Ok(synthetic_raster(32, 18))));
+        let mut projection = changed.new_projection(changed.layout_key());
+        let source = changed.viewport_frame(&mut projection).unwrap();
+        assert!(source.math_blocks.is_empty());
+        assert!(source.cells.iter().any(|cell| cell.text == "$"));
+
+        let mut fenced = DualPlaneSession::new(nz(40), nz(3));
+        fenced.feed_at(b"plain\r\n$$z$$\r\nused", start).unwrap();
+        fenced.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        let mut task = fenced.take_live_worker_task().unwrap();
+        assert!(resolve_live_detection_task(&mut task));
+        fenced
+            .feed_at(
+                b"\x1b[1;1H\x1b[2K```text",
+                start + Duration::from_millis(250),
+            )
+            .unwrap();
+        assert!(!fenced.complete_live_worker_result(task, Ok(synthetic_raster(32, 18))));
+    }
+
+    #[test]
+    fn live_band_borrows_only_contiguous_blank_rows_and_invalidates_on_write() {
+        let start = Instant::now();
+        let mut primary = DualPlaneSession::new(nz(40), nz(3));
+        primary.feed_at(b"$$x$$\r\n\r\nbarrier", start).unwrap();
+        primary.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut primary, synthetic_raster(40, 40)),
+            1
+        );
+        let record = primary.live_decorations.get(&0).unwrap();
+        assert_eq!((record.band_start_row, record.band_end_row), (0, 1));
+        let mut projection = primary.new_projection(primary.layout_key());
+        let borrowed = primary.viewport_frame(&mut projection).unwrap();
+        assert_eq!(borrowed.math_blocks.len(), 1);
+        assert_eq!(
+            borrowed.math_blocks[0].clip_height_subpixels,
+            2 * SPIKE_CELL_HEIGHT_SUBPIXELS.get()
+        );
+        assert_eq!(borrowed.math_blocks[0].artifact.render_scale_milli, 900);
+
+        primary
+            .feed_at(
+                b"\x1b[2;1Hborrowed-row-now-used",
+                start + Duration::from_millis(210),
+            )
+            .unwrap();
+        let reverted = primary.viewport_frame(&mut projection).unwrap();
+        assert!(reverted.math_blocks.is_empty());
+        assert!(reverted.cells.iter().any(|cell| cell.text == "$"));
+
+        let mut inflight = DualPlaneSession::new(nz(40), nz(3));
+        inflight.feed_at(b"$$x$$\r\n\r\nbarrier", start).unwrap();
+        inflight.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        let mut task = inflight.take_live_worker_task().unwrap();
+        assert!(resolve_live_detection_task(&mut task));
+        inflight
+            .feed_at(
+                b"\x1b[2;1Hwritten-during-raster",
+                start + Duration::from_millis(210),
+            )
+            .unwrap();
+        assert!(!inflight.complete_live_worker_result(task, Ok(synthetic_raster(40, 40))));
+
+        let mut blocked = DualPlaneSession::new(nz(40), nz(3));
+        blocked.feed_at(b"$$x$$\r\nbarrier\r\n", start).unwrap();
+        blocked.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut blocked, synthetic_raster(40, 40)),
+            1
+        );
+        assert_eq!(blocked.live_decorations.get(&0).unwrap().band_end_row, 0);
+        let mut projection = blocked.new_projection(blocked.layout_key());
+        let source = blocked.viewport_frame(&mut projection).unwrap();
+        assert!(source.math_blocks.is_empty());
+        assert!(source.cells.iter().any(|cell| cell.text == "$"));
+
+        let mut capped = DualPlaneSession::new(nz(40), nz(5));
+        capped
+            .feed_at(b"$$x$$\r\n\r\n\r\n\r\nbarrier", start)
+            .unwrap();
+        capped.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut capped, synthetic_raster(40, 70)),
+            1
+        );
+        assert_eq!(
+            capped.live_decorations.get(&0).unwrap().band_end_row,
+            2,
+            "the third contiguous blank row remains outside the two-row borrowing cap"
+        );
+
+        let mut alternate = DualPlaneSession::new(nz(40), nz(3));
+        alternate
+            .feed_at(b"\x1b[?1049h$$a$$\r\n\r\nbarrier", start)
+            .unwrap();
+        alternate.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut alternate, synthetic_raster(40, 40)),
+            1
+        );
+        assert_eq!(alternate.live_decorations.get(&0).unwrap().band_end_row, 1);
+        let mut projection = alternate.new_projection(alternate.layout_key());
+        assert_eq!(
+            alternate
+                .viewport_frame(&mut projection)
+                .unwrap()
+                .math_blocks
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn rendered_live_pixels_are_vertically_centered_in_the_owned_band() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session
+            .feed_at(b"$$\r\nx + y\r\n$$\r\nbarrier", start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let placement = &frame.math_blocks[0];
+        let top_gap = placement.content_offset_subpixels;
+        let bottom_gap = placement
+            .clip_height_subpixels
+            .saturating_sub(top_gap)
+            .saturating_sub(placement.artifact.height_subpixels);
+        assert!(
+            (top_gap - bottom_gap).abs() <= SUBPIXELS_PER_PX,
+            "top={top_gap} bottom={bottom_gap}"
+        );
+    }
+
+    #[test]
     fn live_artifacts_cross_session_projection_and_frame_on_both_screens() {
         let start = Instant::now();
         let mut alternate = DualPlaneSession::new(nz(40), nz(6));
@@ -3097,7 +3401,7 @@ mod tests {
             "leaving alt invalidates every transient anchor"
         );
 
-        let mut tiny = DualPlaneSession::new(nz(40), nz(2));
+        let mut tiny = DualPlaneSession::new(nz(40), nz(1));
         tiny.feed_at(b"$$tiny$$", start).unwrap();
         tiny.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(

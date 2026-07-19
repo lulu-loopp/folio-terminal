@@ -584,7 +584,7 @@ impl Runtime {
         if self.ime_active {
             let area = self.renderer.ime_cursor_area(&composed.frame);
             if let Some(area) = self.ime_cursor_throttle.offer(area, Instant::now()) {
-                self.apply_ime_cursor_area(area)?;
+                self.apply_ime_cursor_area(area);
             }
         }
         self.session
@@ -687,24 +687,22 @@ impl Runtime {
         self.resize_trace_logged_events = trace.len();
     }
 
-    fn apply_ime_cursor_area(&mut self, area: ImeCursorArea) -> Result<()> {
+    fn apply_ime_cursor_area(&mut self, area: ImeCursorArea) {
         // Renderer pixels, winit PhysicalPosition, and a per-monitor-aware Win32 client area all
         // share the client-origin device-pixel axis. No screen-origin translation belongs here.
         self.window.set_ime_cursor_area(
             PhysicalPosition::new(area.x, area.y),
             PhysicalSize::new(area.width, area.height),
         );
-        self.ime_system_caret
-            .update(area.x, area.y)
-            .map_err(|error| anyhow!(error))
-            .context("update Chinese IME 1x1 system caret")
+        if let Err(error) = self.ime_system_caret.update(area.x, area.y) {
+            eprintln!("Chinese IME system-caret update ignored: {error}");
+        }
     }
 
-    fn flush_ime_cursor_area(&mut self, now: Instant) -> Result<()> {
+    fn flush_ime_cursor_area(&mut self, now: Instant) {
         if let Some(area) = self.ime_cursor_throttle.flush_due(now) {
-            self.apply_ime_cursor_area(area)?;
+            self.apply_ime_cursor_area(area);
         }
-        Ok(())
     }
 
     fn drain_pty(&mut self) -> Result<()> {
@@ -844,30 +842,34 @@ impl Runtime {
         Ok(())
     }
 
-    fn copy_math_latex(&mut self, anchor: &MathBlockAnchor) -> Result<()> {
+    fn copy_math_latex(&mut self, anchor: &MathBlockAnchor) {
         let Some(source) = self.session.math_source(anchor) else {
-            return Ok(());
+            return;
         };
-        let hwnd = window_hwnd(&self.window)?;
-        bt_platform::set_clipboard_text(hwnd, source)
-            .map_err(|error| anyhow!(error))
-            .context("copy original LaTeX source to clipboard")
+        let result = window_hwnd(&self.window).and_then(|hwnd| {
+            bt_platform::set_clipboard_text(hwnd, source)
+                .map_err(|error| anyhow!(error))
+                .context("copy original LaTeX source to clipboard")
+        });
+        recoverable_clipboard_write(result, "formula copy");
     }
 
-    fn apply_math_context_menu_result(&mut self) -> Result<()> {
+    fn apply_math_context_menu_result(&mut self) {
         let Some(result) = self.math_context_menu.take_result() else {
-            return Ok(());
+            return;
         };
         let anchor = self.pending_math_context_anchor.take();
         self.mouse_route = None;
-        let selected = result
-            .map_err(|error| anyhow!(error))
-            .context("show formula context menu")?;
-        if selected {
-            let anchor = anchor.context("formula context-menu result has no pending anchor")?;
-            self.copy_math_latex(&anchor)?;
+        match (result, anchor) {
+            (Ok(true), Some(anchor)) => self.copy_math_latex(&anchor),
+            (Ok(true), None) => {
+                eprintln!("recoverable formula context-menu result had no pending anchor");
+            }
+            (Ok(false), _) => {}
+            (Err(error), _) => {
+                eprintln!("recoverable formula context-menu failure: {error}");
+            }
         }
-        Ok(())
     }
 
     fn publish_interaction_frame(&mut self) -> Result<()> {
@@ -913,10 +915,14 @@ impl Runtime {
         let Some(text) = self.session.selection_text() else {
             return Ok(());
         };
-        let hwnd = window_hwnd(&self.window)?;
-        bt_platform::set_clipboard_text(hwnd, &text)
-            .map_err(|error| anyhow!(error))
-            .context("write terminal selection to clipboard")?;
+        let result = window_hwnd(&self.window).and_then(|hwnd| {
+            bt_platform::set_clipboard_text(hwnd, &text)
+                .map_err(|error| anyhow!(error))
+                .context("write terminal selection to clipboard")
+        });
+        if !recoverable_clipboard_write(result, "copy") {
+            return Ok(());
+        }
         self.clear_selection();
         self.publish_interaction_frame()
     }
@@ -1100,15 +1106,17 @@ impl Runtime {
                     }
                 }
                 (MouseButton::Left, MathHitTarget::CopyLatex) => {
-                    self.copy_math_latex(&math_hit.anchor)?;
+                    self.copy_math_latex(&math_hit.anchor);
                 }
-                (MouseButton::Right, _) => {
-                    self.math_context_menu
-                        .request()
-                        .map_err(|error| anyhow!(error))
-                        .context("queue formula context menu")?;
-                    self.pending_math_context_anchor = Some(math_hit.anchor.clone());
-                }
+                (MouseButton::Right, _) => match self.math_context_menu.request() {
+                    Ok(true) => {
+                        self.pending_math_context_anchor = Some(math_hit.anchor.clone());
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        eprintln!("recoverable formula context-menu queue failure: {error}");
+                    }
+                },
                 (MouseButton::Left, MathHitTarget::Block) => {
                     if self.session.view_selection().is_some() {
                         self.clear_selection();
@@ -1172,13 +1180,11 @@ impl Runtime {
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => {
-                let multiplier = match bt_platform::wheel_scroll_amount()
-                    .map_err(|error| anyhow!(error))
-                    .context("read system wheel scroll-line setting")?
-                {
-                    bt_platform::WheelScrollAmount::Lines(lines) => lines as f64,
-                    bt_platform::WheelScrollAmount::Page => self.grid.rows.get() as f64,
-                };
+                let multiplier =
+                    match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
+                        bt_platform::WheelScrollAmount::Lines(lines) => lines as f64,
+                        bt_platform::WheelScrollAmount::Page => self.grid.rows.get() as f64,
+                    };
                 self.line_wheel_remainder += f64::from(y) * multiplier;
                 let lines = self.line_wheel_remainder.trunc() as i32;
                 self.line_wheel_remainder -= f64::from(lines);
@@ -1316,13 +1322,13 @@ impl Runtime {
     }
 
     fn paste_from_clipboard(&mut self) -> Result<()> {
-        let hwnd = window_hwnd(&self.window)?;
-        let text = match bt_platform::clipboard_text(hwnd) {
-            Ok(text) => text,
-            Err(error) => {
-                eprintln!("clipboard does not contain readable text; paste ignored: {error}");
-                return Ok(());
-            }
+        let result = window_hwnd(&self.window).and_then(|hwnd| {
+            bt_platform::clipboard_text(hwnd)
+                .map_err(|error| anyhow!(error))
+                .context("read clipboard text")
+        });
+        let Some(text) = recoverable_clipboard_read(result) else {
+            return Ok(());
         };
         let bytes = input::paste_bytes(&text, self.session.bracketed_paste_mode());
         self.return_to_live_for_input();
@@ -1761,10 +1767,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         let Some(runtime) = self.runtime.as_mut() else {
             return;
         };
-        if let Err(error) = runtime.apply_math_context_menu_result() {
-            self.fail(event_loop, error);
-            return;
-        }
+        runtime.apply_math_context_menu_result();
         if let Err(error) = runtime.drain_pty() {
             self.fail(event_loop, error);
             return;
@@ -1778,10 +1781,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
-        if let Err(error) = runtime.flush_ime_cursor_area(now) {
-            self.fail(event_loop, error);
-            return;
-        }
+        runtime.flush_ime_cursor_area(now);
         if let Err(error) = runtime.finish_resize_if_quiescent(now) {
             self.fail(event_loop, error);
             return;
@@ -1838,6 +1838,41 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
 
 fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
+}
+
+fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("clipboard is temporarily unavailable; {action} ignored: {error:#}");
+            false
+        }
+    }
+}
+
+fn recoverable_clipboard_read(result: Result<String>) -> Option<String> {
+    match result {
+        Ok(text) => Some(text),
+        Err(error) => {
+            eprintln!("clipboard does not contain readable text; paste ignored: {error:#}");
+            None
+        }
+    }
+}
+
+fn recoverable_wheel_scroll_amount(
+    result: std::result::Result<bt_platform::WheelScrollAmount, String>,
+) -> bt_platform::WheelScrollAmount {
+    match result {
+        Ok(amount) => amount,
+        Err(error) => {
+            const FALLBACK_WHEEL_LINES: u32 = 3;
+            eprintln!(
+                "system wheel scroll setting unavailable; using {FALLBACK_WHEEL_LINES} lines: {error}"
+            );
+            bt_platform::WheelScrollAmount::Lines(FALLBACK_WHEEL_LINES)
+        }
+    }
 }
 
 fn protocol_mouse_button(button: MouseButton) -> Option<input::MouseProtocolButton> {
@@ -2288,6 +2323,62 @@ mod tests {
         assert_eq!(
             input::paste_bytes("one\r\ntwo\n", session.bracketed_paste_mode()),
             b"one\rtwo\r"
+        );
+    }
+
+    #[test]
+    fn unavailable_clipboard_copy_keeps_selection_and_allows_a_retry() {
+        let mut selection = Some("retry me".to_owned());
+
+        let copied = recoverable_clipboard_write(
+            Err(anyhow!("injected clipboard owner contention")),
+            "copy",
+        );
+        if copied {
+            selection = None;
+        }
+        assert!(
+            !copied,
+            "clipboard contention must not escape as a fatal error"
+        );
+        assert_eq!(selection.as_deref(), Some("retry me"));
+
+        let copied = recoverable_clipboard_write(Ok(()), "copy");
+        if copied {
+            selection = None;
+        }
+        assert!(copied);
+        assert_eq!(selection, None);
+    }
+
+    #[test]
+    fn unavailable_clipboard_paste_keeps_state_and_allows_a_retry() {
+        let mut returned_to_live = false;
+        let mut pty_writes = Vec::new();
+
+        let unavailable =
+            recoverable_clipboard_read(Err(anyhow!("injected clipboard owner contention")));
+        if let Some(text) = unavailable {
+            returned_to_live = true;
+            pty_writes.push(text);
+        }
+        assert!(!returned_to_live);
+        assert!(pty_writes.is_empty());
+
+        let retry = recoverable_clipboard_read(Ok("paste me".to_owned()));
+        if let Some(text) = retry {
+            returned_to_live = true;
+            pty_writes.push(text);
+        }
+        assert!(returned_to_live);
+        assert_eq!(pty_writes, ["paste me"]);
+    }
+
+    #[test]
+    fn unavailable_system_wheel_setting_uses_the_windows_default() {
+        assert_eq!(
+            recoverable_wheel_scroll_amount(Err("injected SPI failure".to_owned())),
+            bt_platform::WheelScrollAmount::Lines(3)
         );
     }
 

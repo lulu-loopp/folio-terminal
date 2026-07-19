@@ -1982,7 +1982,11 @@ impl Renderer {
                 continue;
             };
             let scale = placement.artifact.render_scale_milli as f32 / 1000.0;
-            let block_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+            let block_top = pane_top
+                + placement
+                    .top_subpixels
+                    .saturating_add(placement.content_offset_subpixels) as f32
+                    / SUBPIXELS_PER_PX as f32;
             for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
                 tile_geometry.into_iter().enumerate()
             {
@@ -2035,7 +2039,8 @@ impl Renderer {
             .min(self.config.width as f32);
         let pane_top = self.metrics.padding_px;
         let pane_bottom = self.config.height as f32;
-        let top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+        let band_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+        let top = band_top + placement.content_offset_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let clip_height = placement.clip_height_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32;
         let scaled_width = if placement.display == MathBlockDisplay::Source {
             placement
@@ -2064,9 +2069,9 @@ impl Renderer {
         let block = [pane_left, visible_top, visible_right, visible_bottom];
         let clip = [
             pane_left,
-            top.max(pane_top),
+            band_top.max(pane_top),
             pane_right,
-            (top + clip_height).min(pane_bottom),
+            (band_top + clip_height).min(pane_bottom),
         ];
         let (eye, copy) = if placement.toolbar_visible {
             let scale = self.metrics.scale_factor as f32;

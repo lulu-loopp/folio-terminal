@@ -53,6 +53,12 @@ mod windows_impl {
 
     static WINDOW_CLASS_BACKGROUND: OnceLock<Result<(), String>> = OnceLock::new();
     const CF_UNICODETEXT: u32 = 13;
+    const CLIPBOARD_OPEN_RETRY_DELAYS: [std::time::Duration; 4] = [
+        std::time::Duration::from_millis(5),
+        std::time::Duration::from_millis(10),
+        std::time::Duration::from_millis(20),
+        std::time::Duration::from_millis(40),
+    ];
     const WHEEL_PAGESCROLL: u32 = u32::MAX;
     const DEFERRED_MATH_MENU_MESSAGE: u32 = WM_APP + 0x4b7;
     const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
@@ -78,13 +84,46 @@ mod windows_impl {
         })
     }
 
+    fn retry_open_clipboard(
+        mut open: impl FnMut() -> Result<(), String>,
+        mut wait: impl FnMut(std::time::Duration),
+    ) -> Result<(), String> {
+        for delay in CLIPBOARD_OPEN_RETRY_DELAYS {
+            match open() {
+                Ok(()) => return Ok(()),
+                Err(_) => wait(delay),
+            }
+        }
+        open().map_err(|error| {
+            format!(
+                "OpenClipboard failed after {} attempts (retry wait capped at {} ms): {error}",
+                CLIPBOARD_OPEN_RETRY_DELAYS.len() + 1,
+                CLIPBOARD_OPEN_RETRY_DELAYS
+                    .iter()
+                    .map(std::time::Duration::as_millis)
+                    .sum::<u128>()
+            )
+        })
+    }
+
+    fn open_clipboard_with_retry(hwnd: HWND) -> Result<(), String> {
+        retry_open_clipboard(
+            || {
+                // SAFETY: the caller supplies winit's live HWND and all clipboard transactions run
+                // on its event-loop thread. A failed open acquires no resource that needs cleanup.
+                unsafe { OpenClipboard(Some(hwnd)) }.map_err(|error| error.to_string())
+            },
+            std::thread::sleep,
+        )
+    }
+
     pub fn clipboard_text(hwnd: NonZeroIsize) -> Result<String, String> {
         let hwnd = HWND(hwnd.get() as *mut c_void);
         // SAFETY: all calls run on winit's event-loop thread. The clipboard remains open while the
         // borrowed global-memory handle is locked, its UTF-16 content is copied, and then both the
         // memory and clipboard are released before returning.
+        open_clipboard_with_retry(hwnd)?;
         unsafe {
-            OpenClipboard(Some(hwnd)).map_err(|error| format!("OpenClipboard failed: {error}"))?;
             let result = (|| {
                 IsClipboardFormatAvailable(CF_UNICODETEXT)
                     .map_err(|_| "clipboard has no Unicode text".to_owned())?;
@@ -129,8 +168,8 @@ mod windows_impl {
         // SAFETY: the event-loop thread owns the clipboard for this transaction. The movable
         // allocation is locked only while copying the NUL-terminated UTF-16 payload. After a
         // successful SetClipboardData Windows owns it; every earlier failure frees it locally.
+        open_clipboard_with_retry(hwnd)?;
         unsafe {
-            OpenClipboard(Some(hwnd)).map_err(|error| format!("OpenClipboard failed: {error}"))?;
             let result = (|| {
                 EmptyClipboard().map_err(|error| format!("EmptyClipboard failed: {error}"))?;
                 let byte_len = units.len() * size_of::<u16>();
@@ -178,13 +217,13 @@ mod windows_impl {
             }
         }
 
-        fn begin_request(&self) -> Result<(), String> {
+        fn begin_request(&self) -> bool {
             let mut phase = self.phase.lock().unwrap_or_else(|error| error.into_inner());
             if !matches!(*phase, DeferredMenuPhase::Idle) {
-                return Err("formula context menu request is already pending".to_owned());
+                return false;
             }
             *phase = DeferredMenuPhase::Posted;
-            Ok(())
+            true
         }
 
         fn cancel_request(&self) {
@@ -256,8 +295,12 @@ mod windows_impl {
             Ok(Self { hwnd, state })
         }
 
-        pub fn request(&self) -> Result<(), String> {
-            self.state.begin_request()?;
+        /// Queue the native menu once. A second request while the first is posted, showing, or
+        /// waiting to be consumed is an ordinary coalesced UI race and returns `Ok(false)`.
+        pub fn request(&self) -> Result<bool, String> {
+            if !self.state.begin_request() {
+                return Ok(false);
+            }
             // SAFETY: PostMessageW copies these value parameters into the owning thread's queue
             // and never dispatches the subclass synchronously on this callback stack.
             if let Err(error) = unsafe {
@@ -271,7 +314,7 @@ mod windows_impl {
                 self.state.cancel_request();
                 return Err(format!("PostMessageW(math menu) failed: {error}"));
             }
-            Ok(())
+            Ok(true)
         }
 
         pub fn take_result(&self) -> Option<Result<bool, String>> {
@@ -486,7 +529,48 @@ mod windows_impl {
 
     #[cfg(test)]
     mod tests {
-        use super::{DeferredMenuState, primary_language_id};
+        use super::{
+            CLIPBOARD_OPEN_RETRY_DELAYS, DeferredMenuState, primary_language_id,
+            retry_open_clipboard,
+        };
+
+        #[test]
+        fn clipboard_open_retry_is_bounded_and_can_recover() {
+            let mut attempts = 0;
+            let mut waits = Vec::new();
+            let result = retry_open_clipboard(
+                || {
+                    attempts += 1;
+                    (attempts == 3)
+                        .then_some(())
+                        .ok_or_else(|| "clipboard busy".to_owned())
+                },
+                |delay| waits.push(delay),
+            );
+
+            assert_eq!(result, Ok(()));
+            assert_eq!(attempts, 3);
+            assert_eq!(waits, CLIPBOARD_OPEN_RETRY_DELAYS[..2]);
+        }
+
+        #[test]
+        fn clipboard_open_retry_reports_the_last_failure_after_its_wait_budget() {
+            let mut attempts = 0;
+            let mut waits = Vec::new();
+            let error = retry_open_clipboard(
+                || {
+                    attempts += 1;
+                    Err(format!("busy-{attempts}"))
+                },
+                |delay| waits.push(delay),
+            )
+            .unwrap_err();
+
+            assert_eq!(attempts, CLIPBOARD_OPEN_RETRY_DELAYS.len() + 1);
+            assert_eq!(waits, CLIPBOARD_OPEN_RETRY_DELAYS);
+            assert!(error.contains("busy-5"));
+            assert!(error.contains("75 ms"));
+        }
 
         #[test]
         fn chinese_system_caret_gate_uses_primary_language_bits() {
@@ -499,14 +583,14 @@ mod windows_impl {
         fn deferred_menu_state_requires_posted_dispatch_before_showing() {
             let state = DeferredMenuState::new();
             assert_eq!(state.take_result(), None);
-            state.begin_request().unwrap();
-            assert!(state.begin_request().is_err());
+            assert!(state.begin_request());
+            assert!(!state.begin_request());
             assert_eq!(state.take_result(), None);
             assert!(state.begin_showing());
             assert!(!state.begin_showing());
             state.complete(Ok(true));
             assert_eq!(state.take_result(), Some(Ok(true)));
-            state.begin_request().unwrap();
+            assert!(state.begin_request());
         }
     }
 }

@@ -79,6 +79,10 @@ pub struct LiveDetectionTask {
     pub inputs: Arc<[LiveDetectionInput]>,
     pub start: GridPoint,
     pub end: GridPoint,
+    /// Inclusive live-grid row band reserved for presentation. Detection initializes this to the
+    /// source span; the session may extend it over adjacent blank rows before rasterization.
+    pub band_start_row: u32,
+    pub band_end_row: u32,
     pub span: MathSpan,
     pub resolved: bool,
 }
@@ -465,6 +469,8 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
         row: *end_row,
         column: u32::try_from(end_text.len()).unwrap_or(u32::MAX),
     };
+    task.band_start_row = *start_row;
+    task.band_end_row = *end_row;
     task.span = block.span;
     task.resolved = true;
     true
@@ -588,6 +594,8 @@ mod tests {
                 row: candidate_row,
                 column: 0,
             },
+            band_start_row: candidate_row,
+            band_end_row: candidate_row,
             span: MathSpan {
                 byte_start: 0,
                 byte_end: 0,
