@@ -1335,6 +1335,7 @@ fn copy_row_from_cells(
 pub fn render_detection_task(
     engine: &MathEngine,
     task: &mut DetectionTask,
+    foreground_rgb: [u8; 3],
 ) -> Result<MathRaster, MathRenderError> {
     if !resolve_detection_task(task) {
         return Err(MathRenderError::NotDetected);
@@ -1344,7 +1345,7 @@ pub fn render_detection_task(
         MathRenderKey {
             dpi_milli: task.versions.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
-            foreground_rgb: [224, 224, 224],
+            foreground_rgb,
         },
     )
 }
@@ -1508,6 +1509,44 @@ mod tests {
         let fallback = failed.viewport_frame(&mut projection).unwrap();
         assert!(fallback.math_blocks.is_empty());
         assert!(fallback.cells.iter().any(|cell| cell.text == "$"));
+    }
+
+    #[test]
+    fn theme_revision_rerenders_math_under_a_distinct_texture_key() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
+        let mut first_task = session.take_worker_task().unwrap();
+        assert!(resolve_detection_task(&mut first_task));
+        assert!(session.complete_worker_result(first_task, Ok(synthetic_raster(24, 35))));
+        let first_key = session
+            .decorations
+            .values()
+            .find_map(|record| record.artifact.as_ref())
+            .unwrap()
+            .key
+            .clone();
+
+        session.set_layout_key(LayoutKey {
+            theme_rev: 2,
+            ..session.layout_key()
+        });
+        assert!(
+            session
+                .decorations
+                .values()
+                .all(|record| record.artifact.is_none())
+        );
+        let mut themed_task = session.take_worker_task().unwrap();
+        assert_eq!(themed_task.versions.layout.theme_rev, 2);
+        assert!(resolve_detection_task(&mut themed_task));
+        assert!(session.complete_worker_result(themed_task, Ok(synthetic_raster(24, 35))));
+        let themed_key = &session
+            .decorations
+            .values()
+            .find_map(|record| record.artifact.as_ref())
+            .unwrap()
+            .key;
+        assert_ne!(themed_key, &first_key);
     }
 
     #[test]

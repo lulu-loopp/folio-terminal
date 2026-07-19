@@ -18,7 +18,8 @@ use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_pty::{OutputWake, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, Preedit, PresentOutcome,
-    Renderer, background_rgb, compose_preedit, frame_content_digest, frame_is_alternate_screen,
+    Renderer, background_rgb, compose_preedit, foreground_rgb, frame_content_digest,
+    frame_is_alternate_screen, theme_revision,
 };
 use bt_term::{
     DetectionTask, DualPlaneSession, MouseTracking, TerminalModes, render_detection_task,
@@ -61,21 +62,30 @@ struct MathWorkerResult {
     result: std::result::Result<MathRaster, MathRenderError>,
 }
 
+struct MathWorkerTask {
+    task: DetectionTask,
+    foreground_rgb: [u8; 3],
+}
+
 struct MathWorker {
-    tasks: mpsc::Sender<DetectionTask>,
+    tasks: mpsc::Sender<MathWorkerTask>,
     results: mpsc::Receiver<MathWorkerResult>,
 }
 
 impl MathWorker {
     fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
-        let (task_tx, task_rx) = mpsc::channel::<DetectionTask>();
+        let (task_tx, task_rx) = mpsc::channel::<MathWorkerTask>();
         let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
         thread::Builder::new()
             .name("bt-math-worker".to_owned())
             .spawn(move || {
                 let engine = MathEngine::new();
-                while let Ok(mut task) = task_rx.recv() {
-                    let result = render_detection_task(&engine, &mut task);
+                while let Ok(work) = task_rx.recv() {
+                    let MathWorkerTask {
+                        mut task,
+                        foreground_rgb,
+                    } = work;
+                    let result = render_detection_task(&engine, &mut task, foreground_rgb);
                     if result_tx.send(MathWorkerResult { task, result }).is_err() {
                         break;
                     }
@@ -419,7 +429,7 @@ impl Runtime {
             width_cells: columns,
             dpi_milli: renderer.metrics().dpi_milli(),
             font_rev: 1,
-            theme_rev: 1,
+            theme_rev: theme_revision(),
         });
         if let Some(bytes) = probe_input.as_deref() {
             session
@@ -567,7 +577,10 @@ impl Runtime {
         while let Some(task) = self.session.take_worker_task() {
             self.math_worker
                 .tasks
-                .send(task)
+                .send(MathWorkerTask {
+                    task,
+                    foreground_rgb: foreground_rgb(),
+                })
                 .map_err(|_| anyhow!("math rendering worker stopped"))?;
         }
         Ok(())
@@ -1267,7 +1280,7 @@ impl Runtime {
             width_cells: nonzero_u32(self.grid.columns.get()),
             dpi_milli: self.renderer.metrics().dpi_milli(),
             font_rev: 1,
-            theme_rev: 1,
+            theme_rev: theme_revision(),
         });
         self.pending_resize_present = Some(next_grid);
         self.publish_frame(resize_trigger)?;
@@ -1335,7 +1348,7 @@ impl Runtime {
             width_cells: nonzero_u32(self.grid.columns.get()),
             dpi_milli: self.renderer.metrics().dpi_milli(),
             font_rev: 1,
-            theme_rev: 1,
+            theme_rev: theme_revision(),
         });
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),

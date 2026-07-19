@@ -28,8 +28,8 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
-use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB, DEFAULT_FOREGROUND_RGB};
-pub use theme::{DEFAULT_BACKGROUND_RGB, background_rgb};
+use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB};
+pub use theme::{DEFAULT_BACKGROUND_RGB, background_rgb, foreground_rgb, theme_revision};
 use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
 
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
@@ -3210,7 +3210,10 @@ fn create_math_pipeline(
             entry_point: Some("fragment"),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
-                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                // resvg/tiny-skia rasterizes into premultiplied bytes. bt-math converts those to
+                // straight sRGB RGBA before upload so the sRGB texture decode happens before the
+                // GPU applies coverage in linear space.
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: Default::default(),
@@ -3269,7 +3272,7 @@ fn math_quad_vertices(
 }
 
 fn default_foreground() -> [u8; 3] {
-    DEFAULT_FOREGROUND_RGB
+    foreground_rgb()
 }
 
 fn default_background() -> [u8; 3] {
@@ -4118,7 +4121,7 @@ mod tests {
             .and_then(|value| theme::parse_background_rgb(&value))
             .unwrap_or(DEFAULT_BACKGROUND_RGB);
         assert_eq!(default_background(), expected_background);
-        assert_eq!(default_foreground(), [0xcc, 0xcc, 0xcc]);
+        assert_eq!(default_foreground(), foreground_rgb());
         assert_eq!(DEFAULT_CURSOR_RGB, [0xff, 0xff, 0xff]);
         assert_eq!(
             terminal_color(TerminalColor::Named(18), true),

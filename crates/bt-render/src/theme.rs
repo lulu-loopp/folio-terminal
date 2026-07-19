@@ -7,6 +7,7 @@ use std::sync::OnceLock;
 /// `microsoft/terminal/src/cascadia/TerminalSettingsModel/defaults.json`.
 pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [0x0c, 0x0c, 0x0c];
 pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xcc, 0xcc, 0xcc];
+const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x0c, 0x0c, 0x0c];
 /// Campbell's bright cursor treatment: use white rather than the pre-theme slate fill.
 pub(crate) const DEFAULT_CURSOR_RGB: [u8; 3] = [0xff, 0xff, 0xff];
 pub(crate) const DEFAULT_DIM_FOREGROUND_RGB: [u8; 3] = [0x88, 0x88, 0x88];
@@ -31,6 +32,44 @@ pub fn background_rgb() -> [u8; 3] {
         };
         rgb
     })
+}
+
+/// Default terminal ink paired with the process theme background. The current product surface
+/// exposes `BT_BG` as its theme diagnostic; choosing the higher-contrast Campbell ink here also
+/// gives math rasterization the same dark/light decision as ordinary default-colored text.
+pub fn foreground_rgb() -> [u8; 3] {
+    foreground_for_background(background_rgb())
+}
+
+/// Stable identity for every color which affects theme-authored layout artifacts. A different
+/// `BT_BG` therefore invalidates CPU math rasters and their independently keyed GPU textures even
+/// when it remains on the same side of the dark/light foreground threshold.
+pub fn theme_revision() -> u64 {
+    theme_revision_for_colors(background_rgb(), foreground_rgb())
+}
+
+fn foreground_for_background(background: [u8; 3]) -> [u8; 3] {
+    let background_luma = u32::from(background[0]) * 299
+        + u32::from(background[1]) * 587
+        + u32::from(background[2]) * 114;
+    if background_luma >= 128_000 {
+        LIGHT_BACKGROUND_FOREGROUND_RGB
+    } else {
+        DEFAULT_FOREGROUND_RGB
+    }
+}
+
+fn theme_revision_for_colors(background: [u8; 3], foreground: [u8; 3]) -> u64 {
+    u64::from_be_bytes([
+        1,
+        background[0],
+        background[1],
+        background[2],
+        foreground[0],
+        foreground[1],
+        foreground[2],
+        0,
+    ])
 }
 
 pub(crate) fn parse_background_rgb(value: &str) -> Option<[u8; 3]> {
@@ -66,3 +105,19 @@ pub(crate) const ANSI_16_RGB: [[u8; 3]; 16] = [
     [0x61, 0xd6, 0xd6],
     [0xf2, 0xf2, 0xf2],
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_and_revision_cover_dark_light_and_background_changes() {
+        assert_eq!(foreground_for_background([0x0c, 0x0c, 0x0c]), [0xcc; 3]);
+        assert_eq!(foreground_for_background([0xf5, 0xf5, 0xf5]), [0x0c; 3]);
+        let dark = theme_revision_for_colors([0x0c; 3], [0xcc; 3]);
+        let other_dark = theme_revision_for_colors([0x12, 0x12, 0x12], [0xcc; 3]);
+        let light = theme_revision_for_colors([0xf5; 3], [0x0c; 3]);
+        assert_ne!(dark, other_dark);
+        assert_ne!(dark, light);
+    }
+}

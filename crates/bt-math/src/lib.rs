@@ -19,7 +19,7 @@ pub const MAX_RASTER_BYTES: usize = 64 * 1024 * 1024;
 
 const TYPST_TEMPLATE: &str = r#"
 #import "specs/mod.typ": mitex-scope
-#set page(width: auto, height: auto, margin: 0pt)
+#set page(width: auto, height: auto, margin: 0pt, fill: none)
 #set text(size: sys.inputs.font_size * 1pt, fill: rgb(sys.inputs.red, sys.inputs.green, sys.inputs.blue))
 #let converted = eval("$" + sys.inputs.source + "$", scope: mitex-scope)
 #math.equation(block: true, converted)
@@ -230,8 +230,10 @@ fn rasterize_svg(
     let transform = resvg::tiny_skia::Transform::from_scale(scale, scale)
         .post_translate(0.0, padding_px as f32 / scale);
     resvg::render(&tree, transform, &mut pixmap.as_mut());
+    let mut rgba = pixmap.take();
+    unpremultiply_srgb_rgba(&mut rgba);
     Ok(MathRaster {
-        rgba: pixmap.take(),
+        rgba,
         width_px,
         height_px,
         content_height_px,
@@ -239,6 +241,22 @@ fn rasterize_svg(
         descent_px: (descent_pt as f32 * scale),
         render_time: elapsed,
     })
+}
+
+/// tiny-skia exposes premultiplied sRGB bytes. The renderer uploads to an sRGB texture and uses
+/// straight-alpha blending, so undo byte-space premultiplication before the GPU decodes RGB to
+/// linear light. Transparent pixels remain canonical transparent black.
+fn unpremultiply_srgb_rgba(rgba: &mut [u8]) {
+    for pixel in rgba.chunks_exact_mut(4) {
+        let alpha = u32::from(pixel[3]);
+        if alpha == 0 {
+            pixel[..3].fill(0);
+        } else if alpha < 255 {
+            for channel in &mut pixel[..3] {
+                *channel = ((u32::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -266,6 +284,54 @@ mod tests {
             raster.width_px as usize * raster.height_px as usize * 4
         );
         assert!(raster.ascent_px > 0.0);
+    }
+
+    #[test]
+    fn dark_and_light_theme_rasters_have_transparent_pages_and_theme_ink() {
+        let engine = MathEngine::new();
+        let mut dark_key = key();
+        dark_key.foreground_rgb = [0xe8, 0xe8, 0xe8];
+        let mut light_key = key();
+        light_key.foreground_rgb = [0x18, 0x18, 0x18];
+
+        let dark = engine.render(r"E = mc^2", dark_key).unwrap();
+        let light = engine.render(r"E = mc^2", light_key).unwrap();
+        assert_eq!(
+            (dark.width_px, dark.height_px),
+            (light.width_px, light.height_px)
+        );
+        assert_ne!(dark.rgba, light.rgba);
+
+        for raster in [&dark, &light] {
+            let width = raster.width_px as usize;
+            let height = raster.height_px as usize;
+            for (x, y) in [
+                (0, 0),
+                (width - 1, 0),
+                (0, height - 1),
+                (width - 1, height - 1),
+            ] {
+                assert_eq!(raster.rgba[(y * width + x) * 4 + 3], 0);
+            }
+        }
+        for (raster, ink) in [
+            (&dark, dark_key.foreground_rgb),
+            (&light, light_key.foreground_rgb),
+        ] {
+            assert!(
+                raster
+                    .rgba
+                    .chunks_exact(4)
+                    .any(|pixel| { pixel[3] == 255 && pixel[..3] == ink })
+            );
+        }
+    }
+
+    #[test]
+    fn premultiplied_resvg_bytes_are_exported_as_straight_rgba() {
+        let mut rgba = [64, 32, 16, 128, 9, 8, 7, 0, 4, 5, 6, 255];
+        unpremultiply_srgb_rgba(&mut rgba);
+        assert_eq!(rgba, [128, 64, 32, 128, 0, 0, 0, 0, 4, 5, 6, 255]);
     }
 
     #[derive(Deserialize)]

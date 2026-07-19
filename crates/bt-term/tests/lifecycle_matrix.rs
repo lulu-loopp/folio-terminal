@@ -3,7 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+use bt_detect::resolve_detection_task;
 use bt_doc::{ContentAnchor, DecorationIntent, DecorationLifecycle};
+use bt_math::MathRaster;
 use bt_term::DualPlaneSession;
 use bt_transcript::{CellFlags, TerminalColor};
 use bt_viewport::{FrameViewportOrigin, ViewportFrame};
@@ -60,6 +62,25 @@ fn finish_resize_transaction(session: &mut DualPlaneSession, request_at: Instant
             .finish_resize_if_quiescent(request_at + Duration::from_millis(200))
             .unwrap()
     );
+}
+
+fn complete_next_math(session: &mut DualPlaneSession, height_px: u32) {
+    let mut task = session
+        .take_worker_task()
+        .expect("pending math worker task");
+    assert!(resolve_detection_task(&mut task));
+    assert!(session.complete_worker_result(
+        task,
+        Ok(MathRaster {
+            rgba: vec![0; 4 * height_px as usize],
+            width_px: 1,
+            height_px,
+            content_height_px: height_px,
+            ascent_px: height_px as f32,
+            descent_px: 0.0,
+            render_time: Duration::from_millis(1),
+        })
+    ));
 }
 
 fn logical_content(session: &DualPlaneSession) -> Vec<String> {
@@ -255,6 +276,51 @@ fn m1_8f_collapse_lifecycle_matrix_has_no_projection_holes_or_anchor_drift() {
 
     assert_eq!(scenarios, 16);
     assert_eq!(published_frames, 40);
+}
+
+#[test]
+fn m1_9a_math_ready_and_output_publications_preserve_a_wheel_anchor_inside_a_math_block() {
+    let mut session = DualPlaneSession::new(nz32(16), nz32(2));
+    session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
+    complete_next_math(&mut session, 64);
+
+    let mut projection = session.new_projection(session.layout_key());
+    let bottom = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(bottom.scroll_offset_rows, 0);
+
+    // The rendered block is four visual rows high. One wheel notch targets its last row, which
+    // must become a semantic anchor with an in-block local offset instead of falling back to Bottom.
+    projection.scroll_by_rows(1);
+    session.refresh_projection(&mut projection);
+    let scrolled = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(scrolled.scroll_offset_rows, 1);
+    assert!(matches!(
+        scrolled.viewport_origin,
+        FrameViewportOrigin::Anchored(_)
+    ));
+    let anchor = projection.scroll_anchor().unwrap().clone();
+    assert!(anchor.local_offset > 0);
+    let math_top = scrolled.math_blocks[0].top_subpixels;
+
+    // Ordinary PTY output may publish while the worker is pending, but it must not impersonate
+    // keyboard input or reset the user's viewport-follow state.
+    session.feed(b"\r\n$$y^2$$\r\nbelow\r\ntail-2").unwrap();
+    session.refresh_projection(&mut projection);
+    let output_publish = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(projection.scroll_anchor(), Some(&anchor));
+    assert_eq!(output_publish.math_blocks[0].top_subpixels, math_top);
+
+    // Completing the newly frozen formula changes the height tree below the anchor. Its publish
+    // must reproject from the semantic source/local offset rather than selecting Bottom again.
+    complete_next_math(&mut session, 72);
+    session.refresh_projection(&mut projection);
+    let math_ready_publish = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(projection.scroll_anchor(), Some(&anchor));
+    assert_eq!(math_ready_publish.math_blocks[0].top_subpixels, math_top);
+    assert!(matches!(
+        math_ready_publish.viewport_origin,
+        FrameViewportOrigin::Anchored(_)
+    ));
 }
 
 #[test]

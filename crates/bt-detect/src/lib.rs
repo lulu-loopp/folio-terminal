@@ -260,6 +260,7 @@ pub fn detect_math_blocks<'a>(
                 end: id,
                 span,
             });
+            opening = None;
             continue;
         }
         if trimmed != "$$" {
@@ -419,6 +420,47 @@ mod tests {
         assert_eq!(
             blocks[0].span.source,
             "\\begin{aligned}\nx &= y + 1\n\\end{aligned}"
+        );
+    }
+
+    #[test]
+    fn single_line_block_resets_an_abandoned_multiline_opening() {
+        let blocks = detect_math_blocks([
+            (TranscriptId(1), "$$"),
+            (TranscriptId(2), "$$x$$"),
+            (TranscriptId(3), "$$"),
+        ]);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(
+            (blocks[0].start, blocks[0].end),
+            (TranscriptId(2), TranscriptId(2))
+        );
+        assert_eq!(blocks[0].span.source, "x");
+    }
+
+    #[test]
+    fn rejects_nested_empty_unclosed_and_adjacent_empty_blocks() {
+        assert!(
+            detect_block_math("$$outer $$ inner$$").is_empty(),
+            "nested delimiter"
+        );
+        assert!(
+            detect_block_math("$$$$").is_empty(),
+            "empty single-line block"
+        );
+        assert!(
+            detect_math_blocks([(TranscriptId(1), "$$"), (TranscriptId(2), "x")]).is_empty(),
+            "unclosed multiline block"
+        );
+        assert!(
+            detect_math_blocks([
+                (TranscriptId(1), "$$"),
+                (TranscriptId(2), "$$"),
+                (TranscriptId(3), "$$"),
+                (TranscriptId(4), "$$"),
+            ])
+            .is_empty(),
+            "adjacent empty blocks"
         );
     }
 

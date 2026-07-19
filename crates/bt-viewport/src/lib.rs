@@ -620,13 +620,14 @@ impl ViewportProjection {
             } else {
                 let target_row = bottom_start.saturating_sub(offset);
                 self.scroll_state = self
-                    .anchor_at_absolute_row(document, staged_rows, history_rows, target_row, screen)
-                    .map_or(ViewportScrollState::Bottom, |source| {
-                        ViewportScrollState::Anchored(ScrollAnchor {
-                            source,
-                            local_offset: 0,
-                        })
-                    });
+                    .scroll_anchor_at_absolute_row(
+                        document,
+                        staged_rows,
+                        history_rows,
+                        target_row,
+                        screen,
+                    )
+                    .map_or(ViewportScrollState::Bottom, ViewportScrollState::Anchored);
             }
         }
 
@@ -836,14 +837,14 @@ impl ViewportProjection {
         Ok(frame)
     }
 
-    fn anchor_at_absolute_row(
+    fn scroll_anchor_at_absolute_row(
         &self,
         document: &HistoryDocument,
         staged_rows: &[StagedRow],
         history_rows: usize,
         absolute_row: usize,
         screen: ScreenId,
-    ) -> Option<ContentAnchor> {
+    ) -> Option<ScrollAnchor> {
         if absolute_row < history_rows {
             let index = self
                 .visual_row_heights
@@ -851,32 +852,54 @@ impl ViewportProjection {
             let row_base = self.visual_row_heights.prefix_sum(index) as usize;
             let id = self.ordered_ids.get(index)?;
             let entry = document.entries().get(id)?;
+            let local_row = absolute_row.saturating_sub(row_base);
+            if self.math_artifacts.contains_key(id) {
+                return Some(ScrollAnchor {
+                    source: ContentAnchor::History {
+                        id: *id,
+                        offset: GraphemeOffset(0),
+                        bias: Bias::Before,
+                        generation: entry.line.source_generation,
+                    },
+                    local_offset: (local_row as i64)
+                        .saturating_mul(self.cell_height_subpixels.get()),
+                });
+            }
             return layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize)
-                .get(absolute_row.saturating_sub(row_base))?
+                .get(local_row)?
                 .anchors
                 .first()
-                .map(|anchor| anchor.start.clone());
+                .map(|anchor| ScrollAnchor {
+                    source: anchor.start.clone(),
+                    local_offset: 0,
+                });
         }
 
         let staging_row = absolute_row.saturating_sub(history_rows);
         if let Some(staged) = staged_rows.get(staging_row) {
-            return Some(ContentAnchor::Staging {
-                id: staged.id,
-                offset: GraphemeOffset(0),
-                bias: Bias::Before,
-                generation: self.source_generation,
+            return Some(ScrollAnchor {
+                source: ContentAnchor::Staging {
+                    id: staged.id,
+                    offset: GraphemeOffset(0),
+                    bias: Bias::Before,
+                    generation: self.source_generation,
+                },
+                local_offset: 0,
             });
         }
 
         let live_row = staging_row.saturating_sub(staged_rows.len());
-        (live_row < self.live_rows.get() as usize).then_some(ContentAnchor::Live {
-            screen,
-            point: GridPoint {
-                row: live_row as u32,
-                column: 0,
+        (live_row < self.live_rows.get() as usize).then_some(ScrollAnchor {
+            source: ContentAnchor::Live {
+                screen,
+                point: GridPoint {
+                    row: live_row as u32,
+                    column: 0,
+                },
+                bias: Bias::Before,
+                generation: self.grid_generation,
             },
-            bias: Bias::Before,
-            generation: self.grid_generation,
+            local_offset: 0,
         })
     }
 
