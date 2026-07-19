@@ -484,6 +484,40 @@ fn inline_group(runs: Vec<InlineMathRun>) -> Option<MathSpan> {
 /// Detect conservative block-level math over already-frozen logical lines. Fences are tracked
 /// across lines; a multi-line delimiter must occupy its whole logical line. This deliberately
 /// rejects shell, diff and log prose containing literal `$$` rather than trying to parse it.
+/// Reject a `$$ ... $$` pairing whose body contains a line of ordinary prose.
+///
+/// The scanner sees a window of lines, not the whole stream, and on the alternate screen there is
+/// no history to consult - so when a block's OPENING delimiter has scrolled out of view, the first
+/// `$$` in view is really a CLOSING one. Treating it as an opener pairs it with the NEXT block's
+/// opener and swallows everything between them, which is how a paragraph of Chinese ended up
+/// typeset as mathematics (user report 2026-07-19).
+///
+/// Delimiter counting cannot settle this: the window is truncated, so parity carries no
+/// information. The body itself does. Real display math never contains a line of natural language
+/// that is not wrapped in a command - CJK inside a formula only ever appears through `\text{...}`
+/// or a sibling, and those lines necessarily carry a backslash. A backslash-free line with CJK in
+/// it is therefore prose that has been captured by a mis-paired delimiter, and refusing the whole
+/// block is the honest response: a terminal that renders your literal text has failed as one.
+///
+/// This is deliberately narrow. Latin prose is not yet covered (`x = y` is indistinguishable from
+/// a sentence fragment without deeper parsing) and is left to the fuller context-completeness work.
+fn block_body_looks_like_prose(source: &str) -> bool {
+    source.lines().any(|line| {
+        let trimmed = line.trim();
+        !trimmed.is_empty() && !trimmed.contains('\\') && trimmed.chars().any(is_cjk_prose_char)
+    })
+}
+
+fn is_cjk_prose_char(character: char) -> bool {
+    matches!(character,
+        '\u{3000}'..='\u{303f}'      // CJK punctuation
+        | '\u{3400}'..='\u{4dbf}'    // CJK extension A
+        | '\u{4e00}'..='\u{9fff}'    // CJK unified ideographs
+        | '\u{f900}'..='\u{faff}'    // compatibility ideographs
+        | '\u{ff00}'..='\u{ffef}'    // fullwidth forms
+    )
+}
+
 pub fn detect_math_blocks<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
 ) -> Vec<DetectedMathBlock> {
@@ -538,7 +572,10 @@ pub fn detect_math_blocks<'a>(
                 .map(|(_, line)| *line)
                 .collect::<Vec<_>>()
                 .join("\n");
-            if source.is_empty() || source.len() > MAX_MATH_SOURCE_BYTES {
+            if source.is_empty()
+                || source.len() > MAX_MATH_SOURCE_BYTES
+                || block_body_looks_like_prose(&source)
+            {
                 continue;
             }
             blocks.push(DetectedMathBlock {
@@ -758,6 +795,50 @@ mod tests {
             "inline detection must stay off until its false-positive set is honest"
         );
         assert!(detect_inline_math(text).is_empty());
+    }
+
+    #[test]
+    fn a_truncated_window_never_pairs_a_closer_with_the_next_opener() {
+        // The window starts INSIDE a block, so its first `$$` is really a closing delimiter.
+        // Pairing it with the next block's opener would swallow the prose between them - which is
+        // exactly what rendered a Chinese paragraph as mathematics (user report 2026-07-19).
+        let window = [
+            (TranscriptId(1), r"\frac{a}{b}"), // tail of a block whose opener is off-screen
+            (TranscriptId(2), "$$"),           // actually a CLOSER
+            (TranscriptId(3), "内部含转义或美元符号语义的:"),
+            (TranscriptId(4), "多行里带对齐点和长表达式:"),
+            (TranscriptId(5), "$$"), // the NEXT block's opener
+            (TranscriptId(6), r"\sigma(z)_i = 1"),
+            (TranscriptId(7), "$$"),
+        ];
+        let blocks = detect_math_blocks(window);
+        for block in &blocks {
+            assert!(
+                !block.span.source.contains("内部含"),
+                "prose was captured by a mis-paired delimiter: {:?}",
+                block.span.source
+            );
+        }
+        // The genuine block in this window (5..7) may still resolve; the prose one must not.
+        assert!(
+            blocks
+                .iter()
+                .all(|block| !block.span.source.contains("多行里带"))
+        );
+    }
+
+    #[test]
+    fn a_block_body_may_still_carry_cjk_through_a_command() {
+        // Legitimate: CJK inside \text{...} always arrives on a line that carries a backslash,
+        // so the prose guard must not reject it.
+        let window = [
+            (TranscriptId(1), "$$"),
+            (TranscriptId(2), r"\underbrace{x + x}_{n \text{ 项}} = nx"),
+            (TranscriptId(3), "$$"),
+        ];
+        let blocks = detect_math_blocks(window);
+        assert_eq!(blocks.len(), 1, "\\text{{CJK}} must remain renderable");
+        assert!(blocks[0].span.source.contains("项"));
     }
 
     #[test]
