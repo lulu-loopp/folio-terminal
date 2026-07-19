@@ -23,7 +23,12 @@ use bt_unicode::{cluster_width, graphemes};
 pub use bt_doc::SUBPIXELS_PER_PX;
 pub use height_tree::HeightTree;
 
-pub const LIVE_MATH_READABLE_SCALE_MILLI: u32 = 650;
+/// Live display math is never given a lifecycle-specific presentation scale. Projection preserves
+/// at least this many ordinary text rows and gives the remaining vertical attention budget to the
+/// newest (lowest) complete formula blocks. Eight rows keep a prompt plus several answer/status
+/// lines readable on conventional 24-row terminals without imposing a fixed formula count.
+pub const LIVE_MATH_READABLE_SCALE_MILLI: u32 = 1000;
+pub const LIVE_MIN_VISIBLE_TEXT_ROWS: u32 = 8;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TranscriptSpan {
@@ -85,6 +90,15 @@ pub struct SelectionSpan {
     pub end_column: u32,
 }
 
+/// Geometry and input identity for one row in the last presented frame. Pixel consumers use the
+/// prefix position here instead of independently multiplying the frame row by cell height.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameVisualRow {
+    pub top_subpixels: i64,
+    pub height_subpixels: i64,
+    pub live_grid_row: Option<u32>,
+}
+
 /// Immutable CPU raster produced off the presentation thread. The renderer owns the independent
 /// GPU texture cache; carrying pixels here keeps viewport projection deterministic and device-free.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,14 +109,17 @@ pub struct ProjectedMathArtifact {
     pub width_px: u32,
     pub height_px: u32,
     pub height_subpixels: i64,
+    /// Symmetric presentation breathing outside the alpha-tight texture. This is lifecycle-scale
+    /// geometry, not part of the shared RGBA artifact.
+    pub vertical_padding_subpixels: i64,
     /// Presentation scale for a same-source stale raster. Fresh artifacts use 1000.
     pub render_scale_milli: u32,
     pub source: String,
 }
 
-/// A rendered artifact tied to transient grid coordinates. Unlike history artifacts, this does
-/// not participate in document height or reflow; it is projected only over its fixed live row
-/// band while the screen and grid generation still match.
+/// A rendered artifact tied to transient grid coordinates. Unlike history artifacts, this never
+/// enters the primary document order or terminal reflow; its free height participates only in the
+/// projection-local live prefix map while the screen and grid generation still match.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectedLiveMathArtifact {
     pub screen: ScreenId,
@@ -124,6 +141,8 @@ pub enum MathBlockAnchor {
         screen: ScreenId,
         start: GridPoint,
         end: GridPoint,
+        band_start_row: u32,
+        band_end_row: u32,
         generation: GridGeneration,
     },
 }
@@ -165,6 +184,11 @@ pub struct MathBlockPlacement {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum FrameViewportOrigin {
     Bottom,
+    /// Projection-local review of live pixels displaced above the pane. This is deliberately not
+    /// a primary-history anchor and is therefore also valid for the isolated alternate screen.
+    LiveOverflow {
+        rows_below: usize,
+    },
     Anchored(ScrollAnchor),
 }
 
@@ -176,6 +200,7 @@ pub struct ViewportFrame {
     pub cells: Vec<CapturedCell>,
     pub cursor: GridCursor,
     pub cell_anchors: Vec<CellAnchor>,
+    pub row_map: Vec<FrameVisualRow>,
     pub selection_spans: Vec<SelectionSpan>,
     pub math_blocks: Vec<MathBlockPlacement>,
     pub status_text: Option<String>,
@@ -211,7 +236,123 @@ impl ViewportFrame {
                 actual: self.cell_anchors.len(),
             });
         }
+        if self.row_map.len() != self.rows.get() as usize {
+            return Err(FrameShapeError::RowMapCount {
+                expected: self.rows.get() as usize,
+                actual: self.row_map.len(),
+            });
+        }
+        for span in &self.selection_spans {
+            self.selection_span_vertical_interval(span)?;
+        }
+        for block in &self.math_blocks {
+            let MathBlockAnchor::Live {
+                band_start_row,
+                band_end_row,
+                ..
+            } = block.anchor
+            else {
+                continue;
+            };
+            if block.display != MathBlockDisplay::Rendered {
+                continue;
+            }
+            if band_start_row > band_end_row {
+                return Err(FrameShapeError::MathBlockBandOrder {
+                    start: band_start_row,
+                    end: band_end_row,
+                });
+            }
+            if let Some(band_start) = self
+                .row_map
+                .iter()
+                .find(|row| row.live_grid_row == Some(band_start_row))
+                && block.top_subpixels != band_start.top_subpixels
+            {
+                return Err(FrameShapeError::MathBlockBandTop {
+                    expected: band_start.top_subpixels,
+                    actual: block.top_subpixels,
+                });
+            }
+            let block_bottom = block
+                .top_subpixels
+                .saturating_add(block.clip_height_subpixels);
+            if let Some(band_end) = self
+                .row_map
+                .iter()
+                .find(|row| row.live_grid_row == Some(band_end_row))
+            {
+                let band_bottom = band_end
+                    .top_subpixels
+                    .saturating_add(band_end.height_subpixels);
+                if block_bottom > band_bottom {
+                    return Err(FrameShapeError::MathBlockBeyondBand {
+                        band_bottom,
+                        block_bottom,
+                    });
+                }
+            }
+            for row in self.row_map.iter().filter(|row| {
+                row.live_grid_row
+                    .is_some_and(|live| !(band_start_row..=band_end_row).contains(&live))
+            }) {
+                let row_bottom = row.top_subpixels.saturating_add(row.height_subpixels);
+                if block.top_subpixels < row_bottom && row.top_subpixels < block_bottom {
+                    return Err(FrameShapeError::MathBlockOverlapsOutsideRow {
+                        row: row.live_grid_row.unwrap_or_default(),
+                    });
+                }
+            }
+        }
         Ok(())
+    }
+
+    /// Return the exact vertical drawing interval for a selection span. Selection renderers use
+    /// this frame-owned interval instead of reconstructing a row position from nominal cell
+    /// height, and `validate_shape` rejects every span for which no such interval exists.
+    pub fn selection_span_vertical_interval(
+        &self,
+        span: &SelectionSpan,
+    ) -> Result<std::ops::Range<i64>, FrameShapeError> {
+        let mapped = self.row_map.get(span.row as usize).ok_or(
+            FrameShapeError::SelectionSpanRowOutOfBounds {
+                row: span.row,
+                rows: self.row_map.len(),
+            },
+        )?;
+        let Some(bottom) = mapped.top_subpixels.checked_add(mapped.height_subpixels) else {
+            return Err(FrameShapeError::SelectionSpanInvalidInterval {
+                row: span.row,
+                top: mapped.top_subpixels,
+                height: mapped.height_subpixels,
+            });
+        };
+        if bottom <= mapped.top_subpixels {
+            return Err(FrameShapeError::SelectionSpanInvalidInterval {
+                row: span.row,
+                top: mapped.top_subpixels,
+                height: mapped.height_subpixels,
+            });
+        }
+        Ok(mapped.top_subpixels..bottom)
+    }
+
+    pub fn visual_row_at(&self, y_subpixels: i64) -> Option<u32> {
+        self.row_map
+            .iter()
+            .position(|row| {
+                row.top_subpixels <= y_subpixels
+                    && y_subpixels < row.top_subpixels.saturating_add(row.height_subpixels)
+            })
+            .and_then(|row| u32::try_from(row).ok())
+    }
+
+    pub fn live_point_at(&self, row: u32, column: u32) -> Option<GridPoint> {
+        let live_row = self.row_map.get(row as usize)?.live_grid_row?;
+        Some(GridPoint {
+            row: live_row,
+            column: column.min(self.columns.get().saturating_sub(1)),
+        })
     }
 
     pub fn anchor_at(
@@ -291,6 +432,13 @@ pub enum FrameShapeError {
     LayoutWidth { frame: u32, layout: u32 },
     CellCount { expected: usize, actual: usize },
     AnchorCount { expected: usize, actual: usize },
+    RowMapCount { expected: usize, actual: usize },
+    SelectionSpanRowOutOfBounds { row: u32, rows: usize },
+    SelectionSpanInvalidInterval { row: u32, top: i64, height: i64 },
+    MathBlockBandOrder { start: u32, end: u32 },
+    MathBlockBandTop { expected: i64, actual: i64 },
+    MathBlockBeyondBand { band_bottom: i64, block_bottom: i64 },
+    MathBlockOverlapsOutsideRow { row: u32 },
 }
 
 impl fmt::Display for FrameShapeError {
@@ -307,6 +455,40 @@ impl fmt::Display for FrameShapeError {
             }
             Self::AnchorCount { expected, actual } => {
                 write!(formatter, "frame requires {expected} anchors, got {actual}")
+            }
+            Self::RowMapCount { expected, actual } => {
+                write!(
+                    formatter,
+                    "frame requires {expected} visual rows, got {actual}"
+                )
+            }
+            Self::SelectionSpanRowOutOfBounds { row, rows } => write!(
+                formatter,
+                "selection span row {row} is outside the frame row map with {rows} rows"
+            ),
+            Self::SelectionSpanInvalidInterval { row, top, height } => write!(
+                formatter,
+                "selection span row {row} has invalid drawing interval top={top} height={height}"
+            ),
+            Self::MathBlockBandOrder { start, end } => {
+                write!(
+                    formatter,
+                    "live math band starts at row {start} after row {end}"
+                )
+            }
+            Self::MathBlockBandTop { expected, actual } => write!(
+                formatter,
+                "live math block top is {actual} subpixels, band starts at {expected}"
+            ),
+            Self::MathBlockBeyondBand {
+                band_bottom,
+                block_bottom,
+            } => write!(
+                formatter,
+                "live math block ends at {block_bottom} subpixels beyond band bottom {band_bottom}"
+            ),
+            Self::MathBlockOverlapsOutsideRow { row } => {
+                write!(formatter, "live math block overlaps outside grid row {row}")
             }
         }
     }
@@ -336,6 +518,46 @@ fn validate_visual_row(
         });
     }
     Ok(())
+}
+
+/// Center one complete presentation box (tight ink plus symmetric breathing) in either a borrowed
+/// fixed-height band or a free-height-expanded band. Both paths use this integer calculation, so
+/// their top/bottom remainder can differ by at most one subpixel.
+fn centered_content_offset(
+    band_height_subpixels: i64,
+    box_height_subpixels: i64,
+    vertical_padding_subpixels: i64,
+) -> i64 {
+    band_height_subpixels
+        .saturating_sub(box_height_subpixels)
+        .max(0)
+        .div_euclid(2)
+        .saturating_add(vertical_padding_subpixels)
+}
+
+fn continuous_row_top_subpixels(
+    row: usize,
+    live_base: usize,
+    live_row_prefix: &[i64],
+    cell_height_subpixels: i64,
+) -> i64 {
+    let fixed_rows = row.min(live_base);
+    let fixed_height = i64::try_from(fixed_rows)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(cell_height_subpixels);
+    if row <= live_base {
+        return fixed_height;
+    }
+    let live_row = row.saturating_sub(live_base);
+    let live_height = live_row_prefix.get(live_row).copied().unwrap_or_else(|| {
+        let known_rows = live_row_prefix.len().saturating_sub(1);
+        live_row_prefix.last().copied().unwrap_or(0).saturating_add(
+            i64::try_from(live_row.saturating_sub(known_rows))
+                .unwrap_or(i64::MAX)
+                .saturating_mul(cell_height_subpixels),
+        )
+    });
+    fixed_height.saturating_add(live_height)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -398,6 +620,7 @@ pub struct ViewportProjection {
     artifact_heights: HashMap<TranscriptId, i64>,
     math_artifacts: HashMap<TranscriptId, ProjectedMathArtifact>,
     live_math_artifacts: Vec<ProjectedLiveMathArtifact>,
+    live_row_prefix: Vec<i64>,
     ordered_ids: Vec<TranscriptId>,
     visual_rows: Vec<usize>,
     visual_row_heights: HeightTree,
@@ -412,6 +635,8 @@ pub struct ViewportProjection {
     cache_misses: u64,
     scroll_offset_rows: usize,
     pending_scroll_offset_rows: Option<usize>,
+    live_overflow_offset_rows: usize,
+    last_live_overflow_rows: usize,
     unread_rows: usize,
     last_total_rows: usize,
     /// Resize/reflow changes visual row counts without appending terminal content.
@@ -435,6 +660,9 @@ impl ViewportProjection {
             artifact_heights: HashMap::new(),
             math_artifacts: HashMap::new(),
             live_math_artifacts: Vec::new(),
+            live_row_prefix: (0..=live_rows.get())
+                .map(|row| i64::from(row).saturating_mul(cell_height_subpixels.get()))
+                .collect(),
             ordered_ids: Vec::new(),
             visual_rows: Vec::new(),
             visual_row_heights: HeightTree::default(),
@@ -449,6 +677,8 @@ impl ViewportProjection {
             cache_misses: 0,
             scroll_offset_rows: 0,
             pending_scroll_offset_rows: None,
+            live_overflow_offset_rows: 0,
+            last_live_overflow_rows: 0,
             unread_rows: 0,
             last_total_rows: 0,
             suppress_next_growth_compensation: false,
@@ -490,6 +720,7 @@ impl ViewportProjection {
     pub fn scroll_offset_rows(&self) -> usize {
         self.pending_scroll_offset_rows
             .unwrap_or(self.scroll_offset_rows)
+            .saturating_add(self.live_overflow_offset_rows)
     }
 
     pub fn unread_rows(&self) -> usize {
@@ -497,9 +728,7 @@ impl ViewportProjection {
     }
 
     pub fn is_scrolled(&self) -> bool {
-        self.pending_scroll_offset_rows
-            .unwrap_or(self.scroll_offset_rows)
-            != 0
+        self.scroll_offset_rows() != 0
     }
 
     /// Positive rows move into history; negative rows move toward the live bottom.
@@ -507,16 +736,29 @@ impl ViewportProjection {
         let max = self
             .last_total_rows
             .saturating_sub(self.live_rows.get() as usize);
-        let current = self
+        let mut history = self
             .pending_scroll_offset_rows
             .unwrap_or(self.scroll_offset_rows);
-        let next = if rows >= 0 {
-            current.saturating_add(rows as usize).min(max)
+        if rows >= 0 {
+            let requested = rows as usize;
+            let local_capacity = self
+                .last_live_overflow_rows
+                .saturating_sub(self.live_overflow_offset_rows);
+            let local = requested.min(local_capacity);
+            self.live_overflow_offset_rows = self.live_overflow_offset_rows.saturating_add(local);
+            history = history
+                .saturating_add(requested.saturating_sub(local))
+                .min(max);
         } else {
-            current.saturating_sub(rows.unsigned_abs() as usize)
-        };
-        self.pending_scroll_offset_rows = Some(next);
-        if next == 0 {
+            let requested = rows.unsigned_abs() as usize;
+            let history_delta = requested.min(history);
+            history = history.saturating_sub(history_delta);
+            self.live_overflow_offset_rows = self
+                .live_overflow_offset_rows
+                .saturating_sub(requested.saturating_sub(history_delta));
+        }
+        self.pending_scroll_offset_rows = Some(history);
+        if history == 0 {
             self.scroll_state = ViewportScrollState::Bottom;
             self.scroll_offset_rows = 0;
             self.unread_rows = 0;
@@ -528,6 +770,7 @@ impl ViewportProjection {
         let offset = self
             .last_total_rows
             .saturating_sub(self.live_rows.get() as usize);
+        self.live_overflow_offset_rows = self.last_live_overflow_rows;
         self.pending_scroll_offset_rows = Some(offset);
         if offset == 0 {
             self.scroll_state = ViewportScrollState::Bottom;
@@ -543,6 +786,7 @@ impl ViewportProjection {
             self.scroll_state = ViewportScrollState::Bottom;
             self.scroll_offset_rows = 0;
             self.pending_scroll_offset_rows = None;
+            self.live_overflow_offset_rows = 0;
             self.unread_rows = 0;
             self.view_generation.0 += 1;
         }
@@ -592,6 +836,13 @@ impl ViewportProjection {
             cells,
             cursor,
             cell_anchors,
+            row_map: (0..self.live_rows.get())
+                .map(|row| FrameVisualRow {
+                    top_subpixels: i64::from(row).saturating_mul(self.cell_height_subpixels.get()),
+                    height_subpixels: self.cell_height_subpixels.get(),
+                    live_grid_row: Some(row),
+                })
+                .collect(),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             status_text: None,
@@ -647,6 +898,22 @@ impl ViewportProjection {
         }
 
         let primary = screen == ScreenId::Primary;
+        let live_height = self.live_row_prefix.last().copied().unwrap_or_else(|| {
+            i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get())
+        });
+        let rectangular_live_height =
+            i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get());
+        let live_extra_height = live_height.saturating_sub(rectangular_live_height).max(0);
+        let live_rows_above = usize::try_from(
+            live_extra_height
+                .saturating_add(self.cell_height_subpixels.get() - 1)
+                .div_euclid(self.cell_height_subpixels.get()),
+        )
+        .unwrap_or(usize::MAX);
+        self.last_live_overflow_rows = live_rows_above;
+        self.live_overflow_offset_rows = self
+            .live_overflow_offset_rows
+            .min(self.last_live_overflow_rows);
         let history_rows = if primary {
             usize::try_from(self.visual_row_heights.total())
                 .expect("visual row height totals are non-negative")
@@ -672,7 +939,9 @@ impl ViewportProjection {
             self.scroll_state = ViewportScrollState::Bottom;
             self.pending_scroll_offset_rows = None;
             self.scroll_offset_rows = 0;
-            self.unread_rows = 0;
+            if self.live_overflow_offset_rows == 0 {
+                self.unread_rows = 0;
+            }
         } else if let Some(requested_offset) = self.pending_scroll_offset_rows.take() {
             let offset = requested_offset.min(max_offset);
             if offset == 0 {
@@ -737,6 +1006,33 @@ impl ViewportProjection {
         let content_rows_below = self
             .scroll_offset_rows
             .saturating_sub(blank_live_rows_below);
+        // A primary history anchor is already reviewing the continuous document above live. If a
+        // live raster arrives while that anchor is installed, its new tail height must not move
+        // the anchored pixels. Bottom/alternate views instead consume the projection-local live
+        // overflow explicitly before entering primary history.
+        let reviewed_live_height = if matches!(self.scroll_state, ViewportScrollState::Anchored(_))
+        {
+            live_extra_height
+        } else {
+            i64::try_from(self.live_overflow_offset_rows)
+                .unwrap_or(i64::MAX)
+                .saturating_mul(self.cell_height_subpixels.get())
+                .min(live_extra_height)
+        };
+        let frame_top_subpixels = reviewed_live_height.saturating_sub(live_extra_height);
+        let rows_above = usize::try_from(
+            frame_top_subpixels
+                .saturating_neg()
+                .saturating_add(self.cell_height_subpixels.get() - 1)
+                .div_euclid(self.cell_height_subpixels.get()),
+        )
+        .unwrap_or(usize::MAX);
+        let window_top_subpixels = continuous_row_top_subpixels(
+            window_start,
+            live_base,
+            &self.live_row_prefix,
+            self.cell_height_subpixels.get(),
+        );
         let mut visible = Vec::with_capacity(expected_rows);
         let mut math_blocks = Vec::new();
 
@@ -767,7 +1063,7 @@ impl ViewportProjection {
                             artifact: artifact.clone(),
                             top_subpixels: visible.len() as i64 * self.cell_height_subpixels.get()
                                 - local_start as i64 * self.cell_height_subpixels.get(),
-                            content_offset_subpixels: 0,
+                            content_offset_subpixels: artifact.vertical_padding_subpixels,
                             clip_height_subpixels: artifact.height_subpixels,
                             display: MathBlockDisplay::Rendered,
                             horizontal_overflow: HorizontalOverflowOwner::Block,
@@ -858,57 +1154,41 @@ impl ViewportProjection {
                     continue;
                 }
 
-                let row_count = live_math
-                    .band_end_row
-                    .saturating_sub(live_math.band_start_row)
-                    + 1;
-                let band_height =
-                    i64::from(row_count).saturating_mul(self.cell_height_subpixels.get());
-                let fit_scale_milli = if live_math.artifact.height_subpixels <= band_height {
-                    1000
-                } else {
-                    u32::try_from(
-                        band_height
-                            .saturating_mul(1000)
-                            .div_euclid(live_math.artifact.height_subpixels.max(1)),
-                    )
-                    .unwrap_or(u32::MAX)
-                };
-                let render_scale_milli = live_math
-                    .artifact
-                    .render_scale_milli
-                    .saturating_mul(fit_scale_milli)
-                    / 1000;
-                if render_scale_milli < LIVE_MATH_READABLE_SCALE_MILLI {
-                    continue;
-                }
-
-                let mut artifact = live_math.artifact.clone();
-                artifact.render_scale_milli = render_scale_milli;
-                artifact.height_subpixels = artifact
-                    .height_subpixels
-                    .saturating_mul(i64::from(fit_scale_milli))
-                    / 1000;
-                let content_offset_subpixels =
-                    band_height.saturating_sub(artifact.height_subpixels) / 2;
+                let band_height = self.live_row_prefix[block_last + 1]
+                    .saturating_sub(self.live_row_prefix[block_first]);
+                let artifact = live_math.artifact.clone();
+                debug_assert_eq!(artifact.render_scale_milli, LIVE_MATH_READABLE_SCALE_MILLI);
+                let content_offset_subpixels = centered_content_offset(
+                    band_height,
+                    artifact.height_subpixels,
+                    artifact.vertical_padding_subpixels,
+                );
                 let absolute_start = live_base.saturating_add(block_first);
-                let top_rows = i64::try_from(absolute_start)
-                    .unwrap_or(i64::MAX)
-                    .saturating_sub(i64::try_from(window_start).unwrap_or(i64::MAX));
+                let top_subpixels = frame_top_subpixels.saturating_add(
+                    continuous_row_top_subpixels(
+                        absolute_start,
+                        live_base,
+                        &self.live_row_prefix,
+                        self.cell_height_subpixels.get(),
+                    )
+                    .saturating_sub(window_top_subpixels),
+                );
                 math_blocks.push(MathBlockPlacement {
                     start: TranscriptId(0),
                     anchor: MathBlockAnchor::Live {
                         screen: live_math.screen,
                         start: live_math.start,
                         end: live_math.end,
+                        band_start_row: live_math.band_start_row,
+                        band_end_row: live_math.band_end_row,
                         generation: live_math.generation,
                     },
                     source: artifact.source.clone(),
                     artifact,
-                    top_subpixels: top_rows.saturating_mul(self.cell_height_subpixels.get()),
+                    top_subpixels,
                     content_offset_subpixels,
-                    // The live block owns its source rows plus at most the explicitly borrowed
-                    // blank rows. Pane clipping remains an independent renderer bound.
+                    // The shared live prefix map expands this owned band before all following
+                    // logical rows. It never paints into a neighbour's fixed terminal row.
                     clip_height_subpixels: band_height,
                     display: MathBlockDisplay::Rendered,
                     horizontal_overflow: HorizontalOverflowOwner::Block,
@@ -957,6 +1237,37 @@ impl ViewportProjection {
             .into_iter()
             .flat_map(|row| row.anchors)
             .collect::<Vec<_>>();
+        let mut next_top = reviewed_live_height.saturating_sub(live_extra_height);
+        let row_map = (0..expected_rows)
+            .map(|frame_row| {
+                let absolute_row = window_start.saturating_add(frame_row);
+                let live_grid_row = absolute_row
+                    .checked_sub(live_base)
+                    .filter(|row| *row < expected_rows)
+                    .and_then(|row| u32::try_from(row).ok());
+                let height_subpixels =
+                    live_grid_row.map_or(self.cell_height_subpixels.get(), |row| {
+                        self.live_row_prefix[row as usize + 1]
+                            .saturating_sub(self.live_row_prefix[row as usize])
+                    });
+                let mapped = FrameVisualRow {
+                    top_subpixels: next_top,
+                    height_subpixels,
+                    live_grid_row,
+                };
+                next_top = next_top.saturating_add(height_subpixels);
+                mapped
+            })
+            .collect::<Vec<_>>();
+        for placement in &mut math_blocks {
+            if let MathBlockAnchor::Live { band_start_row, .. } = placement.anchor
+                && let Some(mapped) = row_map
+                    .iter()
+                    .find(|mapped| mapped.live_grid_row == Some(band_start_row))
+            {
+                placement.top_subpixels = mapped.top_subpixels;
+            }
+        }
         let selection_spans = self
             .selection
             .as_ref()
@@ -976,6 +1287,7 @@ impl ViewportProjection {
                     start,
                     end,
                     generation,
+                    ..
                 } if anchor_screen == screen
                     && generation == self.grid_generation
                     && start.row <= cursor.row
@@ -992,17 +1304,32 @@ impl ViewportProjection {
                 ..cursor
             },
             cell_anchors,
+            row_map,
             selection_spans,
             math_blocks,
-            status_text: (content_rows_below != 0)
-                .then(|| format!("{content_rows_below} lines below")),
+            status_text: if rows_above != 0 {
+                Some(format!("{rows_above} rows above"))
+            } else if content_rows_below != 0 {
+                Some(format!("{content_rows_below} lines below"))
+            } else if self.live_overflow_offset_rows != 0 {
+                Some(format!("{} rows below", self.live_overflow_offset_rows))
+            } else {
+                None
+            },
             viewport_origin: match &self.scroll_state {
-                ViewportScrollState::Bottom => FrameViewportOrigin::Bottom,
+                ViewportScrollState::Bottom if self.live_overflow_offset_rows == 0 => {
+                    FrameViewportOrigin::Bottom
+                }
+                ViewportScrollState::Bottom => FrameViewportOrigin::LiveOverflow {
+                    rows_below: self.live_overflow_offset_rows,
+                },
                 ViewportScrollState::Anchored(anchor) => {
                     FrameViewportOrigin::Anchored(anchor.clone())
                 }
             },
-            scroll_offset_rows: self.scroll_offset_rows,
+            scroll_offset_rows: self
+                .scroll_offset_rows
+                .saturating_add(self.live_overflow_offset_rows),
             layout_key: self.layout_key,
             view_generation: self.view_generation,
         };
@@ -1202,9 +1529,88 @@ impl ViewportProjection {
     }
     pub fn sync_live_math_artifacts(
         &mut self,
+        screen: ScreenId,
         artifacts: impl IntoIterator<Item = ProjectedLiveMathArtifact>,
     ) {
-        self.live_math_artifacts = artifacts.into_iter().collect();
+        let candidates = artifacts
+            .into_iter()
+            .filter(|artifact| {
+                artifact.screen == screen && artifact.generation == self.grid_generation
+            })
+            .collect::<Vec<_>>();
+        let mut remaining = i64::from(
+            self.live_rows
+                .get()
+                .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
+        )
+        .saturating_mul(self.cell_height_subpixels.get());
+        let mut accepted = Vec::new();
+        // Prefer the newest/lower blocks. Each accepted box consumes both its source band and any
+        // free-height growth. If the text-row floor would be crossed, older blocks honestly remain
+        // source instead of acquiring a third, scaled presentation.
+        for artifact in candidates.into_iter().rev() {
+            let rows = artifact
+                .band_end_row
+                .saturating_sub(artifact.band_start_row)
+                .saturating_add(1);
+            let band = i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
+            let box_height = artifact.artifact.height_subpixels.max(band);
+            if artifact.artifact.render_scale_milli == LIVE_MATH_READABLE_SCALE_MILLI
+                && box_height <= remaining
+            {
+                remaining = remaining.saturating_sub(box_height);
+                accepted.push(artifact);
+            } else if std::env::var_os("BT_PERF_TRACE").is_some() {
+                let reason = if box_height
+                    > i64::from(
+                        self.live_rows
+                            .get()
+                            .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
+                    )
+                    .saturating_mul(self.cell_height_subpixels.get())
+                {
+                    "block-exceeds-visible-text-floor"
+                } else {
+                    "newer-blocks-reserved-visible-text-floor"
+                };
+                eprintln!(
+                    "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} remaining_subpixels={} min_text_rows={} reason={reason}",
+                    artifact.start.row, box_height, remaining, LIVE_MIN_VISIBLE_TEXT_ROWS,
+                );
+            }
+        }
+        accepted.reverse();
+        let mut per_row_extra = vec![0_i64; self.live_rows.get() as usize];
+        for artifact in &accepted {
+            let rows = artifact
+                .band_end_row
+                .saturating_sub(artifact.band_start_row)
+                .saturating_add(1);
+            let band = i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
+            let extra = artifact
+                .artifact
+                .height_subpixels
+                .saturating_sub(band)
+                .max(0);
+            if let Some(row) = per_row_extra.get_mut(artifact.band_start_row as usize) {
+                *row = row.saturating_add(extra);
+            }
+        }
+        let mut prefix = Vec::with_capacity(per_row_extra.len() + 1);
+        prefix.push(0_i64);
+        for extra in per_row_extra {
+            let next = prefix
+                .last()
+                .copied()
+                .unwrap_or(0)
+                .saturating_add(self.cell_height_subpixels.get().saturating_add(extra));
+            prefix.push(next);
+        }
+        if self.live_math_artifacts != accepted || self.live_row_prefix != prefix {
+            self.view_generation.0 = self.view_generation.0.saturating_add(1);
+        }
+        self.live_math_artifacts = accepted;
+        self.live_row_prefix = prefix;
     }
     pub fn set_live_state(
         &mut self,
@@ -1215,9 +1621,19 @@ impl ViewportProjection {
         if self.live_rows != live_rows {
             self.suppress_next_growth_compensation = true;
         }
+        if self.grid_generation != grid_generation {
+            self.live_overflow_offset_rows = 0;
+            self.last_live_overflow_rows = 0;
+        }
         self.live_rows = live_rows;
         self.source_generation = source_generation;
         self.grid_generation = grid_generation;
+        if self.live_row_prefix.len() != live_rows.get() as usize + 1 {
+            self.live_row_prefix = (0..=live_rows.get())
+                .map(|row| i64::from(row).saturating_mul(self.cell_height_subpixels.get()))
+                .collect();
+            self.live_math_artifacts.clear();
+        }
     }
 
     pub fn project(&mut self, document: &HistoryDocument) {
@@ -1348,7 +1764,7 @@ impl ViewportProjection {
                 if point.row >= self.live_rows.get() {
                     return Err(AnchorError::LiveOutOfBounds);
                 }
-                Ok(self.heights.total() + point.row as i64 * self.cell_height_subpixels.get())
+                Ok(self.heights.total() + self.live_row_prefix[point.row as usize])
             }
             ContentAnchor::Live {
                 screen: ScreenId::Alternate,
@@ -1731,6 +2147,44 @@ mod tests {
     }
 
     #[test]
+    fn borrowed_and_free_height_paths_share_subpixel_exact_vertical_centering() {
+        let padding = 2 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 4;
+        let ink = 20 * SUBPIXELS_PER_PX;
+        let box_height = ink + 2 * padding;
+        for band_height in [box_height, 3 * cell_height().get()] {
+            let top = centered_content_offset(band_height, box_height, padding);
+            let bottom = band_height.saturating_sub(top).saturating_sub(ink);
+            assert!(
+                top.abs_diff(bottom) <= 1,
+                "band={band_height} top={top} bottom={bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn offscreen_live_band_fallback_uses_the_free_height_prefix() {
+        let cell = cell_height().get();
+        let prefix = [
+            0,
+            cell,
+            2 * cell + 32 * SUBPIXELS_PER_PX,
+            3 * cell + 32 * SUBPIXELS_PER_PX,
+        ];
+        let live_base = 5;
+        let live_row_two = continuous_row_top_subpixels(live_base + 2, live_base, &prefix, cell);
+        let live_origin = continuous_row_top_subpixels(live_base, live_base, &prefix, cell);
+        assert_eq!(
+            live_row_two.saturating_sub(live_origin),
+            2 * cell + 32 * SUBPIXELS_PER_PX
+        );
+        assert_ne!(
+            live_row_two.saturating_sub(live_origin),
+            2 * cell,
+            "rows*cell_height must not survive as the offscreen placement fallback"
+        );
+    }
+
+    #[test]
     fn live_frame_flattens_only_well_formed_viewport_rows() {
         let projection = ViewportProjection::new(
             key(2),
@@ -1774,6 +2228,143 @@ mod tests {
                 expected: 2,
                 actual: 1,
             })
+        );
+    }
+
+    #[test]
+    fn rendered_live_blocks_own_exactly_their_borrowed_band() {
+        for (band_start_row, band_end_row) in [(2, 3), (3, 4)] {
+            let mut projection = ViewportProjection::new(
+                key(8),
+                DetectionRevision(1),
+                nz32(12),
+                cell_height(),
+                SourceGeneration(1),
+                GridGeneration(1),
+            );
+            projection.sync_live_math_artifacts(
+                ScreenId::Primary,
+                [ProjectedLiveMathArtifact {
+                    screen: ScreenId::Primary,
+                    start: GridPoint { row: 3, column: 0 },
+                    end: GridPoint { row: 3, column: 4 },
+                    band_start_row,
+                    band_end_row,
+                    generation: GridGeneration(1),
+                    artifact: ProjectedMathArtifact {
+                        key: format!("display-x-{band_start_row}-{band_end_row}"),
+                        end: TranscriptId(0),
+                        rgba: Arc::from(vec![255; 50 * 4]),
+                        width_px: 1,
+                        height_px: 50,
+                        height_subpixels: 50 * SUBPIXELS_PER_PX,
+                        vertical_padding_subpixels: 0,
+                        render_scale_milli: 1000,
+                        source: "x".to_owned(),
+                    },
+                }],
+            );
+            let frame = projection
+                .continuous_frame(
+                    &HistoryDocument::default(),
+                    &[],
+                    vec![CapturedRow::plain("        ", false); 12],
+                    GridCursor {
+                        row: 11,
+                        column: 0,
+                        visible: true,
+                    },
+                    ScreenId::Primary,
+                )
+                .unwrap();
+            let block = &frame.math_blocks[0];
+            let band_top = frame
+                .row_map
+                .iter()
+                .find(|row| row.live_grid_row == Some(band_start_row))
+                .unwrap()
+                .top_subpixels;
+            let band_end = frame
+                .row_map
+                .iter()
+                .find(|row| row.live_grid_row == Some(band_end_row))
+                .unwrap();
+            let band_bottom = band_end
+                .top_subpixels
+                .saturating_add(band_end.height_subpixels);
+            let block_extent = (
+                block.top_subpixels,
+                block
+                    .top_subpixels
+                    .saturating_add(block.clip_height_subpixels),
+            );
+            assert_eq!(block.top_subpixels, band_top);
+            assert!(block_extent.1 <= band_bottom);
+            for row in frame.row_map.iter().filter(|row| {
+                row.live_grid_row
+                    .is_some_and(|live| !(band_start_row..=band_end_row).contains(&live))
+            }) {
+                let row_extent = (
+                    row.top_subpixels,
+                    row.top_subpixels.saturating_add(row.height_subpixels),
+                );
+                assert!(
+                    block_extent.1 <= row_extent.0 || row_extent.1 <= block_extent.0,
+                    "block {block_extent:?} overlaps outside row {:?} {row_extent:?}",
+                    row.live_grid_row
+                );
+            }
+            frame.validate_shape().unwrap();
+            if band_start_row < 3 {
+                assert_ne!(band_start_row, 3, "upward borrowing must be covered");
+            } else {
+                assert_ne!(band_end_row, 3, "downward borrowing must be covered");
+            }
+        }
+    }
+
+    #[test]
+    fn live_height_accounting_filters_the_same_screen_and_generation_as_placement() {
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(7),
+        );
+        let artifact = |screen, generation, key: &str| ProjectedLiveMathArtifact {
+            screen,
+            start: GridPoint { row: 3, column: 0 },
+            end: GridPoint { row: 3, column: 4 },
+            band_start_row: 2,
+            band_end_row: 3,
+            generation,
+            artifact: ProjectedMathArtifact {
+                key: key.to_owned(),
+                end: TranscriptId(0),
+                rgba: Arc::from(vec![255; 50 * 4]),
+                width_px: 1,
+                height_px: 50,
+                height_subpixels: 50 * SUBPIXELS_PER_PX,
+                vertical_padding_subpixels: 0,
+                render_scale_milli: 1000,
+                source: "x".to_owned(),
+            },
+        };
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [
+                artifact(ScreenId::Alternate, GridGeneration(7), "wrong-screen"),
+                artifact(ScreenId::Primary, GridGeneration(6), "stale-generation"),
+            ],
+        );
+        assert!(projection.live_math_artifacts.is_empty());
+        assert!(
+            projection
+                .live_row_prefix
+                .windows(2)
+                .all(|rows| { rows[1].saturating_sub(rows[0]) == cell_height().get() })
         );
     }
 
@@ -1864,6 +2455,65 @@ mod tests {
     }
 
     #[test]
+    fn frame_validation_binds_every_selection_span_to_its_row_map_interval() {
+        let projection = ViewportProjection::new(
+            key(2),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut frame = projection
+            .live_frame(
+                nz32(2),
+                vec![
+                    CapturedRow::plain("ab", false),
+                    CapturedRow::plain("cd", false),
+                ],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+            )
+            .unwrap();
+        frame.selection_spans.push(SelectionSpan {
+            row: 1,
+            start_column: 0,
+            end_column: 2,
+        });
+        let interval = frame
+            .selection_span_vertical_interval(&frame.selection_spans[0])
+            .unwrap();
+        assert_eq!(
+            interval,
+            frame.row_map[1].top_subpixels
+                ..frame.row_map[1]
+                    .top_subpixels
+                    .saturating_add(frame.row_map[1].height_subpixels)
+        );
+        frame.validate_shape().unwrap();
+
+        frame.selection_spans[0].row = 2;
+        assert_eq!(
+            frame.validate_shape(),
+            Err(FrameShapeError::SelectionSpanRowOutOfBounds { row: 2, rows: 2 })
+        );
+
+        frame.selection_spans[0].row = 1;
+        frame.row_map[1].height_subpixels = 0;
+        assert_eq!(
+            frame.validate_shape(),
+            Err(FrameShapeError::SelectionSpanInvalidInterval {
+                row: 1,
+                top: cell_height().get(),
+                height: 0,
+            })
+        );
+    }
+
+    #[test]
     fn g2_two_widths_have_independent_height_selection_and_scroll_anchor() {
         let document = history();
         let anchor = ContentAnchor::Live {
@@ -1939,6 +2589,7 @@ mod tests {
             width_px: 1,
             height_px: 1,
             height_subpixels: 35 * SUBPIXELS_PER_PX,
+            vertical_padding_subpixels: 0,
             render_scale_milli: 1000,
             source: "x^2 + y^2".to_owned(),
         };

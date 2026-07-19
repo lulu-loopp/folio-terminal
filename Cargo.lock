@@ -334,7 +334,10 @@ dependencies = [
 name = "bt-render"
 version = "0.0.0"
 dependencies = [
+ "bt-detect",
  "bt-doc",
+ "bt-math",
+ "bt-term",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",

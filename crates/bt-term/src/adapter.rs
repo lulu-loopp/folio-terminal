@@ -1,4 +1,6 @@
 use std::{
+    collections::hash_map::RandomState,
+    hash::{BuildHasher, Hasher},
     num::NonZeroU32,
     sync::{Arc, Mutex, MutexGuard},
     time::Instant,
@@ -17,7 +19,9 @@ use alacritty_terminal::{
 };
 use bt_transcript::CapturedRow;
 
-use crate::cell_capture::{snapshot, to_captured_row};
+use crate::cell_capture::{
+    CapturedRowFingerprint, captured_row_fingerprint, snapshot, to_captured_row,
+};
 
 pub const SCROLLBACK_LINES: usize = 0;
 
@@ -177,6 +181,7 @@ pub struct TerminalAdapter {
     resize_canonical: Option<ResizeCanonical>,
     columns: NonZeroU32,
     rows: NonZeroU32,
+    row_fingerprint_seed: u64,
 }
 
 struct ResizeCanonical {
@@ -246,6 +251,7 @@ impl TerminalAdapter {
         let listener = CaptureListener::default();
         let mut term = Term::new(config, &size, listener.clone());
         install_transcript_hook(&mut term, &listener);
+        let row_fingerprint_seed = RandomState::new().build_hasher().finish();
         Self {
             term,
             processor: Processor::new(),
@@ -257,6 +263,7 @@ impl TerminalAdapter {
             resize_canonical: None,
             columns,
             rows,
+            row_fingerprint_seed,
         }
     }
 
@@ -433,6 +440,11 @@ impl TerminalAdapter {
                 .collect::<Vec<_>>();
             to_captured_row(&cells)
         })
+    }
+
+    pub(crate) fn visible_row_fingerprint(&self, row: u32) -> Option<CapturedRowFingerprint> {
+        (row < self.rows.get())
+            .then(|| captured_row_fingerprint(&self.term, row as usize, self.row_fingerprint_seed))
     }
 
     pub fn cursor(&self) -> TerminalCursor {
@@ -736,6 +748,41 @@ mod tests {
                 scope: RemovalScope::FullScreen,
             })
         );
+    }
+
+    #[test]
+    fn row_fingerprint_covers_text_sgr_combining_and_wide_semantics() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(1));
+        terminal.feed(b"\x1b[31mA");
+        let red = terminal.visible_row(0).unwrap();
+        let red_fingerprint = terminal.visible_row_fingerprint(0).unwrap();
+
+        terminal.feed(b"\x1b[1;1H\x1b[2K\x1b[31mA");
+        assert_eq!(terminal.visible_row(0).unwrap(), red);
+        assert_eq!(
+            terminal.visible_row_fingerprint(0).unwrap(),
+            red_fingerprint
+        );
+
+        terminal.feed(b"\x1b[1;1H\x1b[2K\x1b[32mA");
+        assert_ne!(terminal.visible_row(0).unwrap(), red);
+        assert_ne!(
+            terminal.visible_row_fingerprint(0).unwrap(),
+            red_fingerprint
+        );
+
+        terminal.feed("\x1b[1;1H\x1b[2Ke\u{301}".as_bytes());
+        let combining = terminal.visible_row_fingerprint(0).unwrap();
+        terminal.feed("\x1b[1;1H\x1b[2K\u{754c}".as_bytes());
+        let wide = terminal.visible_row(0).unwrap();
+        assert!(
+            wide.cells[0]
+                .style
+                .flags
+                .contains(bt_transcript::CellFlags::WIDE_CHAR)
+        );
+        assert!(wide.cells[1].wide_spacer);
+        assert_ne!(terminal.visible_row_fingerprint(0).unwrap(), combining);
     }
 
     #[test]

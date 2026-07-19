@@ -22,7 +22,7 @@ pub struct SourceGeneration(pub u64);
 pub struct GraphemeOffset(pub u32);
 
 /// Stable transcript color vocabulary; no upstream discriminants cross this boundary.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TerminalColor {
     Named(u8),
     Indexed(u8),
@@ -31,7 +31,7 @@ pub enum TerminalColor {
 
 bitflags! {
     /// Stable transcript style flags. Bit positions are owned by BetterTerminal.
-    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
     pub struct CellFlags: u16 {
         const INVERSE = 1 << 0;
         const BOLD = 1 << 1;

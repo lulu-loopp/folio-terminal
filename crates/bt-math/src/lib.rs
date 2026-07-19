@@ -22,14 +22,21 @@ const TYPST_TEMPLATE: &str = r#"
 #set page(width: auto, height: auto, margin: 0pt, fill: none)
 #set text(size: sys.inputs.font_size * 1pt, fill: rgb(sys.inputs.red, sys.inputs.green, sys.inputs.blue))
 #let converted = eval("$" + sys.inputs.source + "$", scope: mitex-scope)
-#math.equation(block: true, converted)
+#math.equation(block: sys.inputs.display, converted)
 "#;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum MathMode {
+    Display,
+    Inline,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct MathRenderKey {
     pub dpi_milli: NonZeroU32,
     pub font_milli_pt: NonZeroU32,
     pub foreground_rgb: [u8; 3],
+    pub mode: MathMode,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -116,6 +123,10 @@ impl MathEngine {
         inputs.insert("red".into(), key.foreground_rgb[0].into_value());
         inputs.insert("green".into(), key.foreground_rgb[1].into_value());
         inputs.insert("blue".into(), key.foreground_rgb[2].into_value());
+        inputs.insert(
+            "display".into(),
+            matches!(key.mode, MathMode::Display).into_value(),
+        );
         let compiled = self.engine.compile_with_input::<_, PagedDocument>(inputs);
         let document = compiled
             .output
@@ -211,8 +222,6 @@ fn rasterize_svg(
     let source_size = tree.size();
     let width_px = (source_size.width() * scale).ceil().max(1.0) as u32;
     let source_height_px = (source_size.height() * scale).ceil().max(1.0) as u32;
-    let padding_px =
-        ((VERTICAL_PADDING_LOGICAL_PX as f32) * key.dpi_milli.get() as f32 / 1000.0).ceil() as u32;
     let source_resident_bytes = (width_px as usize)
         .checked_mul(source_height_px as usize)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -228,30 +237,15 @@ fn rasterize_svg(
         &mut source_pixmap.as_mut(),
     );
     let source_rgba = source_pixmap.take();
-    // Typst's auto page is a layout frame, not an alpha-tight raster box. Crop its vertical blank
-    // rows before adding our padding; otherwise internal descent slack is counted a second time and
-    // presents as the user-observed thick lower margin.
-    let (first_ink_row, last_ink_row) =
-        vertical_alpha_bounds(&source_rgba, width_px).ok_or(MathRenderError::InvalidDimensions)?;
-    let content_height_px = last_ink_row - first_ink_row;
-    let height_px = content_height_px
-        .checked_add(padding_px.saturating_mul(2))
-        .ok_or(MathRenderError::InvalidDimensions)?;
-    let resident_bytes = (width_px as usize)
-        .checked_mul(height_px as usize)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or(MathRenderError::InvalidDimensions)?;
+    // Typst's auto page is a layout frame, not an alpha-tight raster box. The shared artifact owns
+    // ink only; transcript and live projections add their scale-appropriate symmetric breathing
+    // outside these pixels. This also lets live->frozen handoff reuse the exact same RGBA bytes.
+    let (mut rgba, content_height_px) =
+        crop_vertical_alpha(&source_rgba, width_px).ok_or(MathRenderError::InvalidDimensions)?;
+    let height_px = content_height_px;
+    let resident_bytes = rgba.len();
     if width_px > 131_072 || height_px > 16_384 || resident_bytes > MAX_RASTER_BYTES {
         return Err(MathRenderError::InvalidDimensions);
-    }
-    let mut rgba = vec![0; resident_bytes];
-    let row_bytes = width_px as usize * 4;
-    for source_row in first_ink_row..last_ink_row {
-        let source_start = source_row as usize * row_bytes;
-        let destination_row = padding_px + source_row - first_ink_row;
-        let destination_start = destination_row as usize * row_bytes;
-        rgba[destination_start..destination_start + row_bytes]
-            .copy_from_slice(&source_rgba[source_start..source_start + row_bytes]);
     }
     unpremultiply_srgb_rgba(&mut rgba);
     Ok(MathRaster {
@@ -281,6 +275,14 @@ fn vertical_alpha_bounds(rgba: &[u8], width_px: u32) -> Option<(u32, u32)> {
     Some((first as u32, last as u32))
 }
 
+fn crop_vertical_alpha(rgba: &[u8], width_px: u32) -> Option<(Vec<u8>, u32)> {
+    let (first, last) = vertical_alpha_bounds(rgba, width_px)?;
+    let row_bytes = width_px as usize * 4;
+    let start = first as usize * row_bytes;
+    let end = last as usize * row_bytes;
+    Some((rgba.get(start..end)?.to_vec(), last - first))
+}
+
 /// tiny-skia exposes premultiplied sRGB bytes. The renderer uploads to an sRGB texture and uses
 /// straight-alpha blending, so undo byte-space premultiplication before the GPU decodes RGB to
 /// linear light. Transparent pixels remain canonical transparent black.
@@ -307,6 +309,7 @@ mod tests {
             dpi_milli: NonZeroU32::new(1000).unwrap(),
             font_milli_pt: NonZeroU32::new(12_000).unwrap(),
             foreground_rgb: [224, 224, 224],
+            mode: MathMode::Display,
         }
     }
 
@@ -316,7 +319,7 @@ mod tests {
             .render(r"\frac{1}{2}+\sqrt{x}", key())
             .unwrap();
         assert!(raster.width_px > 1);
-        assert!(raster.height_px > raster.content_height_px);
+        assert_eq!(raster.height_px, raster.content_height_px);
         assert_eq!(
             raster.rgba.len(),
             raster.width_px as usize * raster.height_px as usize * 4
@@ -325,24 +328,19 @@ mod tests {
     }
 
     #[test]
-    fn tight_box_has_symmetric_top_and_bottom_raster_margins() {
-        let engine = MathEngine::new();
-        for source in [
-            r"e^{i\pi}+1=0",
-            r"\frac{1}{2}+\sqrt{x}",
-            r"\int_{-\infty}^{\infty} e^{-x^2}\,dx",
-            r"\sum_{k=0}^{42} k^2",
-        ] {
-            let raster = engine.render(source, key()).unwrap();
-            let (first, last) = vertical_alpha_bounds(&raster.rgba, raster.width_px).unwrap();
-            let top = first;
-            let bottom = raster.height_px - last;
-            assert!(
-                top.abs_diff(bottom) <= 1,
-                "asymmetric margins for {source}: top={top}px bottom={bottom}px"
-            );
-            assert_eq!(last - first, raster.content_height_px);
-        }
+    fn vertical_crop_removes_known_transparent_source_margins() {
+        let width = 2_u32;
+        let row_bytes = width as usize * 4;
+        let mut source = vec![0_u8; row_bytes * 6];
+        source[row_bytes * 2..row_bytes * 3].copy_from_slice(&[10, 20, 30, 255, 0, 0, 0, 0]);
+        source[row_bytes * 3..row_bytes * 4].copy_from_slice(&[0, 0, 0, 0, 40, 50, 60, 128]);
+
+        assert_eq!(vertical_alpha_bounds(&source, width), Some((2, 4)));
+        let (cropped, height) = crop_vertical_alpha(&source, width).unwrap();
+        assert_eq!(height, 2);
+        assert_eq!(cropped.len(), row_bytes * 2);
+        assert!(cropped.len() < source.len());
+        assert_eq!(cropped, source[row_bytes * 2..row_bytes * 4]);
     }
 
     #[test]
@@ -362,16 +360,10 @@ mod tests {
         assert_ne!(dark.rgba, light.rgba);
 
         for raster in [&dark, &light] {
-            let width = raster.width_px as usize;
-            let height = raster.height_px as usize;
-            for (x, y) in [
-                (0, 0),
-                (width - 1, 0),
-                (0, height - 1),
-                (width - 1, height - 1),
-            ] {
-                assert_eq!(raster.rgba[(y * width + x) * 4 + 3], 0);
-            }
+            assert!(
+                raster.rgba.chunks_exact(4).any(|pixel| pixel[3] == 0),
+                "the alpha-tight page still preserves transparent background between ink"
+            );
         }
         for (raster, ink) in [
             (&dark, dark_key.foreground_rgb),

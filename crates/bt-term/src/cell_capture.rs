@@ -6,11 +6,15 @@ use alacritty_terminal::{
     vte::ansi::{Color, NamedColor},
 };
 use bt_transcript::{CapturedCell, CapturedRow, CellFlags, CellStyle, TerminalColor};
+use std::hash::{Hash, Hasher};
 
 #[cfg(test)]
 use alacritty_terminal::vte::ansi::Rgb;
 
 use crate::adapter::CaptureListener;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CapturedRowFingerprint(u64);
 
 pub(crate) fn snapshot(term: &Term<CaptureListener>) -> Vec<Vec<Cell>> {
     (0..term.screen_lines())
@@ -20,6 +24,104 @@ pub(crate) fn snapshot(term: &Term<CaptureListener>) -> Vec<Vec<Cell>> {
                 .collect()
         })
         .collect()
+}
+
+/// Hash the exact stable row semantics without allocating captured `String`s. The builder is
+/// randomly keyed per terminal session. A collision would merely defer a live-math invalidation
+/// until a later differing repaint; even an intentionally conservative 10^12 lifetime comparisons
+/// has union-bound probability below 5.5e-8. It cannot affect terminal cells, transcript ownership,
+/// or memory safety, so this is an acceptable visual-cache tradeoff rather than a security boundary.
+pub(crate) fn captured_row_fingerprint(
+    term: &Term<CaptureListener>,
+    row: usize,
+    seed: u64,
+) -> CapturedRowFingerprint {
+    let mut hasher = RowHasher(seed);
+    0x4254_524f_5731_u64.hash(&mut hasher);
+    for column in 0..term.columns() {
+        let cell = &term.grid()[Line(row as i32)][Column(column)];
+        cell.c.hash(&mut hasher);
+        cell.zerowidth().hash(&mut hasher);
+        capture_flags(cell.flags).hash(&mut hasher);
+        capture_color(cell.fg).hash(&mut hasher);
+        capture_color(cell.bg).hash(&mut hasher);
+        if let Some(link) = cell.hyperlink() {
+            true.hash(&mut hasher);
+            link.uri().hash(&mut hasher);
+        } else {
+            false.hash(&mut hasher);
+        }
+        cell.flags
+            .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+            .hash(&mut hasher);
+    }
+    let continues = term.columns() != 0
+        && term.grid()[Line(row as i32)][Column(term.columns() - 1)]
+            .flags
+            .contains(Flags::WRAPLINE);
+    continues.hash(&mut hasher);
+    CapturedRowFingerprint(hasher.finish())
+}
+
+/// Allocation-free, per-session-seeded mixer for non-security visual cache keys. Implementing the
+/// primitive writes avoids SipHash's intentionally expensive adversarial-map protection on the TUI
+/// repaint path while retaining a well-dispersed 64-bit summary.
+struct RowHasher(u64);
+
+impl RowHasher {
+    fn mix(&mut self, value: u64) {
+        self.0 ^= value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        self.0 = self
+            .0
+            .rotate_left(27)
+            .wrapping_mul(0x3c79_ac49_2ba7_b653)
+            .wrapping_add(0x1c69_b3f7_4ac4_ae35);
+    }
+}
+
+impl Hasher for RowHasher {
+    fn finish(&self) -> u64 {
+        let mut value = self.0;
+        value ^= value >> 33;
+        value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        value ^= value >> 33;
+        value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+        value ^ (value >> 33)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        let mut chunks = bytes.chunks_exact(8);
+        for chunk in &mut chunks {
+            self.mix(u64::from_le_bytes(chunk.try_into().unwrap()));
+        }
+        let remainder = chunks.remainder();
+        if !remainder.is_empty() {
+            let mut tail = [0_u8; 8];
+            tail[..remainder.len()].copy_from_slice(remainder);
+            self.mix(u64::from_le_bytes(tail) ^ ((remainder.len() as u64) << 56));
+        }
+        self.mix(bytes.len() as u64);
+    }
+
+    fn write_u8(&mut self, value: u8) {
+        self.mix(u64::from(value));
+    }
+
+    fn write_u16(&mut self, value: u16) {
+        self.mix(u64::from(value));
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.mix(u64::from(value));
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.mix(value);
+    }
+
+    fn write_usize(&mut self, value: usize) {
+        self.mix(value as u64);
+    }
 }
 
 pub(crate) fn captured_row_is_blank(row: &CapturedRow) -> bool {

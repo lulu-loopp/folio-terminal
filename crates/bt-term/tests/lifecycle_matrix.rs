@@ -1330,7 +1330,10 @@ fn g1_local_scroll_region_never_enters_history() {
 #[test]
 fn g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript() {
     const CYCLES: usize = 512;
-    const BUDGET: Duration = Duration::from_millis(250);
+    // 2026-07-19 same-host release exact single-test: HEAD 1.2546 ms, fixed worktree 1.0785 ms.
+    // A 25 ms gate leaves ~23x full-suite scheduling headroom while still rejecting the measured
+    // 200+ ms M1.9e regression. Any increase requires same-condition HEAD/worktree evidence.
+    const BUDGET: Duration = Duration::from_millis(25);
 
     let mut session = DualPlaneSession::new(nz32(120), nz32(40));
     let initial = (0..40)
@@ -1349,6 +1352,7 @@ fn g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript()
             .unwrap();
     }
     let elapsed = started.elapsed();
+    eprintln!("G1_TUI_REPAINT cycles={CYCLES} elapsed={elapsed:?} budget={BUDGET:?}");
 
     assert!(
         elapsed <= BUDGET,

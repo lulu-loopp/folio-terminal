@@ -19,7 +19,7 @@ use bt_unicode::{cluster_width, graphemes};
 use bt_viewport::FrameViewportOrigin;
 use bt_viewport::{
     FrameShapeError, MathBlockAnchor, MathBlockDisplay, MathBlockPlacement, SUBPIXELS_PER_PX,
-    ViewportFrame,
+    SelectionSpan, ViewportFrame,
 };
 use bytemuck::{Pod, Zeroable};
 use glyphon::{
@@ -70,6 +70,12 @@ struct MathBlockGeometry {
     clip: [f32; 4],
     eye: Option<[f32; 4]>,
     copy: Option<[f32; 4]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct StatusOverlayGeometry {
+    rect: [f32; 4],
+    first_column: usize,
 }
 const MATH_TEXTURE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const PRIMARY_FONT_FAMILY: &str = "Consolas";
@@ -165,17 +171,22 @@ impl CellMetrics {
         NonZeroU32::new(value as u32).expect("DPI scale is clamped above zero")
     }
 
-    /// Reusable physical-pixel to terminal-cell hit test. Padding is excluded and callers supply
-    /// the currently displayed grid bounds, so the result is safe for selection and hyperlinks.
-    pub fn hit_test(&self, x: f64, y: f64, columns: u32, rows: u32) -> Option<GridHit> {
+    /// Hit test against the exact geometry published with a frame. This is the sole row oracle
+    /// for selection and protocol forwarding once live rows can have non-uniform pixel heights.
+    pub fn hit_test_frame(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<GridHit> {
         let x = x as f32 - self.padding_px;
         let y = y as f32 - self.padding_px;
-        if x < 0.0 || y < 0.0 {
+        if x < 0.0 {
             return None;
         }
         let column = (x / self.cell_width_px).floor() as u32;
-        let row = (y / self.cell_height_px).floor() as u32;
-        (column < columns && row < rows).then_some(GridHit { row, column })
+        if column >= frame.columns.get() {
+            return None;
+        }
+        let y_subpixels = (f64::from(y) * SUBPIXELS_PER_PX as f64).floor() as i64;
+        frame
+            .visual_row_at(y_subpixels)
+            .map(|row| GridHit { row, column })
     }
 }
 
@@ -1247,6 +1258,7 @@ pub struct Renderer {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    status_text_renderer: TextRenderer,
     rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
@@ -1256,6 +1268,7 @@ pub struct Renderer {
     metrics: CellMetrics,
     init_timings: RendererInitTimings,
     text_rows: Vec<Arc<ComposedRow>>,
+    status_overlay: Option<Arc<ComposedRow>>,
     composed_row_cache: ComposedRowCache,
     font_revision: u64,
     narrow_shaping_cache: NarrowShapingCache,
@@ -1328,8 +1341,10 @@ pub struct HeadlessRenderProbe {
     viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
+    status_text_renderer: TextRenderer,
     metrics: CellMetrics,
     text_rows: Vec<Arc<ComposedRow>>,
+    status_overlay: Option<Arc<ComposedRow>>,
     composed_row_cache: ComposedRowCache,
     font_revision: u64,
     narrow_shaping_cache: NarrowShapingCache,
@@ -1373,6 +1388,8 @@ impl HeadlessRenderProbe {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let status_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("BetterTerminal replay probe target"),
             size: wgpu::Extent3d {
@@ -1395,8 +1412,10 @@ impl HeadlessRenderProbe {
             viewport,
             atlas,
             text_renderer,
+            status_text_renderer,
             metrics,
             text_rows: Vec::new(),
+            status_overlay: None,
             composed_row_cache: ComposedRowCache::new(),
             font_revision: 1,
             narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(true),
@@ -1434,6 +1453,7 @@ impl HeadlessRenderProbe {
             frame,
             self.metrics,
             &mut self.text_rows,
+            &mut self.status_overlay,
             &mut self.composed_row_cache,
             self.font_revision,
             &mut self.font_system,
@@ -1452,7 +1472,20 @@ impl HeadlessRenderProbe {
             &mut self.swash_cache,
             &self.text_rows,
             self.metrics,
-            frame.columns,
+            frame,
+        )
+        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+        prepare_status_text_atlas(
+            &mut self.status_text_renderer,
+            &self.device,
+            &self.queue,
+            &mut self.font_system,
+            &mut self.atlas,
+            &self.viewport,
+            &mut self.swash_cache,
+            self.status_overlay.as_deref(),
+            self.metrics,
+            frame,
         )
         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
         let atlas_prepared_at = Instant::now();
@@ -1479,6 +1512,11 @@ impl HeadlessRenderProbe {
             self.text_renderer
                 .render(&self.atlas, &self.viewport, &mut pass)
                 .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            if self.status_overlay.is_some() {
+                self.status_text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            }
         }
         self.queue.submit([encoder.finish()]);
         let submitted_at = Instant::now();
@@ -1581,6 +1619,8 @@ impl Renderer {
         let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let status_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rect_pipeline = create_rect_pipeline(&device, config.format);
         let (math_pipeline, math_bind_group_layout, math_sampler) =
             create_math_pipeline(&device, config.format);
@@ -1598,6 +1638,7 @@ impl Renderer {
             viewport,
             atlas,
             text_renderer,
+            status_text_renderer,
             rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
@@ -1614,6 +1655,7 @@ impl Renderer {
                 render_resources: render_resources_time,
             },
             text_rows: Vec::new(),
+            status_overlay: None,
             composed_row_cache: ComposedRowCache::new(),
             font_revision: 1,
             narrow_shaping_cache: NarrowShapingCache::with_perf_tracking(trace_perf),
@@ -1634,7 +1676,7 @@ impl Renderer {
     }
 
     pub fn ime_cursor_area(&self, frame: &ViewportFrame) -> ImeCursorArea {
-        ime_cursor_area_for_metrics(self.metrics, frame.cursor)
+        ime_cursor_area_for_metrics(self.metrics, frame)
     }
 
     pub fn math_hit_test(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<MathHit> {
@@ -1684,6 +1726,7 @@ impl Renderer {
     pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
         self.metrics = CellMetrics::measure(&mut self.font_system, scale_factor)?;
         self.text_rows.clear();
+        self.status_overlay = None;
         self.composed_row_cache.clear();
         self.font_revision = self.font_revision.saturating_add(1);
         self.narrow_shaping_cache.clear();
@@ -1710,7 +1753,7 @@ impl Renderer {
         let viewport_updated_at = Instant::now();
         let text_stats = self.prepare_text_rows(frame)?;
         let rows_prepared_at = Instant::now();
-        let text_prepared = match prepare_text_atlas(
+        let text_prepare_result = prepare_text_atlas(
             &mut self.text_renderer,
             &self.device,
             &self.queue,
@@ -1720,8 +1763,24 @@ impl Renderer {
             &mut self.swash_cache,
             &self.text_rows,
             self.metrics,
-            frame.columns,
-        ) {
+            frame,
+        );
+        let text_prepare_result = match text_prepare_result {
+            Ok(()) => prepare_status_text_atlas(
+                &mut self.status_text_renderer,
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.viewport,
+                &mut self.swash_cache,
+                self.status_overlay.as_deref(),
+                self.metrics,
+                frame,
+            ),
+            Err(error) => Err(error),
+        };
+        let text_prepared = match text_prepare_result {
             Ok(()) => true,
             Err(error) => {
                 // glyphon grows each atlas geometrically before returning AtlasFull. If the
@@ -1757,6 +1816,33 @@ impl Renderer {
                 contents: bytemuck::cast_slice(rect_data),
                 usage: wgpu::BufferUsages::VERTEX,
             });
+        let status_rects = frame
+            .status_text
+            .as_deref()
+            .and_then(|status| status_overlay_geometry(self.metrics, frame, status))
+            .map(|geometry| {
+                self.pixel_rect(
+                    geometry.rect[0],
+                    geometry.rect[1],
+                    geometry.rect[2],
+                    geometry.rect[3],
+                    DEFAULT_STATUS_BACKGROUND_RGB,
+                )
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let status_rect_data = if status_rects.is_empty() {
+            empty_rect.as_slice()
+        } else {
+            status_rects.as_slice()
+        };
+        let status_rect_buffer =
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("status overlay rectangle"),
+                    contents: bytemuck::cast_slice(status_rect_data),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
         let math_overlays = self.math_overlay_rectangles(frame);
         let overlay_data = if math_overlays.is_empty() {
             empty_rect.as_slice()
@@ -1858,6 +1944,14 @@ impl Renderer {
                     .render(&self.atlas, &self.viewport, &mut pass)
                     .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
             }
+            if text_prepared && !status_rects.is_empty() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, status_rect_buffer.slice(..));
+                pass.draw(0..6, 0..status_rects.len() as u32);
+                self.status_text_renderer
+                    .render(&self.atlas, &self.viewport, &mut pass)
+                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+            }
             if !math_overlays.is_empty() {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_vertex_buffer(0, math_overlay_buffer.slice(..));
@@ -1933,6 +2027,7 @@ impl Renderer {
             frame,
             self.metrics,
             &mut self.text_rows,
+            &mut self.status_overlay,
             &mut self.composed_row_cache,
             self.font_revision,
             &mut self.font_system,
@@ -2201,7 +2296,7 @@ impl Renderer {
         for (index, cell) in frame.cells.iter().enumerate() {
             let (_, background) = resolve_colors(&cell.style);
             if background != default_background() {
-                rects.push(self.cell_rect(index / columns, index % columns, background));
+                rects.push(self.cell_rect(frame, index / columns, index % columns, background));
             }
         }
         for span in &frame.selection_spans {
@@ -2209,7 +2304,8 @@ impl Renderer {
             let end = span.end_column.min(frame.columns.get()) as usize;
             if end > start && span.row < frame.rows.get() {
                 rects.push(self.cell_rect_span(
-                    span.row as usize,
+                    frame,
+                    span,
                     start,
                     end - start,
                     DEFAULT_SELECTION_BACKGROUND_RGB,
@@ -2227,17 +2323,6 @@ impl Renderer {
                     geometry.block[3],
                     DEFAULT_STATUS_BACKGROUND_RGB,
                     0.45,
-                ));
-            }
-        }
-        if let Some(status) = frame.status_text.as_deref() {
-            let width = status.chars().count().min(columns);
-            if width != 0 {
-                rects.push(self.cell_rect_span(
-                    frame.rows.get() as usize - 1,
-                    columns - width,
-                    width,
-                    DEFAULT_STATUS_BACKGROUND_RGB,
                 ));
             }
         }
@@ -2266,7 +2351,7 @@ impl Renderer {
             }
             let row = index / columns;
             let column = index % columns;
-            let [left, top, right, bottom] = cell_bounds_px(self.metrics, row, column);
+            let [left, top, right, bottom] = frame_cell_bounds_px(self.metrics, frame, row, column);
             let Some(geometry) = procedural::geometry(
                 character,
                 left,
@@ -2293,7 +2378,8 @@ impl Renderer {
             if cell.style.flags.contains(CellFlags::UNDERLINE) {
                 let row = index / columns;
                 let column = index % columns;
-                let [left, _, right, bottom] = cell_bounds_px(self.metrics, row, column);
+                let [left, _, right, bottom] =
+                    frame_cell_bounds_px(self.metrics, frame, row, column);
                 let (foreground, _) = resolve_colors(&cell.style);
                 rects.push(self.pixel_rect(
                     left,
@@ -2379,26 +2465,28 @@ impl Renderer {
         rects
     }
 
-    fn cell_rect(&self, row: usize, column: usize, color: [u8; 3]) -> RectInstance {
-        let [left, top, right, bottom] = cell_bounds_px(self.metrics, row, column);
+    fn cell_rect(
+        &self,
+        frame: &ViewportFrame,
+        row: usize,
+        column: usize,
+        color: [u8; 3],
+    ) -> RectInstance {
+        let [left, top, right, bottom] = frame_cell_bounds_px(self.metrics, frame, row, column);
         self.pixel_rect(left, top, right, bottom, color)
     }
 
     fn cell_rect_span(
         &self,
-        row: usize,
+        frame: &ViewportFrame,
+        selection: &SelectionSpan,
         column: usize,
         span: usize,
         color: [u8; 3],
     ) -> RectInstance {
-        let [left, top, _, bottom] = cell_bounds_px(self.metrics, row, column);
-        self.pixel_rect(
-            left,
-            top,
-            left + span as f32 * self.metrics.cell_width_px,
-            bottom,
-            color,
-        )
+        let [left, top, right, bottom] =
+            selection_span_bounds_px(self.metrics, frame, selection, column, span);
+        self.pixel_rect(left, top, right, bottom, color)
     }
 
     fn pixel_rect(
@@ -2441,6 +2529,7 @@ fn prepare_text_rows(
     frame: &ViewportFrame,
     metrics: CellMetrics,
     text_rows: &mut Vec<Arc<ComposedRow>>,
+    status_overlay: &mut Option<Arc<ComposedRow>>,
     composed_row_cache: &mut ComposedRowCache,
     font_revision: u64,
     font_system: &mut FontSystem,
@@ -2457,17 +2546,14 @@ fn prepare_text_rows(
     let rows = frame.rows.get() as usize;
     let mut next_rows = Vec::with_capacity(rows);
 
-    for (row_index, source_cells) in source_rows.enumerate() {
-        let status_overlay = (row_index + 1 == rows)
-            .then_some(frame.status_text.as_deref())
-            .flatten();
-        let status_cells = status_overlay.map(|status| status_row_cells(source_cells, status));
-        let cells = status_cells.as_deref().unwrap_or(source_cells);
+    for source_cells in source_rows {
+        // Row placement is intentionally absent from this key. Cached rows own shaping only;
+        // `prepare_text_atlas` remaps the same Arc through the presented frame's live prefix map.
         let key = ComposedRowKey {
-            cells: cells.to_vec(),
+            cells: source_cells.to_vec(),
             metrics: metrics.into(),
             font_revision,
-            status_overlay: status_overlay.map(str::to_owned),
+            status_overlay: None,
         };
         if let Some(row) = composed_row_cache.get(&key) {
             next_rows.push(row);
@@ -2476,20 +2562,59 @@ fn prepare_text_rows(
         rows_reshaped = rows_reshaped.saturating_add(1);
 
         let narrow_glyphs = shape_narrow_glyphs(
-            cells,
+            source_cells,
             font_system,
             swash_cache,
             metrics,
             narrow_shaping_cache,
         );
-        let wide_glyphs =
-            shape_wide_glyphs(cells, font_system, swash_cache, metrics, wide_shaping_cache);
+        let wide_glyphs = shape_wide_glyphs(
+            source_cells,
+            font_system,
+            swash_cache,
+            metrics,
+            wide_shaping_cache,
+        );
         let row = Arc::new(ComposedRow {
             narrow_glyphs,
             wide_glyphs,
         });
         composed_row_cache.insert(key, Arc::clone(&row));
         next_rows.push(row);
+    }
+    if let Some(status) = frame.status_text.as_deref() {
+        let cells = status_overlay_cells(frame.columns.get() as usize, status);
+        let key = ComposedRowKey {
+            cells: cells.clone(),
+            metrics: metrics.into(),
+            font_revision,
+            status_overlay: Some(status.to_owned()),
+        };
+        if let Some(row) = composed_row_cache.get(&key) {
+            *status_overlay = Some(row);
+        } else {
+            rows_reshaped = rows_reshaped.saturating_add(1);
+            let row = Arc::new(ComposedRow {
+                narrow_glyphs: shape_narrow_glyphs(
+                    &cells,
+                    font_system,
+                    swash_cache,
+                    metrics,
+                    narrow_shaping_cache,
+                ),
+                wide_glyphs: shape_wide_glyphs(
+                    &cells,
+                    font_system,
+                    swash_cache,
+                    metrics,
+                    wide_shaping_cache,
+                ),
+            });
+            composed_row_cache.insert(key, Arc::clone(&row));
+            *status_overlay = Some(row);
+        }
+    } else {
+        *status_overlay = None;
     }
     *text_rows = next_rows;
     Ok(TextPreparationStats {
@@ -2526,13 +2651,13 @@ fn prepare_text_atlas(
     swash_cache: &mut SwashCache,
     text_rows: &[Arc<ComposedRow>],
     metrics: CellMetrics,
-    columns: NonZeroU32,
+    frame: &ViewportFrame,
 ) -> Result<(), PrepareError> {
     let padding = metrics.padding_px;
-    let text_right = (padding + columns.get() as f32 * metrics.cell_width_px).ceil() as i32;
+    let text_right = (padding + frame.columns.get() as f32 * metrics.cell_width_px).ceil() as i32;
     let narrow_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
         text_row.narrow_glyphs.iter().map(move |glyph| {
-            let [left, top, _, bottom] = cell_bounds_px(metrics, row, glyph.column);
+            let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, glyph.column);
             TextArea {
                 buffer: &glyph.buffer,
                 left: left + glyph.left_offset_px,
@@ -2553,7 +2678,7 @@ fn prepare_text_atlas(
     });
     let wide_text_areas = text_rows.iter().enumerate().flat_map(|(row, text_row)| {
         text_row.wide_glyphs.iter().map(move |wide| {
-            let [left, top, _, bottom] = cell_bounds_px(metrics, row, wide.column);
+            let [left, top, _, bottom] = frame_cell_bounds_px(metrics, frame, row, wide.column);
             TextArea {
                 buffer: &wide.buffer,
                 left,
@@ -2581,6 +2706,75 @@ fn prepare_text_atlas(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn prepare_status_text_atlas(
+    text_renderer: &mut TextRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    font_system: &mut FontSystem,
+    atlas: &mut TextAtlas,
+    viewport: &Viewport,
+    swash_cache: &mut SwashCache,
+    status_overlay: Option<&ComposedRow>,
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+) -> Result<(), PrepareError> {
+    let Some(status) = frame.status_text.as_deref() else {
+        return Ok(());
+    };
+    let Some(row) = status_overlay else {
+        return Ok(());
+    };
+    let Some(geometry) = status_overlay_geometry(metrics, frame, status) else {
+        return Ok(());
+    };
+    let narrow_text_areas = row.narrow_glyphs.iter().map(|glyph| {
+        let left = geometry.rect[0]
+            + glyph.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
+        TextArea {
+            buffer: &glyph.buffer,
+            left: left + glyph.left_offset_px,
+            top: geometry.rect[1] + glyph.top_offset_px,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: geometry.rect[0].floor() as i32,
+                top: geometry.rect[1].floor() as i32,
+                right: geometry.rect[2].ceil() as i32,
+                bottom: geometry.rect[3].ceil() as i32,
+            },
+            default_color: glyph.color,
+            custom_glyphs: &[],
+        }
+    });
+    let wide_text_areas = row.wide_glyphs.iter().map(|wide| {
+        let left = geometry.rect[0]
+            + wide.column.saturating_sub(geometry.first_column) as f32 * metrics.cell_width_px;
+        TextArea {
+            buffer: &wide.buffer,
+            left,
+            top: geometry.rect[1] + wide.top_offset_px,
+            scale: 1.0,
+            bounds: TextBounds {
+                left: left.floor() as i32,
+                top: geometry.rect[1].floor() as i32,
+                right: (left + 2.0 * metrics.cell_width_px).ceil() as i32,
+                bottom: geometry.rect[3].ceil() as i32,
+            },
+            default_color: wide.color,
+            custom_glyphs: &[],
+        }
+    });
+    text_renderer.prepare(
+        device,
+        queue,
+        font_system,
+        atlas,
+        viewport,
+        narrow_text_areas.chain(wide_text_areas),
+        swash_cache,
+    )
+}
+
 /// Validate the complete render frame before exposing exact terminal rows to text shaping.
 ///
 /// This is the shared slice boundary used by `Renderer::prepare_text_rows` and deterministic
@@ -2592,8 +2786,8 @@ pub fn text_row_cells(
     Ok(frame.cells.chunks_exact(frame.columns.get() as usize))
 }
 
-fn status_row_cells(cells: &[CapturedCell], status: &str) -> Vec<CapturedCell> {
-    let mut displayed = cells.to_vec();
+fn status_overlay_cells(columns: usize, status: &str) -> Vec<CapturedCell> {
+    let mut displayed = vec![CapturedCell::default(); columns];
     let characters = status.chars().collect::<Vec<_>>();
     let shown = characters.len().min(displayed.len());
     let start = displayed.len() - shown;
@@ -2606,6 +2800,34 @@ fn status_row_cells(cells: &[CapturedCell], status: &str) -> Vec<CapturedCell> {
     displayed
 }
 
+fn status_overlay_geometry(
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    status: &str,
+) -> Option<StatusOverlayGeometry> {
+    if frame.rows.get() < 2 {
+        return None;
+    }
+    let columns = frame.columns.get() as usize;
+    let shown = status.chars().count().min(columns);
+    if shown == 0 {
+        return None;
+    }
+    let first_column = columns - shown;
+    let right = metrics.padding_px + columns as f32 * metrics.cell_width_px;
+    let left = right - shown as f32 * metrics.cell_width_px;
+    Some(StatusOverlayGeometry {
+        rect: [
+            left,
+            metrics.padding_px,
+            right,
+            metrics.padding_px + metrics.cell_height_px,
+        ],
+        first_column,
+    })
+}
+
+#[cfg(test)]
 fn cell_bounds_px(metrics: CellMetrics, row: usize, column: usize) -> [f32; 4] {
     let left = metrics.padding_px + column as f32 * metrics.cell_width_px;
     let top = metrics.padding_px + row as f32 * metrics.cell_height_px;
@@ -2617,12 +2839,53 @@ fn cell_bounds_px(metrics: CellMetrics, row: usize, column: usize) -> [f32; 4] {
     ]
 }
 
-fn ime_cursor_area_for_metrics(
+fn frame_cell_bounds_px(
     metrics: CellMetrics,
-    cursor: bt_viewport::GridCursor,
-) -> ImeCursorArea {
-    let [left, top, right, bottom] =
-        cell_bounds_px(metrics, cursor.row as usize, cursor.column as usize);
+    frame: &ViewportFrame,
+    row: usize,
+    column: usize,
+) -> [f32; 4] {
+    let left = metrics.padding_px + column as f32 * metrics.cell_width_px;
+    let mapped = frame
+        .row_map
+        .get(row)
+        .expect("frame geometry consumers validate row_map before drawing");
+    let top = metrics.padding_px + mapped.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+    [
+        left,
+        top,
+        left + metrics.cell_width_px,
+        top + mapped.height_subpixels as f32 / SUBPIXELS_PER_PX as f32,
+    ]
+}
+
+fn selection_span_bounds_px(
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    selection: &SelectionSpan,
+    column: usize,
+    span: usize,
+) -> [f32; 4] {
+    let vertical = frame
+        .selection_span_vertical_interval(selection)
+        .expect("renderer validates every selection span against the frame row map");
+    let left = metrics.padding_px + column as f32 * metrics.cell_width_px;
+    let top = metrics.padding_px + vertical.start as f32 / SUBPIXELS_PER_PX as f32;
+    [
+        left,
+        top,
+        left + span as f32 * metrics.cell_width_px,
+        metrics.padding_px + vertical.end as f32 / SUBPIXELS_PER_PX as f32,
+    ]
+}
+
+fn ime_cursor_area_for_metrics(metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
+    let [left, top, right, bottom] = frame_cell_bounds_px(
+        metrics,
+        frame,
+        frame.cursor.row as usize,
+        frame.cursor.column as usize,
+    );
     ImeCursorArea {
         x: left.floor() as i32,
         y: top.floor() as i32,
@@ -2654,7 +2917,8 @@ fn cursor_pixel_bounds(
     focused: bool,
 ) -> Vec<[f32; 4]> {
     let (column, span) = cursor_cell_span(frame);
-    let [left, top, _, bottom] = cell_bounds_px(metrics, frame.cursor.row as usize, column);
+    let [left, top, _, bottom] =
+        frame_cell_bounds_px(metrics, frame, frame.cursor.row as usize, column);
     let right = left + span as f32 * metrics.cell_width_px;
     if focused {
         return vec![[left, top, right, bottom]];
@@ -3602,6 +3866,30 @@ mod tests {
             .collect()
     }
 
+    fn test_row_map(rows: u32) -> Vec<bt_viewport::FrameVisualRow> {
+        (0..rows)
+            .map(|row| bt_viewport::FrameVisualRow {
+                top_subpixels: i64::from(row) * 22 * SUBPIXELS_PER_PX,
+                height_subpixels: 22 * SUBPIXELS_PER_PX,
+                live_grid_row: Some(row),
+            })
+            .collect()
+    }
+
+    fn test_row_map_for_metrics(
+        rows: u32,
+        metrics: CellMetrics,
+    ) -> Vec<bt_viewport::FrameVisualRow> {
+        let height = (metrics.cell_height_px * SUBPIXELS_PER_PX as f32).round() as i64;
+        (0..rows)
+            .map(|row| bt_viewport::FrameVisualRow {
+                top_subpixels: i64::from(row) * height,
+                height_subpixels: height,
+                live_grid_row: Some(row),
+            })
+            .collect()
+    }
+
     #[test]
     fn math_toolbar_shrinks_to_the_visible_source_row_band() {
         for (scale, top, bottom) in [(1.0, 8.0, 26.0), (1.25, 10.0, 32.5)] {
@@ -4136,33 +4424,114 @@ mod tests {
             }
         );
         assert_eq!(metrics.grid_for_pixels(0, 0).columns.get(), 1);
-        assert_eq!(
-            metrics.hit_test(8.0, 8.0, 80, 24),
-            Some(GridHit { row: 0, column: 0 })
-        );
-        assert_eq!(
-            metrics.hit_test(14.9, 24.9, 80, 24),
-            Some(GridHit { row: 0, column: 0 })
-        );
-        assert_eq!(
-            metrics.hit_test(15.0, 25.0, 80, 24),
-            Some(GridHit { row: 1, column: 1 })
-        );
-        assert_eq!(metrics.hit_test(4.9, 8.0, 80, 24), None);
     }
 
     #[test]
-    fn status_overlay_is_right_aligned_without_mutating_source_cells() {
-        let source = vec![CapturedCell::plain("x"); 6];
-        let displayed = status_row_cells(&source, "3 below");
+    fn status_overlay_uses_real_frame_state_and_never_occupies_the_bottom_grid_row() {
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut swash_cache = SwashCache::new();
+        let mut narrow_cache = NarrowShapingCache::new();
+        let mut wide_cache = WideShapingCache::new();
+        let mut row_cache = ComposedRowCache::new();
+        let mut text_rows = Vec::new();
+        let mut status_overlay = None;
+        let columns = 16_usize;
+        let rows = 3_usize;
+        let mut cells = vec![CapturedCell::default(); columns * rows];
+        for (cell, character) in cells[(rows - 1) * columns..]
+            .iter_mut()
+            .zip("bottom-line".chars())
+        {
+            *cell = CapturedCell::plain(character.to_string());
+        }
+        let mut frame = ViewportFrame {
+            columns: NonZeroU32::new(columns as u32).unwrap(),
+            rows: NonZeroU32::new(rows as u32).unwrap(),
+            cells,
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors(columns * rows),
+            row_map: test_row_map(rows as u32),
+            selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns as u32),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        prepare_text_rows(
+            &frame,
+            metrics,
+            &mut text_rows,
+            &mut status_overlay,
+            &mut row_cache,
+            1,
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        assert_eq!(text_rows.len(), rows);
+        assert!(status_overlay.is_none(), "no overflow means no overlay row");
+        let bottom_row = Arc::clone(&text_rows[rows - 1]);
+
+        frame.status_text = Some("2 rows above".to_owned());
+        prepare_text_rows(
+            &frame,
+            metrics,
+            &mut text_rows,
+            &mut status_overlay,
+            &mut row_cache,
+            1,
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        let overlay = status_overlay.as_ref().expect("overflow shapes an overlay");
+        assert_eq!(text_rows.len(), rows, "overlay is not a synthetic grid row");
+        assert!(Arc::ptr_eq(&text_rows[rows - 1], &bottom_row));
+        assert!(!overlay.narrow_glyphs.is_empty());
         assert_eq!(
-            displayed
+            frame.cells[(rows - 1) * columns..]
                 .iter()
                 .map(|cell| cell.text.as_str())
                 .collect::<String>(),
-            " below"
+            "bottom-line"
         );
-        assert_eq!(source[0].text, "x");
+        let geometry = status_overlay_geometry(metrics, &frame, "2 rows above").unwrap();
+        let bottom_row_top = frame_cell_bounds_px(metrics, &frame, rows - 1, 0)[1];
+        assert!(
+            geometry.rect[3] <= bottom_row_top,
+            "independent overlay {:?} must not cover the bottom row starting at {bottom_row_top}",
+            geometry.rect
+        );
+
+        frame.status_text = None;
+        prepare_text_rows(
+            &frame,
+            metrics,
+            &mut text_rows,
+            &mut status_overlay,
+            &mut row_cache,
+            1,
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        assert!(
+            status_overlay.is_none(),
+            "clearing overflow removes the overlay"
+        );
     }
 
     #[test]
@@ -4185,12 +4554,235 @@ mod tests {
                 column: 3,
                 visible: true,
             };
-            let area = ime_cursor_area_for_metrics(metrics, cursor);
+            let frame = ViewportFrame {
+                columns: NonZeroU32::new(4).unwrap(),
+                rows: NonZeroU32::new(3).unwrap(),
+                cells: vec![CapturedCell::default(); 12],
+                cursor,
+                cell_anchors: test_cell_anchors(12),
+                row_map: test_row_map_for_metrics(3, metrics),
+                selection_spans: Vec::new(),
+                math_blocks: Vec::new(),
+                status_text: None,
+                viewport_origin: FrameViewportOrigin::Bottom,
+                scroll_offset_rows: 0,
+                layout_key: bt_doc_layout_key(4),
+                view_generation: bt_doc::ViewGeneration(1),
+            };
+            let area = ime_cursor_area_for_metrics(metrics, &frame);
             let bounds = cell_bounds_px(metrics, 2, 3);
             assert_eq!(area.x, bounds[0].floor() as i32);
             assert_eq!(area.y, bounds[1].floor() as i32);
             assert_eq!(area.width, (bounds[2].ceil() - bounds[0].floor()) as u32);
             assert_eq!(area.height, (bounds[3].ceil() - bounds[1].floor()) as u32);
+        }
+    }
+
+    #[test]
+    fn expanded_live_prefix_places_cursor_ime_and_selection_on_one_vertical_axis() {
+        let metrics = CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 18.0,
+            font_size_px: 14.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 12.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        };
+        let unit = SUBPIXELS_PER_PX;
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(2).unwrap(),
+            rows: NonZeroU32::new(4).unwrap(),
+            cells: vec![CapturedCell::plain("x"); 8],
+            cursor: bt_viewport::GridCursor {
+                row: 2,
+                column: 1,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(8),
+            row_map: vec![
+                bt_viewport::FrameVisualRow {
+                    top_subpixels: -22 * unit,
+                    height_subpixels: 40 * unit,
+                    live_grid_row: Some(0),
+                },
+                bt_viewport::FrameVisualRow {
+                    top_subpixels: 18 * unit,
+                    height_subpixels: 18 * unit,
+                    live_grid_row: Some(1),
+                },
+                bt_viewport::FrameVisualRow {
+                    top_subpixels: 36 * unit,
+                    height_subpixels: 18 * unit,
+                    live_grid_row: Some(2),
+                },
+                bt_viewport::FrameVisualRow {
+                    top_subpixels: 54 * unit,
+                    height_subpixels: 18 * unit,
+                    live_grid_row: Some(3),
+                },
+            ],
+            selection_spans: vec![bt_viewport::SelectionSpan {
+                row: 2,
+                start_column: 0,
+                end_column: 2,
+            }],
+            math_blocks: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(2),
+            view_generation: bt_doc::ViewGeneration(2),
+        };
+
+        let row_bounds = frame_cell_bounds_px(metrics, &frame, 2, 0);
+        assert_eq!(row_bounds, [4.0, 40.0, 12.0, 58.0]);
+        assert_eq!(
+            metrics.hit_test_frame(&frame, 13.0, 41.0),
+            Some(GridHit { row: 2, column: 1 })
+        );
+        let ime = ime_cursor_area_for_metrics(metrics, &frame);
+        assert_eq!((ime.x, ime.y, ime.width, ime.height), (12, 40, 8, 18));
+        assert_eq!(
+            cursor_pixel_bounds(metrics, &frame, true),
+            vec![[12.0, 40.0, 20.0, 58.0]]
+        );
+        assert_eq!(
+            frame_cell_bounds_px(
+                metrics,
+                &frame,
+                frame.selection_spans[0].row as usize,
+                frame.selection_spans[0].start_column as usize,
+            )[1],
+            40.0,
+            "selection rectangles consume the same frame row prefix"
+        );
+    }
+
+    #[test]
+    fn real_math_decoration_keeps_inter_block_selection_in_its_own_row_map_band() {
+        let started = std::time::Instant::now();
+        let mut session = bt_term::DualPlaneSession::new(
+            NonZeroU32::new(40).unwrap(),
+            NonZeroU32::new(24).unwrap(),
+        );
+        session
+            .feed_at(
+                b"\x1b[?1049h$$x0$$\r\nafter-0\r\n$$x1$$\r\nafter-1\r\n$$x2$$\r\nafter-2\r\n$$x3$$\r\nafter-3",
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(started + bt_term::LIVE_MATH_STABLE_INTERVAL),
+            4
+        );
+        let raster = bt_math::MathRaster {
+            rgba: vec![255; 40 * 40 * 4],
+            width_px: 40,
+            height_px: 40,
+            content_height_px: 24,
+            ascent_px: 20.0,
+            descent_px: 4.0,
+            render_time: std::time::Duration::from_millis(1),
+        };
+        let mut completed = 0;
+        while let Some(mut task) = session.take_live_worker_task() {
+            assert!(bt_detect::resolve_live_detection_task(&mut task));
+            assert!(session.complete_live_worker_result(task, Ok(raster.clone())));
+            completed += 1;
+        }
+        assert_eq!(completed, 4);
+
+        let mut projection = session.new_projection(session.layout_key());
+        let unselected = session.viewport_frame(&mut projection).unwrap();
+        let rendered_bands = unselected
+            .math_blocks
+            .iter()
+            .map(|block| match block.anchor {
+                MathBlockAnchor::Live {
+                    band_start_row,
+                    band_end_row,
+                    ..
+                } => (band_start_row, band_end_row),
+                MathBlockAnchor::History { .. } => panic!("fixture must stay on the live plane"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rendered_bands, [(0, 0), (2, 2), (4, 4), (6, 6)]);
+        assert!(
+            unselected.row_map[0].top_subpixels < 0,
+            "four free-height blocks must exercise the negative-top frame"
+        );
+        let start = unselected
+            .anchor_at(0, 0, bt_doc::Bias::Before)
+            .unwrap()
+            .unwrap();
+        let end = unselected
+            .anchor_at(7, 39, bt_doc::Bias::After)
+            .unwrap()
+            .unwrap();
+        session.set_view_selection(Some(bt_viewport::ViewSelection { start, end }));
+        session.refresh_projection(&mut projection);
+
+        let selected = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            selected
+                .selection_spans
+                .iter()
+                .map(|span| span.row)
+                .collect::<Vec<_>>(),
+            [1, 3, 5, 7],
+            "only the four rendered band rows may be suppressed"
+        );
+        let metrics = CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 18.0,
+            font_size_px: 14.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 12.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        };
+        let status = selected
+            .status_text
+            .as_deref()
+            .expect("negative-top live frame must publish rows-above status");
+        assert!(status.ends_with(" rows above"));
+        let terminal_last_row = session.terminal().visible_row(23).unwrap().cells;
+        assert_eq!(
+            &selected.cells[23 * 40..24 * 40],
+            terminal_last_row.as_slice(),
+            "the independent overflow overlay must not rewrite final-row cells"
+        );
+        let status_geometry = status_overlay_geometry(metrics, &selected, status).unwrap();
+        let last_row_top = frame_cell_bounds_px(metrics, &selected, 23, 0)[1];
+        assert!(
+            status_geometry.rect[3] <= last_row_top,
+            "overflow overlay {:?} intersects final row starting at {last_row_top}",
+            status_geometry.rect
+        );
+        for span in &selected.selection_spans {
+            let rect = selection_span_bounds_px(
+                metrics,
+                &selected,
+                span,
+                span.start_column as usize,
+                span.end_column.saturating_sub(span.start_column) as usize,
+            );
+            let mapped = selected.row_map[span.row as usize];
+            let row_top =
+                metrics.padding_px + mapped.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
+            let row_bottom = metrics.padding_px
+                + mapped.top_subpixels.saturating_add(mapped.height_subpixels) as f32
+                    / SUBPIXELS_PER_PX as f32;
+            assert!(
+                row_top <= rect[1] && rect[3] <= row_bottom,
+                "selection row {} rect {rect:?} escaped row_map [{row_top}, {row_bottom})",
+                span.row
+            );
         }
     }
 
@@ -4206,6 +4798,7 @@ mod tests {
                 visible: true,
             },
             cell_anchors: test_cell_anchors(1),
+            row_map: test_row_map(1),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             status_text: None,
@@ -4234,6 +4827,7 @@ mod tests {
             columns: NonZeroU32::new(columns).unwrap(),
             rows: NonZeroU32::new(rows).unwrap(),
             cell_anchors: test_cell_anchors(cells.len()),
+            row_map: test_row_map(rows),
             cells,
             cursor: bt_viewport::GridCursor {
                 row: 0,
@@ -4296,6 +4890,7 @@ mod tests {
                 visible: true,
             },
             cell_anchors: test_cell_anchors(4),
+            row_map: test_row_map(2),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             status_text: None,
@@ -4489,6 +5084,7 @@ mod tests {
         let mut wide_cache = WideShapingCache::new();
         let mut row_cache = ComposedRowCache::new();
         let mut text_rows = Vec::new();
+        let mut status_overlay = None;
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(3).unwrap(),
@@ -4502,6 +5098,7 @@ mod tests {
                 visible: false,
             },
             cell_anchors: test_cell_anchors(6),
+            row_map: test_row_map(3),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             status_text: None,
@@ -4514,6 +5111,7 @@ mod tests {
             &frame,
             metrics,
             &mut text_rows,
+            &mut status_overlay,
             &mut row_cache,
             1,
             &mut font_system,
@@ -4531,6 +5129,7 @@ mod tests {
             &frame,
             metrics,
             &mut text_rows,
+            &mut status_overlay,
             &mut row_cache,
             1,
             &mut font_system,
@@ -4545,6 +5144,34 @@ mod tests {
         assert!(Arc::ptr_eq(&text_rows[1], &original[2]));
         assert!(Arc::ptr_eq(&text_rows[2], &original[0]));
         assert!(shifted.row_cache.resident_bytes > 0);
+
+        let shifted_rows = text_rows.clone();
+        frame.row_map[0].top_subpixels = -4 * SUBPIXELS_PER_PX;
+        frame.row_map[0].height_subpixels += 4 * SUBPIXELS_PER_PX;
+        frame.row_map[1].top_subpixels += 4 * SUBPIXELS_PER_PX;
+        frame.row_map[2].top_subpixels += 4 * SUBPIXELS_PER_PX;
+        let remapped_geometry = prepare_text_rows(
+            &frame,
+            metrics,
+            &mut text_rows,
+            &mut status_overlay,
+            &mut row_cache,
+            1,
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        assert_eq!(remapped_geometry.rows_reshaped, 0);
+        assert_eq!(remapped_geometry.row_cache.hits, 3);
+        assert!(
+            text_rows
+                .iter()
+                .zip(&shifted_rows)
+                .all(|(next, previous)| Arc::ptr_eq(next, previous)),
+            "row height is placement geometry, not a shaping-cache identity"
+        );
     }
 
     #[test]
@@ -4666,6 +5293,7 @@ mod tests {
                 visible: true,
             },
             cell_anchors: test_cell_anchors(16),
+            row_map: test_row_map(2),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             status_text: None,
@@ -4710,6 +5338,7 @@ mod tests {
                 visible: true,
             },
             cell_anchors: test_cell_anchors(16),
+            row_map: test_row_map(2),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             status_text: None,
@@ -4844,6 +5473,7 @@ mod tests {
                 visible: true,
             },
             cell_anchors: test_cell_anchors(3),
+            row_map: test_row_map(1),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             status_text: None,
@@ -4880,6 +5510,7 @@ mod tests {
                 visible: true,
             },
             cell_anchors: test_cell_anchors(1),
+            row_map: test_row_map_for_metrics(1, metrics),
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             status_text: None,

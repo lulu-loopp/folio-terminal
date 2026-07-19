@@ -50,6 +50,8 @@ const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
 /// M0-alpha's single-session frozen-line budget; later configuration work may expose it.
 const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const MATH_WORKER_STOPPED_NOTICE: &str =
+    "Formula rendering stopped; terminal input and output remain available";
 const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
 
 #[derive(Clone, Copy, Debug)]
@@ -111,6 +113,49 @@ impl MathWorker {
     }
 }
 
+fn disable_math_worker_state(running: &mut bool, notice_pending: &mut bool) -> bool {
+    if !*running {
+        return false;
+    }
+    *running = false;
+    *notice_pending = true;
+    eprintln!("formula rendering worker stopped; terminal input and output remain available");
+    true
+}
+
+fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
+    if std::mem::take(notice_pending) {
+        Some(MATH_WORKER_STOPPED_NOTICE)
+    } else {
+        None
+    }
+}
+
+/// Drain the real session queue into the renderer channel. A dead optional-decoration worker is
+/// a one-way feature downgrade, never a terminal/runtime error.
+fn dispatch_pending_math_tasks(
+    session: &mut DualPlaneSession,
+    tasks: &mpsc::Sender<MathWorkerTask>,
+    running: &mut bool,
+    notice_pending: &mut bool,
+) -> bool {
+    if !*running {
+        return false;
+    }
+    while let Some(task) = session.take_math_worker_task() {
+        if tasks
+            .send(MathWorkerTask {
+                task,
+                foreground_rgb: foreground_rgb(),
+            })
+            .is_err()
+        {
+            return disable_math_worker_state(running, notice_pending);
+        }
+    }
+    false
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DpiSnapshot {
     winit_scale: f64,
@@ -124,6 +169,8 @@ struct Runtime {
     pty: Option<PtySession>,
     session: DualPlaneSession,
     math_worker: MathWorker,
+    math_worker_running: bool,
+    math_worker_notice_pending: bool,
     projection: ViewportProjection,
     pending_frames: LatestFrameSlot,
     grid: GridSize,
@@ -211,15 +258,13 @@ impl UserInputKind {
     }
 }
 
-fn live_viewport_mouse_hit(
-    hit: bt_render::GridHit,
-    scroll_offset_rows: usize,
-) -> bt_render::GridHit {
-    let scroll_offset_rows = u32::try_from(scroll_offset_rows).unwrap_or(u32::MAX);
+fn live_viewport_mouse_hit(frame: &ViewportFrame, hit: bt_render::GridHit) -> bt_render::GridHit {
     bt_render::GridHit {
-        // Windows Terminal translates from its visible buffer viewport to the mutable/live
-        // viewport, then clamps positions above the live viewport to its top row.
-        row: hit.row.saturating_sub(scroll_offset_rows),
+        // The mapping belongs to the actual presented frame. Frozen/staging pixels above the
+        // mutable viewport retain Windows Terminal's clamp-to-live-row-zero behaviour.
+        row: frame
+            .live_point_at(hit.row, hit.column)
+            .map_or(0, |point| point.row),
         column: hit.column,
     }
 }
@@ -463,6 +508,8 @@ impl Runtime {
             pty,
             session,
             math_worker,
+            math_worker_running: true,
+            math_worker_notice_pending: false,
             projection,
             pending_frames: LatestFrameSlot::default(),
             grid,
@@ -551,12 +598,20 @@ impl Runtime {
     }
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
-        self.dispatch_math_tasks()?;
+        dispatch_pending_math_tasks(
+            &mut self.session,
+            &self.math_worker.tasks,
+            &mut self.math_worker_running,
+            &mut self.math_worker_notice_pending,
+        );
         self.session.refresh_projection(&mut self.projection);
-        let terminal_frame = self
+        let mut terminal_frame = self
             .session
             .viewport_frame(&mut self.projection)
             .context("project terminal grid into viewport frame")?;
+        if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
+            terminal_frame.status_text = Some(notice.to_owned());
+        }
         let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
             .context("reject non-rectangular frame before IME composition")?;
         if skip_unchanged
@@ -597,32 +652,40 @@ impl Runtime {
         Ok(true)
     }
 
-    fn dispatch_math_tasks(&mut self) -> Result<()> {
-        while let Some(task) = self.session.take_math_worker_task() {
-            self.math_worker
-                .tasks
-                .send(MathWorkerTask {
-                    task,
-                    foreground_rgb: foreground_rgb(),
-                })
-                .map_err(|_| anyhow!("math rendering worker stopped"))?;
-        }
-        Ok(())
+    fn disable_math_worker(&mut self) -> bool {
+        disable_math_worker_state(
+            &mut self.math_worker_running,
+            &mut self.math_worker_notice_pending,
+        )
     }
 
     fn apply_math_results(&mut self) -> Result<()> {
         let mut changed = false;
-        while let Ok(completion) = self.math_worker.results.try_recv() {
-            changed |= match completion.task {
-                SessionMathTask::Frozen(task) => {
-                    self.session.complete_worker_result(task, completion.result)
+        loop {
+            match self.math_worker.results.try_recv() {
+                Ok(completion) => {
+                    changed |= match completion.task {
+                        SessionMathTask::Frozen(task) => {
+                            self.session.complete_worker_result(task, completion.result)
+                        }
+                        SessionMathTask::Live(task) => self
+                            .session
+                            .complete_live_worker_result(task, completion.result),
+                    };
                 }
-                SessionMathTask::Live(task) => self
-                    .session
-                    .complete_live_worker_result(task, completion.result),
-            };
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    changed |= self.disable_math_worker();
+                    break;
+                }
+            }
         }
-        self.dispatch_math_tasks()?;
+        dispatch_pending_math_tasks(
+            &mut self.session,
+            &self.math_worker.tasks,
+            &mut self.math_worker_running,
+            &mut self.math_worker_notice_pending,
+        );
         if changed {
             self.publish_frame(FrameTrigger {
                 occurred_at: Instant::now(),
@@ -639,7 +702,18 @@ impl Runtime {
             .is_some_and(|deadline| now >= deadline)
         {
             self.session.advance_live_stability(now);
-            self.dispatch_math_tasks()?;
+            let disabled = dispatch_pending_math_tasks(
+                &mut self.session,
+                &self.math_worker.tasks,
+                &mut self.math_worker_running,
+                &mut self.math_worker_notice_pending,
+            );
+            if disabled {
+                self.publish_frame(FrameTrigger {
+                    occurred_at: now,
+                    source: FrameSource::Expose,
+                })?;
+            }
         }
         Ok(())
     }
@@ -797,12 +871,9 @@ impl Runtime {
     fn frame_hit(&self) -> Option<bt_render::GridHit> {
         let position = self.pointer_position?;
         let frame = self.last_presented_frame.as_ref()?;
-        self.renderer.metrics().hit_test(
-            position.x,
-            position.y,
-            frame.columns.get(),
-            frame.rows.get(),
-        )
+        self.renderer
+            .metrics()
+            .hit_test_frame(frame, position.x, position.y)
     }
 
     fn math_hit(&self) -> Option<MathHit> {
@@ -912,18 +983,16 @@ impl Runtime {
     }
 
     fn copy_selection(&mut self) -> Result<()> {
-        let Some(text) = self.session.selection_text() else {
-            return Ok(());
-        };
-        let result = window_hwnd(&self.window).and_then(|hwnd| {
-            bt_platform::set_clipboard_text(hwnd, &text)
-                .map_err(|error| anyhow!(error))
-                .context("write terminal selection to clipboard")
-        });
-        if !recoverable_clipboard_write(result, "copy") {
+        let window = Arc::clone(&self.window);
+        if !copy_selection(&mut self.session, &mut self.projection, |text| {
+            window_hwnd(&window).and_then(|hwnd| {
+                bt_platform::set_clipboard_text(hwnd, text)
+                    .map_err(|error| anyhow!(error))
+                    .context("write terminal selection to clipboard")
+            })
+        }) {
             return Ok(());
         }
-        self.clear_selection();
         self.publish_interaction_frame()
     }
 
@@ -1049,12 +1118,11 @@ impl Runtime {
         if matches!(self.mouse_route, Some(MouseRoute::Local(_))) {
             return self.extend_local_selection(hit);
         }
-        let hit = live_viewport_mouse_hit(
-            hit,
-            self.last_presented_frame
-                .as_ref()
-                .map_or(0, |frame| frame.scroll_offset_rows),
-        );
+        let frame = self
+            .last_presented_frame
+            .as_ref()
+            .context("missing frame for forwarded mouse motion")?;
+        let hit = live_viewport_mouse_hit(frame, hit);
         let modes = self.session.terminal_modes();
         if self.modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
             return Ok(());
@@ -1134,11 +1202,11 @@ impl Runtime {
             return Ok(());
         };
         let modes = self.session.terminal_modes();
-        let scroll_offset_rows = self
+        let frame = self
             .last_presented_frame
             .as_ref()
-            .map_or(0, |frame| frame.scroll_offset_rows);
-        let forwarded_hit = live_viewport_mouse_hit(hit, scroll_offset_rows);
+            .context("missing frame for forwarded mouse hit")?;
+        let forwarded_hit = live_viewport_mouse_hit(frame, hit);
         if let Some(bytes) = route_forwarded_mouse_button(
             &mut self.mouse_route,
             state,
@@ -1219,12 +1287,11 @@ impl Runtime {
             let Some(hit) = self.frame_hit() else {
                 return Ok(());
             };
-            let hit = live_viewport_mouse_hit(
-                hit,
-                self.last_presented_frame
-                    .as_ref()
-                    .map_or(0, |frame| frame.scroll_offset_rows),
-            );
+            let frame = self
+                .last_presented_frame
+                .as_ref()
+                .context("missing frame for forwarded wheel hit")?;
+            let hit = live_viewport_mouse_hit(frame, hit);
             let button = if lines > 0 {
                 input::MouseProtocolButton::WheelUp
             } else {
@@ -1245,7 +1312,12 @@ impl Runtime {
             );
         }
         if modes.alternate_screen {
-            if !self.modifiers.shift_key() && modes.alternate_scroll {
+            // Alternate-screen wheel emulation belongs to the application. Shift is the explicit
+            // local override for reviewing projection-only rows displaced above this screen.
+            if self.modifiers.shift_key() {
+                return self.scroll_view(lines);
+            }
+            if modes.alternate_scroll {
                 let bytes =
                     input::alternate_scroll_bytes(lines, self.session.application_cursor_mode());
                 return self.send_user_input(
@@ -1322,24 +1394,28 @@ impl Runtime {
     }
 
     fn paste_from_clipboard(&mut self) -> Result<()> {
-        let result = window_hwnd(&self.window).and_then(|hwnd| {
-            bt_platform::clipboard_text(hwnd)
-                .map_err(|error| anyhow!(error))
-                .context("read clipboard text")
-        });
-        let Some(text) = recoverable_clipboard_read(result) else {
+        let window = Arc::clone(&self.window);
+        let pty = &mut self.pty;
+        if !paste_from_clipboard(
+            &mut self.session,
+            &mut self.projection,
+            || {
+                window_hwnd(&window).and_then(|hwnd| {
+                    bt_platform::clipboard_text(hwnd)
+                        .map_err(|error| anyhow!(error))
+                        .context("read clipboard text")
+                })
+            },
+            |chunk| {
+                if let Some(pty) = pty.as_mut() {
+                    pty.write(chunk).context("write clipboard paste to PTY")?;
+                }
+                Ok(())
+            },
+        )? {
             return Ok(());
-        };
-        let bytes = input::paste_bytes(&text, self.session.bracketed_paste_mode());
-        self.return_to_live_for_input();
-        self.pending_keyboard_at = Some(Instant::now());
-        if let Some(pty) = self.pty.as_mut() {
-            // Keep paste on the sole synchronous PTY writer. Fixed-size writes let ConPTY's
-            // existing write_all/flush path apply backpressure instead of one unbounded call.
-            for chunk in bytes.chunks(input::PASTE_WRITE_CHUNK_BYTES) {
-                pty.write(chunk).context("write clipboard paste to PTY")?;
-            }
         }
+        self.pending_keyboard_at = Some(Instant::now());
         self.publish_frame(FrameTrigger {
             occurred_at: self.pending_keyboard_at.unwrap_or_else(Instant::now),
             source: FrameSource::Keyboard,
@@ -1840,6 +1916,22 @@ fn ime_commit_bytes(text: &str) -> Vec<u8> {
     text.as_bytes().to_vec()
 }
 
+fn copy_selection(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    write: impl FnOnce(&str) -> Result<()>,
+) -> bool {
+    let Some(text) = session.selection_text() else {
+        return false;
+    };
+    if !recoverable_clipboard_write(write(&text), "copy") {
+        return false;
+    }
+    session.set_view_selection(None);
+    projection.set_selection(None);
+    true
+}
+
 fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
     match result {
         Ok(()) => true,
@@ -1848,6 +1940,27 @@ fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
             false
         }
     }
+}
+
+fn paste_from_clipboard(
+    session: &mut DualPlaneSession,
+    projection: &mut ViewportProjection,
+    read: impl FnOnce() -> Result<String>,
+    mut write: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<bool> {
+    let Some(text) = recoverable_clipboard_read(read()) else {
+        return Ok(false);
+    };
+    let bytes = input::paste_bytes(&text, session.bracketed_paste_mode());
+    session.set_view_selection(None);
+    projection.set_selection(None);
+    projection.scroll_to_bottom();
+    // Keep paste on the sole synchronous PTY writer. Fixed-size writes let ConPTY's existing
+    // write_all/flush path apply backpressure instead of one unbounded call.
+    for chunk in bytes.chunks(input::PASTE_WRITE_CHUNK_BYTES) {
+        write(chunk)?;
+    }
+    Ok(true)
 }
 
 fn recoverable_clipboard_read(result: Result<String>) -> Option<String> {
@@ -2063,6 +2176,7 @@ fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bo
         && previous.cells == next.cells
         && previous.cursor == next.cursor
         && previous.cell_anchors == next.cell_anchors
+        && previous.row_map == next.row_map
         && previous.selection_spans == next.selection_spans
         && previous.math_blocks == next.math_blocks
         && previous.status_text == next.status_text
@@ -2328,50 +2442,85 @@ mod tests {
 
     #[test]
     fn unavailable_clipboard_copy_keeps_selection_and_allows_a_retry() {
-        let mut selection = Some("retry me".to_owned());
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(2).unwrap());
+        session.feed(b"retry me").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let selection = ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(0, 7, Bias::After).unwrap().unwrap(),
+        };
+        session.set_view_selection(Some(selection.clone()));
+        projection.set_selection(Some(selection));
 
-        let copied = recoverable_clipboard_write(
-            Err(anyhow!("injected clipboard owner contention")),
-            "copy",
-        );
-        if copied {
-            selection = None;
-        }
+        let copied = copy_selection(&mut session, &mut projection, |_| {
+            Err(anyhow!("injected clipboard owner contention"))
+        });
         assert!(
             !copied,
             "clipboard contention must not escape as a fatal error"
         );
-        assert_eq!(selection.as_deref(), Some("retry me"));
+        assert_eq!(session.selection_text().as_deref(), Some("retry me"));
+        assert!(projection.selection().is_some());
 
-        let copied = recoverable_clipboard_write(Ok(()), "copy");
-        if copied {
-            selection = None;
-        }
+        let mut clipboard = String::new();
+        let copied = copy_selection(&mut session, &mut projection, |text| {
+            clipboard.push_str(text);
+            Ok(())
+        });
         assert!(copied);
-        assert_eq!(selection, None);
+        assert_eq!(clipboard, "retry me");
+        assert!(session.view_selection().is_none());
+        assert!(projection.selection().is_none());
     }
 
     #[test]
     fn unavailable_clipboard_paste_keeps_state_and_allows_a_retry() {
-        let mut returned_to_live = false;
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(2).unwrap());
+        session.feed(b"selected").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let selection = ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(0, 7, Bias::After).unwrap().unwrap(),
+        };
+        session.set_view_selection(Some(selection.clone()));
+        projection.set_selection(Some(selection));
         let mut pty_writes = Vec::new();
 
-        let unavailable =
-            recoverable_clipboard_read(Err(anyhow!("injected clipboard owner contention")));
-        if let Some(text) = unavailable {
-            returned_to_live = true;
-            pty_writes.push(text);
-        }
-        assert!(!returned_to_live);
+        assert!(
+            !paste_from_clipboard(
+                &mut session,
+                &mut projection,
+                || Err(anyhow!("injected clipboard owner contention")),
+                |chunk| {
+                    pty_writes.extend_from_slice(chunk);
+                    Ok(())
+                },
+            )
+            .unwrap()
+        );
         assert!(pty_writes.is_empty());
+        assert!(session.view_selection().is_some());
+        assert!(projection.selection().is_some());
 
-        let retry = recoverable_clipboard_read(Ok("paste me".to_owned()));
-        if let Some(text) = retry {
-            returned_to_live = true;
-            pty_writes.push(text);
-        }
-        assert!(returned_to_live);
-        assert_eq!(pty_writes, ["paste me"]);
+        assert!(
+            paste_from_clipboard(
+                &mut session,
+                &mut projection,
+                || Ok("paste me".to_owned()),
+                |chunk| {
+                    pty_writes.extend_from_slice(chunk);
+                    Ok(())
+                },
+            )
+            .unwrap()
+        );
+        assert_eq!(pty_writes, b"paste me");
+        assert!(session.view_selection().is_none());
+        assert!(projection.selection().is_none());
     }
 
     #[test]
@@ -2379,6 +2528,56 @@ mod tests {
         assert_eq!(
             recoverable_wheel_scroll_amount(Err("injected SPI failure".to_owned())),
             bt_platform::WheelScrollAmount::Lines(3)
+        );
+    }
+
+    #[test]
+    fn disconnected_math_dispatch_downgrades_once_and_leaves_the_real_session_usable() {
+        let start = Instant::now();
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(40).unwrap(), NonZeroU32::new(2).unwrap());
+        session.feed_at(b"$$x$$", start).unwrap();
+        assert_eq!(
+            session.advance_live_stability(start + bt_term::LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        let (tasks, receiver) = mpsc::channel();
+        drop(receiver);
+        let mut running = true;
+        let mut notice_pending = false;
+
+        assert!(dispatch_pending_math_tasks(
+            &mut session,
+            &tasks,
+            &mut running,
+            &mut notice_pending,
+        ));
+        assert!(!running);
+        assert!(notice_pending);
+        session.feed(b"\r\nterminal-still-running").unwrap();
+        assert!(
+            session
+                .terminal()
+                .visible_text()
+                .iter()
+                .any(|row| row.contains("terminal-still-running"))
+        );
+
+        assert_eq!(
+            take_math_worker_notice(&mut notice_pending),
+            Some(MATH_WORKER_STOPPED_NOTICE)
+        );
+        assert!(!notice_pending);
+        assert_eq!(take_math_worker_notice(&mut notice_pending), None);
+        assert!(!dispatch_pending_math_tasks(
+            &mut session,
+            &tasks,
+            &mut running,
+            &mut notice_pending,
+        ));
+        assert!(
+            !notice_pending,
+            "the user-visible downgrade notice is one-shot"
         );
     }
 
@@ -2653,7 +2852,7 @@ mod tests {
 
         let physical_hit = bt_render::GridHit { row: 3, column: 5 };
         assert_eq!(
-            live_viewport_mouse_hit(physical_hit, bottom_frame.scroll_offset_rows),
+            live_viewport_mouse_hit(&bottom_frame, physical_hit),
             physical_hit
         );
 
@@ -2662,7 +2861,7 @@ mod tests {
         let anchored_frame = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(anchored_frame.scroll_offset_rows, 2);
 
-        let live_hit = live_viewport_mouse_hit(physical_hit, anchored_frame.scroll_offset_rows);
+        let live_hit = live_viewport_mouse_hit(&anchored_frame, physical_hit);
         assert_eq!(live_hit, bt_render::GridHit { row: 1, column: 5 });
         assert_eq!(
             input::mouse_bytes(
@@ -2677,11 +2876,68 @@ mod tests {
         );
 
         assert_eq!(
-            live_viewport_mouse_hit(
-                bt_render::GridHit { row: 1, column: 5 },
-                anchored_frame.scroll_offset_rows,
-            ),
+            live_viewport_mouse_hit(&anchored_frame, bt_render::GridHit { row: 1, column: 5 },),
             bt_render::GridHit { row: 0, column: 5 }
+        );
+    }
+
+    #[test]
+    fn expanded_presented_row_map_drives_forwarded_mouse_row_and_column() {
+        let start = Instant::now();
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(8).unwrap(), NonZeroU32::new(12).unwrap());
+        session
+            .feed_at(
+                b"\x1b[?1049h$$x^2$$\r\nbarrier1\r\nbarrier2\r\nbottom",
+                start,
+            )
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(start + bt_term::LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        let mut task = session.take_live_worker_task().unwrap();
+        let raster = render_live_detection_task(&MathEngine::new(), &mut task, foreground_rgb())
+            .expect("test formula rasterizes through the production live worker entry");
+        let ink_height_px = raster.height_px;
+        assert!(session.complete_live_worker_result(task, Ok(raster)));
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let cell_height = 18 * bt_viewport::SUBPIXELS_PER_PX;
+        assert!(frame.row_map[0].height_subpixels > cell_height);
+        assert_eq!(frame.math_blocks[0].artifact.render_scale_milli, 1000);
+        let breathing = cell_height / 8;
+        assert_eq!(
+            frame.math_blocks[0].artifact.height_subpixels,
+            i64::from(ink_height_px) * bt_viewport::SUBPIXELS_PER_PX + 2 * breathing,
+            "live box height is alpha-tight ink plus symmetric 12.5% row breathing"
+        );
+        assert_eq!(
+            frame.math_blocks[0].artifact.vertical_padding_subpixels,
+            breathing
+        );
+
+        let target = frame.row_map[2];
+        let target_y = target.top_subpixels + target.height_subpixels / 2;
+        let visual_hit = bt_render::GridHit {
+            row: frame
+                .visual_row_at(target_y)
+                .expect("expanded logical row remains hittable in the presented frame"),
+            column: 5,
+        };
+        let forwarded = live_viewport_mouse_hit(&frame, visual_hit);
+        assert_eq!(forwarded, bt_render::GridHit { row: 2, column: 5 });
+        assert_eq!(
+            input::mouse_bytes(
+                true,
+                input::MouseProtocolButton::Left,
+                input::MouseProtocolEvent::Press,
+                forwarded.row,
+                forwarded.column,
+                ModifiersState::empty(),
+            ),
+            b"\x1b[<0;6;3M"
         );
     }
 
@@ -2703,7 +2959,7 @@ mod tests {
         assert!(!frame_row_text(&unpresented, 3).contains("header"));
 
         let stale_aim = bt_render::GridHit { row: 3, column: 0 };
-        let forwarded = live_viewport_mouse_hit(stale_aim, presented.scroll_offset_rows);
+        let forwarded = live_viewport_mouse_hit(&presented, stale_aim);
         let mut route = None;
         let bytes = route_forwarded_mouse_button(
             &mut route,
@@ -2738,7 +2994,7 @@ mod tests {
         ] {
             let frame = session.viewport_frame(&mut projection).unwrap();
             assert_eq!(frame.scroll_offset_rows, 0);
-            let live_hit = live_viewport_mouse_hit(hit, frame.scroll_offset_rows);
+            let live_hit = live_viewport_mouse_hit(&frame, hit);
             for state in [ElementState::Pressed, ElementState::Released] {
                 captured_user_input.push(
                     route_forwarded_mouse_button(

@@ -16,5 +16,10 @@ thiserror.workspace = true
 unicode-properties.workspace = true
 wgpu.workspace = true
 
+[dev-dependencies]
+bt-detect = { path = "../bt-detect" }
+bt-math = { path = "../bt-math" }
+bt-term = { path = "../bt-term" }
+
 [lints]
 workspace = true

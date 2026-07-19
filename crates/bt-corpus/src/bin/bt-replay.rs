@@ -369,6 +369,8 @@ fn same_visual_frame(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
         && previous.rows == next.rows
         && previous.cells == next.cells
         && previous.cursor == next.cursor
+        && previous.row_map == next.row_map
+        && previous.math_blocks == next.math_blocks
         && previous.selection_spans == next.selection_spans
         && previous.status_text == next.status_text
 }

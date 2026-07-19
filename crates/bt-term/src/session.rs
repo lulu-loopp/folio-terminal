@@ -10,8 +10,8 @@ use std::{
 
 use bt_detect::{
     DecorationRecord, DetectionInput, DetectionTask, LiveDetectionInput, LiveDetectionSource,
-    LiveDetectionTask, MathSpan, PlaceholderArtifact, StaleArtifact, resolve_detection_task,
-    resolve_live_detection_task,
+    LiveDetectionTask, MathSpan, PlaceholderArtifact, StaleArtifact, detect_math_blocks,
+    resolve_detection_task, resolve_live_detection_task,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -19,7 +19,7 @@ use bt_doc::{
     LayoutKey, LiveRowRemoval, SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp,
     ViewGeneration, compare_anchors,
 };
-use bt_math::{MathEngine, MathRaster, MathRenderError, MathRenderKey};
+use bt_math::{MathEngine, MathMode, MathRaster, MathRenderError, MathRenderKey};
 use bt_transcript::{
     CaptureResult, CapturedRow, DEFAULT_STAGING_QUOTA, FinalizedLine, GraphemeOffset,
     SPIKE_DEFAULT_FROZEN_QUOTA, SourceGeneration, StagedRow, StagingId, TranscriptId,
@@ -33,6 +33,7 @@ use bt_viewport::{
 
 use crate::{
     adapter::{AdapterEvent, TerminalAdapter, TerminalDamage, TerminalModes},
+    cell_capture::CapturedRowFingerprint,
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
 };
@@ -46,7 +47,11 @@ const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
 const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
+/// Live breathing is 12.5% of one terminal row per side. At the baseline 18 px row this is 2.25
+/// px: enough to separate ink from text while remaining below the requested 15% ceiling.
+const LIVE_MATH_BREATHING_DENOMINATOR: i64 = 8;
 pub const LIVE_MATH_READABLE_SCALE_MILLI: u32 = bt_viewport::LIVE_MATH_READABLE_SCALE_MILLI;
+pub const LIVE_MIN_VISIBLE_TEXT_ROWS: u32 = bt_viewport::LIVE_MIN_VISIBLE_TEXT_ROWS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MathLayoutOptions {
@@ -75,6 +80,7 @@ struct LiveRowStability {
     last_damage_at: Option<Instant>,
     settled_revision: Option<u64>,
     candidate_signature: Option<u64>,
+    content_fingerprint: Option<CapturedRowFingerprint>,
 }
 
 #[derive(Clone, Debug)]
@@ -96,6 +102,17 @@ struct LiveDecorationRecord {
     hovered: bool,
     horizontal_scroll_px: u32,
     vertical_scroll_px: u32,
+}
+
+#[derive(Clone, Debug)]
+struct PendingLiveArtifactHandoff {
+    span: MathSpan,
+    artifact: PlaceholderArtifact,
+    layout: LayoutKey,
+    detection_revision: DetectionRevision,
+    candidate_staging: StagingId,
+    candidate_start: Option<TranscriptId>,
+    expected_frozen_lines: u64,
 }
 
 #[derive(Debug)]
@@ -231,6 +248,7 @@ pub struct DualPlaneSession {
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
+    pending_live_handoffs: Vec<PendingLiveArtifactHandoff>,
     live_detection_count: u64,
     live_invalidation_count: u64,
 }
@@ -325,6 +343,7 @@ impl DualPlaneSession {
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
             live_decorations: BTreeMap::new(),
+            pending_live_handoffs: Vec::new(),
             live_detection_count: 0,
             live_invalidation_count: 0,
         }
@@ -446,8 +465,8 @@ impl DualPlaneSession {
         for chunk in bytes.chunks(PARSE_QUANTUM) {
             let events = self.terminal.feed(chunk);
             let damage = self.terminal.take_damage();
-            self.observe_live_damage(damage, observed_at);
             self.apply_events(events, observed_at)?;
+            self.observe_live_damage(damage, observed_at);
             self.sync_staging_tail();
         }
         Ok(())
@@ -487,6 +506,7 @@ impl DualPlaneSession {
         let events = self.terminal.resize(columns, rows);
         let _ = self.terminal.take_damage();
         self.invalidate_all_live_decorations();
+        self.pending_live_handoffs.clear();
         self.live_rows = vec![LiveRowStability::default(); rows.get() as usize];
         self.apply_events(events, observed_at)?;
         if plan.begin_transaction {
@@ -537,8 +557,8 @@ impl DualPlaneSession {
         }
         let events = self.terminal.finish_synchronized_update();
         let damage = self.terminal.take_damage();
-        self.observe_live_damage(damage, observed_at);
         self.apply_events(events, observed_at)?;
+        self.observe_live_damage(damage, observed_at);
         self.sync_staging_tail();
         Ok(true)
     }
@@ -669,9 +689,6 @@ impl DualPlaneSession {
         }
 
         let inputs = self.live_detection_context();
-        let mut hasher = DefaultHasher::new();
-        inputs.hash(&mut hasher);
-        let signature = hasher.finish();
         let candidates = inputs
             .iter()
             .filter_map(|input| match input.source {
@@ -686,6 +703,7 @@ impl DualPlaneSession {
             .collect::<Vec<_>>();
         let mut scheduled = 0usize;
         for candidate_row in candidates {
+            let signature = live_detection_signature(&inputs, candidate_row);
             let state = &mut self.live_rows[candidate_row as usize];
             if state.candidate_signature == Some(signature) {
                 continue;
@@ -773,6 +791,7 @@ impl DualPlaneSession {
         };
         if screen != self.live_screen {
             self.invalidate_all_live_decorations();
+            self.pending_live_handoffs.clear();
             self.live_screen = screen;
             self.live_tasks.clear();
             for row in &mut self.live_rows {
@@ -784,9 +803,20 @@ impl DualPlaneSession {
             TerminalDamage::Rows(rows) => rows,
         };
         for row in damaged {
+            let needs_fingerprint = self
+                .live_decorations
+                .values()
+                .any(|record| record.band_start_row <= row && row <= record.band_end_row);
+            let content_fingerprint = needs_fingerprint
+                .then(|| self.terminal.visible_row_fingerprint(row))
+                .flatten();
             let Some(state) = self.live_rows.get_mut(row as usize) else {
                 continue;
             };
+            if needs_fingerprint && state.content_fingerprint == content_fingerprint {
+                continue;
+            }
+            state.content_fingerprint = content_fingerprint;
             state.revision = state.revision.wrapping_add(1);
             state.last_damage_at = Some(observed_at);
             state.settled_revision = None;
@@ -853,6 +883,16 @@ impl DualPlaneSession {
                         if resolve_live_detection_task(&mut task) {
                             extend_live_task_band(&mut task);
                             let artifact = live_placeholder(&task);
+                            let occupied = self.occupied_live_band_rows(task.start.row);
+                            size_live_task_band_for_artifact(
+                                &mut task,
+                                live_presentation_height_subpixels(
+                                    artifact.height_subpixels,
+                                    self.cell_height_subpixels.get(),
+                                ),
+                                self.cell_height_subpixels.get(),
+                                &occupied,
+                            );
                             self.apply_live_worker_completion(task, Some(artifact));
                         }
                     }
@@ -943,10 +983,15 @@ impl DualPlaneSession {
             .ok()
             .map(|raster| artifact_from_live_raster(&task, raster));
         if let Some(artifact) = artifact.as_ref() {
-            fit_live_task_band_to_artifact(
+            let occupied = self.occupied_live_band_rows(task.start.row);
+            size_live_task_band_for_artifact(
                 &mut task,
-                artifact.height_subpixels,
+                live_presentation_height_subpixels(
+                    artifact.height_subpixels,
+                    self.cell_height_subpixels.get(),
+                ),
                 self.cell_height_subpixels.get(),
+                &occupied,
             );
         } else {
             task.band_start_row = task.start.row;
@@ -966,6 +1011,14 @@ impl DualPlaneSession {
             );
         }
         accepted
+    }
+
+    fn occupied_live_band_rows(&self, replacing_start: u32) -> BTreeSet<u32> {
+        self.live_decorations
+            .values()
+            .filter(|record| record.start.row != replacing_start)
+            .flat_map(|record| record.band_start_row..=record.band_end_row)
+            .collect()
     }
 
     fn apply_live_worker_completion(
@@ -988,6 +1041,9 @@ impl DualPlaneSession {
             return false;
         }
         if !task.resolved {
+            self.live_decorations.retain(|_, record| {
+                !(record.start.row <= task.candidate_row && task.candidate_row <= record.end.row)
+            });
             return true;
         }
         let Some(artifact) = artifact else {
@@ -1006,6 +1062,14 @@ impl DualPlaneSession {
             .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
         let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
             remembered.unwrap_or((false, false, 0, 0));
+        // Install summaries only for the rows whose pixels are about to suppress source. Ordinary
+        // TUI rows stay O(damaged rows), while a same-content repaint of this local dependency band
+        // can retain the artifact without cloning any cell Strings.
+        for row in task.band_start_row..=task.band_end_row {
+            if let Some(state) = self.live_rows.get_mut(row as usize) {
+                state.content_fingerprint = self.terminal.visible_row_fingerprint(row);
+            }
+        }
         self.live_decorations.insert(
             task.start.row,
             LiveDecorationRecord {
@@ -1149,6 +1213,7 @@ impl DualPlaneSession {
         }
         self.document.clear_decorations();
         self.invalidate_all_live_decorations();
+        self.pending_live_handoffs.clear();
         self.live_tasks.clear();
         for row in &mut self.live_rows {
             row.candidate_signature = None;
@@ -1201,6 +1266,9 @@ impl DualPlaneSession {
             },
         )?;
         self.decorate_math_frame(&mut frame);
+        frame
+            .validate_shape()
+            .map_err(FrameProjectionError::FrameShape)?;
         Ok(frame)
     }
 
@@ -1293,6 +1361,7 @@ impl DualPlaneSession {
                 start,
                 end,
                 generation,
+                ..
             } => self
                 .live_decorations
                 .get(&start.row)
@@ -1318,6 +1387,7 @@ impl DualPlaneSession {
                 start,
                 end,
                 generation,
+                ..
             } => self
                 .live_decorations
                 .get_mut(&start.row)
@@ -1360,6 +1430,7 @@ impl DualPlaneSession {
                         start,
                         end,
                         generation,
+                        ..
                     } if *screen == record.screen
                         && *start == record.start
                         && *end == record.end
@@ -1426,6 +1497,7 @@ impl DualPlaneSession {
                 start,
                 end,
                 generation,
+                ..
             } => {
                 let Some(record) = self.live_decorations.get_mut(&start.row).filter(|record| {
                     record.screen == *screen
@@ -1442,20 +1514,6 @@ impl DualPlaneSession {
                     return false;
                 };
                 let artifact_size = (artifact.width_px, artifact.height_px);
-                let band_height = i64::from(end.row.saturating_sub(start.row) + 1)
-                    .saturating_mul(self.cell_height_subpixels.get());
-                let scaled_height =
-                    i64::from(artifact.height_px).saturating_mul(i64::from(scale_milli)) / 1000;
-                let fit = if scaled_height.saturating_mul(SUBPIXELS_PER_PX) <= band_height {
-                    scale_milli
-                } else {
-                    u32::try_from(
-                        band_height
-                            .saturating_mul(i64::from(scale_milli))
-                            .div_euclid(scaled_height.saturating_mul(SUBPIXELS_PER_PX).max(1)),
-                    )
-                    .unwrap_or(scale_milli)
-                };
                 let live_options = MathLayoutOptions {
                     block_max_height_px: None,
                     ..options
@@ -1464,7 +1522,7 @@ impl DualPlaneSession {
                     &mut record.horizontal_scroll_px,
                     &mut record.vertical_scroll_px,
                     artifact_size,
-                    fit,
+                    scale_milli,
                     pane_width_px,
                     live_options,
                     horizontal_delta_px,
@@ -1498,20 +1556,29 @@ impl DualPlaneSession {
     }
 
     fn sync_live_projection_artifacts(&self, projection: &mut ViewportProjection) {
-        projection.sync_live_math_artifacts(self.live_decorations.values().filter_map(|record| {
-            (!record.show_source)
-                .then(|| projected_live_artifact(record, self.layout_key))
-                .flatten()
-                .map(|artifact| ProjectedLiveMathArtifact {
-                    screen: record.screen,
-                    start: record.start,
-                    end: record.end,
-                    band_start_row: record.band_start_row,
-                    band_end_row: record.band_end_row,
-                    generation: record.generation,
-                    artifact,
-                })
-        }));
+        projection.sync_live_math_artifacts(
+            self.live_screen,
+            self.live_decorations.values().filter_map(|record| {
+                (!record.show_source)
+                    .then(|| {
+                        projected_live_artifact(
+                            record,
+                            self.layout_key,
+                            self.cell_height_subpixels.get(),
+                        )
+                    })
+                    .flatten()
+                    .map(|artifact| ProjectedLiveMathArtifact {
+                        screen: record.screen,
+                        start: record.start,
+                        end: record.end,
+                        band_start_row: record.band_start_row,
+                        band_end_row: record.band_end_row,
+                        generation: record.generation,
+                        artifact,
+                    })
+            }),
+        );
     }
 
     fn decorate_math_frame(&self, frame: &mut ViewportFrame) {
@@ -1550,12 +1617,16 @@ impl DualPlaneSession {
                     screen,
                     start,
                     end,
+                    band_start_row,
+                    band_end_row,
                     generation,
                 } => {
                     let Some(record) = self.live_decorations.get(&start.row).filter(|record| {
                         record.screen == *screen
                             && record.start == *start
                             && record.end == *end
+                            && record.band_start_row == *band_start_row
+                            && record.band_end_row == *band_end_row
                             && record.generation == *generation
                     }) else {
                         continue;
@@ -1587,6 +1658,12 @@ impl DualPlaneSession {
                 .take_while(|row| frame_row_history_id(frame, *row).is_some_and(|id| id <= end))
                 .last()
                 .unwrap_or(first_row);
+            let Some(first_mapped) = frame.row_map.get(first_row as usize) else {
+                continue;
+            };
+            let Some(last_mapped) = frame.row_map.get(last_row as usize) else {
+                continue;
+            };
             frame.math_blocks.push(MathBlockPlacement {
                 start: *start,
                 anchor: MathBlockAnchor::History { start: *start, end },
@@ -1595,10 +1672,12 @@ impl DualPlaneSession {
                     .as_ref()
                     .map_or_else(String::new, |span| span.source.clone()),
                 artifact,
-                top_subpixels: i64::from(first_row) * self.cell_height_subpixels.get(),
+                top_subpixels: first_mapped.top_subpixels,
                 content_offset_subpixels: 0,
-                clip_height_subpixels: i64::from(last_row - first_row + 1)
-                    * self.cell_height_subpixels.get(),
+                clip_height_subpixels: last_mapped
+                    .top_subpixels
+                    .saturating_add(last_mapped.height_subpixels)
+                    .saturating_sub(first_mapped.top_subpixels),
                 display: MathBlockDisplay::Source,
                 horizontal_overflow: overflow,
                 horizontal_scroll_px: 0,
@@ -1614,12 +1693,12 @@ impl DualPlaneSession {
             if !record.show_source {
                 continue;
             }
-            let Some(artifact) = projected_live_artifact(record, self.layout_key) else {
+            let Some(artifact) =
+                projected_live_artifact(record, self.layout_key, self.cell_height_subpixels.get())
+            else {
                 continue;
             };
-            let row_count = record.band_end_row.saturating_sub(record.band_start_row) + 1;
-            let band_height = i64::from(row_count).saturating_mul(self.cell_height_subpixels.get());
-            let Some((visible_row, source_row)) = frame_row_for_live_range(
+            let Some((visible_row, _source_row)) = frame_row_for_live_range(
                 frame,
                 record.screen,
                 record.band_start_row,
@@ -1627,19 +1706,33 @@ impl DualPlaneSession {
             ) else {
                 continue;
             };
-            let top_subpixels = i64::from(visible_row) * self.cell_height_subpixels.get()
-                - i64::from(source_row - record.band_start_row) * self.cell_height_subpixels.get();
+            let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
+                continue;
+            };
+            let Some(last_mapped) = frame.row_map.iter().rfind(|row| {
+                row.live_grid_row.is_some_and(|live| {
+                    (record.band_start_row..=record.band_end_row).contains(&live)
+                })
+            }) else {
+                continue;
+            };
+            let band_height = last_mapped
+                .top_subpixels
+                .saturating_add(last_mapped.height_subpixels)
+                .saturating_sub(first_mapped.top_subpixels);
             frame.math_blocks.push(MathBlockPlacement {
                 start: TranscriptId(0),
                 anchor: MathBlockAnchor::Live {
                     screen: record.screen,
                     start: record.start,
                     end: record.end,
+                    band_start_row: record.band_start_row,
+                    band_end_row: record.band_end_row,
                     generation: record.generation,
                 },
                 source: record.span.source.clone(),
                 artifact,
-                top_subpixels,
+                top_subpixels: first_mapped.top_subpixels,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
@@ -1653,23 +1746,37 @@ impl DualPlaneSession {
                 toolbar_visible: record.hovered,
             });
         }
-        let rendered_rows = frame
+        let mut rendered_rows = BTreeSet::new();
+        for placement in frame
             .math_blocks
             .iter()
             .filter(|placement| placement.display == MathBlockDisplay::Rendered)
-            .flat_map(|placement| {
-                let first = placement
-                    .top_subpixels
-                    .div_euclid(self.cell_height_subpixels.get())
-                    .max(0) as u32;
-                let count = placement
-                    .clip_height_subpixels
-                    .saturating_add(self.cell_height_subpixels.get() - 1)
-                    .div_euclid(self.cell_height_subpixels.get())
-                    .max(1) as u32;
-                first..first.saturating_add(count)
-            })
-            .collect::<BTreeSet<_>>();
+        {
+            match placement.anchor {
+                MathBlockAnchor::History { start, end } => {
+                    rendered_rows.extend((0..frame.rows.get()).filter(|row| {
+                        frame_row_history_id(frame, *row).is_some_and(|id| start <= id && id <= end)
+                    }));
+                }
+                MathBlockAnchor::Live {
+                    band_start_row,
+                    band_end_row,
+                    ..
+                } => {
+                    rendered_rows.extend(frame.row_map.iter().enumerate().filter_map(
+                        |(frame_row, mapped)| {
+                            mapped
+                                .live_grid_row
+                                .is_some_and(|live_row| {
+                                    (band_start_row..=band_end_row).contains(&live_row)
+                                })
+                                .then(|| u32::try_from(frame_row).ok())
+                                .flatten()
+                        },
+                    ));
+                }
+            }
+        }
         frame
             .selection_spans
             .retain(|selection| !rendered_rows.contains(&selection.row));
@@ -1802,10 +1909,16 @@ impl DualPlaneSession {
                         .delete_transaction(&[], true, self.grid_generation);
                 }
                 LifecycleDirective::ParkPrimary => {
+                    self.invalidate_all_live_decorations();
+                    self.pending_live_handoffs.clear();
+                    self.live_tasks.clear();
                     self.primary_parked = true;
                     self.bump_view_generation();
                 }
                 LifecycleDirective::RestorePrimary => {
+                    self.invalidate_all_live_decorations();
+                    self.pending_live_handoffs.clear();
+                    self.live_tasks.clear();
                     self.primary_parked = false;
                     self.grid_generation.0 += 1;
                     self.document
@@ -1834,6 +1947,7 @@ impl DualPlaneSession {
             return;
         }
         self.invalidate_all_live_decorations();
+        self.pending_live_handoffs.clear();
         self.live_tasks.clear();
         self.grid_generation.0 += 1;
         self.document
@@ -1881,11 +1995,13 @@ impl DualPlaneSession {
     fn apply_removed_rows(&mut self, rows: Vec<RowDirective>) -> Result<(), SessionError> {
         let mut removals = Vec::new();
         let mut captured = Vec::<CaptureResult>::new();
+        let mut captured_staging = BTreeMap::new();
         for row in rows {
             match row {
                 RowDirective::Capture { live_row, row } => {
                     let grapheme_offsets = captured_grapheme_offsets(&row);
                     let result = self.transcript.capture(row);
+                    captured_staging.insert(live_row, result.staging_id);
                     let generation = self.transcript.source_generation();
                     removals.push(LiveRowRemoval {
                         row: live_row,
@@ -1908,6 +2024,7 @@ impl DualPlaneSession {
             return Ok(());
         }
 
+        self.remember_live_artifact_handoffs(&captured_staging);
         self.invalidate_all_live_decorations();
         self.live_tasks.clear();
         self.grid_generation.0 += 1;
@@ -1926,6 +2043,43 @@ impl DualPlaneSession {
         Ok(())
     }
 
+    fn remember_live_artifact_handoffs(&mut self, captured_rows: &BTreeMap<u32, StagingId>) {
+        if self.live_screen != ScreenId::Primary {
+            return;
+        }
+        for record in self.live_decorations.values() {
+            let Some(candidate_staging) = captured_rows.get(&record.start.row).copied() else {
+                continue;
+            };
+            if record.layout != self.layout_key
+                || record.detection_revision != self.detection_revision
+            {
+                continue;
+            }
+            let Some(artifact) = record.artifact.as_ref() else {
+                continue;
+            };
+            if self
+                .pending_live_handoffs
+                .iter()
+                .any(|pending| pending.artifact.key == artifact.key)
+            {
+                continue;
+            }
+            self.pending_live_handoffs.push(PendingLiveArtifactHandoff {
+                span: record.span.clone(),
+                artifact: artifact.clone(),
+                layout: record.layout,
+                detection_revision: record.detection_revision,
+                candidate_staging,
+                candidate_start: None,
+                expected_frozen_lines: u64::from(
+                    record.end.row.saturating_sub(record.start.row) + 1,
+                ),
+            });
+        }
+    }
+
     fn ingest_finalized(&mut self, finalized: FinalizedLine) -> Result<(), SessionError> {
         let closes_active = self.active_staging_tail.is_some_and(|active| {
             finalized
@@ -1941,14 +2095,113 @@ impl DualPlaneSession {
             source.transition(SourceLifecycle::Frozen)?;
         }
         let id = finalized.line.id;
+        for pending in &mut self.pending_live_handoffs {
+            if pending.candidate_start.is_none()
+                && finalized
+                    .mappings
+                    .iter()
+                    .any(|mapping| mapping.staging_id == pending.candidate_staging)
+            {
+                pending.candidate_start = Some(id);
+            }
+        }
         self.document.finalize_transaction(finalized);
         self.schedule_detection(id);
+        self.try_handoff_live_artifact(id);
         self.staging_sources
             .retain(|_, source| *source != SourceLifecycle::Frozen);
         if closes_active {
             self.active_staging_tail = None;
         }
         Ok(())
+    }
+
+    fn try_handoff_live_artifact(&mut self, closing_id: TranscriptId) {
+        // Ordinary finalized output has no live raster to transfer. This branch is the dominant
+        // path and must stay independent of the frozen-history quota.
+        if self.pending_live_handoffs.is_empty() {
+            return;
+        }
+        let matured = self
+            .pending_live_handoffs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pending)| {
+                if pending.layout != self.layout_key
+                    || pending.detection_revision != self.detection_revision
+                {
+                    return None;
+                }
+                let start = pending.candidate_start?;
+                let expected_end = start
+                    .0
+                    .checked_add(pending.expected_frozen_lines.saturating_sub(1))?;
+                (expected_end <= closing_id.0).then_some((index, start, expected_end))
+            })
+            .next();
+        let Some((pending_index, candidate_start, expected_end)) = matured else {
+            return;
+        };
+
+        // The live detector already proved that this artifact begins at candidate_start and spans
+        // exactly expected_frozen_lines detector inputs. Re-run the authoritative detector only
+        // over that closed candidate, never over unrelated frozen history. A mismatch expires the
+        // handoff; the normal frozen worker remains the source of truth.
+        let block = (expected_end == closing_id.0)
+            .then(|| {
+                detect_math_blocks(
+                    self.document
+                        .entries()
+                        .range(candidate_start..=closing_id)
+                        .map(|(id, entry)| (*id, entry.line.text.as_str())),
+                )
+                .into_iter()
+                .find(|block| {
+                    block.start == candidate_start
+                        && block.end == closing_id
+                        && self.pending_live_handoffs[pending_index].span == block.span
+                })
+            })
+            .flatten();
+        let mut pending = self.pending_live_handoffs.remove(pending_index);
+        let Some(block) = block else {
+            return;
+        };
+        pending.artifact.block_end = block.end;
+        let Some(entry) = self.document.entries().get(&block.start) else {
+            return;
+        };
+        let versions = VersionStamp {
+            source: entry.line.source_generation,
+            detection: self.detection_revision,
+            layout: self.layout_key,
+            view: self.view_generation,
+        };
+        let record = self
+            .decorations
+            .entry(block.start)
+            .or_insert_with(|| DecorationRecord::frozen(versions));
+        record.source = SourceLifecycle::Frozen;
+        record.decoration = DecorationLifecycle::Ready;
+        record.versions = versions;
+        record.artifact = Some(pending.artifact);
+        record.stale_artifact = None;
+        record.block_end = Some(block.end);
+        record.span = Some(block.span.clone());
+        self.document.set_decoration(
+            block.start,
+            DecorationIntent::Math {
+                byte_start: block.span.byte_start,
+                byte_end: block.span.byte_end,
+                detection_revision: self.detection_revision,
+            },
+        );
+        if closing_id != block.start
+            && let Some(candidate) = self.decorations.get_mut(&closing_id)
+        {
+            candidate.decoration = DecorationLifecycle::None;
+        }
+        self.scheduler.remove_sources(&BTreeSet::from([closing_id]));
     }
 
     fn schedule_detection(&mut self, id: TranscriptId) {
@@ -1979,6 +2232,7 @@ impl DualPlaneSession {
         if clear_staging {
             self.staging_sources.clear();
             self.active_staging_tail = None;
+            self.pending_live_handoffs.clear();
         }
         let removed_set = removed.iter().copied().collect::<BTreeSet<_>>();
         self.scheduler.remove_sources(&removed_set);
@@ -1988,6 +2242,7 @@ impl DualPlaneSession {
     }
 
     fn invalidate_layout(&mut self) {
+        self.pending_live_handoffs.clear();
         for record in self.decorations.values_mut() {
             record.layout_changed(self.layout_key);
         }
@@ -1996,13 +2251,8 @@ impl DualPlaneSession {
             if record.layout == self.layout_key {
                 continue;
             }
-            let rendered_layout = record.rendered_layout;
-            if let Some(artifact) = record.artifact.take() {
-                record.stale_artifact = Some(StaleArtifact {
-                    artifact,
-                    rendered_layout,
-                });
-            }
+            record.artifact = None;
+            record.stale_artifact = None;
             record.layout = self.layout_key;
             live_relayouts.push(LiveDetectionTask {
                 candidate_row: record.end.row,
@@ -2216,6 +2466,7 @@ pub fn render_detection_task(
             dpi_milli: task.versions.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
             foreground_rgb,
+            mode: MathMode::Display,
         },
     )
 }
@@ -2235,18 +2486,20 @@ pub fn render_live_detection_task(
             dpi_milli: task.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
             foreground_rgb,
+            mode: MathMode::Display,
         },
     )
 }
 
 fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> PlaceholderArtifact {
-    let mut hasher = DefaultHasher::new();
-    task.span.source.hash(&mut hasher);
-    task.versions.layout.hash(&mut hasher);
-    task.versions.detection.hash(&mut hasher);
     let height_subpixels = i64::from(raster.height_px).saturating_mul(SUBPIXELS_PER_PX);
     PlaceholderArtifact {
-        key: format!("math:{:016x}", hasher.finish()),
+        key: shared_math_artifact_key(
+            MathMode::Display,
+            &task.span.source,
+            task.versions.layout,
+            task.versions.detection,
+        ),
         block_end: task.block_end,
         height_subpixels,
         width_px: raster.width_px,
@@ -2257,15 +2510,14 @@ fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> Placeholder
 }
 
 fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> PlaceholderArtifact {
-    let mut hasher = DefaultHasher::new();
-    task.span.source.hash(&mut hasher);
-    task.layout.hash(&mut hasher);
-    task.detection_revision.hash(&mut hasher);
-    task.screen.hash(&mut hasher);
-    task.start.hash(&mut hasher);
     let height_subpixels = i64::from(raster.height_px).saturating_mul(SUBPIXELS_PER_PX);
     PlaceholderArtifact {
-        key: format!("live-math:{:016x}", hasher.finish()),
+        key: shared_math_artifact_key(
+            MathMode::Display,
+            &task.span.source,
+            task.layout,
+            task.detection_revision,
+        ),
         block_end: TranscriptId(0),
         height_subpixels,
         width_px: raster.width_px,
@@ -2275,11 +2527,27 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
     }
 }
 
+fn shared_math_artifact_key(
+    mode: MathMode,
+    source: &str,
+    layout: LayoutKey,
+    detection: DetectionRevision,
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    mode.hash(&mut hasher);
+    source.hash(&mut hasher);
+    layout.hash(&mut hasher);
+    detection.hash(&mut hasher);
+    format!("math:{:016x}", hasher.finish())
+}
+
 fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
     PlaceholderArtifact {
-        key: format!(
-            "live-math:{}:{}:{}",
-            task.start.row, task.end.row, task.detection_revision.0
+        key: shared_math_artifact_key(
+            MathMode::Display,
+            &task.span.source,
+            task.layout,
+            task.detection_revision,
         ),
         block_end: TranscriptId(0),
         height_subpixels: SUBPIXELS_PER_PX,
@@ -2307,24 +2575,33 @@ fn project_artifact(
     source: String,
 ) -> ProjectedMathArtifact {
     let scale_milli = layout_scale_milli(rendered_layout, current_layout);
-    project_artifact_at_scale(artifact, scale_milli, source)
+    project_artifact_at_scale(
+        artifact,
+        scale_milli,
+        source,
+        transcript_vertical_padding_subpixels(current_layout),
+    )
 }
 
 fn project_artifact_at_scale(
     artifact: &PlaceholderArtifact,
     scale_milli: u32,
     source: String,
+    vertical_padding_subpixels: i64,
 ) -> ProjectedMathArtifact {
+    let tight_height_subpixels = artifact
+        .height_subpixels
+        .saturating_mul(i64::from(scale_milli))
+        / 1000;
     ProjectedMathArtifact {
         key: artifact.key.clone(),
         end: artifact.block_end,
         rgba: Arc::clone(&artifact.rgba),
         width_px: artifact.width_px,
         height_px: artifact.height_px,
-        height_subpixels: artifact
-            .height_subpixels
-            .saturating_mul(i64::from(scale_milli))
-            / 1000,
+        height_subpixels: tight_height_subpixels
+            .saturating_add(vertical_padding_subpixels.saturating_mul(2)),
+        vertical_padding_subpixels,
         render_scale_milli: scale_milli,
         source,
     }
@@ -2368,31 +2645,45 @@ fn live_artifact_and_scale(
     record: &LiveDecorationRecord,
     current_layout: LayoutKey,
 ) -> Option<(&PlaceholderArtifact, u32)> {
-    if let Some(artifact) = record.artifact.as_ref() {
-        Some((
-            artifact,
-            layout_scale_milli(record.rendered_layout, current_layout),
-        ))
-    } else {
-        record.stale_artifact.as_ref().map(|stale| {
-            (
-                &stale.artifact,
-                layout_scale_milli(stale.rendered_layout, current_layout),
-            )
-        })
-    }
+    (record.rendered_layout == current_layout)
+        .then_some(record.artifact.as_ref())
+        .flatten()
+        .map(|artifact| (artifact, 1000))
 }
 
 fn projected_live_artifact(
     record: &LiveDecorationRecord,
     current_layout: LayoutKey,
+    cell_height_subpixels: i64,
 ) -> Option<ProjectedMathArtifact> {
     let (artifact, scale_milli) = live_artifact_and_scale(record, current_layout)?;
     Some(project_artifact_at_scale(
         artifact,
         scale_milli,
         record.span.source.clone(),
+        cell_height_subpixels.div_euclid(LIVE_MATH_BREATHING_DENOMINATOR),
     ))
+}
+
+fn transcript_vertical_padding_subpixels(layout: LayoutKey) -> i64 {
+    let padding_px = u64::from(bt_math::VERTICAL_PADDING_LOGICAL_PX)
+        .saturating_mul(u64::from(layout.dpi_milli.get()))
+        .saturating_add(999)
+        / 1000;
+    i64::try_from(padding_px)
+        .unwrap_or(i64::MAX)
+        .saturating_mul(SUBPIXELS_PER_PX)
+}
+
+fn live_presentation_height_subpixels(
+    tight_height_subpixels: i64,
+    cell_height_subpixels: i64,
+) -> i64 {
+    tight_height_subpixels.saturating_add(
+        cell_height_subpixels
+            .div_euclid(LIVE_MATH_BREATHING_DENOMINATOR)
+            .saturating_mul(2),
+    )
 }
 
 fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetectionInput> {
@@ -2404,6 +2695,7 @@ fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetec
 fn extend_live_task_band(task: &mut LiveDetectionTask) {
     task.band_start_row = task.start.row;
     task.band_end_row = task.end.row;
+    let mut borrowed = 0;
     for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS {
         let Some(row) = task.end.row.checked_add(offset) else {
             break;
@@ -2415,44 +2707,95 @@ fn extend_live_task_band(task: &mut LiveDetectionTask) {
             break;
         }
         task.band_end_row = row;
+        borrowed += 1;
+    }
+    for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS.saturating_sub(borrowed) {
+        let Some(row) = task.start.row.checked_sub(offset) else {
+            break;
+        };
+        let Some(input) = live_grid_input(&task.inputs, row) else {
+            break;
+        };
+        if !input.text.chars().all(char::is_whitespace) {
+            break;
+        }
+        task.band_start_row = row;
     }
 }
 
-fn fit_live_task_band_to_artifact(
+fn size_live_task_band_for_artifact(
     task: &mut LiveDetectionTask,
     artifact_height_subpixels: i64,
     cell_height_subpixels: i64,
+    occupied_rows: &BTreeSet<u32>,
 ) {
     let source_rows = task.end.row.saturating_sub(task.start.row) + 1;
-    let available_rows = task
-        .band_end_row
-        .saturating_sub(task.band_start_row)
-        .saturating_add(1);
     let height = artifact_height_subpixels.max(1);
-    let required_height = height
-        .saturating_mul(i64::from(LIVE_MATH_READABLE_SCALE_MILLI))
-        .saturating_add(999)
-        / 1000;
     let required_rows = u32::try_from(
-        required_height
+        height
             .saturating_add(cell_height_subpixels - 1)
             .div_euclid(cell_height_subpixels),
     )
     .unwrap_or(u32::MAX);
-    let selected_rows = required_rows.max(source_rows).min(available_rows);
-    let selected_height = i64::from(selected_rows).saturating_mul(cell_height_subpixels);
-    let selected_scale = if height <= selected_height {
-        1000
-    } else {
-        u32::try_from(selected_height.saturating_mul(1000).div_euclid(height)).unwrap_or(u32::MAX)
-    };
-    let owned_rows = if selected_scale >= LIVE_MATH_READABLE_SCALE_MILLI {
-        selected_rows
-    } else {
-        source_rows
-    };
+    let mut needed = required_rows
+        .saturating_sub(source_rows)
+        .min(LIVE_MATH_MAX_BORROWED_BLANK_ROWS);
     task.band_start_row = task.start.row;
-    task.band_end_row = task.start.row.saturating_add(owned_rows.saturating_sub(1));
+    task.band_end_row = task.end.row;
+
+    // Preserve the established downward preference, then use contiguous blank rows above when the
+    // lower neighbour is occupied. Upward rows are admitted only when they are blank and not in an
+    // already-owned band, which is the missing non-overlap proof: unlike the old downward-only
+    // argument, blankness alone is insufficient because a previous block may have borrowed it.
+    for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS {
+        if needed == 0 {
+            break;
+        }
+        let Some(row) = task.end.row.checked_add(offset) else {
+            break;
+        };
+        let Some(input) = live_grid_input(&task.inputs, row) else {
+            break;
+        };
+        if occupied_rows.contains(&row) || !input.text.chars().all(char::is_whitespace) {
+            break;
+        }
+        task.band_end_row = row;
+        needed -= 1;
+    }
+    for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS {
+        if needed == 0 {
+            break;
+        }
+        let Some(row) = task.start.row.checked_sub(offset) else {
+            break;
+        };
+        let Some(input) = live_grid_input(&task.inputs, row) else {
+            break;
+        };
+        if occupied_rows.contains(&row) || !input.text.chars().all(char::is_whitespace) {
+            break;
+        }
+        task.band_start_row = row;
+        needed -= 1;
+    }
+}
+
+fn live_detection_signature(inputs: &[LiveDetectionInput], candidate_row: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for input in inputs {
+        let is_candidate = matches!(
+            input.source,
+            LiveDetectionSource::Grid { row, .. } if row == candidate_row
+        );
+        let trimmed = input.text.trim();
+        let structural =
+            trimmed.contains("$$") || trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        if is_candidate || structural {
+            input.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn live_task_is_current(
@@ -2476,7 +2819,14 @@ fn live_task_is_current(
         let Some(current) = live_grid_input(&current_inputs, row) else {
             return false;
         };
-        if snapshot != current {
+        let same_source = matches!(
+            (snapshot.source, current.source),
+            (
+                LiveDetectionSource::Grid { row: snapshot_row, .. },
+                LiveDetectionSource::Grid { row: current_row, .. },
+            ) if snapshot_row == current_row
+        );
+        if !same_source || snapshot.text != current.text {
             return false;
         }
     }
@@ -2649,6 +2999,117 @@ mod tests {
     }
 
     #[test]
+    fn finalized_line_ingest_stays_linear_without_live_handoffs() {
+        let mut elapsed = Vec::new();
+        for count in [1_000_usize, 16_000, 32_000] {
+            let mut session = DualPlaneSession::with_frozen_quota(
+                nz(1),
+                nz(1),
+                NonZeroUsize::new(count + 1).unwrap(),
+            );
+            let started = Instant::now();
+            for _ in 0..count {
+                let captured = session.transcript.capture(CapturedRow::plain("x", false));
+                session
+                    .staging_sources
+                    .insert(captured.staging_id, SourceLifecycle::Live);
+                for finalized in captured.finalized {
+                    session.ingest_finalized(finalized).unwrap();
+                }
+            }
+            let measured = started.elapsed();
+            eprintln!("FINALIZED_SCALE count={count} elapsed={measured:?}");
+            elapsed.push(measured);
+        }
+        let ratio = elapsed[2].as_secs_f64() / elapsed[0].as_secs_f64();
+        // 32k performs 32x the useful append work. A 64x ceiling allows 2x host/timer variance;
+        // the prior whole-history rescan is quadratic and measured near 1,000x on this probe.
+        assert!(
+            ratio <= 64.0,
+            "32k/1k finalized ingest ratio {ratio:.2} exceeds the 64x linearity ceiling: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn wide_same_content_repaint_fingerprint_overhead_is_bounded() {
+        const COLUMNS: u32 = 2_000;
+        const ROWS: u32 = 40;
+        const CYCLES: usize = 16;
+
+        let mut repaint = Vec::with_capacity(COLUMNS as usize * ROWS as usize);
+        for row in 1..=ROWS {
+            repaint.extend_from_slice(format!("\x1b[{row};1H").as_bytes());
+            if row == 1 {
+                repaint.extend_from_slice(b"$$x$$\x1b[K");
+            } else {
+                repaint.extend(std::iter::repeat_n(b'x', COLUMNS as usize));
+            }
+        }
+
+        let mut adapter = TerminalAdapter::new(nz(COLUMNS), nz(ROWS));
+        adapter.feed(b"\x1b[?1049h");
+        adapter.feed(&repaint);
+        adapter.take_damage();
+
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(COLUMNS), nz(ROWS));
+        session.feed_at(b"\x1b[?1049h", start).unwrap();
+        session.feed_at(&repaint, start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            1
+        );
+        session
+            .live_decorations
+            .get_mut(&0)
+            .expect("row-zero formula produced a ready live artifact")
+            .band_end_row = ROWS - 1;
+        let fingerprints = (0..ROWS)
+            .map(|row| session.terminal.visible_row_fingerprint(row))
+            .collect::<Vec<_>>();
+        for (state, fingerprint) in session.live_rows.iter_mut().zip(fingerprints) {
+            state.content_fingerprint = fingerprint;
+        }
+
+        // Warm both parsers and damage trackers before measuring the same byte stream.
+        adapter.feed(&repaint);
+        adapter.take_damage();
+        session.feed(&repaint).unwrap();
+        assert_eq!(session.live_decorations.len(), 1);
+
+        let baseline_started = Instant::now();
+        for _ in 0..CYCLES {
+            adapter.feed(&repaint);
+            adapter.take_damage();
+        }
+        let baseline = baseline_started.elapsed();
+
+        let measured_started = Instant::now();
+        for _ in 0..CYCLES {
+            session.feed(&repaint).unwrap();
+        }
+        let measured = measured_started.elapsed();
+        let ratio = measured.as_secs_f64() / baseline.as_secs_f64();
+        eprintln!(
+            "G1_WIDE_DAMAGE columns={COLUMNS} rows={ROWS} cycles={CYCLES} baseline={baseline:?} fingerprint={measured:?} ratio={ratio:.2}"
+        );
+        assert_eq!(
+            session.live_decorations.len(),
+            1,
+            "same-content repaint must preserve the live artifact"
+        );
+        // Both sides parse and write 1.28M terminal cells. The fixed side additionally streams each
+        // cell once into an allocation-free fingerprint. A 2.25x ceiling allows 12.5% host/timer
+        // variance over the equal-cost parse+hash model, yet still rejects the measured 6.2x clone
+        // regression.
+        assert!(
+            ratio <= 2.25,
+            "wide full-screen content invalidation took {ratio:.2}x parser/damage baseline ({measured:?} vs {baseline:?})"
+        );
+    }
+
+    #[test]
     fn worker_queue_is_bounded_and_retries_on_idle() {
         let mut bytes = Vec::new();
         for index in 0..70 {
@@ -2680,6 +3141,20 @@ mod tests {
     }
 
     #[test]
+    fn math_artifact_cache_identity_includes_delimiter_selected_mode() {
+        let layout = LayoutKey {
+            width_cells: nz(80),
+            dpi_milli: nz(1000),
+            font_rev: 1,
+            theme_rev: 1,
+        };
+        assert_ne!(
+            shared_math_artifact_key(MathMode::Display, "x", layout, DetectionRevision(1)),
+            shared_math_artifact_key(MathMode::Inline, "x", layout, DetectionRevision(1)),
+        );
+    }
+
+    #[test]
     fn math_worker_intermediate_success_failure_and_layout_invalidation_are_projectable() {
         let mut session = DualPlaneSession::new(nz(16), nz(2));
         session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
@@ -2701,7 +3176,10 @@ mod tests {
         projection.scroll_to_top();
         let ready = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(ready.math_blocks.len(), 1);
-        assert_eq!(projection.heights().get(0), Some(35 * SUBPIXELS_PER_PX));
+        assert_eq!(
+            projection.heights().get(0),
+            Some((35 + 2 * i64::from(bt_math::VERTICAL_PADDING_LOGICAL_PX)) * SUBPIXELS_PER_PX)
+        );
         assert!(!ready.cells.iter().any(|cell| cell.text == "$"));
 
         session.set_layout_key(LayoutKey {
@@ -3034,8 +3512,8 @@ mod tests {
     #[test]
     fn live_stable_render_damage_invalidate_and_restabilize_matrix() {
         let start = Instant::now();
-        let mut session = DualPlaneSession::new(nz(40), nz(4));
-        session.feed_at(b"$$x^2$$", start).unwrap();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x^2$$\r\nbarrier", start).unwrap();
         assert_eq!(
             session.live_stability_deadline(),
             Some(start + LIVE_MATH_STABLE_INTERVAL)
@@ -3056,25 +3534,38 @@ mod tests {
         let rendered = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(rendered.math_blocks.len(), 1);
         assert_eq!(
-            rendered.math_blocks[0].artifact.render_scale_milli, 900,
-            "20px raster must fit the fixed 18px source row"
+            rendered.math_blocks[0].artifact.render_scale_milli, 1000,
+            "live display math must never acquire a lifecycle-specific scale"
         );
+        assert_eq!(
+            rendered.math_blocks[0].clip_height_subpixels,
+            live_presentation_height_subpixels(
+                20 * SUBPIXELS_PER_PX,
+                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            )
+        );
+        assert_eq!(rendered.status_text.as_deref(), Some("1 rows above"));
         assert!(!rendered.cells.iter().any(|cell| cell.text == "$"));
 
         session
-            .feed_at(b"\r\x1b[2Kplain", start + Duration::from_millis(210))
+            .feed_at(b"\x1b[1;1H\x1b[2Kplain", start + Duration::from_millis(210))
             .unwrap();
+        let reverted = session.viewport_frame(&mut projection).unwrap();
+        assert!(reverted.math_blocks.is_empty());
         assert!(
-            session
-                .viewport_frame(&mut projection)
-                .unwrap()
-                .math_blocks
-                .is_empty()
+            reverted
+                .row_map
+                .iter()
+                .all(|row| row.height_subpixels == SPIKE_CELL_HEIGHT_SUBPIXELS.get())
         );
+        assert_eq!(reverted.status_text, None);
         assert_eq!(session.live_invalidation_count(), 1);
 
         session
-            .feed_at(b"\r\x1b[2K$$y^2$$", start + Duration::from_millis(220))
+            .feed_at(
+                b"\x1b[1;1H\x1b[2K$$y^2$$",
+                start + Duration::from_millis(220),
+            )
             .unwrap();
         assert_eq!(
             session.advance_live_stability(start + Duration::from_millis(420)),
@@ -3092,12 +3583,24 @@ mod tests {
                 .len(),
             1
         );
+        session
+            .feed_at(b"\x1b[2J", start + Duration::from_millis(430))
+            .unwrap();
+        let cleared = session.viewport_frame(&mut projection).unwrap();
+        assert!(cleared.math_blocks.is_empty());
+        assert_eq!(cleared.status_text, None);
+        assert!(
+            cleared
+                .row_map
+                .iter()
+                .all(|row| row.height_subpixels == SPIKE_CELL_HEIGHT_SUBPIXELS.get())
+        );
     }
 
     #[test]
     fn spinner_neighbor_does_not_block_static_formula_region() {
         let start = Instant::now();
-        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
         session.feed_at(b"$$x$$\r\nspin-0", start).unwrap();
         session
             .feed_at(b"\r\x1b[2Kspin-1", start + Duration::from_millis(100))
@@ -3127,7 +3630,7 @@ mod tests {
     #[test]
     fn completed_live_raster_ignores_spinner_churn_but_rejects_source_or_fence_changes() {
         let start = Instant::now();
-        let mut spinner = DualPlaneSession::new(nz(40), nz(3));
+        let mut spinner = DualPlaneSession::new(nz(40), nz(12));
         spinner.feed_at(b"$$x$$\r\nspin-0", start).unwrap();
         spinner.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         let mut task = spinner.take_live_worker_task().unwrap();
@@ -3178,9 +3681,67 @@ mod tests {
     }
 
     #[test]
+    fn identical_tui_repaints_keep_the_borrowed_artifact_without_raster_retry() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(b"\x1b[?1049h$$x$$\r\n\r\nspin-0\r\ntail", start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let artifact_key = session
+            .live_decorations
+            .get(&0)
+            .and_then(|record| record.artifact.as_ref())
+            .map(|artifact| artifact.key.clone())
+            .unwrap();
+
+        for repaint in 1..=5 {
+            session
+                .feed_at(
+                    b"\x1b[H\x1b[2K$$x$$\x1b[2;1H\x1b[2K\x1b[3;1H\x1b[2Kspin-0\x1b[4;1H\x1b[2Ktail",
+                    start + Duration::from_millis(210 + repaint * 10),
+                )
+                .unwrap();
+            assert_eq!(
+                session
+                    .live_decorations
+                    .get(&0)
+                    .and_then(|record| record.artifact.as_ref())
+                    .map(|artifact| artifact.key.as_str()),
+                Some(artifact_key.as_str())
+            );
+        }
+
+        for tick in 1..=5 {
+            session
+                .feed_at(
+                    format!("\x1b[3;1H\x1b[2Kspin-{tick}").as_bytes(),
+                    start + Duration::from_millis(300 + tick * 100),
+                )
+                .unwrap();
+        }
+        assert_eq!(session.live_detection_count(), 1);
+        assert_eq!(session.live_invalidation_count(), 0);
+        assert!(session.take_live_worker_task().is_none());
+        let mut projection = session.new_projection(session.layout_key());
+        assert_eq!(
+            session
+                .viewport_frame(&mut projection)
+                .unwrap()
+                .math_blocks
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn live_band_borrows_only_contiguous_blank_rows_and_invalidates_on_write() {
         let start = Instant::now();
-        let mut primary = DualPlaneSession::new(nz(40), nz(3));
+        let mut primary = DualPlaneSession::new(nz(40), nz(12));
         primary.feed_at(b"$$x$$\r\n\r\nbarrier", start).unwrap();
         primary.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
@@ -3194,9 +3755,12 @@ mod tests {
         assert_eq!(borrowed.math_blocks.len(), 1);
         assert_eq!(
             borrowed.math_blocks[0].clip_height_subpixels,
-            2 * SPIKE_CELL_HEIGHT_SUBPIXELS.get()
+            live_presentation_height_subpixels(
+                40 * SUBPIXELS_PER_PX,
+                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            )
         );
-        assert_eq!(borrowed.math_blocks[0].artifact.render_scale_milli, 900);
+        assert_eq!(borrowed.math_blocks[0].artifact.render_scale_milli, 1000);
 
         primary
             .feed_at(
@@ -3208,7 +3772,7 @@ mod tests {
         assert!(reverted.math_blocks.is_empty());
         assert!(reverted.cells.iter().any(|cell| cell.text == "$"));
 
-        let mut inflight = DualPlaneSession::new(nz(40), nz(3));
+        let mut inflight = DualPlaneSession::new(nz(40), nz(12));
         inflight.feed_at(b"$$x$$\r\n\r\nbarrier", start).unwrap();
         inflight.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         let mut task = inflight.take_live_worker_task().unwrap();
@@ -3221,7 +3785,7 @@ mod tests {
             .unwrap();
         assert!(!inflight.complete_live_worker_result(task, Ok(synthetic_raster(40, 40))));
 
-        let mut blocked = DualPlaneSession::new(nz(40), nz(3));
+        let mut blocked = DualPlaneSession::new(nz(40), nz(12));
         blocked.feed_at(b"$$x$$\r\nbarrier\r\n", start).unwrap();
         blocked.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
@@ -3230,11 +3794,19 @@ mod tests {
         );
         assert_eq!(blocked.live_decorations.get(&0).unwrap().band_end_row, 0);
         let mut projection = blocked.new_projection(blocked.layout_key());
-        let source = blocked.viewport_frame(&mut projection).unwrap();
-        assert!(source.math_blocks.is_empty());
-        assert!(source.cells.iter().any(|cell| cell.text == "$"));
+        let expanded = blocked.viewport_frame(&mut projection).unwrap();
+        assert_eq!(expanded.math_blocks.len(), 1);
+        assert_eq!(
+            expanded.math_blocks[0].clip_height_subpixels,
+            live_presentation_height_subpixels(
+                40 * SUBPIXELS_PER_PX,
+                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            )
+        );
+        assert_eq!(expanded.math_blocks[0].artifact.render_scale_milli, 1000);
+        assert_eq!(expanded.status_text.as_deref(), Some("2 rows above"));
 
-        let mut capped = DualPlaneSession::new(nz(40), nz(5));
+        let mut capped = DualPlaneSession::new(nz(40), nz(12));
         capped
             .feed_at(b"$$x$$\r\n\r\n\r\n\r\nbarrier", start)
             .unwrap();
@@ -3249,7 +3821,7 @@ mod tests {
             "the third contiguous blank row remains outside the two-row borrowing cap"
         );
 
-        let mut alternate = DualPlaneSession::new(nz(40), nz(3));
+        let mut alternate = DualPlaneSession::new(nz(40), nz(12));
         alternate
             .feed_at(b"\x1b[?1049h$$a$$\r\n\r\nbarrier", start)
             .unwrap();
@@ -3268,12 +3840,29 @@ mod tests {
                 .len(),
             1
         );
+
+        let mut upward = DualPlaneSession::new(nz(40), nz(12));
+        upward.feed_at(b"\r\n$$up$$\r\nbarrier", start).unwrap();
+        upward.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut upward, synthetic_raster(40, 30)),
+            1
+        );
+        let record = upward.live_decorations.get(&1).unwrap();
+        assert_eq!((record.band_start_row, record.band_end_row), (0, 1));
+        upward
+            .feed_at(
+                b"\x1b[1;1Hupper-row-now-used",
+                start + Duration::from_millis(210),
+            )
+            .unwrap();
+        assert!(upward.live_decorations.is_empty());
     }
 
     #[test]
     fn rendered_live_pixels_are_vertically_centered_in_the_owned_band() {
         let start = Instant::now();
-        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
         session
             .feed_at(b"$$\r\nx + y\r\n$$\r\nbarrier", start)
             .unwrap();
@@ -3289,7 +3878,9 @@ mod tests {
         let bottom_gap = placement
             .clip_height_subpixels
             .saturating_sub(top_gap)
-            .saturating_sub(placement.artifact.height_subpixels);
+            .saturating_sub(
+                i64::from(placement.artifact.height_px).saturating_mul(SUBPIXELS_PER_PX),
+            );
         assert!(
             (top_gap - bottom_gap).abs() <= SUBPIXELS_PER_PX,
             "top={top_gap} bottom={bottom_gap}"
@@ -3297,9 +3888,237 @@ mod tests {
     }
 
     #[test]
+    fn bottom_frame_keeps_the_last_live_row_visible_and_alt_overflow_is_locally_reviewable() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(
+                b"\x1b[?1049h$$x$$\r\nbarrier-1\r\nbarrier-2\r\nbottom",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let last_grid_row = session.terminal.visible_row(11).unwrap().cells;
+        let mut projection = session.new_projection(session.layout_key());
+        let bottom = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(session.terminal().dimensions(), (nz(40), nz(12)));
+        assert_eq!(bottom.status_text.as_deref(), Some("2 rows above"));
+        assert_eq!(
+            &bottom.cells[11 * 40..12 * 40],
+            last_grid_row.as_slice(),
+            "free-height overflow must preserve the last grid row at rest"
+        );
+        assert_eq!(
+            bottom.row_map[0].top_subpixels,
+            -(26 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 2)
+        );
+        assert_eq!(bottom.row_map[11].live_grid_row, Some(11));
+        assert_eq!(
+            bottom.row_map[11]
+                .top_subpixels
+                .saturating_add(bottom.row_map[11].height_subpixels),
+            12 * SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            "the bottom logical row ends exactly at the fixed terminal pane bottom"
+        );
+        assert!(
+            bottom
+                .cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .contains("bottom")
+        );
+
+        projection.scroll_by_rows(1);
+        let first_review = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            first_review.row_map[0].top_subpixels,
+            -(8 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 2)
+        );
+        assert_eq!(first_review.status_text.as_deref(), Some("1 rows above"));
+        assert!(matches!(
+            first_review.viewport_origin,
+            FrameViewportOrigin::LiveOverflow { rows_below: 1 }
+        ));
+
+        projection.scroll_by_rows(1);
+        let full_review = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(full_review.row_map[0].top_subpixels, 0);
+        assert_eq!(full_review.status_text.as_deref(), Some("2 rows below"));
+
+        let mut no_overflow = DualPlaneSession::new(nz(40), nz(12));
+        no_overflow.feed(b"bottom-only").unwrap();
+        let last_grid_row = no_overflow.terminal.visible_row(11).unwrap().cells;
+        let mut no_overflow_projection = no_overflow.new_projection(no_overflow.layout_key());
+        let plain = no_overflow
+            .viewport_frame(&mut no_overflow_projection)
+            .unwrap();
+        assert_eq!(plain.status_text, None);
+        assert_eq!(
+            &plain.cells[11 * 40..12 * 40],
+            last_grid_row.as_slice(),
+            "the no-overflow state also preserves the final terminal row byte-for-byte"
+        );
+        projection.scroll_to_bottom();
+        assert_eq!(
+            session.viewport_frame(&mut projection).unwrap().row_map[0].top_subpixels,
+            -(26 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 2)
+        );
+    }
+
+    #[test]
+    fn primary_history_anchor_does_not_move_when_live_height_arrives() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        let initial = (0..16)
+            .map(|row| format!("history-{row:02}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        session.feed_at(initial.as_bytes(), start).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_by_rows(1);
+        let anchored_before = session.viewport_frame(&mut projection).unwrap();
+        assert!(matches!(
+            anchored_before.viewport_origin,
+            FrameViewportOrigin::Anchored(_)
+        ));
+        assert_eq!(anchored_before.row_map[0].top_subpixels, 0);
+
+        session
+            .feed_at(b"\x1b[1;1H\x1b[2K$$x$$", start + Duration::from_millis(10))
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(start + Duration::from_millis(210)),
+            1
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let anchored_after = session.viewport_frame(&mut projection).unwrap();
+        assert!(matches!(
+            anchored_after.viewport_origin,
+            FrameViewportOrigin::Anchored(_)
+        ));
+        assert_eq!(
+            anchored_after.row_map[0].top_subpixels, 0,
+            "a projection-local live tail expansion must not move a primary document anchor"
+        );
+        assert_eq!(anchored_after.math_blocks.len(), 1);
+        assert_eq!(
+            anchored_after.math_blocks[0].artifact.render_scale_milli,
+            1000
+        );
+    }
+
+    #[test]
+    fn live_visible_text_floor_renders_a_screenful_and_stably_prefers_newest_blocks() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(24));
+        session
+            .feed_at(b"$$x0$$\r\n$$x1$$\r\n$$x2$$\r\n$$x3$$\r\nbarrier", start)
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL),
+            4
+        );
+        let mut completed = 0;
+        while let Some(mut task) = session.take_live_worker_task() {
+            assert!(resolve_live_detection_task(&mut task));
+            let heights = [18, 30, 24, 40];
+            let height = heights[task.start.row as usize];
+            assert!(session.complete_live_worker_result(task, Ok(synthetic_raster(40, height))));
+            completed += 1;
+        }
+        assert_eq!(completed, 4);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(frame.math_blocks.len(), 4);
+        assert_eq!(
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| block.source.as_str())
+                .collect::<Vec<_>>(),
+            ["x0", "x1", "x2", "x3"]
+        );
+        let max_formula_height =
+            i64::from(24 - LIVE_MIN_VISIBLE_TEXT_ROWS) * SPIKE_CELL_HEIGHT_SUBPIXELS.get();
+        assert!(
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| block.clip_height_subpixels)
+                .sum::<i64>()
+                <= max_formula_height
+        );
+
+        let mut constrained = DualPlaneSession::new(nz(40), nz(12));
+        constrained
+            .feed_at(b"$$old$$\r\n$$middle$$\r\n$$new$$\r\nbarrier", start)
+            .unwrap();
+        constrained.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut constrained, synthetic_raster(40, 40)),
+            3
+        );
+        let mut projection = constrained.new_projection(constrained.layout_key());
+        let selected = (0..3)
+            .map(|_| {
+                constrained
+                    .viewport_frame(&mut projection)
+                    .unwrap()
+                    .math_blocks
+                    .iter()
+                    .map(|block| block.source.clone())
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(selected, vec![vec!["new".to_owned()]; 3]);
+    }
+
+    #[test]
+    fn resize_epoch_revokes_live_artifact_height_and_source_suppression_together() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        assert_eq!(
+            session.viewport_frame(&mut projection).unwrap().status_text,
+            Some("2 rows above".to_owned())
+        );
+
+        session
+            .resize_at(nz(41), nz(12), start + Duration::from_millis(210))
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let resized = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(session.terminal().dimensions(), (nz(41), nz(12)));
+        assert!(resized.math_blocks.is_empty());
+        assert_eq!(resized.status_text, None);
+        assert!(
+            resized
+                .row_map
+                .iter()
+                .all(|row| row.height_subpixels == SPIKE_CELL_HEIGHT_SUBPIXELS.get())
+        );
+        assert!(resized.cells.iter().any(|cell| cell.text == "$"));
+    }
+
+    #[test]
     fn live_artifacts_cross_session_projection_and_frame_on_both_screens() {
         let start = Instant::now();
-        let mut alternate = DualPlaneSession::new(nz(40), nz(6));
+        let mut alternate = DualPlaneSession::new(nz(40), nz(13));
         alternate
             .feed_at(b"\x1b[?1049hbefore\r\n$$\r\nx + y\r\n$$\r\nafter", start)
             .unwrap();
@@ -3312,11 +4131,25 @@ mod tests {
         let frame = alternate.viewport_frame(&mut projection).unwrap();
         assert_eq!(frame.math_blocks.len(), 1);
         let placement = &frame.math_blocks[0];
-        let row_band_height = 3 * SPIKE_CELL_HEIGHT_SUBPIXELS.get();
-        assert_eq!(placement.top_subpixels, SPIKE_CELL_HEIGHT_SUBPIXELS.get());
-        assert_eq!(placement.clip_height_subpixels, row_band_height);
-        assert!(placement.artifact.height_subpixels <= row_band_height);
-        assert_eq!(placement.artifact.render_scale_milli, 771);
+        assert_eq!(
+            placement.top_subpixels,
+            -(2 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 2)
+        );
+        assert_eq!(
+            placement.clip_height_subpixels,
+            live_presentation_height_subpixels(
+                70 * SUBPIXELS_PER_PX,
+                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            )
+        );
+        assert_eq!(
+            placement.artifact.height_subpixels,
+            live_presentation_height_subpixels(
+                70 * SUBPIXELS_PER_PX,
+                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            )
+        );
+        assert_eq!(placement.artifact.render_scale_milli, 1000);
         let text = frame
             .cells
             .iter()
@@ -3342,7 +4175,7 @@ mod tests {
                 .contains("plain")
         );
 
-        let mut primary = DualPlaneSession::new(nz(40), nz(3));
+        let mut primary = DualPlaneSession::new(nz(40), nz(12));
         primary
             .feed_at(b"$$p^2$$\r\nprimary-neighbor", start)
             .unwrap();
@@ -3356,7 +4189,10 @@ mod tests {
         assert_eq!(frame.math_blocks.len(), 1);
         assert_eq!(
             frame.math_blocks[0].clip_height_subpixels,
-            SPIKE_CELL_HEIGHT_SUBPIXELS.get()
+            live_presentation_height_subpixels(
+                18 * SUBPIXELS_PER_PX,
+                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            )
         );
         assert!(
             frame
@@ -3369,9 +4205,9 @@ mod tests {
     }
 
     #[test]
-    fn multiline_live_band_alt_exit_and_readability_floor_are_honest() {
+    fn multiline_live_band_uses_free_height_and_alt_exit_revokes_it() {
         let start = Instant::now();
-        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        let mut session = DualPlaneSession::new(nz(40), nz(13));
         session
             .feed_at(b"\x1b[?1049h$$\r\nx + y\r\n$$", start)
             .unwrap();
@@ -3385,20 +4221,24 @@ mod tests {
         assert_eq!(frame.math_blocks.len(), 1);
         assert_eq!(
             frame.math_blocks[0].clip_height_subpixels,
-            3 * SPIKE_CELL_HEIGHT_SUBPIXELS.get()
+            5 * SPIKE_CELL_HEIGHT_SUBPIXELS.get()
         );
-        assert_eq!(frame.math_blocks[0].artifact.render_scale_milli, 771);
+        assert_eq!(frame.math_blocks[0].artifact.render_scale_milli, 1000);
 
         session
             .feed_at(b"\x1b[?1049l", start + Duration::from_millis(210))
             .unwrap();
+        let restored = session.viewport_frame(&mut projection).unwrap();
         assert!(
-            session
-                .viewport_frame(&mut projection)
-                .unwrap()
-                .math_blocks
-                .is_empty(),
+            restored.math_blocks.is_empty(),
             "leaving alt invalidates every transient anchor"
+        );
+        assert_eq!(restored.status_text, None);
+        assert!(
+            restored
+                .row_map
+                .iter()
+                .all(|row| row.height_subpixels == SPIKE_CELL_HEIGHT_SUBPIXELS.get())
         );
 
         let mut tiny = DualPlaneSession::new(nz(40), nz(1));
@@ -3409,15 +4249,16 @@ mod tests {
             1
         );
         let mut projection = tiny.new_projection(tiny.layout_key());
-        let source = tiny.viewport_frame(&mut projection).unwrap();
-        assert!(source.math_blocks.is_empty());
-        assert!(source.cells.iter().any(|cell| cell.text == "$"));
+        let rendered = tiny.viewport_frame(&mut projection).unwrap();
+        assert!(rendered.math_blocks.is_empty());
+        assert!(rendered.cells.iter().any(|cell| cell.text == "$"));
+        assert_eq!(rendered.status_text, None);
     }
 
     #[test]
     fn live_eye_copy_and_block_scroll_state_machine_is_per_block() {
         let start = Instant::now();
-        let mut session = DualPlaneSession::new(nz(16), nz(3));
+        let mut session = DualPlaneSession::new(nz(16), nz(12));
         session.feed_at(b"$$x^2$$", start).unwrap();
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
@@ -3451,7 +4292,60 @@ mod tests {
     }
 
     #[test]
-    fn primary_live_scroll_hands_off_by_redetecting_frozen_source() {
+    fn live_show_source_placement_uses_row_map_after_an_expanded_block_above() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(
+                b"$$upper$$\r\nbarrier-upper\r\n\r\n$$lower$$\r\nbarrier-lower",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 50)),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let rendered = session.viewport_frame(&mut projection).unwrap();
+        let lower_anchor = rendered
+            .math_blocks
+            .iter()
+            .find_map(|block| match &block.anchor {
+                MathBlockAnchor::Live { start, .. } if start.row == 3 => Some(block.anchor.clone()),
+                _ => None,
+            })
+            .expect("lower block is rendered");
+
+        projection.scroll_by_rows(i32::MAX);
+        let reviewed = session.viewport_frame(&mut projection).unwrap();
+        assert!(reviewed.status_text.is_some());
+        assert!(session.toggle_math_source(&lower_anchor));
+        let source = session.viewport_frame(&mut projection).unwrap();
+        let placement = source
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Source && block.anchor == lower_anchor)
+            .expect("lower source placement remains visible");
+        let MathBlockAnchor::Live { band_start_row, .. } = placement.anchor else {
+            unreachable!();
+        };
+        let band_top = source
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(band_start_row))
+            .unwrap()
+            .top_subpixels;
+        assert_eq!(placement.top_subpixels, band_top);
+        assert_ne!(
+            placement.top_subpixels,
+            i64::from(band_start_row).saturating_mul(SPIKE_CELL_HEIGHT_SUBPIXELS.get()),
+            "the expanded upper block must make row*cell_height observably wrong"
+        );
+    }
+
+    #[test]
+    fn primary_live_scroll_hands_off_the_exact_raster_without_another_worker_task() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(24), nz(2));
         session.feed_at(b"$$x^2$$\r\ntail", start).unwrap();
@@ -3460,26 +4354,38 @@ mod tests {
             complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
             1
         );
+        let live_artifact = session
+            .live_decorations
+            .get(&0)
+            .and_then(|record| record.artifact.clone())
+            .unwrap();
         session
-            .feed_at(b"\r\nmore", start + Duration::from_millis(210))
+            .feed_at(b"\r\nmore\r\nfinal", start + Duration::from_millis(210))
             .unwrap();
         assert!(session.live_decorations.is_empty());
-        let mut frozen = session
-            .take_worker_task()
-            .expect("scrolled formula is frozen");
-        assert!(resolve_detection_task(&mut frozen));
-        assert!(session.complete_worker_result(frozen, Ok(synthetic_raster(40, 35))));
+        assert!(
+            session.take_worker_task().is_none(),
+            "handoff removes the redundant frozen raster task"
+        );
+        let frozen_artifact = session
+            .decorations
+            .values()
+            .find_map(|record| record.artifact.as_ref())
+            .expect("finalized formula reuses the live raster");
+        assert_eq!(frozen_artifact.key, live_artifact.key);
+        assert!(Arc::ptr_eq(&frozen_artifact.rgba, &live_artifact.rgba));
+        assert_eq!(frozen_artifact.rgba.as_ref(), live_artifact.rgba.as_ref());
         let mut projection = session.new_projection(session.layout_key());
         session.viewport_frame(&mut projection).unwrap();
         projection.scroll_to_top();
         session.refresh_projection(&mut projection);
+        let frozen = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(frozen.math_blocks.len(), 1);
+        assert_eq!(frozen.math_blocks[0].artifact.render_scale_milli, 1000);
         assert_eq!(
-            session
-                .viewport_frame(&mut projection)
-                .unwrap()
-                .math_blocks
-                .len(),
-            1
+            frozen.math_blocks[0].artifact.rgba.as_ref(),
+            live_artifact.rgba.as_ref(),
+            "live and frozen frame artifacts are byte-identical"
         );
     }
 
