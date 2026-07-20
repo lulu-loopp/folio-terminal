@@ -257,7 +257,7 @@ pub struct DualPlaneSession {
     ascii_baseline_subpixels: Option<NonZeroI64>,
     math_layout_options: MathLayoutOptions,
     live_screen: ScreenId,
-    alternate_context_start_trusted: bool,
+    alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
@@ -360,7 +360,7 @@ impl DualPlaneSession {
             ascii_baseline_subpixels: None,
             math_layout_options: MathLayoutOptions::default(),
             live_screen: ScreenId::Primary,
-            alternate_context_start_trusted: true,
+            alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
             live_decorations: BTreeMap::new(),
@@ -827,7 +827,7 @@ impl DualPlaneSession {
                     }),
             );
         }
-        inputs.extend((0..self.live_rows.len()).filter_map(|row| {
+        let grid_inputs = (0..self.live_rows.len()).filter_map(|row| {
             self.terminal
                 .visible_row(row as u32)
                 .map(|captured| LiveDetectionInput {
@@ -837,10 +837,35 @@ impl DualPlaneSession {
                     },
                     text: captured_row_text(&captured),
                 })
-        }));
-        // This is deliberately the available context, not a guessed parser state. In particular,
-        // an alternate-screen fence opener that already scrolled above row 0 is unknowable now;
-        // no heuristic pretends that the terminal retained that missing fact.
+        });
+        if self.live_screen == ScreenId::Alternate {
+            let mut context = self.alternate_detection_context.clone();
+            let grid_inputs = grid_inputs.collect::<Vec<_>>();
+            let trusted_start = if context.is_neutral() {
+                0
+            } else {
+                grid_inputs
+                    .iter()
+                    .position(|input| {
+                        let LiveDetectionSource::Grid { row, .. } = input.source else {
+                            return false;
+                        };
+                        advance_detection_context(
+                            &mut context,
+                            TranscriptId(u64::from(row)),
+                            &input.text,
+                        );
+                        context.is_neutral()
+                    })
+                    .map_or(grid_inputs.len(), |index| index + 1)
+            };
+            inputs.extend(grid_inputs.into_iter().skip(trusted_start));
+        } else {
+            inputs.extend(grid_inputs);
+        }
+        // Alternate-screen rows that precede `inputs[0]` are either represented by the compact
+        // context above or consumed through its first proven-neutral boundary. No missing prefix is
+        // guessed, and the worker still receives only a bounded live-grid snapshot.
         Arc::from(inputs)
     }
 
@@ -850,7 +875,7 @@ impl DualPlaneSession {
                 self.transcript.tombstones().is_empty()
                     && self.document.entries().len() <= LIVE_FENCE_HISTORY_CONTEXT_LINES
             }
-            ScreenId::Alternate => self.alternate_context_start_trusted,
+            ScreenId::Alternate => true,
         }
     }
 
@@ -2276,8 +2301,14 @@ impl DualPlaneSession {
                     if context.cause == RemovalCause::NormalScroll
                         && context.scope == RemovalScope::FullScreen =>
                 {
-                    if context.screen == RemovalScreen::Alternate && !rows.is_empty() {
-                        self.alternate_context_start_trusted = false;
+                    if context.screen == RemovalScreen::Alternate {
+                        for removed in rows {
+                            advance_detection_context(
+                                &mut self.alternate_detection_context,
+                                TranscriptId(0),
+                                &captured_row_text(&removed.row),
+                            );
+                        }
                     }
                     Some((context.screen, rows.len()))
                 }
@@ -2321,7 +2352,7 @@ impl DualPlaneSession {
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
                     self.live_screen = ScreenId::Alternate;
-                    self.alternate_context_start_trusted = true;
+                    self.alternate_detection_context = DetectionContext::default();
                     for row in &mut self.live_rows {
                         *row = LiveRowStability::default();
                     }
@@ -4486,20 +4517,65 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(40), nz(5));
         session
             .feed_at(
-                "\x1b[?1049h$$\r\n\\frac{a}{b}\r\n$$\r\n这是普通中文正文\r\n$$\r\n\\sigma(z)=1\r\n$$"
+                "\x1b[?1049h$$\r\n\\frac{a}{b}\r\n$$\r\nnarrative\r\n$$\r\n\\sigma(z)=1\r\n$$"
                     .as_bytes(),
                 start,
             )
             .unwrap();
-        assert!(!session.alternate_context_start_trusted);
         assert!(
-            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 2,
-            "visible delimiter rows still reach the worker boundary"
+            !session.alternate_detection_context.is_neutral(),
+            "the removed opener must remain the exact state before visible row 0"
+        );
+        assert!(
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
+            "the genuine block after the recovered boundary reaches the worker"
         );
         assert_eq!(
             complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            1,
+            "the genuine block after the phantom closer should still become Ready"
+        );
+        assert_eq!(session.live_decorations.len(), 1);
+        assert!(session.live_decorations.values().all(|record| {
+            record.artifact.is_some()
+                && !record.span.source.contains("narrative")
+                && record.span.source.contains(r"\sigma")
+        }));
+    }
+
+    #[test]
+    fn alternate_hidden_code_fence_still_suppresses_visible_math() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session
+            .feed_at(b"\x1b[?1049h```text\r\ncode\r\n$$\r\nx + y\r\n$$", start)
+            .unwrap();
+        assert!(!session.alternate_detection_context.is_neutral());
+        assert_eq!(
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL),
             0,
-            "unknown prefix parity must reject the whole screen rather than swallow prose"
+            "no candidate inside a fence whose opener is above row 0 may be scheduled"
+        );
+        assert!(session.live_decorations.is_empty());
+    }
+
+    #[test]
+    fn alternate_scrolled_cjk_prose_block_stays_native() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(5));
+        session
+            .feed_at(
+                "\x1b[?1049hdiscard-0\r\ndiscard-1\r\ndiscard-2\r\n$$\r\n这是普通中文正文\r\n$$"
+                    .as_bytes(),
+                start,
+            )
+            .unwrap();
+        assert!(session.alternate_detection_context.is_neutral());
+        assert!(session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            0,
+            "the existing CJK prose guard must remain active after trust recovery"
         );
         assert!(session.live_decorations.is_empty());
     }
@@ -4524,6 +4600,45 @@ mod tests {
                 complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
                 1,
                 "{source} was not detected"
+            );
+        }
+    }
+
+    #[test]
+    fn alternate_full_scroll_then_detects_all_complete_display_delimiters_without_another_scroll() {
+        let start = Instant::now();
+        for source in [
+            "$$\r\nx + y\r\n$$",
+            "\\[\r\nx + y\r\n\\]",
+            "\\begin{align}\r\nx &= y + 1\r\n\\end{align}",
+        ] {
+            let mut session = DualPlaneSession::new(nz(40), nz(5));
+            session
+                .feed_at(
+                    format!("\x1b[?1049hdiscard-0\r\ndiscard-1\r\ndiscard-2\r\n{source}")
+                        .as_bytes(),
+                    start,
+                )
+                .unwrap();
+            assert!(
+                session.alternate_detection_context.is_neutral(),
+                "ordinary removed rows leave a proven-neutral prefix: {source}"
+            );
+            assert!(
+                session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
+                "the closed block was not scheduled after a full scroll: {source}"
+            );
+            assert_eq!(
+                complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+                1,
+                "the closed block did not become Ready after a full scroll: {source}"
+            );
+            assert!(
+                session
+                    .live_decorations
+                    .values()
+                    .all(|record| record.artifact.is_some()),
+                "a detected block was not Ready: {source}"
             );
         }
     }
