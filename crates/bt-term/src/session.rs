@@ -9,10 +9,10 @@ use std::{
 };
 
 use bt_detect::{
-    DecorationRecord, DetectionContext, DetectionInput, DetectionTask, LiveDetectionInput,
-    LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathSpan, PlaceholderArtifact,
-    StaleArtifact, advance_detection_context, detect_math_blocks, resolve_detection_task,
-    resolve_live_detection_task,
+    DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionTask,
+    LiveDetectionInput, LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathSpan,
+    PlaceholderArtifact, StaleArtifact, advance_detection_context, detect_math_blocks,
+    resolve_detection_task, resolve_live_detection_task, resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -22,9 +22,9 @@ use bt_doc::{
 };
 use bt_math::{MathEngine, MathFailureStage, MathMode, MathRaster, MathRenderError, MathRenderKey};
 use bt_transcript::{
-    CaptureResult, CapturedRow, DEFAULT_STAGING_QUOTA, FinalizedLine, FrozenLine, GraphemeOffset,
-    SPIKE_DEFAULT_FROZEN_QUOTA, SourceGeneration, StagedRow, StagingId, TranscriptId,
-    TranscriptStore,
+    CaptureResult, CapturedRow, CellFlags, DEFAULT_STAGING_QUOTA, FinalizedLine, FrozenLine,
+    GraphemeOffset, SPIKE_DEFAULT_FROZEN_QUOTA, SourceGeneration, StagedRow, StagingId,
+    TranscriptId, TranscriptStore,
 };
 use bt_viewport::{
     FrameProjectionError, FrameViewportOrigin, GridCursor, HorizontalOverflowOwner,
@@ -103,7 +103,7 @@ struct LiveDecorationRecord {
     detection_revision: DetectionRevision,
     layout: LayoutKey,
     rendered_layout: LayoutKey,
-    context_start_trusted: bool,
+    initial_context: DetectionContext,
     inputs: Arc<[LiveDetectionInput]>,
     span: MathSpan,
     artifact: Option<PlaceholderArtifact>,
@@ -504,6 +504,9 @@ impl DualPlaneSession {
                 );
             }
         }
+        if self.terminal.modes().alternate_screen && contains_clear_home_snapshot_boundary(bytes) {
+            self.alternate_detection_context = DetectionContext::default();
+        }
         for chunk in bytes.chunks(PARSE_QUANTUM) {
             let events = self.terminal.feed(chunk);
             let damage = self.terminal.take_damage();
@@ -744,21 +747,12 @@ impl DualPlaneSession {
         }
 
         let inputs = self.live_detection_context();
-        let candidates = inputs
-            .iter()
-            .filter_map(|input| match input.source {
-                LiveDetectionSource::Grid { row, .. }
-                    if stable.get(row as usize).copied().unwrap_or(false)
-                        && may_contain_display_math(&input.text) =>
-                {
-                    Some(row)
-                }
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        let mut scheduled = 0usize;
+        let initial_context = self.live_initial_detection_context(&inputs);
+        let candidates = live_candidate_rows(&inputs, initial_context.clone(), &stable);
+        let context_signature = live_detection_context_signature(&inputs);
+        let mut new_tasks = Vec::new();
         for candidate_row in candidates {
-            let signature = live_detection_signature(&inputs, candidate_row);
+            let signature = live_detection_signature(context_signature, candidate_row);
             let state = &mut self.live_rows[candidate_row as usize];
             if state.candidate_signature == Some(signature) {
                 continue;
@@ -773,7 +767,7 @@ impl DualPlaneSession {
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
-                context_start_trusted: self.live_context_start_trusted(),
+                initial_context: initial_context.clone(),
                 inputs: Arc::clone(&inputs),
                 start: GridPoint {
                     row: candidate_row,
@@ -788,14 +782,22 @@ impl DualPlaneSession {
                 span: MathSpan {
                     byte_start: 0,
                     byte_end: 0,
-                    source: String::new(),
+                    original_source: String::new(),
+                    render_source: String::new(),
+                    delimiter_kind: DelimiterKind::Dollars,
                     mode: MathMode::Display,
+                    cell_segments: Vec::new(),
                     inline_runs: Vec::new(),
                 },
+                detection_complete: false,
                 resolved: false,
             };
+            new_tasks.push(task);
+        }
+        resolve_live_detection_tasks(&mut new_tasks);
+        let scheduled = new_tasks.len();
+        for task in new_tasks {
             self.enqueue_live_task(task);
-            scheduled += 1;
         }
         self.live_detection_count = self.live_detection_count.saturating_add(scheduled as u64);
         if scheduled != 0 && std::env::var_os("BT_PERF_TRACE").is_some() {
@@ -824,58 +826,41 @@ impl DualPlaneSession {
                     .map(|(id, entry)| LiveDetectionInput {
                         source: LiveDetectionSource::History { id: *id },
                         text: entry.line.text.clone(),
+                        continues: false,
+                        cell_boundaries: frozen_cell_boundaries(&entry.line),
                     }),
             );
         }
         let grid_inputs = (0..self.live_rows.len()).filter_map(|row| {
-            self.terminal
-                .visible_row(row as u32)
-                .map(|captured| LiveDetectionInput {
+            self.terminal.visible_row(row as u32).map(|captured| {
+                let (text, cell_boundaries) = captured_row_text_and_boundaries(&captured);
+                LiveDetectionInput {
                     source: LiveDetectionSource::Grid {
                         row: row as u32,
                         revision: self.live_rows[row].revision,
                     },
-                    text: captured_row_text(&captured),
-                })
+                    text,
+                    continues: captured.continues,
+                    cell_boundaries,
+                }
+            })
         });
-        if self.live_screen == ScreenId::Alternate {
-            let mut context = self.alternate_detection_context.clone();
-            let grid_inputs = grid_inputs.collect::<Vec<_>>();
-            let trusted_start = if context.is_neutral() {
-                0
-            } else {
-                grid_inputs
-                    .iter()
-                    .position(|input| {
-                        let LiveDetectionSource::Grid { row, .. } = input.source else {
-                            return false;
-                        };
-                        advance_detection_context(
-                            &mut context,
-                            TranscriptId(u64::from(row)),
-                            &input.text,
-                        );
-                        context.is_neutral()
-                    })
-                    .map_or(grid_inputs.len(), |index| index + 1)
-            };
-            inputs.extend(grid_inputs.into_iter().skip(trusted_start));
-        } else {
-            inputs.extend(grid_inputs);
-        }
-        // Alternate-screen rows that precede `inputs[0]` are either represented by the compact
-        // context above or consumed through its first proven-neutral boundary. No missing prefix is
-        // guessed, and the worker still receives only a bounded live-grid snapshot.
+        inputs.extend(grid_inputs);
         Arc::from(inputs)
     }
 
-    fn live_context_start_trusted(&self) -> bool {
+    fn live_initial_detection_context(&self, inputs: &[LiveDetectionInput]) -> DetectionContext {
         match self.live_screen {
-            ScreenId::Primary => {
-                self.transcript.tombstones().is_empty()
-                    && self.document.entries().len() <= LIVE_FENCE_HISTORY_CONTEXT_LINES
-            }
-            ScreenId::Alternate => true,
+            ScreenId::Primary => inputs
+                .first()
+                .and_then(|input| match input.source {
+                    LiveDetectionSource::History { id } => {
+                        self.frozen_detection_contexts.get(&id).cloned()
+                    }
+                    LiveDetectionSource::Grid { .. } => Some(self.frozen_detection_context.clone()),
+                })
+                .unwrap_or_else(DetectionContext::ambiguous),
+            ScreenId::Alternate => self.alternate_detection_context.clone(),
         }
     }
 
@@ -1218,7 +1203,7 @@ impl DualPlaneSession {
                 detection_revision: task.detection_revision,
                 layout: task.layout,
                 rendered_layout: task.layout,
-                context_start_trusted: task.context_start_trusted,
+                initial_context: task.initial_context.clone(),
                 inputs: Arc::clone(&task.inputs),
                 span: task.span,
                 artifact,
@@ -1555,7 +1540,7 @@ impl DualPlaneSession {
                 .get(start)
                 .filter(|record| record.block_end == Some(*end))
                 .and_then(|record| record.span.as_ref())
-                .map(|span| span.source.as_str()),
+                .map(|span| span.original_source.as_str()),
             MathBlockAnchor::Live {
                 screen,
                 start,
@@ -1571,7 +1556,7 @@ impl DualPlaneSession {
                         && record.end == *end
                         && record.generation == *generation
                 })
-                .map(|record| record.span.source.as_str()),
+                .map(|record| record.span.original_source.as_str()),
         }
     }
 
@@ -1890,7 +1875,7 @@ impl DualPlaneSession {
                 source: record
                     .span
                     .as_ref()
-                    .map_or_else(String::new, |span| span.source.clone()),
+                    .map_or_else(String::new, |span| span.original_source.clone()),
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
                 left_subpixels: 0,
@@ -1951,7 +1936,7 @@ impl DualPlaneSession {
                     band_end_row: record.band_end_row,
                     generation: record.generation,
                 },
-                source: record.span.source.clone(),
+                source: record.span.original_source.clone(),
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
                 left_subpixels: 0,
@@ -2010,7 +1995,7 @@ impl DualPlaneSession {
                     start: *start,
                     end: *start,
                 },
-                source: span.source.clone(),
+                source: span.original_source.clone(),
                 artifact,
                 top_subpixels,
                 left_subpixels: i64::from(left_column)
@@ -2072,7 +2057,7 @@ impl DualPlaneSession {
                     band_end_row: record.end.row,
                     generation: record.generation,
                 },
-                source: record.span.source.clone(),
+                source: record.span.original_source.clone(),
                 artifact,
                 top_subpixels,
                 left_subpixels: i64::from(left_column)
@@ -2529,10 +2514,12 @@ impl DualPlaneSession {
         self.live_decorations = preserved;
 
         let inputs = self.live_detection_context();
+        let context_signature = live_detection_context_signature(&inputs);
         for record in self.live_decorations.values_mut() {
             record.inputs = Arc::clone(&inputs);
             if let Some(state) = self.live_rows.get_mut(record.end.row as usize) {
-                state.candidate_signature = Some(live_detection_signature(&inputs, record.end.row));
+                state.candidate_signature =
+                    Some(live_detection_signature(context_signature, record.end.row));
             }
         }
     }
@@ -2653,7 +2640,9 @@ impl DualPlaneSession {
                 .find(|block| {
                     block.start == candidate_start
                         && block.end == closing_id
-                        && self.pending_live_handoffs[pending_index].span == block.span
+                        && self.pending_live_handoffs[pending_index]
+                            .span
+                            .render_equivalent(&block.span)
                 })
             })
             .flatten();
@@ -2762,13 +2751,14 @@ impl DualPlaneSession {
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
-                context_start_trusted: record.context_start_trusted,
+                initial_context: record.initial_context.clone(),
                 inputs: Arc::clone(&record.inputs),
                 start: record.start,
                 end: record.end,
                 band_start_row: record.band_start_row,
                 band_end_row: record.band_end_row,
                 span: record.span.clone(),
+                detection_complete: true,
                 resolved: true,
             });
         }
@@ -2817,32 +2807,36 @@ impl DualPlaneSession {
             return;
         };
         let required_start = candidate_context.required_start(candidate_id);
-        let mut context_start_trusted = self.transcript.tombstones().is_empty();
+        let mut initial_context = candidate_context.clone();
         let mut inputs = Vec::new();
         if let Some(start) = required_start {
-            context_start_trusted &= self
+            initial_context = self
                 .frozen_detection_contexts
                 .get(&start)
-                .is_some_and(DetectionContext::is_neutral);
+                .cloned()
+                .unwrap_or_else(|| candidate_context.clone());
             let mut source_bytes = 0usize;
             for (id, entry) in self.document.entries().range(start..=candidate_id) {
                 source_bytes = source_bytes
                     .saturating_add(entry.line.text.len())
                     .saturating_add(1);
                 if source_bytes > MAX_MATH_SOURCE_BYTES.saturating_add(1) {
-                    context_start_trusted = false;
                     inputs.clear();
+                    initial_context = candidate_context.clone();
                     break;
                 }
                 inputs.push(DetectionInput {
                     id: *id,
                     text: entry.line.text.clone(),
+                    cell_boundaries: frozen_cell_boundaries(&entry.line),
                 });
             }
-            context_start_trusted &= inputs.first().is_some_and(|input| input.id == start)
-                && inputs.last().is_some_and(|input| input.id == candidate_id);
-        } else {
-            context_start_trusted = false;
+            if inputs.first().is_none_or(|input| input.id != start)
+                || inputs.last().is_none_or(|input| input.id != candidate_id)
+            {
+                inputs.clear();
+                initial_context = candidate_context.clone();
+            }
         }
         if inputs.is_empty()
             && let Some(entry) = self.document.entries().get(&candidate_id)
@@ -2850,10 +2844,11 @@ impl DualPlaneSession {
             inputs.push(DetectionInput {
                 id: candidate_id,
                 text: entry.line.text.clone(),
+                cell_boundaries: frozen_cell_boundaries(&entry.line),
             });
         }
         let Some(mut task) = self.decorations.get_mut(&candidate_id).and_then(|record| {
-            record.schedule_scan(candidate_id, context_start_trusted, Arc::from(inputs))
+            record.schedule_scan(candidate_id, initial_context, Arc::from(inputs))
         }) else {
             return;
         };
@@ -3072,7 +3067,7 @@ fn render_task_math(
     key: MathRenderKey,
 ) -> Result<MathRaster, MathRenderError> {
     if span.mode == MathMode::Display {
-        return engine.render(&span.source, key);
+        return engine.render(&span.render_source, key);
     }
     if ascii_baseline_subpixels <= 0 {
         // Inline placement is baseline-anchored. Without the renderer's measured ASCII baseline,
@@ -3187,7 +3182,7 @@ fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> Placeholder
     PlaceholderArtifact {
         key: shared_math_artifact_key(
             task.span.mode,
-            &task.span.source,
+            &task.span.render_source,
             task.versions.layout,
             task.versions.detection,
         ),
@@ -3207,7 +3202,7 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
     PlaceholderArtifact {
         key: shared_math_artifact_key(
             task.span.mode,
-            &task.span.source,
+            &task.span.render_source,
             task.layout,
             task.detection_revision,
         ),
@@ -3240,7 +3235,7 @@ fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
     PlaceholderArtifact {
         key: shared_math_artifact_key(
             task.span.mode,
-            &task.span.source,
+            &task.span.render_source,
             task.layout,
             task.detection_revision,
         ),
@@ -3327,7 +3322,7 @@ fn frozen_artifact_and_scale(record: &DecorationRecord) -> Option<(&PlaceholderA
 }
 
 fn projected_frozen_artifact(record: &DecorationRecord) -> Option<ProjectedMathArtifact> {
-    let source = record.span.as_ref()?.source.clone();
+    let source = record.span.as_ref()?.render_source.clone();
     if let Some(artifact) = record.artifact.as_ref() {
         Some(project_artifact(
             artifact,
@@ -3366,7 +3361,7 @@ fn projected_live_artifact(
     Some(project_artifact_at_scale(
         artifact,
         scale_milli,
-        record.span.source.clone(),
+        record.span.render_source.clone(),
         if artifact.mode == MathMode::Inline {
             0
         } else {
@@ -3494,21 +3489,24 @@ fn size_live_task_band_for_artifact(
     }
 }
 
-fn live_detection_signature(inputs: &[LiveDetectionInput], candidate_row: u32) -> u64 {
+fn live_detection_context_signature(inputs: &[LiveDetectionInput]) -> u64 {
     let mut hasher = DefaultHasher::new();
     for input in inputs {
-        let is_candidate = matches!(
-            input.source,
-            LiveDetectionSource::Grid { row, .. } if row == candidate_row
-        );
         let trimmed = input.text.trim();
         let structural = may_contain_display_math(trimmed)
             || trimmed.starts_with("```")
             || trimmed.starts_with("~~~");
-        if is_candidate || structural {
+        if structural {
             input.hash(&mut hasher);
         }
     }
+    hasher.finish()
+}
+
+fn live_detection_signature(context_signature: u64, candidate_row: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    context_signature.hash(&mut hasher);
+    candidate_row.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -3565,10 +3563,14 @@ fn live_task_is_current(
     current_task.span = MathSpan {
         byte_start: 0,
         byte_end: 0,
-        source: String::new(),
+        original_source: String::new(),
+        render_source: String::new(),
+        delimiter_kind: DelimiterKind::Dollars,
         mode: MathMode::Display,
+        cell_segments: Vec::new(),
         inline_runs: Vec::new(),
     };
+    current_task.detection_complete = false;
     current_task.resolved = false;
     let resolves_now = resolve_live_detection_task(&mut current_task);
     if !task.resolved {
@@ -3581,19 +3583,116 @@ fn live_task_is_current(
 }
 
 fn captured_row_text(row: &CapturedRow) -> String {
+    captured_row_text_and_boundaries(row).0
+}
+
+fn live_candidate_rows(
+    inputs: &[LiveDetectionInput],
+    mut context: DetectionContext,
+    stable: &[bool],
+) -> Vec<u32> {
+    let mut candidates = Vec::new();
+    let mut hidden_code_prefix = context.is_commonmark_code();
+    let mut logical_text = String::new();
+    let mut logical_grid_rows = Vec::new();
+    for input in inputs {
+        logical_text.push_str(&input.text);
+        if let LiveDetectionSource::Grid { row, .. } = input.source {
+            logical_grid_rows.push(row);
+        }
+        if input.continues {
+            continue;
+        }
+        if !hidden_code_prefix
+            && may_contain_display_math(&logical_text)
+            && let Some(row) = logical_grid_rows
+                .last()
+                .copied()
+                .filter(|row| stable.get(*row as usize).copied().unwrap_or(false))
+        {
+            candidates.push(row);
+        }
+        advance_detection_context(&mut context, TranscriptId(0), &logical_text);
+        if hidden_code_prefix && !context.is_commonmark_code() {
+            hidden_code_prefix = false;
+        }
+        logical_text.clear();
+        logical_grid_rows.clear();
+    }
+    candidates
+}
+
+fn captured_row_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32)>) {
     let mut text = String::new();
-    for cell in &row.cells {
+    let mut boundaries = vec![(0, 0)];
+    for (column, cell) in row.cells.iter().enumerate() {
         if cell.wide_spacer {
             continue;
         }
-        if cell.text.is_empty() {
-            text.push(' ');
+        let byte_start = text.len();
+        let cell_text = if cell.text.is_empty() {
+            " "
         } else {
-            text.push_str(&cell.text);
+            cell.text.as_str()
+        };
+        text.push_str(cell_text);
+        let mut cell_end = column + 1;
+        while row
+            .cells
+            .get(cell_end)
+            .is_some_and(|candidate| candidate.wide_spacer)
+        {
+            cell_end += 1;
         }
+        boundaries.push((
+            u32::try_from(byte_start).unwrap_or(u32::MAX),
+            u32::try_from(column).unwrap_or(u32::MAX),
+        ));
+        boundaries.push((
+            u32::try_from(text.len()).unwrap_or(u32::MAX),
+            u32::try_from(cell_end).unwrap_or(u32::MAX),
+        ));
     }
     text.truncate(text.trim_end_matches([' ', '\t']).len());
-    text
+    let final_byte = u32::try_from(text.len()).unwrap_or(u32::MAX);
+    boundaries.retain(|(byte, _)| *byte <= final_byte);
+    boundaries.sort_unstable();
+    boundaries.dedup_by_key(|(byte, _)| *byte);
+    if boundaries
+        .last()
+        .is_none_or(|(byte, _)| *byte != final_byte)
+    {
+        let cell = boundaries.last().map_or(0, |(_, cell)| *cell);
+        boundaries.push((final_byte, cell));
+    }
+    (text, boundaries)
+}
+
+fn frozen_cell_boundaries(line: &FrozenLine) -> Vec<(u32, u32)> {
+    let mut boundaries = Vec::with_capacity(line.grapheme_boundaries.len());
+    let mut cell = 0u32;
+    boundaries.push((0, cell));
+    for bytes in line.grapheme_boundaries.windows(2) {
+        let byte_start = bytes[0];
+        let byte_end = bytes[1];
+        let wide = line.styles.iter().any(|style| {
+            style.byte_start <= byte_start
+                && byte_start < style.byte_end
+                && style.style.flags.contains(CellFlags::WIDE_CHAR)
+        });
+        cell = cell.saturating_add(if wide { 2 } else { 1 });
+        boundaries.push((byte_end, cell));
+    }
+    boundaries
+}
+
+fn contains_clear_home_snapshot_boundary(bytes: &[u8]) -> bool {
+    let Some(clear) = bytes.windows(4).position(|window| window == b"\x1b[2J") else {
+        return false;
+    };
+    let suffix = &bytes[clear + 4..];
+    suffix.windows(3).any(|window| window == b"\x1b[H")
+        || suffix.windows(6).any(|window| window == b"\x1b[1;1H")
 }
 
 fn frame_row_history_id(frame: &ViewportFrame, row: u32) -> Option<TranscriptId> {
@@ -4538,8 +4637,8 @@ mod tests {
         assert_eq!(session.live_decorations.len(), 1);
         assert!(session.live_decorations.values().all(|record| {
             record.artifact.is_some()
-                && !record.span.source.contains("narrative")
-                && record.span.source.contains(r"\sigma")
+                && !record.span.render_source.contains("narrative")
+                && record.span.render_source.contains(r"\sigma")
         }));
     }
 
@@ -4675,6 +4774,110 @@ mod tests {
                 .math_blocks
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn m1_9k_primary_live_detection_survives_long_history_and_tombstones() {
+        let start = Instant::now();
+        for source in ["$$x$$", "\\begin{align}x &= y\\end{align}"] {
+            let mut long = DualPlaneSession::new(nz(40), nz(4));
+            let prefix = (0..LIVE_FENCE_HISTORY_CONTEXT_LINES + 8)
+                .map(|index| format!("history-{index}\r\n"))
+                .collect::<String>();
+            long.feed_at(format!("{prefix}{source}").as_bytes(), start)
+                .unwrap();
+            assert!(
+                long.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
+                "long-history candidate was not scheduled: {source}"
+            );
+            assert_eq!(
+                complete_detected_live_tasks(&mut long, synthetic_raster(32, 18)),
+                1,
+                "visible math must not be disabled by a >1024-line history: {source}"
+            );
+
+            let mut tombstoned =
+                DualPlaneSession::with_frozen_quota(nz(40), nz(4), NonZeroUsize::new(2).unwrap());
+            tombstoned
+                .feed_at(
+                    format!("old-0\r\nold-1\r\nold-2\r\nold-3\r\nold-4\r\nold-5\r\n{source}")
+                        .as_bytes(),
+                    start,
+                )
+                .unwrap();
+            assert!(!tombstoned.transcript.tombstones().is_empty());
+            assert!(
+                tombstoned.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
+                "tombstoned candidate was not scheduled: {source}"
+            );
+            assert_eq!(
+                complete_detected_live_tasks(&mut tombstoned, synthetic_raster(32, 18)),
+                1,
+                "visible math must not be disabled by a tombstone: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn m1_9k_alternate_clear_repaint_starts_a_fresh_parser_snapshot() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(3));
+        session
+            .feed_at(b"\x1b[?1049h$$\r\nold-body\r\nold-tail\r\nscroll", start)
+            .unwrap();
+        assert!(!session.alternate_detection_context.is_neutral());
+
+        session
+            .feed_at(b"\x1b[2J\x1b[H$$x^2$$", start + Duration::from_millis(10))
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(start + Duration::from_millis(210)),
+            1
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+            1,
+            "a clear+home repaint must not inherit the removed snapshot's symmetric opener"
+        );
+        assert_eq!(session.live_decorations.len(), 1);
+        assert_eq!(
+            session
+                .live_decorations
+                .values()
+                .next()
+                .unwrap()
+                .span
+                .render_source,
+            "x^2"
+        );
+    }
+
+    #[test]
+    fn m1_9k_soft_wrapping_does_not_change_live_detection() {
+        let start = Instant::now();
+        for columns in [40, 5] {
+            let mut session = DualPlaneSession::new(nz(columns), nz(4));
+            session.feed_at(b"$$x+y$$", start).unwrap();
+            assert!(
+                session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
+                "width {columns} did not schedule a delimiter candidate"
+            );
+            assert_eq!(
+                complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+                1,
+                "width {columns} changed the detection result"
+            );
+            assert_eq!(
+                session
+                    .live_decorations
+                    .values()
+                    .next()
+                    .unwrap()
+                    .span
+                    .render_source,
+                "x+y"
+            );
+        }
     }
 
     #[test]
@@ -5476,7 +5679,7 @@ mod tests {
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
         let anchor = frame.math_blocks[0].anchor.clone();
-        assert_eq!(session.math_source(&anchor), Some("x^2"));
+        assert_eq!(session.math_source(&anchor), Some("$$x^2$$"));
         assert!(session.set_math_hover(Some(&anchor)));
         assert!(session.toggle_math_source(&anchor));
         let source = session.viewport_frame(&mut projection).unwrap();

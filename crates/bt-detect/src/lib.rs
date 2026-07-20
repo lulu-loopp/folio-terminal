@@ -1,6 +1,6 @@
 //! Conservative block-level `$$...$$` detection and the dual lifecycle/version gate.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use bt_doc::{DecorationIntent, HistoryDocument};
 pub use bt_doc::{
@@ -12,13 +12,44 @@ use bt_transcript::{SourceGeneration, TranscriptId};
 pub const MAX_MATH_SOURCE_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MathSpan {
+pub enum DelimiterKind {
+    Dollars,
+    Brackets,
+    Environment(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MathSourceLine {
+    Transcript(TranscriptId),
+    LiveGrid(u32),
+}
+
+/// Exact terminal-cell coverage for one physical source-row fragment of an occurrence.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathCellSegment {
+    pub logical_line: u32,
+    pub source_line: MathSourceLine,
     pub byte_start: u32,
     pub byte_end: u32,
-    pub source: String,
+    pub cell_start: u32,
+    pub cell_end: u32,
+}
+
+/// One proven math occurrence. Original terminal source and renderer input are deliberately
+/// separate so copy/source presentation never has to reconstruct delimiters from render input.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MathOccurrence {
+    pub byte_start: u32,
+    pub byte_end: u32,
+    pub original_source: String,
+    pub render_source: String,
+    pub delimiter_kind: DelimiterKind,
     pub mode: MathMode,
+    pub cell_segments: Vec<MathCellSegment>,
     pub inline_runs: Vec<InlineMathRun>,
 }
+
+pub type MathSpan = MathOccurrence;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineMathRun {
@@ -58,9 +89,8 @@ pub struct DetectionTask {
     pub cell_width_subpixels: i64,
     pub cell_height_subpixels: i64,
     pub ascii_baseline_subpixels: i64,
-    /// Whether the first input starts at a proven neutral parser boundary rather than a
-    /// truncated window.
-    pub context_start_trusted: bool,
+    /// Exact parser checkpoint immediately before `inputs[0]`.
+    pub initial_context: DetectionContext,
     pub inputs: Arc<[DetectionInput]>,
     pub resolved: bool,
 }
@@ -69,15 +99,25 @@ pub struct DetectionTask {
 pub struct DetectionInput {
     pub id: TranscriptId,
     pub text: String,
+    /// UTF-8 byte boundary to terminal cell-column mappings from the captured logical line.
+    pub cell_boundaries: Vec<(u32, u32)>,
 }
 
 /// Compact parser state immediately before a frozen line. The session retains one of these per
 /// resident line so a viewport-local scan can begin at a proven neutral boundary without copying
 /// the complete transcript prefix.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum PrefixKnowledge {
+    #[default]
+    Known,
+    Ambiguous,
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct DetectionContext {
     fence: Option<(char, usize)>,
     opening: Option<(TranscriptId, DisplayDelimiter)>,
+    prefix: PrefixKnowledge,
 }
 
 impl DetectionContext {
@@ -92,7 +132,33 @@ impl DetectionContext {
     /// A neutral state is a parser boundary: neither a code fence nor a display delimiter began
     /// before the next input line.
     pub fn is_neutral(&self) -> bool {
-        self.fence.is_none() && self.opening.is_none()
+        self.prefix == PrefixKnowledge::Known && self.fence.is_none() && self.opening.is_none()
+    }
+
+    pub fn ambiguous() -> Self {
+        Self {
+            prefix: PrefixKnowledge::Ambiguous,
+            ..Self::default()
+        }
+    }
+
+    pub fn is_commonmark_code(&self) -> bool {
+        self.fence.is_some()
+    }
+}
+
+impl MathOccurrence {
+    /// Cell segments are coordinate-system specific (live grid versus frozen transcript). Handoff
+    /// identity therefore compares the source/render semantics and lets the destination retain its
+    /// freshly detected segment map.
+    pub fn render_equivalent(&self, other: &Self) -> bool {
+        self.byte_start == other.byte_start
+            && self.byte_end == other.byte_end
+            && self.original_source == other.original_source
+            && self.render_source == other.render_source
+            && self.delimiter_kind == other.delimiter_kind
+            && self.mode == other.mode
+            && self.inline_runs == other.inline_runs
     }
 }
 
@@ -109,6 +175,11 @@ pub enum LiveDetectionSource {
 pub struct LiveDetectionInput {
     pub source: LiveDetectionSource,
     pub text: String,
+    /// True when this physical row soft-wraps into the next input row.
+    pub continues: bool,
+    /// UTF-8 byte boundary to terminal cell-column mappings, including `(0, 0)` and the final
+    /// source boundary. These come from captured terminal cells, never Unicode-width inference.
+    pub cell_boundaries: Vec<(u32, u32)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -121,8 +192,8 @@ pub struct LiveDetectionTask {
     pub cell_width_subpixels: i64,
     pub cell_height_subpixels: i64,
     pub ascii_baseline_subpixels: i64,
-    /// Whether the detector can prove that no delimiter or fence began before `inputs[0]`.
-    pub context_start_trusted: bool,
+    /// Exact parser checkpoint immediately before `inputs[0]`.
+    pub initial_context: DetectionContext,
     pub inputs: Arc<[LiveDetectionInput]>,
     pub start: GridPoint,
     pub end: GridPoint,
@@ -131,6 +202,9 @@ pub struct LiveDetectionTask {
     pub band_start_row: u32,
     pub band_end_row: u32,
     pub span: MathSpan,
+    /// The shared scanner has examined this snapshot. `resolved == false` then means a proven
+    /// non-occurrence, so a worker never rescans the same window per candidate.
+    pub detection_complete: bool,
     pub resolved: bool,
 }
 
@@ -196,7 +270,7 @@ impl DecorationRecord {
             cell_width_subpixels: SUBPIXELS_PER_PX,
             cell_height_subpixels: SUBPIXELS_PER_PX,
             ascii_baseline_subpixels: SUBPIXELS_PER_PX,
-            context_start_trusted: true,
+            initial_context: DetectionContext::default(),
             inputs: Arc::from([]),
             resolved: true,
         })
@@ -205,7 +279,7 @@ impl DecorationRecord {
     pub fn schedule_scan(
         &mut self,
         candidate_id: TranscriptId,
-        context_start_trusted: bool,
+        initial_context: DetectionContext,
         inputs: Arc<[DetectionInput]>,
     ) -> Option<DetectionTask> {
         if self.source != SourceLifecycle::Frozen || self.decoration != DecorationLifecycle::None {
@@ -219,15 +293,18 @@ impl DecorationRecord {
             span: MathSpan {
                 byte_start: 0,
                 byte_end: 0,
-                source: String::new(),
+                original_source: String::new(),
+                render_source: String::new(),
+                delimiter_kind: DelimiterKind::Dollars,
                 mode: MathMode::Display,
+                cell_segments: Vec::new(),
                 inline_runs: Vec::new(),
             },
             versions: self.versions,
             cell_width_subpixels: SUBPIXELS_PER_PX,
             cell_height_subpixels: SUBPIXELS_PER_PX,
             ascii_baseline_subpixels: SUBPIXELS_PER_PX,
-            context_start_trusted,
+            initial_context,
             inputs,
             resolved: false,
         })
@@ -362,59 +439,10 @@ pub fn redetect_document(
 }
 
 pub fn detect_block_math(text: &str) -> Vec<MathSpan> {
-    let trimmed = text.trim();
-    let (source, rendered_source) = if trimmed.len() >= 5
-        && trimmed.starts_with("$$")
-        && trimmed.ends_with("$$")
-        && !delimiter_is_escaped(trimmed, 0)
-    {
-        let close = trimmed.len() - 2;
-        if close == 2 || delimiter_is_escaped(trimmed, close) {
-            return Vec::new();
-        }
-        let source = &trimmed[2..close];
-        if source.contains("$$") {
-            return Vec::new();
-        }
-        (source, source)
-    } else if trimmed.len() >= 5 && trimmed.starts_with(r"\[") && trimmed.ends_with(r"\]") {
-        let source = &trimmed[2..trimmed.len() - 2];
-        if source.contains(r"\[") || source.contains(r"\]") {
-            return Vec::new();
-        }
-        (source, source)
-    } else if let Some(body) = single_line_math_environment(trimmed) {
-        (body, trimmed)
-    } else {
-        return Vec::new();
-    };
-    if source.is_empty()
-        || rendered_source.len() > MAX_MATH_SOURCE_BYTES
-        || block_body_looks_like_prose(source)
-    {
-        return Vec::new();
-    }
-    let leading = text.len() - text.trim_start().len();
-    vec![MathSpan {
-        byte_start: leading as u32,
-        byte_end: (leading + trimmed.len()) as u32,
-        source: rendered_source.to_owned(),
-        mode: MathMode::Display,
-        inline_runs: Vec::new(),
-    }]
-}
-
-fn single_line_math_environment(trimmed: &str) -> Option<&str> {
-    let rest = trimmed.strip_prefix(r"\begin{")?;
-    let name_end = rest.find('}')?;
-    let environment = &rest[..name_end];
-    if !is_math_environment(environment) {
-        return None;
-    }
-    let body_start = r"\begin{".len() + name_end + 1;
-    let closing = format!(r"\end{{{environment}}}");
-    let body_end = trimmed.len().checked_sub(closing.len())?;
-    (body_start < body_end && trimmed.ends_with(&closing)).then(|| &trimmed[body_start..body_end])
+    detect_math_blocks([(TranscriptId(1), text)])
+        .into_iter()
+        .map(|block| block.span)
+        .collect()
 }
 
 fn is_math_environment(environment: &str) -> bool {
@@ -567,12 +595,19 @@ fn inline_group(runs: Vec<InlineMathRun>) -> Option<MathSpan> {
     Some(MathSpan {
         byte_start: first.byte_start,
         byte_end: last.byte_end,
-        source: runs
+        original_source: runs
             .iter()
             .map(|run| run.source.as_str())
             .collect::<Vec<_>>()
             .join("; "),
+        render_source: runs
+            .iter()
+            .map(|run| run.source.as_str())
+            .collect::<Vec<_>>()
+            .join("; "),
+        delimiter_kind: DelimiterKind::Dollars,
         mode: MathMode::Inline,
+        cell_segments: Vec::new(),
         inline_runs: runs,
     })
 }
@@ -627,57 +662,20 @@ fn is_cjk_prose_char(character: char) -> bool {
     )
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum DisplayDelimiter {
-    Dollars,
-    Brackets,
-    Environment(String),
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum DisplayDelimiterToken {
-    Symmetric(DisplayDelimiter),
-    Open(DisplayDelimiter),
-    Close(DisplayDelimiter),
-}
-
-fn whole_line_display_delimiter(trimmed: &str) -> Option<DisplayDelimiterToken> {
-    if trimmed == "$$" {
-        return Some(DisplayDelimiterToken::Symmetric(DisplayDelimiter::Dollars));
-    }
-    if trimmed == r"\[" {
-        return Some(DisplayDelimiterToken::Open(DisplayDelimiter::Brackets));
-    }
-    if trimmed == r"\]" {
-        return Some(DisplayDelimiterToken::Close(DisplayDelimiter::Brackets));
-    }
-    for (prefix, open) in [(r"\begin{", true), (r"\end{", false)] {
-        let Some(rest) = trimmed.strip_prefix(prefix) else {
-            continue;
-        };
-        let Some(environment) = rest.strip_suffix('}') else {
-            continue;
-        };
-        if !environment.contains('}') && is_math_environment(environment) {
-            let delimiter = DisplayDelimiter::Environment(environment.to_owned());
-            return Some(if open {
-                DisplayDelimiterToken::Open(delimiter)
-            } else {
-                DisplayDelimiterToken::Close(delimiter)
-            });
-        }
-    }
-    None
-}
+type DisplayDelimiter = DelimiterKind;
 
 /// Advance the compact frozen-history parser proof by one immutable logical line. This mirrors the
 /// structural state transitions in `detect_math_blocks_in_context`; it deliberately records no
 /// body text, so retaining checkpoints is O(resident lines), not O(total source bytes squared).
 pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptId, text: &str) {
-    let trimmed = text.trim();
-    if let Some(marker) = fence_marker(trimmed) {
+    if context.opening.is_none() && commonmark_indented_code(text) {
+        return;
+    }
+    if context.opening.is_none()
+        && let Some(marker) = commonmark_fence_marker(text)
+    {
         match context.fence {
-            Some(active) if active.0 == marker.0 && marker.1 >= active.1 => context.fence = None,
+            Some(active) if commonmark_fence_closes(text, active) => context.fence = None,
             None => context.fence = Some(marker),
             _ => {}
         }
@@ -687,64 +685,84 @@ pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptI
     if context.fence.is_some() {
         return;
     }
-    if !detect_block_math(text).is_empty() {
+    if let Some((delimiter, ..)) = complete_display_on_line(text) {
+        if delimiter == DisplayDelimiter::Dollars
+            && context
+                .opening
+                .as_ref()
+                .is_some_and(|(_, active)| *active == DisplayDelimiter::Dollars)
+        {
+            context.opening = None;
+        }
+        return;
+    }
+    if context
+        .opening
+        .as_ref()
+        .is_some_and(|(_, delimiter)| closing_delimiter(text, delimiter).is_some())
+    {
         context.opening = None;
         return;
     }
-    let Some(token) = whole_line_display_delimiter(trimmed) else {
-        return;
-    };
-    let matching_close = match (&context.opening, &token) {
-        (
-            Some((_, DisplayDelimiter::Dollars)),
-            DisplayDelimiterToken::Symmetric(DisplayDelimiter::Dollars),
-        )
-        | (
-            Some((_, DisplayDelimiter::Brackets)),
-            DisplayDelimiterToken::Close(DisplayDelimiter::Brackets),
-        ) => true,
-        (
-            Some((_, DisplayDelimiter::Environment(open))),
-            DisplayDelimiterToken::Close(DisplayDelimiter::Environment(close)),
-        ) => open == close,
-        _ => false,
-    };
-    if matching_close {
-        context.opening = None;
-    } else if context.opening.is_none() {
-        context.opening = match token {
-            DisplayDelimiterToken::Symmetric(delimiter)
-            | DisplayDelimiterToken::Open(delimiter) => Some((id, delimiter)),
-            DisplayDelimiterToken::Close(_) => None,
-        };
+    if context.opening.is_none()
+        && let Some((delimiter, _)) = opening_delimiter(text)
+        && (delimiter != DisplayDelimiter::Dollars || context.prefix == PrefixKnowledge::Known)
+    {
+        context.opening = Some((id, delimiter));
     }
 }
 
 pub fn detect_math_blocks<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
 ) -> Vec<DetectedMathBlock> {
-    detect_math_blocks_in_context(lines, true)
+    scan_math_blocks_in_context(lines, DetectionContext::default()).blocks
 }
 
-/// Detect display math only when the snapshot starts at a proven parser boundary. An incomplete
-/// prefix cannot establish symmetric-delimiter or code-fence parity, so the honest result is no
-/// decoration rather than a guessed pairing.
-pub fn detect_math_blocks_in_context<'a>(
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmbiguousMathBlock {
+    pub start: TranscriptId,
+    pub end: TranscriptId,
+    pub delimiter_kind: DelimiterKind,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MathScanResult {
+    pub blocks: Vec<DetectedMathBlock>,
+    pub ambiguous: Vec<AmbiguousMathBlock>,
+}
+
+#[derive(Clone, Debug)]
+struct ActiveOpening {
+    start_index: Option<usize>,
+    delimiter: DisplayDelimiter,
+    body_start: usize,
+}
+
+/// One display-math scanner for single-line and multi-line forms. The supplied checkpoint is the
+/// actual CommonMark/display parser state immediately before the first input line. An ambiguous
+/// prefix suppresses only symmetric multi-line pairing; self-contained and directional forms are
+/// still independently provable.
+pub fn scan_math_blocks_in_context<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
-    context_start_trusted: bool,
-) -> Vec<DetectedMathBlock> {
+    initial_context: DetectionContext,
+) -> MathScanResult {
     let lines = lines.into_iter().collect::<Vec<_>>();
-    if !context_start_trusted {
-        return Vec::new();
-    }
-    let mut blocks = Vec::new();
-    let mut fence: Option<(char, usize)> = None;
-    let mut opening: Option<(usize, DisplayDelimiter)> = None;
+    let mut result = MathScanResult::default();
+    let mut fence = initial_context.fence;
+    let mut opening = initial_context.opening.map(|(_, delimiter)| ActiveOpening {
+        start_index: None,
+        delimiter,
+        body_start: 0,
+    });
     for (index, (_, text)) in lines.iter().enumerate() {
-        let trimmed = text.trim();
-        if let Some(marker) = fence_marker(trimmed) {
+        if opening.is_none() && commonmark_indented_code(text) {
+            continue;
+        }
+        if opening.is_none()
+            && let Some(marker) = commonmark_fence_marker(text)
+        {
             match fence {
-                Some(active) if active.0 == marker.0 && marker.1 >= active.1 => fence = None,
+                Some(active) if commonmark_fence_closes(text, active) => fence = None,
                 None => fence = Some(marker),
                 _ => {}
             }
@@ -754,82 +772,123 @@ pub fn detect_math_blocks_in_context<'a>(
         if fence.is_some() {
             continue;
         }
-        if let Some(span) = detect_block_math(text).into_iter().next() {
+        if opening
+            .as_ref()
+            .is_some_and(|active| active.delimiter == DisplayDelimiter::Dollars)
+            && let Some((delimiter, open_start, body_start, body_end, close_end)) =
+                complete_display_on_line(text)
+            && delimiter == DelimiterKind::Dollars
+        {
+            // A self-contained dollars block cannot close a prior abandoned dollars opener: doing
+            // so would swallow its own opening token into the render body.
+            opening = None;
+            let body = &text[body_start..body_end];
+            let original = &text[open_start..close_end];
+            if valid_display_body(body, body) {
+                let id = lines[index].0;
+                result.blocks.push(DetectedMathBlock {
+                    start: id,
+                    end: id,
+                    span: occurrence(
+                        &lines,
+                        OccurrenceRange {
+                            start_index: index,
+                            end_index: index,
+                            byte_start: open_start,
+                            byte_end: close_end,
+                        },
+                        original.to_owned(),
+                        body.to_owned(),
+                        delimiter,
+                    ),
+                });
+            }
+            continue;
+        }
+        if opening.is_none()
+            && let Some((delimiter, open_start, body_start, body_end, close_end)) =
+                complete_display_on_line(text)
+        {
+            let body = &text[body_start..body_end];
+            let original = &text[open_start..close_end];
+            let render = if matches!(delimiter, DisplayDelimiter::Environment(_)) {
+                original
+            } else {
+                body
+            };
+            if !valid_display_body(body, render) {
+                continue;
+            }
             let id = lines[index].0;
-            blocks.push(DetectedMathBlock {
+            result.blocks.push(DetectedMathBlock {
                 start: id,
                 end: id,
-                span,
+                span: occurrence(
+                    &lines,
+                    OccurrenceRange {
+                        start_index: index,
+                        end_index: index,
+                        byte_start: open_start,
+                        byte_end: close_end,
+                    },
+                    original.to_owned(),
+                    render.to_owned(),
+                    delimiter,
+                ),
             });
-            opening = None;
             continue;
         }
         if opening.is_none()
             && let Some(span) = inline_group(detect_inline_math(text))
         {
             let id = lines[index].0;
-            blocks.push(DetectedMathBlock {
+            result.blocks.push(DetectedMathBlock {
                 start: id,
                 end: id,
                 span,
             });
             continue;
         }
-        let Some(token) = whole_line_display_delimiter(trimmed) else {
-            continue;
-        };
-        let matching_close = match (&opening, &token) {
-            (
-                Some((_, DisplayDelimiter::Dollars)),
-                DisplayDelimiterToken::Symmetric(DisplayDelimiter::Dollars),
-            )
-            | (
-                Some((_, DisplayDelimiter::Brackets)),
-                DisplayDelimiterToken::Close(DisplayDelimiter::Brackets),
-            ) => true,
-            (
-                Some((_, DisplayDelimiter::Environment(open))),
-                DisplayDelimiterToken::Close(DisplayDelimiter::Environment(close)),
-            ) => open == close,
-            _ => false,
-        };
-        if matching_close {
-            let Some((start_index, delimiter)) = opening.take() else {
+        if let Some(active) = opening.as_ref()
+            && let Some((body_end, close_end)) = closing_delimiter(text, &active.delimiter)
+        {
+            let active = opening.take().expect("active opening was just observed");
+            let Some(start_index) = active.start_index else {
+                // The opener is before this bounded window. Its exact state proves that this is a
+                // closer, but the missing source means there is no occurrence to render.
                 continue;
             };
-            if index == start_index + 1 {
-                continue;
-            }
-            let body = lines[start_index + 1..index]
-                .iter()
-                .map(|(_, line)| *line)
-                .collect::<Vec<_>>()
-                .join("\n");
-            let source = if matches!(delimiter, DisplayDelimiter::Environment(_)) {
-                lines[start_index..=index]
-                    .iter()
-                    .map(|(_, line)| *line)
-                    .collect::<Vec<_>>()
-                    .join("\n")
+            let body = joined_range(&lines, start_index, index, active.body_start, body_end);
+            let original = joined_range(
+                &lines,
+                start_index,
+                index,
+                delimiter_start(lines[start_index].1),
+                close_end,
+            );
+            let render = if matches!(active.delimiter, DisplayDelimiter::Environment(_)) {
+                original.clone()
             } else {
                 body.clone()
             };
-            if body.trim().is_empty()
-                || source.len() > MAX_MATH_SOURCE_BYTES
-                || block_body_looks_like_prose(&body)
-            {
+            if !valid_display_body(&body, &render) {
                 continue;
             }
-            blocks.push(DetectedMathBlock {
+            result.blocks.push(DetectedMathBlock {
                 start: lines[start_index].0,
                 end: lines[index].0,
-                span: MathSpan {
-                    byte_start: 0,
-                    byte_end: text.len() as u32,
-                    source,
-                    mode: MathMode::Display,
-                    inline_runs: Vec::new(),
-                },
+                span: occurrence(
+                    &lines,
+                    OccurrenceRange {
+                        start_index,
+                        end_index: index,
+                        byte_start: delimiter_start(lines[start_index].1),
+                        byte_end: close_end,
+                    },
+                    original,
+                    render,
+                    active.delimiter,
+                ),
             });
             continue;
         }
@@ -838,13 +897,249 @@ pub fn detect_math_blocks_in_context<'a>(
             // delimiter which matches the active opener is structural at this level.
             continue;
         }
-        opening = match token {
-            DisplayDelimiterToken::Symmetric(delimiter)
-            | DisplayDelimiterToken::Open(delimiter) => Some((index, delimiter)),
-            DisplayDelimiterToken::Close(_) => None,
+        let Some((delimiter, body_start)) = opening_delimiter(text) else {
+            continue;
         };
+        if delimiter == DisplayDelimiter::Dollars
+            && initial_context.prefix == PrefixKnowledge::Ambiguous
+        {
+            result.ambiguous.push(AmbiguousMathBlock {
+                start: lines[index].0,
+                end: lines[index].0,
+                delimiter_kind: delimiter,
+            });
+            continue;
+        }
+        opening = Some(ActiveOpening {
+            start_index: Some(index),
+            delimiter,
+            body_start,
+        });
     }
-    blocks
+    result
+}
+
+fn valid_display_body(body: &str, render_source: &str) -> bool {
+    !body.trim().is_empty()
+        && render_source.len() <= MAX_MATH_SOURCE_BYTES
+        && !block_body_looks_like_prose(body)
+}
+
+#[derive(Clone, Copy)]
+struct OccurrenceRange {
+    start_index: usize,
+    end_index: usize,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+fn occurrence(
+    lines: &[(TranscriptId, &str)],
+    range: OccurrenceRange,
+    original_source: String,
+    render_source: String,
+    delimiter_kind: DelimiterKind,
+) -> MathOccurrence {
+    let cell_segments = (range.start_index..=range.end_index)
+        .map(|index| {
+            let line = lines[index].1;
+            let start = if index == range.start_index {
+                range.byte_start
+            } else {
+                0
+            };
+            let end = if index == range.end_index {
+                range.byte_end
+            } else {
+                line.len()
+            };
+            MathCellSegment {
+                logical_line: u32::try_from(index - range.start_index).unwrap_or(u32::MAX),
+                source_line: MathSourceLine::Transcript(lines[index].0),
+                byte_start: u32::try_from(start).unwrap_or(u32::MAX),
+                byte_end: u32::try_from(end).unwrap_or(u32::MAX),
+                cell_start: u32::try_from(line[..start].chars().count()).unwrap_or(u32::MAX),
+                cell_end: u32::try_from(line[..end].chars().count()).unwrap_or(u32::MAX),
+            }
+        })
+        .collect();
+    MathOccurrence {
+        byte_start: u32::try_from(range.byte_start).unwrap_or(u32::MAX),
+        byte_end: u32::try_from(range.byte_end).unwrap_or(u32::MAX),
+        original_source,
+        render_source,
+        delimiter_kind,
+        mode: MathMode::Display,
+        cell_segments,
+        inline_runs: Vec::new(),
+    }
+}
+
+fn joined_range(
+    lines: &[(TranscriptId, &str)],
+    start_index: usize,
+    end_index: usize,
+    first_start: usize,
+    last_end: usize,
+) -> String {
+    let mut parts = (start_index..=end_index)
+        .map(|index| {
+            let text = lines[index].1;
+            let start = if index == start_index { first_start } else { 0 };
+            let end = if index == end_index {
+                last_end
+            } else {
+                text.len()
+            };
+            &text[start..end]
+        })
+        .collect::<Vec<_>>();
+    if parts.first().is_some_and(|part| part.is_empty()) {
+        parts.remove(0);
+    }
+    if parts.last().is_some_and(|part| part.is_empty()) {
+        parts.pop();
+    }
+    parts.join("\n")
+}
+
+fn delimiter_start(text: &str) -> usize {
+    text.len() - text.trim_start_matches(' ').len()
+}
+
+fn complete_display_on_line(text: &str) -> Option<(DelimiterKind, usize, usize, usize, usize)> {
+    if commonmark_indented_code(text) {
+        return None;
+    }
+    let start = delimiter_start(text);
+    let trimmed = text[start..].trim_end_matches([' ', '\t']);
+    if let Some(rest) = trimmed.strip_prefix("$$") {
+        let close = rest.len().checked_sub(2)?;
+        if !rest.ends_with("$$") || close == 0 || rest[..close].contains("$$") {
+            return None;
+        }
+        let body_start = start + 2;
+        let body_end = body_start + close;
+        return (!delimiter_is_escaped(text, start + trimmed.len() - 2)).then_some((
+            DelimiterKind::Dollars,
+            start,
+            body_start,
+            body_end,
+            start + trimmed.len(),
+        ));
+    }
+    if let Some(rest) = trimmed.strip_prefix(r"\[") {
+        let close = rest.len().checked_sub(2)?;
+        if !rest.ends_with(r"\]") || close == 0 || rest[..close].contains(r"\[") {
+            return None;
+        }
+        return Some((
+            DelimiterKind::Brackets,
+            start,
+            start + 2,
+            start + 2 + close,
+            start + trimmed.len(),
+        ));
+    }
+    let (environment, open_end) = environment_token(trimmed, true)?;
+    let closing = format!(r"\end{{{environment}}}");
+    let body_end = trimmed.len().checked_sub(closing.len())?;
+    (open_end < body_end && trimmed.ends_with(&closing)).then_some((
+        DelimiterKind::Environment(environment),
+        start,
+        start + open_end,
+        start + body_end,
+        start + trimmed.len(),
+    ))
+}
+
+fn opening_delimiter(text: &str) -> Option<(DelimiterKind, usize)> {
+    if commonmark_indented_code(text) {
+        return None;
+    }
+    let start = delimiter_start(text);
+    let trimmed = &text[start..];
+    if trimmed.starts_with("$$") && !delimiter_is_escaped(text, start) {
+        return Some((DelimiterKind::Dollars, start + 2));
+    }
+    if trimmed.starts_with(r"\[") {
+        return Some((DelimiterKind::Brackets, start + 2));
+    }
+    let (environment, open_end) = environment_token(trimmed, true)?;
+    Some((DelimiterKind::Environment(environment), start + open_end))
+}
+
+fn closing_delimiter(text: &str, delimiter: &DelimiterKind) -> Option<(usize, usize)> {
+    let trimmed_end = text.trim_end_matches([' ', '\t']).len();
+    match delimiter {
+        DelimiterKind::Dollars => {
+            let start = trimmed_end.checked_sub(2)?;
+            (text.get(start..trimmed_end) == Some("$$") && !delimiter_is_escaped(text, start))
+                .then_some((start, trimmed_end))
+        }
+        DelimiterKind::Brackets => {
+            let start = trimmed_end.checked_sub(2)?;
+            (text.get(start..trimmed_end) == Some(r"\]")).then_some((start, trimmed_end))
+        }
+        DelimiterKind::Environment(environment) => {
+            let closing = format!(r"\end{{{environment}}}");
+            let start = trimmed_end.checked_sub(closing.len())?;
+            (text.get(start..trimmed_end) == Some(closing.as_str())).then_some((start, trimmed_end))
+        }
+    }
+}
+
+fn environment_token(text: &str, open: bool) -> Option<(String, usize)> {
+    let prefix = if open { r"\begin{" } else { r"\end{" };
+    let rest = text.strip_prefix(prefix)?;
+    let name_end = rest.find('}')?;
+    let environment = &rest[..name_end];
+    is_math_environment(environment)
+        .then_some((environment.to_owned(), prefix.len() + name_end + 1))
+}
+
+fn commonmark_indented_code(text: &str) -> bool {
+    let mut columns = 0usize;
+    for character in text.chars() {
+        match character {
+            ' ' => columns += 1,
+            '\t' => columns += 4 - columns % 4,
+            _ => break,
+        }
+        if columns >= 4 {
+            return true;
+        }
+    }
+    false
+}
+
+fn commonmark_fence_marker(text: &str) -> Option<(char, usize)> {
+    if commonmark_indented_code(text) {
+        return None;
+    }
+    let trimmed = text.trim_start_matches(' ');
+    let marker = fence_marker(trimmed)?;
+    let suffix = trimmed.get(marker.1..)?;
+    (marker.0 != '`' || !suffix.contains('`')).then_some(marker)
+}
+
+fn commonmark_fence_closes(text: &str, active: (char, usize)) -> bool {
+    let trimmed = text.trim_start_matches(' ');
+    let count = trimmed
+        .chars()
+        .take_while(|character| *character == active.0)
+        .count();
+    count >= active.1
+        && trimmed
+            .get(count..)
+            .is_some_and(|suffix| suffix.chars().all(char::is_whitespace))
+}
+
+pub fn detect_math_blocks_in_context<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+) -> Vec<DetectedMathBlock> {
+    scan_math_blocks_in_context(lines, initial_context).blocks
 }
 
 /// Run the authoritative detector on a worker-owned frozen snapshot. The session thread only
@@ -857,7 +1152,7 @@ pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
         task.inputs
             .iter()
             .map(|input| (input.id, input.text.as_str())),
-        task.context_start_trusted,
+        task.initial_context.clone(),
     )
     .into_iter()
     .find(|block| block.end == task.candidate_id);
@@ -866,9 +1161,45 @@ pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
     };
     task.transcript_id = block.start;
     task.block_end = block.end;
-    task.span = block.span;
+    let mut occurrence = block.span;
+    let Some(cell_segments) = frozen_occurrence_segments(&occurrence, &task.inputs) else {
+        return false;
+    };
+    occurrence.cell_segments = cell_segments;
+    task.span = occurrence;
     task.resolved = true;
     true
+}
+
+fn frozen_occurrence_segments(
+    occurrence: &MathOccurrence,
+    inputs: &[DetectionInput],
+) -> Option<Vec<MathCellSegment>> {
+    let mut mapped = Vec::with_capacity(occurrence.cell_segments.len());
+    let mut input_index = 0usize;
+    for segment in &occurrence.cell_segments {
+        let MathSourceLine::Transcript(id) = segment.source_line else {
+            return None;
+        };
+        while inputs.get(input_index).is_some_and(|input| input.id < id) {
+            input_index += 1;
+        }
+        let input = inputs.get(input_index).filter(|input| input.id == id)?;
+        let cell_start = input
+            .cell_boundaries
+            .iter()
+            .find_map(|(byte, cell)| (*byte == segment.byte_start).then_some(*cell))?;
+        let cell_end = input
+            .cell_boundaries
+            .iter()
+            .find_map(|(byte, cell)| (*byte == segment.byte_end).then_some(*cell))?;
+        mapped.push(MathCellSegment {
+            cell_start,
+            cell_end,
+            ..segment.clone()
+        });
+    }
+    Some(mapped)
 }
 
 /// Resolve a live-grid candidate through the exact same conservative detector as frozen history.
@@ -877,72 +1208,230 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
     if task.resolved {
         return true;
     }
-    let Some(candidate_index) = task.inputs.iter().position(|input| {
-        matches!(
-            input.source,
-            LiveDetectionSource::Grid { row, .. } if row == task.candidate_row
-        )
-    }) else {
+    if task.detection_complete {
         return false;
-    };
-    let Some(candidate_id) = live_temporary_id(candidate_index) else {
+    }
+    let logical = live_logical_lines(&task.inputs);
+    let row_to_logical = live_grid_logical_ids(&logical, &task.inputs);
+    let Some(candidate_id) = row_to_logical.get(&task.candidate_row).copied() else {
+        task.detection_complete = true;
         return false;
     };
     let detected = detect_math_blocks_in_context(
-        task.inputs.iter().enumerate().filter_map(|(index, input)| {
-            live_temporary_id(index).map(|id| (id, input.text.as_str()))
-        }),
-        task.context_start_trusted,
+        logical.iter().map(|line| (line.id, line.text.as_str())),
+        task.initial_context.clone(),
     )
     .into_iter()
     .find(|block| block.end == candidate_id);
+    task.detection_complete = true;
     let Some(block) = detected else {
         return false;
     };
-    let Some(start_index) = block
-        .start
-        .0
-        .checked_sub(1)
-        .and_then(|index| usize::try_from(index).ok())
+    apply_live_detected_block(task, &block, &logical)
+}
+
+/// Resolve every candidate from one stable snapshot with one O(n) scanner pass. Non-matches are
+/// marked complete as well, preserving the observable candidate queue without repeating the scan
+/// once per delimiter-looking row.
+pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
+    let Some(first) = tasks.first() else {
+        return;
+    };
+    let inputs = Arc::clone(&first.inputs);
+    let initial_context = first.initial_context.clone();
+    let logical = live_logical_lines(&inputs);
+    let row_to_logical = live_grid_logical_ids(&logical, &inputs);
+    let blocks = detect_math_blocks_in_context(
+        logical.iter().map(|line| (line.id, line.text.as_str())),
+        initial_context.clone(),
+    )
+    .into_iter()
+    .map(|block| (block.end, block))
+    .collect::<BTreeMap<_, _>>();
+    for task in tasks {
+        if task.resolved || task.detection_complete {
+            continue;
+        }
+        if task.initial_context != initial_context || task.inputs.as_ref() != inputs.as_ref() {
+            let _ = resolve_live_detection_task(task);
+            continue;
+        }
+        task.detection_complete = true;
+        let Some(block) = row_to_logical
+            .get(&task.candidate_row)
+            .and_then(|id| blocks.get(id))
+        else {
+            continue;
+        };
+        let _ = apply_live_detected_block(task, block, &logical);
+    }
+}
+
+fn apply_live_detected_block(
+    task: &mut LiveDetectionTask,
+    block: &DetectedMathBlock,
+    logical: &[LiveLogicalLine],
+) -> bool {
+    let mut occurrence = block.span.clone();
+    let Some(cell_segments) =
+        live_occurrence_segments(&occurrence, block.start, logical, &task.inputs)
     else {
         return false;
     };
-    let Some(end_index) = block
-        .end
-        .0
-        .checked_sub(1)
-        .and_then(|index| usize::try_from(index).ok())
-    else {
+    occurrence.cell_segments = cell_segments;
+    let Some(first) = occurrence.cell_segments.first() else {
         return false;
     };
-    let Some(LiveDetectionInput {
-        source: LiveDetectionSource::Grid { row: start_row, .. },
-        ..
-    }) = task.inputs.get(start_index)
-    else {
+    let Some(last) = occurrence.cell_segments.last() else {
+        return false;
+    };
+    let MathSourceLine::LiveGrid(start_row) = first.source_line else {
         // A block that begins in frozen history cannot be represented by a live-grid anchor.
         return false;
     };
-    let Some(LiveDetectionInput {
-        source: LiveDetectionSource::Grid { row: end_row, .. },
-        text: end_text,
-    }) = task.inputs.get(end_index)
-    else {
+    let MathSourceLine::LiveGrid(end_row) = last.source_line else {
         return false;
     };
     task.start = GridPoint {
-        row: *start_row,
-        column: 0,
+        row: start_row,
+        column: first.cell_start,
     };
     task.end = GridPoint {
-        row: *end_row,
-        column: u32::try_from(end_text.len()).unwrap_or(u32::MAX),
+        row: end_row,
+        column: last.cell_end,
     };
-    task.band_start_row = *start_row;
-    task.band_end_row = *end_row;
-    task.span = block.span;
+    task.band_start_row = start_row;
+    task.band_end_row = end_row;
+    task.span = occurrence;
     task.resolved = true;
     true
+}
+
+fn live_grid_logical_ids(
+    logical: &[LiveLogicalLine],
+    inputs: &[LiveDetectionInput],
+) -> BTreeMap<u32, TranscriptId> {
+    logical
+        .iter()
+        .flat_map(|line| {
+            line.fragments.iter().filter_map(|fragment| {
+                let LiveDetectionSource::Grid { row, .. } = inputs[fragment.input_index].source
+                else {
+                    return None;
+                };
+                Some((row, line.id))
+            })
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug)]
+struct LiveLogicalFragment {
+    input_index: usize,
+    byte_start: usize,
+    byte_end: usize,
+}
+
+#[derive(Clone, Debug)]
+struct LiveLogicalLine {
+    id: TranscriptId,
+    text: String,
+    fragments: Vec<LiveLogicalFragment>,
+}
+
+fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
+    let mut logical = Vec::<LiveLogicalLine>::new();
+    for (input_index, input) in inputs.iter().enumerate() {
+        let joins_previous = input_index != 0 && inputs[input_index - 1].continues;
+        if !joins_previous {
+            let Some(id) = live_temporary_id(logical.len()) else {
+                break;
+            };
+            logical.push(LiveLogicalLine {
+                id,
+                text: String::new(),
+                fragments: Vec::new(),
+            });
+        }
+        let Some(line) = logical.last_mut() else {
+            continue;
+        };
+        let byte_start = line.text.len();
+        line.text.push_str(&input.text);
+        line.fragments.push(LiveLogicalFragment {
+            input_index,
+            byte_start,
+            byte_end: line.text.len(),
+        });
+    }
+    logical
+}
+
+fn live_occurrence_segments(
+    occurrence: &MathOccurrence,
+    start: TranscriptId,
+    logical: &[LiveLogicalLine],
+    inputs: &[LiveDetectionInput],
+) -> Option<Vec<MathCellSegment>> {
+    let start_index = logical.iter().position(|line| line.id == start)?;
+    let mut mapped = Vec::new();
+    for source in &occurrence.cell_segments {
+        let logical_index = start_index.checked_add(source.logical_line as usize)?;
+        let line = logical.get(logical_index)?;
+        let source_start = source.byte_start as usize;
+        let source_end = source.byte_end as usize;
+        if source_start == source_end {
+            let fragment = line.fragments.first()?;
+            let input = inputs.get(fragment.input_index)?;
+            let LiveDetectionSource::Grid { row, .. } = input.source else {
+                return None;
+            };
+            let local = u32::try_from(source_start.saturating_sub(fragment.byte_start)).ok()?;
+            let cell = input
+                .cell_boundaries
+                .iter()
+                .find_map(|(byte, cell)| (*byte == local).then_some(*cell))?;
+            mapped.push(MathCellSegment {
+                logical_line: source.logical_line,
+                source_line: MathSourceLine::LiveGrid(row),
+                byte_start: local,
+                byte_end: local,
+                cell_start: cell,
+                cell_end: cell,
+            });
+            continue;
+        }
+        for fragment in &line.fragments {
+            let overlap_start = source_start.max(fragment.byte_start);
+            let overlap_end = source_end.min(fragment.byte_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let input = inputs.get(fragment.input_index)?;
+            let LiveDetectionSource::Grid { row, .. } = input.source else {
+                return None;
+            };
+            let local_start = u32::try_from(overlap_start - fragment.byte_start).ok()?;
+            let local_end = u32::try_from(overlap_end - fragment.byte_start).ok()?;
+            let cell_start = input
+                .cell_boundaries
+                .iter()
+                .find_map(|(byte, cell)| (*byte == local_start).then_some(*cell))?;
+            let cell_end = input
+                .cell_boundaries
+                .iter()
+                .find_map(|(byte, cell)| (*byte == local_end).then_some(*cell))?;
+            mapped.push(MathCellSegment {
+                logical_line: source.logical_line,
+                source_line: MathSourceLine::LiveGrid(row),
+                byte_start: local_start,
+                byte_end: local_end,
+                cell_start,
+                cell_end,
+            });
+        }
+    }
+    (!mapped.is_empty()).then_some(mapped)
 }
 
 fn live_temporary_id(index: usize) -> Option<TranscriptId> {
@@ -1038,7 +1527,7 @@ mod tests {
     fn only_closed_block_delimiters_are_detected() {
         let spans = detect_block_math("  $$x^2$$  ");
         assert_eq!(spans.len(), 1);
-        assert_eq!(spans[0].source, "x^2");
+        assert_eq!(spans[0].render_source, "x^2");
     }
 
     #[test]
@@ -1090,16 +1579,16 @@ mod tests {
         let blocks = detect_math_blocks(window);
         for block in &blocks {
             assert!(
-                !block.span.source.contains("内部含"),
+                !block.span.render_source.contains("内部含"),
                 "prose was captured by a mis-paired delimiter: {:?}",
-                block.span.source
+                block.span.render_source
             );
         }
         // The genuine block in this window (5..7) may still resolve; the prose one must not.
         assert!(
             blocks
                 .iter()
-                .all(|block| !block.span.source.contains("多行里带"))
+                .all(|block| !block.span.render_source.contains("多行里带"))
         );
     }
 
@@ -1114,7 +1603,7 @@ mod tests {
         ];
         let blocks = detect_math_blocks(window);
         assert_eq!(blocks.len(), 1, "\\text{{CJK}} must remain renderable");
-        assert!(blocks[0].span.source.contains("项"));
+        assert!(blocks[0].span.render_source.contains("项"));
     }
 
     #[test]
@@ -1128,7 +1617,7 @@ mod tests {
             (TranscriptId(25), "$$"),
         ];
         assert!(
-            detect_math_blocks_in_context(window, false).is_empty(),
+            detect_math_blocks_in_context(window, DetectionContext::ambiguous()).is_empty(),
             "an unknown prefix cannot prove that the first symmetric delimiter opens"
         );
         assert_eq!(
@@ -1138,7 +1627,7 @@ mod tests {
                     (TranscriptId(2), "x = y"),
                     (TranscriptId(3), "$$"),
                 ],
-                true,
+                DetectionContext::default(),
             )
             .len(),
             1,
@@ -1184,7 +1673,7 @@ mod tests {
                     .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
             );
             assert_eq!(blocks.len(), 1, "{lines:?}");
-            assert!(blocks[0].span.source.contains(expected_source));
+            assert!(blocks[0].span.render_source.contains(expected_source));
         }
 
         for lines in [
@@ -1200,6 +1689,230 @@ mod tests {
                 )
                 .is_empty(),
                 "non-math environment matched: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn m1_9k_inline_body_display_openers_and_closers_span_logical_lines() {
+        let cases = [
+            (
+                vec![r"$$\oint_0^1 x", r"+ y\,dx$$"],
+                "\\oint_0^1 x\n+ y\\,dx",
+            ),
+            (
+                vec![r"\[\oint_0^1 x", r"+ y\,dx\]"],
+                "\\oint_0^1 x\n+ y\\,dx",
+            ),
+            (
+                vec![r"\begin{align}x &= y", r"z &= 1\end{align}"],
+                "\\begin{align}x &= y\nz &= 1\\end{align}",
+            ),
+        ];
+        for (lines, expected_source) in cases {
+            let blocks = detect_math_blocks(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+            );
+            assert_eq!(
+                blocks.len(),
+                1,
+                "inline-body delimiter form was missed: {lines:?}"
+            );
+            assert_eq!(blocks[0].span.render_source, expected_source, "{lines:?}");
+        }
+    }
+
+    #[test]
+    fn m1_9k_commonmark_indented_code_keeps_display_math_literal() {
+        assert!(
+            detect_math_blocks([(TranscriptId(1), "    $$x^2$$")]).is_empty(),
+            "four-space CommonMark code must never become a math decoration"
+        );
+        assert!(
+            detect_math_blocks([(TranscriptId(1), "\t$$x^2$$")]).is_empty(),
+            "tab-indented CommonMark code must never become a math decoration"
+        );
+    }
+
+    #[test]
+    fn m1_9k_math_occurrence_separates_source_render_kind_and_exact_live_cells() {
+        let mut task = live_task(&[r"$$\text{", "中}$$"], 1);
+        let inputs = Arc::make_mut(&mut task.inputs);
+        inputs[0].continues = true;
+        inputs[1].cell_boundaries = vec![(0, 0), (3, 2), (4, 3), (5, 4), (6, 5)];
+        assert!(resolve_live_detection_task(&mut task));
+        assert_eq!(task.span.original_source, r"$$\text{中}$$");
+        assert_eq!(task.span.render_source, r"\text{中}");
+        assert_eq!(task.span.delimiter_kind, DelimiterKind::Dollars);
+        assert_eq!(task.span.cell_segments.len(), 2);
+        assert_eq!(task.span.cell_segments[0].logical_line, 0);
+        assert_eq!(
+            task.span.cell_segments[0].source_line,
+            MathSourceLine::LiveGrid(0)
+        );
+        assert_eq!(
+            task.span.cell_segments[1].source_line,
+            MathSourceLine::LiveGrid(1)
+        );
+        assert_eq!(task.span.cell_segments[1].cell_end, 5);
+    }
+
+    #[test]
+    fn m1_9k_frozen_occurrence_uses_captured_cell_boundaries() {
+        let text = r"$$\text{中}$$";
+        let mut byte = 0u32;
+        let mut cell = 0u32;
+        let mut boundaries = vec![(byte, cell)];
+        for character in text.chars() {
+            byte += character.len_utf8() as u32;
+            cell += if character == '中' { 2 } else { 1 };
+            boundaries.push((byte, cell));
+        }
+        let mut record = DecorationRecord::frozen(stamp());
+        let mut task = record
+            .schedule_scan(
+                TranscriptId(1),
+                DetectionContext::default(),
+                Arc::from([DetectionInput {
+                    id: TranscriptId(1),
+                    text: text.to_owned(),
+                    cell_boundaries: boundaries,
+                }]),
+            )
+            .unwrap();
+        assert!(resolve_detection_task(&mut task));
+        assert_eq!(task.span.cell_segments.len(), 1);
+        assert_eq!(task.span.cell_segments[0].cell_end, 13);
+    }
+
+    #[test]
+    fn m1_9k_redline_a_unknown_symmetric_prefix_is_ambiguous_not_prose_math() {
+        let scan = scan_math_blocks_in_context(
+            [
+                (TranscriptId(1), r"\frac{a}{b}"),
+                (TranscriptId(2), "$$"),
+                (TranscriptId(3), "retrying"),
+                (TranscriptId(4), "$$"),
+            ],
+            DetectionContext::ambiguous(),
+        );
+        assert!(scan.blocks.is_empty(), "ambiguous prose must remain source");
+        assert!(!scan.ambiguous.is_empty(), "the refusal must be explicit");
+
+        for lines in [
+            vec![r"\[x + y", r"+ z\]"],
+            vec![r"\begin{align}x &= y", r"z &= 1\end{align}"],
+        ] {
+            assert_eq!(
+                scan_math_blocks_in_context(
+                    lines
+                        .iter()
+                        .enumerate()
+                        .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+                    DetectionContext::ambiguous(),
+                )
+                .blocks
+                .len(),
+                1,
+                "directional delimiters remain provable with an unknown prefix: {lines:?}"
+            );
+        }
+        assert_eq!(
+            scan_math_blocks_in_context(
+                [(TranscriptId(1), "$$x+y$$")],
+                DetectionContext::ambiguous(),
+            )
+            .blocks
+            .len(),
+            1,
+            "a self-contained symmetric occurrence is independently provable"
+        );
+    }
+
+    #[test]
+    fn m1_9k_redline_b_commonmark_code_context_never_renders_text() {
+        for lines in [
+            vec!["```text", "$$x$$", "```"],
+            vec!["~~~text", "$$x$$", "~~~"],
+            vec!["   ```text", "$$x$$", "   ```"],
+            vec!["    $$x$$"],
+            vec!["\t$$x$$"],
+        ] {
+            assert!(
+                detect_math_blocks(
+                    lines
+                        .iter()
+                        .enumerate()
+                        .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+                )
+                .is_empty(),
+                "CommonMark code was decorated: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn m1_9k_complete_display_shape_matrix_is_covered() {
+        for environment in [
+            "equation",
+            "equation*",
+            "align",
+            "align*",
+            "alignat",
+            "alignat*",
+            "flalign",
+            "flalign*",
+            "gather",
+            "gather*",
+            "multline",
+            "multline*",
+            "aligned",
+            "alignedat",
+            "gathered",
+            "split",
+            "cases",
+            "matrix",
+            "pmatrix",
+            "bmatrix",
+            "Bmatrix",
+            "vmatrix",
+            "Vmatrix",
+            "smallmatrix",
+        ] {
+            let lines = [
+                format!(r"\begin{{{environment}}}x &= y"),
+                format!(r"z &= 1\end{{{environment}}}"),
+            ];
+            let blocks = detect_math_blocks(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| (TranscriptId(index as u64 + 1), line.as_str())),
+            );
+            assert_eq!(blocks.len(), 1, "environment shape missed: {environment}");
+            assert_eq!(
+                blocks[0].span.delimiter_kind,
+                DelimiterKind::Environment(environment.to_owned())
+            );
+            assert_eq!(blocks[0].span.original_source, blocks[0].span.render_source);
+        }
+
+        let outer = detect_math_blocks([
+            (TranscriptId(1), r"$$\begin{aligned}"),
+            (TranscriptId(2), r"x &= y"),
+            (TranscriptId(3), r"\end{aligned}$$"),
+        ]);
+        assert_eq!(outer.len(), 1);
+        assert_eq!(outer[0].span.delimiter_kind, DelimiterKind::Dollars);
+        assert!(outer[0].span.render_source.contains(r"\begin{aligned}"));
+
+        for literal in [r"$x+y$", r"\(x+y\)", r"\$$x$$", "$$$$", "$$open"] {
+            assert!(
+                detect_math_blocks([(TranscriptId(1), literal)]).is_empty(),
+                "{literal}"
             );
         }
     }
@@ -1255,7 +1968,7 @@ mod tests {
             cell_width_subpixels: 9 * SUBPIXELS_PER_PX,
             cell_height_subpixels: 18 * SUBPIXELS_PER_PX,
             ascii_baseline_subpixels: 14 * SUBPIXELS_PER_PX,
-            context_start_trusted: true,
+            initial_context: DetectionContext::default(),
             inputs: Arc::from(
                 lines
                     .iter()
@@ -1266,6 +1979,8 @@ mod tests {
                             revision: 1,
                         },
                         text: (*text).to_owned(),
+                        continues: false,
+                        cell_boundaries: scalar_boundaries(text),
                     })
                     .collect::<Vec<_>>(),
             ),
@@ -1282,12 +1997,26 @@ mod tests {
             span: MathSpan {
                 byte_start: 0,
                 byte_end: 0,
-                source: String::new(),
+                original_source: String::new(),
+                render_source: String::new(),
+                delimiter_kind: DelimiterKind::Dollars,
                 mode: MathMode::Display,
+                cell_segments: Vec::new(),
                 inline_runs: Vec::new(),
             },
+            detection_complete: false,
             resolved: false,
         }
+    }
+
+    fn scalar_boundaries(text: &str) -> Vec<(u32, u32)> {
+        let mut boundaries = text
+            .char_indices()
+            .enumerate()
+            .map(|(cell, (byte, _))| (byte as u32, cell as u32))
+            .collect::<Vec<_>>();
+        boundaries.push((text.len() as u32, text.chars().count() as u32));
+        boundaries
     }
 
     #[test]
@@ -1316,7 +2045,7 @@ mod tests {
         assert!(resolve_live_detection_task(&mut task));
         assert_eq!(task.start, GridPoint { row: 0, column: 0 });
         assert_eq!(task.end, GridPoint { row: 2, column: 2 });
-        assert_eq!(task.span.source, "x + y");
+        assert_eq!(task.span.render_source, "x + y");
     }
 
     #[test]
@@ -1334,7 +2063,7 @@ mod tests {
         assert_eq!(blocks[0].start, TranscriptId(2));
         assert_eq!(blocks[0].end, TranscriptId(6));
         assert_eq!(
-            blocks[0].span.source,
+            blocks[0].span.render_source,
             "\\begin{aligned}\nx &= y + 1\n\\end{aligned}"
         );
     }
@@ -1351,7 +2080,7 @@ mod tests {
             (blocks[0].start, blocks[0].end),
             (TranscriptId(2), TranscriptId(2))
         );
-        assert_eq!(blocks[0].span.source, "x");
+        assert_eq!(blocks[0].span.render_source, "x");
     }
 
     #[test]
