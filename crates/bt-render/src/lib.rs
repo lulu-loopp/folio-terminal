@@ -2192,8 +2192,15 @@ impl Renderer {
             placement.artifact.height_px as f32 * placement.artifact.render_scale_milli as f32
                 / 1000.0
         };
-        let visible_top = top.max(pane_top);
-        let visible_bottom = (top + scaled_height.min(clip_height)).min(pane_bottom);
+        let ([visible_top, visible_bottom], [clip_top, clip_bottom]) = math_vertical_bounds(
+            placement.artifact.mode,
+            pane_top,
+            pane_bottom,
+            band_top,
+            top,
+            scaled_height,
+            clip_height,
+        );
         let (visible_left, visible_right) = math_horizontal_bounds(
             self.metrics,
             self.config.width,
@@ -2206,19 +2213,11 @@ impl Renderer {
             return None;
         }
         let block = [visible_left, visible_top, visible_right, visible_bottom];
-        // The clip rectangle must contain the raster wherever the vertical-centring offset places
-        // it. `top` already carries `content_offset` (display) or the baseline shift (inline), so
-        // the clip's top must follow `top`, not the un-offset `band_top`: keying it on band_top let
-        // a centred multi-line raster's top edge fall ABOVE the clip and get scissored away - the
-        // ascender of a lower row clipped while the block never touched a neighbour (user report
-        // 2026-07-19). The clip still spans the full band height downward from that point.
-        let clip_top = top.max(pane_top);
-        let clip = [
-            visible_left,
-            clip_top,
-            pane_right,
-            (top + clip_height).min(pane_bottom),
-        ];
+        // Display math owns a complete presentation box: alpha-tight ink is offset by symmetric
+        // padding inside the band, while the clip is the band itself. Inline math retains its
+        // baseline-relative clip. In both cases the visible raster is intersected with this clip
+        // above, so the frame-level rule remains explicit: clip contains every block pixel.
+        let clip = [visible_left, clip_top, pane_right, clip_bottom];
         // The scissor must never crop the visible raster: its top may not sit below the block's
         // top, nor its bottom above the block's bottom. This is the invariant the centred multi-
         // line clip violated (see above); asserting it here fails the moment any future change
@@ -3912,6 +3911,33 @@ fn math_horizontal_bounds(
     (visible_right > visible_left).then_some((visible_left, visible_right))
 }
 
+fn math_vertical_bounds(
+    mode: MathMode,
+    pane_top: f32,
+    pane_bottom: f32,
+    band_top: f32,
+    raster_top: f32,
+    raster_height: f32,
+    clip_height: f32,
+) -> ([f32; 2], [f32; 2]) {
+    let clip = if mode == MathMode::Display {
+        [
+            band_top.max(pane_top),
+            (band_top + clip_height).min(pane_bottom),
+        ]
+    } else {
+        [
+            raster_top.max(pane_top),
+            (raster_top + clip_height).min(pane_bottom),
+        ]
+    };
+    let visible = [
+        raster_top.max(clip[0]),
+        (raster_top + raster_height).min(clip[1]),
+    ];
+    (visible, clip)
+}
+
 fn point_in_rect([x, y]: [f32; 2], [left, top, right, bottom]: [f32; 4]) -> bool {
     x >= left && x < right && y >= top && y < bottom
 }
@@ -4074,6 +4100,23 @@ mod tests {
             (9.0, 31.0),
             "a taller block keeps the intended 22px control"
         );
+    }
+
+    #[test]
+    fn display_math_clip_is_the_padded_box_and_contains_the_tight_raster() {
+        let (visible, clip) =
+            math_vertical_bounds(MathMode::Display, 0.0, 100.0, 10.0, 15.0, 20.0, 30.0);
+        assert_eq!(clip, [10.0, 40.0]);
+        assert_eq!(visible, [15.0, 35.0]);
+        assert!(clip[0] <= visible[0] && visible[1] <= clip[1]);
+        assert_eq!(visible[0] - clip[0], clip[1] - visible[1]);
+
+        let (inline_visible, inline_clip) =
+            math_vertical_bounds(MathMode::Inline, 0.0, 100.0, 10.0, 15.0, 20.0, 30.0);
+        assert_eq!(inline_clip, [15.0, 45.0]);
+        assert_eq!(inline_visible, [15.0, 35.0]);
+        // Mutation: keying display clip_top to raster_top makes display clip equal inline_clip.
+        assert_ne!(clip, inline_clip);
     }
 
     fn shape_narrow_for_test(

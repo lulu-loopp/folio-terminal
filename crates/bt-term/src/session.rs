@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     error::Error,
     fmt,
     hash::{DefaultHasher, Hash, Hasher},
@@ -53,9 +53,9 @@ const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
 const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
-/// Live breathing is 12.5% of one terminal row per side. At the baseline 18 px row this is 2.25
-/// px: enough to separate ink from text while remaining below the requested 15% ceiling.
-const LIVE_MATH_BREATHING_DENOMINATOR: i64 = 8;
+/// M1.9m presentation padding is expressed as thousandths of the measured cell height so one
+/// option follows both DPI and font metrics. The default is one quarter cell on each side.
+pub const DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI: u32 = 250;
 /// Alpha-tight display rasters begin half a terminal cell inside the pane. This follows the
 /// measured cell advance across fonts and DPI instead of baking a logical-pixel value into layout.
 const DISPLAY_MATH_LEFT_INSET_DENOMINATOR: i64 = 2;
@@ -66,6 +66,9 @@ pub const LIVE_MIN_VISIBLE_TEXT_ROWS: u32 = bt_viewport::LIVE_MIN_VISIBLE_TEXT_R
 pub struct MathLayoutOptions {
     pub line_wrapping: bool,
     pub block_max_height_px: Option<NonZeroU32>,
+    /// Symmetric display-math padding per side, in thousandths of the measured cell height.
+    /// Zero is valid and intentionally exposes the alpha-tight raster without breathing room.
+    pub vertical_padding_cell_milli: u32,
 }
 
 impl Default for MathLayoutOptions {
@@ -73,6 +76,22 @@ impl Default for MathLayoutOptions {
         Self {
             line_wrapping: true,
             block_max_height_px: None,
+            vertical_padding_cell_milli: DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct MathSourcePreferenceKey {
+    original_source: String,
+    mode: MathMode,
+}
+
+impl MathSourcePreferenceKey {
+    fn from_span(span: &MathSpan) -> Self {
+        Self {
+            original_source: span.original_source.clone(),
+            mode: span.mode,
         }
     }
 }
@@ -261,6 +280,10 @@ pub struct DualPlaneSession {
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
+    /// User presentation choices are content state, not decoration-instance state. Entries are
+    /// created only by an explicit toggle and live for the session, so alternate-screen repaint,
+    /// redetection, grid-generation changes, and layout changes cannot reset the choice.
+    math_source_preferences: HashMap<MathSourcePreferenceKey, bool>,
     pending_live_handoffs: Vec<PendingLiveArtifactHandoff>,
     frozen_detection_context: DetectionContext,
     frozen_detection_contexts: BTreeMap<TranscriptId, DetectionContext>,
@@ -364,6 +387,7 @@ impl DualPlaneSession {
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
             live_decorations: BTreeMap::new(),
+            math_source_preferences: HashMap::new(),
             pending_live_handoffs: Vec::new(),
             frozen_detection_context: DetectionContext::default(),
             frozen_detection_contexts: BTreeMap::new(),
@@ -450,6 +474,15 @@ impl DualPlaneSession {
 
     pub fn set_math_layout_options(&mut self, options: MathLayoutOptions) {
         self.math_layout_options = options;
+    }
+
+    fn math_vertical_padding_subpixels(&self) -> i64 {
+        self.cell_height_subpixels
+            .get()
+            .saturating_mul(i64::from(
+                self.math_layout_options.vertical_padding_cell_milli,
+            ))
+            .div_euclid(1000)
     }
 
     pub fn live_detection_count(&self) -> u64 {
@@ -967,9 +1000,9 @@ impl DualPlaneSession {
                             let occupied = self.occupied_live_band_rows(task.start.row);
                             size_live_task_band_for_artifact(
                                 &mut task,
-                                live_presentation_height_subpixels(
+                                math_presentation_height_subpixels(
                                     artifact.height_subpixels,
-                                    self.cell_height_subpixels.get(),
+                                    self.math_vertical_padding_subpixels(),
                                 ),
                                 self.cell_height_subpixels.get(),
                                 &occupied,
@@ -1079,9 +1112,9 @@ impl DualPlaneSession {
             let occupied = self.occupied_live_band_rows(task.start.row);
             size_live_task_band_for_artifact(
                 &mut task,
-                live_presentation_height_subpixels(
+                math_presentation_height_subpixels(
                     artifact.height_subpixels,
-                    self.cell_height_subpixels.get(),
+                    self.math_vertical_padding_subpixels(),
                 ),
                 self.cell_height_subpixels.get(),
                 &occupied,
@@ -1171,18 +1204,27 @@ impl DualPlaneSession {
             self.live_decorations.remove(&task.start.row);
             return true;
         }
-        let remembered = self.live_decorations.get(&task.start.row).map(|record| {
-            (
-                record.show_source,
-                record.hovered,
-                record.horizontal_scroll_px,
-                record.vertical_scroll_px,
-            )
-        });
+        let preference_key = MathSourcePreferenceKey::from_span(&task.span);
+        let show_source = self
+            .math_source_preferences
+            .get(&preference_key)
+            .copied()
+            .unwrap_or(false);
+        let remembered = self
+            .live_decorations
+            .get(&task.start.row)
+            .filter(|record| MathSourcePreferenceKey::from_span(&record.span) == preference_key)
+            .map(|record| {
+                (
+                    record.hovered,
+                    record.horizontal_scroll_px,
+                    record.vertical_scroll_px,
+                )
+            });
         self.live_decorations
             .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
-        let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
-            remembered.unwrap_or((false, false, 0, 0));
+        let (hovered, horizontal_scroll_px, vertical_scroll_px) =
+            remembered.unwrap_or((false, 0, 0));
         // Install summaries only for the rows whose pixels are about to suppress source. Ordinary
         // TUI rows stay O(damaged rows), while a same-content repaint of this local dependency band
         // can retain the artifact without cloning any cell Strings.
@@ -1248,6 +1290,12 @@ impl DualPlaneSession {
             candidate.decoration = DecorationLifecycle::None;
             candidate.artifact = None;
         }
+        let preference_key = MathSourcePreferenceKey::from_span(&task.span);
+        let show_source = self
+            .math_source_preferences
+            .get(&preference_key)
+            .copied()
+            .unwrap_or(false);
         let Some(record) = self.decorations.get_mut(&task.transcript_id) else {
             return false;
         };
@@ -1265,7 +1313,7 @@ impl DualPlaneSession {
         else {
             return false;
         };
-        match artifact {
+        let applied = match artifact {
             Some(artifact) => {
                 self.document.set_decoration(
                     task.transcript_id,
@@ -1283,7 +1331,11 @@ impl DualPlaneSession {
                     .set_decoration(task.transcript_id, DecorationIntent::Plain);
                 record.fail(&resolved_task, failure_reason)
             }
+        };
+        if applied {
+            record.show_source = show_source;
         }
+        applied
     }
 
     fn worker_task_is_current(&self, task: &DetectionTask) -> bool {
@@ -1561,34 +1613,50 @@ impl DualPlaneSession {
     }
 
     pub fn toggle_math_source(&mut self, anchor: &MathBlockAnchor) -> bool {
-        match anchor {
-            MathBlockAnchor::History { start, end } => self
-                .decorations
-                .get_mut(start)
-                .filter(|record| record.block_end == Some(*end))
-                .is_some_and(DecorationRecord::toggle_source),
+        let preference = match anchor {
+            MathBlockAnchor::History { start, end } => {
+                let Some(record) = self
+                    .decorations
+                    .get_mut(start)
+                    .filter(|record| record.block_end == Some(*end))
+                else {
+                    return false;
+                };
+                let Some(key) = record.span.as_ref().map(MathSourcePreferenceKey::from_span) else {
+                    return false;
+                };
+                if !record.toggle_source() {
+                    return false;
+                }
+                (key, record.show_source)
+            }
             MathBlockAnchor::Live {
                 screen,
                 start,
                 end,
                 generation,
                 ..
-            } => self
-                .live_decorations
-                .get_mut(&start.row)
-                .filter(|record| {
+            } => {
+                let Some(record) = self.live_decorations.get_mut(&start.row).filter(|record| {
                     record.screen == *screen
                         && record.start == *start
                         && record.end == *end
                         && record.generation == *generation
-                })
-                .is_some_and(|record| {
-                    record.show_source = !record.show_source;
-                    record.horizontal_scroll_px = 0;
-                    record.vertical_scroll_px = 0;
-                    true
-                }),
-        }
+                }) else {
+                    return false;
+                };
+                record.show_source = !record.show_source;
+                record.horizontal_scroll_px = 0;
+                record.vertical_scroll_px = 0;
+                (
+                    MathSourcePreferenceKey::from_span(&record.span),
+                    record.show_source,
+                )
+            }
+        };
+        self.math_source_preferences
+            .insert(preference.0, preference.1);
+        true
     }
 
     pub fn set_math_hover(&mut self, anchor: Option<&MathBlockAnchor>) -> bool {
@@ -1746,7 +1814,7 @@ impl DualPlaneSession {
                     .span
                     .as_ref()
                     .is_some_and(|span| span.mode == MathMode::Display))
-            .then(|| projected_frozen_artifact(record))
+            .then(|| projected_frozen_artifact(record, self.math_vertical_padding_subpixels()))
             .flatten()
             .map(|artifact| (*id, artifact))
         }));
@@ -1764,7 +1832,7 @@ impl DualPlaneSession {
                         projected_live_artifact(
                             record,
                             self.layout_key,
-                            self.cell_height_subpixels.get(),
+                            self.math_vertical_padding_subpixels(),
                         )
                     })
                     .flatten()
@@ -1852,7 +1920,9 @@ impl DualPlaneSession {
             if !record.show_source {
                 continue;
             }
-            let Some(artifact) = projected_frozen_artifact(record) else {
+            let Some(artifact) =
+                projected_frozen_artifact(record, self.math_vertical_padding_subpixels())
+            else {
                 continue;
             };
             let Some(first_row) = frame_row_for_history(frame, *start) else {
@@ -1899,9 +1969,11 @@ impl DualPlaneSession {
             if !record.show_source {
                 continue;
             }
-            let Some(artifact) =
-                projected_live_artifact(record, self.layout_key, self.cell_height_subpixels.get())
-            else {
+            let Some(artifact) = projected_live_artifact(
+                record,
+                self.layout_key,
+                self.math_vertical_padding_subpixels(),
+            ) else {
                 continue;
             };
             let Some((visible_row, _source_row)) = frame_row_for_live_range(
@@ -1965,7 +2037,9 @@ impl DualPlaneSession {
             if record.show_source || record.failure_reason.is_some() {
                 continue;
             }
-            let Some(artifact) = projected_frozen_artifact(record) else {
+            let Some(artifact) =
+                projected_frozen_artifact(record, self.math_vertical_padding_subpixels())
+            else {
                 continue;
             };
             let Some(entry) = self.document.entries().get(start) else {
@@ -2019,9 +2093,11 @@ impl DualPlaneSession {
             {
                 continue;
             }
-            let Some(artifact) =
-                projected_live_artifact(record, self.layout_key, self.cell_height_subpixels.get())
-            else {
+            let Some(artifact) = projected_live_artifact(
+                record,
+                self.layout_key,
+                self.math_vertical_padding_subpixels(),
+            ) else {
                 continue;
             };
             let Some(text) =
@@ -3265,6 +3341,7 @@ fn project_artifact(
     rendered_layout: LayoutKey,
     current_layout: LayoutKey,
     source: String,
+    vertical_padding_subpixels: i64,
 ) -> ProjectedMathArtifact {
     let scale_milli = layout_scale_milli(rendered_layout, current_layout);
     project_artifact_at_scale(
@@ -3274,7 +3351,7 @@ fn project_artifact(
         if artifact.mode == MathMode::Inline {
             0
         } else {
-            transcript_vertical_padding_subpixels(current_layout)
+            vertical_padding_subpixels
         },
     )
 }
@@ -3295,8 +3372,10 @@ fn project_artifact_at_scale(
         rgba: Arc::clone(&artifact.rgba),
         width_px: artifact.width_px,
         height_px: artifact.height_px,
-        height_subpixels: tight_height_subpixels
-            .saturating_add(vertical_padding_subpixels.saturating_mul(2)),
+        height_subpixels: math_presentation_height_subpixels(
+            tight_height_subpixels,
+            vertical_padding_subpixels,
+        ),
         baseline_subpixels: artifact
             .baseline_subpixels
             .saturating_mul(i64::from(scale_milli))
@@ -3321,7 +3400,10 @@ fn frozen_artifact_and_scale(record: &DecorationRecord) -> Option<(&PlaceholderA
     }
 }
 
-fn projected_frozen_artifact(record: &DecorationRecord) -> Option<ProjectedMathArtifact> {
+fn projected_frozen_artifact(
+    record: &DecorationRecord,
+    vertical_padding_subpixels: i64,
+) -> Option<ProjectedMathArtifact> {
     let source = record.span.as_ref()?.render_source.clone();
     if let Some(artifact) = record.artifact.as_ref() {
         Some(project_artifact(
@@ -3329,6 +3411,7 @@ fn projected_frozen_artifact(record: &DecorationRecord) -> Option<ProjectedMathA
             record.versions.layout,
             record.versions.layout,
             source,
+            vertical_padding_subpixels,
         ))
     } else {
         record.stale_artifact.as_ref().map(|stale| {
@@ -3337,6 +3420,7 @@ fn projected_frozen_artifact(record: &DecorationRecord) -> Option<ProjectedMathA
                 stale.rendered_layout,
                 record.versions.layout,
                 source,
+                vertical_padding_subpixels,
             )
         })
     }
@@ -3355,7 +3439,7 @@ fn live_artifact_and_scale(
 fn projected_live_artifact(
     record: &LiveDecorationRecord,
     current_layout: LayoutKey,
-    cell_height_subpixels: i64,
+    vertical_padding_subpixels: i64,
 ) -> Option<ProjectedMathArtifact> {
     let (artifact, scale_milli) = live_artifact_and_scale(record, current_layout)?;
     Some(project_artifact_at_scale(
@@ -3365,30 +3449,18 @@ fn projected_live_artifact(
         if artifact.mode == MathMode::Inline {
             0
         } else {
-            cell_height_subpixels.div_euclid(LIVE_MATH_BREATHING_DENOMINATOR)
+            vertical_padding_subpixels
         },
     ))
 }
 
-fn transcript_vertical_padding_subpixels(layout: LayoutKey) -> i64 {
-    let padding_px = u64::from(bt_math::VERTICAL_PADDING_LOGICAL_PX)
-        .saturating_mul(u64::from(layout.dpi_milli.get()))
-        .saturating_add(999)
-        / 1000;
-    i64::try_from(padding_px)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(SUBPIXELS_PER_PX)
-}
-
-fn live_presentation_height_subpixels(
+fn math_presentation_height_subpixels(
     tight_height_subpixels: i64,
-    cell_height_subpixels: i64,
+    vertical_padding_subpixels: i64,
 ) -> i64 {
-    tight_height_subpixels.saturating_add(
-        cell_height_subpixels
-            .div_euclid(LIVE_MATH_BREATHING_DENOMINATOR)
-            .saturating_mul(2),
-    )
+    tight_height_subpixels
+        .saturating_add(vertical_padding_subpixels.saturating_mul(2))
+        .max(1)
 }
 
 fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetectionInput> {
@@ -3916,6 +3988,13 @@ mod tests {
         NonZeroU32::new(value).unwrap()
     }
 
+    fn default_math_padding_subpixels() -> i64 {
+        SPIKE_CELL_HEIGHT_SUBPIXELS
+            .get()
+            .saturating_mul(i64::from(DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI))
+            / 1000
+    }
+
     #[test]
     fn finalized_line_ingest_stays_linear_without_live_handoffs() {
         let mut elapsed = Vec::new();
@@ -4324,7 +4403,10 @@ mod tests {
         );
         assert_eq!(
             projection.heights().get(0),
-            Some((35 + 2 * i64::from(bt_math::VERTICAL_PADDING_LOGICAL_PX)) * SUBPIXELS_PER_PX)
+            Some(math_presentation_height_subpixels(
+                35 * SUBPIXELS_PER_PX,
+                default_math_padding_subpixels(),
+            ))
         );
         assert!(!ready.cells.iter().any(|cell| cell.text == "$"));
 
@@ -4486,6 +4568,7 @@ mod tests {
         session.set_math_layout_options(MathLayoutOptions {
             line_wrapping: true,
             block_max_height_px: Some(nz(40)),
+            ..MathLayoutOptions::default()
         });
         assert!(session.scroll_math_block(&anchor, 0, 20));
         let clamped = session.viewport_frame(&mut projection).unwrap();
@@ -4950,9 +5033,9 @@ mod tests {
         );
         assert_eq!(
             rendered.math_blocks[0].clip_height_subpixels,
-            live_presentation_height_subpixels(
+            math_presentation_height_subpixels(
                 20 * SUBPIXELS_PER_PX,
-                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+                default_math_padding_subpixels(),
             )
         );
         assert_eq!(rendered.status_text.as_deref(), Some("1 rows above"));
@@ -5166,9 +5249,9 @@ mod tests {
         assert_eq!(borrowed.math_blocks.len(), 1);
         assert_eq!(
             borrowed.math_blocks[0].clip_height_subpixels,
-            live_presentation_height_subpixels(
+            math_presentation_height_subpixels(
                 40 * SUBPIXELS_PER_PX,
-                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+                default_math_padding_subpixels(),
             )
         );
         assert_eq!(borrowed.math_blocks[0].artifact.render_scale_milli, 1000);
@@ -5209,9 +5292,9 @@ mod tests {
         assert_eq!(expanded.math_blocks.len(), 1);
         assert_eq!(
             expanded.math_blocks[0].clip_height_subpixels,
-            live_presentation_height_subpixels(
+            math_presentation_height_subpixels(
                 40 * SUBPIXELS_PER_PX,
-                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+                default_math_padding_subpixels(),
             )
         );
         assert_eq!(expanded.math_blocks[0].artifact.render_scale_milli, 1000);
@@ -5325,7 +5408,12 @@ mod tests {
         );
         assert_eq!(
             bottom.row_map[0].top_subpixels,
-            -(26 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 2)
+            SPIKE_CELL_HEIGHT_SUBPIXELS
+                .get()
+                .saturating_sub(math_presentation_height_subpixels(
+                    40 * SUBPIXELS_PER_PX,
+                    default_math_padding_subpixels(),
+                ),)
         );
         assert_eq!(bottom.row_map[11].live_grid_row, Some(11));
         assert_eq!(
@@ -5348,7 +5436,9 @@ mod tests {
         let first_review = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(
             first_review.row_map[0].top_subpixels,
-            -(8 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 2)
+            bottom.row_map[0]
+                .top_subpixels
+                .saturating_add(SPIKE_CELL_HEIGHT_SUBPIXELS.get())
         );
         assert_eq!(first_review.status_text.as_deref(), Some("1 rows above"));
         assert!(matches!(
@@ -5377,7 +5467,7 @@ mod tests {
         projection.scroll_to_bottom();
         assert_eq!(
             session.viewport_frame(&mut projection).unwrap().row_map[0].top_subpixels,
-            -(26 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 2)
+            bottom.row_map[0].top_subpixels
         );
     }
 
@@ -5542,22 +5632,30 @@ mod tests {
         let frame = alternate.viewport_frame(&mut projection).unwrap();
         assert_eq!(frame.math_blocks.len(), 1);
         let placement = &frame.math_blocks[0];
+        let MathBlockAnchor::Live { band_start_row, .. } = placement.anchor else {
+            unreachable!();
+        };
         assert_eq!(
             placement.top_subpixels,
-            -(2 * SUBPIXELS_PER_PX + SUBPIXELS_PER_PX / 2)
+            frame
+                .row_map
+                .iter()
+                .find(|row| row.live_grid_row == Some(band_start_row))
+                .unwrap()
+                .top_subpixels
         );
         assert_eq!(
             placement.clip_height_subpixels,
-            live_presentation_height_subpixels(
+            math_presentation_height_subpixels(
                 70 * SUBPIXELS_PER_PX,
-                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+                default_math_padding_subpixels(),
             )
         );
         assert_eq!(
             placement.artifact.height_subpixels,
-            live_presentation_height_subpixels(
+            math_presentation_height_subpixels(
                 70 * SUBPIXELS_PER_PX,
-                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+                default_math_padding_subpixels(),
             )
         );
         assert_eq!(placement.artifact.render_scale_milli, 1000);
@@ -5600,9 +5698,9 @@ mod tests {
         assert_eq!(frame.math_blocks.len(), 1);
         assert_eq!(
             frame.math_blocks[0].clip_height_subpixels,
-            live_presentation_height_subpixels(
+            math_presentation_height_subpixels(
                 18 * SUBPIXELS_PER_PX,
-                SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+                default_math_padding_subpixels(),
             )
         );
         assert!(
@@ -5613,6 +5711,229 @@ mod tests {
                 .collect::<String>()
                 .contains("primary-neighbor")
         );
+    }
+
+    #[test]
+    fn display_box_is_tight_ink_plus_configurable_symmetric_padding() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(b"\x1b[?1049h$$x^2$$\r\ninput", start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let padded = session.viewport_frame(&mut projection).unwrap();
+        let block = &padded.math_blocks[0];
+        let padding = default_math_padding_subpixels();
+        let tight = 20 * SUBPIXELS_PER_PX;
+        assert_eq!(block.artifact.height_subpixels, tight + 2 * padding);
+        assert_eq!(block.clip_height_subpixels, tight + 2 * padding);
+        assert_eq!(block.content_offset_subpixels, padding);
+        assert_eq!(
+            block
+                .clip_height_subpixels
+                .saturating_sub(block.content_offset_subpixels)
+                .saturating_sub(tight),
+            padding,
+            "top and bottom padding must be symmetric"
+        );
+
+        session.set_math_layout_options(MathLayoutOptions {
+            vertical_padding_cell_milli: 0,
+            ..MathLayoutOptions::default()
+        });
+        let tight_only = session.viewport_frame(&mut projection).unwrap();
+        let block = &tight_only.math_blocks[0];
+        assert_eq!(block.artifact.height_subpixels, tight);
+        assert_eq!(block.clip_height_subpixels, tight);
+        assert_eq!(block.content_offset_subpixels, 0);
+        // Mutation: ignoring the option or retaining the former 12.5% constant makes this red.
+        assert_eq!(
+            padded.math_blocks[0]
+                .clip_height_subpixels
+                .saturating_sub(block.clip_height_subpixels),
+            2 * padding
+        );
+    }
+
+    #[test]
+    fn tall_display_raster_stays_inside_its_padded_block_clip() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(16));
+        session
+            .feed_at(
+                b"\x1b[?1049h\\begin{align}\r\n\\nabla \\cdot E &= \\frac{rho}{epsilon} \\\\\r\n\\nabla \\times B &= J\r\n\\end{align}\r\ninput",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(80, 100)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(session.terminal_modes().alternate_screen);
+        assert!(matches!(
+            frame.cell_anchors[0].start,
+            ContentAnchor::Live {
+                screen: ScreenId::Alternate,
+                ..
+            }
+        ));
+        let block = &frame.math_blocks[0];
+        let raster_top = block
+            .top_subpixels
+            .saturating_add(block.content_offset_subpixels);
+        let raster_bottom = raster_top.saturating_add(100 * SUBPIXELS_PER_PX);
+        let clip_top = block.top_subpixels;
+        let clip_bottom = clip_top.saturating_add(block.clip_height_subpixels);
+        assert!(raster_top >= clip_top);
+        assert!(raster_bottom <= clip_bottom);
+        assert_eq!(
+            raster_top.saturating_sub(clip_top),
+            default_math_padding_subpixels()
+        );
+        // Mutation: box height = tight + one padding makes raster_bottom exceed clip_bottom.
+        assert_eq!(
+            clip_bottom.saturating_sub(raster_bottom),
+            default_math_padding_subpixels()
+        );
+    }
+
+    #[test]
+    fn multiline_short_block_collapses_and_alternate_input_remains_bottom_anchored() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(13));
+        session
+            .feed_at(
+                b"\x1b[?1049h$$\r\n\r\n\r\nx = 1\r\n\r\n\r\n$$\x1b[13;1Hinput-line",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let block = &frame.math_blocks[0];
+        let expected_box = math_presentation_height_subpixels(
+            20 * SUBPIXELS_PER_PX,
+            default_math_padding_subpixels(),
+        );
+        assert!(session.terminal_modes().alternate_screen);
+        assert!(matches!(
+            frame.cell_anchors[0].start,
+            ContentAnchor::Live {
+                screen: ScreenId::Alternate,
+                ..
+            }
+        ));
+        let MathBlockAnchor::Live {
+            band_start_row,
+            band_end_row,
+            ..
+        } = block.anchor
+        else {
+            unreachable!();
+        };
+        let band_height = frame
+            .row_map
+            .iter()
+            .filter(|row| {
+                row.live_grid_row
+                    .is_some_and(|live| (band_start_row..=band_end_row).contains(&live))
+            })
+            .map(|row| row.height_subpixels)
+            .sum::<i64>();
+        assert_eq!(band_height, expected_box);
+        assert_eq!(block.clip_height_subpixels, expected_box);
+        assert!(
+            expected_box
+                < i64::from(band_end_row - band_start_row + 1) * SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            "mutation max(presentation_box, source_rows*cell) must leave visible blank space"
+        );
+        assert!(
+            frame.row_map[0].top_subpixels > 0,
+            "released height belongs at the top: {:?}",
+            frame.row_map
+        );
+        assert_eq!(
+            frame.status_text, None,
+            "bottom-anchor top slack is blank space, not hidden rows: the overflow indicator must \
+             read zero, never underflow to usize::MAX"
+        );
+        let last = frame.row_map.last().unwrap();
+        assert_eq!(
+            last.top_subpixels.saturating_add(last.height_subpixels),
+            13 * SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            "mutation to top anchoring moves the input row above the pane bottom"
+        );
+        assert!(
+            frame.cells[12 * 40..13 * 40]
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .contains("input-line")
+        );
+    }
+
+    #[test]
+    fn alternate_show_source_preference_survives_redetection_in_both_directions() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(b"\x1b[?1049h$$x^2$$\r\ninput", start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let rendered = session.viewport_frame(&mut projection).unwrap();
+        let anchor = rendered.math_blocks[0].anchor.clone();
+        assert!(session.toggle_math_source(&anchor));
+
+        session.redetect(DetectionRevision(2));
+        assert_eq!(
+            session.advance_live_stability(start + Duration::from_millis(400)),
+            1
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            1
+        );
+        let source = session.viewport_frame(&mut projection).unwrap();
+        let source_block = source
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Source)
+            .expect("content preference restores source after redetection");
+        assert!(session.toggle_math_source(&source_block.anchor));
+
+        session.redetect(DetectionRevision(3));
+        assert_eq!(
+            session.advance_live_stability(start + Duration::from_millis(600)),
+            1
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 20)),
+            1
+        );
+        let rendered_again = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered_again.math_blocks.len(), 1);
+        assert_eq!(
+            rendered_again.math_blocks[0].display,
+            MathBlockDisplay::Rendered
+        );
+        // Mutation: removing the content-preference lookup restores Rendered after revision 2.
     }
 
     #[test]
@@ -5632,7 +5953,10 @@ mod tests {
         assert_eq!(frame.math_blocks.len(), 1);
         assert_eq!(
             frame.math_blocks[0].clip_height_subpixels,
-            5 * SPIKE_CELL_HEIGHT_SUBPIXELS.get()
+            math_presentation_height_subpixels(
+                70 * SUBPIXELS_PER_PX,
+                default_math_padding_subpixels(),
+            )
         );
         assert_eq!(frame.math_blocks[0].artifact.render_scale_milli, 1000);
 
@@ -5694,6 +6018,7 @@ mod tests {
         session.set_math_layout_options(MathLayoutOptions {
             line_wrapping: false,
             block_max_height_px: None,
+            ..MathLayoutOptions::default()
         });
         assert!(!session.scroll_math_block(&anchor, 40, 0));
         assert_eq!(

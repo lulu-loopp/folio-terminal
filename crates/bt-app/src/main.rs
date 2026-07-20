@@ -2918,15 +2918,15 @@ mod tests {
         let cell_height = 18 * bt_viewport::SUBPIXELS_PER_PX;
         assert!(frame.row_map[0].height_subpixels > cell_height);
         assert_eq!(frame.math_blocks[0].artifact.render_scale_milli, 1000);
-        let breathing = cell_height / 8;
+        let padding = cell_height / 4;
         assert_eq!(
             frame.math_blocks[0].artifact.height_subpixels,
-            i64::from(ink_height_px) * bt_viewport::SUBPIXELS_PER_PX + 2 * breathing,
-            "live box height is alpha-tight ink plus symmetric 12.5% row breathing"
+            i64::from(ink_height_px) * bt_viewport::SUBPIXELS_PER_PX + 2 * padding,
+            "display box height is alpha-tight ink plus symmetric 25% cell padding"
         );
         assert_eq!(
             frame.math_blocks[0].artifact.vertical_padding_subpixels,
-            breathing
+            padding
         );
 
         let target = frame.row_map[2];

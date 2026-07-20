@@ -546,6 +546,19 @@ fn centered_content_offset(
         .saturating_add(vertical_padding_subpixels)
 }
 
+fn distributed_row_heights(total_height_subpixels: i64, rows: usize) -> Vec<i64> {
+    if rows == 0 {
+        return Vec::new();
+    }
+    let total = total_height_subpixels.max(1);
+    let row_count = i64::try_from(rows).unwrap_or(i64::MAX);
+    let base = total.div_euclid(row_count);
+    let remainder = usize::try_from(total.rem_euclid(row_count)).unwrap_or(usize::MAX);
+    (0..rows)
+        .map(|row| base + if row < remainder { 1 } else { 0 })
+        .collect()
+}
+
 fn continuous_row_top_subpixels(
     row: usize,
     live_base: usize,
@@ -915,7 +928,8 @@ impl ViewportProjection {
         });
         let rectangular_live_height =
             i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get());
-        let live_extra_height = live_height.saturating_sub(rectangular_live_height).max(0);
+        let live_height_delta = live_height.saturating_sub(rectangular_live_height);
+        let live_extra_height = live_height_delta.max(0);
         let live_rows_above = usize::try_from(
             live_extra_height
                 .saturating_add(self.cell_height_subpixels.get() - 1)
@@ -1031,10 +1045,20 @@ impl ViewportProjection {
                 .saturating_mul(self.cell_height_subpixels.get())
                 .min(live_extra_height)
         };
-        let frame_top_subpixels = reviewed_live_height.saturating_sub(live_extra_height);
+        let frame_top_subpixels = if !primary && live_height_delta < 0 {
+            // The alternate screen is a fixed N x M application grid whose presentation may be
+            // shorter after source rows collapse into formula boxes. Keep the last application row
+            // at the same window-bottom coordinate and consume all released pixels at the top.
+            live_height_delta.saturating_neg()
+        } else {
+            reviewed_live_height.saturating_sub(live_extra_height)
+        };
         let rows_above = usize::try_from(
             frame_top_subpixels
                 .saturating_neg()
+                // Bottom-anchoring leaves positive top slack (blank), not hidden rows: its negated
+                // value is below zero and must read as zero rows above, never wrap to usize::MAX.
+                .max(0)
                 .saturating_add(self.cell_height_subpixels.get() - 1)
                 .div_euclid(self.cell_height_subpixels.get()),
         )
@@ -1046,6 +1070,7 @@ impl ViewportProjection {
             self.cell_height_subpixels.get(),
         );
         let mut visible = Vec::with_capacity(expected_rows);
+        let mut visible_heights = Vec::with_capacity(expected_rows);
         let mut math_blocks = Vec::new();
 
         if primary && window_start < history_rows {
@@ -1061,52 +1086,69 @@ impl ViewportProjection {
                     && row_base < window_end
                     && let Some(entry) = document.entries().get(id)
                 {
-                    let laid_out = if let Some(artifact) = self.math_artifacts.get(id) {
-                        let max_offset =
-                            entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
-                        let local_start = window_start.saturating_sub(row_base);
-                        math_blocks.push(MathBlockPlacement {
-                            start: *id,
-                            anchor: MathBlockAnchor::History {
+                    let (laid_out, laid_out_heights) =
+                        if let Some(artifact) = self.math_artifacts.get(id) {
+                            let max_offset =
+                                entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
+                            let local_start = window_start.saturating_sub(row_base);
+                            let row_heights =
+                                distributed_row_heights(artifact.height_subpixels, line_rows);
+                            let visible_top = frame_top_subpixels
+                                .saturating_add(visible_heights.iter().copied().sum::<i64>());
+                            math_blocks.push(MathBlockPlacement {
                                 start: *id,
-                                end: artifact.end,
-                            },
-                            source: artifact.source.clone(),
-                            artifact: artifact.clone(),
-                            top_subpixels: visible.len() as i64 * self.cell_height_subpixels.get()
-                                - local_start as i64 * self.cell_height_subpixels.get(),
-                            left_subpixels: 0,
-                            content_offset_subpixels: artifact.vertical_padding_subpixels,
-                            clip_height_subpixels: artifact.height_subpixels,
-                            display: MathBlockDisplay::Rendered,
-                            horizontal_overflow: HorizontalOverflowOwner::Block,
-                            horizontal_scroll_px: 0,
-                            vertical_scroll_px: 0,
-                            toolbar_visible: false,
-                        });
-                        (0..line_rows)
-                            .map(|_| {
-                                blank_visual_row(column_count, |_, bias| ContentAnchor::History {
-                                    id: *id,
-                                    offset: if bias == Bias::Before {
-                                        GraphemeOffset(0)
-                                    } else {
-                                        GraphemeOffset(max_offset)
-                                    },
-                                    bias,
-                                    generation: entry.line.source_generation,
-                                })
-                            })
-                            .collect::<Vec<_>>()
-                    } else {
-                        layout_frozen_line(&entry.line, column_count)
-                    };
+                                anchor: MathBlockAnchor::History {
+                                    start: *id,
+                                    end: artifact.end,
+                                },
+                                source: artifact.source.clone(),
+                                artifact: artifact.clone(),
+                                top_subpixels: visible_top.saturating_sub(
+                                    row_heights[..local_start.min(row_heights.len())]
+                                        .iter()
+                                        .copied()
+                                        .sum::<i64>(),
+                                ),
+                                left_subpixels: 0,
+                                content_offset_subpixels: artifact.vertical_padding_subpixels,
+                                clip_height_subpixels: artifact.height_subpixels,
+                                display: MathBlockDisplay::Rendered,
+                                horizontal_overflow: HorizontalOverflowOwner::Block,
+                                horizontal_scroll_px: 0,
+                                vertical_scroll_px: 0,
+                                toolbar_visible: false,
+                            });
+                            (
+                                (0..line_rows)
+                                    .map(|_| {
+                                        blank_visual_row(column_count, |_, bias| {
+                                            ContentAnchor::History {
+                                                id: *id,
+                                                offset: if bias == Bias::Before {
+                                                    GraphemeOffset(0)
+                                                } else {
+                                                    GraphemeOffset(max_offset)
+                                                },
+                                                bias,
+                                                generation: entry.line.source_generation,
+                                            }
+                                        })
+                                    })
+                                    .collect::<Vec<_>>(),
+                                row_heights,
+                            )
+                        } else {
+                            let rows = layout_frozen_line(&entry.line, column_count);
+                            let heights = vec![self.cell_height_subpixels.get(); rows.len()];
+                            (rows, heights)
+                        };
                     for (local_row, row) in laid_out.iter().enumerate() {
                         validate_visual_row(row, column_count, "history", row_base + local_row)?;
                     }
                     let local_start = window_start.saturating_sub(row_base);
                     let local_end = window_end.saturating_sub(row_base).min(laid_out.len());
                     visible.extend(laid_out[local_start..local_end].iter().cloned());
+                    visible_heights.extend_from_slice(&laid_out_heights[local_start..local_end]);
                 }
                 row_base = line_end;
                 if row_base >= window_end {
@@ -1125,6 +1167,7 @@ impl ViewportProjection {
                 let row = captured_staged_visual_row(staged, column_count, self.source_generation);
                 validate_visual_row(&row, column_count, "staging", first + offset)?;
                 visible.push(row);
+                visible_heights.push(self.cell_height_subpixels.get());
             }
         }
 
@@ -1149,6 +1192,9 @@ impl ViewportProjection {
                         })
                     }),
             );
+            visible_heights.extend((first..last).map(|live_row| {
+                self.live_row_prefix[live_row + 1].saturating_sub(self.live_row_prefix[live_row])
+            }));
 
             for live_math in &self.live_math_artifacts {
                 if live_math.screen != screen
@@ -1237,8 +1283,10 @@ impl ViewportProjection {
                     generation: self.grid_generation,
                 }
             }));
+            visible_heights.push(self.cell_height_subpixels.get());
         }
         visible.truncate(expected_rows);
+        visible_heights.truncate(expected_rows);
         for (row_index, row) in visible.iter().enumerate() {
             validate_visual_row(row, column_count, "visible", row_index)?;
         }
@@ -1251,7 +1299,7 @@ impl ViewportProjection {
             .into_iter()
             .flat_map(|row| row.anchors)
             .collect::<Vec<_>>();
-        let mut next_top = reviewed_live_height.saturating_sub(live_extra_height);
+        let mut next_top = frame_top_subpixels;
         let row_map = (0..expected_rows)
             .map(|frame_row| {
                 let absolute_row = window_start.saturating_add(frame_row);
@@ -1259,11 +1307,10 @@ impl ViewportProjection {
                     .checked_sub(live_base)
                     .filter(|row| *row < expected_rows)
                     .and_then(|row| u32::try_from(row).ok());
-                let height_subpixels =
-                    live_grid_row.map_or(self.cell_height_subpixels.get(), |row| {
-                        self.live_row_prefix[row as usize + 1]
-                            .saturating_sub(self.live_row_prefix[row as usize])
-                    });
+                let height_subpixels = visible_heights
+                    .get(frame_row)
+                    .copied()
+                    .unwrap_or(self.cell_height_subpixels.get());
                 let mapped = FrameVisualRow {
                     top_subpixels: next_top,
                     height_subpixels,
@@ -1560,16 +1607,11 @@ impl ViewportProjection {
         )
         .saturating_mul(self.cell_height_subpixels.get());
         let mut accepted = Vec::new();
-        // Prefer the newest/lower blocks. Each accepted box consumes both its source band and any
-        // free-height growth. If the text-row floor would be crossed, older blocks honestly remain
-        // source instead of acquiring a third, scaled presentation.
+        // Prefer the newest/lower blocks. Each accepted block consumes its presentation box,
+        // independent of how many logical source rows that box suppresses. If the text-row floor
+        // would be crossed, older blocks honestly remain source instead of acquiring a third scale.
         for artifact in candidates.into_iter().rev() {
-            let rows = artifact
-                .band_end_row
-                .saturating_sub(artifact.band_start_row)
-                .saturating_add(1);
-            let band = i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
-            let box_height = artifact.artifact.height_subpixels.max(band);
+            let box_height = artifact.artifact.height_subpixels.max(1);
             if artifact.artifact.render_scale_milli == LIVE_MATH_READABLE_SCALE_MILLI
                 && box_height <= remaining
             {
@@ -1595,30 +1637,31 @@ impl ViewportProjection {
             }
         }
         accepted.reverse();
-        let mut per_row_extra = vec![0_i64; self.live_rows.get() as usize];
+        let mut per_row_height =
+            vec![self.cell_height_subpixels.get(); self.live_rows.get() as usize];
         for artifact in &accepted {
             let rows = artifact
                 .band_end_row
                 .saturating_sub(artifact.band_start_row)
                 .saturating_add(1);
-            let band = i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
-            let extra = artifact
-                .artifact
-                .height_subpixels
-                .saturating_sub(band)
-                .max(0);
-            if let Some(row) = per_row_extra.get_mut(artifact.band_start_row as usize) {
-                *row = row.saturating_add(extra);
+            let heights =
+                distributed_row_heights(artifact.artifact.height_subpixels, rows.max(1) as usize);
+            // Logical ownership remains the complete source/borrowed band, but its row-height sum
+            // is exactly the presentation box. Remainder subpixels are assigned deterministically
+            // from the top; no source-line count can impose a minimum pixel height.
+            for offset in 0..rows {
+                if let Some(height) =
+                    per_row_height.get_mut(artifact.band_start_row.saturating_add(offset) as usize)
+                    && let Some(distributed) = heights.get(offset as usize)
+                {
+                    *height = *distributed;
+                }
             }
         }
-        let mut prefix = Vec::with_capacity(per_row_extra.len() + 1);
+        let mut prefix = Vec::with_capacity(per_row_height.len() + 1);
         prefix.push(0_i64);
-        for extra in per_row_extra {
-            let next = prefix
-                .last()
-                .copied()
-                .unwrap_or(0)
-                .saturating_add(self.cell_height_subpixels.get().saturating_add(extra));
+        for height in per_row_height {
+            let next = prefix.last().copied().unwrap_or(0).saturating_add(height);
             prefix.push(next);
         }
         if self.live_math_artifacts != accepted || self.live_row_prefix != prefix {
