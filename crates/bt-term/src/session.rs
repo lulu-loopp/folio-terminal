@@ -34,7 +34,10 @@ use bt_viewport::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    adapter::{AdapterEvent, TerminalAdapter, TerminalDamage, TerminalModes},
+    adapter::{
+        AdapterEvent, RemovalCause, RemovalScope, RemovalScreen, TerminalAdapter, TerminalDamage,
+        TerminalModes,
+    },
     cell_capture::CapturedRowFingerprint,
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
@@ -96,6 +99,7 @@ struct LiveDecorationRecord {
     detection_revision: DetectionRevision,
     layout: LayoutKey,
     rendered_layout: LayoutKey,
+    context_start_trusted: bool,
     inputs: Arc<[LiveDetectionInput]>,
     span: MathSpan,
     artifact: Option<PlaceholderArtifact>,
@@ -246,8 +250,10 @@ pub struct DualPlaneSession {
     primary_parked: bool,
     cell_height_subpixels: NonZeroI64,
     cell_width_subpixels: NonZeroI64,
+    ascii_baseline_subpixels: Option<NonZeroI64>,
     math_layout_options: MathLayoutOptions,
     live_screen: ScreenId,
+    alternate_context_start_trusted: bool,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
@@ -344,8 +350,10 @@ impl DualPlaneSession {
             primary_parked: false,
             cell_height_subpixels,
             cell_width_subpixels: NonZeroI64::new(9 * SUBPIXELS_PER_PX).unwrap(),
+            ascii_baseline_subpixels: None,
             math_layout_options: MathLayoutOptions::default(),
             live_screen: ScreenId::Primary,
+            alternate_context_start_trusted: true,
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
             live_decorations: BTreeMap::new(),
@@ -417,6 +425,10 @@ impl DualPlaneSession {
 
     pub fn set_cell_width_subpixels(&mut self, cell_width_subpixels: NonZeroI64) {
         self.cell_width_subpixels = cell_width_subpixels;
+    }
+
+    pub fn set_ascii_baseline_subpixels(&mut self, ascii_baseline_subpixels: NonZeroI64) {
+        self.ascii_baseline_subpixels = Some(ascii_baseline_subpixels);
     }
 
     pub fn set_math_layout_options(&mut self, options: MathLayoutOptions) {
@@ -716,7 +728,7 @@ impl DualPlaneSession {
             .filter_map(|input| match input.source {
                 LiveDetectionSource::Grid { row, .. }
                     if stable.get(row as usize).copied().unwrap_or(false)
-                        && input.text.contains('$') =>
+                        && may_contain_display_math(&input.text) =>
                 {
                     Some(row)
                 }
@@ -739,6 +751,8 @@ impl DualPlaneSession {
                 layout: self.layout_key,
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
+                ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
+                context_start_trusted: self.live_context_start_trusted(),
                 inputs: Arc::clone(&inputs),
                 start: GridPoint {
                     row: candidate_row,
@@ -807,6 +821,16 @@ impl DualPlaneSession {
         // an alternate-screen fence opener that already scrolled above row 0 is unknowable now;
         // no heuristic pretends that the terminal retained that missing fact.
         Arc::from(inputs)
+    }
+
+    fn live_context_start_trusted(&self) -> bool {
+        match self.live_screen {
+            ScreenId::Primary => {
+                self.transcript.tombstones().is_empty()
+                    && self.document.entries().len() <= LIVE_FENCE_HISTORY_CONTEXT_LINES
+            }
+            ScreenId::Alternate => self.alternate_context_start_trusted,
+        }
     }
 
     fn observe_live_damage(&mut self, damage: TerminalDamage, observed_at: Instant) {
@@ -1148,6 +1172,7 @@ impl DualPlaneSession {
                 detection_revision: task.detection_revision,
                 layout: task.layout,
                 rendered_layout: task.layout,
+                context_start_trusted: task.context_start_trusted,
                 inputs: Arc::clone(&task.inputs),
                 span: task.span,
                 artifact,
@@ -2149,12 +2174,36 @@ impl DualPlaneSession {
     ) -> Result<(), SessionError> {
         for event in events {
             self.trace_adapter_event(&event, observed_at);
+            let full_screen_output_scroll = match &event {
+                AdapterEvent::RowsRemoved { context, rows }
+                    if context.cause == RemovalCause::NormalScroll
+                        && context.scope == RemovalScope::FullScreen =>
+                {
+                    if context.screen == RemovalScreen::Alternate && !rows.is_empty() {
+                        self.alternate_context_start_trusted = false;
+                    }
+                    Some((context.screen, rows.len()))
+                }
+                _ => None,
+            };
             match classify(event) {
                 LifecycleDirective::RowsRemoved { rows } => {
                     if self.resize_epoch.is_active() {
                         self.rebase_vendor_owned_rows(rows);
                     } else {
-                        self.apply_removed_rows(rows)?;
+                        let preserve_primary_scroll = matches!(
+                            full_screen_output_scroll,
+                            Some((RemovalScreen::Primary, count)) if count != 0
+                        );
+                        self.apply_removed_rows(rows, preserve_primary_scroll)?;
+                        if let Some((RemovalScreen::Alternate, count)) = full_screen_output_scroll
+                            && count != 0
+                        {
+                            self.grid_generation.0 += 1;
+                            self.document
+                                .capture_rows_transaction(&[], self.grid_generation);
+                            self.preserve_live_after_top_scroll(count);
+                        }
                     }
                 }
                 LifecycleDirective::ClearHistoryAndStaging => {
@@ -2174,6 +2223,11 @@ impl DualPlaneSession {
                     self.invalidate_all_live_decorations();
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
+                    self.live_screen = ScreenId::Alternate;
+                    self.alternate_context_start_trusted = true;
+                    for row in &mut self.live_rows {
+                        *row = LiveRowStability::default();
+                    }
                     self.primary_parked = true;
                     self.bump_view_generation();
                 }
@@ -2181,6 +2235,10 @@ impl DualPlaneSession {
                     self.invalidate_all_live_decorations();
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
+                    self.live_screen = ScreenId::Primary;
+                    for row in &mut self.live_rows {
+                        *row = LiveRowStability::default();
+                    }
                     self.primary_parked = false;
                     self.grid_generation.0 += 1;
                     self.document
@@ -2254,7 +2312,11 @@ impl DualPlaneSession {
         Ok(())
     }
 
-    fn apply_removed_rows(&mut self, rows: Vec<RowDirective>) -> Result<(), SessionError> {
+    fn apply_removed_rows(
+        &mut self,
+        rows: Vec<RowDirective>,
+        preserve_full_screen_scroll: bool,
+    ) -> Result<(), SessionError> {
         let mut removals = Vec::new();
         let mut captured = Vec::<CaptureResult>::new();
         let mut captured_staging = BTreeMap::new();
@@ -2287,7 +2349,9 @@ impl DualPlaneSession {
         }
 
         self.remember_live_artifact_handoffs(&captured_staging);
-        self.invalidate_all_live_decorations();
+        if !preserve_full_screen_scroll {
+            self.invalidate_all_live_decorations();
+        }
         self.live_tasks.clear();
         self.grid_generation.0 += 1;
         self.document
@@ -2302,7 +2366,47 @@ impl DualPlaneSession {
         }
         let evicted = self.transcript.take_evictions();
         self.delete_history(&evicted, false);
+        if preserve_full_screen_scroll {
+            self.preserve_live_after_top_scroll(removals.len());
+        }
         Ok(())
+    }
+
+    fn preserve_live_after_top_scroll(&mut self, removed_rows: usize) {
+        if removed_rows == 0 {
+            return;
+        }
+        let shift = removed_rows.min(self.live_rows.len());
+        self.live_rows.drain(..shift);
+        self.live_rows
+            .extend(std::iter::repeat_n(LiveRowStability::default(), shift));
+        let shift = u32::try_from(shift).unwrap_or(u32::MAX);
+        let mut preserved = BTreeMap::new();
+        let mut invalidated = 0usize;
+        for (_, mut record) in std::mem::take(&mut self.live_decorations) {
+            if record.band_start_row < shift {
+                invalidated += 1;
+                continue;
+            }
+            record.start.row -= shift;
+            record.end.row -= shift;
+            record.band_start_row -= shift;
+            record.band_end_row -= shift;
+            record.generation = self.grid_generation;
+            preserved.insert(record.start.row, record);
+        }
+        self.live_invalidation_count = self
+            .live_invalidation_count
+            .saturating_add(invalidated as u64);
+        self.live_decorations = preserved;
+
+        let inputs = self.live_detection_context();
+        for record in self.live_decorations.values_mut() {
+            record.inputs = Arc::clone(&inputs);
+            if let Some(state) = self.live_rows.get_mut(record.end.row as usize) {
+                state.candidate_signature = Some(live_detection_signature(&inputs, record.end.row));
+            }
+        }
     }
 
     fn remember_live_artifact_handoffs(&mut self, captured_rows: &BTreeMap<u32, StagingId>) {
@@ -2481,7 +2585,7 @@ impl DualPlaneSession {
             .insert(id, DecorationRecord::frozen(versions));
         // Ordinary frozen lines take only the allocation-free delimiter prefilter. A candidate
         // snapshots immutable source here; the worker owns fence/pairing/escape/size detection.
-        if !entry.line.text.contains('$') {
+        if !may_contain_display_math(&entry.line.text) {
             return;
         }
         if !self.primary_parked && self.resize_epoch.decorations_allowed() {
@@ -2525,6 +2629,8 @@ impl DualPlaneSession {
                 layout: self.layout_key,
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
+                ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
+                context_start_trusted: record.context_start_trusted,
                 inputs: Arc::clone(&record.inputs),
                 start: record.start,
                 end: record.end,
@@ -2558,7 +2664,7 @@ impl DualPlaneSession {
             .document
             .entries()
             .iter()
-            .filter_map(|(id, entry)| entry.line.text.contains('$').then_some(*id))
+            .filter_map(|(id, entry)| may_contain_display_math(&entry.line.text).then_some(*id))
             .collect::<Vec<_>>();
         for id in candidates {
             self.schedule_scan(id);
@@ -2566,6 +2672,7 @@ impl DualPlaneSession {
     }
 
     fn schedule_scan(&mut self, candidate_id: TranscriptId) {
+        let context_start_trusted = self.transcript.tombstones().is_empty();
         let inputs = self
             .document
             .entries()
@@ -2575,15 +2682,14 @@ impl DualPlaneSession {
                 text: entry.line.text.clone(),
             })
             .collect::<Vec<_>>();
-        let Some(mut task) = self
-            .decorations
-            .get_mut(&candidate_id)
-            .and_then(|record| record.schedule_scan(candidate_id, Arc::from(inputs)))
-        else {
+        let Some(mut task) = self.decorations.get_mut(&candidate_id).and_then(|record| {
+            record.schedule_scan(candidate_id, context_start_trusted, Arc::from(inputs))
+        }) else {
             return;
         };
         task.cell_width_subpixels = self.cell_width_subpixels.get();
         task.cell_height_subpixels = self.cell_height_subpixels.get();
+        task.ascii_baseline_subpixels = self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get);
         self.enqueue_task(task);
     }
 
@@ -2748,6 +2854,7 @@ pub fn render_detection_task(
         line,
         task.cell_width_subpixels,
         task.cell_height_subpixels,
+        task.ascii_baseline_subpixels,
         MathRenderKey {
             dpi_milli: task.versions.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
@@ -2774,6 +2881,7 @@ pub fn render_live_detection_task(
         line,
         task.cell_width_subpixels,
         task.cell_height_subpixels,
+        task.ascii_baseline_subpixels,
         MathRenderKey {
             dpi_milli: task.layout.dpi_milli,
             font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
@@ -2789,10 +2897,16 @@ fn render_task_math(
     line: &str,
     cell_width_subpixels: i64,
     cell_height_subpixels: i64,
+    ascii_baseline_subpixels: i64,
     key: MathRenderKey,
 ) -> Result<MathRaster, MathRenderError> {
     if span.mode == MathMode::Display {
         return engine.render(&span.source, key);
+    }
+    if ascii_baseline_subpixels <= 0 {
+        // Inline placement is baseline-anchored. Without the renderer's measured ASCII baseline,
+        // retaining source is the only geometry-safe outcome.
+        return Err(MathRenderError::InlineGeometry);
     }
     let Some(first) = span.inline_runs.first() else {
         return Err(MathRenderError::NotDetected);
@@ -2804,13 +2918,11 @@ fn render_task_math(
     };
     let base_column = UnicodeWidthStr::width(prefix);
     let cell_width_px = (cell_width_subpixels.max(1) as f32 / SUBPIXELS_PER_PX as f32).max(1.0);
-    let line_height_px = u32::try_from(
-        cell_height_subpixels
-            .max(1)
-            .saturating_add(SUBPIXELS_PER_PX - 1)
-            .div_euclid(SUBPIXELS_PER_PX),
-    )
-    .unwrap_or(u32::MAX);
+    let terminal_baseline_subpixels =
+        ascii_baseline_subpixels.clamp(1, cell_height_subpixels.max(1));
+    let terminal_descent_subpixels = cell_height_subpixels
+        .max(1)
+        .saturating_sub(terminal_baseline_subpixels);
     let mut rendered = Vec::with_capacity(span.inline_runs.len());
     let mut baseline_px = 0_u32;
     let mut render_time = Duration::ZERO;
@@ -2824,7 +2936,13 @@ fn render_task_math(
         let available_px =
             (UnicodeWidthStr::width(delimited) as f32 * cell_width_px).floor() as u32;
         let raster = engine.render(&run.source, key)?;
-        if raster.height_px > line_height_px || raster.width_px > available_px.max(1) {
+        if !baseline_box_fits(
+            raster.height_px,
+            raster.baseline_px,
+            terminal_baseline_subpixels,
+            terminal_descent_subpixels,
+        ) || raster.width_px > available_px.max(1)
+        {
             return Err(MathRenderError::InlineGeometry);
         }
         baseline_px = baseline_px.max(raster.baseline_px.ceil().max(0.0) as u32);
@@ -2846,7 +2964,12 @@ fn render_task_math(
         })
         .max()
         .ok_or(MathRenderError::InlineGeometry)?;
-    if height_px > line_height_px {
+    if !baseline_box_fits(
+        height_px,
+        baseline_px as f32,
+        terminal_baseline_subpixels,
+        terminal_descent_subpixels,
+    ) {
         return Err(MathRenderError::InlineGeometry);
     }
     let len = (width_px as usize)
@@ -2874,6 +2997,18 @@ fn render_task_math(
         baseline_px: baseline_px as f32,
         render_time,
     })
+}
+
+fn baseline_box_fits(
+    height_px: u32,
+    baseline_px: f32,
+    terminal_ascent_subpixels: i64,
+    terminal_descent_subpixels: i64,
+) -> bool {
+    let ascent_subpixels = (baseline_px.max(0.0) * SUBPIXELS_PER_PX as f32).ceil() as i64;
+    let descent_subpixels =
+        ((height_px as f32 - baseline_px).max(0.0) * SUBPIXELS_PER_PX as f32).ceil() as i64;
+    ascent_subpixels <= terminal_ascent_subpixels && descent_subpixels <= terminal_descent_subpixels
 }
 
 fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> PlaceholderArtifact {
@@ -3196,13 +3331,22 @@ fn live_detection_signature(inputs: &[LiveDetectionInput], candidate_row: u32) -
             LiveDetectionSource::Grid { row, .. } if row == candidate_row
         );
         let trimmed = input.text.trim();
-        let structural =
-            trimmed.contains("$$") || trimmed.starts_with("```") || trimmed.starts_with("~~~");
+        let structural = may_contain_display_math(trimmed)
+            || trimmed.starts_with("```")
+            || trimmed.starts_with("~~~");
         if is_candidate || structural {
             input.hash(&mut hasher);
         }
     }
     hasher.finish()
+}
+
+fn may_contain_display_math(text: &str) -> bool {
+    text.contains("$$")
+        || text.contains(r"\[")
+        || text.contains(r"\]")
+        || text.contains(r"\begin{")
+        || text.contains(r"\end{")
 }
 
 fn live_task_is_current(
@@ -3645,6 +3789,25 @@ mod tests {
     }
 
     #[test]
+    fn inline_fit_uses_the_terminal_baseline_not_total_ink_height() {
+        let height_px = 18;
+        let math_baseline_px = 14.0;
+        // Total ink exactly fits the 18 px row, so the old height-only check accepted it.
+        assert!(!baseline_box_fits(
+            height_px,
+            math_baseline_px,
+            10 * SUBPIXELS_PER_PX,
+            8 * SUBPIXELS_PER_PX,
+        ));
+        assert!(baseline_box_fits(
+            height_px,
+            math_baseline_px,
+            14 * SUBPIXELS_PER_PX,
+            4 * SUBPIXELS_PER_PX,
+        ));
+    }
+
+    #[test]
     fn inline_candidates_produce_no_work_while_detection_is_disabled() {
         // Inline `$...$` is off until its disambiguator is sound (see detect_inline_math).
         // Both of these lines - genuine inline math, and a shell line that the old heuristic
@@ -4023,6 +4186,54 @@ mod tests {
                 .math_blocks
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn alternate_truncated_prefix_never_pairs_a_closer_with_the_next_opener() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(5));
+        session
+            .feed_at(
+                "\x1b[?1049h$$\r\n\\frac{a}{b}\r\n$$\r\n这是普通中文正文\r\n$$\r\n\\sigma(z)=1\r\n$$"
+                    .as_bytes(),
+                start,
+            )
+            .unwrap();
+        assert!(!session.alternate_context_start_trusted);
+        assert!(
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 2,
+            "visible delimiter rows still reach the worker boundary"
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            0,
+            "unknown prefix parity must reject the whole screen rather than swallow prose"
+        );
+        assert!(session.live_decorations.is_empty());
+    }
+
+    #[test]
+    fn live_scheduler_recognizes_all_supported_display_delimiters() {
+        let start = Instant::now();
+        for source in [
+            "$$\r\nx + y\r\n$$",
+            "\\[\r\nx + y\r\n\\]",
+            "\\begin{align}\r\nx &= y + 1\r\n\\end{align}",
+        ] {
+            let mut session = DualPlaneSession::new(nz(40), nz(5));
+            session
+                .feed_at(format!("\x1b[?1049h{source}").as_bytes(), start)
+                .unwrap();
+            assert!(
+                session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
+                "{source} was not scheduled"
+            );
+            assert_eq!(
+                complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+                1,
+                "{source} was not detected"
+            );
+        }
     }
 
     #[test]
@@ -4999,6 +5210,43 @@ mod tests {
         }
         assert_eq!(session.live_detection_count, detections);
         assert_eq!(session.live_invalidation_count, invalidations);
+    }
+
+    #[test]
+    fn full_screen_scroll_rebases_a_surviving_live_artifact_without_raster_work() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(24), nz(4));
+        session
+            .feed_at(b"head\r\n$$x^2$$\r\nbody\r\ntail", start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 18)),
+            1
+        );
+        let before = session
+            .live_decorations
+            .get(&1)
+            .and_then(|record| record.artifact.as_ref())
+            .map(|artifact| Arc::clone(&artifact.rgba))
+            .unwrap();
+        let detections = session.live_detection_count;
+        let invalidations = session.live_invalidation_count;
+
+        session
+            .feed_at(b"\r\nnew-tail", start + Duration::from_millis(210))
+            .unwrap();
+
+        let after = session
+            .live_decorations
+            .get(&0)
+            .and_then(|record| record.artifact.as_ref())
+            .map(|artifact| Arc::clone(&artifact.rgba))
+            .expect("the unchanged formula shifts with the full-screen scroll");
+        assert!(Arc::ptr_eq(&before, &after));
+        assert_eq!(session.live_detection_count, detections);
+        assert_eq!(session.live_invalidation_count, invalidations);
+        assert!(session.take_math_worker_task().is_none());
     }
 
     #[test]

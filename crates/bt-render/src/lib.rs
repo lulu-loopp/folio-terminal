@@ -165,6 +165,11 @@ impl CellMetrics {
         NonZeroI64::new(value.max(1)).expect("cell height is clamped above zero")
     }
 
+    pub fn ascii_baseline_subpixels(&self) -> NonZeroI64 {
+        let value = (self.ascii_baseline_px * SUBPIXELS_PER_PX as f32).round() as i64;
+        NonZeroI64::new(value.max(1)).expect("measured ASCII baseline is above zero")
+    }
+
     pub fn dpi_milli(&self) -> NonZeroU32 {
         let value = (self.scale_factor * 1000.0)
             .round()
@@ -2189,12 +2194,27 @@ impl Renderer {
             return None;
         }
         let block = [visible_left, visible_top, visible_right, visible_bottom];
+        // The clip rectangle must contain the raster wherever the vertical-centring offset places
+        // it. `top` already carries `content_offset` (display) or the baseline shift (inline), so
+        // the clip's top must follow `top`, not the un-offset `band_top`: keying it on band_top let
+        // a centred multi-line raster's top edge fall ABOVE the clip and get scissored away - the
+        // ascender of a lower row clipped while the block never touched a neighbour (user report
+        // 2026-07-19). The clip still spans the full band height downward from that point.
+        let clip_top = top.max(pane_top);
         let clip = [
             visible_left,
-            band_top.max(pane_top),
+            clip_top,
             pane_right,
-            (band_top + clip_height).min(pane_bottom),
+            (top + clip_height).min(pane_bottom),
         ];
+        // The scissor must never crop the visible raster: its top may not sit below the block's
+        // top, nor its bottom above the block's bottom. This is the invariant the centred multi-
+        // line clip violated (see above); asserting it here fails the moment any future change
+        // decouples the clip from `top` again.
+        debug_assert!(
+            clip[1] <= block[1] + 0.5 && clip[3] >= block[3] - 0.5,
+            "math scissor crops the raster: clip={clip:?} block={block:?}"
+        );
         let (eye, copy) = if placement.toolbar_visible {
             let scale = self.metrics.scale_factor as f32;
             let (toolbar_top, toolbar_bottom) =

@@ -57,6 +57,9 @@ pub struct DetectionTask {
     pub versions: VersionStamp,
     pub cell_width_subpixels: i64,
     pub cell_height_subpixels: i64,
+    pub ascii_baseline_subpixels: i64,
+    /// Whether the first input is a known stream boundary rather than a truncated window.
+    pub context_start_trusted: bool,
     pub inputs: Arc<[DetectionInput]>,
     pub resolved: bool,
 }
@@ -91,6 +94,9 @@ pub struct LiveDetectionTask {
     pub layout: LayoutKey,
     pub cell_width_subpixels: i64,
     pub cell_height_subpixels: i64,
+    pub ascii_baseline_subpixels: i64,
+    /// Whether the detector can prove that no delimiter or fence began before `inputs[0]`.
+    pub context_start_trusted: bool,
     pub inputs: Arc<[LiveDetectionInput]>,
     pub start: GridPoint,
     pub end: GridPoint,
@@ -163,6 +169,8 @@ impl DecorationRecord {
             versions: self.versions,
             cell_width_subpixels: SUBPIXELS_PER_PX,
             cell_height_subpixels: SUBPIXELS_PER_PX,
+            ascii_baseline_subpixels: SUBPIXELS_PER_PX,
+            context_start_trusted: true,
             inputs: Arc::from([]),
             resolved: true,
         })
@@ -171,6 +179,7 @@ impl DecorationRecord {
     pub fn schedule_scan(
         &mut self,
         candidate_id: TranscriptId,
+        context_start_trusted: bool,
         inputs: Arc<[DetectionInput]>,
     ) -> Option<DetectionTask> {
         if self.source != SourceLifecycle::Frozen || self.decoration != DecorationLifecycle::None {
@@ -191,6 +200,8 @@ impl DecorationRecord {
             versions: self.versions,
             cell_width_subpixels: SUBPIXELS_PER_PX,
             cell_height_subpixels: SUBPIXELS_PER_PX,
+            ascii_baseline_subpixels: SUBPIXELS_PER_PX,
+            context_start_trusted,
             inputs,
             resolved: false,
         })
@@ -326,29 +337,88 @@ pub fn redetect_document(
 
 pub fn detect_block_math(text: &str) -> Vec<MathSpan> {
     let trimmed = text.trim();
-    if trimmed.len() < 5
-        || !trimmed.starts_with("$$")
-        || !trimmed.ends_with("$$")
-        || delimiter_is_escaped(trimmed, 0)
+    let (source, rendered_source) = if trimmed.len() >= 5
+        && trimmed.starts_with("$$")
+        && trimmed.ends_with("$$")
+        && !delimiter_is_escaped(trimmed, 0)
     {
+        let close = trimmed.len() - 2;
+        if close == 2 || delimiter_is_escaped(trimmed, close) {
+            return Vec::new();
+        }
+        let source = &trimmed[2..close];
+        if source.contains("$$") {
+            return Vec::new();
+        }
+        (source, source)
+    } else if trimmed.len() >= 5 && trimmed.starts_with(r"\[") && trimmed.ends_with(r"\]") {
+        let source = &trimmed[2..trimmed.len() - 2];
+        if source.contains(r"\[") || source.contains(r"\]") {
+            return Vec::new();
+        }
+        (source, source)
+    } else if let Some(body) = single_line_math_environment(trimmed) {
+        (body, trimmed)
+    } else {
         return Vec::new();
-    }
-    let close = trimmed.len() - 2;
-    if close == 2 || delimiter_is_escaped(trimmed, close) {
-        return Vec::new();
-    }
-    let source = &trimmed[2..close];
-    if source.len() > MAX_MATH_SOURCE_BYTES || source.contains("$$") {
+    };
+    if source.is_empty()
+        || rendered_source.len() > MAX_MATH_SOURCE_BYTES
+        || block_body_looks_like_prose(source)
+    {
         return Vec::new();
     }
     let leading = text.len() - text.trim_start().len();
     vec![MathSpan {
         byte_start: leading as u32,
         byte_end: (leading + trimmed.len()) as u32,
-        source: source.to_owned(),
+        source: rendered_source.to_owned(),
         mode: MathMode::Display,
         inline_runs: Vec::new(),
     }]
+}
+
+fn single_line_math_environment(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.strip_prefix(r"\begin{")?;
+    let name_end = rest.find('}')?;
+    let environment = &rest[..name_end];
+    if !is_math_environment(environment) {
+        return None;
+    }
+    let body_start = r"\begin{".len() + name_end + 1;
+    let closing = format!(r"\end{{{environment}}}");
+    let body_end = trimmed.len().checked_sub(closing.len())?;
+    (body_start < body_end && trimmed.ends_with(&closing)).then(|| &trimmed[body_start..body_end])
+}
+
+fn is_math_environment(environment: &str) -> bool {
+    matches!(
+        environment,
+        "equation"
+            | "equation*"
+            | "align"
+            | "align*"
+            | "alignat"
+            | "alignat*"
+            | "flalign"
+            | "flalign*"
+            | "gather"
+            | "gather*"
+            | "multline"
+            | "multline*"
+            | "aligned"
+            | "alignedat"
+            | "gathered"
+            | "split"
+            | "cases"
+            | "matrix"
+            | "pmatrix"
+            | "bmatrix"
+            | "Bmatrix"
+            | "vmatrix"
+            | "Vmatrix"
+            | "smallmatrix"
+    )
 }
 
 /// Conservatively detect one or more `$...$` runs on a single logical line. A run needs an
@@ -492,20 +562,33 @@ fn inline_group(runs: Vec<InlineMathRun>) -> Option<MathSpan> {
 /// opener and swallows everything between them, which is how a paragraph of Chinese ended up
 /// typeset as mathematics (user report 2026-07-19).
 ///
-/// Delimiter counting cannot settle this: the window is truncated, so parity carries no
-/// information. The body itself does. Real display math never contains a line of natural language
-/// that is not wrapped in a command - CJK inside a formula only ever appears through `\text{...}`
-/// or a sibling, and those lines necessarily carry a backslash. A backslash-free line with CJK in
-/// it is therefore prose that has been captured by a mis-paired delimiter, and refusing the whole
-/// block is the honest response: a terminal that renders your literal text has failed as one.
-///
-/// This is deliberately narrow. Latin prose is not yet covered (`x = y` is indistinguishable from
-/// a sentence fragment without deeper parsing) and is left to the fuller context-completeness work.
+/// Context completeness is the primary proof. The body check is independent defense in depth:
+/// real display math does not contain a whole natural-language line unless a LaTeX command carries
+/// it. Two multi-letter Latin words count as prose, while one-letter algebra such as `x = y` stays
+/// valid. Refusing the whole block is the honest response when either proof fails.
 fn block_body_looks_like_prose(source: &str) -> bool {
     source.lines().any(|line| {
         let trimmed = line.trim();
-        !trimmed.is_empty() && !trimmed.contains('\\') && trimmed.chars().any(is_cjk_prose_char)
+        !trimmed.is_empty()
+            && !trimmed.contains('\\')
+            && (trimmed.chars().any(is_cjk_prose_char) || ascii_line_looks_like_prose(trimmed))
     })
+}
+
+fn ascii_line_looks_like_prose(line: &str) -> bool {
+    let mut words = 0usize;
+    let mut multi_letter_words = 0usize;
+    let mut word_len = 0usize;
+    for character in line.chars().chain(std::iter::once(' ')) {
+        if character.is_ascii_alphabetic() {
+            word_len += 1;
+        } else if word_len != 0 {
+            words += 1;
+            multi_letter_words += usize::from(word_len > 1);
+            word_len = 0;
+        }
+    }
+    multi_letter_words >= 2 || (multi_letter_words >= 1 && words >= 3)
 }
 
 fn is_cjk_prose_char(character: char) -> bool {
@@ -518,13 +601,69 @@ fn is_cjk_prose_char(character: char) -> bool {
     )
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DisplayDelimiter {
+    Dollars,
+    Brackets,
+    Environment(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum DisplayDelimiterToken {
+    Symmetric(DisplayDelimiter),
+    Open(DisplayDelimiter),
+    Close(DisplayDelimiter),
+}
+
+fn whole_line_display_delimiter(trimmed: &str) -> Option<DisplayDelimiterToken> {
+    if trimmed == "$$" {
+        return Some(DisplayDelimiterToken::Symmetric(DisplayDelimiter::Dollars));
+    }
+    if trimmed == r"\[" {
+        return Some(DisplayDelimiterToken::Open(DisplayDelimiter::Brackets));
+    }
+    if trimmed == r"\]" {
+        return Some(DisplayDelimiterToken::Close(DisplayDelimiter::Brackets));
+    }
+    for (prefix, open) in [(r"\begin{", true), (r"\end{", false)] {
+        let Some(rest) = trimmed.strip_prefix(prefix) else {
+            continue;
+        };
+        let Some(environment) = rest.strip_suffix('}') else {
+            continue;
+        };
+        if !environment.contains('}') && is_math_environment(environment) {
+            let delimiter = DisplayDelimiter::Environment(environment.to_owned());
+            return Some(if open {
+                DisplayDelimiterToken::Open(delimiter)
+            } else {
+                DisplayDelimiterToken::Close(delimiter)
+            });
+        }
+    }
+    None
+}
+
 pub fn detect_math_blocks<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
 ) -> Vec<DetectedMathBlock> {
+    detect_math_blocks_in_context(lines, true)
+}
+
+/// Detect display math only when the snapshot starts at a proven parser boundary. An incomplete
+/// prefix cannot establish symmetric-delimiter or code-fence parity, so the honest result is no
+/// decoration rather than a guessed pairing.
+pub fn detect_math_blocks_in_context<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    context_start_trusted: bool,
+) -> Vec<DetectedMathBlock> {
     let lines = lines.into_iter().collect::<Vec<_>>();
+    if !context_start_trusted {
+        return Vec::new();
+    }
     let mut blocks = Vec::new();
     let mut fence: Option<(char, usize)> = None;
-    let mut opening: Option<usize> = None;
+    let mut opening: Option<(usize, DisplayDelimiter)> = None;
     for (index, (_, text)) in lines.iter().enumerate() {
         let trimmed = text.trim();
         if let Some(marker) = fence_marker(trimmed) {
@@ -560,21 +699,48 @@ pub fn detect_math_blocks<'a>(
             });
             continue;
         }
-        if trimmed != "$$" {
+        let Some(token) = whole_line_display_delimiter(trimmed) else {
             continue;
-        }
-        if let Some(start_index) = opening.take() {
+        };
+        let matching_close = match (&opening, &token) {
+            (
+                Some((_, DisplayDelimiter::Dollars)),
+                DisplayDelimiterToken::Symmetric(DisplayDelimiter::Dollars),
+            )
+            | (
+                Some((_, DisplayDelimiter::Brackets)),
+                DisplayDelimiterToken::Close(DisplayDelimiter::Brackets),
+            ) => true,
+            (
+                Some((_, DisplayDelimiter::Environment(open))),
+                DisplayDelimiterToken::Close(DisplayDelimiter::Environment(close)),
+            ) => open == close,
+            _ => false,
+        };
+        if matching_close {
+            let Some((start_index, delimiter)) = opening.take() else {
+                continue;
+            };
             if index == start_index + 1 {
                 continue;
             }
-            let source = lines[start_index + 1..index]
+            let body = lines[start_index + 1..index]
                 .iter()
                 .map(|(_, line)| *line)
                 .collect::<Vec<_>>()
                 .join("\n");
-            if source.is_empty()
+            let source = if matches!(delimiter, DisplayDelimiter::Environment(_)) {
+                lines[start_index..=index]
+                    .iter()
+                    .map(|(_, line)| *line)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            } else {
+                body.clone()
+            };
+            if body.trim().is_empty()
                 || source.len() > MAX_MATH_SOURCE_BYTES
-                || block_body_looks_like_prose(&source)
+                || block_body_looks_like_prose(&body)
             {
                 continue;
             }
@@ -589,9 +755,18 @@ pub fn detect_math_blocks<'a>(
                     inline_runs: Vec::new(),
                 },
             });
-        } else {
-            opening = Some(index);
+            continue;
         }
+        if opening.is_some() {
+            // Directional environments commonly nest inside an outer display block. Only the
+            // delimiter which matches the active opener is structural at this level.
+            continue;
+        }
+        opening = match token {
+            DisplayDelimiterToken::Symmetric(delimiter)
+            | DisplayDelimiterToken::Open(delimiter) => Some((index, delimiter)),
+            DisplayDelimiterToken::Close(_) => None,
+        };
     }
     blocks
 }
@@ -602,10 +777,11 @@ pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
     if task.resolved {
         return true;
     }
-    let detected = detect_math_blocks(
+    let detected = detect_math_blocks_in_context(
         task.inputs
             .iter()
             .map(|input| (input.id, input.text.as_str())),
+        task.context_start_trusted,
     )
     .into_iter()
     .find(|block| block.end == task.candidate_id);
@@ -636,12 +812,14 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
     let Some(candidate_id) = live_temporary_id(candidate_index) else {
         return false;
     };
-    let detected =
-        detect_math_blocks(task.inputs.iter().enumerate().filter_map(|(index, input)| {
+    let detected = detect_math_blocks_in_context(
+        task.inputs.iter().enumerate().filter_map(|(index, input)| {
             live_temporary_id(index).map(|id| (id, input.text.as_str()))
-        }))
-        .into_iter()
-        .find(|block| block.end == candidate_id);
+        }),
+        task.context_start_trusted,
+    )
+    .into_iter()
+    .find(|block| block.end == candidate_id);
     let Some(block) = detected else {
         return false;
     };
@@ -842,6 +1020,105 @@ mod tests {
     }
 
     #[test]
+    fn truncated_context_rejects_ambiguous_pairing_before_body_heuristics_run() {
+        let window = [
+            (TranscriptId(20), r"\frac{a}{b}"),
+            (TranscriptId(21), "$$"),
+            (TranscriptId(22), "ordinary English prose continues here"),
+            (TranscriptId(23), "$$"),
+            (TranscriptId(24), "x = y"),
+            (TranscriptId(25), "$$"),
+        ];
+        assert!(
+            detect_math_blocks_in_context(window, false).is_empty(),
+            "an unknown prefix cannot prove that the first symmetric delimiter opens"
+        );
+        assert_eq!(
+            detect_math_blocks_in_context(
+                [
+                    (TranscriptId(1), "$$"),
+                    (TranscriptId(2), "x = y"),
+                    (TranscriptId(3), "$$"),
+                ],
+                true,
+            )
+            .len(),
+            1,
+            "the same complete block is valid at a trusted boundary"
+        );
+    }
+
+    #[test]
+    fn independent_latin_prose_line_is_never_a_display_body() {
+        let blocks = detect_math_blocks([
+            (TranscriptId(1), "$$"),
+            (TranscriptId(2), "ordinary English prose continues here"),
+            (TranscriptId(3), "$$"),
+        ]);
+        assert!(blocks.is_empty());
+        assert_eq!(
+            detect_math_blocks([
+                (TranscriptId(1), "$$"),
+                (TranscriptId(2), "x = y"),
+                (TranscriptId(3), "$$"),
+            ])
+            .len(),
+            1,
+            "one-letter algebra must not be mistaken for prose"
+        );
+    }
+
+    #[test]
+    fn display_delimiters_and_bare_math_environment_whitelist_are_supported() {
+        let cases = [
+            (vec!["$$", "x + y", "$$"], "x + y"),
+            (vec![r"\[", "x + y", r"\]"], "x + y"),
+            (
+                vec![r"\begin{align}", r"x &= y + 1", r"\end{align}"],
+                r"\begin{align}",
+            ),
+        ];
+        for (lines, expected_source) in cases {
+            let blocks = detect_math_blocks(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+            );
+            assert_eq!(blocks.len(), 1, "{lines:?}");
+            assert!(blocks[0].span.source.contains(expected_source));
+        }
+
+        for lines in [
+            vec![r"\begin{document}", "x + y", r"\end{document}"],
+            vec![r"\begin{itemize}", r"\item x", r"\end{itemize}"],
+        ] {
+            assert!(
+                detect_math_blocks(
+                    lines
+                        .iter()
+                        .enumerate()
+                        .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+                )
+                .is_empty(),
+                "non-math environment matched: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn single_line_display_forms_work_but_parenthesis_inline_stays_disabled() {
+        for source in [r"\[x + y\]", r"\begin{equation}x+y\end{equation}"] {
+            assert_eq!(detect_block_math(source).len(), 1, "{source}");
+        }
+        assert!(detect_block_math(r"\(x + y\)").is_empty());
+        assert!(
+            detect_math_blocks([(TranscriptId(1), r"\(x + y\)")]).is_empty(),
+            "parenthesis inline detection must remain disabled"
+        );
+    }
+
+    #[test]
     fn inline_false_positive_set_stays_native() {
         for text in [
             "$5 和 $10",
@@ -879,6 +1156,8 @@ mod tests {
             layout: stamp().layout,
             cell_width_subpixels: 9 * SUBPIXELS_PER_PX,
             cell_height_subpixels: 18 * SUBPIXELS_PER_PX,
+            ascii_baseline_subpixels: 14 * SUBPIXELS_PER_PX,
+            context_start_trusted: true,
             inputs: Arc::from(
                 lines
                     .iter()

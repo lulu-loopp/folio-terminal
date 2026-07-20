@@ -490,6 +490,7 @@ impl Runtime {
             renderer.metrics().cell_height_subpixels(),
         );
         session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
+        session.set_ascii_baseline_subpixels(renderer.metrics().ascii_baseline_subpixels());
         session.set_layout_key(LayoutKey {
             width_cells: columns,
             dpi_milli: renderer.metrics().dpi_milli(),
@@ -1623,6 +1624,8 @@ impl Runtime {
             .set_cell_height_subpixels(metrics.cell_height_subpixels());
         self.session
             .set_cell_width_subpixels(cell_width_subpixels(metrics));
+        self.session
+            .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
         Ok(())
     }
 

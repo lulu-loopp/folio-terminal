@@ -9,7 +9,7 @@ use typst_as_lib::{TypstEngine, typst_kit_options::TypstKitFontOptions};
 use typst_layout::PagedDocument;
 use typst_library::{
     foundations::{Dict, IntoValue, Str, Value},
-    layout::{Frame, FrameItem},
+    layout::{Frame, FrameItem, Point, Transform},
 };
 
 pub const MAX_SOURCE_BYTES: usize = 8 * 1024;
@@ -83,6 +83,8 @@ pub enum MathRenderError {
     InvalidDimensions,
     #[error("inline math does not fit its terminal line box")]
     InlineGeometry,
+    #[error("no installed font provides every requested CJK glyph")]
+    MissingCjkGlyph,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,7 +104,7 @@ impl MathRenderError {
             Self::Compile(_) | Self::NoPage | Self::Svg(_) | Self::InvalidDimensions => {
                 Some(MathFailureStage::Compile)
             }
-            Self::NotDetected | Self::InlineGeometry => None,
+            Self::NotDetected | Self::InlineGeometry | Self::MissingCjkGlyph => None,
         }
     }
 }
@@ -113,6 +115,10 @@ pub struct MathEngine {
 
 impl MathEngine {
     pub fn new() -> Self {
+        Self::with_system_fonts(true)
+    }
+
+    fn with_system_fonts(include_system_fonts: bool) -> Self {
         let engine = TypstEngine::builder()
             .main_file(TYPST_TEMPLATE)
             .with_static_source_file_resolver([
@@ -131,7 +137,7 @@ impl MathEngine {
             ])
             .search_fonts_with(
                 TypstKitFontOptions::default()
-                    .include_system_fonts(false)
+                    .include_system_fonts(include_system_fonts)
                     .include_embedded_fonts(true),
             )
             .build();
@@ -161,11 +167,14 @@ impl MathEngine {
             .output
             .map_err(|error| MathRenderError::Compile(error.to_string()))?;
         let page = document.pages().first().ok_or(MathRenderError::NoPage)?;
+        if frame_has_missing_cjk_glyph(&page.frame) {
+            return Err(MathRenderError::MissingCjkGlyph);
+        }
         let svg = typst_svg::svg(page, &Default::default());
-        let (ascent_pt, descent_pt) = find_math_metrics(&page.frame)
+        let metrics = find_math_metrics(&page.frame)
             .or_else(|| fallback_math_metrics(&page.frame))
             .ok_or(MathRenderError::InvalidDimensions)?;
-        rasterize_svg(&svg, key, ascent_pt, descent_pt, started.elapsed())
+        rasterize_svg(&svg, key, metrics, started.elapsed())
     }
 }
 
@@ -207,40 +216,81 @@ fn validate_source(source: &str) -> Result<(), MathRenderError> {
     Ok(())
 }
 
-fn find_math_metrics(frame: &Frame) -> Option<(f64, f64)> {
-    let mut best = frame.has_baseline().then(|| {
-        (
-            frame.height().to_pt(),
-            frame.ascent().to_pt(),
-            frame.descent().to_pt(),
-        )
-    });
-    for (_, item) in frame.items() {
-        if let FrameItem::Group(group) = item
-            && let Some((ascent, descent)) = find_math_metrics(&group.frame)
-        {
-            let height = ascent + descent;
-            if best.is_none_or(|current| height > current.0) {
-                best = Some((height, ascent, descent));
+#[derive(Clone, Copy, Debug)]
+struct MathMetrics {
+    baseline_from_page_top_pt: f64,
+}
+
+fn find_math_metrics(frame: &Frame) -> Option<MathMetrics> {
+    fn visit(frame: &Frame, transform: Transform, best: &mut Option<(f64, MathMetrics)>) {
+        if frame.has_baseline() {
+            let top = Point::zero().transform(transform).y.to_pt();
+            let baseline = Point::new(Default::default(), frame.baseline())
+                .transform(transform)
+                .y
+                .to_pt();
+            let bottom = Point::new(Default::default(), frame.height())
+                .transform(transform)
+                .y
+                .to_pt();
+            let height = (bottom - top).abs();
+            let metrics = MathMetrics {
+                baseline_from_page_top_pt: baseline,
+            };
+            if best.as_ref().is_none_or(|current| height > current.0) {
+                *best = Some((height, metrics));
+            }
+        }
+        for (position, item) in frame.items() {
+            if let FrameItem::Group(group) = item {
+                let child_transform = transform
+                    .pre_concat(Transform::translate(position.x, position.y))
+                    .pre_concat(group.transform);
+                visit(&group.frame, child_transform, best);
             }
         }
     }
-    best.map(|(_, ascent, descent)| (ascent, descent))
+
+    let mut best = None;
+    visit(frame, Transform::identity(), &mut best);
+    best.map(|(_, metrics)| metrics)
 }
 
 /// MiTeX custom-macro wrappers can clear a Typst frame's explicit baseline even though the
 /// rendered frame remains a valid math box. Treat Typst's documented implicit bottom baseline as
 /// the adapter baseline. This closes spike 03's nine same-shape h/d holes without guessing from
 /// the SVG ink bounds.
-fn fallback_math_metrics(frame: &Frame) -> Option<(f64, f64)> {
-    (!frame.is_empty()).then(|| (frame.baseline().to_pt(), frame.descent().to_pt()))
+fn fallback_math_metrics(frame: &Frame) -> Option<MathMetrics> {
+    (!frame.is_empty()).then(|| MathMetrics {
+        baseline_from_page_top_pt: frame.baseline().to_pt(),
+    })
+}
+
+fn frame_has_missing_cjk_glyph(frame: &Frame) -> bool {
+    frame.items().any(|(_, item)| match item {
+        FrameItem::Text(text) => {
+            text.text.chars().any(is_cjk_character) && text.glyphs.iter().any(|glyph| glyph.id == 0)
+        }
+        FrameItem::Group(group) => frame_has_missing_cjk_glyph(&group.frame),
+        _ => false,
+    })
+}
+
+fn is_cjk_character(character: char) -> bool {
+    matches!(
+        character,
+        '\u{3000}'..='\u{303f}'
+            | '\u{3400}'..='\u{4dbf}'
+            | '\u{4e00}'..='\u{9fff}'
+            | '\u{f900}'..='\u{faff}'
+            | '\u{ff00}'..='\u{ffef}'
+    )
 }
 
 fn rasterize_svg(
     svg: &str,
     key: MathRenderKey,
-    ascent_pt: f64,
-    descent_pt: f64,
+    metrics: MathMetrics,
     elapsed: Duration,
 ) -> Result<MathRaster, MathRenderError> {
     static OPTIONS: OnceLock<resvg::usvg::Options<'static>> = OnceLock::new();
@@ -277,15 +327,16 @@ fn rasterize_svg(
         return Err(MathRenderError::InvalidDimensions);
     }
     unpremultiply_srgb_rgba(&mut rgba);
+    let baseline_px = (metrics.baseline_from_page_top_pt as f32 * scale - content_top_px as f32)
+        .clamp(0.0, content_height_px as f32);
     Ok(MathRaster {
         rgba,
         width_px,
         height_px,
         content_height_px,
-        ascent_px: (ascent_pt as f32 * scale),
-        descent_px: (descent_pt as f32 * scale),
-        baseline_px: (ascent_pt as f32 * scale - content_top_px as f32)
-            .clamp(0.0, content_height_px as f32),
+        ascent_px: baseline_px,
+        descent_px: content_height_px as f32 - baseline_px,
+        baseline_px,
         render_time: elapsed,
     })
 }
@@ -365,6 +416,19 @@ mod tests {
             .0
     }
 
+    fn alpha_signature(raster: &MathRaster) -> Vec<u32> {
+        let row_bytes = raster.width_px as usize * 4;
+        (0..raster.width_px as usize)
+            .map(|column| {
+                raster
+                    .rgba
+                    .chunks_exact(row_bytes)
+                    .filter(|row| row[column * 4 + 3] != 0)
+                    .count() as u32
+            })
+            .collect()
+    }
+
     #[test]
     fn renders_native_rgba_with_free_pixel_height() {
         let raster = MathEngine::new()
@@ -440,6 +504,72 @@ mod tests {
         let inline = engine.render(r"\sum_{i=1}^n i", inline).unwrap();
         assert!(display.height_px > inline.height_px);
         assert!(display.baseline_px > 0.0 && inline.baseline_px > 0.0);
+    }
+
+    #[test]
+    fn cjk_text_uses_distinct_real_system_glyphs_and_mixed_math_stays_visible() {
+        // System fonts remain external OS assets (for example Microsoft YaHei/DengXian on
+        // Windows); BetterTerminal neither embeds nor redistributes their bytes.
+        let engine = MathEngine::new();
+        let middle = engine.render(r"\text{中}", key()).unwrap();
+        let writing = engine.render(r"\text{文}", key()).unwrap();
+        let chinese = engine.render(r"\text{中文}", key()).unwrap();
+        assert!(chinese.rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
+        assert_ne!(
+            (middle.width_px, middle.height_px, alpha_signature(&middle)),
+            (
+                writing.width_px,
+                writing.height_px,
+                alpha_signature(&writing)
+            ),
+            "two CJK characters must not collapse to one repeated .notdef box"
+        );
+
+        let latin = engine.render("x", key()).unwrap();
+        let mixed = engine.render(r"x + \text{项目数}", key()).unwrap();
+        assert!(mixed.width_px > latin.width_px);
+        assert!(mixed.rgba.chunks_exact(4).any(|pixel| pixel[3] != 0));
+    }
+
+    #[test]
+    fn missing_cjk_font_returns_source_fallback_signal_instead_of_tofu() {
+        assert_eq!(
+            MathEngine::with_system_fonts(false).render(r"\text{中文}", key()),
+            Err(MathRenderError::MissingCjkGlyph)
+        );
+    }
+
+    #[test]
+    fn baseline_is_measured_from_the_page_top_for_each_formula() {
+        let engine = MathEngine::new();
+        let samples = [
+            "x",
+            r"\frac{a}{b}",
+            r"\sqrt{x}",
+            r"x_1",
+            r"x^2",
+            r"\sum_{i=1}^n i",
+            r"\int_0^1 x\,dx",
+        ];
+        let metrics = samples
+            .map(|source| engine.render(source, key()).unwrap())
+            .map(|raster| {
+                (
+                    raster.height_px,
+                    raster.baseline_px,
+                    raster.height_px as f32 - raster.baseline_px,
+                )
+            })
+            .to_vec();
+        let descents = metrics
+            .iter()
+            .map(|(_, _, descent)| (descent * 100.0).round() as i32)
+            .collect::<std::collections::BTreeSet<_>>();
+        eprintln!("per-formula baseline metrics: {metrics:?}");
+        assert!(
+            descents.len() >= 3,
+            "formula descents must not repeat one page-local baseline constant: {metrics:?}"
+        );
     }
 
     #[test]
