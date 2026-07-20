@@ -2,7 +2,7 @@
 
 use std::{
     collections::VecDeque,
-    ffi::OsString,
+    ffi::{OsStr, OsString},
     io::{Read, Write},
     num::{NonZeroU16, NonZeroUsize},
     path::PathBuf,
@@ -90,6 +90,8 @@ pub struct PtyCommand {
     pub program: OsString,
     pub arguments: Vec<OsString>,
     pub working_directory: Option<PathBuf>,
+    pub environment: Vec<(OsString, OsString)>,
+    declare_color_support: bool,
 }
 
 impl PtyCommand {
@@ -98,6 +100,8 @@ impl PtyCommand {
             program: program.into(),
             arguments: Vec::new(),
             working_directory: None,
+            environment: Vec::new(),
+            declare_color_support: false,
         }
     }
 
@@ -111,8 +115,80 @@ impl PtyCommand {
         self
     }
 
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        let key = key.into();
+        let value = value.into();
+        if let Some((_, existing_value)) = self
+            .environment
+            .iter_mut()
+            .find(|(existing_key, _)| environment_key_eq(existing_key, &key))
+        {
+            *existing_value = value;
+        } else {
+            self.environment.push((key, value));
+        }
+        self
+    }
+
     pub fn powershell() -> Self {
-        Self::new("powershell.exe").arg("-NoLogo")
+        let mut command = Self::new("powershell.exe").arg("-NoLogo");
+        command.declare_color_support = true;
+        command
+    }
+
+    fn command_has_no_color(&self) -> bool {
+        self.environment
+            .iter()
+            .any(|(key, _)| environment_key_eq(key, OsStr::new("NO_COLOR")))
+    }
+
+    /// Color-capable interactive shells receive `COLORTERM`/`TERM` declarations merged with the
+    /// caller's environment (explicit values win). A caller that explicitly sets `NO_COLOR` opts
+    /// out and gets no declarations. An *inherited* `NO_COLOR` does not suppress them — it is
+    /// stripped instead, see `strips_inherited_no_color`.
+    fn resolved_environment(&self) -> Vec<(OsString, OsString)> {
+        let command_has_no_color = self.command_has_no_color();
+        let mut environment = Vec::with_capacity(self.environment.len() + 2);
+        if self.declare_color_support && !command_has_no_color {
+            if !self
+                .environment
+                .iter()
+                .any(|(key, _)| environment_key_eq(key, OsStr::new("COLORTERM")))
+            {
+                environment.push(("COLORTERM".into(), "truecolor".into()));
+            }
+            if !self
+                .environment
+                .iter()
+                .any(|(key, _)| environment_key_eq(key, OsStr::new("TERM")))
+            {
+                environment.push(("TERM".into(), "xterm-256color".into()));
+            }
+        }
+        environment.extend(self.environment.iter().cloned());
+        environment
+    }
+
+    /// A color-capable interactive shell must not inherit a `NO_COLOR` that was aimed at the
+    /// terminal process itself: `NO_COLOR` mutes programs that *emit* ANSI color, but the terminal
+    /// *renders* it, so an inherited value is launch noise, not the user's intent for this session.
+    /// Strip it so the shell sees a color-capable environment. A caller that explicitly sets
+    /// `NO_COLOR`, or the user's own shell profile, still opts out (the profile runs inside the
+    /// shell, after this strip, and wins).
+    fn strips_inherited_no_color(&self) -> bool {
+        self.declare_color_support && !self.command_has_no_color()
+    }
+}
+
+fn environment_key_eq(left: &OsStr, right: &OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        left.to_string_lossy()
+            .eq_ignore_ascii_case(&right.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        left == right
     }
 }
 
@@ -270,6 +346,8 @@ impl PtySession {
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
         let conpty_source = conpty_source();
+        let strip_inherited_no_color = command.strips_inherited_no_color();
+        let environment = command.resolved_environment();
         let pair = native_pty_system()
             .openpty(size.backend())
             .map_err(backend)?;
@@ -279,6 +357,14 @@ impl PtySession {
         }
         if let Some(directory) = command.working_directory {
             builder.cwd(directory);
+        }
+        // Drop an inherited NO_COLOR before layering our declarations so the shell starts in a
+        // color-capable environment regardless of how the terminal itself was launched.
+        if strip_inherited_no_color {
+            builder.env_remove("NO_COLOR");
+        }
+        for (key, value) in environment {
+            builder.env(key, value);
         }
         let child = pair.slave.spawn_command(builder).map_err(backend)?;
         drop(pair.slave);
@@ -764,6 +850,135 @@ mod tests {
             recalled_screen,
             cleared_screen,
         }
+    }
+
+    fn environment_value<'a>(
+        environment: &'a [(OsString, OsString)],
+        key: &str,
+    ) -> Option<&'a std::ffi::OsStr> {
+        environment
+            .iter()
+            .find(|(candidate, _)| environment_key_eq(candidate, OsStr::new(key)))
+            .map(|(_, value)| value.as_os_str())
+    }
+
+    #[test]
+    fn powershell_declares_truecolor_environment_by_default() {
+        let command = PtyCommand::powershell();
+        assert!(command.strips_inherited_no_color());
+        let environment = command.resolved_environment();
+        assert_eq!(
+            environment_value(&environment, "COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+        assert_eq!(
+            environment_value(&environment, "TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+    }
+
+    #[test]
+    fn plain_command_declares_no_color_capability() {
+        let command = PtyCommand::new("some-tool.exe");
+        assert!(!command.strips_inherited_no_color());
+        let environment = command.resolved_environment();
+        assert_eq!(environment_value(&environment, "COLORTERM"), None);
+        assert_eq!(environment_value(&environment, "TERM"), None);
+    }
+
+    #[test]
+    fn explicit_environment_overrides_default_color_declarations() {
+        let colorterm_key = if cfg!(windows) {
+            "colorterm"
+        } else {
+            "COLORTERM"
+        };
+        let environment = PtyCommand::powershell()
+            .env(colorterm_key, "24bit")
+            .env("TERM", "better-terminal")
+            .resolved_environment();
+        assert_eq!(
+            environment_value(&environment, "COLORTERM"),
+            Some(std::ffi::OsStr::new("24bit"))
+        );
+        assert_eq!(
+            environment_value(&environment, "TERM"),
+            Some(std::ffi::OsStr::new("better-terminal"))
+        );
+    }
+
+    #[test]
+    fn command_no_color_opts_out_while_inherited_is_stripped() {
+        // An inherited NO_COLOR no longer suppresses the declarations: it is stripped at spawn
+        // and the color-capable shell is declared regardless.
+        let interactive = PtyCommand::powershell();
+        assert!(interactive.strips_inherited_no_color());
+        assert_eq!(
+            environment_value(&interactive.resolved_environment(), "COLORTERM"),
+            Some(std::ffi::OsStr::new("truecolor"))
+        );
+
+        // An explicit command-level NO_COLOR is a genuine opt-out: nothing is stripped, no
+        // declarations are added, and the value passes through to the child unchanged.
+        let no_color_key = if cfg!(windows) {
+            "no_color"
+        } else {
+            "NO_COLOR"
+        };
+        let command_opt_out = PtyCommand::powershell().env(no_color_key, "1");
+        assert!(!command_opt_out.strips_inherited_no_color());
+        let environment = command_opt_out.resolved_environment();
+        assert_eq!(environment_value(&environment, "COLORTERM"), None);
+        assert_eq!(environment_value(&environment, "TERM"), None);
+        assert_eq!(
+            environment_value(&environment, "NO_COLOR"),
+            Some(std::ffi::OsStr::new("1"))
+        );
+    }
+
+    #[test]
+    fn real_conpty_child_receives_color_environment_even_under_inherited_no_color() {
+        // The terminal strips an inherited NO_COLOR, so this holds regardless of the host's own
+        // NO_COLOR (this dev host and many CI runners export NO_COLOR=1) — the child must still
+        // come up color-capable and must not see the inherited opt-out.
+        let command = PtyCommand::powershell()
+            .arg("-NoProfile")
+            .arg("-Command")
+            .arg("cmd.exe /D /C set");
+        let mut session = PtySession::spawn(command, size(80, 20), no_wake()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        let mut child_exited = false;
+        while Instant::now() < deadline {
+            output.extend(session.read_output());
+            child_exited |= session.try_wait().unwrap().is_some();
+            if child_exited && session.output_is_drained() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        output.extend(session.read_output());
+        session.shutdown().unwrap();
+        let output = String::from_utf8_lossy(&output);
+        assert!(
+            output
+                .lines()
+                .any(|line| line.trim() == "COLORTERM=truecolor"),
+            "child environment did not contain COLORTERM=truecolor: {output:?}"
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line.trim() == "TERM=xterm-256color"),
+            "child environment did not contain TERM=xterm-256color: {output:?}"
+        );
+        assert!(
+            !output.lines().any(|line| line
+                .trim_start()
+                .to_ascii_uppercase()
+                .starts_with("NO_COLOR=")),
+            "child environment still carried an inherited NO_COLOR: {output:?}"
+        );
     }
 
     #[test]
