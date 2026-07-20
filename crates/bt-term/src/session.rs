@@ -9,9 +9,10 @@ use std::{
 };
 
 use bt_detect::{
-    DecorationRecord, DetectionInput, DetectionTask, LiveDetectionInput, LiveDetectionSource,
-    LiveDetectionTask, MathSpan, PlaceholderArtifact, StaleArtifact, detect_math_blocks,
-    resolve_detection_task, resolve_live_detection_task,
+    DecorationRecord, DetectionContext, DetectionInput, DetectionTask, LiveDetectionInput,
+    LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathSpan, PlaceholderArtifact,
+    StaleArtifact, advance_detection_context, detect_math_blocks, resolve_detection_task,
+    resolve_live_detection_task,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -55,6 +56,9 @@ const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
 /// Live breathing is 12.5% of one terminal row per side. At the baseline 18 px row this is 2.25
 /// px: enough to separate ink from text while remaining below the requested 15% ceiling.
 const LIVE_MATH_BREATHING_DENOMINATOR: i64 = 8;
+/// Alpha-tight display rasters begin half a terminal cell inside the pane. This follows the
+/// measured cell advance across fonts and DPI instead of baking a logical-pixel value into layout.
+const DISPLAY_MATH_LEFT_INSET_DENOMINATOR: i64 = 2;
 pub const LIVE_MATH_READABLE_SCALE_MILLI: u32 = bt_viewport::LIVE_MATH_READABLE_SCALE_MILLI;
 pub const LIVE_MIN_VISIBLE_TEXT_ROWS: u32 = bt_viewport::LIVE_MIN_VISIBLE_TEXT_ROWS;
 
@@ -258,6 +262,9 @@ pub struct DualPlaneSession {
     live_tasks: VecDeque<LiveDetectionTask>,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
     pending_live_handoffs: Vec<PendingLiveArtifactHandoff>,
+    frozen_detection_context: DetectionContext,
+    frozen_detection_contexts: BTreeMap<TranscriptId, DetectionContext>,
+    frozen_detection_count: u64,
     live_detection_count: u64,
     live_invalidation_count: u64,
     math_failure_validate_count: u64,
@@ -358,6 +365,9 @@ impl DualPlaneSession {
             live_tasks: VecDeque::new(),
             live_decorations: BTreeMap::new(),
             pending_live_handoffs: Vec::new(),
+            frozen_detection_context: DetectionContext::default(),
+            frozen_detection_contexts: BTreeMap::new(),
+            frozen_detection_count: 0,
             live_detection_count: 0,
             live_invalidation_count: 0,
             math_failure_validate_count: 0,
@@ -427,6 +437,13 @@ impl DualPlaneSession {
         self.cell_width_subpixels = cell_width_subpixels;
     }
 
+    fn display_math_left_inset_subpixels(&self) -> i64 {
+        self.cell_width_subpixels
+            .get()
+            .div_euclid(DISPLAY_MATH_LEFT_INSET_DENOMINATOR)
+            .max(1)
+    }
+
     pub fn set_ascii_baseline_subpixels(&mut self, ascii_baseline_subpixels: NonZeroI64) {
         self.ascii_baseline_subpixels = Some(ascii_baseline_subpixels);
     }
@@ -437,6 +454,10 @@ impl DualPlaneSession {
 
     pub fn live_detection_count(&self) -> u64 {
         self.live_detection_count
+    }
+
+    pub fn frozen_detection_count(&self) -> u64 {
+        self.frozen_detection_count
     }
 
     pub fn live_invalidation_count(&self) -> u64 {
@@ -951,7 +972,7 @@ impl DualPlaneSession {
             if !self.scheduler.has_retry() {
                 break;
             }
-            self.schedule_existing_artifacts();
+            self.schedule_retry_artifacts();
             if self.scheduler.pending_len() == 0 {
                 break;
             }
@@ -1366,6 +1387,66 @@ impl DualPlaneSession {
         Ok(frame)
     }
 
+    /// Schedule frozen math candidates intersecting the published viewport. The frame is the
+    /// visibility oracle: one history anchor is sampled per visual row, then scans are expanded
+    /// only to a delimiter opener and an 8 KiB look-ahead. Work is therefore bounded by visible
+    /// rows plus the detector's maximum admissible source, independent of transcript length.
+    pub fn schedule_visible_artifacts(&mut self, frame: &ViewportFrame) -> usize {
+        if self.primary_parked || !self.resize_epoch.decorations_allowed() {
+            return 0;
+        }
+        let columns = frame.columns.get() as usize;
+        if columns == 0 {
+            return 0;
+        }
+        let visible = frame
+            .cell_anchors
+            .chunks(columns)
+            .filter_map(|row| match &row.first()?.start {
+                ContentAnchor::History { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        if visible.is_empty() {
+            return 0;
+        }
+
+        let mut candidates = visible
+            .iter()
+            .filter(|id| {
+                self.document
+                    .entries()
+                    .get(id)
+                    .is_some_and(|entry| may_contain_display_math(&entry.line.text))
+            })
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let last_visible = *visible.last().expect("non-empty visible history set");
+        let mut lookahead_bytes = 0usize;
+        for (id, entry) in self.document.entries().range(last_visible..) {
+            lookahead_bytes = lookahead_bytes
+                .saturating_add(entry.line.text.len())
+                .saturating_add(1);
+            if lookahead_bytes > MAX_MATH_SOURCE_BYTES {
+                break;
+            }
+            let overlaps_visible = self
+                .frozen_detection_contexts
+                .get(id)
+                .and_then(|context| context.required_start(*id))
+                .is_some_and(|start| start <= last_visible);
+            if overlaps_visible && may_contain_display_math(&entry.line.text) {
+                candidates.insert(*id);
+            }
+        }
+
+        let before = self.frozen_detection_count;
+        for id in candidates {
+            self.schedule_scan(id);
+        }
+        self.frozen_detection_count.saturating_sub(before) as usize
+    }
+
     pub fn set_view_selection(&mut self, selection: Option<ViewSelection>) {
         if let Some(selection) = selection {
             self.document
@@ -1562,6 +1643,7 @@ impl DualPlaneSession {
             .saturating_mul(i64::from(self.layout_key.width_cells.get()))
             .div_euclid(SUBPIXELS_PER_PX)
             .max(1) as u32;
+        let display_left_inset_subpixels = self.display_math_left_inset_subpixels();
         match anchor {
             MathBlockAnchor::History { start, end } => {
                 let Some(record) = self
@@ -1575,12 +1657,17 @@ impl DualPlaneSession {
                     return false;
                 };
                 let artifact_size = (artifact.width_px, artifact.height_px);
+                let available_width_px = math_block_available_width_px(
+                    pane_width_px,
+                    artifact.mode,
+                    display_left_inset_subpixels,
+                );
                 scroll_offsets(
                     &mut record.horizontal_scroll_px,
                     &mut record.vertical_scroll_px,
                     artifact_size,
                     scale_milli,
-                    pane_width_px,
+                    available_width_px,
                     options,
                     horizontal_delta_px,
                     vertical_delta_px,
@@ -1608,6 +1695,11 @@ impl DualPlaneSession {
                     return false;
                 };
                 let artifact_size = (artifact.width_px, artifact.height_px);
+                let available_width_px = math_block_available_width_px(
+                    pane_width_px,
+                    artifact.mode,
+                    display_left_inset_subpixels,
+                );
                 let live_options = MathLayoutOptions {
                     block_max_height_px: None,
                     ..options
@@ -1617,7 +1709,7 @@ impl DualPlaneSession {
                     &mut record.vertical_scroll_px,
                     artifact_size,
                     scale_milli,
-                    pane_width_px,
+                    available_width_px,
                     live_options,
                     horizontal_delta_px,
                     0,
@@ -1693,6 +1785,11 @@ impl DualPlaneSession {
         });
 
         for placement in &mut frame.math_blocks {
+            if placement.display == MathBlockDisplay::Rendered
+                && placement.artifact.mode == MathMode::Display
+            {
+                placement.left_subpixels = self.display_math_left_inset_subpixels();
+            }
             match &placement.anchor {
                 MathBlockAnchor::History { start, .. } => {
                     let Some(record) = self.decorations.get(start) else {
@@ -2575,20 +2672,21 @@ impl DualPlaneSession {
         let Some(entry) = self.document.entries().get(&id) else {
             return;
         };
+        let may_contain_math = may_contain_display_math(&entry.line.text);
         let versions = VersionStamp {
             source: entry.line.source_generation,
             detection: self.detection_revision,
             layout: self.layout_key,
             view: self.view_generation,
         };
+        self.frozen_detection_contexts
+            .insert(id, self.frozen_detection_context.clone());
+        advance_detection_context(&mut self.frozen_detection_context, id, &entry.line.text);
         self.decorations
             .insert(id, DecorationRecord::frozen(versions));
         // Ordinary frozen lines take only the allocation-free delimiter prefilter. A candidate
         // snapshots immutable source here; the worker owns fence/pairing/escape/size detection.
-        if !may_contain_display_math(&entry.line.text) {
-            return;
-        }
-        if !self.primary_parked && self.resize_epoch.decorations_allowed() {
+        if may_contain_math && !self.primary_parked && self.resize_epoch.decorations_allowed() {
             self.schedule_scan(id);
         }
     }
@@ -2600,11 +2698,14 @@ impl DualPlaneSession {
             self.staging_sources.clear();
             self.active_staging_tail = None;
             self.pending_live_handoffs.clear();
+            self.frozen_detection_context = DetectionContext::default();
+            self.frozen_detection_contexts.clear();
         }
         let removed_set = removed.iter().copied().collect::<BTreeSet<_>>();
         self.scheduler.remove_sources(&removed_set);
         for id in removed {
             self.decorations.remove(id);
+            self.frozen_detection_contexts.remove(id);
         }
     }
 
@@ -2671,17 +2772,55 @@ impl DualPlaneSession {
         }
     }
 
+    fn schedule_retry_artifacts(&mut self) {
+        if self.primary_parked || !self.resize_epoch.decorations_allowed() {
+            return;
+        }
+        for id in self.scheduler.retry_sources(WORKER_QUEUE_CAP) {
+            self.schedule_scan(id);
+        }
+    }
+
     fn schedule_scan(&mut self, candidate_id: TranscriptId) {
-        let context_start_trusted = self.transcript.tombstones().is_empty();
-        let inputs = self
-            .document
-            .entries()
-            .iter()
-            .map(|(id, entry)| DetectionInput {
-                id: *id,
+        let Some(candidate_context) = self.frozen_detection_contexts.get(&candidate_id) else {
+            return;
+        };
+        let required_start = candidate_context.required_start(candidate_id);
+        let mut context_start_trusted = self.transcript.tombstones().is_empty();
+        let mut inputs = Vec::new();
+        if let Some(start) = required_start {
+            context_start_trusted &= self
+                .frozen_detection_contexts
+                .get(&start)
+                .is_some_and(DetectionContext::is_neutral);
+            let mut source_bytes = 0usize;
+            for (id, entry) in self.document.entries().range(start..=candidate_id) {
+                source_bytes = source_bytes
+                    .saturating_add(entry.line.text.len())
+                    .saturating_add(1);
+                if source_bytes > MAX_MATH_SOURCE_BYTES.saturating_add(1) {
+                    context_start_trusted = false;
+                    inputs.clear();
+                    break;
+                }
+                inputs.push(DetectionInput {
+                    id: *id,
+                    text: entry.line.text.clone(),
+                });
+            }
+            context_start_trusted &= inputs.first().is_some_and(|input| input.id == start)
+                && inputs.last().is_some_and(|input| input.id == candidate_id);
+        } else {
+            context_start_trusted = false;
+        }
+        if inputs.is_empty()
+            && let Some(entry) = self.document.entries().get(&candidate_id)
+        {
+            inputs.push(DetectionInput {
+                id: candidate_id,
                 text: entry.line.text.clone(),
-            })
-            .collect::<Vec<_>>();
+            });
+        }
         let Some(mut task) = self.decorations.get_mut(&candidate_id).and_then(|record| {
             record.schedule_scan(candidate_id, context_start_trusted, Arc::from(inputs))
         }) else {
@@ -2690,6 +2829,7 @@ impl DualPlaneSession {
         task.cell_width_subpixels = self.cell_width_subpixels.get();
         task.cell_height_subpixels = self.cell_height_subpixels.get();
         task.ascii_baseline_subpixels = self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get);
+        self.frozen_detection_count = self.frozen_detection_count.saturating_add(1);
         self.enqueue_task(task);
     }
 
@@ -3574,6 +3714,21 @@ fn scroll_offsets(
     changed
 }
 
+fn math_block_available_width_px(
+    pane_width_px: u32,
+    mode: MathMode,
+    display_left_inset_subpixels: i64,
+) -> u32 {
+    if mode != MathMode::Display {
+        return pane_width_px;
+    }
+    let inset_px = display_left_inset_subpixels
+        .saturating_add(SUBPIXELS_PER_PX - 1)
+        .div_euclid(SUBPIXELS_PER_PX)
+        .max(0) as u32;
+    pane_width_px.saturating_sub(inset_px).max(1)
+}
+
 fn ordered_selection(selection: &ViewSelection) -> Option<(&ContentAnchor, &ContentAnchor)> {
     match compare_selection_anchors(&selection.start, &selection.end)? {
         std::cmp::Ordering::Greater => Some((&selection.end, &selection.start)),
@@ -3761,6 +3916,115 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn stopped_scrollback_schedules_only_visible_frozen_candidates() {
+        const TOTAL_LINES: usize = 2_048;
+        const VIEW_ROWS: u32 = 8;
+        let mut bytes = Vec::new();
+        for index in 0..TOTAL_LINES {
+            bytes.extend_from_slice(
+                format!("\\begin{{align}}x_{{{index}}}&=y\\end{{align}}\r\n").as_bytes(),
+            );
+        }
+        bytes.extend_from_slice(b"tail");
+        let mut session = DualPlaneSession::with_frozen_quota(
+            nz(80),
+            nz(VIEW_ROWS),
+            NonZeroUsize::new(TOTAL_LINES + 16).unwrap(),
+        );
+        session.feed(&bytes).unwrap();
+        while session.take_worker_task().is_some() {}
+        for record in session.decorations.values_mut() {
+            record.decoration = DecorationLifecycle::None;
+            record.artifact = None;
+            record.stale_artifact = None;
+        }
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_by_rows((TOTAL_LINES / 2) as i32);
+        session.refresh_projection(&mut projection);
+        let stopped = session.viewport_frame(&mut projection).unwrap();
+        let visible_ids = stopped
+            .cell_anchors
+            .chunks(stopped.columns.get() as usize)
+            .filter_map(|row| match &row.first()?.start {
+                ContentAnchor::History { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(visible_ids.len(), VIEW_ROWS as usize);
+
+        let detections_before = session.frozen_detection_count();
+        let scheduled = session.schedule_visible_artifacts(&stopped);
+        let scheduled_delta = session
+            .frozen_detection_count()
+            .saturating_sub(detections_before) as usize;
+        assert_eq!(scheduled, scheduled_delta);
+        assert!(scheduled > 0);
+        assert!(
+            scheduled <= visible_ids.len() + 1,
+            "visible scheduling inspected {scheduled} candidates for {} visible lines out of {TOTAL_LINES}",
+            visible_ids.len()
+        );
+        assert!(
+            session.retry_on_idle() > visible_ids.len(),
+            "offscreen retries must remain deferred instead of triggering a history-wide scan"
+        );
+
+        let mut completed = 0usize;
+        while let Some(mut task) = session.take_worker_task() {
+            assert!(
+                task.inputs.len() <= 1,
+                "single-line visible formulas need no transcript-wide prefix: {:?}",
+                task.inputs.iter().map(|input| input.id).collect::<Vec<_>>()
+            );
+            assert!(resolve_detection_task(&mut task));
+            assert!(session.complete_worker_result(task, Ok(synthetic_raster(40, 18))));
+            completed += 1;
+        }
+        assert_eq!(completed, scheduled);
+        assert!(visible_ids.iter().all(|id| {
+            session
+                .decoration(*id)
+                .is_some_and(|record| record.decoration == DecorationLifecycle::Ready)
+        }));
+    }
+
+    #[test]
+    fn visible_multiline_opener_schedules_its_offscreen_finalized_close_without_another_scroll() {
+        let mut session = DualPlaneSession::new(nz(40), nz(2));
+        session
+            .feed(
+                b"header\r\n\\begin{align}\r\nx &= y\r\n\\end{align}\r\none\r\ntwo\r\nthree\r\ntail",
+            )
+            .unwrap();
+        while session.take_worker_task().is_some() {}
+        for record in session.decorations.values_mut() {
+            record.decoration = DecorationLifecycle::None;
+            record.artifact = None;
+        }
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        let stopped = session.viewport_frame(&mut projection).unwrap();
+        assert!(stopped.cells.iter().any(|cell| cell.text == "\\"));
+        assert!(session.schedule_visible_artifacts(&stopped) >= 2);
+
+        let mut saw_necessary_context = false;
+        while let Some(task) = session.take_worker_task() {
+            saw_necessary_context |= task.inputs.len() == 3;
+            session.complete_worker_task(task);
+        }
+        assert!(saw_necessary_context);
+        assert!(session.decorations.values().any(|record| {
+            record.decoration == DecorationLifecycle::Ready
+                && record.block_end.is_some_and(|end| end.0 > 1)
+        }));
+    }
+
     fn synthetic_raster(width_px: u32, height_px: u32) -> MathRaster {
         MathRaster {
             rgba: vec![255; width_px as usize * height_px as usize * 4],
@@ -3925,6 +4189,10 @@ mod tests {
         let ready = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(ready.math_blocks.len(), 1);
         assert_eq!(
+            ready.math_blocks[0].left_subpixels,
+            session.cell_width_subpixels.get() / DISPLAY_MATH_LEFT_INSET_DENOMINATOR
+        );
+        assert_eq!(
             projection.heights().get(0),
             Some((35 + 2 * i64::from(bt_math::VERTICAL_PADDING_LOGICAL_PX)) * SUBPIXELS_PER_PX)
         );
@@ -3965,6 +4233,18 @@ mod tests {
         let fallback = failed.viewport_frame(&mut projection).unwrap();
         assert!(fallback.math_blocks.is_empty());
         assert!(fallback.cells.iter().any(|cell| cell.text == "$"));
+    }
+
+    #[test]
+    fn display_math_inset_reduces_only_block_owned_horizontal_viewport() {
+        assert_eq!(
+            math_block_available_width_px(100, MathMode::Display, 5 * SUBPIXELS_PER_PX),
+            95
+        );
+        assert_eq!(
+            math_block_available_width_px(100, MathMode::Inline, 5 * SUBPIXELS_PER_PX),
+            100
+        );
     }
 
     #[test]
@@ -4114,6 +4394,18 @@ mod tests {
         assert!(cleared.math_blocks.is_empty());
         assert_eq!(session.math_resident_bytes(), 0);
         assert!(session.decorations.is_empty());
+    }
+
+    #[test]
+    fn ed3_resets_the_compact_frozen_detection_boundary() {
+        let mut session = DualPlaneSession::new(nz(16), nz(2));
+        session.feed(b"```\r\ninside\r\ntail").unwrap();
+        assert!(!session.frozen_detection_context.is_neutral());
+        assert!(!session.frozen_detection_contexts.is_empty());
+
+        session.feed(b"\x1b[3J").unwrap();
+        assert!(session.frozen_detection_context.is_neutral());
+        assert!(session.frozen_detection_contexts.is_empty());
     }
 
     fn complete_detected_live_tasks(session: &mut DualPlaneSession, raster: MathRaster) -> usize {
@@ -5193,6 +5485,7 @@ mod tests {
             &live_artifact.rgba
         ));
         let detections = session.live_detection_count;
+        let frozen_detections = session.frozen_detection_count;
         let invalidations = session.live_invalidation_count;
         for _ in 0..8 {
             projection.scroll_to_bottom();
@@ -5209,7 +5502,50 @@ mod tests {
             assert!(session.take_math_worker_task().is_none());
         }
         assert_eq!(session.live_detection_count, detections);
+        assert_eq!(session.frozen_detection_count, frozen_detections);
         assert_eq!(session.live_invalidation_count, invalidations);
+    }
+
+    #[test]
+    fn pure_view_scroll_keeps_a_frozen_only_artifact_without_detection_or_raster_work() {
+        let mut session = DualPlaneSession::new(nz(24), nz(3));
+        session
+            .feed(b"head\r\n$$x^2$$\r\nbody\r\nmore\r\ntail")
+            .unwrap();
+        let mut task = session.take_worker_task().expect("frozen formula task");
+        assert!(resolve_detection_task(&mut task));
+        assert!(session.complete_worker_result(task, Ok(synthetic_raster(40, 18))));
+        let (id, rgba) = session
+            .decorations
+            .iter()
+            .find_map(|(id, record)| {
+                record
+                    .artifact
+                    .as_ref()
+                    .map(|artifact| (*id, Arc::clone(&artifact.rgba)))
+            })
+            .expect("ready frozen-only artifact");
+        let detections = session.frozen_detection_count();
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        for _ in 0..12 {
+            projection.scroll_to_top();
+            session.refresh_projection(&mut projection);
+            let reviewed = session.viewport_frame(&mut projection).unwrap();
+            session.schedule_visible_artifacts(&reviewed);
+            projection.scroll_to_bottom();
+            session.refresh_projection(&mut projection);
+            let live_boundary = session.viewport_frame(&mut projection).unwrap();
+            session.schedule_visible_artifacts(&live_boundary);
+            let current = session
+                .decoration(id)
+                .and_then(|record| record.artifact.as_ref())
+                .expect("pure viewport motion keeps frozen pixels");
+            assert!(Arc::ptr_eq(&rgba, &current.rgba));
+            assert!(session.take_math_worker_task().is_none());
+        }
+        assert_eq!(session.frozen_detection_count(), detections);
     }
 
     #[test]

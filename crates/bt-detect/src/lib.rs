@@ -58,7 +58,8 @@ pub struct DetectionTask {
     pub cell_width_subpixels: i64,
     pub cell_height_subpixels: i64,
     pub ascii_baseline_subpixels: i64,
-    /// Whether the first input is a known stream boundary rather than a truncated window.
+    /// Whether the first input starts at a proven neutral parser boundary rather than a
+    /// truncated window.
     pub context_start_trusted: bool,
     pub inputs: Arc<[DetectionInput]>,
     pub resolved: bool,
@@ -68,6 +69,31 @@ pub struct DetectionTask {
 pub struct DetectionInput {
     pub id: TranscriptId,
     pub text: String,
+}
+
+/// Compact parser state immediately before a frozen line. The session retains one of these per
+/// resident line so a viewport-local scan can begin at a proven neutral boundary without copying
+/// the complete transcript prefix.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DetectionContext {
+    fence: Option<(char, usize)>,
+    opening: Option<(TranscriptId, DisplayDelimiter)>,
+}
+
+impl DetectionContext {
+    /// Return the earliest resident line needed to resolve `candidate`. `None` means the candidate
+    /// is inside a proven code fence and therefore cannot begin or close a detectable math block.
+    pub fn required_start(&self, candidate: TranscriptId) -> Option<TranscriptId> {
+        self.fence
+            .is_none()
+            .then(|| self.opening.as_ref().map_or(candidate, |opening| opening.0))
+    }
+
+    /// A neutral state is a parser boundary: neither a code fence nor a display delimiter began
+    /// before the next input line.
+    pub fn is_neutral(&self) -> bool {
+        self.fence.is_none() && self.opening.is_none()
+    }
 }
 
 /// A worker-owned snapshot of one stable live-grid run. Row numbers are grid coordinates, never
@@ -644,6 +670,56 @@ fn whole_line_display_delimiter(trimmed: &str) -> Option<DisplayDelimiterToken> 
     None
 }
 
+/// Advance the compact frozen-history parser proof by one immutable logical line. This mirrors the
+/// structural state transitions in `detect_math_blocks_in_context`; it deliberately records no
+/// body text, so retaining checkpoints is O(resident lines), not O(total source bytes squared).
+pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptId, text: &str) {
+    let trimmed = text.trim();
+    if let Some(marker) = fence_marker(trimmed) {
+        match context.fence {
+            Some(active) if active.0 == marker.0 && marker.1 >= active.1 => context.fence = None,
+            None => context.fence = Some(marker),
+            _ => {}
+        }
+        context.opening = None;
+        return;
+    }
+    if context.fence.is_some() {
+        return;
+    }
+    if !detect_block_math(text).is_empty() {
+        context.opening = None;
+        return;
+    }
+    let Some(token) = whole_line_display_delimiter(trimmed) else {
+        return;
+    };
+    let matching_close = match (&context.opening, &token) {
+        (
+            Some((_, DisplayDelimiter::Dollars)),
+            DisplayDelimiterToken::Symmetric(DisplayDelimiter::Dollars),
+        )
+        | (
+            Some((_, DisplayDelimiter::Brackets)),
+            DisplayDelimiterToken::Close(DisplayDelimiter::Brackets),
+        ) => true,
+        (
+            Some((_, DisplayDelimiter::Environment(open))),
+            DisplayDelimiterToken::Close(DisplayDelimiter::Environment(close)),
+        ) => open == close,
+        _ => false,
+    };
+    if matching_close {
+        context.opening = None;
+    } else if context.opening.is_none() {
+        context.opening = match token {
+            DisplayDelimiterToken::Symmetric(delimiter)
+            | DisplayDelimiterToken::Open(delimiter) => Some((id, delimiter)),
+            DisplayDelimiterToken::Close(_) => None,
+        };
+    }
+}
+
 pub fn detect_math_blocks<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
 ) -> Vec<DetectedMathBlock> {
@@ -934,6 +1010,28 @@ mod tests {
             },
             view: ViewGeneration(1),
         }
+    }
+
+    #[test]
+    fn compact_context_proves_local_pairing_boundaries_without_guessing_through_fences() {
+        let id = TranscriptId;
+        let mut context = DetectionContext::default();
+        advance_detection_context(&mut context, id(1), "ordinary");
+        assert!(context.is_neutral());
+
+        advance_detection_context(&mut context, id(2), r"\begin{align}");
+        assert_eq!(context.required_start(id(3)), Some(id(2)));
+        advance_detection_context(&mut context, id(3), "x &= y");
+        assert_eq!(context.required_start(id(4)), Some(id(2)));
+        advance_detection_context(&mut context, id(4), r"\end{align}");
+        assert!(context.is_neutral());
+
+        advance_detection_context(&mut context, id(5), "```");
+        assert_eq!(context.required_start(id(6)), None);
+        advance_detection_context(&mut context, id(6), "$$");
+        assert_eq!(context.required_start(id(7)), None);
+        advance_detection_context(&mut context, id(7), "```");
+        assert!(context.is_neutral());
     }
 
     #[test]

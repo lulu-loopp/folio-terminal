@@ -126,6 +126,10 @@ impl WorkerScheduler {
         !self.retry_on_idle.is_empty()
     }
 
+    pub(crate) fn retry_sources(&self, limit: usize) -> Vec<TranscriptId> {
+        self.retry_on_idle.iter().copied().take(limit).collect()
+    }
+
     pub(crate) fn take(&mut self) -> Option<DetectionTask> {
         self.pending.pop_front()
     }

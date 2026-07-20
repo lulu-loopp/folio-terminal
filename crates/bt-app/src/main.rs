@@ -610,6 +610,14 @@ impl Runtime {
             .session
             .viewport_frame(&mut self.projection)
             .context("project terminal grid into viewport frame")?;
+        if self.session.schedule_visible_artifacts(&terminal_frame) != 0 {
+            dispatch_pending_math_tasks(
+                &mut self.session,
+                &self.math_worker.tasks,
+                &mut self.math_worker_running,
+                &mut self.math_worker_notice_pending,
+            );
+        }
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
             terminal_frame.status_text = Some(notice.to_owned());
         }

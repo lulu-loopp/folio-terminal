@@ -43,6 +43,11 @@ const WIDE_SHAPING_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
 const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
+/// A rendered formula's raster is cropped tight to its ink, so its glyphs would touch the pane
+/// edge while a text row's characters sit inside their cell with natural left bearing. This small
+/// indent gives the ink the same visual left edge as the text above it (user report 2026-07-20).
+/// Applied to rendered blocks only - a source block already carries its own column offset.
+const MATH_LEFT_INDENT_LOGICAL_PX: f32 = 8.0;
 
 fn math_toolbar_vertical_bounds(visible_top: f32, visible_bottom: f32, scale: f32) -> (f32, f32) {
     let band_height = (visible_bottom - visible_top).max(0.0);
@@ -2108,9 +2113,11 @@ impl Renderer {
             for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
                 tile_geometry.into_iter().enumerate()
             {
-                let left = pane_left
-                    + placement.left_subpixels as f32 / SUBPIXELS_PER_PX as f32
-                    + tile_x as f32 * scale
+                let left = math_block_left_px(
+                    self.metrics,
+                    placement.left_subpixels,
+                    placement.display == MathBlockDisplay::Rendered,
+                ) + tile_x as f32 * scale
                     - placement.horizontal_scroll_px as f32;
                 let top = block_top + tile_y as f32 * scale - placement.vertical_scroll_px as f32;
                 let right = left + tile_width as f32 * scale;
@@ -2160,7 +2167,6 @@ impl Renderer {
         let pane_top = self.metrics.padding_px;
         let pane_bottom = self.config.height as f32;
         let band_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
-        let block_left = pane_left + placement.left_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let top = if placement.artifact.mode == MathMode::Inline {
             band_top + self.metrics.ascii_baseline_px
                 - placement.artifact.baseline_subpixels as f32 / SUBPIXELS_PER_PX as f32
@@ -2188,8 +2194,14 @@ impl Renderer {
         };
         let visible_top = top.max(pane_top);
         let visible_bottom = (top + scaled_height.min(clip_height)).min(pane_bottom);
-        let visible_left = block_left.max(pane_left);
-        let visible_right = (block_left + scaled_width).min(pane_right);
+        let (visible_left, visible_right) = math_horizontal_bounds(
+            self.metrics,
+            self.config.width,
+            frame.columns,
+            placement.left_subpixels,
+            scaled_width,
+            placement.display == MathBlockDisplay::Rendered,
+        )?;
         if visible_right <= visible_left || visible_bottom <= visible_top {
             return None;
         }
@@ -3869,6 +3881,37 @@ fn math_quad_vertices(
     ]
 }
 
+/// The x where a math block's raster (and its clip and hit rect) begins. Every consumer must use
+/// this one value: the quad vertices, the scissor and the hit test all key on it, and computing
+/// the indent in one place while the quad computes its own left is exactly how the indent clipped
+/// the raster's left edge (user report 2026-07-20). `rendered_indent` gives a tight-cropped
+/// formula the left bearing that text glyphs have; a source block already carries its column.
+fn math_block_left_px(metrics: CellMetrics, left_subpixels: i64, rendered_indent: bool) -> f32 {
+    let indent = if rendered_indent {
+        (MATH_LEFT_INDENT_LOGICAL_PX * metrics.scale_factor as f32).round()
+    } else {
+        0.0
+    };
+    metrics.padding_px + indent + left_subpixels as f32 / SUBPIXELS_PER_PX as f32
+}
+
+fn math_horizontal_bounds(
+    metrics: CellMetrics,
+    surface_width: u32,
+    columns: NonZeroU32,
+    left_subpixels: i64,
+    scaled_width: f32,
+    rendered_indent: bool,
+) -> Option<(f32, f32)> {
+    let pane_left = metrics.padding_px;
+    let pane_right =
+        (pane_left + columns.get() as f32 * metrics.cell_width_px).min(surface_width as f32);
+    let block_left = math_block_left_px(metrics, left_subpixels, rendered_indent);
+    let visible_left = block_left.max(pane_left);
+    let visible_right = (block_left + scaled_width).min(pane_right);
+    (visible_right > visible_left).then_some((visible_left, visible_right))
+}
+
 fn point_in_rect([x, y]: [f32; 2], [left, top, right, bottom]: [f32; 4]) -> bool {
     x >= left && x < right && y >= top && y < bottom
 }
@@ -3978,6 +4021,44 @@ mod tests {
                 live_grid_row: Some(row),
             })
             .collect()
+    }
+
+    #[test]
+    fn display_math_inset_aligns_visual_left_and_moves_hit_geometry_with_it() {
+        let metrics = CellMetrics {
+            cell_width_px: 10.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 8.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 15.0,
+            primary_advance_px: 10.0,
+            primary_cap_height_px: 12.0,
+            primary_cap_center_y_px: 10.0,
+        };
+        let inset_subpixels = 5 * SUBPIXELS_PER_PX;
+        // A source-column offset (left_subpixels) positions the block without the rendered indent.
+        let (visible_left, visible_right) = math_horizontal_bounds(
+            metrics,
+            200,
+            NonZeroU32::new(10).unwrap(),
+            inset_subpixels,
+            40.0,
+            false,
+        )
+        .unwrap();
+        let expected_left = metrics.padding_px + 5.0;
+        assert!((visible_left - expected_left).abs() <= 1.0);
+
+        // A rendered block gets a small left indent so its tight-cropped ink lines up with text.
+        let (rendered_left, _) =
+            math_horizontal_bounds(metrics, 200, NonZeroU32::new(10).unwrap(), 0, 40.0, true)
+                .unwrap();
+        assert!(rendered_left > metrics.padding_px + 1.0);
+
+        let hit = [visible_left, 10.0, visible_right, 30.0];
+        assert!(!point_in_rect([metrics.padding_px + 1.0, 20.0], hit));
+        assert!(point_in_rect([visible_left + 1.0, 20.0], hit));
     }
 
     #[test]
