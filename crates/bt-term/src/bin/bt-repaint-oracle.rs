@@ -1,0 +1,252 @@
+use std::{
+    env,
+    error::Error,
+    fs, io,
+    num::NonZeroU32,
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+
+use bt_math::MathEngine;
+use bt_term::{
+    DualPlaneSession, FormulaFlashOracle, LIVE_MATH_STABLE_INTERVAL, SessionMathTask,
+    render_detection_task, render_live_detection_task,
+};
+use bt_viewport::ViewportProjection;
+
+const FOREGROUND_RGB: [u8; 3] = [0xd8, 0xdc, 0xe8];
+
+struct ReplayChunk<'a> {
+    elapsed: Duration,
+    bytes: &'a [u8],
+}
+
+struct HeadlessOracle {
+    session: DualPlaneSession,
+    projection: ViewportProjection,
+    engine: MathEngine,
+    flash_oracle: FormulaFlashOracle,
+    frame_sequence: usize,
+}
+
+impl HeadlessOracle {
+    fn new(columns: NonZeroU32, rows: NonZeroU32) -> Self {
+        let session = DualPlaneSession::new(columns, rows);
+        let projection = session.new_projection(session.layout_key());
+        Self {
+            session,
+            projection,
+            engine: MathEngine::new(),
+            flash_oracle: FormulaFlashOracle::default(),
+            frame_sequence: 0,
+        }
+    }
+
+    fn advance_before(
+        &mut self,
+        observed_at: Instant,
+        elapsed: Duration,
+    ) -> Result<(), Box<dyn Error>> {
+        self.session.advance_live_stability(observed_at);
+        if self.complete_pending_math() {
+            self.publish("math-ready", elapsed)?;
+        }
+        Ok(())
+    }
+
+    fn feed(
+        &mut self,
+        chunk: &[u8],
+        observed_at: Instant,
+        elapsed: Duration,
+    ) -> Result<(), Box<dyn Error>> {
+        self.session.feed_at(chunk, observed_at)?;
+        self.publish("pty", elapsed)?;
+        if self.complete_pending_math() {
+            self.publish("math-ready", elapsed)?;
+        }
+        Ok(())
+    }
+
+    fn complete_pending_math(&mut self) -> bool {
+        let mut changed = false;
+        while let Some(task) = self.session.take_math_worker_task() {
+            changed |= match task {
+                SessionMathTask::Frozen(mut task) => {
+                    let result = render_detection_task(&self.engine, &mut task, FOREGROUND_RGB);
+                    self.session.complete_worker_result(task, result)
+                }
+                SessionMathTask::Live(mut task) => {
+                    let result =
+                        render_live_detection_task(&self.engine, &mut task, FOREGROUND_RGB);
+                    self.session.complete_live_worker_result(task, result)
+                }
+            };
+        }
+        changed
+    }
+
+    fn publish(&mut self, event: &str, elapsed: Duration) -> Result<(), Box<dyn Error>> {
+        self.session.refresh_projection(&mut self.projection);
+        let frame = self.session.viewport_frame(&mut self.projection)?;
+        let (state, rendered_sources, source_rows) = {
+            let observation = self.flash_oracle.observe(&frame);
+            (
+                observation.state,
+                observation.rendered_sources.clone(),
+                observation.source_rows.clone(),
+            )
+        };
+        let flash_detected = self.flash_oracle.flash_detected();
+        println!(
+            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} flash={}",
+            self.frame_sequence,
+            elapsed.as_micros(),
+            state,
+            rendered_sources,
+            source_rows,
+            flash_detected,
+        );
+        self.frame_sequence = self.frame_sequence.saturating_add(1);
+        Ok(())
+    }
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    let input_path = env::var_os("BT_PROBE_INPUT")
+        .map(PathBuf::from)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "BT_PROBE_INPUT is required"))?;
+    let input = fs::read(&input_path)?;
+    let chunks_path = env::var_os("BT_PROBE_CHUNKS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| append_suffix(&input_path, ".chunks"));
+    let chunks = if chunks_path.is_file() {
+        parse_chunks(&input, &fs::read_to_string(&chunks_path)?)?
+    } else {
+        vec![ReplayChunk {
+            elapsed: Duration::ZERO,
+            bytes: &input,
+        }]
+    };
+    let columns = env_dimension("BT_PROBE_COLUMNS", 120)?;
+    let rows = env_dimension("BT_PROBE_ROWS", 40)?;
+    let started = Instant::now();
+    let mut oracle = HeadlessOracle::new(columns, rows);
+    let mut final_elapsed = Duration::ZERO;
+
+    for chunk in chunks {
+        final_elapsed = chunk.elapsed;
+        let observed_at = started + chunk.elapsed;
+        oracle.advance_before(observed_at, chunk.elapsed)?;
+        oracle.feed(chunk.bytes, observed_at, chunk.elapsed)?;
+    }
+    final_elapsed = final_elapsed.saturating_add(LIVE_MATH_STABLE_INTERVAL);
+    oracle.advance_before(started + final_elapsed, final_elapsed)?;
+
+    if oracle.flash_oracle.flash_detected() {
+        return Err(io::Error::other(format!(
+            "formula repaint flash detected for {:?}",
+            oracle.flash_oracle.flashed_sources()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn parse_chunks<'a>(
+    input: &'a [u8],
+    manifest: &str,
+) -> Result<Vec<ReplayChunk<'a>>, Box<dyn Error>> {
+    let mut chunks = Vec::new();
+    let mut offset = 0usize;
+    let mut expected_sequence = 0u64;
+    let mut previous_elapsed = Duration::ZERO;
+    for (line_index, line) in manifest.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 {
+            return Err(invalid_manifest(line_index, "expected: sequence elapsed_us bytes").into());
+        }
+        let sequence = fields[0].parse::<u64>()?;
+        let elapsed = Duration::from_micros(fields[1].parse::<u64>()?);
+        let length = fields[2].parse::<usize>()?;
+        if sequence != expected_sequence {
+            return Err(invalid_manifest(line_index, "non-contiguous sequence number").into());
+        }
+        if elapsed < previous_elapsed {
+            return Err(invalid_manifest(line_index, "arrival time moved backwards").into());
+        }
+        let end = offset.checked_add(length).ok_or_else(|| {
+            invalid_manifest(line_index, "chunk length overflowed the input offset")
+        })?;
+        let bytes = input
+            .get(offset..end)
+            .ok_or_else(|| invalid_manifest(line_index, "chunk lengths exceed BT_PROBE_INPUT"))?;
+        chunks.push(ReplayChunk { elapsed, bytes });
+        offset = end;
+        expected_sequence = expected_sequence.saturating_add(1);
+        previous_elapsed = elapsed;
+    }
+    if offset != input.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "chunk manifest accounts for {offset} of {} BT_PROBE_INPUT bytes",
+                input.len()
+            ),
+        )
+        .into());
+    }
+    Ok(chunks)
+}
+
+fn invalid_manifest(line_index: usize, message: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("invalid chunk manifest line {}: {message}", line_index + 1),
+    )
+}
+
+fn env_dimension(name: &str, default: u32) -> Result<NonZeroU32, Box<dyn Error>> {
+    let value = env::var(name)
+        .ok()
+        .map(|value| value.parse::<u32>())
+        .transpose()?
+        .unwrap_or(default);
+    NonZeroU32::new(value)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{name} must be non-zero"),
+            )
+        })
+        .map_err(Into::into)
+}
+
+fn append_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut result = path.as_os_str().to_os_string();
+    result.push(suffix);
+    PathBuf::from(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_manifest_slices_the_exact_raw_stream() {
+        let input = b"abcdef";
+        let chunks = parse_chunks(
+            input,
+            "# BT_PTY_DUMP_CHUNKS_V1 sequence elapsed_us bytes\n0 10 2\n1 20 4\n",
+        )
+        .unwrap();
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].bytes, b"ab");
+        assert_eq!(chunks[1].bytes, b"cdef");
+        assert_eq!(chunks[1].elapsed, Duration::from_micros(20));
+    }
+}

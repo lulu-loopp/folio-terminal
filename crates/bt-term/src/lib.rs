@@ -2,6 +2,7 @@
 
 mod adapter;
 mod cell_capture;
+mod diagnostics;
 mod lifecycle;
 mod scheduling;
 mod session;
@@ -12,6 +13,9 @@ pub use adapter::{
     TerminalModes,
 };
 pub use bt_detect::DetectionTask;
+pub use diagnostics::{
+    FormulaFlashOracle, FormulaFrameObservation, FormulaFrameState, observe_formula_frame,
+};
 pub use lifecycle::{
     LIFECYCLE_RULES, LifecycleDirective, LifecycleRule, MatchValue, ResizePlan, RowAction,
     RowDirective, RowShape, classify, plan_resize,

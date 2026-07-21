@@ -1045,14 +1045,8 @@ impl ViewportProjection {
                 .saturating_mul(self.cell_height_subpixels.get())
                 .min(live_extra_height)
         };
-        let frame_top_subpixels = if !primary && live_height_delta < 0 {
-            // The alternate screen is a fixed N x M application grid whose presentation may be
-            // shorter after source rows collapse into formula boxes. Keep the last application row
-            // at the same window-bottom coordinate and consume all released pixels at the top.
-            live_height_delta.saturating_neg()
-        } else {
-            reviewed_live_height.saturating_sub(live_extra_height)
-        };
+        debug_assert!(primary || live_height_delta >= 0);
+        let frame_top_subpixels = reviewed_live_height.saturating_sub(live_extra_height);
         let rows_above = usize::try_from(
             frame_top_subpixels
                 .saturating_neg()
@@ -1600,43 +1594,49 @@ impl ViewportProjection {
                 artifact.screen == screen && artifact.generation == self.grid_generation
             })
             .collect::<Vec<_>>();
-        let mut remaining = i64::from(
-            self.live_rows
-                .get()
-                .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
-        )
-        .saturating_mul(self.cell_height_subpixels.get());
-        let mut accepted = Vec::new();
-        // Prefer the newest/lower blocks. Each accepted block consumes its presentation box,
-        // independent of how many logical source rows that box suppresses. If the text-row floor
-        // would be crossed, older blocks honestly remain source instead of acquiring a third scale.
-        for artifact in candidates.into_iter().rev() {
-            let box_height = artifact.artifact.height_subpixels.max(1);
-            if artifact.artifact.render_scale_milli == LIVE_MATH_READABLE_SCALE_MILLI
-                && box_height <= remaining
-            {
-                remaining = remaining.saturating_sub(box_height);
-                accepted.push(artifact);
-            } else if std::env::var_os("BT_PERF_TRACE").is_some() {
-                let reason = if box_height
-                    > i64::from(
-                        self.live_rows
-                            .get()
-                            .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
-                    )
-                    .saturating_mul(self.cell_height_subpixels.get())
+        let accepted = if screen == ScreenId::Alternate {
+            // Alternate presentation is expand-only: every proven Ready block remains rendered.
+            // Extra pixels overflow above the fixed N x M grid; they never consume or move the
+            // application's input/status rows at the bottom.
+            candidates
+        } else {
+            let mut remaining = i64::from(
+                self.live_rows
+                    .get()
+                    .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
+            )
+            .saturating_mul(self.cell_height_subpixels.get());
+            let mut accepted = Vec::new();
+            // Primary keeps its existing visible-text floor and newest/lower-block preference.
+            for artifact in candidates.into_iter().rev() {
+                let box_height = artifact.artifact.height_subpixels.max(1);
+                if artifact.artifact.render_scale_milli == LIVE_MATH_READABLE_SCALE_MILLI
+                    && box_height <= remaining
                 {
-                    "block-exceeds-visible-text-floor"
-                } else {
-                    "newer-blocks-reserved-visible-text-floor"
-                };
-                eprintln!(
-                    "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} remaining_subpixels={} min_text_rows={} reason={reason}",
-                    artifact.start.row, box_height, remaining, LIVE_MIN_VISIBLE_TEXT_ROWS,
-                );
+                    remaining = remaining.saturating_sub(box_height);
+                    accepted.push(artifact);
+                } else if std::env::var_os("BT_PERF_TRACE").is_some() {
+                    let reason = if box_height
+                        > i64::from(
+                            self.live_rows
+                                .get()
+                                .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
+                        )
+                        .saturating_mul(self.cell_height_subpixels.get())
+                    {
+                        "block-exceeds-visible-text-floor"
+                    } else {
+                        "newer-blocks-reserved-visible-text-floor"
+                    };
+                    eprintln!(
+                        "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} remaining_subpixels={} min_text_rows={} reason={reason}",
+                        artifact.start.row, box_height, remaining, LIVE_MIN_VISIBLE_TEXT_ROWS,
+                    );
+                }
             }
-        }
-        accepted.reverse();
+            accepted.reverse();
+            accepted
+        };
         let mut per_row_height =
             vec![self.cell_height_subpixels.get(); self.live_rows.get() as usize];
         for artifact in &accepted {
@@ -1644,11 +1644,16 @@ impl ViewportProjection {
                 .band_end_row
                 .saturating_sub(artifact.band_start_row)
                 .saturating_add(1);
-            let heights =
-                distributed_row_heights(artifact.artifact.height_subpixels, rows.max(1) as usize);
-            // Logical ownership remains the complete source/borrowed band, but its row-height sum
-            // is exactly the presentation box. Remainder subpixels are assigned deterministically
-            // from the top; no source-line count can impose a minimum pixel height.
+            let source_band_height =
+                i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
+            let presentation_height = if screen == ScreenId::Alternate {
+                artifact.artifact.height_subpixels.max(source_band_height)
+            } else {
+                artifact.artifact.height_subpixels
+            };
+            let heights = distributed_row_heights(presentation_height, rows.max(1) as usize);
+            // Primary retains free height. Alternate is expand-only: a short formula keeps the
+            // complete source-row band and centers inside it; a tall formula expands above it.
             for offset in 0..rows {
                 if let Some(height) =
                     per_row_height.get_mut(artifact.band_start_row.saturating_add(offset) as usize)

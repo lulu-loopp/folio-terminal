@@ -3,11 +3,13 @@
 use std::{
     collections::VecDeque,
     ffi::{OsStr, OsString},
+    fs::File,
     io::{Read, Write},
     num::{NonZeroU16, NonZeroUsize},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Condvar, Mutex, MutexGuard},
     thread::JoinHandle,
+    time::Instant,
 };
 
 use portable_pty::{
@@ -47,6 +49,111 @@ pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap()
 /// Matches the serialized Term actor quantum from DESIGN.md §1.3.
 pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap();
 const READER_CHUNK_BYTES: usize = 16 * 1024;
+const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
+
+/// Diagnostic-only byte sink for one ConPTY reader. The main file is byte-for-byte suitable for
+/// `BT_PROBE_INPUT`; the adjacent `.chunks` file preserves reader arrival boundaries and timing.
+struct PtyDump {
+    bytes: File,
+    chunks: File,
+    started: Instant,
+    sequence: u64,
+}
+
+impl PtyDump {
+    fn from_environment() -> Result<Option<Self>, PtyError> {
+        let Some(path) = std::env::var_os(PTY_DUMP_ENV) else {
+            return Ok(None);
+        };
+        Self::create(&PathBuf::from(path)).map(Some)
+    }
+
+    fn create(path: &Path) -> Result<Self, PtyError> {
+        let bytes = File::create(path)?;
+        let mut chunks = File::create(pty_dump_chunks_path(path))?;
+        writeln!(chunks, "# BT_PTY_DUMP_CHUNKS_V1 sequence elapsed_us bytes")?;
+        Ok(Self {
+            bytes,
+            chunks,
+            started: Instant::now(),
+            sequence: 0,
+        })
+    }
+
+    fn write_chunk(&mut self, chunk: &[u8]) -> std::io::Result<()> {
+        self.bytes.write_all(chunk)?;
+        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        writeln!(
+            self.chunks,
+            "{} {elapsed_us} {}",
+            self.sequence,
+            chunk.len()
+        )?;
+        self.sequence = self.sequence.saturating_add(1);
+        Ok(())
+    }
+}
+
+fn pty_dump_chunks_path(path: &Path) -> PathBuf {
+    let mut chunks = path.as_os_str().to_os_string();
+    chunks.push(".chunks");
+    PathBuf::from(chunks)
+}
+
+fn read_pty_output(
+    reader: &mut dyn Read,
+    output: &OutputRing,
+    wake: &OutputWake,
+    dump: Option<PtyDump>,
+) {
+    if let Some(dump) = dump {
+        read_pty_output_with_dump(reader, output, wake, dump);
+    } else {
+        read_pty_output_without_dump(reader, output, wake);
+    }
+}
+
+/// Keep the normal reader loop free of dump branches, clocks, allocations, and file operations.
+fn read_pty_output_without_dump(reader: &mut dyn Read, output: &OutputRing, wake: &OutputWake) {
+    let mut buffer = [0_u8; READER_CHUNK_BYTES];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        if output.push(buffer[..count].to_vec()).is_err() {
+            break;
+        }
+        wake();
+    }
+}
+
+fn read_pty_output_with_dump(
+    reader: &mut dyn Read,
+    output: &OutputRing,
+    wake: &OutputWake,
+    mut dump: PtyDump,
+) {
+    let mut buffer = [0_u8; READER_CHUNK_BYTES];
+    loop {
+        let count = match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        if let Err(error) = dump.write_chunk(&buffer[..count]) {
+            eprintln!("BT_PTY_DUMP disabled after write failure: {error}");
+            if output.push(buffer[..count].to_vec()).is_ok() {
+                wake();
+                read_pty_output_without_dump(reader, output, wake);
+            }
+            return;
+        }
+        if output.push(buffer[..count].to_vec()).is_err() {
+            break;
+        }
+        wake();
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PtySize {
@@ -345,6 +452,7 @@ impl PtySession {
     }
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
+        let dump = PtyDump::from_environment()?;
         let conpty_source = conpty_source();
         let strip_inherited_no_color = command.strips_inherited_no_color();
         let environment = command.resolved_environment();
@@ -373,17 +481,7 @@ impl PtySession {
         let output = Arc::new(OutputRing::new(PTY_RING_BYTES));
         let reader_output = Arc::clone(&output);
         let reader_thread = std::thread::spawn(move || {
-            let mut buffer = [0_u8; READER_CHUNK_BYTES];
-            loop {
-                let count = match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => count,
-                };
-                if reader_output.push(buffer[..count].to_vec()).is_err() {
-                    break;
-                }
-                wake();
-            }
+            read_pty_output(reader.as_mut(), &reader_output, &wake, dump);
             reader_output.close();
             wake();
         });
@@ -934,6 +1032,40 @@ mod tests {
             environment_value(&environment, "NO_COLOR"),
             Some(std::ffi::OsStr::new("1"))
         );
+    }
+
+    #[test]
+    fn pty_dump_is_an_exact_byte_sidecar_with_replayable_chunk_metadata() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path =
+            std::env::temp_dir().join(format!("bt-pty-dump-{}-{unique}.vt", std::process::id()));
+        let chunks_path = pty_dump_chunks_path(&path);
+        let dump = PtyDump::create(&path).unwrap();
+        let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
+        let mut reader = std::io::Cursor::new(b"first\x1b[2Jsecond".to_vec());
+
+        read_pty_output(&mut reader, &ring, &no_wake(), Some(dump));
+
+        assert_eq!(
+            ring.try_pop(NonZeroUsize::new(64).unwrap()),
+            b"first\x1b[2Jsecond"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"first\x1b[2Jsecond");
+        let manifest = std::fs::read_to_string(&chunks_path).unwrap();
+        let record = manifest
+            .lines()
+            .find(|line| !line.starts_with('#'))
+            .unwrap()
+            .split_ascii_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(record[0], "0");
+        assert_eq!(record[2], b"first\x1b[2Jsecond".len().to_string());
+
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(chunks_path).unwrap();
     }
 
     #[test]
