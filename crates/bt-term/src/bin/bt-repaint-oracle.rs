@@ -127,6 +127,47 @@ impl HeadlessOracle {
         Ok(())
     }
 
+    fn scroll_top_probe(&mut self) -> Result<(), Box<dyn Error>> {
+        // From the resting (bottom) view, scroll up one row at a time and report the highest
+        // rendered artifact top after each step. If the top never reaches >= 0 before the offset
+        // stops growing, the upward allowance cannot bring a tall block's top fully into the pane.
+        let mut last_offset = usize::MAX;
+        for step in 0..60 {
+            self.projection.scroll_by_rows(1);
+            self.session.refresh_projection(&mut self.projection);
+            let frame = self.session.viewport_frame(&mut self.projection)?;
+            let min_top = frame
+                .math_blocks
+                .iter()
+                .filter(|block| block.display == bt_viewport::MathBlockDisplay::Rendered)
+                .map(|block| {
+                    block
+                        .top_subpixels
+                        .saturating_add(block.content_offset_subpixels)
+                })
+                .min();
+            let offset = self.projection.scroll_offset_rows();
+            let (total, hist_off, live_allow, live_used, unread) =
+                self.projection.debug_scroll_extent();
+            eprintln!(
+                "SCROLLUP step={step} offset_rows={offset} total={total} hist_off={hist_off} live_allow={live_allow} live_used={live_used} unread={unread} min_artifact_top={:?} rendered={}",
+                min_top,
+                frame
+                    .math_blocks
+                    .iter()
+                    .filter(|b| b.display == bt_viewport::MathBlockDisplay::Rendered)
+                    .count(),
+            );
+            if offset == last_offset {
+                eprintln!("SCROLLUP capped at offset_rows={offset} after {step} steps");
+                self.dump_geometry(&frame);
+                break;
+            }
+            last_offset = offset;
+        }
+        Ok(())
+    }
+
     fn dump_geometry(&self, frame: &ViewportFrame) {
         for block in &frame.math_blocks {
             if block.display != bt_viewport::MathBlockDisplay::Rendered {
@@ -242,6 +283,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     final_elapsed = final_elapsed.saturating_add(LIVE_MATH_STABLE_INTERVAL);
     oracle.advance_before(started + final_elapsed, final_elapsed)?;
+
+    if env::var_os("BT_PROBE_GEOMETRY").is_some() || env::var_os("BT_PROBE_SCROLLTOP").is_some() {
+        let (total, hist_off, live_allow, live_used, unread) =
+            oracle.projection.debug_scroll_extent();
+        eprintln!(
+            "RESTEXTENT total={total} hist_off={hist_off} live_allow={live_allow} live_used={live_used} unread={unread}"
+        );
+    }
+
+    if env::var_os("BT_PROBE_SCROLLTOP").is_some() {
+        oracle.scroll_top_probe()?;
+    }
 
     if oracle.flash_oracle.flash_detected() {
         return Err(io::Error::other(format!(

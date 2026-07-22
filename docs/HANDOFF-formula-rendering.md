@@ -39,7 +39,22 @@ _最后更新:2026-07-22,HEAD `951c3fc`_
   计算偏差?)。**下次先用 `BT_PROBE_GEOMETRY` + 真机复现把大小屏差异挖实,再改滚动溢出量。**
 
 **❌ 别再走的死路**:M1.9u 初版把顶裁当 bt-math 光栅 alpha 贴边、加 1px 透明 guard —— **错根因,已撤**
-(顶裁是好几像素的窗格裁切,不是贴边)。顶裁是**滚动可达性**问题,不是光栅/clip 数值问题。
+(顶裁是好几像素的窗格裁切,不是贴边)。
+
+**根因已由真机 `cc-large.vt`(约 212×48,gitignored)字节级坐实(2026-07-22)**——用户假设正确:
+① CC **确实滚到它自己的顶**(录制里 banner「Claude Code」在文件 0.949、prompt 在 0.991 被 CC 重绘);
+② 我们 expand-only **向上**溢出的撑高累积把 banner 顶出窗格上边;③ 可上滚量 `last_live_overflow_rows`
+(`lib.rs:956`)实测只 5、顶出约 11 → 够不回;④ **最顶 aligned 块 `content_off` 变负**
+(`band=0..=7 top_sub=-84309 content_off=-17579 clip_h<art_h`)→ artifact 戳出自己 band 顶被裁。
+
+**⚠️ M1.9v Codex 首试(2026-07-22)被后台超时杀、且方向不足,已撤**:它加了
+`alternate_live_math_vertical_geometry` 辅助,但 before/after 探针 **live_allow 只 5→6、min_artifact_top
+仍 -83456(还是裁的)**——证明**光加可上滚量不够**。关键:高块 band 就在 row 0,`content_off` 负让
+artifact 戳出 band 顶,滚窗口也没用(它 band 之上没内容可露)。**真修得让「可达最顶」态 content_off ≥ 0
+(顶对齐不戳出)+ 可上滚量覆盖全部向上撑高**,两者都要。任务书
+`docs/prompts/codex-M1-9v-scroll-overflow-reveal.md` 已写;诊断工具
+(`BT_PROBE_SCROLLTOP`/`BT_PROBE_GEOMETRY`/`debug_scroll_extent`)在工作树未提交。
+**下次可先提交诊断工具再重派 Codex(给更长 runway)或自己改。**
 
 ## 关键工具 / 方法(今天血泪换来的,务必沿用)
 

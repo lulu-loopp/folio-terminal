@@ -774,6 +774,19 @@ impl ViewportProjection {
         self.unread_rows
     }
 
+    /// Diagnostic snapshot of the scroll-extent bookkeeping: the last projected total row count,
+    /// the history offset, the live-overflow allowance, and how much of it is consumed.
+    pub fn debug_scroll_extent(&self) -> (usize, usize, usize, usize, usize) {
+        (
+            self.last_total_rows,
+            self.pending_scroll_offset_rows
+                .unwrap_or(self.scroll_offset_rows),
+            self.last_live_overflow_rows,
+            self.live_overflow_offset_rows,
+            self.unread_rows,
+        )
+    }
+
     pub fn is_scrolled(&self) -> bool {
         self.scroll_offset_rows() != 0
     }
