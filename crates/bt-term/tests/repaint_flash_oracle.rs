@@ -46,6 +46,19 @@ fn observe_frame(
     oracle.observe(&frame).state
 }
 
+fn synchronized_repaint(rows: &[&str]) -> Vec<u8> {
+    let mut out = b"\x1b[?2026h\x1b[?25l\x1b[H".to_vec();
+    for (row, line) in rows.iter().enumerate() {
+        if row != 0 {
+            out.extend_from_slice(format!("\x1b[{};1H", row + 1).as_bytes());
+        }
+        out.extend_from_slice(b"\x1b[K");
+        out.extend_from_slice(line.as_bytes());
+    }
+    out.extend_from_slice(b"\x1b[?25h\x1b[?2026l");
+    out
+}
+
 #[test]
 fn interaction_repaint_never_reexposes_ready_formula_source() {
     let start = std::time::Instant::now();
@@ -245,4 +258,217 @@ fn synchronized_update_repaint_never_reexposes_ready_formula_source() {
         oracle.frames(),
         oracle.flashed_sources()
     );
+}
+
+#[test]
+fn multiline_formula_crossing_internal_pane_bottom_keeps_identity_and_raster() {
+    const BEFORE: &[&str] = &[
+        "content alpha",
+        "content beta",
+        "$$",
+        r"\begin{aligned}",
+        r"a &= b + c \\",
+        r"d &= e + f \\",
+        r"\end{aligned}",
+        "$$",
+        "",
+        "────────────────────────",
+        "prompt> ",
+        "status: ready",
+    ];
+    const CROSSES_PANE_BOTTOM: &[&str] = &[
+        "new content 0",
+        "new content 1",
+        "new content 2",
+        "content alpha",
+        "content beta",
+        "$$",
+        r"\begin{aligned}",
+        r"a &= b + c \\",
+        "",
+        "────────────────────────",
+        "prompt> ",
+        "status: ready",
+    ];
+
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(12));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(BEFORE));
+    session.feed_at(&first, start).unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    let detections = session.live_detection_count();
+
+    // The upper content pane moves by +3 while blank row 8 and the fixed chrome at rows 9..11 stay
+    // put. The proven band now intersects the content pane only at rows 5..7; its tail is occluded,
+    // not mapped onto the separator/prompt. Mutation: using one whole-band delta compares those
+    // tail rows with chrome and makes this assertion turn red.
+    session
+        .feed_at(
+            &synchronized_repaint(CROSSES_PANE_BOTTOM),
+            start + Duration::from_millis(400),
+        )
+        .unwrap();
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    let observation = oracle.frames().last().unwrap();
+    assert_eq!(observation.occluded_sources.len(), 1);
+
+    // A later in-place repaint keeps the previously proven pane boundary. The Jump chip mutates
+    // only the pane's last row, so that row becomes occluded without granting a frame-wide waiver.
+    let mut boundary_overlay = CROSSES_PANE_BOTTOM.to_vec();
+    boundary_overlay[7] = r"a &= b + c \\        Jump to bottom";
+    session
+        .feed_at(
+            &synchronized_repaint(&boundary_overlay),
+            start + Duration::from_millis(420),
+        )
+        .unwrap();
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
+    assert_eq!(
+        session.live_detection_count(),
+        detections,
+        "preserving a proven block must not schedule first detection again"
+    );
+}
+
+#[test]
+fn repaint_with_opener_above_row_zero_keeps_visible_formula_suffix_rendered() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(40), nz(6));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&[
+        "top", "$$", "x + y", "$$", "tail", "prompt> ",
+    ]));
+    session.feed_at(&first, start).unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    let detections = session.live_detection_count();
+
+    // The opener and the old top row are now above row zero. The body/closer suffix is exact,
+    // so this is preservation of an already-proven occurrence, not an ambiguous first detection.
+    session
+        .feed_at(
+            &synchronized_repaint(&["x + y", "$$", "tail", "prompt> ", "", ""]),
+            start + Duration::from_millis(400),
+        )
+        .unwrap();
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
+    assert_eq!(session.live_detection_count(), detections);
+}
+
+#[test]
+fn repaint_with_closer_below_last_row_keeps_visible_formula_prefix_rendered() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(40), nz(8));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    let complete = [
+        "$$",
+        r"\begin{cases}",
+        r"x + y &= 1 \\",
+        r"x - y &= 0",
+        r"\end{cases}",
+        "$$",
+        "tail",
+        "prompt> ",
+    ];
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&synchronized_repaint(&complete));
+    session.feed_at(&first, start).unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    let detections = session.live_detection_count();
+
+    // The same proven block moves down: its closer is now one row below the grid, while the exact
+    // opener/body/end prefix remains visible and must keep the original band/raster identity.
+    session
+        .feed_at(
+            &synchronized_repaint(&[
+                "header 0",
+                "header 1",
+                "header 2",
+                "$$",
+                r"\begin{cases}",
+                r"x + y &= 1 \\",
+                r"x - y &= 0",
+                r"\end{cases}",
+            ]),
+            start + Duration::from_millis(400),
+        )
+        .unwrap();
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
+    assert_eq!(session.live_detection_count(), detections);
+}
+
+#[test]
+fn rendered_formula_stays_rendered_across_grid_resize_and_fresh_raster_swap() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(48), nz(8));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    session
+        .feed_at(b"\x1b[?1049h$$x^2 + y^2 = z^2$$\r\nprompt> ", start)
+        .unwrap();
+    observe_frame(&mut session, &mut projection, &mut oracle);
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+
+    session
+        .resize_at(nz(40), nz(10), start + Duration::from_millis(250))
+        .unwrap();
+    projection = session.new_projection(session.layout_key());
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered,
+        "the stale raster must bridge the resize without exposing source"
+    );
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_frame(&mut session, &mut projection, &mut oracle),
+        FormulaFrameState::Rendered
+    );
+    assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
 }

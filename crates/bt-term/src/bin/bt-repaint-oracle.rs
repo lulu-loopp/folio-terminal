@@ -89,23 +89,27 @@ impl HeadlessOracle {
     fn publish(&mut self, event: &str, elapsed: Duration) -> Result<(), Box<dyn Error>> {
         self.session.refresh_projection(&mut self.projection);
         let frame = self.session.viewport_frame(&mut self.projection)?;
-        let (state, rendered_sources, source_rows) = {
+        let (state, rendered_sources, source_rows, occluded_sources) = {
             let observation = self.flash_oracle.observe(&frame);
             (
                 observation.state,
                 observation.rendered_sources.clone(),
                 observation.source_rows.clone(),
+                observation.occluded_sources.clone(),
             )
         };
         let flash_detected = self.flash_oracle.flash_detected();
         println!(
-            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} flash={}",
+            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} occluded={:?} flash={} detections={} invalidations={}",
             self.frame_sequence,
             elapsed.as_micros(),
             state,
             rendered_sources,
             source_rows,
+            occluded_sources,
             flash_detected,
+            self.session.live_detection_count(),
+            self.session.live_invalidation_count(),
         );
         self.frame_sequence = self.frame_sequence.saturating_add(1);
         Ok(())

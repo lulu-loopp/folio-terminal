@@ -9,11 +9,11 @@ use std::{
 };
 
 use bt_detect::{
-    DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionTask,
-    LiveDetectionInput, LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES,
-    MathSourceLine, MathSpan, PlaceholderArtifact, StaleArtifact, advance_detection_context,
-    detect_math_blocks, resolve_detection_task, resolve_live_detection_task,
-    resolve_live_detection_tasks,
+    DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
+    DetectionTask, LiveDetectionInput, LiveDetectionSource, LiveDetectionTask,
+    MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine, MathSpan, PlaceholderArtifact,
+    StaleArtifact, advance_detection_context, detect_math_blocks_with_options,
+    resolve_detection_task, resolve_live_detection_task, resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -29,9 +29,9 @@ use bt_transcript::{
 };
 use bt_viewport::{
     FrameProjectionError, FrameViewportOrigin, GridCursor, HorizontalOverflowOwner,
-    MathBlockAnchor, MathBlockDisplay, MathBlockPlacement, MathFailurePlacement,
-    ProjectedLiveMathArtifact, ProjectedMathArtifact, ViewSelection, ViewportFrame,
-    ViewportProjection,
+    LiveMathOccurrenceId, MathBlockAnchor, MathBlockDisplay, MathBlockPlacement,
+    MathFailurePlacement, ProjectedLiveMathArtifact, ProjectedMathArtifact, ViewSelection,
+    ViewportFrame, ViewportProjection,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -51,6 +51,7 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// than forty conventional 24-row terminal screens while bounding each shared worker snapshot.
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
+const MAX_ALTERNATE_OFFSCREEN_RECORDS: usize = 128;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
 const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
@@ -70,6 +71,9 @@ pub struct MathLayoutOptions {
     /// Symmetric display-math padding per side, in thousandths of the measured cell height.
     /// Zero is valid and intentionally exposes the alpha-tight raster without breathing room.
     pub vertical_padding_cell_milli: u32,
+    /// Work around Claude Code stripping one slash from environment row separators. Disable this
+    /// after Claude Code emits LaTeX `\\\\` row separators faithfully.
+    pub restore_stripped_environment_newlines: bool,
 }
 
 impl Default for MathLayoutOptions {
@@ -78,6 +82,7 @@ impl Default for MathLayoutOptions {
             line_wrapping: true,
             block_max_height_px: None,
             vertical_padding_cell_milli: DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI,
+            restore_stripped_environment_newlines: true,
         }
     }
 }
@@ -113,13 +118,61 @@ struct LiveRowStability {
 }
 
 #[derive(Clone, Debug)]
+struct ProvenLiveRow {
+    band_offset: u32,
+    text: String,
+    continues: bool,
+    cell_boundaries: Vec<(u32, u32)>,
+}
+
+impl ProvenLiveRow {
+    fn exactly_matches(&self, input: &LiveDetectionInput) -> bool {
+        self.text == input.text
+            && self.continues == input.continues
+            && self.cell_boundaries == input.cell_boundaries
+    }
+}
+
+/// Immutable identity for one detector-proven occurrence. Grid rows deliberately do not live in
+/// this object: two identical formulas remain distinct occurrences, while repaint placement can
+/// move or become partially occluded without rewriting the proof which produced the artifact.
+#[derive(Clone, Debug)]
+struct ProvenLiveOccurrence {
+    occurrence_id: LiveMathOccurrenceId,
+    created_generation: GridGeneration,
+    created_start: GridPoint,
+    band_rows: u32,
+    source_start_offset: u32,
+    source_end_offset: u32,
+    source_rows: Vec<ProvenLiveRow>,
+    span: MathSpan,
+}
+
+/// Mutable projection of a proven occurrence into the current alternate-screen transaction.
+/// `logical_band_start` is signed and never clamped to a terminal edge. The visible fields on the
+/// record below are only the exact intersection which projection is allowed to suppress.
+#[derive(Clone, Debug)]
+struct LiveOccurrencePlacement {
+    logical_band_start: i64,
+    occluded_source_rows: u32,
+}
+
+#[derive(Clone, Debug)]
 struct LiveDecorationRecord {
+    identity: ProvenLiveOccurrence,
+    placement: LiveOccurrencePlacement,
     screen: ScreenId,
     generation: GridGeneration,
     start: GridPoint,
     end: GridPoint,
     band_start_row: u32,
     band_end_row: u32,
+    /// Rows from the proven owned band that currently sit above alternate-screen row zero.
+    /// Projection keeps their geometry but clips their pixels and terminal cells.
+    clipped_top_rows: u32,
+    /// Rows from the proven owned band that currently sit below the alternate-screen bottom.
+    /// Like top clipping, these retain identity and geometry without entering the visible grid.
+    clipped_bottom_rows: u32,
     detection_revision: DetectionRevision,
     layout: LayoutKey,
     rendered_layout: LayoutKey,
@@ -135,11 +188,19 @@ struct LiveDecorationRecord {
     failure_reason: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SegmentedRowMapping {
+    content_delta: i64,
+    content_start_row: u32,
+    content_end_row: u32,
+    fixed_start_row: Option<u32>,
+}
+
 #[derive(Clone, Debug)]
 struct AlternateRepaintSnapshot {
-    initial_context: DetectionContext,
     inputs: Arc<[LiveDetectionInput]>,
     decorations: Vec<LiveDecorationRecord>,
+    dormant_decorations: Vec<LiveDecorationRecord>,
     invalidation_count: u64,
     snapshot_boundary: bool,
 }
@@ -290,7 +351,11 @@ pub struct DualPlaneSession {
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
+    next_live_occurrence_id: u64,
+    alternate_offscreen_decorations: VecDeque<LiveDecorationRecord>,
+    alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
+    alternate_content_end_row: Option<u32>,
     /// User presentation choices are content state, not decoration-instance state. Entries are
     /// created only by an explicit toggle and live for the session, so alternate-screen repaint,
     /// redetection, grid-generation changes, and layout changes cannot reset the choice.
@@ -398,7 +463,11 @@ impl DualPlaneSession {
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
             live_decorations: BTreeMap::new(),
+            next_live_occurrence_id: 1,
+            alternate_offscreen_decorations: VecDeque::new(),
+            alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
+            alternate_content_end_row: None,
             math_source_preferences: HashMap::new(),
             pending_live_handoffs: Vec::new(),
             frozen_detection_context: DetectionContext::default(),
@@ -488,6 +557,14 @@ impl DualPlaneSession {
         self.math_layout_options = options;
     }
 
+    fn detection_options(&self) -> DetectionOptions {
+        DetectionOptions {
+            restore_stripped_environment_newlines: self
+                .math_layout_options
+                .restore_stripped_environment_newlines,
+        }
+    }
+
     fn math_vertical_padding_subpixels(&self) -> i64 {
         self.cell_height_subpixels
             .get()
@@ -535,8 +612,10 @@ impl DualPlaneSession {
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
-        let alternate_repaint = self.begin_alternate_repaint(bytes);
-        self.alternate_repaint_in_progress = alternate_repaint.is_some();
+        if self.alternate_repaint_snapshot.is_none() {
+            self.alternate_repaint_snapshot = self.begin_alternate_repaint(bytes);
+        }
+        self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         // Frozen history is immutable. Staging/live selections are conservatively invalidated by
         // output because the parser may rewrite a selected row without emitting a removal fact.
         if !bytes.is_empty() && self.selection_touches_mutable_source() {
@@ -564,13 +643,18 @@ impl DualPlaneSession {
             }
             Ok(())
         })();
-        self.alternate_repaint_in_progress = false;
-        if let Some(snapshot) = alternate_repaint {
-            if result.is_ok() {
-                self.finish_alternate_repaint(snapshot);
-            } else {
-                self.invalidate_all_live_decorations();
-            }
+        if result.is_err() {
+            self.alternate_repaint_snapshot = None;
+            self.alternate_repaint_in_progress = false;
+            self.invalidate_all_live_decorations();
+        } else if self.synchronized_update_deadline().is_none()
+            && let Some(snapshot) = self.alternate_repaint_snapshot.take()
+        {
+            self.finish_alternate_repaint(snapshot);
+        }
+        self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
+        if result.is_ok() {
+            self.restore_alternate_offscreen_decorations();
         }
         result
     }
@@ -606,9 +690,13 @@ impl DualPlaneSession {
                 },
             );
         }
+        let alternate_resize = self.snapshot_alternate_repaint(false);
+        self.alternate_repaint_in_progress = alternate_resize.is_some();
         let events = self.terminal.resize(columns, rows);
         let _ = self.terminal.take_damage();
-        self.invalidate_all_live_decorations();
+        if alternate_resize.is_none() {
+            self.invalidate_all_live_decorations();
+        }
         self.pending_live_handoffs.clear();
         // Seed the damage clock instead of leaving it None: stability is judged by
         // `last_damage_at.is_some_and(elapsed >= INTERVAL)`, so a None row is never stable and
@@ -624,7 +712,13 @@ impl DualPlaneSession {
             };
             rows.get() as usize
         ];
-        self.apply_events(events, observed_at)?;
+        let apply_result = self.apply_events(events, observed_at);
+        self.alternate_repaint_in_progress = false;
+        apply_result?;
+        if let Some(snapshot) = alternate_resize {
+            self.finish_alternate_repaint(snapshot);
+        }
+        self.restore_alternate_offscreen_decorations();
         if plan.begin_transaction {
             self.trace_resize_event(
                 observed_at,
@@ -671,11 +765,22 @@ impl DualPlaneSession {
         if self.synchronized_update_deadline().is_none() {
             return Ok(false);
         }
+        self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         let events = self.terminal.finish_synchronized_update();
         let damage = self.terminal.take_damage();
-        self.apply_events(events, observed_at)?;
+        if let Err(error) = self.apply_events(events, observed_at) {
+            self.alternate_repaint_snapshot = None;
+            self.alternate_repaint_in_progress = false;
+            self.invalidate_all_live_decorations();
+            return Err(error);
+        }
         self.observe_live_damage(damage, observed_at);
         self.sync_staging_tail();
+        if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
+            self.finish_alternate_repaint(snapshot);
+        }
+        self.alternate_repaint_in_progress = false;
+        self.restore_alternate_offscreen_decorations();
         Ok(true)
     }
 
@@ -825,6 +930,7 @@ impl DualPlaneSession {
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
+                options: self.detection_options(),
                 initial_context: initial_context.clone(),
                 inputs: Arc::clone(&inputs),
                 start: GridPoint {
@@ -924,16 +1030,29 @@ impl DualPlaneSession {
 
     fn begin_alternate_repaint(&self, bytes: &[u8]) -> Option<AlternateRepaintSnapshot> {
         let snapshot_boundary = contains_clear_home_snapshot_boundary(bytes);
-        (snapshot_boundary
-            && self.live_screen == ScreenId::Alternate
+        snapshot_boundary
+            .then(|| self.snapshot_alternate_repaint(snapshot_boundary))
+            .flatten()
+    }
+
+    fn snapshot_alternate_repaint(
+        &self,
+        snapshot_boundary: bool,
+    ) -> Option<AlternateRepaintSnapshot> {
+        (self.live_screen == ScreenId::Alternate
             && self.terminal.modes().alternate_screen
-            && !self.live_decorations.is_empty())
+            && (!self.live_decorations.is_empty()
+                || !self.alternate_offscreen_decorations.is_empty()))
         .then(|| {
             let inputs = self.live_detection_context();
             AlternateRepaintSnapshot {
-                initial_context: self.live_initial_detection_context(&inputs),
                 inputs,
                 decorations: self.live_decorations.values().cloned().collect(),
+                dormant_decorations: self
+                    .alternate_offscreen_decorations
+                    .iter()
+                    .cloned()
+                    .collect(),
                 invalidation_count: self.live_invalidation_count,
                 snapshot_boundary,
             }
@@ -947,31 +1066,41 @@ impl DualPlaneSession {
 
         let current_inputs = self.live_detection_context();
         let current_initial_context = self.live_initial_detection_context(&current_inputs);
-        let before_prefixes =
-            live_grid_parser_prefixes(&snapshot.inputs, snapshot.initial_context.clone());
-        let current_prefixes =
-            live_grid_parser_prefixes(&current_inputs, current_initial_context.clone());
-        let row_count = u32::try_from(self.live_rows.len()).unwrap_or(u32::MAX);
+        let mut row_mappings = segmented_row_mapping(&snapshot.inputs, &current_inputs);
+        if let Some(content_end_row) = self.alternate_content_end_row
+            && fixed_boundary_remains_proven(&snapshot.inputs, &current_inputs, content_end_row)
+        {
+            for mapping in &mut row_mappings {
+                if mapping.fixed_start_row.is_none() {
+                    mapping.content_end_row = mapping.content_end_row.min(content_end_row);
+                    mapping.fixed_start_row = content_end_row.checked_add(1);
+                }
+            }
+        }
+        if let Some(content_end_row) = row_mappings
+            .iter()
+            .filter_map(|mapping| mapping.fixed_start_row.map(|_| mapping.content_end_row))
+            .min()
+        {
+            self.alternate_content_end_row = Some(content_end_row);
+        }
         let mut preserved = BTreeMap::new();
         let mut occupied = BTreeSet::new();
         let mut unresolved = Vec::new();
+        self.alternate_offscreen_decorations.clear();
 
-        for record in snapshot.decorations {
-            let exact_mapping = alternate_record_mapping(
-                &record,
-                &snapshot.inputs,
-                &current_inputs,
-                &before_prefixes,
-                &current_prefixes,
-                row_count,
-            );
-            let Some(delta) = exact_mapping else {
+        for record in snapshot
+            .decorations
+            .into_iter()
+            .chain(snapshot.dormant_decorations)
+        {
+            if row_mappings.is_empty() {
                 unresolved.push(record);
                 continue;
-            };
-            let Some(record) = shift_live_record(
+            }
+            let Some(projected) = project_live_record_uniquely(
                 &record,
-                delta,
+                &row_mappings,
                 self.grid_generation,
                 self.detection_revision,
                 self.layout_key,
@@ -980,6 +1109,13 @@ impl DualPlaneSession {
             ) else {
                 unresolved.push(record);
                 continue;
+            };
+            let record = match projected {
+                RecordProjection::Visible(record) => record,
+                RecordProjection::Dormant(record) => {
+                    self.retain_alternate_offscreen_record(record);
+                    continue;
+                }
             };
             if let Some(record) =
                 insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
@@ -1003,7 +1139,9 @@ impl DualPlaneSession {
                     still_unresolved.push(record);
                     continue;
                 };
-                let delta = i64::from(task.start.row) - i64::from(record.start.row);
+                let delta = i64::from(task.start.row)
+                    .saturating_sub(record.placement.logical_band_start)
+                    .saturating_sub(i64::from(record.identity.source_start_offset));
                 let Some(mut record) = shift_live_record(
                     &record,
                     delta,
@@ -1034,9 +1172,14 @@ impl DualPlaneSession {
             unresolved = still_unresolved;
         }
 
-        self.live_invalidation_count = snapshot
-            .invalidation_count
-            .saturating_add(unresolved.len() as u64);
+        self.live_invalidation_count = snapshot.invalidation_count;
+        for record in unresolved {
+            if record.artifact.is_some() || record.stale_artifact.is_some() {
+                self.retain_alternate_offscreen_record(record);
+            } else {
+                self.live_invalidation_count = self.live_invalidation_count.saturating_add(1);
+            }
+        }
         self.live_decorations = preserved;
         let context_signature = live_detection_context_signature(&current_inputs);
         let stable = vec![true; self.live_rows.len()];
@@ -1084,6 +1227,7 @@ impl DualPlaneSession {
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
+                options: self.detection_options(),
                 initial_context: initial_context.clone(),
                 inputs: Arc::clone(&inputs),
                 start: GridPoint {
@@ -1106,6 +1250,122 @@ impl DualPlaneSession {
         tasks
     }
 
+    fn retain_alternate_offscreen_record(&mut self, record: LiveDecorationRecord) {
+        if self.live_screen != ScreenId::Alternate {
+            return;
+        }
+        if self.alternate_offscreen_decorations.len() == MAX_ALTERNATE_OFFSCREEN_RECORDS {
+            self.alternate_offscreen_decorations.pop_front();
+        }
+        self.alternate_offscreen_decorations.push_back(record);
+    }
+
+    fn restore_alternate_offscreen_decorations(&mut self) {
+        if self.live_screen != ScreenId::Alternate
+            || self.alternate_offscreen_decorations.is_empty()
+        {
+            return;
+        }
+        let inputs = self.live_detection_context();
+        let initial_context = self.live_initial_detection_context(&inputs);
+        let prefixes = live_grid_parser_prefixes(&inputs, initial_context.clone());
+        let mut occupied = self
+            .live_decorations
+            .values()
+            .flat_map(|record| record.band_start_row..=record.band_end_row)
+            .collect::<BTreeSet<_>>();
+        let mut remaining = VecDeque::new();
+        let mut relayout_tasks = Vec::new();
+        while let Some(mut record) = self.alternate_offscreen_decorations.pop_front() {
+            let Some((start, end, segments)) =
+                exact_live_source_match(&record.span.original_source, &inputs, &occupied)
+            else {
+                remaining.push_back(record);
+                continue;
+            };
+            if prefixes
+                .get(&start.row)
+                .is_some_and(DetectionContext::is_commonmark_code)
+            {
+                remaining.push_back(record);
+                continue;
+            }
+            let Some(logical_band_start) =
+                i64::from(start.row).checked_sub(i64::from(record.identity.source_start_offset))
+            else {
+                remaining.push_back(record);
+                continue;
+            };
+            let Some(logical_band_end) = logical_band_start
+                .checked_add(i64::from(record.identity.band_rows.saturating_sub(1)))
+            else {
+                remaining.push_back(record);
+                continue;
+            };
+            let Ok(band_start_row) = u32::try_from(logical_band_start) else {
+                remaining.push_back(record);
+                continue;
+            };
+            let Ok(band_end_row) = u32::try_from(logical_band_end) else {
+                remaining.push_back(record);
+                continue;
+            };
+            record.start = start;
+            record.end = end;
+            record.band_start_row = band_start_row;
+            record.band_end_row = band_end_row;
+            record.clipped_top_rows = 0;
+            record.clipped_bottom_rows = 0;
+            record.placement.logical_band_start = logical_band_start;
+            record.placement.occluded_source_rows = 0;
+            record.generation = self.grid_generation;
+            record.detection_revision = self.detection_revision;
+            if record.rendered_layout != self.layout_key
+                && let Some(artifact) = record.artifact.take()
+            {
+                record.stale_artifact = Some(StaleArtifact {
+                    artifact,
+                    rendered_layout: record.rendered_layout,
+                });
+            }
+            record.layout = self.layout_key;
+            record.initial_context = initial_context.clone();
+            record.inputs = Arc::clone(&inputs);
+            record.span = record.identity.span.clone();
+            record.span.cell_segments = segments;
+            if record.artifact.is_none() && record.stale_artifact.is_some() {
+                relayout_tasks.push(LiveDetectionTask {
+                    candidate_row: record.end.row,
+                    screen: record.screen,
+                    grid_generation: record.generation,
+                    detection_revision: record.detection_revision,
+                    layout: record.layout,
+                    cell_width_subpixels: self.cell_width_subpixels.get(),
+                    cell_height_subpixels: self.cell_height_subpixels.get(),
+                    ascii_baseline_subpixels: self
+                        .ascii_baseline_subpixels
+                        .map_or(0, NonZeroI64::get),
+                    options: self.detection_options(),
+                    initial_context: record.initial_context.clone(),
+                    inputs: Arc::clone(&record.inputs),
+                    start: record.start,
+                    end: record.end,
+                    band_start_row: record.band_start_row,
+                    band_end_row: record.band_end_row,
+                    span: record.span.clone(),
+                    detection_complete: true,
+                    resolved: true,
+                });
+            }
+            occupied.extend(record.band_start_row..=record.band_end_row);
+            self.live_decorations.insert(record.start.row, record);
+        }
+        self.alternate_offscreen_decorations = remaining;
+        for task in relayout_tasks {
+            self.enqueue_live_task(task);
+        }
+    }
+
     fn observe_live_damage(&mut self, damage: TerminalDamage, observed_at: Instant) {
         let screen = if self.terminal.modes().alternate_screen {
             ScreenId::Alternate
@@ -1114,6 +1374,7 @@ impl DualPlaneSession {
         };
         if screen != self.live_screen {
             self.invalidate_all_live_decorations();
+            self.alternate_content_end_row = None;
             self.pending_live_handoffs.clear();
             self.live_screen = screen;
             self.live_tasks.clear();
@@ -1157,17 +1418,25 @@ impl DualPlaneSession {
             .filter(|(_, record)| record.band_start_row <= row && row <= record.band_end_row)
             .map(|(start, _)| *start)
             .collect::<Vec<_>>();
-        self.live_invalidation_count = self
-            .live_invalidation_count
-            .saturating_add(removed.len() as u64);
-        if !removed.is_empty() && std::env::var_os("BT_PERF_TRACE").is_some() {
+        let mut invalidated = 0_u64;
+        for start in removed {
+            let Some(record) = self.live_decorations.remove(&start) else {
+                continue;
+            };
+            if self.live_screen == ScreenId::Alternate
+                && (record.artifact.is_some() || record.stale_artifact.is_some())
+            {
+                self.retain_alternate_offscreen_record(record);
+            } else {
+                invalidated = invalidated.saturating_add(1);
+            }
+        }
+        self.live_invalidation_count = self.live_invalidation_count.saturating_add(invalidated);
+        if invalidated != 0 && std::env::var_os("BT_PERF_TRACE").is_some() {
             eprintln!(
                 "BT_PERF_TRACE live_math_event=invalidate live_math_detect={} live_math_invalidations={}",
                 self.live_detection_count, self.live_invalidation_count
             );
-        }
-        for start in removed {
-            self.live_decorations.remove(&start);
         }
     }
 
@@ -1175,6 +1444,9 @@ impl DualPlaneSession {
         let removed = self.live_decorations.len();
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(removed as u64);
         self.live_decorations.clear();
+        if !(self.live_screen == ScreenId::Alternate && self.alternate_repaint_in_progress) {
+            self.alternate_offscreen_decorations.clear();
+        }
         if removed != 0 && std::env::var_os("BT_PERF_TRACE").is_some() {
             eprintln!(
                 "BT_PERF_TRACE live_math_event=invalidate-all live_math_detect={} live_math_invalidations={}",
@@ -1432,6 +1704,11 @@ impl DualPlaneSession {
             .retain(|_, record| record.end.row < task.start.row || record.start.row > task.end.row);
         let (hovered, horizontal_scroll_px, vertical_scroll_px) =
             remembered.unwrap_or((false, 0, 0));
+        let occurrence_id = LiveMathOccurrenceId(self.next_live_occurrence_id);
+        let Some(identity) = proven_live_occurrence(&task, occurrence_id) else {
+            return false;
+        };
+        self.next_live_occurrence_id = self.next_live_occurrence_id.saturating_add(1);
         // Install summaries only for the rows whose pixels are about to suppress source. Ordinary
         // TUI rows stay O(damaged rows), while a same-content repaint of this local dependency band
         // can retain the artifact without cloning any cell Strings.
@@ -1443,12 +1720,19 @@ impl DualPlaneSession {
         self.live_decorations.insert(
             task.start.row,
             LiveDecorationRecord {
+                identity,
+                placement: LiveOccurrencePlacement {
+                    logical_band_start: i64::from(task.band_start_row),
+                    occluded_source_rows: 0,
+                },
                 screen: task.screen,
                 generation: task.grid_generation,
                 start: task.start,
                 end: task.end,
                 band_start_row: task.band_start_row,
                 band_end_row: task.band_end_row,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
                 detection_revision: task.detection_revision,
                 layout: task.layout,
                 rendered_layout: task.layout,
@@ -2044,11 +2328,15 @@ impl DualPlaneSession {
                     })
                     .flatten()
                     .map(|artifact| ProjectedLiveMathArtifact {
+                        occurrence_id: record.identity.occurrence_id,
                         screen: record.screen,
                         start: record.start,
                         end: record.end,
                         band_start_row: record.band_start_row,
                         band_end_row: record.band_end_row,
+                        clipped_top_rows: record.clipped_top_rows,
+                        clipped_bottom_rows: record.clipped_bottom_rows,
+                        occluded_source_rows: record.placement.occluded_source_rows,
                         generation: record.generation,
                         artifact,
                     })
@@ -2166,6 +2454,8 @@ impl DualPlaneSession {
                 horizontal_scroll_px: 0,
                 vertical_scroll_px: 0,
                 toolbar_visible: record.hovered,
+                occluded_source_rows: 0,
+                live_occurrence_id: None,
             });
         }
 
@@ -2230,6 +2520,8 @@ impl DualPlaneSession {
                 },
                 vertical_scroll_px: record.vertical_scroll_px,
                 toolbar_visible: record.hovered,
+                occluded_source_rows: record.placement.occluded_source_rows,
+                live_occurrence_id: Some(record.identity.occurrence_id),
             });
         }
 
@@ -2288,6 +2580,8 @@ impl DualPlaneSession {
                 horizontal_scroll_px: 0,
                 vertical_scroll_px: 0,
                 toolbar_visible: false,
+                occluded_source_rows: 0,
+                live_occurrence_id: None,
             });
         }
 
@@ -2352,6 +2646,8 @@ impl DualPlaneSession {
                 horizontal_scroll_px: 0,
                 vertical_scroll_px: 0,
                 toolbar_visible: false,
+                occluded_source_rows: 0,
+                live_occurrence_id: Some(record.identity.occurrence_id),
             });
         }
 
@@ -2587,19 +2883,12 @@ impl DualPlaneSession {
                     if self.resize_epoch.is_active() {
                         self.rebase_vendor_owned_rows(rows);
                     } else {
-                        let preserve_primary_scroll = matches!(
+                        let preserve_full_screen_scroll = matches!(
                             full_screen_output_scroll,
-                            Some((RemovalScreen::Primary, count)) if count != 0
+                            Some((RemovalScreen::Primary | RemovalScreen::Alternate, count))
+                                if count != 0
                         );
-                        self.apply_removed_rows(rows, preserve_primary_scroll)?;
-                        if let Some((RemovalScreen::Alternate, count)) = full_screen_output_scroll
-                            && count != 0
-                        {
-                            self.grid_generation.0 += 1;
-                            self.document
-                                .capture_rows_transaction(&[], self.grid_generation);
-                            self.preserve_live_after_top_scroll(count);
-                        }
+                        self.apply_removed_rows(rows, preserve_full_screen_scroll)?;
                     }
                 }
                 LifecycleDirective::ClearHistoryAndStaging => {
@@ -2777,26 +3066,44 @@ impl DualPlaneSession {
         self.live_rows
             .extend(std::iter::repeat_n(LiveRowStability::default(), shift));
         let shift = u32::try_from(shift).unwrap_or(u32::MAX);
+        let inputs = self.live_detection_context();
+        let last_row = after_grid_row_count(&inputs).saturating_sub(1);
+        let mapping = SegmentedRowMapping {
+            content_delta: -i64::from(shift),
+            content_start_row: 0,
+            content_end_row: last_row,
+            fixed_start_row: None,
+        };
         let mut preserved = BTreeMap::new();
         let mut invalidated = 0usize;
-        for (_, mut record) in std::mem::take(&mut self.live_decorations) {
-            if record.band_start_row < shift {
+        for (_, record) in std::mem::take(&mut self.live_decorations) {
+            let Some(projected) = project_live_record(
+                &record,
+                mapping,
+                self.grid_generation,
+                self.detection_revision,
+                self.layout_key,
+                record.initial_context.clone(),
+                Arc::clone(&inputs),
+            ) else {
                 invalidated += 1;
                 continue;
+            };
+            match projected {
+                RecordProjection::Visible(record) => {
+                    preserved.insert(record.start.row, record);
+                }
+                RecordProjection::Dormant(record) if self.live_screen == ScreenId::Alternate => {
+                    self.retain_alternate_offscreen_record(record);
+                }
+                RecordProjection::Dormant(_) => invalidated += 1,
             }
-            record.start.row -= shift;
-            record.end.row -= shift;
-            record.band_start_row -= shift;
-            record.band_end_row -= shift;
-            record.generation = self.grid_generation;
-            preserved.insert(record.start.row, record);
         }
         self.live_invalidation_count = self
             .live_invalidation_count
             .saturating_add(invalidated as u64);
         self.live_decorations = preserved;
 
-        let inputs = self.live_detection_context();
         let context_signature = live_detection_context_signature(&inputs);
         for record in self.live_decorations.values_mut() {
             record.inputs = Arc::clone(&inputs);
@@ -2913,11 +3220,12 @@ impl DualPlaneSession {
         // handoff; the normal frozen worker remains the source of truth.
         let block = (expected_end == closing_id.0)
             .then(|| {
-                detect_math_blocks(
+                detect_math_blocks_with_options(
                     self.document
                         .entries()
                         .range(candidate_start..=closing_id)
                         .map(|(id, entry)| (*id, entry.line.text.as_str())),
+                    self.detection_options(),
                 )
                 .into_iter()
                 .find(|block| {
@@ -3014,6 +3322,7 @@ impl DualPlaneSession {
 
     fn invalidate_layout(&mut self) {
         self.pending_live_handoffs.clear();
+        let detection_options = self.detection_options();
         for record in self.decorations.values_mut() {
             record.layout_changed(self.layout_key);
         }
@@ -3022,9 +3331,15 @@ impl DualPlaneSession {
             if record.layout == self.layout_key {
                 continue;
             }
-            record.artifact = None;
-            record.stale_artifact = None;
+            let rendered_layout = record.rendered_layout;
+            if let Some(artifact) = record.artifact.take() {
+                record.stale_artifact = Some(StaleArtifact {
+                    artifact,
+                    rendered_layout,
+                });
+            }
             record.layout = self.layout_key;
+            record.generation = self.grid_generation;
             live_relayouts.push(LiveDetectionTask {
                 candidate_row: record.end.row,
                 screen: record.screen,
@@ -3034,6 +3349,7 @@ impl DualPlaneSession {
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
+                options: detection_options,
                 initial_context: record.initial_context.clone(),
                 inputs: Arc::clone(&record.inputs),
                 start: record.start,
@@ -3045,16 +3361,26 @@ impl DualPlaneSession {
                 resolved: true,
             });
         }
+        for record in &mut self.alternate_offscreen_decorations {
+            if record.layout == self.layout_key {
+                continue;
+            }
+            let rendered_layout = record.rendered_layout;
+            if let Some(artifact) = record.artifact.take() {
+                record.stale_artifact = Some(StaleArtifact {
+                    artifact,
+                    rendered_layout,
+                });
+            }
+            record.layout = self.layout_key;
+            record.generation = self.grid_generation;
+        }
         for task in live_relayouts {
             self.enqueue_live_task(task);
         }
-        // A relayout requeued above carries the record's ORIGINAL grid generation, and a resize
-        // bumps that generation - so every one of those results is rejected on arrival as stale
-        // (`complete_live_worker_result`). The stability pass would normally re-detect, but its
-        // per-row signature gate skips rows whose CONTENT is unchanged, and a resize changes the
-        // layout, not the text. Both locks together left formulas as source forever after any
-        // window resize (user report 2026-07-19). Clearing the signatures is what lets the next
-        // stability pass re-schedule with the CURRENT generation.
+        // Relayout tasks carry the current grid generation and a stale raster bridges the worker
+        // interval. Clearing content signatures still provides a retry path if a queued task is
+        // dropped: resize changed layout, so unchanged text must not suppress the fresh raster.
         for row in &mut self.live_rows {
             row.candidate_signature = None;
         }
@@ -3086,6 +3412,7 @@ impl DualPlaneSession {
     }
 
     fn schedule_scan(&mut self, candidate_id: TranscriptId) {
+        let detection_options = self.detection_options();
         let Some(candidate_context) = self.frozen_detection_contexts.get(&candidate_id) else {
             return;
         };
@@ -3131,7 +3458,12 @@ impl DualPlaneSession {
             });
         }
         let Some(mut task) = self.decorations.get_mut(&candidate_id).and_then(|record| {
-            record.schedule_scan(candidate_id, initial_context, Arc::from(inputs))
+            record.schedule_scan(
+                candidate_id,
+                initial_context,
+                Arc::from(inputs),
+                detection_options,
+            )
         }) else {
             return;
         };
@@ -3642,10 +3974,18 @@ fn live_artifact_and_scale(
     record: &LiveDecorationRecord,
     current_layout: LayoutKey,
 ) -> Option<(&PlaceholderArtifact, u32)> {
-    (record.rendered_layout == current_layout)
-        .then_some(record.artifact.as_ref())
-        .flatten()
-        .map(|artifact| (artifact, 1000))
+    if record.rendered_layout == current_layout
+        && let Some(artifact) = record.artifact.as_ref()
+    {
+        Some((artifact, 1000))
+    } else {
+        record.stale_artifact.as_ref().map(|stale| {
+            (
+                &stale.artifact,
+                layout_scale_milli(stale.rendered_layout, current_layout),
+            )
+        })
+    }
 }
 
 fn projected_live_artifact(
@@ -3679,6 +4019,143 @@ fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetec
     inputs.iter().find(|input| {
         matches!(input.source, LiveDetectionSource::Grid { row: input_row, .. } if input_row == row)
     })
+}
+
+fn proven_live_occurrence(
+    task: &LiveDetectionTask,
+    occurrence_id: LiveMathOccurrenceId,
+) -> Option<ProvenLiveOccurrence> {
+    let band_rows = task
+        .band_end_row
+        .checked_sub(task.band_start_row)?
+        .checked_add(1)?;
+    let source_start_offset = task.start.row.checked_sub(task.band_start_row)?;
+    let source_end_offset = task.end.row.checked_sub(task.band_start_row)?;
+    let mut span = task.span.clone();
+    for segment in &mut span.cell_segments {
+        let MathSourceLine::LiveGrid(row) = &mut segment.source_line else {
+            return None;
+        };
+        *row = row.checked_sub(task.band_start_row)?;
+    }
+    let source_rows = (task.start.row..=task.end.row)
+        .map(|row| {
+            let input = live_grid_input(&task.inputs, row)?;
+            Some(ProvenLiveRow {
+                band_offset: row.checked_sub(task.band_start_row)?,
+                text: input.text.clone(),
+                continues: input.continues,
+                cell_boundaries: input.cell_boundaries.clone(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(ProvenLiveOccurrence {
+        occurrence_id,
+        created_generation: task.grid_generation,
+        created_start: task.start,
+        band_rows,
+        source_start_offset,
+        source_end_offset,
+        source_rows,
+        span,
+    })
+}
+
+fn exact_live_source_match(
+    source: &str,
+    inputs: &[LiveDetectionInput],
+    occupied: &BTreeSet<u32>,
+) -> Option<(GridPoint, GridPoint, Vec<MathCellSegment>)> {
+    struct RowRange<'a> {
+        row: u32,
+        logical_line: u32,
+        start: usize,
+        end: usize,
+        input: &'a LiveDetectionInput,
+    }
+
+    if source.is_empty() {
+        return None;
+    }
+    let mut text = String::new();
+    let mut ranges = Vec::new();
+    let mut logical_line = 0_u32;
+    for input in inputs {
+        let LiveDetectionSource::Grid { row, .. } = input.source else {
+            continue;
+        };
+        let start = text.len();
+        text.push_str(&input.text);
+        let end = text.len();
+        ranges.push(RowRange {
+            row,
+            logical_line,
+            start,
+            end,
+            input,
+        });
+        if !input.continues {
+            text.push('\n');
+            logical_line = logical_line.saturating_add(1);
+        }
+    }
+
+    let mut matches = text.match_indices(source);
+    let (match_start, _) = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+    let match_end = match_start.checked_add(source.len())?;
+    let mut segments = Vec::new();
+    for range in ranges {
+        let segment_start = match_start.max(range.start);
+        let segment_end = match_end.min(range.end);
+        if segment_start >= segment_end {
+            continue;
+        }
+        if occupied.contains(&range.row) {
+            return None;
+        }
+        let byte_start = u32::try_from(segment_start - range.start).ok()?;
+        let byte_end = u32::try_from(segment_end - range.start).ok()?;
+        let cell_start = range
+            .input
+            .cell_boundaries
+            .iter()
+            .find_map(|(byte, cell)| (*byte == byte_start).then_some(*cell))?;
+        let cell_end = range
+            .input
+            .cell_boundaries
+            .iter()
+            .find_map(|(byte, cell)| (*byte == byte_end).then_some(*cell))?;
+        segments.push(MathCellSegment {
+            logical_line: range.logical_line,
+            source_line: MathSourceLine::LiveGrid(range.row),
+            byte_start,
+            byte_end,
+            cell_start,
+            cell_end,
+        });
+    }
+    let first = segments.first()?;
+    let last = segments.last()?;
+    let MathSourceLine::LiveGrid(start_row) = first.source_line else {
+        return None;
+    };
+    let MathSourceLine::LiveGrid(end_row) = last.source_line else {
+        return None;
+    };
+    Some((
+        GridPoint {
+            row: start_row,
+            column: first.cell_start,
+        },
+        GridPoint {
+            row: end_row,
+            column: last.cell_end,
+        },
+        segments,
+    ))
 }
 
 fn extend_live_task_band(task: &mut LiveDetectionTask) {
@@ -3879,72 +4356,446 @@ fn live_grid_parser_prefixes(
     prefixes
 }
 
-fn alternate_record_mapping(
-    record: &LiveDecorationRecord,
-    before: &[LiveDetectionInput],
-    after: &[LiveDetectionInput],
-    before_prefixes: &BTreeMap<u32, DetectionContext>,
-    after_prefixes: &BTreeMap<u32, DetectionContext>,
-    row_count: u32,
-) -> Option<i64> {
-    if alternate_record_semantics_match(record, before, after, before_prefixes, after_prefixes, 0) {
-        return Some(0);
-    }
-
-    let mut unique = None;
-    for new_start in 0..row_count {
-        let delta = i64::from(new_start) - i64::from(record.start.row);
-        if delta == 0
-            || !alternate_record_semantics_match(
-                record,
-                before,
-                after,
-                before_prefixes,
-                after_prefixes,
-                delta,
-            )
-        {
-            continue;
-        }
-        if unique.replace(delta).is_some() {
-            return None;
-        }
-    }
-    unique
+fn exact_row_content(left: &LiveDetectionInput, right: &LiveDetectionInput) -> bool {
+    left.text == right.text
+        && left.continues == right.continues
+        && left.cell_boundaries == right.cell_boundaries
 }
 
-fn alternate_record_semantics_match(
-    record: &LiveDecorationRecord,
+/// Build one transaction-level mapping before touching any decoration. Unique exact row/cell
+/// anchors prove the moving delta. Exact fixed rows below those anchors prove the application's
+/// chrome; repeated separator/blank rows may extend an already-proven fixed region but never act
+/// as anchors themselves.
+fn segmented_row_mapping(
     before: &[LiveDetectionInput],
     after: &[LiveDetectionInput],
-    before_prefixes: &BTreeMap<u32, DetectionContext>,
-    after_prefixes: &BTreeMap<u32, DetectionContext>,
-    delta: i64,
+) -> Vec<SegmentedRowMapping> {
+    let before_rows = before
+        .iter()
+        .filter_map(|input| match input.source {
+            LiveDetectionSource::Grid { row, .. } => Some((row, input)),
+            LiveDetectionSource::History { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let after_rows = after
+        .iter()
+        .filter_map(|input| match input.source {
+            LiveDetectionSource::Grid { row, .. } => Some((row, input)),
+            LiveDetectionSource::History { .. } => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(last_row) = after_grid_row_count(after).checked_sub(1) else {
+        return Vec::new();
+    };
+
+    let unchanged = before_rows.len() == after_rows.len()
+        && before_rows.iter().zip(&after_rows).all(
+            |((before_row, before_input), (after_row, after_input))| {
+                before_row == after_row && exact_row_content(before_input, after_input)
+            },
+        );
+    if unchanged {
+        return vec![SegmentedRowMapping {
+            content_delta: 0,
+            content_start_row: 0,
+            content_end_row: last_row,
+            fixed_start_row: None,
+        }];
+    }
+
+    let unique_anchors = before_rows
+        .iter()
+        .filter_map(|(before_row, before_input)| {
+            let before_matches = before_rows
+                .iter()
+                .filter(|(_, candidate)| exact_row_content(before_input, candidate))
+                .count();
+            if before_matches != 1 {
+                return None;
+            }
+            let after_matches = after_rows
+                .iter()
+                .filter(|(_, candidate)| exact_row_content(before_input, candidate))
+                .collect::<Vec<_>>();
+            let [(after_row, _)] = after_matches.as_slice() else {
+                return None;
+            };
+            Some((*before_row, *after_row))
+        })
+        .collect::<Vec<_>>();
+    let mut by_delta = BTreeMap::<i64, Vec<(u32, u32)>>::new();
+    for (before_row, after_row) in unique_anchors {
+        by_delta
+            .entry(i64::from(after_row).saturating_sub(i64::from(before_row)))
+            .or_default()
+            .push((before_row, after_row));
+    }
+
+    let moving = by_delta
+        .iter()
+        .filter(|(delta, anchors)| **delta != 0 && anchors.len() >= 2)
+        .map(|(delta, anchors)| (*delta, anchors))
+        .collect::<Vec<_>>();
+    if moving.is_empty() {
+        return if by_delta.get(&0).is_some_and(|anchors| anchors.len() >= 2) {
+            vec![SegmentedRowMapping {
+                content_delta: 0,
+                content_start_row: 0,
+                content_end_row: last_row,
+                fixed_start_row: None,
+            }]
+        } else {
+            Vec::new()
+        };
+    }
+
+    moving
+        .into_iter()
+        .filter_map(|(content_delta, moving_anchors)| {
+            let last_moving_anchor = moving_anchors
+                .iter()
+                .map(|(_, after_row)| *after_row)
+                .max()?;
+            let lower_fixed_anchors = by_delta
+                .get(&0)
+                .into_iter()
+                .flatten()
+                .filter(|(_, after_row)| *after_row > last_moving_anchor)
+                .map(|(_, after_row)| *after_row)
+                .collect::<Vec<_>>();
+            let fixed_start_row = if lower_fixed_anchors.len() >= 2 {
+                let mut start = *lower_fixed_anchors.iter().min()?;
+                while let Some(previous) = start.checked_sub(1) {
+                    let Some(before_input) = live_grid_input(before, previous) else {
+                        break;
+                    };
+                    let Some(after_input) = live_grid_input(after, previous) else {
+                        break;
+                    };
+                    if !exact_row_content(before_input, after_input) {
+                        break;
+                    }
+                    start = previous;
+                }
+                Some(start)
+            } else {
+                None
+            };
+            let content_end_row = fixed_start_row
+                .and_then(|row| row.checked_sub(1))
+                .unwrap_or(last_row);
+            moving_anchors
+                .iter()
+                .all(|(_, after_row)| *after_row <= content_end_row)
+                .then_some(SegmentedRowMapping {
+                    content_delta,
+                    content_start_row: 0,
+                    content_end_row,
+                    fixed_start_row,
+                })
+        })
+        .collect()
+}
+
+fn fixed_boundary_remains_proven(
+    before: &[LiveDetectionInput],
+    after: &[LiveDetectionInput],
+    content_end_row: u32,
 ) -> bool {
-    let Some(new_start) = shift_live_row(record.start.row, delta) else {
+    let Some(fixed_start_row) = content_end_row.checked_add(1) else {
         return false;
     };
-    if shift_live_row(record.end.row, delta).is_none()
-        || shift_live_row(record.band_start_row, delta).is_none()
-        || shift_live_row(record.band_end_row, delta).is_none()
-        || before_prefixes.get(&record.start.row) != after_prefixes.get(&new_start)
-    {
-        return false;
+    let mut anchors = 0_u32;
+    for row in fixed_start_row..after_grid_row_count(after) {
+        let (Some(before_input), Some(after_input)) =
+            (live_grid_input(before, row), live_grid_input(after, row))
+        else {
+            continue;
+        };
+        if !exact_row_content(before_input, after_input) {
+            continue;
+        }
+        let unique_before = before
+            .iter()
+            .filter(|candidate| exact_row_content(before_input, candidate))
+            .count()
+            == 1;
+        let unique_after = after
+            .iter()
+            .filter(|candidate| exact_row_content(after_input, candidate))
+            .count()
+            == 1;
+        if unique_before && unique_after {
+            anchors = anchors.saturating_add(1);
+        }
     }
-    (record.band_start_row..=record.band_end_row).all(|old_row| {
-        let Some(new_row) = shift_live_row(old_row, delta) else {
-            return false;
-        };
-        let Some(old) = live_grid_input(before, old_row) else {
-            return false;
-        };
-        let Some(new) = live_grid_input(after, new_row) else {
-            return false;
-        };
-        old.text == new.text
-            && old.continues == new.continues
-            && old.cell_boundaries == new.cell_boundaries
+    anchors >= 2
+}
+
+enum RecordProjection {
+    Visible(LiveDecorationRecord),
+    Dormant(LiveDecorationRecord),
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_live_record_uniquely(
+    record: &LiveDecorationRecord,
+    mappings: &[SegmentedRowMapping],
+    generation: GridGeneration,
+    detection_revision: DetectionRevision,
+    layout: LayoutKey,
+    initial_context: DetectionContext,
+    inputs: Arc<[LiveDetectionInput]>,
+) -> Option<RecordProjection> {
+    let mut visible = Vec::new();
+    let mut dormant = Vec::new();
+    for mapping in mappings {
+        match project_live_record(
+            record,
+            *mapping,
+            generation,
+            detection_revision,
+            layout,
+            initial_context.clone(),
+            Arc::clone(&inputs),
+        ) {
+            Some(RecordProjection::Visible(record)) => visible.push(record),
+            Some(RecordProjection::Dormant(record)) => dormant.push(record),
+            None => {}
+        }
+    }
+    if visible.len() == 1 {
+        return visible.pop().map(RecordProjection::Visible);
+    }
+    if visible.len() > 1 {
+        return None;
+    }
+
+    if let Some(identity_mapping) = identity_row_mapping(record, mappings, &inputs)
+        && !mappings.contains(&identity_mapping)
+        && let Some(RecordProjection::Visible(record)) = project_live_record(
+            record,
+            identity_mapping,
+            generation,
+            detection_revision,
+            layout,
+            initial_context,
+            inputs,
+        )
+    {
+        return Some(RecordProjection::Visible(record));
+    }
+    (dormant.len() == 1)
+        .then(|| dormant.pop().map(RecordProjection::Dormant))
+        .flatten()
+}
+
+/// A partially visible proven occurrence may be the only rows in its local screen segment which
+/// survived repaint. Derive a placement only when at least two complete proven row/cell
+/// fingerprints vote for the same logical origin and no competing origin has the same support.
+/// This is identity continuation inside an already-proven transaction region, not first detection.
+fn identity_row_mapping(
+    record: &LiveDecorationRecord,
+    mappings: &[SegmentedRowMapping],
+    inputs: &[LiveDetectionInput],
+) -> Option<SegmentedRowMapping> {
+    let content_start_row = mappings
+        .iter()
+        .map(|mapping| mapping.content_start_row)
+        .max()?;
+    let content_end_row = mappings
+        .iter()
+        .map(|mapping| mapping.content_end_row)
+        .min()?;
+    let fixed_start_row = mappings
+        .iter()
+        .filter_map(|mapping| mapping.fixed_start_row)
+        .min();
+    let mut origins = BTreeMap::<i64, u32>::new();
+    for proven in &record.identity.source_rows {
+        for input in inputs {
+            let LiveDetectionSource::Grid { row, .. } = input.source else {
+                continue;
+            };
+            if !(content_start_row..=content_end_row).contains(&row)
+                || !proven.exactly_matches(input)
+            {
+                continue;
+            }
+            let origin = i64::from(row).saturating_sub(i64::from(proven.band_offset));
+            let support = origins.entry(origin).or_default();
+            *support = support.saturating_add(1);
+        }
+    }
+    let best_support = origins.values().copied().max()?;
+    if best_support < 2 {
+        return None;
+    }
+    let best = origins
+        .into_iter()
+        .filter(|(_, support)| *support == best_support)
+        .collect::<Vec<_>>();
+    let [(logical_band_start, _)] = best.as_slice() else {
+        return None;
+    };
+    Some(SegmentedRowMapping {
+        content_delta: logical_band_start.saturating_sub(record.placement.logical_band_start),
+        content_start_row,
+        content_end_row,
+        fixed_start_row,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn project_live_record(
+    record: &LiveDecorationRecord,
+    mapping: SegmentedRowMapping,
+    generation: GridGeneration,
+    detection_revision: DetectionRevision,
+    layout: LayoutKey,
+    initial_context: DetectionContext,
+    inputs: Arc<[LiveDetectionInput]>,
+) -> Option<RecordProjection> {
+    let row_count = after_grid_row_count(&inputs);
+    let last_row = row_count.checked_sub(1)?;
+    let mut record = record.clone();
+    let logical_band_start = record
+        .placement
+        .logical_band_start
+        .checked_add(mapping.content_delta)?;
+    let logical_band_end =
+        logical_band_start.checked_add(i64::from(record.identity.band_rows.checked_sub(1)?))?;
+    record.placement.logical_band_start = logical_band_start;
+    record.generation = generation;
+    record.detection_revision = detection_revision;
+    record.layout = layout;
+    record.initial_context = initial_context;
+    record.inputs = Arc::clone(&inputs);
+
+    debug_assert!(record.identity.source_start_offset <= record.identity.source_end_offset);
+    debug_assert!(record.identity.created_start.row >= record.identity.source_start_offset);
+    let _occurrence_proof = (
+        record.identity.created_generation,
+        record.identity.created_start,
+    );
+
+    let content_start = i64::from(mapping.content_start_row);
+    let content_end = i64::from(mapping.content_end_row.min(last_row));
+    let terminal_end = i64::from(last_row);
+    let band_intersects_content = logical_band_end >= content_start
+        && logical_band_start <= content_end
+        && logical_band_end >= 0
+        && logical_band_start <= terminal_end;
+
+    let mut exact_rows = Vec::<(u32, u32)>::new();
+    let mut mismatched_rows = Vec::<i64>::new();
+    let mut occluded_source_rows = 0_u32;
+    for proven in &record.identity.source_rows {
+        let target = logical_band_start.checked_add(i64::from(proven.band_offset))?;
+        if target < 0 || target > terminal_end {
+            continue;
+        }
+        if target < content_start || target > content_end {
+            occluded_source_rows = occluded_source_rows.saturating_add(1);
+            continue;
+        }
+        let target_row = u32::try_from(target).ok()?;
+        let input = live_grid_input(&inputs, target_row)?;
+        if proven.exactly_matches(input) {
+            exact_rows.push((proven.band_offset, target_row));
+        } else {
+            mismatched_rows.push(target);
+        }
+    }
+
+    if exact_rows.is_empty() {
+        if band_intersects_content && !mismatched_rows.is_empty() {
+            return None;
+        }
+        record.placement.occluded_source_rows = occluded_source_rows;
+        return Some(RecordProjection::Dormant(record));
+    }
+    exact_rows.sort_unstable();
+    let first_exact_target = i64::from(exact_rows.first()?.1);
+    let last_exact_target = i64::from(exact_rows.last()?.1);
+    let top_mismatches = mismatched_rows
+        .iter()
+        .copied()
+        .filter(|row| *row < first_exact_target)
+        .collect::<Vec<_>>();
+    let bottom_mismatches = mismatched_rows
+        .iter()
+        .copied()
+        .filter(|row| *row > last_exact_target)
+        .collect::<Vec<_>>();
+    let boundary_mismatches_are_occluded = top_mismatches.len() + bottom_mismatches.len()
+        == mismatched_rows.len()
+        && top_mismatches
+            .iter()
+            .min()
+            .is_none_or(|row| *row == content_start)
+        && (top_mismatches.is_empty()
+            || i64::try_from(top_mismatches.len())
+                .is_ok_and(|count| count == first_exact_target.saturating_sub(content_start)))
+        && bottom_mismatches
+            .iter()
+            .max()
+            .is_none_or(|row| *row == content_end)
+        && (bottom_mismatches.is_empty()
+            || i64::try_from(bottom_mismatches.len())
+                .is_ok_and(|count| count == content_end.saturating_sub(last_exact_target)));
+    if !boundary_mismatches_are_occluded {
+        return None;
+    }
+    occluded_source_rows = occluded_source_rows
+        .saturating_add(u32::try_from(mismatched_rows.len()).unwrap_or(u32::MAX));
+
+    let exact_offsets = exact_rows
+        .iter()
+        .map(|(offset, _)| *offset)
+        .collect::<BTreeSet<_>>();
+    let mut span = record.identity.span.clone();
+    span.cell_segments.retain_mut(|segment| {
+        let MathSourceLine::LiveGrid(offset) = &mut segment.source_line else {
+            return false;
+        };
+        if !exact_offsets.contains(offset) {
+            return false;
+        }
+        let Some(target) = logical_band_start.checked_add(i64::from(*offset)) else {
+            return false;
+        };
+        let Ok(target) = u32::try_from(target) else {
+            return false;
+        };
+        *offset = target;
+        true
+    });
+    let first_segment = span.cell_segments.first()?;
+    let last_segment = span.cell_segments.last()?;
+    let MathSourceLine::LiveGrid(start_row) = first_segment.source_line else {
+        return None;
+    };
+    let MathSourceLine::LiveGrid(end_row) = last_segment.source_line else {
+        return None;
+    };
+    record.start = GridPoint {
+        row: start_row,
+        column: first_segment.cell_start,
+    };
+    record.end = GridPoint {
+        row: end_row,
+        column: last_segment.cell_end,
+    };
+    record.band_start_row = exact_rows.first()?.1;
+    record.band_end_row = exact_rows.last()?.1;
+    record.clipped_top_rows =
+        u32::try_from(i64::from(record.band_start_row).saturating_sub(logical_band_start)).ok()?;
+    record.clipped_bottom_rows =
+        u32::try_from(logical_band_end.saturating_sub(i64::from(record.band_end_row))).ok()?;
+    record.placement.occluded_source_rows = occluded_source_rows;
+    record.span = span;
+    Some(RecordProjection::Visible(record))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3957,28 +4808,37 @@ fn shift_live_record(
     initial_context: DetectionContext,
     inputs: Arc<[LiveDetectionInput]>,
 ) -> Option<LiveDecorationRecord> {
-    let mut record = record.clone();
-    record.start.row = shift_live_row(record.start.row, delta)?;
-    record.end.row = shift_live_row(record.end.row, delta)?;
-    record.band_start_row = shift_live_row(record.band_start_row, delta)?;
-    record.band_end_row = shift_live_row(record.band_end_row, delta)?;
-    for segment in &mut record.span.cell_segments {
-        let MathSourceLine::LiveGrid(row) = &mut segment.source_line else {
-            return None;
-        };
-        *row = shift_live_row(*row, delta)?;
+    let row_count = after_grid_row_count(&inputs);
+    let last_row = row_count.checked_sub(1)?;
+    let mapping = SegmentedRowMapping {
+        content_delta: delta,
+        content_start_row: 0,
+        content_end_row: last_row,
+        fixed_start_row: None,
+    };
+    match project_live_record(
+        record,
+        mapping,
+        generation,
+        detection_revision,
+        layout,
+        initial_context,
+        inputs,
+    )? {
+        RecordProjection::Visible(record) => Some(record),
+        RecordProjection::Dormant(_) => None,
     }
-    record.generation = generation;
-    record.detection_revision = detection_revision;
-    record.layout = layout;
-    record.initial_context = initial_context;
-    record.inputs = inputs;
-    Some(record)
 }
 
-fn shift_live_row(row: u32, delta: i64) -> Option<u32> {
-    let shifted = i64::from(row).checked_add(delta)?;
-    u32::try_from(shifted).ok()
+fn after_grid_row_count(inputs: &[LiveDetectionInput]) -> u32 {
+    inputs
+        .iter()
+        .filter_map(|input| match input.source {
+            LiveDetectionSource::Grid { row, .. } => Some(row.saturating_add(1)),
+            LiveDetectionSource::History { .. } => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn alternate_borrowed_band_is_clear(
@@ -4436,6 +5296,94 @@ mod tests {
             .get()
             .saturating_mul(i64::from(DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI))
             / 1000
+    }
+
+    fn mapping_inputs(rows: &[&str]) -> Vec<LiveDetectionInput> {
+        rows.iter()
+            .enumerate()
+            .map(|(row, text)| LiveDetectionInput {
+                source: LiveDetectionSource::Grid {
+                    row: row as u32,
+                    revision: 1,
+                },
+                text: (*text).to_owned(),
+                continues: false,
+                cell_boundaries: std::iter::once((0, 0))
+                    .chain(
+                        text.char_indices()
+                            .enumerate()
+                            .map(|(column, (byte, character))| {
+                                (
+                                    u32::try_from(byte + character.len_utf8()).unwrap(),
+                                    u32::try_from(column + 1).unwrap(),
+                                )
+                            }),
+                    )
+                    .collect(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn exact_screen_mapping_separates_moving_content_from_fixed_chrome() {
+        let before = mapping_inputs(&[
+            "alpha",
+            "beta",
+            "$$",
+            "begin",
+            "equation-a",
+            "equation-b",
+            "end",
+            "$$",
+            "",
+            "separator",
+            "prompt",
+            "status",
+        ]);
+        let after = mapping_inputs(&[
+            "new-0",
+            "new-1",
+            "new-2",
+            "alpha",
+            "beta",
+            "$$",
+            "begin",
+            "equation-a",
+            "",
+            "separator",
+            "prompt",
+            "status",
+        ]);
+
+        let mappings = segmented_row_mapping(&before, &after);
+        assert!(mappings.contains(&SegmentedRowMapping {
+            content_delta: 3,
+            content_start_row: 0,
+            content_end_row: 7,
+            fixed_start_row: Some(8),
+        }));
+        assert!(fixed_boundary_remains_proven(&before, &after, 7));
+        assert!(
+            !mappings
+                .iter()
+                .any(|mapping| { mapping.content_delta == 3 && mapping.content_end_row == 11 }),
+            "mutation guard: a whole-terminal single delta must not absorb fixed chrome"
+        );
+    }
+
+    #[test]
+    fn restore_stripped_environment_newlines_option_reaches_detector_tasks() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session.set_math_layout_options(MathLayoutOptions {
+            restore_stripped_environment_newlines: false,
+            ..MathLayoutOptions::default()
+        });
+        assert_eq!(
+            session.detection_options(),
+            DetectionOptions {
+                restore_stripped_environment_newlines: false,
+            }
+        );
     }
 
     #[test]

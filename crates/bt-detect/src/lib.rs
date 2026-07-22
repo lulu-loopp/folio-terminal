@@ -11,6 +11,22 @@ use bt_transcript::{SourceGeneration, TranscriptId};
 
 pub const MAX_MATH_SOURCE_BYTES: usize = 8 * 1024;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DetectionOptions {
+    /// Restore a row separator which Claude Code currently strips from the end of a logical line
+    /// inside a LaTeX math environment. Set this to `false` once Claude Code emits the original
+    /// `\\\\` faithfully; disabling it preserves renderer input byte-for-byte.
+    pub restore_stripped_environment_newlines: bool,
+}
+
+impl Default for DetectionOptions {
+    fn default() -> Self {
+        Self {
+            restore_stripped_environment_newlines: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DelimiterKind {
     Dollars,
@@ -89,6 +105,7 @@ pub struct DetectionTask {
     pub cell_width_subpixels: i64,
     pub cell_height_subpixels: i64,
     pub ascii_baseline_subpixels: i64,
+    pub options: DetectionOptions,
     /// Exact parser checkpoint immediately before `inputs[0]`.
     pub initial_context: DetectionContext,
     pub inputs: Arc<[DetectionInput]>,
@@ -192,6 +209,7 @@ pub struct LiveDetectionTask {
     pub cell_width_subpixels: i64,
     pub cell_height_subpixels: i64,
     pub ascii_baseline_subpixels: i64,
+    pub options: DetectionOptions,
     /// Exact parser checkpoint immediately before `inputs[0]`.
     pub initial_context: DetectionContext,
     pub inputs: Arc<[LiveDetectionInput]>,
@@ -270,6 +288,7 @@ impl DecorationRecord {
             cell_width_subpixels: SUBPIXELS_PER_PX,
             cell_height_subpixels: SUBPIXELS_PER_PX,
             ascii_baseline_subpixels: SUBPIXELS_PER_PX,
+            options: DetectionOptions::default(),
             initial_context: DetectionContext::default(),
             inputs: Arc::from([]),
             resolved: true,
@@ -281,6 +300,7 @@ impl DecorationRecord {
         candidate_id: TranscriptId,
         initial_context: DetectionContext,
         inputs: Arc<[DetectionInput]>,
+        options: DetectionOptions,
     ) -> Option<DetectionTask> {
         if self.source != SourceLifecycle::Frozen || self.decoration != DecorationLifecycle::None {
             return None;
@@ -304,6 +324,7 @@ impl DecorationRecord {
             cell_width_subpixels: SUBPIXELS_PER_PX,
             cell_height_subpixels: SUBPIXELS_PER_PX,
             ascii_baseline_subpixels: SUBPIXELS_PER_PX,
+            options,
             initial_context,
             inputs,
             resolved: false,
@@ -715,7 +736,14 @@ pub fn advance_detection_context(context: &mut DetectionContext, id: TranscriptI
 pub fn detect_math_blocks<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
 ) -> Vec<DetectedMathBlock> {
-    scan_math_blocks_in_context(lines, DetectionContext::default()).blocks
+    detect_math_blocks_with_options(lines, DetectionOptions::default())
+}
+
+pub fn detect_math_blocks_with_options<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    options: DetectionOptions,
+) -> Vec<DetectedMathBlock> {
+    scan_math_blocks_in_context_with_options(lines, DetectionContext::default(), options).blocks
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -745,6 +773,14 @@ struct ActiveOpening {
 pub fn scan_math_blocks_in_context<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
     initial_context: DetectionContext,
+) -> MathScanResult {
+    scan_math_blocks_in_context_with_options(lines, initial_context, DetectionOptions::default())
+}
+
+pub fn scan_math_blocks_in_context_with_options<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
 ) -> MathScanResult {
     let lines = lines.into_iter().collect::<Vec<_>>();
     let mut result = MathScanResult::default();
@@ -866,10 +902,15 @@ pub fn scan_math_blocks_in_context<'a>(
                 delimiter_start(lines[start_index].1),
                 close_end,
             );
-            let render = if matches!(active.delimiter, DisplayDelimiter::Environment(_)) {
-                original.clone()
-            } else {
-                body.clone()
+            let render = match active.delimiter {
+                DisplayDelimiter::Environment(_) => restore_stripped_environment_newlines(
+                    &original,
+                    options.restore_stripped_environment_newlines,
+                ),
+                _ => restore_stripped_environment_newlines(
+                    &body,
+                    options.restore_stripped_environment_newlines,
+                ),
             };
             if !valid_display_body(&body, &render) {
                 continue;
@@ -1001,6 +1042,98 @@ fn joined_range(
         parts.pop();
     }
     parts.join("\n")
+}
+
+#[derive(Clone, Debug)]
+struct MathEnvironmentRange {
+    content_start: usize,
+    close_start: usize,
+}
+
+/// Claude Code currently turns a LaTeX environment row separator (`\\\\`) into a bare trailing
+/// backslash. A bare `\\` at a logical-line boundary is not a LaTeX command, so restoring its
+/// missing mate is syntax recovery rather than a probabilistic content guess.
+///
+/// This function only sees detector-joined logical lines. Live-grid soft wraps have already been
+/// merged before `joined_range` creates these `\n` boundaries. Original terminal source remains
+/// untouched; this output is renderer input only.
+fn restore_stripped_environment_newlines(source: &str, enabled: bool) -> String {
+    if !enabled || !source.contains('\n') {
+        return source.to_owned();
+    }
+
+    let mut stack = Vec::<(String, usize)>::new();
+    let mut environments = Vec::<MathEnvironmentRange>::new();
+    let mut byte = 0usize;
+    while byte < source.len() {
+        if source.as_bytes()[byte] != b'\\' || delimiter_is_escaped(source, byte) {
+            byte += source[byte..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+        if let Some((environment, token_len)) = environment_token(&source[byte..], true) {
+            stack.push((environment, byte + token_len));
+            byte += token_len;
+            continue;
+        }
+        if let Some((environment, token_len)) = environment_token(&source[byte..], false)
+            && stack
+                .last()
+                .is_some_and(|(active, _)| *active == environment)
+        {
+            let (_, content_start) = stack.pop().expect("matching environment is active");
+            environments.push(MathEnvironmentRange {
+                content_start,
+                close_start: byte,
+            });
+            byte += token_len;
+            continue;
+        }
+        byte += 1;
+    }
+    if environments.is_empty() {
+        return source.to_owned();
+    }
+
+    let mut insertions = Vec::new();
+    let mut line_start = 0usize;
+    while let Some(relative_newline) = source[line_start..].find('\n') {
+        let newline = line_start + relative_newline;
+        let line = &source[line_start..newline];
+        let trimmed_end = line.trim_end().len();
+        let slash = line_start + trimmed_end;
+        let has_bare_trailing_slash = trimmed_end != 0
+            && line.as_bytes()[trimmed_end - 1] == b'\\'
+            && (trimmed_end == 1 || line.as_bytes()[trimmed_end - 2] != b'\\');
+        let active_environment = environments
+            .iter()
+            .filter(|environment| {
+                environment.content_start <= slash && slash <= environment.close_start
+            })
+            .max_by_key(|environment| environment.content_start);
+        if has_bare_trailing_slash
+            && active_environment.is_some_and(|environment| {
+                source[newline + 1..environment.close_start]
+                    .chars()
+                    .any(|character| !character.is_whitespace())
+            })
+        {
+            insertions.push(slash);
+        }
+        line_start = newline + 1;
+    }
+    if insertions.is_empty() {
+        return source.to_owned();
+    }
+
+    let mut restored = String::with_capacity(source.len() + insertions.len());
+    let mut copied = 0usize;
+    for insertion in insertions {
+        restored.push_str(&source[copied..insertion]);
+        restored.push('\\');
+        copied = insertion;
+    }
+    restored.push_str(&source[copied..]);
+    restored
 }
 
 fn delimiter_start(text: &str) -> usize {
@@ -1139,7 +1272,15 @@ pub fn detect_math_blocks_in_context<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
     initial_context: DetectionContext,
 ) -> Vec<DetectedMathBlock> {
-    scan_math_blocks_in_context(lines, initial_context).blocks
+    detect_math_blocks_in_context_with_options(lines, initial_context, DetectionOptions::default())
+}
+
+pub fn detect_math_blocks_in_context_with_options<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+) -> Vec<DetectedMathBlock> {
+    scan_math_blocks_in_context_with_options(lines, initial_context, options).blocks
 }
 
 /// Run the authoritative detector on a worker-owned frozen snapshot. The session thread only
@@ -1148,11 +1289,12 @@ pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
     if task.resolved {
         return true;
     }
-    let detected = detect_math_blocks_in_context(
+    let detected = detect_math_blocks_in_context_with_options(
         task.inputs
             .iter()
             .map(|input| (input.id, input.text.as_str())),
         task.initial_context.clone(),
+        task.options,
     )
     .into_iter()
     .find(|block| block.end == task.candidate_id);
@@ -1217,9 +1359,10 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
         task.detection_complete = true;
         return false;
     };
-    let detected = detect_math_blocks_in_context(
+    let detected = detect_math_blocks_in_context_with_options(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         task.initial_context.clone(),
+        task.options,
     )
     .into_iter()
     .find(|block| block.end == candidate_id);
@@ -1239,11 +1382,13 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
     };
     let inputs = Arc::clone(&first.inputs);
     let initial_context = first.initial_context.clone();
+    let options = first.options;
     let logical = live_logical_lines(&inputs);
     let row_to_logical = live_grid_logical_ids(&logical, &inputs);
-    let blocks = detect_math_blocks_in_context(
+    let blocks = detect_math_blocks_in_context_with_options(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context.clone(),
+        options,
     )
     .into_iter()
     .map(|block| (block.end, block))
@@ -1252,7 +1397,10 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
         if task.resolved || task.detection_complete {
             continue;
         }
-        if task.initial_context != initial_context || task.inputs.as_ref() != inputs.as_ref() {
+        if task.initial_context != initial_context
+            || task.inputs.as_ref() != inputs.as_ref()
+            || task.options != options
+        {
             let _ = resolve_live_detection_task(task);
             continue;
         }
@@ -1781,6 +1929,7 @@ mod tests {
                     text: text.to_owned(),
                     cell_boundaries: boundaries,
                 }]),
+                DetectionOptions::default(),
             )
             .unwrap();
         assert!(resolve_detection_task(&mut task));
@@ -1930,6 +2079,168 @@ mod tests {
     }
 
     #[test]
+    fn stripped_environment_newlines_are_restored_only_in_renderer_input() {
+        let lines = [
+            r"$$\begin{aligned}",
+            r"F_x &= 0 \ ",
+            r"F_y &= 1\",
+            r"F_z &= 2\",
+            r"\end{aligned}$$",
+        ];
+        let detected = detect_math_blocks(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        );
+        assert_eq!(detected.len(), 1);
+        assert_eq!(
+            detected[0].span.render_source,
+            concat!(
+                r"\begin{aligned}",
+                "\n",
+                r"F_x &= 0 \\ ",
+                "\n",
+                r"F_y &= 1\\",
+                "\n",
+                r"F_z &= 2\",
+                "\n",
+                r"\end{aligned}"
+            )
+        );
+        assert_eq!(
+            detected[0].span.original_source,
+            lines.join("\n"),
+            "copy/source presentation must retain the exact terminal bytes"
+        );
+    }
+
+    #[test]
+    fn restore_switch_off_is_byte_identical_to_the_unrepaired_baseline() {
+        let lines = [
+            r"$$\begin{aligned}",
+            r"x &= 0\",
+            r"y &= 1\",
+            r"\end{aligned}$$",
+        ];
+        let options = DetectionOptions {
+            restore_stripped_environment_newlines: false,
+        };
+        let detected = detect_math_blocks_with_options(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+            options,
+        );
+        assert_eq!(detected.len(), 1);
+        assert_eq!(
+            detected[0].span.render_source,
+            concat!(
+                r"\begin{aligned}",
+                "\n",
+                r"x &= 0\",
+                "\n",
+                r"y &= 1\",
+                "\n",
+                r"\end{aligned}"
+            )
+        );
+    }
+
+    #[test]
+    fn existing_row_separators_and_non_environment_backslashes_are_unchanged() {
+        let already_valid = [
+            r"$$\begin{aligned}",
+            r"x &= 0\\",
+            r"y &= \nabla f",
+            r"\end{aligned}$$",
+        ];
+        let detected = detect_math_blocks(
+            already_valid
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        );
+        assert_eq!(
+            detected[0].span.render_source,
+            already_valid[0][2..].to_owned()
+                + "\n"
+                + already_valid[1]
+                + "\n"
+                + already_valid[2]
+                + "\n"
+                + &already_valid[3][..already_valid[3].len() - 2]
+        );
+        assert!(!detected[0].span.render_source.contains(r"\\\"));
+
+        let outside = [r"$$", r"foo \", r"bar", r"$$"];
+        let detected = detect_math_blocks(
+            outside
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        );
+        assert_eq!(detected[0].span.render_source, "foo \\\nbar");
+        assert_eq!(
+            restore_stripped_environment_newlines(r"$$x \$$", true),
+            r"$$x \$$"
+        );
+    }
+
+    #[test]
+    fn matrix_and_cases_use_the_same_syntax_recovery_rule() {
+        for environment in ["matrix", "cases"] {
+            let lines = [
+                r"$$".to_owned(),
+                format!(r"\begin{{{environment}}}"),
+                r"a & b \".to_owned(),
+                r"c & d".to_owned(),
+                format!(r"\end{{{environment}}}"),
+                r"$$".to_owned(),
+            ];
+            let detected = detect_math_blocks(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| (TranscriptId(index as u64 + 1), line.as_str())),
+            );
+            assert_eq!(detected.len(), 1, "{environment}");
+            assert!(
+                detected[0].span.render_source.contains("a & b \\\\\nc & d"),
+                "{}",
+                detected[0].span.render_source
+            );
+        }
+    }
+
+    #[test]
+    fn final_line_of_the_innermost_environment_does_not_gain_a_separator() {
+        let lines = [
+            r"\begin{equation}",
+            r"\begin{aligned}",
+            r"x &= 0 \ ",
+            r"y &= 1\",
+            r"\end{aligned}",
+            r"\end{equation}",
+        ];
+        let detected = detect_math_blocks(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        );
+        assert_eq!(detected.len(), 1);
+        assert!(
+            detected[0]
+                .span
+                .render_source
+                .contains("x &= 0 \\\\ \ny &= 1\\\n")
+        );
+        assert!(!detected[0].span.render_source.contains("y &= 1\\\\\n"));
+    }
+
+    #[test]
     fn inline_false_positive_set_stays_native() {
         for text in [
             "$5 和 $10",
@@ -1968,6 +2279,7 @@ mod tests {
             cell_width_subpixels: 9 * SUBPIXELS_PER_PX,
             cell_height_subpixels: 18 * SUBPIXELS_PER_PX,
             ascii_baseline_subpixels: 14 * SUBPIXELS_PER_PX,
+            options: DetectionOptions::default(),
             initial_context: DetectionContext::default(),
             inputs: Arc::from(
                 lines
@@ -2017,6 +2329,24 @@ mod tests {
             .collect::<Vec<_>>();
         boundaries.push((text.len() as u32, text.chars().count() as u32));
         boundaries
+    }
+
+    #[test]
+    fn soft_wrap_join_does_not_create_a_restoration_boundary() {
+        let mut task = live_task(
+            &[
+                r"$$\begin{aligned}",
+                r"x &= 0 \",
+                r"+ 1",
+                r"y &= 2",
+                r"\end{aligned}$$",
+            ],
+            4,
+        );
+        Arc::make_mut(&mut task.inputs)[1].continues = true;
+        assert!(resolve_live_detection_task(&mut task));
+        assert!(task.span.render_source.contains("x &= 0 \\+ 1\ny &= 2"));
+        assert!(!task.span.render_source.contains("x &= 0 \\\\+ 1"));
     }
 
     #[test]

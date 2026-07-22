@@ -1,6 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use bt_viewport::{MathBlockDisplay, ViewportFrame};
+use bt_viewport::{LiveMathOccurrenceId, MathBlockDisplay, ViewportFrame};
 
 /// Headless classification of one frame's formula presentation. This is diagnostic state only;
 /// render and detection decisions remain owned by the normal session pipeline.
@@ -21,6 +21,11 @@ pub struct FormulaFrameObservation {
     /// free body lines of a multi-line block, so a reverted `$$\n<body>\n$$` can be matched against
     /// the source it used to render from.
     pub source_plane: String,
+    /// Sources whose proven identity is still present but whose missing rows are covered by an
+    /// application-internal fixed region. This is per occurrence, never a whole-frame exemption.
+    pub occluded_sources: Vec<String>,
+    pub rendered_occurrences: BTreeMap<LiveMathOccurrenceId, String>,
+    pub occluded_occurrences: BTreeSet<LiveMathOccurrenceId>,
 }
 
 /// Classify the exact `ViewportFrame` handed to the renderer. A rendered block carries its source
@@ -32,6 +37,33 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
         .filter(|block| block.display == MathBlockDisplay::Rendered)
         .map(|block| block.source.clone())
         .collect::<Vec<_>>();
+    let occluded_sources = frame
+        .math_blocks
+        .iter()
+        .filter(|block| {
+            block.display == MathBlockDisplay::Rendered && block.occluded_source_rows != 0
+        })
+        .map(|block| block.source.clone())
+        .collect::<Vec<_>>();
+    let rendered_occurrences = frame
+        .math_blocks
+        .iter()
+        .filter_map(|block| {
+            (block.display == MathBlockDisplay::Rendered)
+                .then_some(block.live_occurrence_id)
+                .flatten()
+                .map(|id| (id, block.source.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let occluded_occurrences = frame
+        .math_blocks
+        .iter()
+        .filter_map(|block| {
+            (block.display == MathBlockDisplay::Rendered && block.occluded_source_rows != 0)
+                .then_some(block.live_occurrence_id)
+                .flatten()
+        })
+        .collect::<BTreeSet<_>>();
     let columns = frame.columns.get() as usize;
     let all_rows = frame
         .cells
@@ -61,6 +93,9 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
         rendered_sources,
         source_rows,
         source_plane,
+        occluded_sources,
+        rendered_occurrences,
+        occluded_occurrences,
     }
 }
 
@@ -69,20 +104,47 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
 #[derive(Debug, Default)]
 pub struct FormulaFlashOracle {
     frames: Vec<FormulaFrameObservation>,
-    rendered_sources: BTreeSet<String>,
+    active_occurrences: BTreeMap<LiveMathOccurrenceId, String>,
+    anonymous_rendered_sources: BTreeSet<String>,
     flashed_sources: BTreeSet<String>,
 }
 
 impl FormulaFlashOracle {
     pub fn observe(&mut self, frame: &ViewportFrame) -> &FormulaFrameObservation {
         let observation = observe_formula_frame(frame);
-        for source in &self.rendered_sources {
-            if source_rows_expose(&observation.source_rows, &observation.source_plane, source) {
+        for (id, source) in std::mem::take(&mut self.active_occurrences) {
+            let exposed =
+                source_rows_expose(&observation.source_rows, &observation.source_plane, &source);
+            if exposed && !observation.occluded_occurrences.contains(&id) {
+                self.flashed_sources.insert(source.clone());
+            }
+            if observation.rendered_occurrences.contains_key(&id) {
+                self.active_occurrences.insert(id, source);
+            }
+        }
+        for source in &self.anonymous_rendered_sources {
+            if !observation.occluded_sources.contains(source)
+                && source_rows_expose(&observation.source_rows, &observation.source_plane, source)
+            {
                 self.flashed_sources.insert(source.clone());
             }
         }
-        self.rendered_sources
-            .extend(observation.rendered_sources.iter().cloned());
+        self.active_occurrences.extend(
+            observation
+                .rendered_occurrences
+                .iter()
+                .map(|(id, source)| (*id, source.clone())),
+        );
+        self.anonymous_rendered_sources.extend(
+            frame
+                .math_blocks
+                .iter()
+                .filter(|block| {
+                    block.display == MathBlockDisplay::Rendered
+                        && block.live_occurrence_id.is_none()
+                })
+                .map(|block| block.source.clone()),
+        );
         self.frames.push(observation);
         self.frames.last().expect("just pushed one observation")
     }
@@ -121,6 +183,12 @@ fn source_rows_expose(rows: &[String], source_plane: &str, rendered_source: &str
     }
     // The multi-line delimiter-on-its-own-line forms: match against the full cell plane, which
     // retains the delimiter-free body rows that `rows` (delimiter-filtered) drops.
+    if let Some(environment) = rendered_environment_name(source)
+        && source_plane.contains(&format!(r"\begin{{{environment}}}"))
+        && source_plane.contains(&format!(r"\end{{{environment}}}"))
+    {
+        return true;
+    }
     [
         format!("$${source}$$"),
         format!("$$\n{source}\n$$"),
@@ -129,6 +197,11 @@ fn source_rows_expose(rows: &[String], source_plane: &str, rendered_source: &str
     ]
     .iter()
     .any(|delimited| source_plane.contains(delimited))
+}
+
+fn rendered_environment_name(source: &str) -> Option<&str> {
+    let suffix = source.split_once(r"\begin{")?.1;
+    suffix.split_once('}').map(|(environment, _)| environment)
 }
 
 fn row_may_contain_display_math(row: &str) -> bool {
@@ -142,11 +215,16 @@ fn row_may_contain_display_math(row: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::num::NonZeroU32;
+    use std::{num::NonZeroU32, sync::Arc};
 
-    use bt_doc::{LayoutKey, ViewGeneration};
+    use bt_doc::{GridGeneration, GridPoint, LayoutKey, MathMode, ScreenId, ViewGeneration};
     use bt_transcript::CapturedCell;
-    use bt_viewport::{FrameViewportOrigin, GridCursor, ViewportFrame};
+    use bt_transcript::TranscriptId;
+    use bt_viewport::{
+        FrameViewportOrigin, GridCursor, HorizontalOverflowOwner, LiveMathOccurrenceId,
+        MathBlockAnchor, MathBlockDisplay, MathBlockPlacement, ProjectedMathArtifact,
+        ViewportFrame,
+    };
 
     fn source_frame(text: &str) -> ViewportFrame {
         let columns = NonZeroU32::new(12).unwrap();
@@ -213,5 +291,99 @@ mod tests {
         ));
         // An unrelated formula that never rendered must not be reported.
         assert!(!source_rows_expose(&rows, plane, "\\int_0^1 x\\,dx"));
+    }
+
+    fn rendered_frame(id: LiveMathOccurrenceId, occluded_source_rows: u32) -> ViewportFrame {
+        let mut frame = source_frame("");
+        frame.math_blocks.push(MathBlockPlacement {
+            start: TranscriptId(0),
+            anchor: MathBlockAnchor::Live {
+                screen: ScreenId::Alternate,
+                start: GridPoint { row: 0, column: 0 },
+                end: GridPoint { row: 0, column: 4 },
+                band_start_row: 0,
+                band_end_row: 0,
+                generation: GridGeneration(1),
+            },
+            source: "x".to_owned(),
+            artifact: ProjectedMathArtifact {
+                key: "x".to_owned(),
+                end: TranscriptId(0),
+                rgba: Arc::from(vec![255_u8; 4]),
+                width_px: 1,
+                height_px: 1,
+                height_subpixels: 1,
+                baseline_subpixels: 0,
+                mode: MathMode::Display,
+                vertical_padding_subpixels: 0,
+                render_scale_milli: 1000,
+                source: "x".to_owned(),
+            },
+            top_subpixels: 0,
+            left_subpixels: 0,
+            content_offset_subpixels: 0,
+            clip_height_subpixels: 1,
+            display: MathBlockDisplay::Rendered,
+            horizontal_overflow: HorizontalOverflowOwner::Block,
+            horizontal_scroll_px: 0,
+            vertical_scroll_px: 0,
+            toolbar_visible: false,
+            occluded_source_rows,
+            live_occurrence_id: Some(id),
+        });
+        frame
+    }
+
+    #[test]
+    fn restored_environment_source_is_matched_to_raw_grid_markers() {
+        let rendered = "\\begin{aligned}\na &= b \\\\\nc &= d\n\\end{aligned}";
+        let plane = "$$\n\\begin{aligned}\na &= b \\\nc &= d\n\\end{aligned}\n$$";
+        assert!(source_rows_expose(
+            &[r"\begin{aligned}".to_owned(), r"\end{aligned}".to_owned()],
+            plane,
+            rendered,
+        ));
+        assert!(
+            source_rows_expose(
+                &[r"\begin{aligned}".to_owned(), r"\end{aligned}".to_owned()],
+                &format!("{plane}\nJump to bottom (ctrl+End)"),
+                rendered,
+            ),
+            "an unrelated Jump chip must not exempt the whole frame"
+        );
+    }
+
+    #[test]
+    fn dropping_a_live_occurrence_while_its_source_is_exposed_is_a_flash() {
+        let id = LiveMathOccurrenceId(7);
+        let mut oracle = FormulaFlashOracle::default();
+        oracle.observe(&rendered_frame(id, 0));
+        oracle.observe(&source_frame("$$x$$"));
+        assert!(oracle.flash_detected());
+    }
+
+    #[test]
+    fn only_the_same_occluded_occurrence_receives_the_flash_exemption() {
+        let id = LiveMathOccurrenceId(7);
+        let mut oracle = FormulaFlashOracle::default();
+        oracle.observe(&rendered_frame(id, 0));
+        let mut occluded = rendered_frame(id, 1);
+        occluded.cells = source_frame("$$x$$").cells;
+        oracle.observe(&occluded);
+        assert!(!oracle.flash_detected());
+
+        let mut dropped = FormulaFlashOracle::default();
+        dropped.observe(&rendered_frame(id, 0));
+        dropped.observe(&source_frame("$$x$$"));
+        assert!(dropped.flash_detected());
+    }
+
+    #[test]
+    fn an_offscreen_occurrence_does_not_poison_a_later_equal_source() {
+        let mut oracle = FormulaFlashOracle::default();
+        oracle.observe(&rendered_frame(LiveMathOccurrenceId(7), 0));
+        oracle.observe(&source_frame(""));
+        oracle.observe(&source_frame("$$x$$"));
+        assert!(!oracle.flash_detected());
     }
 }

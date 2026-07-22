@@ -30,6 +30,9 @@ pub use height_tree::HeightTree;
 pub const LIVE_MATH_READABLE_SCALE_MILLI: u32 = 1000;
 pub const LIVE_MIN_VISIBLE_TEXT_ROWS: u32 = 8;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct LiveMathOccurrenceId(pub u64);
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct TranscriptSpan {
     pub start: TranscriptId,
@@ -124,11 +127,21 @@ pub struct ProjectedMathArtifact {
 /// projection-local live prefix map while the screen and grid generation still match.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectedLiveMathArtifact {
+    pub occurrence_id: LiveMathOccurrenceId,
     pub screen: ScreenId,
     pub start: GridPoint,
     pub end: GridPoint,
     pub band_start_row: u32,
     pub band_end_row: u32,
+    /// Rows of this proven block that remain above live row zero. They still participate in the
+    /// complete presentation geometry; only their pixels and terminal cells are clipped.
+    pub clipped_top_rows: u32,
+    /// Rows of this proven block that remain below the last live row. They participate in the
+    /// complete presentation geometry while pixels and terminal cells are bottom-clipped.
+    pub clipped_bottom_rows: u32,
+    /// Proven source rows hidden by an application-internal fixed region or its overlay boundary.
+    /// Terminal-edge clipping is tracked separately above.
+    pub occluded_source_rows: u32,
     pub generation: GridGeneration,
     pub artifact: ProjectedMathArtifact,
 }
@@ -182,6 +195,12 @@ pub struct MathBlockPlacement {
     pub horizontal_scroll_px: u32,
     pub vertical_scroll_px: u32,
     pub toolbar_visible: bool,
+    /// Diagnostic provenance for a still-live identity whose source is partly covered by fixed TUI
+    /// chrome. A missing placement is never treated as occlusion.
+    pub occluded_source_rows: u32,
+    /// Present only for live-grid math; survives repaint placement changes and distinguishes equal
+    /// source text belonging to different occurrences.
+    pub live_occurrence_id: Option<LiveMathOccurrenceId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1111,6 +1130,8 @@ impl ViewportProjection {
                                 horizontal_scroll_px: 0,
                                 vertical_scroll_px: 0,
                                 toolbar_visible: false,
+                                occluded_source_rows: 0,
+                                live_occurrence_id: None,
                             });
                             (
                                 (0..line_rows)
@@ -1211,11 +1232,37 @@ impl ViewportProjection {
                     .saturating_sub(self.live_row_prefix[block_first]);
                 let artifact = live_math.artifact.clone();
                 debug_assert_eq!(artifact.render_scale_milli, LIVE_MATH_READABLE_SCALE_MILLI);
+                let total_rows = live_math
+                    .clipped_top_rows
+                    .saturating_add(
+                        live_math
+                            .band_end_row
+                            .saturating_sub(live_math.band_start_row)
+                            .saturating_add(1),
+                    )
+                    .saturating_add(live_math.clipped_bottom_rows);
+                let source_band_height =
+                    i64::from(total_rows).saturating_mul(self.cell_height_subpixels.get());
+                let presentation_height = if screen == ScreenId::Alternate {
+                    artifact.height_subpixels.max(source_band_height)
+                } else {
+                    band_height
+                };
+                let hidden_height = if screen == ScreenId::Alternate {
+                    distributed_row_heights(presentation_height, total_rows as usize)
+                        .iter()
+                        .take(live_math.clipped_top_rows as usize)
+                        .copied()
+                        .sum::<i64>()
+                } else {
+                    0
+                };
                 let content_offset_subpixels = centered_content_offset(
-                    band_height,
+                    presentation_height,
                     artifact.height_subpixels,
                     artifact.vertical_padding_subpixels,
-                );
+                )
+                .saturating_sub(hidden_height);
                 let absolute_start = live_base.saturating_add(block_first);
                 let top_subpixels = frame_top_subpixels.saturating_add(
                     continuous_row_top_subpixels(
@@ -1249,6 +1296,8 @@ impl ViewportProjection {
                     horizontal_scroll_px: 0,
                     vertical_scroll_px: 0,
                     toolbar_visible: false,
+                    occluded_source_rows: live_math.occluded_source_rows,
+                    live_occurrence_id: Some(live_math.occurrence_id),
                 });
 
                 let visible_first = block_first.max(first);
@@ -1640,10 +1689,14 @@ impl ViewportProjection {
         let mut per_row_height =
             vec![self.cell_height_subpixels.get(); self.live_rows.get() as usize];
         for artifact in &accepted {
-            let rows = artifact
+            let visible_rows = artifact
                 .band_end_row
                 .saturating_sub(artifact.band_start_row)
                 .saturating_add(1);
+            let rows = artifact
+                .clipped_top_rows
+                .saturating_add(visible_rows)
+                .saturating_add(artifact.clipped_bottom_rows);
             let source_band_height =
                 i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
             let presentation_height = if screen == ScreenId::Alternate {
@@ -1654,10 +1707,11 @@ impl ViewportProjection {
             let heights = distributed_row_heights(presentation_height, rows.max(1) as usize);
             // Primary retains free height. Alternate is expand-only: a short formula keeps the
             // complete source-row band and centers inside it; a tall formula expands above it.
-            for offset in 0..rows {
+            for offset in 0..visible_rows {
                 if let Some(height) =
                     per_row_height.get_mut(artifact.band_start_row.saturating_add(offset) as usize)
-                    && let Some(distributed) = heights.get(offset as usize)
+                    && let Some(distributed) =
+                        heights.get(artifact.clipped_top_rows.saturating_add(offset) as usize)
                 {
                     *height = *distributed;
                 }
@@ -2308,11 +2362,15 @@ mod tests {
             projection.sync_live_math_artifacts(
                 ScreenId::Primary,
                 [ProjectedLiveMathArtifact {
+                    occurrence_id: LiveMathOccurrenceId(1),
                     screen: ScreenId::Primary,
                     start: GridPoint { row: 3, column: 0 },
                     end: GridPoint { row: 3, column: 4 },
                     band_start_row,
                     band_end_row,
+                    clipped_top_rows: 0,
+                    clipped_bottom_rows: 0,
+                    occluded_source_rows: 0,
                     generation: GridGeneration(1),
                     artifact: ProjectedMathArtifact {
                         key: format!("display-x-{band_start_row}-{band_end_row}"),
@@ -2399,11 +2457,15 @@ mod tests {
             GridGeneration(7),
         );
         let artifact = |screen, generation, key: &str| ProjectedLiveMathArtifact {
+            occurrence_id: LiveMathOccurrenceId(1),
             screen,
             start: GridPoint { row: 3, column: 0 },
             end: GridPoint { row: 3, column: 4 },
             band_start_row: 2,
             band_end_row: 3,
+            clipped_top_rows: 0,
+            clipped_bottom_rows: 0,
+            occluded_source_rows: 0,
             generation,
             artifact: ProjectedMathArtifact {
                 key: key.to_owned(),
