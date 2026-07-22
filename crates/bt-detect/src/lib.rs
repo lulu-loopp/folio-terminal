@@ -17,12 +17,16 @@ pub struct DetectionOptions {
     /// inside a LaTeX math environment. Set this to `false` once Claude Code emits the original
     /// `\\\\` faithfully; disabling it preserves renderer input byte-for-byte.
     pub restore_stripped_environment_newlines: bool,
+    /// Reject a display-math candidate containing Claude Code's exact scroll-review overlay text.
+    /// Disable this once Claude Code no longer writes that chip into terminal content rows.
+    pub reject_claude_code_jump_chip_overlay: bool,
 }
 
 impl Default for DetectionOptions {
     fn default() -> Self {
         Self {
             restore_stripped_environment_newlines: true,
+            reject_claude_code_jump_chip_overlay: true,
         }
     }
 }
@@ -820,7 +824,7 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
             opening = None;
             let body = &text[body_start..body_end];
             let original = &text[open_start..close_end];
-            if valid_display_body(body, body) {
+            if valid_display_body(body, body, options) {
                 let id = lines[index].0;
                 result.blocks.push(DetectedMathBlock {
                     start: id,
@@ -852,7 +856,7 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
             } else {
                 body
             };
-            if !valid_display_body(body, render) {
+            if !valid_display_body(body, render, options) {
                 continue;
             }
             let id = lines[index].0;
@@ -912,7 +916,7 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
                     options.restore_stripped_environment_newlines,
                 ),
             };
-            if !valid_display_body(&body, &render) {
+            if !valid_display_body(&body, &render, options) {
                 continue;
             }
             result.blocks.push(DetectedMathBlock {
@@ -960,7 +964,10 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
     result
 }
 
-fn valid_display_body(body: &str, render_source: &str) -> bool {
+fn valid_display_body(body: &str, render_source: &str, options: DetectionOptions) -> bool {
+    if options.reject_claude_code_jump_chip_overlay && body.contains("Jump to bottom (ctrl+End)") {
+        return false;
+    }
     !body.trim().is_empty()
         && render_source.len() <= MAX_MATH_SOURCE_BYTES
         && !block_body_looks_like_prose(body)
@@ -2079,6 +2086,25 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_jump_chip_overlay_is_not_baked_into_display_math() {
+        let polluted = r"$$\hat{f}(\xi) = \int_{-\infty}^{\in Jump to bottom (ctrl+End) ↓ dx$$";
+        assert!(detect_block_math(polluted).is_empty());
+
+        let options = DetectionOptions {
+            reject_claude_code_jump_chip_overlay: false,
+            ..DetectionOptions::default()
+        };
+        assert_eq!(
+            detect_math_blocks_with_options([(TranscriptId(1), polluted)], options).len(),
+            1,
+            "the CC-specific workaround must be removable after the overlay bug is fixed"
+        );
+
+        let clean = r"$$\hat{f}(\xi) = \int_{-\infty}^{\infty} dx$$";
+        assert_eq!(detect_block_math(clean).len(), 1);
+    }
+
+    #[test]
     fn stripped_environment_newlines_are_restored_only_in_renderer_input() {
         let lines = [
             r"$$\begin{aligned}",
@@ -2125,6 +2151,7 @@ mod tests {
         ];
         let options = DetectionOptions {
             restore_stripped_environment_newlines: false,
+            ..DetectionOptions::default()
         };
         let detected = detect_math_blocks_with_options(
             lines

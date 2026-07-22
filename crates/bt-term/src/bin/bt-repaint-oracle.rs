@@ -9,10 +9,10 @@ use std::{
 
 use bt_math::MathEngine;
 use bt_term::{
-    DualPlaneSession, FormulaFlashOracle, LIVE_MATH_STABLE_INTERVAL, SessionMathTask,
-    render_detection_task, render_live_detection_task,
+    DualPlaneSession, FormulaFlashOracle, FormulaFrameState, LIVE_MATH_STABLE_INTERVAL,
+    SessionMathTask, render_detection_task, render_live_detection_task,
 };
-use bt_viewport::ViewportProjection;
+use bt_viewport::{ViewportFrame, ViewportProjection};
 
 const FOREGROUND_RGB: [u8; 3] = [0xd8, 0xdc, 0xe8];
 
@@ -111,8 +111,104 @@ impl HeadlessOracle {
             self.session.live_detection_count(),
             self.session.live_invalidation_count(),
         );
+        let dump = env::var_os("BT_PROBE_VERBOSE").is_some() && state == FormulaFrameState::Mixed;
+        let geometry = env::var_os("BT_PROBE_GEOMETRY").is_some()
+            && frame
+                .math_blocks
+                .iter()
+                .any(|block| block.display == bt_viewport::MathBlockDisplay::Rendered);
+        if dump {
+            self.dump_frame(&frame);
+        }
+        if geometry {
+            self.dump_geometry(&frame);
+        }
         self.frame_sequence = self.frame_sequence.saturating_add(1);
         Ok(())
+    }
+
+    fn dump_geometry(&self, frame: &ViewportFrame) {
+        for block in &frame.math_blocks {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+                continue;
+            }
+            let (band_start, band_end, occurrence) = match block.anchor {
+                bt_viewport::MathBlockAnchor::Live {
+                    band_start_row,
+                    band_end_row,
+                    ..
+                } => (
+                    band_start_row as i64,
+                    band_end_row as i64,
+                    block.live_occurrence_id.map(|id| id.0),
+                ),
+                _ => (-1, -1, None),
+            };
+            let source_head = block
+                .source
+                .replace('\n', " ")
+                .chars()
+                .take(24)
+                .collect::<String>();
+            eprintln!(
+                "GEOM frame={} occ_id={:?} band={}..={} occ_rows={} top_sub={} content_off={} clip_h={} art_h={} pad={} src=\"{}\"",
+                self.frame_sequence,
+                occurrence,
+                band_start,
+                band_end,
+                block.occluded_source_rows,
+                block.top_subpixels,
+                block.content_offset_subpixels,
+                block.clip_height_subpixels,
+                block.artifact.height_subpixels,
+                block.artifact.vertical_padding_subpixels,
+                source_head,
+            );
+        }
+    }
+
+    fn dump_frame(&self, frame: &ViewportFrame) {
+        eprintln!("### FRAME {} (Mixed)", self.frame_sequence);
+        for (index, block) in frame.math_blocks.iter().enumerate() {
+            let (band_start, band_end, occurrence) = match block.anchor {
+                bt_viewport::MathBlockAnchor::Live {
+                    band_start_row,
+                    band_end_row,
+                    ..
+                } => (
+                    band_start_row as i64,
+                    band_end_row as i64,
+                    block.live_occurrence_id.map(|id| id.0),
+                ),
+                _ => (-1, -1, None),
+            };
+            let source_head = block
+                .source
+                .replace('\n', " ")
+                .chars()
+                .take(40)
+                .collect::<String>();
+            eprintln!(
+                "  block[{index}] display={:?} band={}..={} occluded={} occ_id={:?} src=\"{}\"",
+                block.display,
+                band_start,
+                band_end,
+                block.occluded_source_rows,
+                occurrence,
+                source_head,
+            );
+        }
+        let columns = frame.columns.get() as usize;
+        for (row, cells) in frame.cells.chunks(columns).enumerate() {
+            let text = cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>();
+            let trimmed = text.trim_end();
+            if !trimmed.is_empty() {
+                eprintln!("  row[{row:>2}] |{trimmed}");
+            }
+        }
     }
 }
 

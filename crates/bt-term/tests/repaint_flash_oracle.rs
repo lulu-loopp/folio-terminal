@@ -59,6 +59,14 @@ fn synchronized_repaint(rows: &[&str]) -> Vec<u8> {
     out
 }
 
+fn frame_row_text(frame: &bt_viewport::ViewportFrame, row: usize) -> String {
+    let columns = frame.columns.get() as usize;
+    frame.cells[row * columns..(row + 1) * columns]
+        .iter()
+        .map(|cell| cell.text.as_str())
+        .collect()
+}
+
 #[test]
 fn interaction_repaint_never_reexposes_ready_formula_source() {
     let start = std::time::Instant::now();
@@ -338,6 +346,18 @@ fn multiline_formula_crossing_internal_pane_bottom_keeps_identity_and_raster() {
     assert_eq!(
         observe_frame(&mut session, &mut projection, &mut oracle),
         FormulaFrameState::Rendered
+    );
+    session.refresh_projection(&mut projection);
+    let boundary_frame = session.viewport_frame(&mut projection).unwrap();
+    assert_eq!(
+        frame_row_text(&boundary_frame, 7).trim(),
+        "",
+        "an occluded row that still begins with this occurrence's proven source must be cleared"
+    );
+    assert_eq!(
+        frame_row_text(&boundary_frame, 9).trim(),
+        "────────────────────────",
+        "fixed chrome which does not match the proven source must never be cleared"
     );
     assert!(!oracle.flash_detected(), "sequence={:?}", oracle.frames());
     assert_eq!(

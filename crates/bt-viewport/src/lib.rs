@@ -142,6 +142,8 @@ pub struct ProjectedLiveMathArtifact {
     /// Proven source rows hidden by an application-internal fixed region or its overlay boundary.
     /// Terminal-edge clipping is tracked separately above.
     pub occluded_source_rows: u32,
+    /// Occluded terminal rows whose cells still carry this occurrence's proven source prefix.
+    pub occluded_visible_rows: Vec<u32>,
     pub generation: GridGeneration,
     pub artifact: ProjectedMathArtifact,
 }
@@ -198,6 +200,8 @@ pub struct MathBlockPlacement {
     /// Diagnostic provenance for a still-live identity whose source is partly covered by fixed TUI
     /// chrome. A missing placement is never treated as occlusion.
     pub occluded_source_rows: u32,
+    /// Source-proven occluded rows cleared from this frame; fixed chrome is never included.
+    pub occluded_visible_rows: Vec<u32>,
     /// Present only for live-grid math; survives repaint placement changes and distinguishes equal
     /// source text belonging to different occurrences.
     pub live_occurrence_id: Option<LiveMathOccurrenceId>,
@@ -1131,6 +1135,7 @@ impl ViewportProjection {
                                 vertical_scroll_px: 0,
                                 toolbar_visible: false,
                                 occluded_source_rows: 0,
+                                occluded_visible_rows: Vec::new(),
                                 live_occurrence_id: None,
                             });
                             (
@@ -1297,12 +1302,25 @@ impl ViewportProjection {
                     vertical_scroll_px: 0,
                     toolbar_visible: false,
                     occluded_source_rows: live_math.occluded_source_rows,
+                    occluded_visible_rows: live_math.occluded_visible_rows.clone(),
                     live_occurrence_id: Some(live_math.occurrence_id),
                 });
 
                 let visible_first = block_first.max(first);
                 let visible_last = block_last.min(last.saturating_sub(1));
                 for live_row in visible_first..=visible_last {
+                    let row = &mut visible[visible_live_start + live_row - first];
+                    for cell in &mut row.cells {
+                        cell.text.clear();
+                        cell.wide_spacer = false;
+                        cell.style.flags.remove(CellFlags::WIDE_CHAR);
+                    }
+                }
+                for live_row in &live_math.occluded_visible_rows {
+                    let live_row = *live_row as usize;
+                    if live_row < first || live_row >= last {
+                        continue;
+                    }
                     let row = &mut visible[visible_live_start + live_row - first];
                     for cell in &mut row.cells {
                         cell.text.clear();
@@ -2371,6 +2389,7 @@ mod tests {
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
                     occluded_source_rows: 0,
+                    occluded_visible_rows: Vec::new(),
                     generation: GridGeneration(1),
                     artifact: ProjectedMathArtifact {
                         key: format!("display-x-{band_start_row}-{band_end_row}"),
@@ -2466,6 +2485,7 @@ mod tests {
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
             occluded_source_rows: 0,
+            occluded_visible_rows: Vec::new(),
             generation,
             artifact: ProjectedMathArtifact {
                 key: key.to_owned(),

@@ -74,6 +74,8 @@ pub struct MathLayoutOptions {
     /// Work around Claude Code stripping one slash from environment row separators. Disable this
     /// after Claude Code emits LaTeX `\\\\` row separators faithfully.
     pub restore_stripped_environment_newlines: bool,
+    /// Reject Claude Code's exact Jump-to-bottom overlay when it is written into a math row.
+    pub reject_claude_code_jump_chip_overlay: bool,
 }
 
 impl Default for MathLayoutOptions {
@@ -83,6 +85,7 @@ impl Default for MathLayoutOptions {
             block_max_height_px: None,
             vertical_padding_cell_milli: DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI,
             restore_stripped_environment_newlines: true,
+            reject_claude_code_jump_chip_overlay: true,
         }
     }
 }
@@ -131,6 +134,35 @@ impl ProvenLiveRow {
             && self.continues == input.continues
             && self.cell_boundaries == input.cell_boundaries
     }
+
+    fn matches_source_prefix(&self, input: &LiveDetectionInput) -> bool {
+        if self.text.is_empty() || self.continues != input.continues {
+            return false;
+        }
+        if input.text.starts_with(&self.text)
+            && input.cell_boundaries.starts_with(&self.cell_boundaries)
+        {
+            return true;
+        }
+
+        let Some((before_chip, _)) = input.text.split_once("Jump to bottom (ctrl+End)") else {
+            return false;
+        };
+        let visible_source = before_chip.trim_end();
+        if visible_source.is_empty() || !self.text.starts_with(visible_source) {
+            return false;
+        }
+        let prefix_end = u32::try_from(visible_source.len()).unwrap_or(u32::MAX);
+        let proven_boundaries = self
+            .cell_boundaries
+            .iter()
+            .take_while(|(byte, _)| *byte <= prefix_end);
+        let visible_boundaries = input
+            .cell_boundaries
+            .iter()
+            .take_while(|(byte, _)| *byte <= prefix_end);
+        proven_boundaries.eq(visible_boundaries)
+    }
 }
 
 /// Immutable identity for one detector-proven occurrence. Grid rows deliberately do not live in
@@ -155,6 +187,9 @@ struct ProvenLiveOccurrence {
 struct LiveOccurrencePlacement {
     logical_band_start: i64,
     occluded_source_rows: u32,
+    /// Terminal rows outside the projected band whose current cells still begin with this
+    /// occurrence's proven source. Viewport may clear only these source-proven rows, never chrome.
+    occluded_visible_rows: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -562,6 +597,9 @@ impl DualPlaneSession {
             restore_stripped_environment_newlines: self
                 .math_layout_options
                 .restore_stripped_environment_newlines,
+            reject_claude_code_jump_chip_overlay: self
+                .math_layout_options
+                .reject_claude_code_jump_chip_overlay,
         }
     }
 
@@ -1318,6 +1356,7 @@ impl DualPlaneSession {
             record.clipped_bottom_rows = 0;
             record.placement.logical_band_start = logical_band_start;
             record.placement.occluded_source_rows = 0;
+            record.placement.occluded_visible_rows.clear();
             record.generation = self.grid_generation;
             record.detection_revision = self.detection_revision;
             if record.rendered_layout != self.layout_key
@@ -1724,6 +1763,7 @@ impl DualPlaneSession {
                 placement: LiveOccurrencePlacement {
                     logical_band_start: i64::from(task.band_start_row),
                     occluded_source_rows: 0,
+                    occluded_visible_rows: Vec::new(),
                 },
                 screen: task.screen,
                 generation: task.grid_generation,
@@ -2337,6 +2377,7 @@ impl DualPlaneSession {
                         clipped_top_rows: record.clipped_top_rows,
                         clipped_bottom_rows: record.clipped_bottom_rows,
                         occluded_source_rows: record.placement.occluded_source_rows,
+                        occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
                         generation: record.generation,
                         artifact,
                     })
@@ -2455,6 +2496,7 @@ impl DualPlaneSession {
                 vertical_scroll_px: 0,
                 toolbar_visible: record.hovered,
                 occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
                 live_occurrence_id: None,
             });
         }
@@ -2521,6 +2563,7 @@ impl DualPlaneSession {
                 vertical_scroll_px: record.vertical_scroll_px,
                 toolbar_visible: record.hovered,
                 occluded_source_rows: record.placement.occluded_source_rows,
+                occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
                 live_occurrence_id: Some(record.identity.occurrence_id),
             });
         }
@@ -2581,6 +2624,7 @@ impl DualPlaneSession {
                 vertical_scroll_px: 0,
                 toolbar_visible: false,
                 occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
                 live_occurrence_id: None,
             });
         }
@@ -2647,6 +2691,7 @@ impl DualPlaneSession {
                 vertical_scroll_px: 0,
                 toolbar_visible: false,
                 occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
                 live_occurrence_id: Some(record.identity.occurrence_id),
             });
         }
@@ -4689,22 +4734,30 @@ fn project_live_record(
 
     let mut exact_rows = Vec::<(u32, u32)>::new();
     let mut mismatched_rows = Vec::<i64>::new();
+    let mut mismatched_source_rows = Vec::<u32>::new();
     let mut occluded_source_rows = 0_u32;
+    let mut occluded_visible_rows = Vec::<u32>::new();
     for proven in &record.identity.source_rows {
         let target = logical_band_start.checked_add(i64::from(proven.band_offset))?;
         if target < 0 || target > terminal_end {
             continue;
         }
-        if target < content_start || target > content_end {
-            occluded_source_rows = occluded_source_rows.saturating_add(1);
-            continue;
-        }
         let target_row = u32::try_from(target).ok()?;
         let input = live_grid_input(&inputs, target_row)?;
+        if target < content_start || target > content_end {
+            occluded_source_rows = occluded_source_rows.saturating_add(1);
+            if proven.matches_source_prefix(input) {
+                occluded_visible_rows.push(target_row);
+            }
+            continue;
+        }
         if proven.exactly_matches(input) {
             exact_rows.push((proven.band_offset, target_row));
         } else {
             mismatched_rows.push(target);
+            if proven.matches_source_prefix(input) {
+                mismatched_source_rows.push(target_row);
+            }
         }
     }
 
@@ -4713,6 +4766,7 @@ fn project_live_record(
             return None;
         }
         record.placement.occluded_source_rows = occluded_source_rows;
+        record.placement.occluded_visible_rows = occluded_visible_rows;
         return Some(RecordProjection::Dormant(record));
     }
     exact_rows.sort_unstable();
@@ -4749,6 +4803,9 @@ fn project_live_record(
     }
     occluded_source_rows = occluded_source_rows
         .saturating_add(u32::try_from(mismatched_rows.len()).unwrap_or(u32::MAX));
+    occluded_visible_rows.extend(mismatched_source_rows);
+    occluded_visible_rows.sort_unstable();
+    occluded_visible_rows.dedup();
 
     let exact_offsets = exact_rows
         .iter()
@@ -4794,6 +4851,7 @@ fn project_live_record(
     record.clipped_bottom_rows =
         u32::try_from(logical_band_end.saturating_sub(i64::from(record.band_end_row))).ok()?;
     record.placement.occluded_source_rows = occluded_source_rows;
+    record.placement.occluded_visible_rows = occluded_visible_rows;
     record.span = span;
     Some(RecordProjection::Visible(record))
 }
@@ -5376,12 +5434,14 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(40), nz(4));
         session.set_math_layout_options(MathLayoutOptions {
             restore_stripped_environment_newlines: false,
+            reject_claude_code_jump_chip_overlay: false,
             ..MathLayoutOptions::default()
         });
         assert_eq!(
             session.detection_options(),
             DetectionOptions {
                 restore_stripped_environment_newlines: false,
+                reject_claude_code_jump_chip_overlay: false,
             }
         );
     }
@@ -7139,6 +7199,20 @@ mod tests {
             )
         );
         assert_eq!(placement.artifact.render_scale_milli, 1000);
+        let alternate_raster_top = placement
+            .top_subpixels
+            .saturating_add(placement.content_offset_subpixels);
+        let alternate_raster_bottom = alternate_raster_top.saturating_add(
+            i64::from(placement.artifact.height_px).saturating_mul(SUBPIXELS_PER_PX),
+        );
+        assert!(alternate_raster_top >= placement.top_subpixels);
+        assert!(
+            alternate_raster_bottom
+                <= placement
+                    .top_subpixels
+                    .saturating_add(placement.clip_height_subpixels),
+            "alternate placement/clip must contain the complete raster"
+        );
         let text = frame
             .cells
             .iter()
@@ -7176,12 +7250,27 @@ mod tests {
         let mut projection = primary.new_projection(primary.layout_key());
         let frame = primary.viewport_frame(&mut projection).unwrap();
         assert_eq!(frame.math_blocks.len(), 1);
+        let placement = &frame.math_blocks[0];
         assert_eq!(
-            frame.math_blocks[0].clip_height_subpixels,
+            placement.clip_height_subpixels,
             math_presentation_height_subpixels(
                 18 * SUBPIXELS_PER_PX,
                 default_math_padding_subpixels(),
             )
+        );
+        let primary_raster_top = placement
+            .top_subpixels
+            .saturating_add(placement.content_offset_subpixels);
+        let primary_raster_bottom = primary_raster_top.saturating_add(
+            i64::from(placement.artifact.height_px).saturating_mul(SUBPIXELS_PER_PX),
+        );
+        assert!(primary_raster_top >= placement.top_subpixels);
+        assert!(
+            primary_raster_bottom
+                <= placement
+                    .top_subpixels
+                    .saturating_add(placement.clip_height_subpixels),
+            "primary placement/clip must contain the complete raster"
         );
         assert!(
             frame

@@ -329,6 +329,7 @@ mod tests {
             vertical_scroll_px: 0,
             toolbar_visible: false,
             occluded_source_rows,
+            occluded_visible_rows: Vec::new(),
             live_occurrence_id: Some(id),
         });
         frame
