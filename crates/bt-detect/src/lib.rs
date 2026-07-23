@@ -1143,8 +1143,21 @@ fn restore_stripped_environment_newlines(source: &str, enabled: bool) -> String 
     restored
 }
 
+/// Byte offset where a display delimiter may begin on its line: leading spaces, then optionally
+/// one rendered CommonMark list-marker glyph (how TUI markdown renderers such as Claude Code and
+/// Codex emit a list item) followed by its spacing. A display block is valid list-item content,
+/// so the marker does not deny the delimiter its owns-the-line status; every other guard
+/// (escapes, prose body, CommonMark code contexts, pairing) runs unchanged.
 fn delimiter_start(text: &str) -> usize {
-    text.len() - text.trim_start_matches(' ').len()
+    let spaces = text.len() - text.trim_start_matches(' ').len();
+    let rest = &text[spaces..];
+    for marker in ["• ", "◦ ", "▪ ", "● "] {
+        if let Some(after) = rest.strip_prefix(marker) {
+            let extra = after.len() - after.trim_start_matches(' ').len();
+            return spaces + marker.len() + extra;
+        }
+    }
+    spaces
 }
 
 fn complete_display_on_line(text: &str) -> Option<(DelimiterKind, usize, usize, usize, usize)> {
@@ -2560,5 +2573,65 @@ mod tests {
                 ..
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod rendered_list_marker_delimiters {
+    use super::*;
+
+    /// Codex CLI (and other TUI markdown renderers) put a reply inside a list item, so the first
+    /// display opener arrives as `• $$`. Denying that opener its owns-the-line status desyncs the
+    /// `$$` pairing for the entire message: every following pair swallows a blank body and gets
+    /// rejected, which the user saw as "none of these render" (2026-07-23). A rendered list
+    /// marker is valid CommonMark list-item context for a display block, so it is skipped like
+    /// leading indentation; all other guards run unchanged.
+    #[test]
+    fn a_rendered_list_marker_does_not_desync_display_pairing() {
+        let lines: Vec<(TranscriptId, &str)> = vec![
+            (TranscriptId(1), "• $$"),
+            (TranscriptId(2), r"  x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}"),
+            (TranscriptId(3), "  $$"),
+            (TranscriptId(4), ""),
+            (TranscriptId(5), "  $$"),
+            (TranscriptId(6), r"  e^{i\pi}+1=0"),
+            (TranscriptId(7), "  $$"),
+            (TranscriptId(8), ""),
+            (TranscriptId(9), "  $$"),
+            (TranscriptId(10), "  A="),
+            (TranscriptId(11), r"  \begin{pmatrix}"),
+            (TranscriptId(12), "  a & b\\"),
+            (TranscriptId(13), "  c & d"),
+            (TranscriptId(14), r"  \end{pmatrix}"),
+            (TranscriptId(15), "  $$"),
+        ];
+        let blocks = detect_math_blocks(lines);
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.start, block.end))
+                .collect::<Vec<_>>(),
+            [
+                (TranscriptId(1), TranscriptId(3)),
+                (TranscriptId(5), TranscriptId(7)),
+                (TranscriptId(9), TranscriptId(15)),
+            ],
+            "every $$ block must pair despite the list marker on the first opener"
+        );
+    }
+
+    /// The marker skip must not weaken the prose and inline-superstring guards.
+    #[test]
+    fn a_list_marker_line_with_prose_dollars_stays_undetected() {
+        let lines: Vec<(TranscriptId, &str)> = vec![
+            (TranscriptId(1), "• $$5.00 and then $$6.00 for shipping"),
+            (TranscriptId(2), "• $$"),
+            (TranscriptId(3), "  the total price is five dollars"),
+            (TranscriptId(4), "  $$"),
+        ];
+        assert!(
+            detect_math_blocks(lines).is_empty(),
+            "prose bodies and inline superstrings stay rejected behind a list marker"
+        );
     }
 }
