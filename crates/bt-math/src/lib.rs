@@ -20,7 +20,7 @@ pub const MAX_RASTER_BYTES: usize = 64 * 1024 * 1024;
 
 const TYPST_TEMPLATE: &str = r#"
 #import "specs/mod.typ": mitex-scope as base-mitex-scope
-#set page(width: auto, height: auto, margin: 0pt, fill: none)
+#set page(width: auto, height: auto, margin: (x: 0pt, y: if sys.inputs.display { sys.inputs.font_size * 1pt } else { 0pt }), fill: none)
 #set text(size: sys.inputs.font_size * 1pt, fill: rgb(sys.inputs.red, sys.inputs.green, sys.inputs.blue))
 #let mitex-scope = base-mitex-scope + (
   diff: math.partial,
@@ -708,5 +708,69 @@ mod tests {
             MathEngine::new().render(r"\input{secret}", key()),
             Err(MathRenderError::UnsafeCommand)
         );
+    }
+}
+
+#[cfg(test)]
+mod display_page_margin {
+    use super::*;
+    use std::num::NonZeroU32;
+
+    /// Typst auto-sizes the page to the layout box, and glyph ink is allowed to overshoot that
+    /// box (a first-row superscript, `\frac{\rho}{\varepsilon_0}` in an aligned row). With
+    /// `margin: 0pt` that overshoot is rasterised off-page and silently lost, which the user saw
+    /// as multi-line display blocks with their first line's top clipped on both screens. The
+    /// display-only 1em vertical page margin captures the overshoot and `crop_vertical_alpha`
+    /// trims the raster back to alpha-tight ink, so geometry stays tight while ink is complete.
+    #[test]
+    fn display_page_margin_preserves_overshooting_ink() {
+        let engine = MathEngine::new();
+        let key = MathRenderKey {
+            dpi_milli: NonZeroU32::new(2000).unwrap(),
+            font_milli_pt: NonZeroU32::new(24_000).unwrap(),
+            foreground_rgb: [255, 255, 255],
+            mode: MathMode::Display,
+        };
+        // Pinned against the vendored Typst + fonts at this exact render key. Reverting the page
+        // margin to 0pt clips the aligned first row and drops these to 89/135/92.
+        for (source, expected_ink_height) in [
+            (
+                r"\begin{aligned}(a+b)^2 &= a^2 + 2ab + b^2 \ (a-b)^2 &= a^2 - 2ab + b^2\end{aligned}",
+                92,
+            ),
+            (
+                r"\begin{aligned}\nabla \cdot \mathbf{E} &= \frac{\rho}{\varepsilon_0} \ \nabla \cdot \mathbf{B} &= 0\end{aligned}",
+                177,
+            ),
+            (r"(a+b)^2 = a^2 + 2ab + b^2", 93),
+        ] {
+            let raster = engine.render(source, key).unwrap();
+            assert_eq!(
+                raster.content_height_px, expected_ink_height,
+                "display ink must include layout-box overshoot for {source}"
+            );
+        }
+    }
+
+    /// Inline placement is baseline-anchored on measurements that only hold with the historical
+    /// zero-margin page, so inline rendering keeps `margin: 0pt` byte-for-byte.
+    #[test]
+    fn inline_rasters_keep_the_zero_margin_page() {
+        let engine = MathEngine::new();
+        let key = MathRenderKey {
+            dpi_milli: NonZeroU32::new(2000).unwrap(),
+            font_milli_pt: NonZeroU32::new(24_000).unwrap(),
+            foreground_rgb: [255, 255, 255],
+            mode: MathMode::Inline,
+        };
+        for (source, expected_ink_height, expected_baseline) in [("x", 39, 23.7), ("y", 39, 23.7)] {
+            let raster = engine.render(source, key).unwrap();
+            assert_eq!(raster.content_height_px, expected_ink_height, "{source}");
+            assert!(
+                (raster.baseline_px - expected_baseline).abs() < 0.6,
+                "{source}: baseline {} drifted from the zero-margin measurement {expected_baseline}",
+                raster.baseline_px
+            );
+        }
     }
 }
