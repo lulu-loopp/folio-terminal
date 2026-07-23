@@ -1292,6 +1292,14 @@ impl Runtime {
             }
         }
         let modes = self.session.terminal_modes();
+        // Sticky local review: while the alternate-screen viewport is displaced into the
+        // projection-local overflow (Shift+wheel entered it), the user is looking at displaced
+        // pixels, not the application's live pane — forwarding wheel bytes there would scroll a
+        // surface the user cannot see. Plain wheel therefore stays local in both directions;
+        // scrolling back to the resting bottom (offset 0) exits and restores forwarding.
+        if modes.alternate_screen && self.projection.is_scrolled() {
+            return self.scroll_view(lines);
+        }
         if !self.modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off {
             let Some(hit) = self.frame_hit() else {
                 return Ok(());
@@ -1387,6 +1395,15 @@ impl Runtime {
                 }
                 _ => {}
             }
+        } else if matches!(&event.logical_key, Key::Named(NamedKey::End))
+            && self.modifiers == ModifiersState::CONTROL
+            && self.projection.is_scrolled()
+        {
+            // The application's own jump-to-bottom binding: also return the projection-local
+            // overflow review to rest so both scroll layers land at the bottom together. The
+            // bytes still reach the application below.
+            self.projection.scroll_to_bottom();
+            self.publish_interaction_frame()?;
         }
 
         let application_cursor_mode = self.session.application_cursor_mode();

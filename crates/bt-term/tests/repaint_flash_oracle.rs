@@ -336,7 +336,7 @@ fn multiline_formula_crossing_internal_pane_bottom_keeps_identity_and_raster() {
     // A later in-place repaint keeps the previously proven pane boundary. The Jump chip mutates
     // only the pane's last row, so that row becomes occluded without granting a frame-wide waiver.
     let mut boundary_overlay = CROSSES_PANE_BOTTOM.to_vec();
-    boundary_overlay[7] = r"a &= b + c \\        Jump to bottom";
+    boundary_overlay[7] = r"a &= b + c \\        Jump to bottom (ctrl+End)";
     session
         .feed_at(
             &synchronized_repaint(&boundary_overlay),
@@ -351,8 +351,9 @@ fn multiline_formula_crossing_internal_pane_bottom_keeps_identity_and_raster() {
     let boundary_frame = session.viewport_frame(&mut projection).unwrap();
     assert_eq!(
         frame_row_text(&boundary_frame, 7).trim(),
-        "",
-        "an occluded row that still begins with this occurrence's proven source must be cleared"
+        "Jump to bottom (ctrl+End)",
+        "an occluded row clears exactly this occurrence's proven source prefix while the \
+         application's Jump chip keeps its own cells (text and highlight style)"
     );
     assert_eq!(
         frame_row_text(&boundary_frame, 9).trim(),

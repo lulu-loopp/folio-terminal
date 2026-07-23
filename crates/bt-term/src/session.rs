@@ -135,16 +135,50 @@ impl ProvenLiveRow {
             && self.cell_boundaries == input.cell_boundaries
     }
 
-    fn matches_source_prefix(&self, input: &LiveDetectionInput) -> bool {
+    /// Column ranges of `input`'s row that still display this occurrence's proven source and may
+    /// therefore be cleared. `None` = the row does not carry this row's source. Identification
+    /// requires the row to begin with this row's proven source (optionally interrupted by Claude
+    /// Code's Jump chip); the cleared set is then exactly the cells whose content equals the
+    /// proven source cell at the same column, so an overlay splitting the row (chip text, its
+    /// highlight style, the trailing arrow) keeps every one of its own cells untouched while the
+    /// leaked source on either side of it is removed.
+    fn source_clear_ranges(&self, input: &LiveDetectionInput) -> Option<Vec<(u32, u32)>> {
         if self.text.is_empty() || self.continues != input.continues {
-            return false;
+            return None;
         }
-        if input.text.starts_with(&self.text)
-            && input.cell_boundaries.starts_with(&self.cell_boundaries)
-        {
-            return true;
+        let identified = (input.text.starts_with(&self.text)
+            && input.cell_boundaries.starts_with(&self.cell_boundaries))
+            || self.chip_split_matches(input);
+        if !identified {
+            return None;
         }
 
+        let proven_cells = boundary_cells(&self.text, &self.cell_boundaries);
+        let input_cells = boundary_cells(&input.text, &input.cell_boundaries);
+        let mut ranges = Vec::<(u32, u32)>::new();
+        for proven_cell in &proven_cells {
+            let matches = input_cells.iter().any(|input_cell| {
+                input_cell.columns == proven_cell.columns && input_cell.text == proven_cell.text
+            });
+            if !matches {
+                continue;
+            }
+            let (start, end) = proven_cell.columns;
+            match ranges.last_mut() {
+                Some((_, previous_end)) if *previous_end == start => *previous_end = end,
+                _ => ranges.push((start, end)),
+            }
+        }
+        if ranges.is_empty() {
+            None
+        } else {
+            Some(ranges)
+        }
+    }
+
+    /// The Jump chip overwrote this row mid-source: everything visible before the exact chip
+    /// signature must be this row's proven source prefix, byte- and boundary-identical.
+    fn chip_split_matches(&self, input: &LiveDetectionInput) -> bool {
         let Some((before_chip, _)) = input.text.split_once("Jump to bottom (ctrl+End)") else {
             return false;
         };
@@ -163,6 +197,30 @@ impl ProvenLiveRow {
             .take_while(|(byte, _)| *byte <= prefix_end);
         proven_boundaries.eq(visible_boundaries)
     }
+}
+
+#[derive(Eq, PartialEq)]
+struct BoundaryCell<'a> {
+    columns: (u32, u32),
+    text: &'a str,
+}
+
+/// Split boundary-mapped row text back into its per-cell pieces. Consecutive `(byte, column)`
+/// boundary pairs delimit one cell's bytes and its column span (wide glyphs span two columns).
+fn boundary_cells<'a>(text: &'a str, boundaries: &[(u32, u32)]) -> Vec<BoundaryCell<'a>> {
+    boundaries
+        .windows(2)
+        .filter_map(|window| {
+            let [(byte_start, column_start), (byte_end, column_end)] = window else {
+                return None;
+            };
+            let piece = text.get(*byte_start as usize..*byte_end as usize)?;
+            Some(BoundaryCell {
+                columns: (*column_start, *column_end),
+                text: piece,
+            })
+        })
+        .collect()
 }
 
 /// Immutable identity for one detector-proven occurrence. Grid rows deliberately do not live in
@@ -187,9 +245,10 @@ struct ProvenLiveOccurrence {
 struct LiveOccurrencePlacement {
     logical_band_start: i64,
     occluded_source_rows: u32,
-    /// Terminal rows outside the projected band whose current cells still begin with this
-    /// occurrence's proven source. Viewport may clear only these source-proven rows, never chrome.
-    occluded_visible_rows: Vec<u32>,
+    /// `(terminal_row, column_ranges)` pairs outside the projected band whose current cells still
+    /// show this occurrence's proven source. Viewport may clear only those exact cells — never
+    /// chrome, and never the cells of an application overlay (Jump chip) sharing the row.
+    occluded_visible_rows: Vec<(u32, Vec<(u32, u32)>)>,
 }
 
 #[derive(Clone, Debug)]
@@ -4734,9 +4793,9 @@ fn project_live_record(
 
     let mut exact_rows = Vec::<(u32, u32)>::new();
     let mut mismatched_rows = Vec::<i64>::new();
-    let mut mismatched_source_rows = Vec::<u32>::new();
+    let mut mismatched_source_rows = Vec::<(u32, Vec<(u32, u32)>)>::new();
     let mut occluded_source_rows = 0_u32;
-    let mut occluded_visible_rows = Vec::<u32>::new();
+    let mut occluded_visible_rows = Vec::<(u32, Vec<(u32, u32)>)>::new();
     for proven in &record.identity.source_rows {
         let target = logical_band_start.checked_add(i64::from(proven.band_offset))?;
         if target < 0 || target > terminal_end {
@@ -4746,8 +4805,8 @@ fn project_live_record(
         let input = live_grid_input(&inputs, target_row)?;
         if target < content_start || target > content_end {
             occluded_source_rows = occluded_source_rows.saturating_add(1);
-            if proven.matches_source_prefix(input) {
-                occluded_visible_rows.push(target_row);
+            if let Some(ranges) = proven.source_clear_ranges(input) {
+                occluded_visible_rows.push((target_row, ranges));
             }
             continue;
         }
@@ -4755,8 +4814,8 @@ fn project_live_record(
             exact_rows.push((proven.band_offset, target_row));
         } else {
             mismatched_rows.push(target);
-            if proven.matches_source_prefix(input) {
-                mismatched_source_rows.push(target_row);
+            if let Some(ranges) = proven.source_clear_ranges(input) {
+                mismatched_source_rows.push((target_row, ranges));
             }
         }
     }
@@ -6940,7 +6999,10 @@ mod tests {
         let mut projection = session.new_projection(session.layout_key());
         let bottom = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(session.terminal().dimensions(), (nz(40), nz(12)));
-        assert_eq!(bottom.status_text.as_deref(), Some("2 rows above"));
+        assert_eq!(
+            bottom.status_text.as_deref(),
+            Some("2 rows above · Shift+wheel")
+        );
         assert_eq!(
             &bottom.cells[11 * 40..12 * 40],
             last_grid_row.as_slice(),
@@ -6980,7 +7042,10 @@ mod tests {
                 .top_subpixels
                 .saturating_add(SPIKE_CELL_HEIGHT_SUBPIXELS.get())
         );
-        assert_eq!(first_review.status_text.as_deref(), Some("1 rows above"));
+        assert_eq!(
+            first_review.status_text.as_deref(),
+            Some("1 rows above · Shift+wheel")
+        );
         assert!(matches!(
             first_review.viewport_origin,
             FrameViewportOrigin::LiveOverflow { rows_below: 1 }
@@ -7378,7 +7443,10 @@ mod tests {
             clip_bottom.saturating_sub(raster_bottom),
             default_math_padding_subpixels()
         );
-        assert_eq!(frame.status_text.as_deref(), Some("3 rows above"));
+        assert_eq!(
+            frame.status_text.as_deref(),
+            Some("3 rows above · Shift+wheel")
+        );
         assert!(
             frame
                 .cells
@@ -7932,5 +8000,65 @@ mod tests {
                 whole.document().entries().values().map(|entry| entry.line.text.clone()).collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn occluded_clear_ranges_cover_source_on_both_sides_of_the_jump_chip() {
+        fn ascii_boundaries(text: &str) -> Vec<(u32, u32)> {
+            (0..=u32::try_from(text.len()).unwrap())
+                .map(|index| (index, index))
+                .collect()
+        }
+        let proven_text = r"\nabla \times \mathbf{B} = \mu_0 \mathbf{J}";
+        let proven = ProvenLiveRow {
+            band_offset: 0,
+            text: proven_text.to_owned(),
+            continues: false,
+            cell_boundaries: ascii_boundaries(proven_text),
+        };
+        let chip = "Jump to bottom (ctrl+End)";
+        let chip_start = 10_usize;
+        let chip_end = chip_start + chip.len();
+        let input_text = format!(
+            "{}{chip}{}",
+            &proven_text[..chip_start],
+            &proven_text[chip_end..]
+        );
+        let input = LiveDetectionInput {
+            source: LiveDetectionSource::Grid {
+                row: 17,
+                revision: 1,
+            },
+            text: input_text.clone(),
+            continues: false,
+            cell_boundaries: ascii_boundaries(&input_text),
+        };
+        // The chip overwrote columns 10..35 mid-source: the leaked prefix AND the leaked tail
+        // after the chip are cleared, while every chip glyph keeps its text and style. Column 24
+        // is a chip space which coincidentally equals the proven source's space at that column;
+        // clearing a space's text is visually identical because cell styles are never touched.
+        let expected_prefix = (0, u32::try_from(chip_start).unwrap());
+        let coincidental_space = (24, 25);
+        let expected_tail = (
+            u32::try_from(chip_end).unwrap(),
+            u32::try_from(proven_text.len()).unwrap(),
+        );
+        assert_eq!(
+            proven.source_clear_ranges(&input),
+            Some(vec![expected_prefix, coincidental_space, expected_tail])
+        );
+
+        // A row which does not carry this source (fixed chrome) must never produce clear ranges.
+        let chrome_text = "────────────────";
+        let chrome = LiveDetectionInput {
+            source: LiveDetectionSource::Grid {
+                row: 19,
+                revision: 1,
+            },
+            text: chrome_text.to_owned(),
+            continues: false,
+            cell_boundaries: vec![(0, 0), (u32::try_from(chrome_text.len()).unwrap(), 16)],
+        };
+        assert_eq!(proven.source_clear_ranges(&chrome), None);
     }
 }

@@ -143,7 +143,7 @@ pub struct ProjectedLiveMathArtifact {
     /// Terminal-edge clipping is tracked separately above.
     pub occluded_source_rows: u32,
     /// Occluded terminal rows whose cells still carry this occurrence's proven source prefix.
-    pub occluded_visible_rows: Vec<u32>,
+    pub occluded_visible_rows: Vec<(u32, Vec<(u32, u32)>)>,
     pub generation: GridGeneration,
     pub artifact: ProjectedMathArtifact,
 }
@@ -201,7 +201,7 @@ pub struct MathBlockPlacement {
     /// chrome. A missing placement is never treated as occlusion.
     pub occluded_source_rows: u32,
     /// Source-proven occluded rows cleared from this frame; fixed chrome is never included.
-    pub occluded_visible_rows: Vec<u32>,
+    pub occluded_visible_rows: Vec<(u32, Vec<(u32, u32)>)>,
     /// Present only for live-grid math; survives repaint placement changes and distinguishes equal
     /// source text belonging to different occurrences.
     pub live_occurrence_id: Option<LiveMathOccurrenceId>,
@@ -1266,21 +1266,11 @@ impl ViewportProjection {
                 } else {
                     band_height
                 };
-                let hidden_height = if screen == ScreenId::Alternate {
-                    distributed_row_heights(presentation_height, total_rows as usize)
-                        .iter()
-                        .take(live_math.clipped_top_rows as usize)
-                        .copied()
-                        .sum::<i64>()
-                } else {
-                    0
-                };
                 let content_offset_subpixels = centered_content_offset(
                     presentation_height,
                     artifact.height_subpixels,
                     artifact.vertical_padding_subpixels,
-                )
-                .saturating_sub(hidden_height);
+                );
                 let absolute_start = live_base.saturating_add(block_first);
                 let top_subpixels = frame_top_subpixels.saturating_add(
                     continuous_row_top_subpixels(
@@ -1329,16 +1319,23 @@ impl ViewportProjection {
                         cell.style.flags.remove(CellFlags::WIDE_CHAR);
                     }
                 }
-                for live_row in &live_math.occluded_visible_rows {
+                for (live_row, clear_ranges) in &live_math.occluded_visible_rows {
                     let live_row = *live_row as usize;
                     if live_row < first || live_row >= last {
                         continue;
                     }
                     let row = &mut visible[visible_live_start + live_row - first];
-                    for cell in &mut row.cells {
-                        cell.text.clear();
-                        cell.wide_spacer = false;
-                        cell.style.flags.remove(CellFlags::WIDE_CHAR);
+                    // Only cells proven to show this occurrence's source are cleared; an
+                    // application overlay sharing the row (Jump chip) keeps its text and
+                    // highlight style untouched on both sides.
+                    for (start, end) in clear_ranges {
+                        let start = (*start as usize).min(row.cells.len());
+                        let end = (*end as usize).min(row.cells.len());
+                        for cell in &mut row.cells[start..end] {
+                            cell.text.clear();
+                            cell.wide_spacer = false;
+                            cell.style.flags.remove(CellFlags::WIDE_CHAR);
+                        }
                     }
                 }
             }
@@ -1444,7 +1441,14 @@ impl ViewportProjection {
             math_blocks,
             math_failures: Vec::new(),
             status_text: if rows_above != 0 {
-                Some(format!("{rows_above} rows above"))
+                if primary {
+                    Some(format!("{rows_above} rows above"))
+                } else {
+                    // Plain wheel belongs to the application on the alternate screen (M1.7);
+                    // these projection-local rows are only reachable through the explicit local
+                    // override, so the indicator itself must teach that affordance.
+                    Some(format!("{rows_above} rows above · Shift+wheel"))
+                }
             } else if content_rows_below != 0 {
                 Some(format!("{content_rows_below} lines below"))
             } else if self.live_overflow_offset_rows != 0 {
@@ -1745,6 +1749,24 @@ impl ViewportProjection {
                         heights.get(artifact.clipped_top_rows.saturating_add(offset) as usize)
                 {
                     *height = *distributed;
+                }
+            }
+            if screen == ScreenId::Alternate && artifact.clipped_top_rows > 0 {
+                // Terminal-edge clipping removes logical rows, not their upward presentation
+                // extent. Fold the clipped-top slice into the first visible band row so the live
+                // prefix still measures the complete height that was pushed above the fixed grid.
+                // Bottom anchoring consumes this added height at the pane top; local review can
+                // then spend the same amount to bring the complete box back, with a non-negative
+                // content offset. Clipped-bottom rows remain outside this upward reveal extent.
+                let clipped_top_height = heights
+                    .iter()
+                    .take(artifact.clipped_top_rows as usize)
+                    .copied()
+                    .sum::<i64>();
+                if let Some(first_visible_height) =
+                    per_row_height.get_mut(artifact.band_start_row as usize)
+                {
+                    *first_visible_height = first_visible_height.saturating_add(clipped_top_height);
                 }
             }
         }
@@ -2528,6 +2550,131 @@ mod tests {
                 .windows(2)
                 .all(|rows| { rows[1].saturating_sub(rows[0]) == cell_height().get() })
         );
+    }
+
+    #[test]
+    fn alternate_clipped_top_extent_is_fully_reviewable_without_negative_content_offset() {
+        let cell = cell_height().get();
+        let padding = cell / 4;
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(6),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let artifact = |occurrence_id,
+                        band_start_row,
+                        band_end_row,
+                        clipped_top_rows,
+                        box_cells,
+                        key: &str| {
+            let box_height = i64::from(box_cells).saturating_mul(cell);
+            let tight_height = box_height.saturating_sub(2 * padding);
+            let height_px = u32::try_from(tight_height / SUBPIXELS_PER_PX).unwrap();
+            ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(occurrence_id),
+                screen: ScreenId::Alternate,
+                start: GridPoint {
+                    row: band_start_row,
+                    column: 0,
+                },
+                end: GridPoint {
+                    row: band_end_row,
+                    column: 4,
+                },
+                band_start_row,
+                band_end_row,
+                clipped_top_rows,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    key: key.to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; height_px as usize * 4]),
+                    width_px: 1,
+                    height_px,
+                    height_subpixels: box_height,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    vertical_padding_subpixels: padding,
+                    render_scale_milli: 1000,
+                    source: key.to_owned(),
+                },
+            }
+        };
+        projection.sync_live_math_artifacts(
+            ScreenId::Alternate,
+            [
+                artifact(1, 0, 1, 1, 4, "clipped-top"),
+                artifact(2, 3, 3, 0, 3, "lower-expansion"),
+            ],
+        );
+
+        let live = || vec![CapturedRow::plain("        ", false); 6];
+        let cursor = GridCursor {
+            row: 5,
+            column: 0,
+            visible: true,
+        };
+        let bottom = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                live(),
+                cursor,
+                ScreenId::Alternate,
+            )
+            .unwrap();
+        let last = bottom.row_map.last().unwrap();
+        assert_eq!(
+            last.top_subpixels.saturating_add(last.height_subpixels),
+            6 * cell,
+            "the extra reveal extent must still be consumed above the fixed bottom row"
+        );
+        assert_eq!(projection.debug_scroll_extent().2, 4);
+        assert_eq!(
+            bottom.status_text.as_deref(),
+            Some("4 rows above · Shift+wheel")
+        );
+
+        projection.scroll_by_rows(99);
+        let top = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                live(),
+                cursor,
+                ScreenId::Alternate,
+            )
+            .unwrap();
+        assert_eq!(projection.scroll_offset_rows(), 4);
+        let top_block = top
+            .math_blocks
+            .iter()
+            .find(|block| block.source == "clipped-top")
+            .unwrap();
+        assert_eq!(top_block.top_subpixels, 0);
+        assert_eq!(top_block.content_offset_subpixels, padding);
+        assert_eq!(top_block.clip_height_subpixels, 4 * cell);
+        let raster_top = top_block
+            .top_subpixels
+            .saturating_add(top_block.content_offset_subpixels);
+        let raster_bottom = raster_top.saturating_add(
+            i64::from(top_block.artifact.height_px).saturating_mul(SUBPIXELS_PER_PX),
+        );
+        assert!(raster_top >= 0);
+        assert!(
+            raster_bottom
+                <= top_block
+                    .top_subpixels
+                    .saturating_add(top_block.clip_height_subpixels)
+        );
+        // Mutations that omit the clipped-top slice cap the allowance at three rows; retaining
+        // `centered - hidden_top` makes the final content offset negative.
     }
 
     #[test]
