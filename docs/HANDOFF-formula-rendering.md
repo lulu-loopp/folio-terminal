@@ -1,60 +1,44 @@
 # Handoff:公式渲染(M1.9 线)— 下个 session 从这里接手
 
-_最后更新:2026-07-22,HEAD `951c3fc`_
+_最后更新:2026-07-23,HEAD `241e74b`_
 
-## 当前状态
-
-**公式渲染核心问题 + occlusion 边界都已解决并提交,用户真机确认**。剩一个几何/滚动问题(M1.9v)。
+## 当前状态:**M1.9 公式线全部收线,用户真机确认「CC 没什么问题了」**
 
 已提交链(main 分支):
 - `bac8d5a` M1.9k — 检测器重写(多行 `$$`/`\[` 渲染,长会话不熄火,两条红线)
 - `20846b1` M1.9m — 呈现模型(块高=净高+对称 padding,竖直居中,底锚)
 - `efd2587` M1.9o — 消灭滚/点/双击闪回(矮块;DEC 2026 重绘识别 + oracle 工具)
-- `b9faf31` M1.9t — **多行大块跨 CC 内部窗格滚动保持渲染**(identity/placement 分层
-  + 事务级分段映射 + occlusion)+ 数学环境 `\\` 还原(带开关)+ 顶部出屏保持
-- `951c3fc` M1.9u — **occluded 尾行不再露源码(①)+ Jump 芯片不再烤进渲染(②)**。
-  projection 产出 `occluded_visible_rows`(occluded 且仍是本块 proven source 精确前缀的
-  终端行)→ viewport 沿 band 清行路径清掉;chrome 不匹配 proven source 绝不清。检测加
-  默认开关 `reject_claude_code_jump_chip_overlay` 只拒确切芯片签名。真红门
-  `scripts/dev/check-occlusion-leak.py`:cc-topbot 30→0。oracle 加 `BT_PROBE_VERBOSE`
-  行级 dump + `BT_PROBE_GEOMETRY` placement dump。
+- `b9faf31` M1.9t — 多行大块跨 CC 内部窗格滚动保持渲染(identity/placement 分层
+  + 事务级分段映射 + occlusion)+ 数学环境 `\\` 还原(带开关)
+- `951c3fc` M1.9u — occluded 尾行不露源码 + Jump 芯片不烤进渲染
+  (`reject_claude_code_jump_chip_overlay` 开关;红门 `scripts/dev/check-occlusion-leak.py` 30→0)
+- `e66fe88` — oracle 诊断:`BT_PROBE_VERBOSE`(行级 dump)/`BT_PROBE_GEOMETRY`(placement)/
+  `BT_PROBE_SCROLLTOP`(逐行上滚探针)/`debug_scroll_extent`
+- `65f0fa4` — **bt-math 页面 margin:display 墨迹溢出不再被裁**(真根因:Typst `margin: 0pt`
+  把溢出排版盒的墨迹光栅时切掉,Maxwell aligned 首行实测被切 42px——这就是"顶裁"的**纹理级**
+  根因,两屏共享。display 加 1em 垂直 margin+crop 裁回;**inline 保持 0 margin 逐位不变**,
+  它的 baseline 计量只在 0 margin 下成立(canvas 与 page 坐标系不同源的既有 quirk),有钉死测试)
+- `241e74b` M1.9v — **溢出可达 + occlusion 逐 cell 清 + 粘滞本地回看**:
+  ① clipped-top 撑高折进首可见 band 行(进 `live_row_prefix`/滚动 extent,底锚像素不变),
+  content_off 不再扣 hidden-height 变负 → 可达最顶时 artifact 顶 ≥0;
+  ② 占用行清除改**逐 cell 判定**(cell 内容==proven source 同列 cell 才清)→ 芯片前后
+  泄漏源码都清、芯片文字+高亮样式保留(修灰条+芯片后尾巴 `}{\partial t}`);
+  ③ **粘滞本地回看**(bt-app):视口位移进本地溢出层时普通滚轮双向归本地、滑回底自动恢复
+  转发 CC;ctrl+End 两层同归底;指示条「N rows above · Shift+wheel」教入口。
+  Shift+wheel 仍是**进入**本地层的唯一方式(CC 到顶无信号,自动接管=时序猜测,违质量红线)。
 
-**工作树干净,dist = `951c3fc`(用户已真机确认 ①②)。**
+**工作树只剩 handoff 未提交,dist = `241e74b`,用户真机确认全部 OK。**
 
-## 下次第一件事:M1.9v — 高多行公式顶裁 = 滚动溢出量不足(与大屏滚不到顶同源)
+## M1.9 线剩余小尾巴(都不紧急,下次可选)
 
-用户 2026-07-22 实拍(旧 image236 顶裁 + 大屏滚不到顶):**多行高公式(aligned/`(a+b)²`
-三行组)顶部被窗格裁**,主屏+备用屏都有;且**大屏向上滚到某处就卡住、上不去**(小屏能滚到顶)。
-
-**统一真根因(几何实测,非猜——`BT_PROBE_GEOMETRY` dump cc-topbot 得):**
-- alt 是 **expand-only**(`bt-viewport/lib.rs:1666` 注释明说):高公式 band 比可见网格高,
-  **额外像素溢出到窗格上边之外**,本就要**向上滚**才看得全。这是设计,不是渲染 bug。
-- 实测 aligned 块(9 行 band、artifact 6 行高):居中 `content_off=+31744`,但静止(bottom)时
-  `top_sub=-47104` → artifact 顶 = -47104+31744 = **-15360(窗格顶之上 0.83 行)→ 被窗格顶裁**。
-  **块完整可见(top_sub≥0)时顶不裁**——所以顶裁只发生在"没滚够、块顶露在窗格外"时。
-- **和大屏滚不到顶是同一个 bug**:允许滚进 live 溢出区的行数 `last_live_overflow_rows`
-  (`lib.rs:956`,= ceil(live_extra_height/cell))+ `scroll_by_rows`(`lib.rs:782`)在大屏/公式多时
-  **不够**,滚不到能把多行块顶部完整拉进视野的位置 → 块顶永久卡在窗格顶被裁。用户"公式多导致"准。
-- **未做实的细节**:大屏 vs 小屏为何差异(alt vs primary 路径?`live_rows` 变大后 overflow/max
-  计算偏差?)。**下次先用 `BT_PROBE_GEOMETRY` + 真机复现把大小屏差异挖实,再改滚动溢出量。**
-
-**❌ 别再走的死路**:M1.9u 初版把顶裁当 bt-math 光栅 alpha 贴边、加 1px 透明 guard —— **错根因,已撤**
-(顶裁是好几像素的窗格裁切,不是贴边)。
-
-**根因已由真机 `cc-large.vt`(约 212×48,gitignored)字节级坐实(2026-07-22)**——用户假设正确:
-① CC **确实滚到它自己的顶**(录制里 banner「Claude Code」在文件 0.949、prompt 在 0.991 被 CC 重绘);
-② 我们 expand-only **向上**溢出的撑高累积把 banner 顶出窗格上边;③ 可上滚量 `last_live_overflow_rows`
-(`lib.rs:956`)实测只 5、顶出约 11 → 够不回;④ **最顶 aligned 块 `content_off` 变负**
-(`band=0..=7 top_sub=-84309 content_off=-17579 clip_h<art_h`)→ artifact 戳出自己 band 顶被裁。
-
-**⚠️ M1.9v Codex 首试(2026-07-22)被后台超时杀、且方向不足,已撤**:它加了
-`alternate_live_math_vertical_geometry` 辅助,但 before/after 探针 **live_allow 只 5→6、min_artifact_top
-仍 -83456(还是裁的)**——证明**光加可上滚量不够**。关键:高块 band 就在 row 0,`content_off` 负让
-artifact 戳出 band 顶,滚窗口也没用(它 band 之上没内容可露)。**真修得让「可达最顶」态 content_off ≥ 0
-(顶对齐不戳出)+ 可上滚量覆盖全部向上撑高**,两者都要。任务书
-`docs/prompts/codex-M1-9v-scroll-overflow-reveal.md` 已写;诊断工具
-(`BT_PROBE_SCROLLTOP`/`BT_PROBE_GEOMETRY`/`debug_scroll_extent`)在工作树未提交。
-**下次可先提交诊断工具再重派 Codex(给更长 runway)或自己改。**
+- **M1.9r 补行中 `\ ` 还原**:单行 pmatrix(`$$A=\begin{pmatrix} a & b \ c & d \end{pmatrix}$$`)
+  渲染成一行(image232)。行中还原比行尾微妙(防误伤 `\frac` 等命令与 `\ ` 控制空格)。
+- **M1.9q 底部出屏方向**(closer 滚出屏底的保持,image228 一类)——M1.9t 的分段映射可能已盖住
+  大部分,需真机确认还有没有残留场景。
+- **inline 渲染休眠 quirk**(本次发现):inline 的 baseline 计量在 canvas/page 坐标系不同源下
+  只是凑巧成立、`y` 的降部在 0 margin 下被裁——当前 inline 在 CC 里保持源码显示,不可见,
+  不紧急;若未来开 inline 渲染须先修 baseline 计量。
+- **Codex CLI 公式战线**(主屏 TUI 路径,战略上"两条路径都通=覆盖绝大多数 CLI",未开工)。
 
 ## 关键工具 / 方法(今天血泪换来的,务必沿用)
 
