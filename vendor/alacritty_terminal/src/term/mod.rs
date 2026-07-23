@@ -1163,10 +1163,12 @@ impl<T> Term<T> {
                 } else {
                     TranscriptScreen::Primary
                 };
-                let scope = if origin == Line(0)
-                    && self.scroll_region.start == Line(0)
-                    && self.scroll_region.end == Line(self.screen_lines() as i32)
-                {
+                // Scope must mirror `Grid::scroll_up`'s actual history behaviour: a top-anchored
+                // scroll (the region handed to the grid starts at row 0) rotates the removed rows
+                // into scrollback even when the region bottom sits above the last screen line —
+                // this is how ratatui/Codex-style inline TUIs commit finalized lines above their
+                // bottom viewport. Only scrolls that never touch row 0 stay local.
+                let scope = if origin == Line(0) {
                     ScrollRegionScope::FullScreen
                 } else {
                     ScrollRegionScope::Partial

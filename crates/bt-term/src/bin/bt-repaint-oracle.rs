@@ -127,6 +127,42 @@ impl HeadlessOracle {
         Ok(())
     }
 
+    /// Reconstruct the complete scrollback exactly as a user reviewing it would see it: jump to
+    /// the top of the projected document, then walk downward one viewport page at a time,
+    /// emitting each visible row once. Overlapping pages are de-duplicated by absolute offset.
+    fn document_dump(&mut self) -> Result<(), Box<dyn Error>> {
+        self.projection.scroll_to_top();
+        self.session.refresh_projection(&mut self.projection);
+        let mut emitted_offset = i64::MIN;
+        loop {
+            let frame = self.session.viewport_frame(&mut self.projection)?;
+            let offset = self.projection.scroll_offset_rows() as i64;
+            let rows = frame.rows.get() as i64;
+            let columns = frame.columns.get() as usize;
+            // Absolute document row of this frame's first visible row grows as offset shrinks.
+            let frame_start = -offset;
+            for (row, cells) in frame.cells.chunks(columns).enumerate() {
+                let absolute = frame_start + row as i64;
+                if absolute < emitted_offset {
+                    continue;
+                }
+                let text = cells
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>();
+                eprintln!("DOC[{absolute}] |{}", text.trim_end());
+                emitted_offset = absolute + 1;
+            }
+            if offset == 0 {
+                break;
+            }
+            let step = i32::try_from(rows.min(offset)).unwrap_or(i32::MAX);
+            self.projection.scroll_by_rows(-step);
+            self.session.refresh_projection(&mut self.projection);
+        }
+        Ok(())
+    }
+
     fn scroll_top_probe(&mut self) -> Result<(), Box<dyn Error>> {
         // From the resting (bottom) view, scroll up one row at a time and report the highest
         // rendered artifact top after each step. If the top never reaches >= 0 before the offset
@@ -294,6 +330,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if env::var_os("BT_PROBE_SCROLLTOP").is_some() {
         oracle.scroll_top_probe()?;
+    }
+
+    if env::var_os("BT_PROBE_DOCDUMP").is_some() {
+        oracle.document_dump()?;
     }
 
     if oracle.flash_oracle.flash_detected() {

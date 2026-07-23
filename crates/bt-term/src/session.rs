@@ -8061,4 +8061,38 @@ mod tests {
         };
         assert_eq!(proven.source_clear_ranges(&chrome), None);
     }
+
+    #[test]
+    fn top_anchored_region_scroll_commits_rows_to_canonical_history() {
+        // ratatui/Codex-style inline TUIs commit finalized lines by scrolling a DECSTBM region
+        // anchored at row 1 whose bottom sits above their bottom viewport. xterm and the vendored
+        // alacritty grid both rotate those rows into scrollback, so the transcript must capture
+        // them; a region that never touches row 0 stays a local screen effect.
+        let mut top_anchored = DualPlaneSession::new(nz(40), nz(10));
+        top_anchored.feed(b"\x1b[1;6r\x1b[6;1H").unwrap();
+        for index in 0..12 {
+            top_anchored
+                .feed(format!("committed-{index:02}\r\n").as_bytes())
+                .unwrap();
+        }
+        let captured =
+            top_anchored.transcript().staging_len() + top_anchored.transcript().frozen().len();
+        assert!(
+            captured >= 12,
+            "12 committed rows plus the region's initial blanks must reach the transcript, got {captured}"
+        );
+
+        let mut mid_region = DualPlaneSession::new(nz(40), nz(10));
+        mid_region.feed(b"\x1b[3;6r\x1b[6;1H").unwrap();
+        for index in 0..12 {
+            mid_region
+                .feed(format!("local-{index:02}\r\n").as_bytes())
+                .unwrap();
+        }
+        assert_eq!(
+            mid_region.transcript().staging_len() + mid_region.transcript().frozen().len(),
+            0,
+            "a scroll region that never touches row 0 must stay out of canonical history"
+        );
+    }
 }

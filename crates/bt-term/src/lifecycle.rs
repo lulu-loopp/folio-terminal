@@ -66,8 +66,12 @@ impl LifecycleRule {
 
 /// Ordered DESIGN.md §3.1 row-removal decision table.
 ///
-/// The last rule is a fail-closed catch-all: local scroll regions, IL/DL, and alternate-screen
-/// removal are observable facts but never become canonical history.
+/// `FullScreen` scope means the scroll feeds scrollback under xterm/alacritty semantics: any
+/// output scroll whose removed rows leave through row 0 — including a top-anchored DECSTBM region
+/// whose bottom sits above the last line, which is how ratatui/Codex-style inline TUIs commit
+/// finalized lines above their bottom viewport. The last rule is a fail-closed catch-all:
+/// non-top-anchored region scrolls, IL/DL, and alternate-screen removal are observable facts but
+/// never become canonical history.
 pub const LIFECYCLE_RULES: [LifecycleRule; 4] = [
     LifecycleRule {
         screen: MatchValue::Exact(RemovalScreen::Primary),
