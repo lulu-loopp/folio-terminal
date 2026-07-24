@@ -2459,6 +2459,10 @@ impl DualPlaneSession {
             self.transcript.source_generation(),
             self.grid_generation,
         );
+        // A vanished review anchor is a resize-driven reflow (Codex clears scrollback then reprints)
+        // only while a resize transaction is open; a user clear is not. The projection gates its
+        // frame hold on this so a genuine clear still snaps to the (empty) bottom.
+        projection.set_resize_reflow_active(self.resize_epoch.is_active());
         projection.set_selection(self.view_selection());
         projection.sync_math_artifacts(self.decorations.iter().filter_map(|(id, record)| {
             (!record.show_source
@@ -8257,6 +8261,133 @@ mod tests {
         assert_eq!(
             bottom.scroll_offset_rows, 0,
             "an explicit jump to bottom must clear the preserved displacement"
+        );
+    }
+
+    // Real byte sequence driving the a66eb84 residual: while reviewing, a resize opens the
+    // transaction, Codex clears scrollback (2J+3J) and reprints. The scroll offset is already
+    // preserved (a66eb84); these tests pin the *presentation hold* that removes the visible flash
+    // to the bottom during the empty-history window, and its deterministic exits.
+    fn scrolled_review_session(rows: u32) -> (DualPlaneSession, ViewportProjection, Vec<u8>) {
+        let mut session = DualPlaneSession::new(nz(40), nz(rows));
+        let mut lines = Vec::new();
+        for index in 0..60 {
+            lines.extend_from_slice(format!("line-{index:03}\r\n").as_bytes());
+        }
+        session.feed(&lines).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_by_rows(20);
+        session.refresh_projection(&mut projection);
+        let reviewing = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(reviewing.scroll_offset_rows, 20);
+        assert!(
+            !projection.review_hold(),
+            "no resize is in flight while simply reviewing"
+        );
+        (session, projection, lines)
+    }
+
+    // Drive the real resize→reflow→reprint transaction: open it, send the final PTY resize, let
+    // Codex clear then reprint (both staged inside the vendor transaction), and quiesce it. Codex
+    // output holds the transaction open until 200 ms of silence, so history refills only at harvest
+    // — exactly where bt-app republishes. `finish_at` returns the instant past the quiescence
+    // deadline for the final harvest+publish.
+    fn run_reflow_reprint(
+        session: &mut DualPlaneSession,
+        projection: &mut ViewportProjection,
+        reprint: &[u8],
+        start: Instant,
+    ) -> Instant {
+        session.resize_at(nz(40), nz(12), start).unwrap();
+        session.mark_pty_resize_requested_at(nz(40), nz(12), start + Duration::from_millis(10));
+        session
+            .feed_at(b"\x1b[2J\x1b[3J\x1b[H", start + Duration::from_millis(20))
+            .unwrap();
+        session.refresh_projection(projection);
+        let empty_window = session.viewport_frame(projection).unwrap();
+        assert_eq!(
+            empty_window.scroll_offset_rows, 0,
+            "history is empty during the reflow, so the frame itself can only sit at the bottom"
+        );
+        assert!(
+            projection.review_hold(),
+            "presentation must hold the last frame instead of flashing to the bottom on clear"
+        );
+        session
+            .feed_at(reprint, start + Duration::from_millis(30))
+            .unwrap();
+        session.refresh_projection(projection);
+        session.viewport_frame(projection).unwrap();
+        assert!(
+            projection.review_hold(),
+            "the hold persists while the reprint is still staged inside the transaction"
+        );
+        start + Duration::from_millis(280)
+    }
+
+    #[test]
+    fn a_resize_reflow_holds_presentation_across_the_empty_history_window() {
+        let start = Instant::now();
+        let (mut session, mut projection, lines) = scrolled_review_session(10);
+
+        let finish_at = run_reflow_reprint(&mut session, &mut projection, &lines, start);
+
+        // The transaction quiesces: the staged reprint freezes into history, the displacement
+        // re-anchors, and the hold ends in the same frame — a direct hand-off, no bottom flash.
+        assert!(session.finish_resize_if_quiescent(finish_at).unwrap());
+        session.refresh_projection(&mut projection);
+        let restored = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            restored.scroll_offset_rows, 20,
+            "the reprint restores the review displacement"
+        );
+        assert!(
+            !projection.review_hold(),
+            "the hold releases once the transaction closes and the displacement re-anchors"
+        );
+    }
+
+    #[test]
+    fn an_explicit_takeover_during_the_hold_releases_it_and_the_reprint_no_longer_yanks_the_view() {
+        let start = Instant::now();
+        let (mut session, mut projection, lines) = scrolled_review_session(10);
+
+        let finish_at = run_reflow_reprint(&mut session, &mut projection, &lines, start);
+
+        // The user takes over mid-hold: an explicit scroll — or a keystroke, which routes through
+        // scroll_to_bottom in bt-app — clears the preserved displacement immediately.
+        projection.scroll_to_bottom();
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(after.scroll_offset_rows, 0);
+        assert!(
+            !projection.review_hold(),
+            "an explicit takeover releases the hold at once"
+        );
+
+        // The later harvest must not yank the view back up: the displacement was superseded.
+        assert!(session.finish_resize_if_quiescent(finish_at).unwrap());
+        session.refresh_projection(&mut projection);
+        let bottom = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(bottom.scroll_offset_rows, 0);
+        assert!(!projection.review_hold());
+    }
+
+    #[test]
+    fn a_user_clear_without_a_resize_snaps_to_the_empty_bottom_without_holding() {
+        let (mut session, mut projection, _lines) = scrolled_review_session(10);
+
+        // No resize transaction is open: a genuine cls (2J+3J) must show the empty bottom rather
+        // than hold the pre-clear frame. The offset is still preserved (a66eb84), but with nothing
+        // to reprint it never re-anchors, and the user's next keystroke would clear it.
+        session.feed(b"\x1b[2J\x1b[3J\x1b[H").unwrap();
+        session.refresh_projection(&mut projection);
+        let cleared = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(cleared.scroll_offset_rows, 0);
+        assert!(
+            !projection.review_hold(),
+            "a user clear opens no resize transaction, so presentation shows the empty bottom"
         );
     }
 }

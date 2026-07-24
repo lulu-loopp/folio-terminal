@@ -701,6 +701,17 @@ pub struct ViewportProjection {
     /// meaningful, so it is re-established by row count as history refills instead of snapping
     /// the view to the bottom. Any explicit scroll action supersedes it.
     displaced_review_rows: Option<usize>,
+    /// Whether a resize transaction is currently open, pushed in by the session each frame. It is
+    /// the deterministic signal that a vanished review anchor is a resize-driven reflow (Codex
+    /// clears scrollback then reprints) rather than a user-initiated clear, which gates the
+    /// presentation-layer frame hold below.
+    resize_reflow_active: bool,
+    /// True while the preserved `displaced_review_rows` was created by a resize reflow and has not
+    /// yet been re-anchored: during this window history is transiently empty, so the projection can
+    /// only fall to the live bottom. Presentation reads this to hold the last frame instead of
+    /// flashing to the bottom. It clears deterministically — when the displacement re-anchors, or
+    /// when any explicit scroll/input supersedes the displacement — never on a timer.
+    review_hold: bool,
     live_overflow_offset_rows: usize,
     last_live_overflow_rows: usize,
     unread_rows: usize,
@@ -744,6 +755,8 @@ impl ViewportProjection {
             scroll_offset_rows: 0,
             pending_scroll_offset_rows: None,
             displaced_review_rows: None,
+            resize_reflow_active: false,
+            review_hold: false,
             live_overflow_offset_rows: 0,
             last_live_overflow_rows: 0,
             unread_rows: 0,
@@ -809,6 +822,20 @@ impl ViewportProjection {
 
     pub fn is_scrolled(&self) -> bool {
         self.scroll_offset_rows() != 0
+    }
+
+    /// Tell the projection whether a resize transaction is currently open. The session pushes this
+    /// each frame; it gates the frame hold so a user-initiated clear (not a resize) never holds.
+    pub fn set_resize_reflow_active(&mut self, active: bool) {
+        self.resize_reflow_active = active;
+    }
+
+    /// True while a resize-driven transcript rewrite has displaced the review anchor and history
+    /// has not yet refilled enough to re-anchor it. Presentation holds the last frame during this
+    /// window rather than flashing the view to the live bottom. Cleared deterministically once the
+    /// displacement re-anchors or an explicit scroll/input supersedes it.
+    pub fn review_hold(&self) -> bool {
+        self.review_hold
     }
 
     /// Positive rows move into history; negative rows move toward the live bottom.
@@ -1110,6 +1137,14 @@ impl ViewportProjection {
             self.scroll_offset_rows = 0;
             self.unread_rows = 0;
         }
+        // A resize reflow that cleared the history under an anchored reviewer leaves the view at the
+        // live bottom while the reprint refills. Signal presentation to hold the last frame across
+        // that transient window instead of flashing to the bottom. This is intrinsically bounded by
+        // the displacement state: it turns off the frame the displacement re-anchors (`else if`
+        // branch above clears `displaced_review_rows`) or an explicit scroll/input supersedes it,
+        // and it never engages for a user-initiated clear because no resize transaction is open.
+        self.review_hold =
+            primary && self.resize_reflow_active && self.displaced_review_rows.is_some();
         let live_base = history_rows + staging_rows;
         let window_end = (window_start + expected_rows).min(total_rows);
         // The live plane is always rectangular, but blank rows at its tail are presentation
@@ -3768,6 +3803,120 @@ mod tests {
             .unwrap();
         assert_eq!(projection.scroll_offset_rows(), 1);
         assert_eq!(projection.unread_rows(), 0);
+    }
+
+    // Isolated state-machine coverage for the presentation frame hold. `set_resize_reflow_active`
+    // is the session's per-frame signal that a resize transaction is open; the projection only
+    // holds a vanished review anchor while that signal is set, and releases the frame the
+    // displacement re-anchors.
+    fn history_of(store: &mut TranscriptStore, count: usize) -> HistoryDocument {
+        let mut document = HistoryDocument::default();
+        for index in 0..count {
+            document.finalize_transaction(
+                store
+                    .capture(CapturedRow::plain(&format!("line-{index:03}"), false))
+                    .finalized
+                    .remove(0),
+            );
+        }
+        document
+    }
+
+    fn six_blank_live() -> Vec<CapturedRow> {
+        vec![CapturedRow::plain("         ", false); 6]
+    }
+
+    fn reviewing_projection(store: &mut TranscriptStore) -> (ViewportProjection, HistoryDocument) {
+        let document = history_of(store, 40);
+        let mut projection = ViewportProjection::new(
+            key(9),
+            DetectionRevision(1),
+            nz32(6),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        let cursor = GridCursor {
+            row: 0,
+            column: 0,
+            visible: true,
+        };
+        projection.project(&document);
+        projection
+            .continuous_frame(&document, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        projection.scroll_by_rows(20);
+        projection.project(&document);
+        let reviewing = projection
+            .continuous_frame(&document, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(reviewing.scroll_offset_rows, 20);
+        assert!(!projection.review_hold());
+        (projection, document)
+    }
+
+    #[test]
+    fn review_hold_engages_under_a_resize_signal_and_releases_when_the_reprint_re_anchors() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(256).unwrap());
+        let (mut projection, _document) = reviewing_projection(&mut store);
+        let cursor = GridCursor {
+            row: 0,
+            column: 0,
+            visible: true,
+        };
+
+        // A resize transaction is open; the reflow clears history under the anchored reader.
+        projection.set_resize_reflow_active(true);
+        let cleared = HistoryDocument::default();
+        projection.project(&cleared);
+        let empty = projection
+            .continuous_frame(&cleared, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(
+            empty.scroll_offset_rows, 0,
+            "with history empty the frame can only sit at the bottom"
+        );
+        assert!(
+            projection.review_hold(),
+            "the resize signal holds the last frame across the empty window"
+        );
+
+        // The reprint refills equivalent history; the displacement re-anchors and the hold clears.
+        let reprinted = history_of(&mut store, 40);
+        projection.project(&reprinted);
+        let restored = projection
+            .continuous_frame(&reprinted, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(restored.scroll_offset_rows, 20);
+        assert!(
+            !projection.review_hold(),
+            "re-anchoring the full displacement ends the hold"
+        );
+    }
+
+    #[test]
+    fn review_hold_stays_off_for_a_vanished_anchor_with_no_resize_signal() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(256).unwrap());
+        let (mut projection, _document) = reviewing_projection(&mut store);
+        let cursor = GridCursor {
+            row: 0,
+            column: 0,
+            visible: true,
+        };
+
+        // No resize signal: this is a user clear, so the vanished anchor snaps to the empty bottom
+        // and is never held, even though the numeric displacement is still preserved (a66eb84).
+        assert!(!projection.review_hold());
+        let cleared = HistoryDocument::default();
+        projection.project(&cleared);
+        let empty = projection
+            .continuous_frame(&cleared, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(empty.scroll_offset_rows, 0);
+        assert!(
+            !projection.review_hold(),
+            "a vanished anchor with no open resize transaction never holds"
+        );
     }
 
     #[test]

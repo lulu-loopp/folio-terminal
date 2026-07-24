@@ -610,6 +610,17 @@ impl Runtime {
             .session
             .viewport_frame(&mut self.projection)
             .context("project terminal grid into viewport frame")?;
+        // Frame hold: a resize-driven transcript rewrite (Codex clears scrollback then reprints)
+        // cleared the history the reviewer was anchored to. The displacement is preserved and will
+        // re-anchor once the reprint refills history a moment later; presenting the interim frame
+        // would flash the view to the bottom and back. Hold the last presented frame across that
+        // window instead. The hold is bounded entirely by projection state — it ends the frame the
+        // displacement re-anchors or an explicit scroll/keystroke supersedes it (both clear
+        // `displaced_review_rows`), and it never engages for a user clear (no resize transaction),
+        // so a genuine cls still snaps to the empty bottom.
+        if self.projection.review_hold() && self.last_presented_frame.is_some() {
+            return Ok(false);
+        }
         if self.session.schedule_visible_artifacts(&terminal_frame) != 0 {
             dispatch_pending_math_tasks(
                 &mut self.session,
@@ -2330,6 +2341,12 @@ mod tests {
         fn publish_pty_frame(&mut self) -> bool {
             self.session.refresh_projection(&mut self.projection);
             let frame = self.session.viewport_frame(&mut self.projection).unwrap();
+            // Mirror publish_frame_inner's frame hold: while a resize reflow has displaced the
+            // review anchor and the reprint has not re-anchored it, hold the last presented frame
+            // instead of publishing the bottom-snapped interim.
+            if self.projection.review_hold() && self.last_presented.is_some() {
+                return false;
+            }
             if pty_frame_is_unchanged(
                 self.pending.pending_frame(),
                 self.last_presented.as_ref(),
@@ -2365,6 +2382,94 @@ mod tests {
             .iter()
             .map(|cell| cell.text.as_str())
             .collect()
+    }
+
+    #[test]
+    fn a_resize_reflow_holds_the_presented_frame_until_the_reprint_re_anchors() {
+        let start = Instant::now();
+        let mut harness = PtyPresentationHarness::new(40, 10);
+        let mut lines = Vec::new();
+        for index in 0..60 {
+            lines.extend_from_slice(format!("line-{index:03}\r\n").as_bytes());
+        }
+        harness.session.feed(&lines).unwrap();
+        assert!(harness.publish_pty_frame());
+        harness.present_pending();
+
+        // Enter review.
+        harness.projection.scroll_by_rows(20);
+        assert!(harness.publish_pty_frame());
+        harness.present_pending();
+        assert_eq!(
+            harness.last_presented.as_ref().unwrap().scroll_offset_rows,
+            20
+        );
+        let publications_before = harness.publications;
+
+        // A resize opens the transaction and Codex clears scrollback: the review anchor vanishes
+        // and history is transiently empty. The interim frame is bottom-snapped, but presentation
+        // must hold the last frame rather than flash to the bottom.
+        harness
+            .session
+            .resize_at(
+                NonZeroU32::new(40).unwrap(),
+                NonZeroU32::new(12).unwrap(),
+                start,
+            )
+            .unwrap();
+        harness.session.mark_pty_resize_requested_at(
+            NonZeroU32::new(40).unwrap(),
+            NonZeroU32::new(12).unwrap(),
+            start + Duration::from_millis(10),
+        );
+        harness
+            .session
+            .feed_at(b"\x1b[2J\x1b[3J\x1b[H", start + Duration::from_millis(20))
+            .unwrap();
+        assert!(
+            !harness.publish_pty_frame(),
+            "the hold skips publishing the bottom-snapped interim frame"
+        );
+        assert!(
+            !harness.present_pending(),
+            "nothing was published to present"
+        );
+        assert_eq!(
+            harness.publications, publications_before,
+            "no new publication during the hold"
+        );
+        assert_eq!(
+            harness.last_presented.as_ref().unwrap().scroll_offset_rows,
+            20,
+            "the screen still shows the reviewing frame, not the bottom"
+        );
+
+        // The reprint refills history and the transaction quiesces: publication resumes at the
+        // restored review position — a direct hand-off with no bottom frame ever presented.
+        harness
+            .session
+            .feed_at(&lines, start + Duration::from_millis(30))
+            .unwrap();
+        assert!(
+            !harness.publish_pty_frame(),
+            "still held while the reprint is staged inside the transaction"
+        );
+        assert!(
+            harness
+                .session
+                .finish_resize_if_quiescent(start + Duration::from_millis(280))
+                .unwrap()
+        );
+        assert!(
+            harness.publish_pty_frame(),
+            "the hold releases once the transaction closes and the displacement re-anchors"
+        );
+        harness.present_pending();
+        assert_eq!(
+            harness.last_presented.as_ref().unwrap().scroll_offset_rows,
+            20,
+            "presentation resumes exactly at the restored review displacement"
+        );
     }
 
     #[test]
