@@ -682,6 +682,12 @@ pub struct ViewportProjection {
     cache_misses: u64,
     scroll_offset_rows: usize,
     pending_scroll_offset_rows: Option<usize>,
+    /// A review offset preserved across an application transcript rewrite. Codex-style TUIs
+    /// reflow by clearing scrollback (ED3) and reprinting equivalent content; the anchored row
+    /// the user was reading dies with the clear, but their review displacement is still
+    /// meaningful, so it is re-established by row count as history refills instead of snapping
+    /// the view to the bottom. Any explicit scroll action supersedes it.
+    displaced_review_rows: Option<usize>,
     live_overflow_offset_rows: usize,
     last_live_overflow_rows: usize,
     unread_rows: usize,
@@ -724,6 +730,7 @@ impl ViewportProjection {
             cache_misses: 0,
             scroll_offset_rows: 0,
             pending_scroll_offset_rows: None,
+            displaced_review_rows: None,
             live_overflow_offset_rows: 0,
             last_live_overflow_rows: 0,
             unread_rows: 0,
@@ -793,6 +800,9 @@ impl ViewportProjection {
 
     /// Positive rows move into history; negative rows move toward the live bottom.
     pub fn scroll_by_rows(&mut self, rows: i32) {
+        // An explicit scroll is the user taking over: any preserved review displacement from an
+        // application transcript rewrite is superseded.
+        self.displaced_review_rows = None;
         let max = self
             .last_total_rows
             .saturating_sub(self.live_rows.get() as usize);
@@ -827,6 +837,7 @@ impl ViewportProjection {
     }
 
     pub fn scroll_to_top(&mut self) {
+        self.displaced_review_rows = None;
         let offset = self
             .last_total_rows
             .saturating_sub(self.live_rows.get() as usize);
@@ -839,6 +850,7 @@ impl ViewportProjection {
     }
 
     pub fn scroll_to_bottom(&mut self) {
+        self.displaced_review_rows = None;
         if self.is_scrolled()
             || !matches!(self.scroll_state, ViewportScrollState::Bottom)
             || self.unread_rows != 0
@@ -1020,6 +1032,26 @@ impl ViewportProjection {
                     )
                     .map_or(ViewportScrollState::Bottom, ViewportScrollState::Anchored);
             }
+        } else if let Some(displaced) = self.displaced_review_rows {
+            // Re-establish a review displacement preserved across an application transcript
+            // rewrite: as the reprint refills history the offset deepens frame by frame, and the
+            // preservation completes once the full displacement (or the new maximum) is reachable.
+            let offset = displaced.min(max_offset);
+            if offset != 0 {
+                let target_row = bottom_start.saturating_sub(offset);
+                if let Some(anchor) = self.scroll_anchor_at_absolute_row(
+                    document,
+                    staged_rows,
+                    history_rows,
+                    target_row,
+                    screen,
+                ) {
+                    self.scroll_state = ViewportScrollState::Anchored(anchor);
+                    if offset == displaced {
+                        self.displaced_review_rows = None;
+                    }
+                }
+            }
         }
 
         let mut window_start = bottom_start;
@@ -1044,6 +1076,18 @@ impl ViewportProjection {
                     self.scroll_state = ViewportScrollState::Bottom;
                 }
             } else {
+                // The anchored content vanished under the reader — a Codex-style reflow clears
+                // scrollback before reprinting equivalent content. Preserve the displacement so
+                // the refilled history restores the reading position instead of jumping to the
+                // bottom; a review already being restored keeps its original target.
+                if self.scroll_offset_rows != 0 {
+                    self.displaced_review_rows = Some(
+                        self.displaced_review_rows
+                            .map_or(self.scroll_offset_rows, |kept| {
+                                kept.max(self.scroll_offset_rows)
+                            }),
+                    );
+                }
                 self.scroll_state = ViewportScrollState::Bottom;
             }
         }

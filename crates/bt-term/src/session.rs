@@ -8095,4 +8095,47 @@ mod tests {
             "a scroll region that never touches row 0 must stay out of canonical history"
         );
     }
+
+    #[test]
+    fn a_transcript_rewrite_preserves_the_review_offset_instead_of_jumping_to_bottom() {
+        // Codex reflows by clearing scrollback (2J+3J) and reprinting equivalent content. The
+        // anchored row the reviewer was reading dies with the clear, but their displacement is
+        // still meaningful: the refilled history must restore the reading position.
+        let mut session = DualPlaneSession::new(nz(40), nz(10));
+        let mut lines = Vec::new();
+        for index in 0..60 {
+            lines.extend_from_slice(format!("line-{index:03}\r\n").as_bytes());
+        }
+        session.feed(&lines).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_by_rows(20);
+        session.refresh_projection(&mut projection);
+        let reviewing = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(reviewing.scroll_offset_rows, 20);
+
+        session.feed(b"\x1b[2J\x1b[3J\x1b[H").unwrap();
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        session.feed(&lines).unwrap();
+        session.refresh_projection(&mut projection);
+        let restored = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            restored.scroll_offset_rows, 20,
+            "the reprint must restore the review displacement instead of leaving the bottom snap"
+        );
+
+        // An explicit jump supersedes the preservation.
+        session.feed(b"\x1b[2J\x1b[3J\x1b[H").unwrap();
+        session.refresh_projection(&mut projection);
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_bottom();
+        session.feed(&lines).unwrap();
+        session.refresh_projection(&mut projection);
+        let bottom = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            bottom.scroll_offset_rows, 0,
+            "an explicit jump to bottom must clear the preserved displacement"
+        );
+    }
 }
