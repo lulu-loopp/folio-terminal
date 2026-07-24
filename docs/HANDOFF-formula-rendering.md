@@ -218,10 +218,14 @@ _最后更新:2026-07-24,HEAD `33fb866`_
   Codex 重排丢开符 → 冻结历史结构性 `$$` 奇数 → live 扫描(平推 1024 行历史)跨边界时已在"块内"
   → 网格全部块配对错位 0 渲染,zoom 全量重印才救活(用户"间歇不渲染/像吃输出",字节证无内容丢失)。
   修=frozen→live 边界重同步:frozen 前缀的悬空 Dollars 开符,拼合 body 过 `valid_display_body`
-  才算真桥(0848375 劈裂块的 body=真数学恒过;奇偶幻影的"开符"实为错位闭符,其后必是块间散文
-  恒不过),否则废弃、网格重新配对。规则局部自证,误报守卫齐。**oracle 新红门 `isolation_gap`**
-  (孤立可证但缺席检测的块数,帧级+终态 `ISOLATION_GAP final/max`),七录制 final 全 0——这类
-  中毒以后测得出。live-norender 0/5→5/5;codex-formula cases 块提前 1500 帧渲染。
+  才算真桥,否则废弃、网格重新配对。**oracle 新红门 `isolation_gap`**(孤立可证但缺席检测,
+  `ISOLATION_GAP final/max`)。live-norender 0/5→5/5。
+  **`3875209` 收敛性修正(3da6d64 首版回归,审修 stream-mispair.vt)**:废弃判定曾不收敛——
+  `=ad-bc` 被旧散文启发按 `-` 切成两"词"→跨界真块 body 误判散文→真开符被废→下方整屏 `$$`
+  错一位卡死(环境抢跑渲染+裸 `$$`+半行残片三形态同根)。修:①废弃仅当"网格 `$$` 当新开符
+  能向前配出合法显示块"(奇偶幻影的真签名);body 仅仅不合法的跨界块只丢自己、保下方奇偶。
+  ②散文判定改按空白分词,`=ad-bc`/`mc^2`/`x_i` 不再算词,真散文仍拦。③isolation_gap 对
+  bridge 后缀匹配不再误报。stream-mispair 三形态全消;codex-formula 5→4 flips、+2 渲染。
 - **共享边**(记录在案,非 zoom 特有):若重排后精确源码锚不上,off-band 记录在 resize 静止时被清
   → 回源。与 resize 路径同边(Codex 重印同文,实际都能锚上),既有行为未恶化。
 - 若 resize epoch 在重印到达前先静止(Codex 实测不会,重印即时且撑住 epoch),hold 会释放到
