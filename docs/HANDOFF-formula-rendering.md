@@ -210,8 +210,18 @@ _最后更新:2026-07-24,HEAD `33fb866`_
   修=接受缩放刻度 stale(band 按缩放高保留、整栅原子呈现);无需新触发,stale-pending 记录态
   已覆盖窗口、退场全确定事件。两条 zoom 钉死测试按 bt-app 真实调用序列双向驱动,修前红。
   非 DPI 录制构造性无影响(native 刻度是 no-op,回放逐字节同)。
-- **zoom 后跳到底**(仍挂账):bt-app `reconcile_authoritative_dpi`/projection 滚动锚,需独立一单
-  (类比 33fb866 的 review_hold 跨 zoom 重排版保持回看偏移)。
+- ~~**zoom 后位置跳变/跳底**~~ → 已修 `ed40450`,又翻挂账假设:滚动锚本来就对(review_hold 已覆盖
+  zoom 链,zoom 经 apply_zoom→resize_at 开同一 epoch),真根因=**投影行高在构造时钉死永不更新**,
+  zoom 后公式带按旧行距定位、文本按新行距画。修=`sync_projection_state` 先推会话行高进投影,
+  变更即全量重投影。resize 不跳是因为不改 DPI。三条钉死测试;回放构造性 no-op 逐字节同。
+- ~~**历史奇偶毒块=整屏不渲染**~~ → 已修 `3da6d64`(审因 `docs/reviews/live-norender-audit.md`):
+  Codex 重排丢开符 → 冻结历史结构性 `$$` 奇数 → live 扫描(平推 1024 行历史)跨边界时已在"块内"
+  → 网格全部块配对错位 0 渲染,zoom 全量重印才救活(用户"间歇不渲染/像吃输出",字节证无内容丢失)。
+  修=frozen→live 边界重同步:frozen 前缀的悬空 Dollars 开符,拼合 body 过 `valid_display_body`
+  才算真桥(0848375 劈裂块的 body=真数学恒过;奇偶幻影的"开符"实为错位闭符,其后必是块间散文
+  恒不过),否则废弃、网格重新配对。规则局部自证,误报守卫齐。**oracle 新红门 `isolation_gap`**
+  (孤立可证但缺席检测的块数,帧级+终态 `ISOLATION_GAP final/max`),七录制 final 全 0——这类
+  中毒以后测得出。live-norender 0/5→5/5;codex-formula cases 块提前 1500 帧渲染。
 - **共享边**(记录在案,非 zoom 特有):若重排后精确源码锚不上,off-band 记录在 resize 静止时被清
   → 回源。与 resize 路径同边(Codex 重印同文,实际都能锚上),既有行为未恶化。
 - 若 resize epoch 在重印到达前先静止(Codex 实测不会,重印即时且撑住 epoch),hold 会释放到
