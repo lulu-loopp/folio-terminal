@@ -1387,7 +1387,11 @@ impl ViewportProjection {
 
                 let cell_height = self.cell_height_subpixels.get();
                 let artifact = live_math.artifact.clone();
-                debug_assert_eq!(artifact.render_scale_milli, LIVE_MATH_READABLE_SCALE_MILLI);
+                // A fresh live artifact renders at the readable scale; a live record whose layout
+                // changed (a zoom/DPI change) holds its previous raster as a stale artifact scaled
+                // by the DPI delta until the fresh relayout lands, so a scaled raster here is the
+                // pinned old-layout preview, not an error.
+                debug_assert!(artifact.render_scale_milli >= 1);
                 let (top_subpixels, clip_height_subpixels, content_offset_subpixels, frozen_rows) =
                     if let Some(&(abs_top, frozen_rows)) =
                         bridge_geometry.get(&live_math.occurrence_id)
@@ -1925,9 +1929,11 @@ impl ViewportProjection {
                     .saturating_mul(self.cell_height_subpixels.get())
                     .max(1)
                 };
-                if artifact.artifact.render_scale_milli == LIVE_MATH_READABLE_SCALE_MILLI
-                    && box_height <= remaining
-                {
+                // A scaled stale raster (render_scale_milli != readable) is a proven block whose
+                // layout changed under a zoom; it stays pinned (scaled to approximate the new size)
+                // rather than flashing to source while its fresh relayout is off-thread. Its box
+                // height is already the scaled height, so the visible-text floor stays honest.
+                if box_height <= remaining {
                     remaining = remaining.saturating_sub(box_height);
                     accepted.push(artifact);
                 } else if std::env::var_os("BT_PERF_TRACE").is_some() {

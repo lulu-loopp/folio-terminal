@@ -6584,6 +6584,196 @@ mod tests {
         completed
     }
 
+    /// Drive the exact app zoom sequence (`reconcile_authoritative_dpi`): remeasure the cell metrics,
+    /// resize the grid, then set the new-DPI `LayoutKey`. A zoom that shrinks the font also grows the
+    /// grid (a real ConPTY resize), so this reproduces the LayoutKey change + resize_at + reprint
+    /// storm the real machine sees, without any zoom recording (zoom is app state, absent from PTY
+    /// bytes).
+    fn apply_zoom(
+        session: &mut DualPlaneSession,
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+        cell_px: i64,
+        dpi_milli: NonZeroU32,
+        at: Instant,
+    ) {
+        session.set_cell_height_subpixels(NonZeroI64::new(cell_px * SUBPIXELS_PER_PX).unwrap());
+        session.set_cell_width_subpixels(
+            NonZeroI64::new((cell_px / 2).max(1) * SUBPIXELS_PER_PX).unwrap(),
+        );
+        session.set_ascii_baseline_subpixels(
+            NonZeroI64::new((cell_px - 3).max(1) * SUBPIXELS_PER_PX).unwrap(),
+        );
+        session.resize_at(columns, rows, at).unwrap();
+        session.mark_pty_resize_requested_at(columns, rows, at);
+        let theme_rev = session.layout_key().theme_rev;
+        session.set_layout_key(LayoutKey {
+            width_cells: columns,
+            dpi_milli,
+            font_rev: 1,
+            theme_rev,
+        });
+    }
+
+    fn zoom_frame_is_all_rendered(
+        session: &mut DualPlaneSession,
+        projection: &mut ViewportProjection,
+        expected_blocks: usize,
+    ) -> Vec<u32> {
+        session.refresh_projection(projection);
+        let frame = session.viewport_frame(projection).unwrap();
+        assert_eq!(
+            crate::observe_formula_frame(&frame).state,
+            crate::FormulaFrameState::Rendered,
+            "a zoom must never expose a proven live formula's source"
+        );
+        assert_eq!(frame.math_blocks.len(), expected_blocks);
+        assert!(
+            frame
+                .math_blocks
+                .iter()
+                .all(|block| block.display == MathBlockDisplay::Rendered)
+        );
+        // Atomicity (the stray-raster fragment): every row a rendered block owns is cleared of its
+        // source text, so a scaled stale raster never coexists with exposed `$$` source.
+        assert!(
+            !frame.cells.iter().any(|cell| cell.text == "$"),
+            "no source delimiter may remain visible while the block renders"
+        );
+        frame
+            .math_blocks
+            .iter()
+            .map(|block| block.artifact.render_scale_milli)
+            .collect()
+    }
+
+    #[test]
+    fn zoom_out_holds_live_formula_as_scaled_stale_instead_of_flashing_to_source() {
+        // Real-machine regression (2026-07-24): shrinking the font (zoom out) dropped proven Codex
+        // formulas to their `$$` source and left them there. Root cause: a DPI change demotes the
+        // live raster to a stale artifact scaled by the DPI ratio, and the live viewport hard-rejected
+        // any non-readable-scale raster on primary -> source fallback for the whole async relayout
+        // window. The scaled stale raster must instead stay pinned until the fresh relayout lands.
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(24));
+        session
+            .feed_at(
+                b"intro line here\r\n$$x$$\r\nmid line\r\n$$y$$\r\nbarrier",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+
+        // Zoom out: smaller cells, more cols/rows, DPI 1000 -> 800.
+        let t = start + Duration::from_millis(210);
+        apply_zoom(&mut session, nz(52), nz(32), 14, nz(800), t);
+        // The window (epoch open) shows the held stale raster scaled to 80%, not source.
+        let scales = zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+        assert!(
+            scales.iter().all(|scale| *scale == 800),
+            "the held raster is the old layout's pixels scaled by the DPI ratio: {scales:?}"
+        );
+
+        // Codex reprints its transcript after the resize: still held, still no source.
+        session
+            .feed_at(b"\x1b[H\x1b[2J\x1b[3J", t + Duration::from_millis(10))
+            .unwrap();
+        session
+            .feed_at(
+                b"intro line here\r\n$$x$$\r\nmid line\r\n$$y$$\r\nbarrier",
+                t + Duration::from_millis(20),
+            )
+            .unwrap();
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+
+        // Output quiesces before the async relayout lands: preservation must survive the epoch close.
+        let finish_at = t + Duration::from_millis(300);
+        assert!(session.finish_resize_if_quiescent(finish_at).unwrap());
+        assert!(
+            session.has_pending_resize_relayout(),
+            "the fresh relayout has not landed, so the stale raster must remain pinned"
+        );
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+
+        // A re-detection pass scheduled during the hold must not tear the held record down.
+        session.advance_live_stability(finish_at + LIVE_MATH_STABLE_INTERVAL);
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+
+        // The fresh relayout lands at the new DPI's native scale and replaces the stale raster.
+        complete_detected_live_tasks(&mut session, synthetic_raster(52, 40));
+        let scales = zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+        assert!(
+            scales.iter().all(|scale| *scale == 1000),
+            "the fresh raster renders at native readable scale: {scales:?}"
+        );
+    }
+
+    #[test]
+    fn zoom_in_holds_live_formula_across_the_relayout_window() {
+        // The mirror direction: growing the font (zoom in) scales the held raster UP by the DPI ratio.
+        // In a normally sized window the visible-text floor has room for the enlarged boxes, so the
+        // block stays rendered the whole window rather than flashing to source.
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(52), nz(30));
+        session.set_cell_height_subpixels(NonZeroI64::new(14 * SUBPIXELS_PER_PX).unwrap());
+        session.set_cell_width_subpixels(NonZeroI64::new(7 * SUBPIXELS_PER_PX).unwrap());
+        session.set_ascii_baseline_subpixels(NonZeroI64::new(11 * SUBPIXELS_PER_PX).unwrap());
+        session.set_layout_key(LayoutKey {
+            width_cells: nz(52),
+            dpi_milli: nz(800),
+            font_rev: 1,
+            theme_rev: session.layout_key().theme_rev,
+        });
+        session
+            .feed_at(
+                b"intro line here\r\n$$x$$\r\nmid line\r\n$$y$$\r\nbarrier",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(52, 40)),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+
+        // Zoom in: bigger cells, fewer cols/rows, DPI 800 -> 1000 (scale 1250 on the held raster).
+        let t = start + Duration::from_millis(210);
+        apply_zoom(&mut session, nz(40), nz(24), 18, nz(1000), t);
+        let scales = zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+        assert!(
+            scales.iter().all(|scale| *scale == 1250),
+            "the held raster scales up by the DPI ratio during zoom in: {scales:?}"
+        );
+
+        session
+            .feed_at(b"\x1b[H\x1b[2J\x1b[3J", t + Duration::from_millis(10))
+            .unwrap();
+        session
+            .feed_at(
+                b"intro line here\r\n$$x$$\r\nmid line\r\n$$y$$\r\nbarrier",
+                t + Duration::from_millis(20),
+            )
+            .unwrap();
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+
+        let finish_at = t + Duration::from_millis(300);
+        assert!(session.finish_resize_if_quiescent(finish_at).unwrap());
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+
+        session.advance_live_stability(finish_at + LIVE_MATH_STABLE_INTERVAL);
+        complete_detected_live_tasks(&mut session, synthetic_raster(40, 40));
+        let scales = zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+        assert!(scales.iter().all(|scale| *scale == 1000), "{scales:?}");
+    }
+
     #[test]
     fn live_window_keeps_fence_context_across_an_unstable_spinner_row() {
         let start = Instant::now();
