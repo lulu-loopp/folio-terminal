@@ -1471,14 +1471,34 @@ fn apply_live_detected_block(
         return false;
     };
     occurrence.cell_segments = cell_segments;
-    let Some(first) = occurrence.cell_segments.first() else {
+    // The occurrence may straddle the frozen/live boundary: its opener (and body) can already be
+    // committed to scrollback while the closer is still in the live grid. Detection over the
+    // combined context proves the complete pairing; the live-grid rows carry the anchor, and the
+    // leading frozen rows form a prefix the presentation layer bridges. A block with no live-grid
+    // row at all is entirely frozen and belongs to the frozen detector, not a live anchor.
+    let first_live = occurrence
+        .cell_segments
+        .iter()
+        .position(|segment| matches!(segment.source_line, MathSourceLine::LiveGrid(_)));
+    let last_live = occurrence
+        .cell_segments
+        .iter()
+        .rposition(|segment| matches!(segment.source_line, MathSourceLine::LiveGrid(_)));
+    let (Some(first_live), Some(last_live)) = (first_live, last_live) else {
         return false;
     };
-    let Some(last) = occurrence.cell_segments.last() else {
+    // The frozen prefix must be exactly a contiguous leading run: the live-grid rows are never
+    // interrupted by a frozen row. Anything else is not a boundary split and is rejected rather
+    // than anchored to a fabricated geometry.
+    if occurrence.cell_segments[first_live..=last_live]
+        .iter()
+        .any(|segment| matches!(segment.source_line, MathSourceLine::Transcript(_)))
+    {
         return false;
-    };
+    }
+    let first = &occurrence.cell_segments[first_live];
+    let last = &occurrence.cell_segments[last_live];
     let MathSourceLine::LiveGrid(start_row) = first.source_line else {
-        // A block that begins in frozen history cannot be represented by a live-grid anchor.
         return false;
     };
     let MathSourceLine::LiveGrid(end_row) = last.source_line else {
@@ -1575,9 +1595,7 @@ fn live_occurrence_segments(
         if source_start == source_end {
             let fragment = line.fragments.first()?;
             let input = inputs.get(fragment.input_index)?;
-            let LiveDetectionSource::Grid { row, .. } = input.source else {
-                return None;
-            };
+            let source_line = live_input_source_line(input);
             let local = u32::try_from(source_start.saturating_sub(fragment.byte_start)).ok()?;
             let cell = input
                 .cell_boundaries
@@ -1585,7 +1603,7 @@ fn live_occurrence_segments(
                 .find_map(|(byte, cell)| (*byte == local).then_some(*cell))?;
             mapped.push(MathCellSegment {
                 logical_line: source.logical_line,
-                source_line: MathSourceLine::LiveGrid(row),
+                source_line,
                 byte_start: local,
                 byte_end: local,
                 cell_start: cell,
@@ -1600,9 +1618,7 @@ fn live_occurrence_segments(
                 continue;
             }
             let input = inputs.get(fragment.input_index)?;
-            let LiveDetectionSource::Grid { row, .. } = input.source else {
-                return None;
-            };
+            let source_line = live_input_source_line(input);
             let local_start = u32::try_from(overlap_start - fragment.byte_start).ok()?;
             let local_end = u32::try_from(overlap_end - fragment.byte_start).ok()?;
             let cell_start = input
@@ -1615,7 +1631,7 @@ fn live_occurrence_segments(
                 .find_map(|(byte, cell)| (*byte == local_end).then_some(*cell))?;
             mapped.push(MathCellSegment {
                 logical_line: source.logical_line,
-                source_line: MathSourceLine::LiveGrid(row),
+                source_line,
                 byte_start: local_start,
                 byte_end: local_end,
                 cell_start,
@@ -1624,6 +1640,16 @@ fn live_occurrence_segments(
         }
     }
     (!mapped.is_empty()).then_some(mapped)
+}
+
+/// Physical source row of a live-detection fragment. A live-detection context prepends a bounded
+/// tail of already-frozen transcript lines before the live grid, so a proven occurrence may cover
+/// both: the frozen rows carry their real `TranscriptId`, the live rows their grid index.
+fn live_input_source_line(input: &LiveDetectionInput) -> MathSourceLine {
+    match input.source {
+        LiveDetectionSource::Grid { row, .. } => MathSourceLine::LiveGrid(row),
+        LiveDetectionSource::History { id } => MathSourceLine::Transcript(id),
+    }
 }
 
 fn live_temporary_id(index: usize) -> Option<TranscriptId> {
@@ -2441,6 +2467,102 @@ abla f",
         assert_eq!(task.start, GridPoint { row: 0, column: 0 });
         assert_eq!(task.end, GridPoint { row: 2, column: 2 });
         assert_eq!(task.span.render_source, "x + y");
+    }
+
+    /// A `$$…$$` block whose opener and body already scrolled into frozen history while the closer
+    /// is still in the live grid must resolve: detection over the combined context proves the whole
+    /// pairing, the live-grid closer carries the anchor, and the leading frozen rows are kept as
+    /// `Transcript` segments so the presentation layer can bridge both domains.
+    #[test]
+    fn live_block_split_across_frozen_boundary_anchors_on_the_live_closer() {
+        let mut task = live_task(&["placeholder"], 0);
+        task.inputs = boundary_inputs(&[
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(296),
+                },
+                "$$",
+            ),
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(297),
+                },
+                r"\sum_{k=1}^{n}k=\frac{n(n+1)}{2}",
+            ),
+            (
+                LiveDetectionSource::Grid {
+                    row: 0,
+                    revision: 1,
+                },
+                "$$",
+            ),
+        ]);
+        // The candidate is the live-grid closer row.
+        assert!(resolve_live_detection_task(&mut task));
+        assert_eq!(task.start, GridPoint { row: 0, column: 0 });
+        assert_eq!(task.end.row, 0);
+        assert_eq!(task.band_start_row, 0);
+        assert_eq!(task.band_end_row, 0);
+        assert_eq!(task.span.render_source, r"\sum_{k=1}^{n}k=\frac{n(n+1)}{2}");
+        let sources = task
+            .span
+            .cell_segments
+            .iter()
+            .map(|segment| segment.source_line)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            sources.first(),
+            Some(&MathSourceLine::Transcript(TranscriptId(296)))
+        );
+        assert!(sources.contains(&MathSourceLine::Transcript(TranscriptId(297))));
+        assert_eq!(sources.last(), Some(&MathSourceLine::LiveGrid(0)));
+    }
+
+    /// A `$$…$$` block that has already fully committed to frozen history (closer included) ends in
+    /// history, not at the live-grid candidate row, so the live path must not anchor it: the frozen
+    /// detector owns it, and there is no boundary split to bridge.
+    #[test]
+    fn fully_frozen_block_is_not_anchored_by_the_live_path() {
+        let mut task = live_task(&["tail"], 0);
+        task.inputs = boundary_inputs(&[
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(10),
+                },
+                "$$",
+            ),
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(11),
+                },
+                "x + y",
+            ),
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(12),
+                },
+                "$$",
+            ),
+            (
+                LiveDetectionSource::Grid {
+                    row: 0,
+                    revision: 1,
+                },
+                "unrelated",
+            ),
+        ]);
+        assert!(!resolve_live_detection_task(&mut task));
+    }
+
+    fn boundary_inputs(rows: &[(LiveDetectionSource, &str)]) -> Arc<[LiveDetectionInput]> {
+        rows.iter()
+            .map(|(source, text)| LiveDetectionInput {
+                source: *source,
+                text: (*text).to_owned(),
+                continues: false,
+                cell_boundaries: scalar_boundaries(text),
+            })
+            .collect()
     }
 
     #[test]

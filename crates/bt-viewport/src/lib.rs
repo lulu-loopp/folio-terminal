@@ -144,6 +144,11 @@ pub struct ProjectedLiveMathArtifact {
     pub occluded_source_rows: u32,
     /// Occluded terminal rows whose cells still carry this occurrence's proven source prefix.
     pub occluded_visible_rows: Vec<(u32, Vec<(u32, u32)>)>,
+    /// Frozen transcript rows (opener/body) already committed to scrollback while the closer is
+    /// still in the live grid. Empty for an ordinary all-live block. Ordered top to bottom and
+    /// immediately preceding the live band; projection renders the whole occurrence as one block
+    /// bridging the history and live domains.
+    pub frozen_prefix: Vec<TranscriptId>,
     pub generation: GridGeneration,
     pub artifact: ProjectedMathArtifact,
 }
@@ -205,6 +210,10 @@ pub struct MathBlockPlacement {
     /// Present only for live-grid math; survives repaint placement changes and distinguishes equal
     /// source text belonging to different occurrences.
     pub live_occurrence_id: Option<LiveMathOccurrenceId>,
+    /// Number of frozen transcript (scrollback) visual rows this block owns above its live band. A
+    /// boundary-split block bridges both domains, so its top sits in the history region above the
+    /// live band start; zero for every ordinary block, whose top aligns to its own band start.
+    pub frozen_prefix_rows: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -297,10 +306,14 @@ impl ViewportFrame {
                     end: band_end_row,
                 });
             }
-            if let Some(band_start) = self
-                .row_map
-                .iter()
-                .find(|row| row.live_grid_row == Some(band_start_row))
+            // A boundary-split block bridges the frozen history rows above its live band, so its
+            // top deliberately sits above the live band start rather than aligning to it. The other
+            // band invariants (order, bottom, non-overlap of live rows outside the band) still hold.
+            if block.frozen_prefix_rows == 0
+                && let Some(band_start) = self
+                    .row_map
+                    .iter()
+                    .find(|row| row.live_grid_row == Some(band_start_row))
                 && block.top_subpixels != band_start.top_subpixels
             {
                 return Err(FrameShapeError::MathBlockBandTop {
@@ -1147,6 +1160,52 @@ impl ViewportProjection {
         let mut visible_heights = Vec::with_capacity(expected_rows);
         let mut math_blocks = Vec::new();
 
+        // A boundary-split formula owns frozen scrollback rows (its opener/body) above the live
+        // band that holds its closer. Resolve each such block's history geometry once: the frozen
+        // prefix must be exactly the contiguous history tail, immediately adjacent to the live grid
+        // (no staging between), and the live portion must begin at grid row zero. Anything else is
+        // not a clean boundary split and is left to render as source.
+        let mut bridge_geometry: HashMap<LiveMathOccurrenceId, (usize, u32)> = HashMap::new();
+        if primary && staging_rows == 0 {
+            let ordered = self.ordered_ids.len();
+            for live_math in &self.live_math_artifacts {
+                if live_math.frozen_prefix.is_empty()
+                    || live_math.screen != screen
+                    || live_math.generation != self.grid_generation
+                    || live_math.band_start_row != 0
+                {
+                    continue;
+                }
+                let prefix = live_math.frozen_prefix.len();
+                if prefix == 0 || prefix > ordered {
+                    continue;
+                }
+                if self.ordered_ids[ordered - prefix..] != live_math.frozen_prefix[..] {
+                    continue;
+                }
+                // The frozen prefix must be plain source rows. A prefix id that is itself a rendered
+                // history math block means the frozen and live detectors paired differently (a
+                // transient reflow ambiguity): rendering that as one bridged block would double-claim
+                // the row, so it stays source until the state settles into a clean split.
+                if live_math
+                    .frozen_prefix
+                    .iter()
+                    .any(|id| self.math_artifacts.contains_key(id))
+                {
+                    continue;
+                }
+                let first_index = ordered - prefix;
+                let abs_top =
+                    usize::try_from(self.visual_row_heights.prefix_sum(first_index)).unwrap_or(0);
+                let frozen_rows = u32::try_from(history_rows.saturating_sub(abs_top)).unwrap_or(0);
+                if abs_top >= history_rows || frozen_rows == 0 {
+                    continue;
+                }
+                bridge_geometry.insert(live_math.occurrence_id, (abs_top, frozen_rows));
+            }
+        }
+        let mut bridge_frozen_blank: Vec<usize> = Vec::new();
+
         if primary && window_start < history_rows {
             let first_index = self
                 .visual_row_heights
@@ -1194,6 +1253,7 @@ impl ViewportProjection {
                                 occluded_source_rows: 0,
                                 occluded_visible_rows: Vec::new(),
                                 live_occurrence_id: None,
+                                frozen_prefix_rows: 0,
                             });
                             (
                                 (0..line_rows)
@@ -1290,41 +1350,79 @@ impl ViewportProjection {
                     continue;
                 }
 
-                let band_height = self.live_row_prefix[block_last + 1]
-                    .saturating_sub(self.live_row_prefix[block_first]);
+                let cell_height = self.cell_height_subpixels.get();
                 let artifact = live_math.artifact.clone();
                 debug_assert_eq!(artifact.render_scale_milli, LIVE_MATH_READABLE_SCALE_MILLI);
-                let total_rows = live_math
-                    .clipped_top_rows
-                    .saturating_add(
-                        live_math
-                            .band_end_row
-                            .saturating_sub(live_math.band_start_row)
-                            .saturating_add(1),
-                    )
-                    .saturating_add(live_math.clipped_bottom_rows);
-                let source_band_height =
-                    i64::from(total_rows).saturating_mul(self.cell_height_subpixels.get());
-                let presentation_height = if screen == ScreenId::Alternate {
-                    artifact.height_subpixels.max(source_band_height)
-                } else {
-                    band_height
-                };
-                let content_offset_subpixels = centered_content_offset(
-                    presentation_height,
-                    artifact.height_subpixels,
-                    artifact.vertical_padding_subpixels,
-                );
-                let absolute_start = live_base.saturating_add(block_first);
-                let top_subpixels = frame_top_subpixels.saturating_add(
-                    continuous_row_top_subpixels(
-                        absolute_start,
-                        live_base,
-                        &self.live_row_prefix,
-                        self.cell_height_subpixels.get(),
-                    )
-                    .saturating_sub(window_top_subpixels),
-                );
+                let (top_subpixels, clip_height_subpixels, content_offset_subpixels, frozen_rows) =
+                    if let Some(&(abs_top, frozen_rows)) =
+                        bridge_geometry.get(&live_math.occurrence_id)
+                    {
+                        // Boundary-split block: its owned band starts in the frozen history rows
+                        // above and runs down through the live closer. The whole occurrence renders
+                        // as one image spanning both domains, centered in the combined row height.
+                        // Positions are read from the frame's own accumulated row heights (never a
+                        // uniform estimate) so a stretched history block sitting in the window above
+                        // does not skew the bridge's top or clip height. Frozen-prefix rows above
+                        // the window are uniform cell height, so the upward extrapolation is exact.
+                        let row_top = |absolute: usize| -> i64 {
+                            if absolute >= window_start {
+                                let index = absolute - window_start;
+                                frame_top_subpixels.saturating_add(
+                                    visible_heights.iter().take(index).copied().sum::<i64>(),
+                                )
+                            } else {
+                                let rows_above =
+                                    i64::try_from(window_start - absolute).unwrap_or(i64::MAX);
+                                frame_top_subpixels
+                                    .saturating_sub(rows_above.saturating_mul(cell_height))
+                            }
+                        };
+                        let top = row_top(abs_top);
+                        let band_end_absolute = live_base.saturating_add(block_last);
+                        let bottom = row_top(band_end_absolute.saturating_add(1));
+                        let combined_height = bottom.saturating_sub(top).max(0);
+                        let content_offset = centered_content_offset(
+                            combined_height,
+                            artifact.height_subpixels,
+                            artifact.vertical_padding_subpixels,
+                        );
+                        bridge_frozen_blank.push(abs_top);
+                        (top, combined_height, content_offset, frozen_rows)
+                    } else {
+                        let band_height = self.live_row_prefix[block_last + 1]
+                            .saturating_sub(self.live_row_prefix[block_first]);
+                        let total_rows = live_math
+                            .clipped_top_rows
+                            .saturating_add(
+                                live_math
+                                    .band_end_row
+                                    .saturating_sub(live_math.band_start_row)
+                                    .saturating_add(1),
+                            )
+                            .saturating_add(live_math.clipped_bottom_rows);
+                        let source_band_height = i64::from(total_rows).saturating_mul(cell_height);
+                        let presentation_height = if screen == ScreenId::Alternate {
+                            artifact.height_subpixels.max(source_band_height)
+                        } else {
+                            band_height
+                        };
+                        let content_offset = centered_content_offset(
+                            presentation_height,
+                            artifact.height_subpixels,
+                            artifact.vertical_padding_subpixels,
+                        );
+                        let absolute_start = live_base.saturating_add(block_first);
+                        let top = frame_top_subpixels.saturating_add(
+                            continuous_row_top_subpixels(
+                                absolute_start,
+                                live_base,
+                                &self.live_row_prefix,
+                                cell_height,
+                            )
+                            .saturating_sub(window_top_subpixels),
+                        );
+                        (top, band_height, content_offset, 0)
+                    };
                 math_blocks.push(MathBlockPlacement {
                     start: TranscriptId(0),
                     anchor: MathBlockAnchor::Live {
@@ -1342,7 +1440,7 @@ impl ViewportProjection {
                     content_offset_subpixels,
                     // The shared live prefix map expands this owned band before all following
                     // logical rows. It never paints into a neighbour's fixed terminal row.
-                    clip_height_subpixels: band_height,
+                    clip_height_subpixels,
                     display: MathBlockDisplay::Rendered,
                     horizontal_overflow: HorizontalOverflowOwner::Block,
                     horizontal_scroll_px: 0,
@@ -1351,6 +1449,7 @@ impl ViewportProjection {
                     occluded_source_rows: live_math.occluded_source_rows,
                     occluded_visible_rows: live_math.occluded_visible_rows.clone(),
                     live_occurrence_id: Some(live_math.occurrence_id),
+                    frozen_prefix_rows: frozen_rows,
                 });
 
                 let visible_first = block_first.max(first);
@@ -1380,6 +1479,25 @@ impl ViewportProjection {
                             cell.wide_spacer = false;
                             cell.style.flags.remove(CellFlags::WIDE_CHAR);
                         }
+                    }
+                }
+            }
+
+            // Suppress the frozen scrollback source of every emitted boundary-split block: its
+            // opener/body rows sit in the history region above and are drawn over by the bridged
+            // block image. Only rows within the visible history window are touched.
+            for abs_top in bridge_frozen_blank.drain(..) {
+                for absolute in abs_top.max(window_start)..history_rows {
+                    let Some(index) = absolute.checked_sub(window_start) else {
+                        continue;
+                    };
+                    let Some(row) = visible.get_mut(index) else {
+                        break;
+                    };
+                    for cell in &mut row.cells {
+                        cell.text.clear();
+                        cell.wide_spacer = false;
+                        cell.style.flags.remove(CellFlags::WIDE_CHAR);
                     }
                 }
             }
@@ -1437,11 +1555,30 @@ impl ViewportProjection {
             .collect::<Vec<_>>();
         for placement in &mut math_blocks {
             if let MathBlockAnchor::Live { band_start_row, .. } = placement.anchor
-                && let Some(mapped) = row_map
+                && let Some((band_index, mapped)) = row_map
                     .iter()
-                    .find(|mapped| mapped.live_grid_row == Some(band_start_row))
+                    .enumerate()
+                    .find(|(_, mapped)| mapped.live_grid_row == Some(band_start_row))
             {
-                placement.top_subpixels = mapped.top_subpixels;
+                if placement.frozen_prefix_rows == 0 {
+                    placement.top_subpixels = mapped.top_subpixels;
+                } else {
+                    // A boundary-split block starts in the frozen scrollback rows above its live
+                    // band. Snap its top to the first frozen-prefix row: visible frozen rows use
+                    // their exact row-map top, and any that sit above the window are uniform cell
+                    // height. Its clip height already reaches the live band bottom, so the whole
+                    // occurrence renders as one block bridging both domains.
+                    let frozen = placement.frozen_prefix_rows as usize;
+                    placement.top_subpixels = if band_index >= frozen {
+                        row_map[band_index - frozen].top_subpixels
+                    } else {
+                        let above = i64::try_from(frozen - band_index).unwrap_or(i64::MAX);
+                        row_map
+                            .first()
+                            .map_or(frame_top_subpixels, |first| first.top_subpixels)
+                            .saturating_sub(above.saturating_mul(self.cell_height_subpixels.get()))
+                    };
+                }
             }
         }
         let selection_spans = self
@@ -1737,7 +1874,22 @@ impl ViewportProjection {
             let mut accepted = Vec::new();
             // Primary keeps its existing visible-text floor and newest/lower-block preference.
             for artifact in candidates.into_iter().rev() {
-                let box_height = artifact.artifact.height_subpixels.max(1);
+                // A boundary-split block occupies only its live band on the grid; the bulk of its
+                // height is carried by the frozen scrollback rows it already owns above. It is
+                // charged its live-band height (never the full image) against the visible-text
+                // floor and does not expand live rows below.
+                let box_height = if artifact.frozen_prefix.is_empty() {
+                    artifact.artifact.height_subpixels.max(1)
+                } else {
+                    i64::from(
+                        artifact
+                            .band_end_row
+                            .saturating_sub(artifact.band_start_row)
+                            .saturating_add(1),
+                    )
+                    .saturating_mul(self.cell_height_subpixels.get())
+                    .max(1)
+                };
                 if artifact.artifact.render_scale_milli == LIVE_MATH_READABLE_SCALE_MILLI
                     && box_height <= remaining
                 {
@@ -1768,6 +1920,12 @@ impl ViewportProjection {
         let mut per_row_height =
             vec![self.cell_height_subpixels.get(); self.live_rows.get() as usize];
         for artifact in &accepted {
+            // A boundary-split block never expands its live rows: its rendered image spans the
+            // frozen scrollback rows above plus its live band, and projection sizes that bridged
+            // span directly. Its live band keeps natural row heights here.
+            if !artifact.frozen_prefix.is_empty() {
+                continue;
+            }
             let visible_rows = artifact
                 .band_end_row
                 .saturating_sub(artifact.band_start_row)
@@ -2479,6 +2637,7 @@ mod tests {
                     clipped_bottom_rows: 0,
                     occluded_source_rows: 0,
                     occluded_visible_rows: Vec::new(),
+                    frozen_prefix: Vec::new(),
                     generation: GridGeneration(1),
                     artifact: ProjectedMathArtifact {
                         key: format!("display-x-{band_start_row}-{band_end_row}"),
@@ -2554,6 +2713,149 @@ mod tests {
         }
     }
 
+    /// A `$$…$$` block whose opener and body committed to frozen scrollback while its closer stayed
+    /// in the live grid renders as ONE block bridging both domains: the frozen source rows and the
+    /// live closer are suppressed, and the placement spans upward from the frozen rows through the
+    /// live band, never revealing bare `$$` source.
+    #[test]
+    fn boundary_split_block_renders_as_one_bridge_across_frozen_and_live() {
+        let width = 32;
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let opener = store
+            .capture(CapturedRow::plain("$$", false))
+            .finalized
+            .remove(0);
+        let body = store
+            .capture(CapturedRow::plain(
+                r"\sum_{k=1}^{n}k=\frac{n(n+1)}{2}",
+                false,
+            ))
+            .finalized
+            .remove(0);
+        let mut document = HistoryDocument::default();
+        document.finalize_transaction(opener);
+        document.finalize_transaction(body);
+        let frozen_prefix = document.entries().keys().copied().collect::<Vec<_>>();
+        assert_eq!(frozen_prefix.len(), 2);
+
+        let mut projection = ViewportProjection::new(
+            key(width),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.relayout(key(width), &document);
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(9),
+                screen: ScreenId::Primary,
+                start: GridPoint { row: 0, column: 0 },
+                end: GridPoint { row: 0, column: 2 },
+                band_start_row: 0,
+                band_end_row: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                frozen_prefix: frozen_prefix.clone(),
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    key: "sum".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; 40 * 4]),
+                    width_px: 1,
+                    height_px: 40,
+                    height_subpixels: 40 * SUBPIXELS_PER_PX,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: r"\sum_{k=1}^{n}k=\frac{n(n+1)}{2}".to_owned(),
+                },
+            }],
+        );
+        projection.project(&document);
+        projection.scroll_to_top();
+
+        let closer = format!("{:<width$}", "$$", width = width as usize);
+        let blank = " ".repeat(width as usize);
+        let mut live_rows = vec![CapturedRow::plain(&closer, false)];
+        live_rows.extend(vec![CapturedRow::plain(&blank, false); 11]);
+        let frame = projection
+            .continuous_frame(
+                &document,
+                &[],
+                live_rows,
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+
+        let bridge = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.display == MathBlockDisplay::Rendered)
+            .expect("boundary-split block renders");
+        assert_eq!(bridge.frozen_prefix_rows, 2);
+        assert_eq!(bridge.live_occurrence_id, Some(LiveMathOccurrenceId(9)));
+        assert!(
+            matches!(
+                bridge.anchor,
+                MathBlockAnchor::Live {
+                    band_start_row: 0,
+                    ..
+                }
+            ),
+            "bridge anchors on the live closer at grid row 0"
+        );
+
+        // The block's top rises above the live closer row into the frozen scrollback rows, and its
+        // bottom reaches the closer row's bottom: one image spans both domains.
+        let closer_row = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(0))
+            .unwrap();
+        let closer_bottom = closer_row
+            .top_subpixels
+            .saturating_add(closer_row.height_subpixels);
+        assert!(
+            bridge.top_subpixels < closer_row.top_subpixels,
+            "bridge top {} must rise above the closer row top {}",
+            bridge.top_subpixels,
+            closer_row.top_subpixels
+        );
+        assert_eq!(
+            bridge
+                .top_subpixels
+                .saturating_add(bridge.clip_height_subpixels),
+            closer_bottom,
+            "bridge bottom must reach the live closer row bottom"
+        );
+
+        // No bare `$$` delimiter survives: the frozen opener/body and the live closer are all
+        // suppressed by the single rendered block.
+        let column_count = width as usize;
+        for (row, cells) in frame.cells.chunks(column_count).enumerate() {
+            let text = cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>();
+            assert!(
+                !text.contains("$$") && !text.contains("sum"),
+                "row {row} still shows split-block source: {text:?}"
+            );
+        }
+    }
+
     #[test]
     fn live_height_accounting_filters_the_same_screen_and_generation_as_placement() {
         let mut projection = ViewportProjection::new(
@@ -2575,6 +2877,7 @@ mod tests {
             clipped_bottom_rows: 0,
             occluded_source_rows: 0,
             occluded_visible_rows: Vec::new(),
+            frozen_prefix: Vec::new(),
             generation,
             artifact: ProjectedMathArtifact {
                 key: key.to_owned(),
@@ -2644,6 +2947,7 @@ mod tests {
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
                 occluded_visible_rows: Vec::new(),
+                frozen_prefix: Vec::new(),
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
                     key: key.to_owned(),

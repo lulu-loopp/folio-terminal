@@ -261,6 +261,11 @@ struct LiveDecorationRecord {
     end: GridPoint,
     band_start_row: u32,
     band_end_row: u32,
+    /// Frozen transcript rows (opener and body) that already committed to scrollback while this
+    /// occurrence's closer is still in the live grid. Empty for an ordinary all-live block. Ordered
+    /// top to bottom, immediately preceding the live band; the presentation layer bridges the two
+    /// domains into one rendered block so a boundary-split formula does not stall as source.
+    frozen_prefix: Vec<TranscriptId>,
     /// Rows from the proven owned band that currently sit above alternate-screen row zero.
     /// Projection keeps their geometry but clips their pixels and terminal cells.
     clipped_top_rows: u32,
@@ -1806,6 +1811,7 @@ impl DualPlaneSession {
         let Some(identity) = proven_live_occurrence(&task, occurrence_id) else {
             return false;
         };
+        let frozen_prefix = frozen_prefix_ids(&task.span);
         self.next_live_occurrence_id = self.next_live_occurrence_id.saturating_add(1);
         // Install summaries only for the rows whose pixels are about to suppress source. Ordinary
         // TUI rows stay O(damaged rows), while a same-content repaint of this local dependency band
@@ -1830,6 +1836,7 @@ impl DualPlaneSession {
                 end: task.end,
                 band_start_row: task.band_start_row,
                 band_end_row: task.band_end_row,
+                frozen_prefix,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 detection_revision: task.detection_revision,
@@ -2437,6 +2444,7 @@ impl DualPlaneSession {
                         clipped_bottom_rows: record.clipped_bottom_rows,
                         occluded_source_rows: record.placement.occluded_source_rows,
                         occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
+                        frozen_prefix: record.frozen_prefix.clone(),
                         generation: record.generation,
                         artifact,
                     })
@@ -2557,6 +2565,7 @@ impl DualPlaneSession {
                 occluded_source_rows: 0,
                 occluded_visible_rows: Vec::new(),
                 live_occurrence_id: None,
+                frozen_prefix_rows: 0,
             });
         }
 
@@ -2624,6 +2633,7 @@ impl DualPlaneSession {
                 occluded_source_rows: record.placement.occluded_source_rows,
                 occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
                 live_occurrence_id: Some(record.identity.occurrence_id),
+                frozen_prefix_rows: 0,
             });
         }
 
@@ -2685,6 +2695,7 @@ impl DualPlaneSession {
                 occluded_source_rows: 0,
                 occluded_visible_rows: Vec::new(),
                 live_occurrence_id: None,
+                frozen_prefix_rows: 0,
             });
         }
 
@@ -2752,6 +2763,7 @@ impl DualPlaneSession {
                 occluded_source_rows: 0,
                 occluded_visible_rows: Vec::new(),
                 live_occurrence_id: Some(record.identity.occurrence_id),
+                frozen_prefix_rows: 0,
             });
         }
 
@@ -4125,6 +4137,25 @@ fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetec
     })
 }
 
+/// Frozen transcript rows this occurrence's opener/body already committed to scrollback, ordered
+/// top to bottom. These are the leading `MathSourceLine::Transcript` segments of a boundary-split
+/// block; an ordinary all-live occurrence yields an empty prefix. Consecutive segments on one
+/// physical line share an id, so adjacent duplicates are collapsed.
+fn frozen_prefix_ids(span: &MathSpan) -> Vec<TranscriptId> {
+    let mut ids: Vec<TranscriptId> = Vec::new();
+    for segment in &span.cell_segments {
+        match segment.source_line {
+            MathSourceLine::Transcript(id) => {
+                if ids.last() != Some(&id) {
+                    ids.push(id);
+                }
+            }
+            MathSourceLine::LiveGrid(_) => break,
+        }
+    }
+    ids
+}
+
 fn proven_live_occurrence(
     task: &LiveDetectionTask,
     occurrence_id: LiveMathOccurrenceId,
@@ -4137,10 +4168,12 @@ fn proven_live_occurrence(
     let source_end_offset = task.end.row.checked_sub(task.band_start_row)?;
     let mut span = task.span.clone();
     for segment in &mut span.cell_segments {
-        let MathSourceLine::LiveGrid(row) = &mut segment.source_line else {
-            return None;
-        };
-        *row = row.checked_sub(task.band_start_row)?;
+        // Live-grid rows are stored band-relative so an identical formula stays a distinct
+        // occurrence regardless of where it is later placed. Frozen-prefix rows keep their absolute
+        // transcript identity; they are never part of the live band offset space.
+        if let MathSourceLine::LiveGrid(row) = &mut segment.source_line {
+            *row = row.checked_sub(task.band_start_row)?;
+        }
     }
     let source_rows = (task.start.row..=task.end.row)
         .map(|row| {
@@ -4302,7 +4335,18 @@ fn size_resolved_live_task_band(
     cell_height_subpixels: i64,
     occupied_rows: &BTreeSet<u32>,
 ) {
-    if task.screen == ScreenId::Primary && task.span.mode == MathMode::Display {
+    let is_bridge = task
+        .span
+        .cell_segments
+        .iter()
+        .any(|segment| matches!(segment.source_line, MathSourceLine::Transcript(_)));
+    if is_bridge {
+        // A boundary-split block gains its upward height from the frozen prefix rows it already
+        // owns in scrollback. Borrowing blank live rows below the closer would place the rendered
+        // formula below its source instead of over it, so the live band stays exactly the closer.
+        task.band_start_row = task.start.row;
+        task.band_end_row = task.end.row;
+    } else if task.screen == ScreenId::Primary && task.span.mode == MathMode::Display {
         size_live_task_band_for_artifact(
             task,
             artifact_height_subpixels,

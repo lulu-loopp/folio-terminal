@@ -331,6 +331,7 @@ mod tests {
             occluded_source_rows,
             occluded_visible_rows: Vec::new(),
             live_occurrence_id: Some(id),
+            frozen_prefix_rows: 0,
         });
         frame
     }
