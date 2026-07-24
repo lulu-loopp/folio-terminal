@@ -1144,20 +1144,44 @@ fn restore_stripped_environment_newlines(source: &str, enabled: bool) -> String 
 }
 
 /// Byte offset where a display delimiter may begin on its line: leading spaces, then optionally
-/// one rendered CommonMark list-marker glyph (how TUI markdown renderers such as Claude Code and
-/// Codex emit a list item) followed by its spacing. A display block is valid list-item content,
-/// so the marker does not deny the delimiter its owns-the-line status; every other guard
-/// (escapes, prose body, CommonMark code contexts, pairing) runs unchanged.
+/// rendered CommonMark block markers followed by their spacing — one list-marker glyph (how TUI
+/// markdown renderers such as Claude Code and Codex emit a list item) and/or one ATX heading
+/// marker (Codex's resize reflow re-renders a `$$` opener as a `# $$` heading, observed stacked
+/// as `• # $$`). A display block is valid list-item content and the heading form is the reflow's
+/// mangling of one, so the markers do not deny the delimiter its owns-the-line status. Crucially,
+/// refusing the opener here would desynchronise the whole message's `$$` pairing and let a later
+/// closer pair across prose — every other guard (escapes, prose body, CommonMark code contexts,
+/// pairing) runs unchanged.
 fn delimiter_start(text: &str) -> usize {
     let spaces = text.len() - text.trim_start_matches(' ').len();
-    let rest = &text[spaces..];
-    for marker in ["• ", "◦ ", "▪ ", "● "] {
-        if let Some(after) = rest.strip_prefix(marker) {
-            let extra = after.len() - after.trim_start_matches(' ').len();
-            return spaces + marker.len() + extra;
+    let mut offset = spaces;
+    let mut skipped_list = false;
+    let mut skipped_heading = false;
+    loop {
+        let rest = &text[offset..];
+        if !skipped_list
+            && let Some(marker) = ["• ", "◦ ", "▪ ", "● "]
+                .iter()
+                .find(|marker| rest.starts_with(**marker))
+        {
+            let after = &rest[marker.len()..];
+            offset += marker.len() + (after.len() - after.trim_start_matches(' ').len());
+            skipped_list = true;
+            continue;
         }
+        if !skipped_heading {
+            let hashes = rest.len() - rest.trim_start_matches('#').len();
+            if (1..=6).contains(&hashes)
+                && let Some(after) = rest.get(hashes..)
+                && after.starts_with(' ')
+            {
+                offset += hashes + (after.len() - after.trim_start_matches(' ').len());
+                skipped_heading = true;
+                continue;
+            }
+        }
+        return offset;
     }
-    spaces
 }
 
 fn complete_display_on_line(text: &str) -> Option<(DelimiterKind, usize, usize, usize, usize)> {
@@ -1736,8 +1760,8 @@ mod tests {
         // Pairing it with the next block's opener would swallow the prose between them - which is
         // exactly what rendered a Chinese paragraph as mathematics (user report 2026-07-19).
         let window = [
-            (TranscriptId(1), r"\frac{a}{b}"), // tail of a block whose opener is off-screen
-            (TranscriptId(2), "$$"),           // actually a CLOSER
+            (TranscriptId(1), r"rac{a}{b}"), // tail of a block whose opener is off-screen
+            (TranscriptId(2), "$$"),          // actually a CLOSER
             (TranscriptId(3), "内部含转义或美元符号语义的:"),
             (TranscriptId(4), "多行里带对齐点和长表达式:"),
             (TranscriptId(5), "$$"), // the NEXT block's opener
@@ -1777,7 +1801,7 @@ mod tests {
     #[test]
     fn truncated_context_rejects_ambiguous_pairing_before_body_heuristics_run() {
         let window = [
-            (TranscriptId(20), r"\frac{a}{b}"),
+            (TranscriptId(20), r"rac{a}{b}"),
             (TranscriptId(21), "$$"),
             (TranscriptId(22), "ordinary English prose continues here"),
             (TranscriptId(23), "$$"),
@@ -1961,7 +1985,7 @@ mod tests {
     fn m1_9k_redline_a_unknown_symmetric_prefix_is_ambiguous_not_prose_math() {
         let scan = scan_math_blocks_in_context(
             [
-                (TranscriptId(1), r"\frac{a}{b}"),
+                (TranscriptId(1), r"rac{a}{b}"),
                 (TranscriptId(2), "$$"),
                 (TranscriptId(3), "retrying"),
                 (TranscriptId(4), "$$"),
@@ -2193,7 +2217,8 @@ mod tests {
         let already_valid = [
             r"$$\begin{aligned}",
             r"x &= 0\\",
-            r"y &= \nabla f",
+            r"y &= 
+abla f",
             r"\end{aligned}$$",
         ];
         let detected = detect_math_blocks(
@@ -2590,7 +2615,7 @@ mod rendered_list_marker_delimiters {
     fn a_rendered_list_marker_does_not_desync_display_pairing() {
         let lines: Vec<(TranscriptId, &str)> = vec![
             (TranscriptId(1), "• $$"),
-            (TranscriptId(2), r"  x=\frac{-b\pm\sqrt{b^2-4ac}}{2a}"),
+            (TranscriptId(2), r"  x=rac{-b\pm\sqrt{b^2-4ac}}{2a}"),
             (TranscriptId(3), "  $$"),
             (TranscriptId(4), ""),
             (TranscriptId(5), "  $$"),
@@ -2617,6 +2642,46 @@ mod rendered_list_marker_delimiters {
                 (TranscriptId(9), TranscriptId(15)),
             ],
             "every $$ block must pair despite the list marker on the first opener"
+        );
+    }
+
+    /// Codex's resize reflow re-renders a `$$` opener as an ATX heading (`# $$`, stacked
+    /// `• # $$` behind the list marker). Refusing those openers desynchronised the whole
+    /// message's pairing and let a later closer pair across the injected `#` line, typesetting it
+    /// (real capture resize-repro.vt, 2026-07-24). Skipping the heading marker resyncs pairing.
+    #[test]
+    fn a_reflowed_heading_opener_keeps_pairing_in_sync() {
+        let lines: Vec<(TranscriptId, &str)> = vec![
+            (TranscriptId(1), "  # $$"),
+            (
+                TranscriptId(2),
+                r"  \oint_{\partial\Omega}\mathbf F\cdot\mathrm d\mathbf r",
+            ),
+            (TranscriptId(3), ""),
+            (
+                TranscriptId(4),
+                r"  \iint_\Omega(
+abla	imes\mathbf F)\cdot\mathbf n",
+            ),
+            (TranscriptId(5), "  $$"),
+            (TranscriptId(6), ""),
+            (TranscriptId(7), "• # $$"),
+            (
+                TranscriptId(8),
+                r"  i\hbarrac{\partial}{\partial t}\Psi(\mathbf r,t)",
+            ),
+            (TranscriptId(9), "  $$"),
+        ];
+        let blocks = detect_math_blocks(lines);
+        assert_eq!(
+            blocks
+                .iter()
+                .map(|block| (block.start, block.end))
+                .collect::<Vec<_>>(),
+            [
+                (TranscriptId(1), TranscriptId(5)),
+                (TranscriptId(7), TranscriptId(9)),
+            ],
         );
     }
 

@@ -50,6 +50,9 @@ impl HeadlessOracle {
         observed_at: Instant,
         elapsed: Duration,
     ) -> Result<(), Box<dyn Error>> {
+        // Mirror the app's timer: a resize epoch only releases live stability once the transaction
+        // quiesces, so a replay that never drives this would suppress re-detection forever.
+        let _ = self.session.finish_resize_if_quiescent(observed_at);
         self.session.advance_live_stability(observed_at);
         if self.complete_pending_math() {
             self.publish("math-ready", elapsed)?;
@@ -344,6 +347,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         let observed_at = started + chunk.elapsed;
         if let Some((columns, rows)) = chunk.resize_before {
             oracle.session.resize_at(columns, rows, observed_at)?;
+            // The marker is written when the PTY itself is resized, so both the local resize and
+            // the ConPTY acknowledgement happen here, exactly like the app's coalesced flush.
+            oracle
+                .session
+                .mark_pty_resize_requested_at(columns, rows, observed_at);
             oracle.publish("resize", chunk.elapsed)?;
         }
         oracle.advance_before(observed_at, chunk.elapsed)?;
