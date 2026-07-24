@@ -185,26 +185,25 @@ _最后更新:2026-07-24,HEAD `33fb866`_
 
 ### 当前挂账(都不紧急)
 
-- **流内重印闪(非 resize)** — **部分收线(primary 重印保持,未提交)**:给 primary 加了重印保持
-  触发(`primary_repaint_in_progress`,在 feed 检 `contains_clear_home_snapshot_boundary` 边界即置,
-  DEC 2026 同步更新跨到 commit 才清),并入 `offscreen_preservation_active` → 重印改写块行时
-  `invalidate_live_row` 把可渲染记录 drain 进 off-band 队列而非丢弃,`restore_offscreen_decorations`
-  按**源码精确相等**重锚(复用 resize 那套,红线守住)。**不收编 002acc7/59b393e**:resize 在
-  `resize_at` 当刻 reflow 整栅、未必同 feed 带重印边界,两触发互补并存。
-  - **实测(延迟完成 50ms + 多行 trace,修前→修后 R→S)**:codex-issues 12→3、同步模式 13→4;
-    codex-formula 同步 10→9;resize-endflash 7→7、resize-repro 28→28(**无改善**);
-    alt 两份 1→1(与产品码无关,见工具误报)。全部**不退化**(逐 capture ≤ 修前),终态渲染集不变。
-  - **仍未竟(下一阶段)= 多行「渐进式/整段重印」闪**(resize-endflash 的 aligned/pmatrix、
-    resize-repro 整批同帧回源、codex-issues 残留 pmatrix)。根因:这类重印**非原子**——块跨多个
-    pty chunk 渐进重印(opener 到、closer 未到的窗口),off-band 的 `exact_live_source_match` 对
-    "不完整/重排后网格"匹配不上 → drain 后**隐藏**记录 → 露源。off-band drain 本质是"藏起来等重锚",
-    对渐进窗口天然露源。**真解 = alt 的 suppress+remap(hold 旧栅 + 段映射 project_live_record 逐 proven-row
-    重锚)推广到 primary**(finish_alternate_repaint 那套,grid-based、已对多行 0 flip)。风险:段映射/
-    finish 是 alt 共享码,动它可能弄坏 alt 红线;且 resize-repro 的闪与 resize epoch 纠缠(需 resize 余波
-    也能跨渐进重印 hold 旧栅)。建议**隔离实现**(primary 专用 snapshot/finish,复用纯 helper,不碰 alt
-    函数),先在 headless 延迟模式验 alt 两份仍 crate-oracle 0 再上。
-  - **审因修正**:审因把此闪归因于"异步间隙"(同步回放假绿);实测多行块的闪在**同步模式也在**
-    (12→13 这类),只是旧 trace 多行盲 → 假绿。单行块的原子重印闪才是纯异步间隙(同步藏、延迟露)。
+- **流内重印闪(非 resize)** — **两阶段落地(`1f963c9` 原子类 + `d7adce8` 渐进类)**:
+  - `1f963c9` 原子重印:`primary_repaint_in_progress`(`contains_clear_home_snapshot_boundary`
+    边界,2026 跨 commit)→ `invalidate_live_row` drain off-band + 精确源码重锚。不收编
+    002acc7/59b393e(resize reflow 未必同 feed 带重印边界,互补并存)。
+  - `d7adce8` 渐进多行重印:**primary 隔离版 suppress+remap**——`primary_repaint_snapshot`
+    在重印边界拍快照,风暴期间 `observe_live_damage` 对已装饰行**suppress 不失效**(旧栅压着
+    Codex 改写中的行继续渲染),`finish_primary_repaint` 用 `segmented_row_mapping` **+ 强制
+    identity 映射**(primary 重印只改几行,未动的记录必须能原样映射——没有 identity 就把没动的
+    记录也丢了,这是前两版试错的关键教训)经 `project_live_record_uniquely` 重投影;未解记录落
+    off-band 精确重锚或正当放归重检测。**不碰 alt 函数**,alt 两份回放同步+延迟双模逐字节等同。
+    曾实测"resize 期间 stand-down 重印窗口"更差(3→5),故与 resize 保持并存不互斥。
+  - **实测(延迟 50ms,基线→现在)**:resize-repro 28→3、resize-endflash 7→4、codex-issues
+    3→2、codex-formula 7→4;渲染集不缩(resize-repro 终态 rendered 18→28)。
+  - **审因修正**:多行块的闪同步模式也在(旧 trace 多行盲才假绿);单行原子重印闪才是纯异步间隙。
+  - **残余(新的下一步)= 边界滚动族,非重印族**:剩余 flips 全是 `invalidations=0` 的回源——块
+    整体在网格里,但滚动使顶行(`$$`/`\begin`)越过 live row 0 进 history,`project_live_record`
+    (仅 grid 行)返 None、精确匹配对不连续全源失败 → 丢投影。这是 `0848375` bridge 的地界:
+    **正解 = 重印窗口与 bridge/occlusion 整合,顶部裁进 history 的记录用 `clipped_top` 重投影
+    而非丢弃**(session↔viewport 双侧改,值得独立一单)。基线里这族也闪(被重印闪淹没),非回归。
 - **zoom(font_rev/dpi)后部分公式回源码**:根因与 resize 不同——`set_layout_key→
   invalidate_layout` 不开 resize epoch,是检测竞态撞 M1.9p 首检(handoff「Codex 战线未闭环」
   第 2 条)。需要独立的 layout 变更保持触发;headless 无 zoom 录制素材,需先录。
