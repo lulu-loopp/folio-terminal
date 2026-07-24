@@ -812,6 +812,27 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
         if fence.is_some() {
             continue;
         }
+        // Swallow-radius bound. A math *environment* body can never legally contain a `$$`/`\[`
+        // display opener — those switch display mode and are a syntax error inside
+        // `\begin{env}…\end{env}`. So when one appears while an environment opening is still
+        // unclosed, that environment's closer was lost (mangled by a reflow, scrolled out of this
+        // window, or malformed), and continuing to swallow would consume every following display
+        // block as phantom environment body (the `\end{pmatrix},`-poisoning failure mode). Abandon
+        // the stale environment opening here; the line is then handled by the normal
+        // opening-is-none paths below (single-line complete block, or a fresh multi-line opener)
+        // under every existing guard — prose body, escapes, CommonMark code, ambiguous-prefix
+        // pairing. This never fires for an active `$$`/`\[` opening: inner `\begin`/`\end`
+        // directional environments are not display openers, so a genuinely nested environment is
+        // still swallowed as body by the catch-all further down.
+        if opening
+            .as_ref()
+            .is_some_and(|active| matches!(active.delimiter, DisplayDelimiter::Environment(_)))
+            && opening_delimiter(text).is_some_and(|(kind, _)| {
+                matches!(kind, DelimiterKind::Dollars | DelimiterKind::Brackets)
+            })
+        {
+            opening = None;
+        }
         if opening
             .as_ref()
             .is_some_and(|active| active.delimiter == DisplayDelimiter::Dollars)
@@ -1220,13 +1241,19 @@ fn complete_display_on_line(text: &str) -> Option<(DelimiterKind, usize, usize, 
     }
     let (environment, open_end) = environment_token(trimmed, true)?;
     let closing = format!(r"\end{{{environment}}}");
-    let body_end = trimmed.len().checked_sub(closing.len())?;
-    (open_end < body_end && trimmed.ends_with(&closing)).then_some((
+    // Same prose-punctuation tolerance as the multi-line closer (`closing_delimiter`): a
+    // single-line `\begin{pmatrix}…\end{pmatrix},` still pairs, with the trailing punctuation held
+    // out of the rendered occurrence.
+    let content_end = trimmed
+        .trim_end_matches(is_trailing_prose_punctuation)
+        .len();
+    let body_end = content_end.checked_sub(closing.len())?;
+    (open_end < body_end && trimmed[..content_end].ends_with(&closing)).then_some((
         DelimiterKind::Environment(environment),
         start,
         start + open_end,
         start + body_end,
-        start + trimmed.len(),
+        start + content_end,
     ))
 }
 
@@ -1260,10 +1287,30 @@ fn closing_delimiter(text: &str, delimiter: &DelimiterKind) -> Option<(usize, us
         }
         DelimiterKind::Environment(environment) => {
             let closing = format!(r"\end{{{environment}}}");
-            let start = trimmed_end.checked_sub(closing.len())?;
-            (text.get(start..trimmed_end) == Some(closing.as_str())).then_some((start, trimmed_end))
+            // A display environment closer is routinely followed by sentence punctuation when it
+            // sits in prose (`\end{pmatrix},` / `\end{aligned}.` / CJK `\end{pmatrix}。`). Tolerate
+            // that trailing run so the environment still pairs, but pin the closer's end at the
+            // `}` — the punctuation is prose, not formula, and stays a native cell outside the
+            // rendered occurrence. Anything other than a punctuation run after `\end{env}`
+            // (e.g. `\end{pmatrix} extra`) still refuses to close.
+            let content_end = text[..trimmed_end]
+                .trim_end_matches(is_trailing_prose_punctuation)
+                .len();
+            let start = content_end.checked_sub(closing.len())?;
+            (text.get(start..content_end) == Some(closing.as_str())).then_some((start, content_end))
         }
     }
+}
+
+/// Sentence/clause punctuation (ASCII and CJK full-width forms) that may trail a display
+/// environment closer in prose without denying it its closing role. Deliberately excludes `$`,
+/// `\`, `]`, `}` and every other structural glyph so it can never absorb a real delimiter or
+/// command; only prose terminators are stripped.
+fn is_trailing_prose_punctuation(character: char) -> bool {
+    matches!(
+        character,
+        ',' | '.' | ';' | ':' | '!' | '?' | '，' | '。' | '、' | '；' | '：' | '！' | '？'
+    )
 }
 
 fn environment_token(text: &str, open: bool) -> Option<(String, usize)> {
@@ -2134,6 +2181,196 @@ mod tests {
                 "{literal}"
             );
         }
+    }
+
+    fn detect_lines(lines: &[&str]) -> Vec<DetectedMathBlock> {
+        detect_math_blocks(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+        )
+    }
+
+    #[test]
+    fn environment_closer_with_trailing_prose_punctuation_still_pairs() {
+        // The independent audit's POISONED/CLEAN pair, pinned. A bare `\begin{pmatrix}` (Codex ate
+        // the enclosing `\[`) whose closer reads `\end{pmatrix},` used to never close, so the
+        // scanner stayed inside the open environment and swallowed every following `$$` block as
+        // phantom body. Both the matrix and the `$$` block must now resolve.
+        let poisoned = detect_lines(&[
+            "matrix:",
+            r"\begin{pmatrix}",
+            "a & b",
+            r"\end{pmatrix},",
+            "energy:",
+            "$$",
+            "E=mc^2",
+            "$$",
+        ]);
+        assert_eq!(
+            poisoned.len(),
+            2,
+            "trailing comma must not poison the later $$ block: {poisoned:#?}"
+        );
+        assert!(
+            poisoned
+                .iter()
+                .any(|block| block.span.render_source.contains(r"\begin{pmatrix}")),
+            "the pmatrix environment must resolve"
+        );
+        assert!(
+            poisoned
+                .iter()
+                .any(|block| block.span.render_source.contains("E=mc^2")),
+            "the following $$ block must no longer be swallowed"
+        );
+        // The tolerated punctuation is prose, not formula: it never enters the rendered source.
+        for block in &poisoned {
+            assert!(
+                !block.span.render_source.ends_with(','),
+                "trailing prose punctuation leaked into the render source: {:?}",
+                block.span.render_source
+            );
+        }
+    }
+
+    #[test]
+    fn environment_closer_tolerates_each_prose_terminator_variant() {
+        for punctuation in [",", ".", ";", ":", "，", "。", "、", "；", "！", "？"] {
+            // Multi-line closer on its own line.
+            let multiline = detect_lines(&[
+                r"\begin{pmatrix}",
+                "a & b",
+                &format!(r"\end{{pmatrix}}{punctuation}"),
+            ]);
+            assert_eq!(
+                multiline.len(),
+                1,
+                "multi-line closer refused trailing {punctuation:?}"
+            );
+            assert_eq!(
+                multiline[0].span.delimiter_kind,
+                DelimiterKind::Environment("pmatrix".to_owned())
+            );
+            assert!(
+                !multiline[0].span.render_source.contains(punctuation),
+                "trailing {punctuation:?} leaked into multi-line render source"
+            );
+            // Environment render source is exactly its original source (no punctuation on either).
+            assert_eq!(
+                multiline[0].span.original_source,
+                multiline[0].span.render_source
+            );
+
+            // Single-line closer on the same line as the opener.
+            let single = detect_lines(&[&format!(
+                r"\begin{{pmatrix}}a & b\end{{pmatrix}}{punctuation}"
+            )]);
+            assert_eq!(
+                single.len(),
+                1,
+                "single-line closer refused trailing {punctuation:?}"
+            );
+            assert!(
+                !single[0].span.render_source.contains(punctuation),
+                "trailing {punctuation:?} leaked into single-line render source"
+            );
+        }
+    }
+
+    #[test]
+    fn environment_closer_still_refuses_arbitrary_trailing_content() {
+        // Only a run of prose punctuation is tolerated. Any other trailing text means the line is
+        // not the closer, so the environment keeps looking (here: never closes → nothing renders).
+        assert!(
+            detect_lines(&[r"\begin{pmatrix}", "a & b", r"\end{pmatrix} extra prose"]).is_empty(),
+            "arbitrary trailing prose must not be accepted as an environment closer"
+        );
+        // `$` is structural, never prose punctuation: `\end{pmatrix}$$` is not an environment close.
+        assert!(
+            detect_lines(&[r"\begin{pmatrix}", "a & b", r"\end{pmatrix}$$"]).is_empty(),
+            "a trailing $$ must not be swallowed as tolerated punctuation"
+        );
+    }
+
+    #[test]
+    fn unclosed_environment_is_abandoned_at_a_display_opener_not_swallowing_later_blocks() {
+        // Swallow-radius bound: an environment whose closer is lost entirely (no `\end` at all)
+        // must not consume the following `$$` block as phantom body — a `$$`/`\[` opener cannot
+        // legally appear inside a math environment, so the stale opening is abandoned.
+        let dollars = detect_lines(&[r"\begin{pmatrix}", "a & b", "$$", "E=mc^2", "$$"]);
+        assert_eq!(
+            dollars.len(),
+            1,
+            "the $$ block must survive an unclosed environment above it: {dollars:#?}"
+        );
+        assert!(dollars[0].span.render_source.contains("E=mc^2"));
+
+        let brackets = detect_lines(&[r"\begin{pmatrix}", "a & b", r"\[", "E=mc^2", r"\]"]);
+        assert_eq!(
+            brackets.len(),
+            1,
+            "the \\[ block must also survive: {brackets:#?}"
+        );
+        assert!(brackets[0].span.render_source.contains("E=mc^2"));
+    }
+
+    #[test]
+    fn genuinely_nested_environment_inside_dollars_is_not_abandoned() {
+        // The abandonment is one-directional: a display `$$`/`\[` opening still legitimately nests
+        // an inner directional environment as body. It must keep rendering as one Dollars block.
+        let nested = detect_lines(&["$$", r"\begin{aligned}", "x &= y", r"\end{aligned}", "$$"]);
+        assert_eq!(
+            nested.len(),
+            1,
+            "nested environment broke $$ pairing: {nested:#?}"
+        );
+        assert_eq!(nested[0].span.delimiter_kind, DelimiterKind::Dollars);
+        assert!(nested[0].span.render_source.contains(r"\begin{aligned}"));
+    }
+
+    #[test]
+    fn prose_body_is_still_rejected_even_when_the_closer_carries_punctuation() {
+        // The loosened closer must not become a prose loophole: tolerating `\end{pmatrix},` for
+        // *pairing* still leaves the prose-body guard to reject an environment whose interior is
+        // ordinary sentences (English or CJK). Nothing renders.
+        assert!(
+            detect_lines(&[
+                r"\begin{pmatrix}",
+                "this is ordinary english prose that should never render",
+                r"\end{pmatrix},",
+            ])
+            .is_empty(),
+            "an English-prose body must stay source despite a tolerated closer"
+        );
+        assert!(
+            detect_lines(&[
+                r"\begin{pmatrix}",
+                "这是一段普通的中文散文绝不能被排成公式",
+                r"\end{pmatrix}。",
+            ])
+            .is_empty(),
+            "a CJK-prose body must stay source despite a tolerated closer"
+        );
+        // And the abandonment path must not render the prose it steps over either: a bare
+        // unclosed environment sitting above a real $$ block leaves the intervening prose native.
+        let stepped = detect_lines(&[
+            r"\begin{pmatrix}",
+            "meanwhile some ordinary english prose is written here",
+            "$$",
+            "E=mc^2",
+            "$$",
+        ]);
+        assert_eq!(
+            stepped.len(),
+            1,
+            "only the $$ block should render: {stepped:#?}"
+        );
+        assert!(
+            !stepped[0].span.render_source.contains("meanwhile"),
+            "stepped-over prose leaked into the render source"
+        );
     }
 
     #[test]
