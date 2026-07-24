@@ -51,7 +51,7 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// than forty conventional 24-row terminal screens while bounding each shared worker snapshot.
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
-const MAX_ALTERNATE_OFFSCREEN_RECORDS: usize = 128;
+const MAX_OFFSCREEN_RECORDS: usize = 128;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
 const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
@@ -451,7 +451,7 @@ pub struct DualPlaneSession {
     live_tasks: VecDeque<LiveDetectionTask>,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
     next_live_occurrence_id: u64,
-    alternate_offscreen_decorations: VecDeque<LiveDecorationRecord>,
+    offscreen_decorations: VecDeque<LiveDecorationRecord>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
     alternate_content_end_row: Option<u32>,
@@ -563,7 +563,7 @@ impl DualPlaneSession {
             live_tasks: VecDeque::new(),
             live_decorations: BTreeMap::new(),
             next_live_occurrence_id: 1,
-            alternate_offscreen_decorations: VecDeque::new(),
+            offscreen_decorations: VecDeque::new(),
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
             alternate_content_end_row: None,
@@ -756,7 +756,7 @@ impl DualPlaneSession {
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         if result.is_ok() {
-            self.restore_alternate_offscreen_decorations();
+            self.restore_offscreen_decorations();
         }
         result
     }
@@ -797,6 +797,9 @@ impl DualPlaneSession {
         let events = self.terminal.resize(columns, rows);
         let _ = self.terminal.take_damage();
         if alternate_resize.is_none() {
+            // On primary this preserves proven formulas off-band for the resize transaction rather
+            // than wiping them (see `invalidate_all_live_decorations`); `restore_offscreen_decorations`
+            // below re-anchors each by exact source equality onto the reflowed grid.
             self.invalidate_all_live_decorations();
         }
         self.pending_live_handoffs.clear();
@@ -820,7 +823,7 @@ impl DualPlaneSession {
         if let Some(snapshot) = alternate_resize {
             self.finish_alternate_repaint(snapshot);
         }
-        self.restore_alternate_offscreen_decorations();
+        self.restore_offscreen_decorations();
         if plan.begin_transaction {
             self.trace_resize_event(
                 observed_at,
@@ -882,7 +885,7 @@ impl DualPlaneSession {
             self.finish_alternate_repaint(snapshot);
         }
         self.alternate_repaint_in_progress = false;
-        self.restore_alternate_offscreen_decorations();
+        self.restore_offscreen_decorations();
         Ok(true)
     }
 
@@ -907,6 +910,15 @@ impl DualPlaneSession {
             self.grid_generation.0 += 1;
             self.document
                 .capture_rows_transaction(&[], self.grid_generation);
+            // The vendor reconcile can shift rows and always bumps the grid generation, which
+            // strands the formulas `restore_offscreen_decorations` re-anchored inside `resize_at`
+            // one generation behind the frame the app is about to publish. Re-anchor them against
+            // the now-settled grid so proven blocks render immediately instead of flashing to
+            // source for the post-reconcile frame. Primary-only; alternate keeps its own path.
+            if self.primary_resize_preservation_active() {
+                self.retain_live_decorations_offscreen();
+                self.restore_offscreen_decorations();
+            }
         }
         let cursor = self.terminal.cursor();
         self.trace_resize_event(
@@ -937,6 +949,12 @@ impl DualPlaneSession {
         // tracing every unrelated frame for the remainder of the session.
         self.resize_trace_post_end_frames_remaining = Some(16);
         self.resize_epoch.mark_quiescent();
+        // The transaction is over: fresh detection is authoritative again, so drop any primary
+        // formulas still held off-band whose exact source never reappeared on the reflowed grid.
+        // (Alternate keeps its queue across repaints, so it is left untouched.)
+        if self.live_screen == ScreenId::Primary {
+            self.offscreen_decorations.clear();
+        }
         self.schedule_existing_artifacts();
         Ok(true)
     }
@@ -1143,18 +1161,13 @@ impl DualPlaneSession {
     ) -> Option<AlternateRepaintSnapshot> {
         (self.live_screen == ScreenId::Alternate
             && self.terminal.modes().alternate_screen
-            && (!self.live_decorations.is_empty()
-                || !self.alternate_offscreen_decorations.is_empty()))
+            && (!self.live_decorations.is_empty() || !self.offscreen_decorations.is_empty()))
         .then(|| {
             let inputs = self.live_detection_context();
             AlternateRepaintSnapshot {
                 inputs,
                 decorations: self.live_decorations.values().cloned().collect(),
-                dormant_decorations: self
-                    .alternate_offscreen_decorations
-                    .iter()
-                    .cloned()
-                    .collect(),
+                dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
                 invalidation_count: self.live_invalidation_count,
                 snapshot_boundary,
             }
@@ -1189,7 +1202,7 @@ impl DualPlaneSession {
         let mut preserved = BTreeMap::new();
         let mut occupied = BTreeSet::new();
         let mut unresolved = Vec::new();
-        self.alternate_offscreen_decorations.clear();
+        self.offscreen_decorations.clear();
 
         for record in snapshot
             .decorations
@@ -1215,7 +1228,7 @@ impl DualPlaneSession {
             let record = match projected {
                 RecordProjection::Visible(record) => record,
                 RecordProjection::Dormant(record) => {
-                    self.retain_alternate_offscreen_record(record);
+                    self.retain_offscreen_record(record);
                     continue;
                 }
             };
@@ -1277,7 +1290,7 @@ impl DualPlaneSession {
         self.live_invalidation_count = snapshot.invalidation_count;
         for record in unresolved {
             if record.artifact.is_some() || record.stale_artifact.is_some() {
-                self.retain_alternate_offscreen_record(record);
+                self.retain_offscreen_record(record);
             } else {
                 self.live_invalidation_count = self.live_invalidation_count.saturating_add(1);
             }
@@ -1352,20 +1365,50 @@ impl DualPlaneSession {
         tasks
     }
 
-    fn retain_alternate_offscreen_record(&mut self, record: LiveDecorationRecord) {
-        if self.live_screen != ScreenId::Alternate {
-            return;
-        }
-        if self.alternate_offscreen_decorations.len() == MAX_ALTERNATE_OFFSCREEN_RECORDS {
-            self.alternate_offscreen_decorations.pop_front();
-        }
-        self.alternate_offscreen_decorations.push_back(record);
+    /// The current live screen owns the off-band preservation queue. Alternate retains renderable
+    /// decorations across every repaint; primary retains them only for the span of a resize
+    /// transaction so a reflow does not flash proven formulas back to source (see
+    /// `primary_resize_preservation_active`). Any other primary state drops as before.
+    fn offscreen_preservation_active(&self) -> bool {
+        self.live_screen == ScreenId::Alternate || self.primary_resize_preservation_active()
     }
 
-    fn restore_alternate_offscreen_decorations(&mut self) {
-        if self.live_screen != ScreenId::Alternate
-            || self.alternate_offscreen_decorations.is_empty()
-        {
+    /// Primary preserves live formulas across a window resize by holding the same off-band queue
+    /// alternate uses, but only while a resize transaction is open. Codex reflows and then reprints
+    /// its whole transcript, so proven blocks would otherwise revert to source between the reflow
+    /// and re-detection. The queue is re-anchored by exact source equality every frame and cleared
+    /// once the transaction quiesces, at which point fresh detection is authoritative again.
+    fn primary_resize_preservation_active(&self) -> bool {
+        self.live_screen == ScreenId::Primary && self.resize_epoch.is_active()
+    }
+
+    fn retain_offscreen_record(&mut self, record: LiveDecorationRecord) {
+        if !self.offscreen_preservation_active() {
+            return;
+        }
+        if self.offscreen_decorations.len() == MAX_OFFSCREEN_RECORDS {
+            self.offscreen_decorations.pop_front();
+        }
+        self.offscreen_decorations.push_back(record);
+    }
+
+    /// Drain every live decoration into the off-band queue so a resize reflow can re-anchor the
+    /// renderable ones by exact source equality. Records with no raster (pending or failed) carry
+    /// nothing to preserve and count as ordinary invalidations.
+    fn retain_live_decorations_offscreen(&mut self) {
+        let mut dropped = 0_u64;
+        for (_, record) in std::mem::take(&mut self.live_decorations) {
+            if record.artifact.is_some() || record.stale_artifact.is_some() {
+                self.retain_offscreen_record(record);
+            } else {
+                dropped = dropped.saturating_add(1);
+            }
+        }
+        self.live_invalidation_count = self.live_invalidation_count.saturating_add(dropped);
+    }
+
+    fn restore_offscreen_decorations(&mut self) {
+        if self.offscreen_decorations.is_empty() {
             return;
         }
         let inputs = self.live_detection_context();
@@ -1378,7 +1421,7 @@ impl DualPlaneSession {
             .collect::<BTreeSet<_>>();
         let mut remaining = VecDeque::new();
         let mut relayout_tasks = Vec::new();
-        while let Some(mut record) = self.alternate_offscreen_decorations.pop_front() {
+        while let Some(mut record) = self.offscreen_decorations.pop_front() {
             let Some((start, end, segments)) =
                 exact_live_source_match(&record.span.original_source, &inputs, &occupied)
             else {
@@ -1463,7 +1506,7 @@ impl DualPlaneSession {
             occupied.extend(record.band_start_row..=record.band_end_row);
             self.live_decorations.insert(record.start.row, record);
         }
-        self.alternate_offscreen_decorations = remaining;
+        self.offscreen_decorations = remaining;
         for task in relayout_tasks {
             self.enqueue_live_task(task);
         }
@@ -1477,6 +1520,10 @@ impl DualPlaneSession {
         };
         if screen != self.live_screen {
             self.invalidate_all_live_decorations();
+            // A screen switch is a hard boundary: never carry the previous screen's off-band
+            // preservation queue across it, even if a resize transaction on the old screen kept
+            // `invalidate_all_live_decorations` from clearing it.
+            self.offscreen_decorations.clear();
             self.alternate_content_end_row = None;
             self.pending_live_handoffs.clear();
             self.live_screen = screen;
@@ -1526,10 +1573,10 @@ impl DualPlaneSession {
             let Some(record) = self.live_decorations.remove(&start) else {
                 continue;
             };
-            if self.live_screen == ScreenId::Alternate
+            if self.offscreen_preservation_active()
                 && (record.artifact.is_some() || record.stale_artifact.is_some())
             {
-                self.retain_alternate_offscreen_record(record);
+                self.retain_offscreen_record(record);
             } else {
                 invalidated = invalidated.saturating_add(1);
             }
@@ -1544,11 +1591,19 @@ impl DualPlaneSession {
     }
 
     fn invalidate_all_live_decorations(&mut self) {
+        if self.primary_resize_preservation_active() {
+            // During a primary resize transaction a wipe (reflow, reflow-capture into history, or a
+            // synchronized-update commit) must not flash proven formulas back to source. Move the
+            // renderable ones off-band so `restore_offscreen_decorations` can re-anchor them by
+            // exact source equality; the off-band queue itself is left intact.
+            self.retain_live_decorations_offscreen();
+            return;
+        }
         let removed = self.live_decorations.len();
         self.live_invalidation_count = self.live_invalidation_count.saturating_add(removed as u64);
         self.live_decorations.clear();
         if !(self.live_screen == ScreenId::Alternate && self.alternate_repaint_in_progress) {
-            self.alternate_offscreen_decorations.clear();
+            self.offscreen_decorations.clear();
         }
         if removed != 0 && std::env::var_os("BT_PERF_TRACE").is_some() {
             eprintln!(
@@ -3210,7 +3265,7 @@ impl DualPlaneSession {
                     preserved.insert(record.start.row, record);
                 }
                 RecordProjection::Dormant(record) if self.live_screen == ScreenId::Alternate => {
-                    self.retain_alternate_offscreen_record(record);
+                    self.retain_offscreen_record(record);
                 }
                 RecordProjection::Dormant(_) => invalidated += 1,
             }
@@ -3477,7 +3532,7 @@ impl DualPlaneSession {
                 resolved: true,
             });
         }
-        for record in &mut self.alternate_offscreen_decorations {
+        for record in &mut self.offscreen_decorations {
             if record.layout == self.layout_key {
                 continue;
             }
@@ -7233,7 +7288,12 @@ mod tests {
     }
 
     #[test]
-    fn resize_epoch_revokes_live_artifact_height_and_source_suppression_together() {
+    fn primary_resize_preserves_live_formula_as_stale_instead_of_flashing_to_source() {
+        // Regression for the primary (Codex) resize flash: a proven live formula must survive a
+        // window resize by re-anchoring its raster (demoted to stale) onto the reflowed grid, not
+        // revert to source while re-detection catches up. Minimal real terminal output, no
+        // synthetic viewport state. Before this fix `resize_at` wiped every live decoration on
+        // primary, so the reflow frame flashed `$$x$$` back to source.
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
         session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
@@ -7243,26 +7303,43 @@ mod tests {
             1
         );
         let mut projection = session.new_projection(session.layout_key());
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(before.math_blocks.len(), 1);
+        assert_eq!(before.math_blocks[0].display, MathBlockDisplay::Rendered);
         assert_eq!(
-            session.viewport_frame(&mut projection).unwrap().status_text,
-            Some("2 rows above".to_owned())
+            crate::observe_formula_frame(&before).state,
+            crate::FormulaFrameState::Rendered
         );
 
+        // A width resize reflows the grid, opens a resize transaction, and the vendor reconcile
+        // (mark_pty_resize_requested_at) bumps the grid generation before the app's next frame.
         session
             .resize_at(nz(41), nz(12), start + Duration::from_millis(210))
             .unwrap();
+        session.mark_pty_resize_requested_at(nz(41), nz(12), start + Duration::from_millis(210));
         session.refresh_projection(&mut projection);
         let resized = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(session.terminal().dimensions(), (nz(41), nz(12)));
-        assert!(resized.math_blocks.is_empty());
-        assert_eq!(resized.status_text, None);
-        assert!(
-            resized
-                .row_map
-                .iter()
-                .all(|row| row.height_subpixels == SPIKE_CELL_HEIGHT_SUBPIXELS.get())
+        // Preserved, not flashed: the block still renders and the frame exposes no bare source.
+        assert_eq!(
+            resized.math_blocks.len(),
+            1,
+            "a proven formula must survive the reflow instead of reverting to source"
         );
-        assert!(resized.cells.iter().any(|cell| cell.text == "$"));
+        assert_eq!(resized.math_blocks[0].display, MathBlockDisplay::Rendered);
+        assert_eq!(
+            crate::observe_formula_frame(&resized).state,
+            crate::FormulaFrameState::Rendered,
+            "the reflow frame must not expose the formula's source"
+        );
+
+        // Once the transaction quiesces the relayout completes and a fresh raster replaces the
+        // stale one; the block never passed through a source state.
+        complete_detected_live_tasks(&mut session, synthetic_raster(41, 40));
+        session.refresh_projection(&mut projection);
+        let settled = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(settled.math_blocks.len(), 1);
+        assert_eq!(settled.math_blocks[0].display, MathBlockDisplay::Rendered);
     }
 
     #[test]
