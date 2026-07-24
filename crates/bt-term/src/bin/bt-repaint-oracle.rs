@@ -49,6 +49,9 @@ struct HeadlessOracle {
     /// worker: currency is re-checked at apply time, so a task whose generation/revision/layout
     /// was bumped mid-flight is rejected exactly as it would be on the main thread.
     deferred: Vec<DeferredMath>,
+    /// Peak document-level detection gap seen across the run: on-screen blocks provable by a clean
+    /// grid-only re-scan but absent from the full history+grid detection. See the summary line.
+    max_isolation_gap: usize,
 }
 
 impl HeadlessOracle {
@@ -69,6 +72,7 @@ impl HeadlessOracle {
             started,
             math_latency,
             deferred: Vec::new(),
+            max_isolation_gap: 0,
         }
     }
 
@@ -243,10 +247,15 @@ impl HeadlessOracle {
             )
         };
         let flash_detected = self.flash_oracle.flash_detected();
+        let isolation_gap = self.session.live_detection_isolation_gap();
+        self.max_isolation_gap = self.max_isolation_gap.max(isolation_gap);
         // `source_plane` retains the delimiter-free body rows a multi-line block drops from
         // `source_rows`, so trace_blocks.py can count a split-body revert as a real R->S flip.
+        // `isolation_gap` is the document-level detection red gate: on-screen blocks provable by a
+        // clean grid-only re-scan yet missing from the full detection (a poisoned-history desync the
+        // flash oracle cannot see). A healthy frame is 0.
         println!(
-            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} occluded={:?} flash={} detections={} invalidations={} source_plane={:?}",
+            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} occluded={:?} flash={} detections={} invalidations={} isolation_gap={isolation_gap} source_plane={:?}",
             self.frame_sequence,
             elapsed.as_micros(),
             state,
@@ -559,6 +568,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
         }
     }
+
+    // Document-level detection red gate (live-norender audit tool-gap): blocks provable by a clean
+    // grid-only re-scan but stranded at source by a poisoned frozen prefix. The flash oracle is
+    // blind to these (a block never placed leaves no placement history). A healthy run is 0/0.
+    let final_isolation_gap = oracle.session.live_detection_isolation_gap();
+    eprintln!(
+        "ISOLATION_GAP final={final_isolation_gap} max={}",
+        oracle.max_isolation_gap
+    );
 
     if oracle.flash_oracle.flash_detected() {
         return Err(io::Error::other(format!(

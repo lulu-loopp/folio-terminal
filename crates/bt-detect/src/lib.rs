@@ -786,6 +786,26 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
     initial_context: DetectionContext,
     options: DetectionOptions,
 ) -> MathScanResult {
+    scan_math_blocks_impl(lines, initial_context, options, None)
+}
+
+/// `live_grid_boundary` is the logical index of the first live-grid line when this scan spans a
+/// frozen-history prefix followed by the live grid (primary live detection); `None` for every
+/// frozen-only or self-contained context. When set, a `$$` opening that began in the frozen prefix
+/// and would close on a live-grid `$$` is only honoured if the joined body is valid display math (a
+/// genuine frozen/live bridge, per `0848375`). Otherwise the "opener" is a lost-closer poison from a
+/// history reflow that left odd `$$` parity: consuming this grid `$$` as its closer would shift
+/// every following grid block by one and strand the whole screen at source. In that case the stale
+/// frozen opening is abandoned so the grid re-pairs from a clean state — exactly what a zoom reprint
+/// achieves, done deterministically. It never fires for a pure-grid context (an alternate screen,
+/// or a primary with empty history — `live_grid_boundary` is then `None`) nor for a block whose
+/// opener is itself in the grid.
+fn scan_math_blocks_impl<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+    live_grid_boundary: Option<usize>,
+) -> MathScanResult {
     let lines = lines.into_iter().collect::<Vec<_>>();
     let mut result = MathScanResult::default();
     let mut fence = initial_context.fence;
@@ -832,6 +852,40 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
             })
         {
             opening = None;
+        }
+        // Frozen→live `$$` boundary resync. A Dollars opening whose opener lies in the frozen
+        // prefix (or before the scanned window entirely) meeting its candidate closer on a
+        // live-grid line is a genuine bridge only when the joined body is valid display math;
+        // otherwise the opener is lost-closer poison (odd `$$` parity from a history reflow) and
+        // consuming this grid `$$` would desync every later grid block. Abandon the stale opening
+        // so this line re-enters the opening paths below as a fresh grid opener. Openers already in
+        // the grid (`start_index >= boundary`) are ordinary grid blocks and are never abandoned.
+        if let Some(boundary) = live_grid_boundary
+            && index >= boundary
+        {
+            let abandon_stale_dollars = if let Some(active) = opening.as_ref() {
+                active.delimiter == DisplayDelimiter::Dollars
+                    && active.start_index.is_none_or(|start| start < boundary)
+                    && closing_delimiter(text, &active.delimiter).is_some_and(|(body_end, _)| {
+                        match active.start_index {
+                            Some(start) => {
+                                let body =
+                                    joined_range(&lines, start, index, active.body_start, body_end);
+                                let render = restore_stripped_environment_newlines(
+                                    &body,
+                                    options.restore_stripped_environment_newlines,
+                                );
+                                !valid_display_body(&body, &render, options)
+                            }
+                            None => true,
+                        }
+                    })
+            } else {
+                false
+            };
+            if abandon_stale_dollars {
+                opening = None;
+            }
         }
         if opening
             .as_ref()
@@ -1374,6 +1428,63 @@ pub fn detect_math_blocks_in_context_with_options<'a>(
     scan_math_blocks_in_context_with_options(lines, initial_context, options).blocks
 }
 
+/// Live-detection variant that knows the frozen→live seam so a `$$` opening straddling it can be
+/// resynchronised (see `scan_math_blocks_impl`'s `live_grid_boundary`). `live_grid_boundary` is the
+/// first live-grid logical index; `None` means the window is pure frozen history.
+pub fn detect_live_math_blocks_in_context<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+    live_grid_boundary: Option<usize>,
+) -> Vec<DetectedMathBlock> {
+    scan_math_blocks_impl(lines, initial_context, options, live_grid_boundary).blocks
+}
+
+/// Document-level detection red gate (the tool-gap the live-norender audit filed). Counts display
+/// blocks that are provable from the live grid alone — a clean-context grid-only scan, exactly what
+/// a zoom reprint re-detects — yet are ABSENT from the full history+grid detection. A nonzero value
+/// is a silent detection desync: a poisoned frozen prefix (odd `$$` parity from a reflow) has
+/// stranded on-screen blocks at source while the flash oracle — which derives "rendered" from
+/// placement history and never sees a block that was never placed — stays green. Compared by render
+/// source, so a block detected in both (bridged or plain) does not count. Returns `0` for a pure
+/// grid context (no frozen prefix) since the two scans then coincide.
+pub fn live_detection_isolation_gap(
+    inputs: &[LiveDetectionInput],
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+) -> usize {
+    let logical = live_logical_lines(inputs);
+    let boundary = live_grid_boundary_index(&logical, inputs);
+    let full = detect_live_math_blocks_in_context(
+        logical.iter().map(|line| (line.id, line.text.as_str())),
+        initial_context,
+        options,
+        boundary,
+    );
+    let full_sources = full
+        .iter()
+        .map(|block| block.span.render_source.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let grid_inputs = inputs
+        .iter()
+        .filter(|input| matches!(input.source, LiveDetectionSource::Grid { .. }))
+        .cloned()
+        .collect::<Vec<_>>();
+    let grid_logical = live_logical_lines(&grid_inputs);
+    let isolation = detect_math_blocks_in_context_with_options(
+        grid_logical
+            .iter()
+            .map(|line| (line.id, line.text.as_str())),
+        DetectionContext::default(),
+        options,
+    );
+    isolation
+        .iter()
+        .filter(|block| !full_sources.contains(block.span.render_source.as_str()))
+        .count()
+}
+
 /// Run the authoritative detector on a worker-owned frozen snapshot. The session thread only
 /// chooses a cheap `$$` candidate and never calls this while ingesting a finalized line.
 pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
@@ -1450,10 +1561,12 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
         task.detection_complete = true;
         return false;
     };
-    let detected = detect_math_blocks_in_context_with_options(
+    let live_grid_boundary = live_grid_boundary_index(&logical, &task.inputs);
+    let detected = detect_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         task.initial_context.clone(),
         task.options,
+        live_grid_boundary,
     )
     .into_iter()
     .find(|block| block.end == candidate_id);
@@ -1476,10 +1589,12 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
     let options = first.options;
     let logical = live_logical_lines(&inputs);
     let row_to_logical = live_grid_logical_ids(&logical, &inputs);
-    let blocks = detect_math_blocks_in_context_with_options(
+    let live_grid_boundary = live_grid_boundary_index(&logical, &inputs);
+    let blocks = detect_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context.clone(),
         options,
+        live_grid_boundary,
     )
     .into_iter()
     .map(|block| (block.end, block))
@@ -1564,6 +1679,28 @@ fn apply_live_detected_block(
     task.span = occurrence;
     task.resolved = true;
     true
+}
+
+/// Index of the first logical line that carries a live-grid fragment, when at least one frozen
+/// history line precedes it — i.e. a real frozen→live seam. Returns `None` when the first logical
+/// line is already grid (a pure alternate-screen context, or a primary with empty history): there
+/// is no frozen prefix to be poisoned, so the boundary-resync guard must stay inert and leave a
+/// legitimately truncated alternate prefix (its off-screen opener) to pair as it always has.
+fn live_grid_boundary_index(
+    logical: &[LiveLogicalLine],
+    inputs: &[LiveDetectionInput],
+) -> Option<usize> {
+    logical
+        .iter()
+        .position(|line| {
+            line.fragments.iter().any(|fragment| {
+                matches!(
+                    inputs[fragment.input_index].source,
+                    LiveDetectionSource::Grid { .. }
+                )
+            })
+        })
+        .filter(|&boundary| boundary > 0)
 }
 
 fn live_grid_logical_ids(
@@ -2800,6 +2937,140 @@ abla f",
                 cell_boundaries: scalar_boundaries(text),
             })
             .collect()
+    }
+
+    /// Frozen history holds an odd number of structural `$$` (a reflow lost one block's opener), so
+    /// a flat re-scan reaches the live grid already inside an open `$$`. Without the frozen→live
+    /// boundary resync the grid's first `$$` is consumed as that dangling opener's closer and every
+    /// grid block shifts by one, stranding the whole screen at source (the live-norender.vt bug).
+    /// The clean grid block must still resolve. Red before the resync, green after.
+    #[test]
+    fn odd_dollar_parity_in_frozen_history_does_not_strand_the_live_grid_block() {
+        let mut task = live_task(&["a", "b", "c"], 2);
+        task.inputs = boundary_inputs(&[
+            // A complete, well-paired display block already in history.
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(200),
+                },
+                "$$",
+            ),
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(201),
+                },
+                r"\gamma=0",
+            ),
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(202),
+                },
+                "$$",
+            ),
+            // A block whose opener a reflow deleted: only its closer survives in history. This is
+            // the odd delimiter that leaves the scanner open at the boundary.
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(203),
+                },
+                "$$",
+            ),
+            // The intact live-grid block; its opener is grid row 0.
+            (
+                LiveDetectionSource::Grid {
+                    row: 0,
+                    revision: 1,
+                },
+                "$$",
+            ),
+            (
+                LiveDetectionSource::Grid {
+                    row: 1,
+                    revision: 1,
+                },
+                r"\alpha+\beta",
+            ),
+            (
+                LiveDetectionSource::Grid {
+                    row: 2,
+                    revision: 1,
+                },
+                "$$",
+            ),
+        ]);
+        assert!(resolve_live_detection_task(&mut task));
+        assert_eq!(task.span.render_source, r"\alpha+\beta");
+        assert_eq!(task.start, GridPoint { row: 0, column: 0 });
+        assert_eq!(task.end.row, 2);
+    }
+
+    /// The abandonment relaxation must never fabricate a formula: after a poison opener is dropped,
+    /// the grid block that re-pairs from clean is still held to `valid_display_body`, so a prose
+    /// body is rejected rather than typeset (M1.9k/M1.9p prose red line).
+    #[test]
+    fn boundary_resync_never_renders_prose_after_abandoning_a_poison_opener() {
+        let mut task = live_task(&["a", "b", "c"], 2);
+        task.inputs = boundary_inputs(&[
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(203),
+                },
+                "$$",
+            ),
+            (
+                LiveDetectionSource::Grid {
+                    row: 0,
+                    revision: 1,
+                },
+                "$$",
+            ),
+            (
+                LiveDetectionSource::Grid {
+                    row: 1,
+                    revision: 1,
+                },
+                "the quick brown fox jumps",
+            ),
+            (
+                LiveDetectionSource::Grid {
+                    row: 2,
+                    revision: 1,
+                },
+                "$$",
+            ),
+        ]);
+        assert!(!resolve_live_detection_task(&mut task));
+    }
+
+    /// The discriminator that keeps the `0848375` bridge alive is body validity, not position: a
+    /// frozen opener whose seam-spanning body is prose is not a bridge and is abandoned, so nothing
+    /// renders. Paired with `live_block_split_across_frozen_boundary_anchors_on_the_live_closer`
+    /// (valid math body → renders) this pins the exact keep/abandon boundary.
+    #[test]
+    fn a_frozen_opener_with_a_prose_seam_body_is_abandoned_not_bridged() {
+        let mut task = live_task(&["a"], 0);
+        task.inputs = boundary_inputs(&[
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(300),
+                },
+                "$$",
+            ),
+            (
+                LiveDetectionSource::History {
+                    id: TranscriptId(301),
+                },
+                "the quick brown fox jumps",
+            ),
+            (
+                LiveDetectionSource::Grid {
+                    row: 0,
+                    revision: 1,
+                },
+                "$$",
+            ),
+        ]);
+        assert!(!resolve_live_detection_task(&mut task));
     }
 
     #[test]

@@ -1212,6 +1212,20 @@ impl DualPlaneSession {
         }
     }
 
+    /// Diagnostic red gate: how many on-screen display blocks are provable from the live grid in
+    /// isolation (a clean grid-only re-scan, what a zoom achieves) yet absent from the full
+    /// history+grid detection. Nonzero means a poisoned frozen prefix is silently stranding
+    /// complete blocks at source — the exact live-norender desync, which the flash oracle cannot
+    /// see. Primary only; the alternate screen carries no frozen prefix.
+    pub fn live_detection_isolation_gap(&self) -> usize {
+        if self.live_screen != ScreenId::Primary {
+            return 0;
+        }
+        let inputs = self.live_detection_context();
+        let initial_context = self.live_initial_detection_context(&inputs);
+        bt_detect::live_detection_isolation_gap(&inputs, initial_context, self.detection_options())
+    }
+
     fn begin_alternate_repaint(&self, bytes: &[u8]) -> Option<AlternateRepaintSnapshot> {
         let snapshot_boundary = contains_clear_home_snapshot_boundary(bytes);
         snapshot_boundary
