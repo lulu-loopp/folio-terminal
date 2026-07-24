@@ -460,6 +460,19 @@ pub struct DualPlaneSession {
     /// reflowing reprint re-anchors proven formulas by exact source equality instead of flashing
     /// them to source. See `primary_repaint_active`.
     primary_repaint_in_progress: bool,
+    /// Records held resident-and-suppressed for the span of a primary in-stream reprint window (the
+    /// same off-band snapshot alternate takes on a repaint boundary). While it is `Some`,
+    /// `observe_live_damage` does not invalidate a decorated row: the proven raster keeps rendering
+    /// over the rows Codex is rewriting (suppression) instead of the record being drained off-band
+    /// and its source flashing through. `finish_primary_repaint` reprojects the snapshot onto the
+    /// reflowed grid by proven-row fingerprint (`segmented_row_mapping` + `project_live_record`),
+    /// which tracks a progressive/partial reprint the exact-source restore path cannot. Primary
+    /// only; alternate keeps its own `alternate_repaint_snapshot`.
+    primary_repaint_snapshot: Option<AlternateRepaintSnapshot>,
+    /// Set while a primary reprint window is open once a row under it actually changed. A
+    /// same-content repaint leaves it false, so the window closes without paying for the segmented
+    /// reprojection — nothing moved, every resident record is already correctly placed.
+    primary_repaint_dirty: bool,
     alternate_content_end_row: Option<u32>,
     /// User presentation choices are content state, not decoration-instance state. Entries are
     /// created only by an explicit toggle and live for the session, so alternate-screen repaint,
@@ -573,6 +586,8 @@ impl DualPlaneSession {
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
             primary_repaint_in_progress: false,
+            primary_repaint_snapshot: None,
+            primary_repaint_dirty: false,
             alternate_content_end_row: None,
             math_source_preferences: HashMap::new(),
             pending_live_handoffs: Vec::new(),
@@ -727,15 +742,26 @@ impl DualPlaneSession {
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         // Primary in-stream reprint preservation: a Codex transcript reflow/reprint would otherwise
         // drop proven live formulas to source between the reprint and re-detection. Engage the same
-        // off-band queue the resize path uses (via `offscreen_preservation_active`) so that as the
-        // reprint rewrites rows, `invalidate_live_row` drains their records off-band and
-        // `restore_offscreen_decorations` at the end of this feed re-anchors them by exact source
-        // equality. A DEC 2026 synchronized-update reprint withholds its damage until the commit,
-        // so the flag stays engaged (it re-arms below on every feed) until the update closes.
+        // suppress-and-remap alternate uses on a repaint boundary: while the window is open the
+        // proven raster keeps rendering over the rows being rewritten (see `observe_live_damage`),
+        // and `finish_primary_repaint` at the window's close reprojects each record onto the
+        // reflowed grid by proven-row fingerprint. A DEC 2026 synchronized-update reprint withholds
+        // its damage until the commit, so the flag stays engaged (it re-arms below on every feed)
+        // until the update closes; the snapshot, taken once when the window opens, spans it.
         if self.live_screen == ScreenId::Primary
             && (self.primary_repaint_in_progress || contains_clear_home_snapshot_boundary(bytes))
         {
             self.primary_repaint_in_progress = true;
+            // The reprint window and the resize transaction (`primary_resize_preservation_active`,
+            // 002acc7) coexist: both drain/hold the same records off-band, and the reprint's
+            // segmented reprojection re-anchors resize-reflowed blocks the resize path's exact-source
+            // restore could not (measured: it keeps resize-repro's rapid-drag frames rendered). They
+            // do not contend for ownership — a record lives in exactly one of `live_decorations` or
+            // `offscreen_decorations`, and `finish_primary_repaint` merges the off-band queue that
+            // resize drained rather than rebuilding over it.
+            if self.primary_repaint_snapshot.is_none() {
+                self.primary_repaint_snapshot = self.snapshot_primary_repaint();
+            }
         }
         // Frozen history is immutable. Staging/live selections are conservatively invalidated by
         // output because the parser may rewrite a selected row without emitting a removal fact.
@@ -768,11 +794,16 @@ impl DualPlaneSession {
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
             self.primary_repaint_in_progress = false;
+            self.primary_repaint_snapshot = None;
+            self.primary_repaint_dirty = false;
             self.invalidate_all_live_decorations();
-        } else if self.synchronized_update_deadline().is_none()
-            && let Some(snapshot) = self.alternate_repaint_snapshot.take()
-        {
-            self.finish_alternate_repaint(snapshot);
+        } else if self.synchronized_update_deadline().is_none() {
+            if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
+                self.finish_alternate_repaint(snapshot);
+            }
+            if let Some(snapshot) = self.primary_repaint_snapshot.take() {
+                self.finish_primary_repaint(snapshot);
+            }
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         if result.is_ok() {
@@ -902,6 +933,8 @@ impl DualPlaneSession {
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
             self.primary_repaint_in_progress = false;
+            self.primary_repaint_snapshot = None;
+            self.primary_repaint_dirty = false;
             self.invalidate_all_live_decorations();
             return Err(error);
         }
@@ -909,6 +942,9 @@ impl DualPlaneSession {
         self.sync_staging_tail();
         if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
             self.finish_alternate_repaint(snapshot);
+        }
+        if let Some(snapshot) = self.primary_repaint_snapshot.take() {
+            self.finish_primary_repaint(snapshot);
         }
         self.alternate_repaint_in_progress = false;
         self.restore_offscreen_decorations();
@@ -1393,6 +1429,177 @@ impl DualPlaneSession {
         tasks
     }
 
+    /// Snapshot the primary live decorations (resident and off-band) and the grid inputs when an
+    /// in-stream reprint window opens, mirroring `snapshot_alternate_repaint`. Suppression keeps the
+    /// resident records rendering through the window; `finish_primary_repaint` reprojects this
+    /// snapshot onto the reflowed grid at the window's close. No live decoration (resident or
+    /// off-band) → nothing a reprint could flash, so no snapshot and the window stays inert.
+    fn snapshot_primary_repaint(&self) -> Option<AlternateRepaintSnapshot> {
+        (self.live_screen == ScreenId::Primary
+            && !self.terminal.modes().alternate_screen
+            && (!self.live_decorations.is_empty() || !self.offscreen_decorations.is_empty()))
+        .then(|| AlternateRepaintSnapshot {
+            inputs: self.live_detection_context(),
+            decorations: self.live_decorations.values().cloned().collect(),
+            dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
+            invalidation_count: self.live_invalidation_count,
+            snapshot_boundary: true,
+        })
+    }
+
+    /// Close a primary in-stream reprint window by reprojecting every proven record the snapshot
+    /// held (resident and off-band) onto the reflowed grid, using the proven-row fingerprint
+    /// segmented mapping alternate uses (`segmented_row_mapping` + `project_live_record`) rather
+    /// than only exact source equality.
+    ///
+    /// A Codex reprint rewrites its transcript by wrapping-and-cursor-addressing individual rows, so
+    /// a proven block's rows come back reflowed: the same body, differently wrapped or shifted.
+    /// Suppression kept every proven record resident (rendering) through the window; here each is
+    /// re-seated onto the reflowed grid before the frame is published, so its source never shows.
+    ///
+    /// The mapping set is the segmented row mapping plus a forced identity mapping: unlike an
+    /// alternate clear+home that rewrites the whole screen, a primary reprint rewrites only a few
+    /// lines, so most records are unchanged and must map straight through even when no proven row
+    /// moved by a common delta (the segmented mapping is then empty). A record maps under exactly
+    /// one of {identity, a segmented delta}: an unchanged record matches at its own rows (identity),
+    /// a shifted one at its rows plus the delta, so the placement is unambiguous. A record that maps
+    /// under neither falls off-band, where `restore_offscreen_decorations` re-anchors it by exact
+    /// source equality if its proven text reappears verbatim; failing that it retires to
+    /// re-detection — the justified fallback when the reprint genuinely rewrote the source (not a
+    /// flash), never a wrongly-placed raster.
+    ///
+    /// Isolated from `finish_alternate_repaint`: the forced identity mapping, and the absence of
+    /// alternate's content-end-row / borrowed-band handling and bounded re-detection, are primary
+    /// specific. Alternate's path is untouched.
+    fn finish_primary_repaint(&mut self, snapshot: AlternateRepaintSnapshot) {
+        let dirty = std::mem::take(&mut self.primary_repaint_dirty);
+        if self.live_screen != ScreenId::Primary || self.terminal.modes().alternate_screen {
+            return;
+        }
+        if !dirty && self.offscreen_decorations.is_empty() {
+            // The reprint changed no row under any resident record and nothing is waiting off-band:
+            // every record is already correctly placed, so skip the segmented reprojection entirely.
+            return;
+        }
+        let current_inputs = self.live_detection_context();
+        let current_initial_context = self.live_initial_detection_context(&current_inputs);
+        let row_mappings = primary_repaint_row_mappings(&snapshot.inputs, &current_inputs);
+        let context_signature = live_detection_context_signature(&current_inputs);
+        let stable = vec![true; self.live_rows.len()];
+        let candidate_rows =
+            live_candidate_rows(&current_inputs, current_initial_context.clone(), &stable);
+
+        let mut preserved = BTreeMap::new();
+        let mut occupied = BTreeSet::new();
+        let mut relayout_tasks = Vec::new();
+        let mut unresolved = Vec::new();
+        for record in snapshot
+            .decorations
+            .into_iter()
+            .chain(snapshot.dormant_decorations)
+        {
+            let projected = (!row_mappings.is_empty())
+                .then(|| {
+                    project_live_record_uniquely(
+                        &record,
+                        &row_mappings,
+                        self.grid_generation,
+                        self.detection_revision,
+                        self.layout_key,
+                        current_initial_context.clone(),
+                        Arc::clone(&current_inputs),
+                    )
+                })
+                .flatten();
+            let mut record = match projected {
+                Some(RecordProjection::Visible(record)) => record,
+                Some(RecordProjection::Dormant(record)) => {
+                    self.retain_offscreen_record(record);
+                    continue;
+                }
+                None => {
+                    unresolved.push(record);
+                    continue;
+                }
+            };
+            // A reflow (resize/zoom) makes the reprojected raster stale for the new layout: hold it
+            // as a stale artifact and queue a fresh relayout, exactly as
+            // `restore_offscreen_decorations` does, so no old-DPI raster is shown.
+            if record.rendered_layout != self.layout_key
+                && let Some(artifact) = record.artifact.take()
+            {
+                record.stale_artifact = Some(StaleArtifact {
+                    artifact,
+                    rendered_layout: record.rendered_layout,
+                });
+            }
+            if record.artifact.is_none() && record.stale_artifact.is_some() {
+                relayout_tasks.push(LiveDetectionTask {
+                    candidate_row: record.end.row,
+                    screen: record.screen,
+                    grid_generation: record.generation,
+                    detection_revision: record.detection_revision,
+                    layout: record.layout,
+                    cell_width_subpixels: self.cell_width_subpixels.get(),
+                    cell_height_subpixels: self.cell_height_subpixels.get(),
+                    ascii_baseline_subpixels: self
+                        .ascii_baseline_subpixels
+                        .map_or(0, NonZeroI64::get),
+                    options: self.detection_options(),
+                    initial_context: record.initial_context.clone(),
+                    inputs: Arc::clone(&record.inputs),
+                    start: record.start,
+                    end: record.end,
+                    band_start_row: record.band_start_row,
+                    band_end_row: record.band_end_row,
+                    span: record.span.clone(),
+                    detection_complete: true,
+                    resolved: true,
+                });
+            }
+            if let Some(record) =
+                insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
+            {
+                unresolved.push(record);
+            }
+        }
+
+        // Suppression skipped invalidation for the window, so the count is unchanged from the
+        // snapshot; re-add only records that reprojection could neither place nor keep off-band.
+        self.live_invalidation_count = snapshot.invalidation_count;
+        for record in unresolved {
+            if record.artifact.is_some() || record.stale_artifact.is_some() {
+                self.retain_offscreen_record(record);
+            } else {
+                self.live_invalidation_count = self.live_invalidation_count.saturating_add(1);
+            }
+        }
+        self.live_decorations = preserved;
+
+        // Reseat the row fingerprints/candidate signatures under each preserved band so the next
+        // damage compares against the reflowed grid, exactly as `finish_alternate_repaint` does.
+        for record in self.live_decorations.values() {
+            for row in record.band_start_row..=record.band_end_row {
+                if let Some(state) = self.live_rows.get_mut(row as usize) {
+                    state.content_fingerprint = self.terminal.visible_row_fingerprint(row);
+                }
+            }
+            for candidate_row in candidate_rows
+                .iter()
+                .copied()
+                .filter(|row| (record.start.row..=record.end.row).contains(row))
+            {
+                if let Some(state) = self.live_rows.get_mut(candidate_row as usize) {
+                    state.candidate_signature =
+                        Some(live_detection_signature(context_signature, candidate_row));
+                }
+            }
+        }
+        for task in relayout_tasks {
+            self.enqueue_live_task(task);
+        }
+    }
+
     /// The current live screen owns the off-band preservation queue. Alternate retains renderable
     /// decorations across every repaint; primary retains them only for the span of a resize
     /// transaction so a reflow does not flash proven formulas back to source (see
@@ -1602,6 +1809,8 @@ impl DualPlaneSession {
             // `invalidate_all_live_decorations` from clearing it.
             self.offscreen_decorations.clear();
             self.primary_repaint_in_progress = false;
+            self.primary_repaint_snapshot = None;
+            self.primary_repaint_dirty = false;
             self.alternate_content_end_row = None;
             self.pending_live_handoffs.clear();
             self.live_screen = screen;
@@ -1633,9 +1842,24 @@ impl DualPlaneSession {
             state.last_damage_at = Some(observed_at);
             state.settled_revision = None;
             state.candidate_signature = None;
-            if !(screen == ScreenId::Alternate && self.alternate_repaint_in_progress) {
-                self.invalidate_live_row(row);
+            // Suppression: inside a repaint window the proven raster keeps rendering over the rows
+            // being rewritten instead of the record being torn down (and its source flashing
+            // through). Alternate suppresses across a boundary repaint; primary suppresses across an
+            // in-stream reprint window while its snapshot is held. `finish_*_repaint` reprojects
+            // every held record onto the reflowed grid at the window's close, and the frame is only
+            // published after the feed completes, so no intermediate stale position is ever shown.
+            if screen == ScreenId::Alternate && self.alternate_repaint_in_progress {
+                continue;
             }
+            if screen == ScreenId::Primary && self.primary_repaint_snapshot.is_some() {
+                // A row genuinely changed under the reprint window (an unchanged row `continue`d
+                // above at the fingerprint check): mark the window dirty so its close reprojects.
+                // A same-content repaint changes no row, so the reprojection — and its full-grid
+                // segmented mapping — is skipped entirely.
+                self.primary_repaint_dirty = true;
+                continue;
+            }
+            self.invalidate_live_row(row);
         }
     }
 
@@ -4653,6 +4877,33 @@ fn exact_row_content(left: &LiveDetectionInput, right: &LiveDetectionInput) -> b
         && left.cell_boundaries == right.cell_boundaries
 }
 
+/// The mapping set for a primary in-stream reprint: the proven segmented row mapping plus a forced
+/// identity mapping over the whole grid. A primary reprint rewrites only part of the screen, so a
+/// record whose rows did not move must map straight through even when the segmented mapping found no
+/// moving anchor and is empty. A record maps Visible under at most one of {identity, a segmented
+/// delta} — an unchanged record at its own rows, a shifted one at its rows plus the delta — so
+/// `project_live_record_uniquely` still yields a single placement. Deduplicated so identity is not
+/// tried twice when the segmented mapping already is identity.
+fn primary_repaint_row_mappings(
+    before: &[LiveDetectionInput],
+    after: &[LiveDetectionInput],
+) -> Vec<SegmentedRowMapping> {
+    let mut mappings = segmented_row_mapping(before, after);
+    let Some(last_row) = after_grid_row_count(after).checked_sub(1) else {
+        return mappings;
+    };
+    let identity = SegmentedRowMapping {
+        content_delta: 0,
+        content_start_row: 0,
+        content_end_row: last_row,
+        fixed_start_row: None,
+    };
+    if !mappings.contains(&identity) {
+        mappings.push(identity);
+    }
+    mappings
+}
+
 /// Build one transaction-level mapping before touching any decoration. Unique exact row/cell
 /// anchors prove the moving delta. Exact fixed rows below those anchors prove the application's
 /// chrome; repeated separator/blank rows may extend an already-proven fixed region but never act
@@ -7662,6 +7913,164 @@ mod tests {
                         .rendered_sources
                         .contains(&record.span.original_source)),
             "a queued record whose source vanished never re-enters the rendered set"
+        );
+    }
+
+    #[test]
+    fn primary_progressive_synchronized_reprint_holds_formula_across_feeds_without_flashing() {
+        // The remaining in-stream reprint class: Codex reprints inside a DEC 2026 synchronized
+        // update that is *split across several pty chunks* — `?2026h` in one feed, the reflowed
+        // lines in the next, the `?2026l` commit in a later feed. The reprint window must open on
+        // the first chunk and span every chunk to the commit (the snapshot is taken once and held),
+        // suppressing invalidation so the proven raster keeps rendering, then reproject the block
+        // onto its shifted row at the commit. No observed frame across the whole split update may
+        // expose the formula's source.
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let mut oracle = crate::FormulaFlashOracle::default();
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&before).state,
+            crate::FormulaFrameState::Rendered
+        );
+        let anchored_row = session
+            .live_decorations
+            .values()
+            .next()
+            .expect("one live decoration")
+            .start
+            .row;
+
+        // Chunk 1: open the synchronized update. The window opens and takes its snapshot; the update
+        // buffers, so nothing is committed yet.
+        session
+            .feed_at(b"\x1b[?2026h", start + Duration::from_millis(50))
+            .unwrap();
+        assert!(
+            session.primary_repaint_snapshot.is_some(),
+            "the reprint window opened and holds a snapshot across the split update"
+        );
+        assert!(session.synchronized_update_deadline().is_some());
+        session.refresh_projection(&mut projection);
+        let mid = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&mid).state,
+            crate::FormulaFrameState::Rendered,
+            "mid-update the proven raster keeps rendering"
+        );
+
+        // Chunk 2: the reflowed transcript, block shifted down one row — still buffered.
+        session
+            .feed_at(
+                b"\x1b[2J\x1b[Htop\r\n$$x$$\r\nbarrier",
+                start + Duration::from_millis(51),
+            )
+            .unwrap();
+        assert!(
+            session.primary_repaint_snapshot.is_some(),
+            "the window is still open across the buffered chunk"
+        );
+        session.refresh_projection(&mut projection);
+        let buffered = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&buffered).state,
+            crate::FormulaFrameState::Rendered
+        );
+
+        // Chunk 3: commit. The buffered reprint lands atomically; the window closes and reprojects
+        // the block onto its new row.
+        session
+            .feed_at(b"\x1b[?2026l", start + Duration::from_millis(52))
+            .unwrap();
+        assert!(
+            session.primary_repaint_snapshot.is_none(),
+            "the window closed at the commit"
+        );
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            after.math_blocks.len(),
+            1,
+            "the proven block survives the split reprint, not dropped to source"
+        );
+        assert_eq!(after.math_blocks[0].display, MathBlockDisplay::Rendered);
+        assert_eq!(
+            oracle.observe(&after).state,
+            crate::FormulaFrameState::Rendered
+        );
+        let reanchored_row = session
+            .live_decorations
+            .values()
+            .next()
+            .expect("still one live decoration")
+            .start
+            .row;
+        assert_eq!(
+            reanchored_row,
+            anchored_row + 1,
+            "the record reprojected to the block's shifted row on the committed grid"
+        );
+        assert!(
+            !oracle.flash_detected(),
+            "no frame across the split synchronized reprint flashed the formula: {:?}",
+            oracle.flashed_sources()
+        );
+    }
+
+    #[test]
+    fn primary_progressive_reprint_that_rewrites_the_source_releases_it_across_feeds() {
+        // The release direction of the split-update guard: suppression is not a blanket hold. A
+        // split synchronized reprint whose committed grid no longer contains the block's source must
+        // release the record to re-detection, never keep rendering a stale raster at a wrong place.
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        assert_eq!(
+            session.viewport_frame(&mut projection).unwrap().math_blocks[0].display,
+            MathBlockDisplay::Rendered
+        );
+
+        // Split synchronized reprint: open, write prose (no `$$x$$`), commit.
+        session
+            .feed_at(b"\x1b[?2026h", start + Duration::from_millis(50))
+            .unwrap();
+        session
+            .feed_at(
+                b"\x1b[2J\x1b[Hno more math here\r\nbarrier",
+                start + Duration::from_millis(51),
+            )
+            .unwrap();
+        session
+            .feed_at(b"\x1b[?2026l", start + Duration::from_millis(52))
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            after.math_blocks.is_empty(),
+            "with its source rewritten away, the block must not be held rendered off a stale raster"
+        );
+        assert!(
+            !session
+                .offscreen_decorations
+                .iter()
+                .any(|record| record.artifact.is_some()
+                    && crate::observe_formula_frame(&after)
+                        .rendered_sources
+                        .contains(&record.span.original_source)),
+            "a held record whose source vanished never re-enters the rendered set"
         );
     }
 
