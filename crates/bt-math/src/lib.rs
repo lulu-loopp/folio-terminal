@@ -25,6 +25,7 @@ const TYPST_TEMPLATE: &str = r#"
 #let mitex-scope = base-mitex-scope + (
   diff: math.partial,
   sect: math.inter,
+  planck: symbol("ħ", ("reduce", "ℏ")),
 )
 #let source = if sys.inputs.display {
   "$ " + sys.inputs.source + " $"
