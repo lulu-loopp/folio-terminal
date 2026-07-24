@@ -838,6 +838,23 @@ impl ViewportProjection {
         self.review_hold
     }
 
+    pub fn cell_height_subpixels(&self) -> NonZeroI64 {
+        self.cell_height_subpixels
+    }
+
+    /// Track the authoritative cell height. A zoom / DPI change remeasures the font, which changes
+    /// the pixel height of every row while leaving row and scroll-offset semantics untouched. The
+    /// projection caches subpixel geometry (`live_row_prefix`, math band tops) keyed on this height,
+    /// so it must be re-derived at the new value; forcing a full reproject rebuilds them (the live
+    /// prefix in `sync_live_math_artifacts`, the history layout in `project`). No scroll state is
+    /// disturbed — a reviewer keeps the same anchored row, now measured at the new cell height.
+    pub fn set_cell_height_subpixels(&mut self, cell_height_subpixels: NonZeroI64) {
+        if self.cell_height_subpixels != cell_height_subpixels {
+            self.cell_height_subpixels = cell_height_subpixels;
+            self.projection_dirty = true;
+        }
+    }
+
     /// Positive rows move into history; negative rows move toward the live bottom.
     pub fn scroll_by_rows(&mut self, rows: i32) {
         // An explicit scroll is the user taking over: any preserved review displacement from an

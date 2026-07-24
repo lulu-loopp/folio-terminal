@@ -2762,6 +2762,11 @@ impl DualPlaneSession {
     }
 
     fn sync_projection_state(&self, projection: &mut ViewportProjection) {
+        // A zoom / DPI change remeasures the cell height on the session; propagate it before any
+        // geometry is derived this pass so the projection's subpixel caches (live_row_prefix, math
+        // band tops) are rebuilt at the new height rather than the height captured at construction.
+        // Row and scroll-offset semantics are unaffected — only the pixel scale of each row changes.
+        projection.set_cell_height_subpixels(self.cell_height_subpixels);
         projection.set_live_state(
             self.terminal.dimensions().1,
             self.transcript.source_generation(),
@@ -6772,6 +6777,249 @@ mod tests {
         complete_detected_live_tasks(&mut session, synthetic_raster(40, 40));
         let scales = zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
         assert!(scales.iter().all(|scale| *scale == 1000), "{scales:?}");
+    }
+
+    /// Resolve a frame the way the app does — `refresh_projection` then `viewport_frame`. The scroll
+    /// state and `review_hold` are committed inside the frame builder, so both must run before those
+    /// are read.
+    fn present(
+        session: &mut DualPlaneSession,
+        projection: &mut ViewportProjection,
+    ) -> ViewportFrame {
+        session.refresh_projection(projection);
+        session.viewport_frame(projection).unwrap()
+    }
+
+    #[test]
+    fn zoom_reprojects_the_formula_band_at_the_new_cell_height_bottom_follow() {
+        // Bottom-follow regression (2026-07-24): after a zoom the projection kept its construction
+        // cell height, so the math band was placed at the old row pitch while text rendered at the
+        // new one — the block appeared to jump. The projection must track the session cell height so
+        // the band lands at the new pitch, and the view stays anchored at the bottom the whole time.
+        // The invariant: a zoom applied in place must produce the exact geometry of a projection
+        // rebuilt fresh at the new cell height (before the fix the in-place band kept the old pitch).
+        for zoom_out in [true, false] {
+            let start = Instant::now();
+            let (start_px, start_rows, start_dpi) = if zoom_out {
+                (18_i64, nz(24), nz(1000))
+            } else {
+                (14, nz(32), nz(800))
+            };
+            let mut session = DualPlaneSession::with_cell_height(
+                nz(40),
+                start_rows,
+                NonZeroI64::new(start_px * SUBPIXELS_PER_PX).unwrap(),
+            );
+            session.set_layout_key(LayoutKey {
+                width_cells: nz(40),
+                dpi_milli: start_dpi,
+                font_rev: 1,
+                theme_rev: session.layout_key().theme_rev,
+            });
+            session
+                .feed_at(
+                    b"intro line here\r\n$$x$$\r\nmid line\r\n$$y$$\r\nbarrier",
+                    start,
+                )
+                .unwrap();
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+            assert_eq!(
+                complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+                2
+            );
+            let mut projection = session.new_projection(session.layout_key());
+            let before = present(&mut session, &mut projection);
+            assert_eq!(
+                before.scroll_offset_rows, 0,
+                "the view begins at the bottom"
+            );
+            let before_tops: Vec<i64> =
+                before.math_blocks.iter().map(|b| b.top_subpixels).collect();
+
+            let t = start + Duration::from_millis(210);
+            let (end_px, end_rows, end_dpi) = if zoom_out {
+                (14_i64, nz(32), nz(800))
+            } else {
+                (18, nz(24), nz(1000))
+            };
+            apply_zoom(&mut session, nz(40), end_rows, end_px, end_dpi, t);
+
+            let after = present(&mut session, &mut projection);
+            assert!(
+                after
+                    .math_blocks
+                    .iter()
+                    .all(|b| b.display == MathBlockDisplay::Rendered),
+                "the block stays rendered across the zoom",
+            );
+            assert_eq!(
+                projection.cell_height_subpixels().get(),
+                end_px * SUBPIXELS_PER_PX,
+                "the projection tracks the session's new cell height",
+            );
+            assert_eq!(
+                after.scroll_offset_rows, 0,
+                "bottom-follow is preserved — no jump to an offset",
+            );
+            let after_tops: Vec<i64> = after.math_blocks.iter().map(|b| b.top_subpixels).collect();
+            assert_ne!(
+                after_tops, before_tops,
+                "the band geometry must move to the new cell pitch, not stay stale",
+            );
+
+            // A projection rebuilt fresh at the new height is the reference geometry. The in-place
+            // zoom must match it exactly — proof that the new height fully propagated with no stale
+            // subpixel residue in live_row_prefix or the band tops.
+            let mut fresh = session.new_projection(session.layout_key());
+            let reference = present(&mut session, &mut fresh);
+            let reference_tops: Vec<i64> = reference
+                .math_blocks
+                .iter()
+                .map(|b| b.top_subpixels)
+                .collect();
+            assert_eq!(
+                after_tops, reference_tops,
+                "in-place zoom geometry equals a fresh rebuild at the new cell height",
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_preserves_the_review_offset_and_holds_across_the_reprint() {
+        // Review regression (2026-07-24): the row-level review displacement already survived a
+        // resize reflow (33fb866), but a zoom additionally remeasures the cell height. The offset
+        // must be preserved and restored across the transcript rewrite exactly as a resize, and the
+        // projection must track the new cell height throughout. Both directions.
+        for zoom_out in [true, false] {
+            let start = Instant::now();
+            let (start_px, start_rows, start_dpi, end_px, end_rows, end_dpi) = if zoom_out {
+                (18_i64, nz(10), nz(1000), 14_i64, nz(13), nz(800))
+            } else {
+                (14, nz(13), nz(800), 18, nz(10), nz(1000))
+            };
+            let mut session = DualPlaneSession::with_cell_height(
+                nz(40),
+                start_rows,
+                NonZeroI64::new(start_px * SUBPIXELS_PER_PX).unwrap(),
+            );
+            session.set_layout_key(LayoutKey {
+                width_cells: nz(40),
+                dpi_milli: start_dpi,
+                font_rev: 1,
+                theme_rev: session.layout_key().theme_rev,
+            });
+            let mut lines = Vec::new();
+            for i in 0..60 {
+                lines.extend_from_slice(format!("line-{i:03}\r\n").as_bytes());
+            }
+            session.feed_at(&lines, start).unwrap();
+            let mut projection = session.new_projection(session.layout_key());
+
+            // Enter review 20 rows up.
+            let _ = present(&mut session, &mut projection);
+            projection.scroll_by_rows(20);
+            let frame = present(&mut session, &mut projection);
+            assert_eq!(frame.scroll_offset_rows, 20, "reviewing 20 rows up");
+
+            // Zoom remeasures the cell height and resizes the grid; the anchored content is still
+            // present, so the review holds its offset and the projection adopts the new height.
+            let t = start + Duration::from_millis(210);
+            apply_zoom(&mut session, nz(40), end_rows, end_px, end_dpi, t);
+            let frame = present(&mut session, &mut projection);
+            assert_eq!(
+                projection.cell_height_subpixels().get(),
+                end_px * SUBPIXELS_PER_PX,
+                "the projection tracks the new cell height",
+            );
+            assert_eq!(
+                frame.scroll_offset_rows, 20,
+                "the review offset survives the zoom-driven metric change",
+            );
+            assert!(!projection.review_hold());
+
+            // Codex clears scrollback and reprints: the anchor vanishes, presentation must hold.
+            session
+                .feed_at(b"\x1b[H\x1b[2J\x1b[3J", t + Duration::from_millis(10))
+                .unwrap();
+            let _ = present(&mut session, &mut projection);
+            assert!(
+                projection.review_hold(),
+                "the cleared anchor engages the frame hold instead of flashing to bottom",
+            );
+            session
+                .feed_at(&lines, t + Duration::from_millis(20))
+                .unwrap();
+            let _ = present(&mut session, &mut projection);
+            assert!(
+                projection.review_hold(),
+                "still held while the reprint stages"
+            );
+
+            // Quiescence closes the transaction: the offset re-anchors and the hold releases.
+            assert!(
+                session
+                    .finish_resize_if_quiescent(t + Duration::from_millis(300))
+                    .unwrap()
+            );
+            let frame = present(&mut session, &mut projection);
+            assert!(!projection.review_hold(), "the hold releases at re-anchor");
+            assert_eq!(
+                frame.scroll_offset_rows, 20,
+                "the review returns to its original position after the zoom reprint",
+            );
+            assert_eq!(
+                projection.cell_height_subpixels().get(),
+                end_px * SUBPIXELS_PER_PX,
+            );
+        }
+    }
+
+    #[test]
+    fn zoom_review_takeover_releases_and_real_cls_never_holds() {
+        // The zoom hold must yield to the user and must not fire for a genuine clear.
+        let start = Instant::now();
+        let mut lines = Vec::new();
+        for i in 0..60 {
+            lines.extend_from_slice(format!("line-{i:03}\r\n").as_bytes());
+        }
+
+        // Takeover: while held across a zoom reprint, an explicit scroll supersedes the hold.
+        let mut session = DualPlaneSession::new(nz(40), nz(10));
+        session.feed_at(&lines, start).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let _ = present(&mut session, &mut projection);
+        projection.scroll_by_rows(20);
+        let _ = present(&mut session, &mut projection);
+        let t = start + Duration::from_millis(210);
+        apply_zoom(&mut session, nz(40), nz(13), 14, nz(800), t);
+        session
+            .feed_at(b"\x1b[H\x1b[2J\x1b[3J", t + Duration::from_millis(10))
+            .unwrap();
+        let _ = present(&mut session, &mut projection);
+        assert!(projection.review_hold(), "held before takeover");
+        projection.scroll_by_rows(-5); // user scrolls: supersedes the preserved displacement
+        let _ = present(&mut session, &mut projection);
+        assert!(
+            !projection.review_hold(),
+            "an explicit scroll releases the hold immediately",
+        );
+
+        // Real cls (no resize transaction) must never hold — it snaps to the empty bottom.
+        let mut session = DualPlaneSession::new(nz(40), nz(10));
+        session.feed_at(&lines, start).unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let _ = present(&mut session, &mut projection);
+        projection.scroll_by_rows(20);
+        let _ = present(&mut session, &mut projection);
+        session
+            .feed_at(b"\x1b[H\x1b[2J\x1b[3J", start + Duration::from_millis(10))
+            .unwrap();
+        let frame = present(&mut session, &mut projection);
+        assert!(
+            !projection.review_hold(),
+            "a user clear opens no resize epoch, so the hold never engages",
+        );
+        assert_eq!(frame.scroll_offset_rows, 0, "a real cls snaps to bottom");
     }
 
     #[test]
