@@ -433,12 +433,17 @@ fn normalize(
 
         // A WRAPLINE fragment owns every cell through its wrap boundary.  In particular a space
         // in the final column is source text, not padding; trimming it turns "find path" into
-        // "findpath" when logical rows are later rejoined.  Only hard line ends trim padding.
+        // "findpath" when logical rows are later rejoined.  Only hard line ends trim padding,
+        // and only visually inert padding: a trailing space carrying a non-default background
+        // (or reverse video) paints a bar the application drew — Codex's prompt echo — so it is
+        // content and must survive freezing.
         if !continues {
-            while cells
-                .last()
-                .is_some_and(|c| !c.wide_spacer && c.text.chars().all(char::is_whitespace))
-            {
+            while cells.last().is_some_and(|c| {
+                !c.wide_spacer
+                    && c.text.chars().all(char::is_whitespace)
+                    && c.style.background == TerminalColor::Named(17)
+                    && !c.style.flags.contains(CellFlags::INVERSE)
+            }) {
                 cells.pop();
             }
         }
@@ -632,5 +637,34 @@ mod tests {
         );
         assert_eq!(store.take_evictions(), vec![TranscriptId(1)]);
         assert_eq!(store.tombstones(), &[TranscriptId(1)]);
+    }
+    #[test]
+    fn trailing_spaces_with_a_painted_background_survive_freezing() {
+        // Codex echoes the user's prompt on a background bar that extends past the text with
+        // background-colored spaces. Those cells are visible content, not padding: trimming them
+        // truncated the bar at the last glyph once the line froze into history.
+        let mut store = TranscriptStore::new(NonZeroUsize::new(4).unwrap());
+        let mut bar_space = CapturedCell::plain(" ");
+        bar_space.style.background = TerminalColor::Rgb(41, 41, 41);
+        let mut glyph = CapturedCell::plain("x");
+        glyph.style.background = TerminalColor::Rgb(41, 41, 41);
+        let result = store.capture(CapturedRow {
+            cells: vec![
+                glyph,
+                bar_space.clone(),
+                bar_space.clone(),
+                CapturedCell::plain(" "),
+            ],
+            continues: false,
+            shell_mark: None,
+        });
+        let line = &result.finalized[0].line;
+        assert_eq!(
+            line.text, "x  ",
+            "background-painted spaces stay; the default-background pad is trimmed"
+        );
+        let last = line.styles.last().unwrap();
+        assert_eq!(last.byte_end, 3);
+        assert_eq!(last.style.background, TerminalColor::Rgb(41, 41, 41));
     }
 }
