@@ -131,15 +131,27 @@ _最后更新:2026-07-23,HEAD `241e74b`_
   `#` 排成公式**。`delimiter_start` 跳标题符(可叠列表符),守卫全保持;resize-repro.vt 回放终态全
   Rendered、错配块消失。
 - **用户确认**:拖拽后短暂过渡能回来;CC(alt)resize 公式保持 ✓。
+- `a66eb84` **回看位移跨 transcript 重写保持**:锚死于清史(Codex reflow)时存
+  `displaced_review_rows`,重印填回历史后逐帧重新锚定复位;任何主动滚动接管清除。真 cls 场景
+  用户一碰滚轮即回旧行为。回归+变异红。**已知观感**:恢复过程可见"跳一下再回来"(空历史窗口
+  期间只能显示底部;要消掉需帧保持/过渡策略,打磨项)。
+- **primary resize 公式闪回源码一下(alt 不闪)**:根因=`resize_at` 对 primary 走
+  `invalidate_all_live_decorations()`(全失效),alt 走 snapshot+stale-artifact 保持(M1.9)。
+  改进方向=primary 也走 stale-artifact 式跨 resize 保持(M1.9q 遗留的 primary 版),打磨项。
 
 ### Resize 残留(下次专项)
 
-1. **随机个别块滞留源码**(image24,`$$\sum...$$` 块,周围块都渲染):**回放收敛全渲染复现不了**
-   ——是交互态竞态。嫌疑:①resize 风暴后 staging 缝隙行无公式管线(staged 行不走 math 装饰,
-   若 codex 之后无输出关闭 candidate 则永滞);②app timer 与稳定时钟的漏行。**下次**:让用户带
-   `BT_RESIZE_TRACE`+dump 录到滞留现场,回放时打印 staging_len/staged 行判 ①;或 oracle 加
-   wheel 交互回放。注意 codex-issues.vt 里滞留的也是 `\sum` 块(当时判"录制尾未定稿"——两次都是
-   它,可能非巧合)。
+1. **个别块永久滞留源码 = 块被劈在 frozen/live 边界两侧(机制已闭环,2026-07-24)**:三次目击
+   全是 `$$\sum...$$` 块(image24/25 + codex-issues.vt)→ 非随机,**位置性**。证据链:
+   codex-issues.vt 终态 frozen 恰停在 `\sum` body(FROZEN[297]),closer `$$` 在 live 屏
+   (DOC[105-107] 源码可见);staging 空(STAGED probe=0);检测器对该文本两变体都检出(probe);
+   frozen 管线健康。机制:**opener+body 已定稿、closer 还在 live 网格** → frozen 侧见未闭合块
+   (拒=对)、live 侧见无 opener 尾巴(M1.9p 拒=对)→ 两侧都不渲染;Codex 空闲边界静止 → 永滞。
+   回放收敛全渲染=收割时机不同、边界落点不同。**修复方向(下次,真功能项)**:primary 版跨界渲染
+   ——live 检测的 primary 上下文本就含 frozen tail(session.rs advance 注释),检测能证出完整块;
+   缺的是**跨 History/Live 两域的 band 呈现**(viewport 现有 History/Live 两种 math placement,
+   需要跨界 band 或"冻结侧持 opener、live 侧渲整块"的呈现设计)。是 M1.9t(alt 跨内部窗格)的
+   primary 对应物。
 2. **resize 后跳底(用户澄清:主体是 Codex/primary,CC 无此困扰)**:机制=Codex resize 用
    `2J+3J` 清史+全量重印,我们在清史瞬间把 scroll offset clamp 到 0 → 跳底;但重印马上把等价
    内容填回历史——内容并没消失。**可修方向(非启发式)**:回看态(is_scrolled)下 ED3 不重置滚动

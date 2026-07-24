@@ -376,6 +376,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         oracle.document_dump()?;
     }
 
+    if env::var_os("BT_PROBE_STAGED").is_some() {
+        for staged in oracle.session.transcript().staged_rows() {
+            let text = staged
+                .row
+                .cells
+                .iter()
+                .filter(|cell| !cell.wide_spacer)
+                .map(|cell| cell.text.as_str())
+                .collect::<String>();
+            eprintln!(
+                "STAGED[{}] continues={} |{}",
+                staged.id.0,
+                staged.row.continues,
+                text.trim_end()
+            );
+        }
+    }
+
     if env::var_os("BT_PROBE_FROZEN").is_some() {
         for line in oracle.session.transcript().frozen() {
             eprintln!("FROZEN[{}] |{}", line.id.0, line.text);
