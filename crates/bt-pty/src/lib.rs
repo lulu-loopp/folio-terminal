@@ -92,6 +92,13 @@ impl PtyDump {
         self.sequence = self.sequence.saturating_add(1);
         Ok(())
     }
+
+    /// Interleave a resize marker with the byte chunks so a replay can apply the new dimensions
+    /// at the exact point they took effect. The `#` prefix keeps older manifest parsers working.
+    fn write_resize(&mut self, columns: u16, rows: u16) -> std::io::Result<()> {
+        let elapsed_us = u64::try_from(self.started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        writeln!(self.chunks, "# RESIZE {columns} {rows} {elapsed_us}")
+    }
 }
 
 fn pty_dump_chunks_path(path: &Path) -> PathBuf {
@@ -104,7 +111,7 @@ fn read_pty_output(
     reader: &mut dyn Read,
     output: &OutputRing,
     wake: &OutputWake,
-    dump: Option<PtyDump>,
+    dump: Option<Arc<Mutex<PtyDump>>>,
 ) {
     if let Some(dump) = dump {
         read_pty_output_with_dump(reader, output, wake, dump);
@@ -132,7 +139,7 @@ fn read_pty_output_with_dump(
     reader: &mut dyn Read,
     output: &OutputRing,
     wake: &OutputWake,
-    mut dump: PtyDump,
+    dump: Arc<Mutex<PtyDump>>,
 ) {
     let mut buffer = [0_u8; READER_CHUNK_BYTES];
     loop {
@@ -140,7 +147,11 @@ fn read_pty_output_with_dump(
             Ok(0) | Err(_) => break,
             Ok(count) => count,
         };
-        if let Err(error) = dump.write_chunk(&buffer[..count]) {
+        let write_result = dump
+            .lock()
+            .map_err(|_| std::io::Error::other("dump mutex poisoned"))
+            .and_then(|mut dump| dump.write_chunk(&buffer[..count]));
+        if let Err(error) = write_result {
             eprintln!("BT_PTY_DUMP disabled after write failure: {error}");
             if output.push(buffer[..count].to_vec()).is_ok() {
                 wake();
@@ -442,6 +453,8 @@ pub struct PtySession {
     output: Arc<OutputRing>,
     reader: Option<JoinHandle<()>>,
     conpty_source: ConPtySource,
+    /// Shared with the reader thread so `resize` can interleave `# RESIZE` markers with chunks.
+    dump: Option<Arc<Mutex<PtyDump>>>,
 }
 
 impl PtySession {
@@ -452,7 +465,7 @@ impl PtySession {
     }
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        let dump = PtyDump::from_environment()?;
+        let dump = PtyDump::from_environment()?.map(|dump| Arc::new(Mutex::new(dump)));
         let conpty_source = conpty_source();
         let strip_inherited_no_color = command.strips_inherited_no_color();
         let environment = command.resolved_environment();
@@ -480,8 +493,9 @@ impl PtySession {
         let mut reader = pair.master.try_clone_reader().map_err(backend)?;
         let output = Arc::new(OutputRing::new(PTY_RING_BYTES));
         let reader_output = Arc::clone(&output);
+        let reader_dump = dump.clone();
         let reader_thread = std::thread::spawn(move || {
-            read_pty_output(reader.as_mut(), &reader_output, &wake, dump);
+            read_pty_output(reader.as_mut(), &reader_output, &wake, reader_dump);
             reader_output.close();
             wake();
         });
@@ -492,6 +506,7 @@ impl PtySession {
             output,
             reader: Some(reader_thread),
             conpty_source,
+            dump,
         })
     }
 
@@ -503,6 +518,12 @@ impl PtySession {
     }
 
     pub fn resize(&self, size: PtySize) -> Result<(), PtyError> {
+        if let Some(dump) = &self.dump
+            && let Ok(mut dump) = dump.lock()
+            && let Err(error) = dump.write_resize(size.columns.get(), size.rows.get())
+        {
+            eprintln!("BT_PTY_DUMP resize marker failed: {error}");
+        }
         self.master
             .as_ref()
             .ok_or(PtyError::RingClosed)?
@@ -1047,7 +1068,12 @@ mod tests {
         let ring = OutputRing::new(NonZeroUsize::new(64).unwrap());
         let mut reader = std::io::Cursor::new(b"first\x1b[2Jsecond".to_vec());
 
-        read_pty_output(&mut reader, &ring, &no_wake(), Some(dump));
+        read_pty_output(
+            &mut reader,
+            &ring,
+            &no_wake(),
+            Some(Arc::new(Mutex::new(dump))),
+        );
 
         assert_eq!(
             ring.try_pop(NonZeroUsize::new(64).unwrap()),

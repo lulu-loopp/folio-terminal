@@ -19,6 +19,9 @@ const FOREGROUND_RGB: [u8; 3] = [0xd8, 0xdc, 0xe8];
 struct ReplayChunk<'a> {
     elapsed: Duration,
     bytes: &'a [u8],
+    /// A `# RESIZE columns rows elapsed_us` marker recorded before this chunk: the new dimensions
+    /// take effect at this point of the replay, exactly as they did in the live session.
+    resize_before: Option<(NonZeroU32, NonZeroU32)>,
 }
 
 struct HeadlessOracle {
@@ -327,6 +330,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         vec![ReplayChunk {
             elapsed: Duration::ZERO,
             bytes: &input,
+            resize_before: None,
         }]
     };
     let columns = env_dimension("BT_PROBE_COLUMNS", 120)?;
@@ -338,6 +342,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     for chunk in chunks {
         final_elapsed = chunk.elapsed;
         let observed_at = started + chunk.elapsed;
+        if let Some((columns, rows)) = chunk.resize_before {
+            oracle.session.resize_at(columns, rows, observed_at)?;
+            oracle.publish("resize", chunk.elapsed)?;
+        }
         oracle.advance_before(observed_at, chunk.elapsed)?;
         oracle.feed(chunk.bytes, observed_at, chunk.elapsed)?;
     }
@@ -389,8 +397,26 @@ fn parse_chunks<'a>(
     let mut offset = 0usize;
     let mut expected_sequence = 0u64;
     let mut previous_elapsed = Duration::ZERO;
+    let mut pending_resize = None;
     for (line_index, line) in manifest.lines().enumerate() {
         let line = line.trim();
+        if let Some(resize) = line.strip_prefix("# RESIZE ") {
+            let fields = resize.split_ascii_whitespace().collect::<Vec<_>>();
+            let (Some(columns), Some(rows)) = (
+                fields.first().and_then(|f| f.parse::<u32>().ok()),
+                fields.get(1).and_then(|f| f.parse::<u32>().ok()),
+            ) else {
+                return Err(invalid_manifest(line_index, "expected: # RESIZE cols rows").into());
+            };
+            let (Some(columns), Some(rows)) = (NonZeroU32::new(columns), NonZeroU32::new(rows))
+            else {
+                return Err(
+                    invalid_manifest(line_index, "resize dimensions must be non-zero").into(),
+                );
+            };
+            pending_resize = Some((columns, rows));
+            continue;
+        }
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -413,7 +439,11 @@ fn parse_chunks<'a>(
         let bytes = input
             .get(offset..end)
             .ok_or_else(|| invalid_manifest(line_index, "chunk lengths exceed BT_PROBE_INPUT"))?;
-        chunks.push(ReplayChunk { elapsed, bytes });
+        chunks.push(ReplayChunk {
+            elapsed,
+            bytes,
+            resize_before: pending_resize.take(),
+        });
         offset = end;
         expected_sequence = expected_sequence.saturating_add(1);
         previous_elapsed = elapsed;
