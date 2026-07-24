@@ -664,14 +664,18 @@ fn block_body_looks_like_prose(source: &str) -> bool {
 fn ascii_line_looks_like_prose(line: &str) -> bool {
     let mut words = 0usize;
     let mut multi_letter_words = 0usize;
-    let mut word_len = 0usize;
-    for character in line.chars().chain(std::iter::once(' ')) {
-        if character.is_ascii_alphabetic() {
-            word_len += 1;
-        } else if word_len != 0 {
+    // A natural-language word is set off by whitespace and is an uninterrupted run of letters,
+    // optionally wrapped in punctuation (`word,` / `(word)`). A whitespace token whose interior
+    // mixes letters with math connectives — `ad-bc`, `mc^2`, `x_i`, `a=b` — is a math operand group,
+    // not a prose word, and must not be counted: `-`, `=`, `^`, `_`, digits and the like separate
+    // operands, not words. (The earlier version split on every non-letter, so `=ad-bc` read as the
+    // two "words" `ad`/`bc` and a genuine `$$…=ad-bc…$$` block was rejected as prose.) Trim only the
+    // outer punctuation, then require the remaining core to be a single letter run.
+    for token in line.split_ascii_whitespace() {
+        let core = token.trim_matches(|character: char| !character.is_ascii_alphabetic());
+        if !core.is_empty() && core.bytes().all(|byte| byte.is_ascii_alphabetic()) {
             words += 1;
-            multi_letter_words += usize::from(word_len > 1);
-            word_len = 0;
+            multi_letter_words += usize::from(core.len() > 1);
         }
     }
     multi_letter_words >= 2 || (multi_letter_words >= 1 && words >= 3)
@@ -867,7 +871,7 @@ fn scan_math_blocks_impl<'a>(
                 active.delimiter == DisplayDelimiter::Dollars
                     && active.start_index.is_none_or(|start| start < boundary)
                     && closing_delimiter(text, &active.delimiter).is_some_and(|(body_end, _)| {
-                        match active.start_index {
+                        let frozen_body_invalid = match active.start_index {
                             Some(start) => {
                                 let body =
                                     joined_range(&lines, start, index, active.body_start, body_end);
@@ -878,7 +882,21 @@ fn scan_math_blocks_impl<'a>(
                                 !valid_display_body(&body, &render, options)
                             }
                             None => true,
-                        }
+                        };
+                        // Convergence guard. Abandoning the stale opening re-reads this grid `$$`
+                        // as a *fresh opener*; that is only sound when the `$$` genuinely opens the
+                        // next block (a lost-opener parity phantom, where the frozen opening was
+                        // spurious). If instead this `$$` is the real closer of a complete block
+                        // that straddles the seam — its body merely tripping the body check (e.g. a
+                        // `=ad-bc` line the prose heuristic over-reads, an over-length body, a Jump
+                        // chip) — abandoning would turn its own closer into an opener and shift
+                        // every following grid block by one, stranding the whole screen at source
+                        // with no recovery until a reprint. So only abandon when re-pairing this
+                        // `$$` forward actually yields a valid display block; otherwise keep the
+                        // opening and let the normal closer path consume this `$$`, dropping only
+                        // the single unrenderable block and preserving parity for everything below.
+                        frozen_body_invalid
+                            && grid_dollars_opens_valid_block(&lines, index, options)
                     })
             } else {
                 false
@@ -1037,6 +1055,31 @@ fn scan_math_blocks_impl<'a>(
         });
     }
     result
+}
+
+/// True when the grid `$$` at `index`, re-interpreted as a fresh display opener, pairs forward into
+/// a valid display block. This is the signature of a lost-opener parity phantom: the frozen opening
+/// carried into the grid was spurious, and this `$$` really opens the next block, so abandoning the
+/// phantom lets the grid re-pair cleanly (the live-norender resync). When it is false, the `$$` is
+/// instead the real closer of a straddling block and must be consumed as a closer so the blocks
+/// below it stay in parity. `index` is at or past the frozen→live boundary, so `lines[index..]` is a
+/// pure grid slice and the forward scan runs with the boundary guard disabled (no recursion, no
+/// further resync). Grid rows are proven present, so the forward scan begins from a `Known` prefix.
+fn grid_dollars_opens_valid_block(
+    lines: &[(TranscriptId, &str)],
+    index: usize,
+    options: DetectionOptions,
+) -> bool {
+    let opener_id = lines[index].0;
+    scan_math_blocks_impl(
+        lines[index..].iter().copied(),
+        DetectionContext::default(),
+        options,
+        None,
+    )
+    .blocks
+    .iter()
+    .any(|block| block.start == opener_id)
 }
 
 fn valid_display_body(body: &str, render_source: &str, options: DetectionOptions) -> bool {
@@ -1461,10 +1504,17 @@ pub fn live_detection_isolation_gap(
         options,
         boundary,
     );
+    // A block the full context renders as a `0848375` frozen→live bridge carries its frozen opener
+    // (and any leading body) as a PREFIX of its render source; the grid-only re-scan, lacking those
+    // frozen rows, sees the same block as a bare-environment SUFFIX. Comparing exact render sources
+    // would then flag every bridged block as "provable in isolation but absent from detection" — a
+    // false strand, since the block is in fact rendered. A grid-only block is genuinely stranded
+    // only when NO full block ends with it. (A real poison strands the block entirely: the full scan
+    // yields nothing that ends with it — live-norender's 5 blocks stay counted.)
     let full_sources = full
         .iter()
-        .map(|block| block.span.render_source.as_str())
-        .collect::<std::collections::BTreeSet<_>>();
+        .map(|block| block.span.render_source.trim_end())
+        .collect::<Vec<_>>();
 
     let grid_inputs = inputs
         .iter()
@@ -1481,7 +1531,10 @@ pub fn live_detection_isolation_gap(
     );
     isolation
         .iter()
-        .filter(|block| !full_sources.contains(block.span.render_source.as_str()))
+        .filter(|block| {
+            let grid_source = block.span.render_source.trim_end();
+            !full_sources.iter().any(|full| full.ends_with(grid_source))
+        })
         .count()
 }
 
@@ -2937,6 +2990,67 @@ abla f",
                 cell_boundaries: scalar_boundaries(text),
             })
             .collect()
+    }
+
+    /// A determinant identity line `=ad-bc` is display math, not prose: the earlier prose heuristic
+    /// split on every non-letter and read the hyphen-joined operands `ad`/`bc` as two words, so the
+    /// whole `$$…=ad-bc…$$` block was rejected as prose and never rendered. Prose words are set off
+    /// by whitespace; a hyphen-joined token is one math operand group.
+    #[test]
+    fn an_operator_joined_math_token_is_not_prose() {
+        assert!(!block_body_looks_like_prose("=ad-bc"));
+        assert!(!block_body_looks_like_prose(
+            r"\det\begin{pmatrix}a&b\\c&d\end{pmatrix}=ad-bc"
+        ));
+        assert!(!block_body_looks_like_prose("E = mc^2"));
+        // Genuine natural-language lines must still be caught (M1.9k prose red line).
+        assert!(block_body_looks_like_prose("the quick brown fox jumps"));
+        assert!(block_body_looks_like_prose("See figure below now"));
+    }
+
+    /// Streaming-arrival regression (`stream-mispair.vt`). A complete `$$ \det …=ad-bc $$` block
+    /// straddles the frozen/live seam: its opener has frozen while its `\begin{pmatrix}…\end{pmatrix}`
+    /// body and closer are still on the live grid. The boundary resync must not abandon that genuine
+    /// opener at its own grid closer — doing so re-reads the closer as a fresh opener and shifts every
+    /// following grid block by one, stranding the whole screen at source (the user's "环境抢跑 + 外层
+    /// $$ 裸奔" / whole-screen-stuck). The heat-equation block below it must resolve. Red before the
+    /// convergence guard, green after. (With the `=ad-bc` prose fix the det block itself also bridges
+    /// and renders — see `an_operator_joined_math_token_is_not_prose`.)
+    #[test]
+    fn a_straddling_block_does_not_desync_the_blocks_below_it() {
+        let id = TranscriptId;
+        let lines: Vec<(TranscriptId, &str)> = vec![
+            (id(100), "$$"),               // 0 frozen det opener
+            (id(101), r"\det"),            // 1
+            (id(102), r"\begin{pmatrix}"), // 2
+            (id(103), r"a & b\"),          // 3
+            (id(104), "c & d"),            // 4
+            (id(105), r"\end{pmatrix}"),   // 5
+            (id(106), "=ad-bc"),           // 6
+            (id(107), "$$"),               // 7 live det closer
+            (id(108), ""),                 // 8
+            (id(109), "$$"),               // 9 heat opener
+            (id(110), r"\nabla^2 u=x"),    // 10
+            (id(111), "$$"),               // 11 heat closer
+        ];
+        let blocks = detect_live_math_blocks_in_context(
+            lines.iter().copied(),
+            DetectionContext::default(),
+            DetectionOptions::default(),
+            Some(7),
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.span.render_source.contains(r"\nabla^2 u=")),
+            "the heat block below the straddling det block must still resolve"
+        );
+        assert!(
+            blocks
+                .iter()
+                .any(|block| block.span.render_source.contains(r"\det")),
+            "the det block itself bridges and renders once =ad-bc is not read as prose"
+        );
     }
 
     /// Frozen history holds an odd number of structural `$$` (a reflow lost one block's opener), so
