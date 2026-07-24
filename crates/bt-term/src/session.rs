@@ -454,6 +454,12 @@ pub struct DualPlaneSession {
     offscreen_decorations: VecDeque<LiveDecorationRecord>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
+    /// True while a primary-screen in-stream transcript reprint is in flight (a clear+home /
+    /// erase-storm / synchronized-update repaint boundary was seen and, for a DEC 2026 update, has
+    /// not yet committed). It engages the same off-band preservation the resize path uses so a
+    /// reflowing reprint re-anchors proven formulas by exact source equality instead of flashing
+    /// them to source. See `primary_repaint_active`.
+    primary_repaint_in_progress: bool,
     alternate_content_end_row: Option<u32>,
     /// User presentation choices are content state, not decoration-instance state. Entries are
     /// created only by an explicit toggle and live for the session, so alternate-screen repaint,
@@ -566,6 +572,7 @@ impl DualPlaneSession {
             offscreen_decorations: VecDeque::new(),
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
+            primary_repaint_in_progress: false,
             alternate_content_end_row: None,
             math_source_preferences: HashMap::new(),
             pending_live_handoffs: Vec::new(),
@@ -718,6 +725,18 @@ impl DualPlaneSession {
             self.alternate_repaint_snapshot = self.begin_alternate_repaint(bytes);
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
+        // Primary in-stream reprint preservation: a Codex transcript reflow/reprint would otherwise
+        // drop proven live formulas to source between the reprint and re-detection. Engage the same
+        // off-band queue the resize path uses (via `offscreen_preservation_active`) so that as the
+        // reprint rewrites rows, `invalidate_live_row` drains their records off-band and
+        // `restore_offscreen_decorations` at the end of this feed re-anchors them by exact source
+        // equality. A DEC 2026 synchronized-update reprint withholds its damage until the commit,
+        // so the flag stays engaged (it re-arms below on every feed) until the update closes.
+        if self.live_screen == ScreenId::Primary
+            && (self.primary_repaint_in_progress || contains_clear_home_snapshot_boundary(bytes))
+        {
+            self.primary_repaint_in_progress = true;
+        }
         // Frozen history is immutable. Staging/live selections are conservatively invalidated by
         // output because the parser may rewrite a selected row without emitting a removal fact.
         if !bytes.is_empty() && self.selection_touches_mutable_source() {
@@ -748,6 +767,7 @@ impl DualPlaneSession {
         if result.is_err() {
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
+            self.primary_repaint_in_progress = false;
             self.invalidate_all_live_decorations();
         } else if self.synchronized_update_deadline().is_none()
             && let Some(snapshot) = self.alternate_repaint_snapshot.take()
@@ -757,6 +777,11 @@ impl DualPlaneSession {
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         if result.is_ok() {
             self.restore_offscreen_decorations();
+            // The reprint has landed and its records are re-anchored: end preservation unless a
+            // synchronized update is still buffering the repaint (its damage arrives at the commit).
+            if self.synchronized_update_deadline().is_none() {
+                self.primary_repaint_in_progress = false;
+            }
         }
         result
     }
@@ -876,6 +901,7 @@ impl DualPlaneSession {
         if let Err(error) = self.apply_events(events, observed_at) {
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
+            self.primary_repaint_in_progress = false;
             self.invalidate_all_live_decorations();
             return Err(error);
         }
@@ -886,6 +912,8 @@ impl DualPlaneSession {
         }
         self.alternate_repaint_in_progress = false;
         self.restore_offscreen_decorations();
+        // The synchronized-update reprint has committed and re-anchored: end primary preservation.
+        self.primary_repaint_in_progress = false;
         Ok(true)
     }
 
@@ -1370,7 +1398,24 @@ impl DualPlaneSession {
     /// transaction so a reflow does not flash proven formulas back to source (see
     /// `primary_resize_preservation_active`). Any other primary state drops as before.
     fn offscreen_preservation_active(&self) -> bool {
-        self.live_screen == ScreenId::Alternate || self.primary_resize_preservation_active()
+        self.live_screen == ScreenId::Alternate
+            || self.primary_resize_preservation_active()
+            || self.primary_repaint_active()
+    }
+
+    /// Primary preserves live formulas across an in-stream transcript reprint the same way it does
+    /// across a resize: by draining renderable decorations into the off-band queue and re-anchoring
+    /// them by exact source equality (`restore_offscreen_decorations`) once the reprint lands,
+    /// instead of dropping them to source and re-detecting (the in-stream reprint flash). Codex
+    /// reflows and reprints its whole transcript mid-stream, so a proven block whose rows are
+    /// rewritten with new wrapping would otherwise revert to source until re-detection caught up.
+    ///
+    /// This is a distinct trigger from `primary_resize_preservation_active`, not a superset of it:
+    /// a resize reflows the grid at `resize_at` time without necessarily carrying a reprint
+    /// boundary in the same feed, so resize preservation must engage on the resize operation while
+    /// reprint preservation engages on the clear+home / erase-storm / synchronized-update boundary.
+    fn primary_repaint_active(&self) -> bool {
+        self.live_screen == ScreenId::Primary && self.primary_repaint_in_progress
     }
 
     /// Primary preserves live formulas across a window resize by holding the same off-band queue
@@ -1556,6 +1601,7 @@ impl DualPlaneSession {
             // preservation queue across it, even if a resize transaction on the old screen kept
             // `invalidate_all_live_decorations` from clearing it.
             self.offscreen_decorations.clear();
+            self.primary_repaint_in_progress = false;
             self.alternate_content_end_row = None;
             self.pending_live_handoffs.clear();
             self.live_screen = screen;
@@ -7501,6 +7547,121 @@ mod tests {
             !oracle.flash_detected(),
             "no frame flashed the formula back to source: {:?}",
             oracle.flashed_sources()
+        );
+    }
+
+    #[test]
+    fn primary_in_stream_reprint_reanchors_proven_formula_instead_of_flashing() {
+        // Regression for the primary in-stream reprint flash. Codex reflows and reprints its whole
+        // transcript mid-stream (a clear+home boundary). A proven live formula whose row is rewritten
+        // at a new position by that reprint must re-anchor to its new row by exact source equality,
+        // not drop to source until re-detection catches up. Before the primary_repaint preservation,
+        // the reprint's `invalidate_live_row` dropped the record on the spot and the frame flashed
+        // `$$x$$` back to bare source.
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let mut oracle = crate::FormulaFlashOracle::default();
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&before).state,
+            crate::FormulaFrameState::Rendered
+        );
+        let anchored_row = session
+            .live_decorations
+            .values()
+            .next()
+            .expect("one live decoration")
+            .start
+            .row;
+
+        // A clear+home reprint (the transcript repaint boundary) rewrites the screen with the block
+        // shifted down one row. The block's exact source reappears complete in the same feed.
+        session
+            .feed_at(
+                b"\x1b[2J\x1b[Htop\r\n$$x$$\r\nbarrier",
+                start + Duration::from_millis(50),
+            )
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            after.math_blocks.len(),
+            1,
+            "the proven block must survive the reprint, not drop to source"
+        );
+        assert_eq!(after.math_blocks[0].display, MathBlockDisplay::Rendered);
+        assert_eq!(
+            oracle.observe(&after).state,
+            crate::FormulaFrameState::Rendered,
+            "the reprint frame must not expose the formula's source"
+        );
+        let reanchored_row = session
+            .live_decorations
+            .values()
+            .next()
+            .expect("still one live decoration")
+            .start
+            .row;
+        assert_eq!(
+            reanchored_row,
+            anchored_row + 1,
+            "the record re-anchored to the block's new row on the reprinted grid"
+        );
+        assert!(
+            !oracle.flash_detected(),
+            "no frame flashed the formula to source: {:?}",
+            oracle.flashed_sources()
+        );
+    }
+
+    #[test]
+    fn primary_reprint_that_removes_the_formula_source_releases_it_to_redetection() {
+        // The other direction of the same guard: preservation is exact-source, never a blanket hold.
+        // A reprint whose new grid no longer contains the block's source must NOT keep rendering the
+        // stale raster — the record falls to re-detection, which is correct fallback, not a flash.
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        assert_eq!(
+            session.viewport_frame(&mut projection).unwrap().math_blocks[0].display,
+            MathBlockDisplay::Rendered
+        );
+
+        // The reprint replaces the formula with prose: the exact source `$$x$$` is gone from the grid.
+        session
+            .feed_at(
+                b"\x1b[2J\x1b[Hno more math here\r\nbarrier",
+                start + Duration::from_millis(50),
+            )
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            after.math_blocks.is_empty(),
+            "with its source gone, the block must not be held rendered off a stale raster"
+        );
+        assert!(
+            !session
+                .offscreen_decorations
+                .iter()
+                .any(|record| record.artifact.is_some()
+                    && crate::observe_formula_frame(&after)
+                        .rendered_sources
+                        .contains(&record.span.original_source)),
+            "a queued record whose source vanished never re-enters the rendered set"
         );
     }
 

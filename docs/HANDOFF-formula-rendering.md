@@ -49,8 +49,21 @@ _最后更新:2026-07-24,HEAD `33fb866`_
 - **交互态问题必须用真实录制字节验证**:`BT_PTY_DUMP=<path>` 启动 bt-app 录 CC 原始 VT,
   产出 `.vt` + `.chunks`;合成/静态截图会给**假 green**(今天栽过 M1.9j/n/o 初版)。
 - **不信 oracle 的 EXIT 码**(诊断豁免会假绿,今天 Jump-chip 豁免坑过)。用逐源状态轨迹:
-  `scratchpad/trace_blocks.py <frames.txt>` 直接解析每帧、追踪每个块的 RENDERED↔SOURCE。
+  `scripts/dev/trace_blocks.py <frames.txt>` 直接解析每帧、追踪每个块的 RENDERED↔SOURCE。
   **判据 = `RENDERED -> SOURCE` flips 数(0 = 不闪)**。
+- **oracle 延迟完成模式(`BT_PROBE_MATH_LATENCY_US=<微秒>`)**:模拟 off-thread bt-math。设了这个
+  环境变量,oracle 就不再在 feed 里同步 render+apply,而是 taken 时打 `now+latency` 时间戳、到
+  期才 render+apply,并在 chunk 之间按最早内部截止时间(math 到期 / resize 静止 / live 稳定)驱动
+  tick(镜像 winit `WaitUntil`),让"渲染中被重印打断"“落地后立刻被重印"的真机时序在回放里成形。
+  **不设=历史同步行为(回归跑法逐字节不变)**。典型:`BT_PROBE_MATH_LATENCY_US=50000`(50ms)。
+  注意:同步模式塌缩异步间隙 → 对**单行块的原子重印闪**假绿(块在同 feed 立刻重渲);延迟模式才暴露。
+  (故意不驱动 synchronized-update 超时:录制里 `2026h`/`2026l` 成对、feed 内 in-band 收口,驱动超时会
+  抢跑把还差一 chunk 的更新提交、打乱回放。)
+- **trace_blocks 多行暴露**已补:oracle 现打 `source_plane=...`(整屏逐行文本),trace_blocks 用它把
+  多行块 body 被拆进多行 source_rows 的回源也计成 R→S(旧版只认整串/单 `$$` → 多行块假绿)。
+  **已知盲点**:alt 借行滚动时,分隔符会瞬帧进 source_rows(env 名匹配误判 1 flip);此处 **crate 内
+  `FormulaFlashOracle`(逐 occurrence + occlusion)权威、判 0**,cc-topbot/cc-scrollout 的那 1 是工具误报,
+  与产品码无关(修前修后逐字节相同)。占用重的 alt 场景以 crate oracle `flash=` 为准。
 - **连续返工打偏 ≥3 轮 → 切独立审因**(read-only,不许修、只找因、可翻架构,无假设)。
   今天大块 flash 我带错假设栽 3 轮,靠这个纪律翻案成功(见下方审因报告)。
 
@@ -172,10 +185,26 @@ _最后更新:2026-07-24,HEAD `33fb866`_
 
 ### 当前挂账(都不紧急)
 
-- **流内重印闪(非 resize)**:Codex 在流中途 `2J`/重印(resize-repro ~45.7s、codex-issues
-  ~225s 的 pmatrix 闪)会把 live 块全失效短暂回源。修法方向 = alt 的 clear+home repaint
-  snapshot 机制的 primary 版(比 resize 保持更大的独立项,002acc7 的保持窗口只覆盖 resize
-  epoch 内)。
+- **流内重印闪(非 resize)** — **部分收线(primary 重印保持,未提交)**:给 primary 加了重印保持
+  触发(`primary_repaint_in_progress`,在 feed 检 `contains_clear_home_snapshot_boundary` 边界即置,
+  DEC 2026 同步更新跨到 commit 才清),并入 `offscreen_preservation_active` → 重印改写块行时
+  `invalidate_live_row` 把可渲染记录 drain 进 off-band 队列而非丢弃,`restore_offscreen_decorations`
+  按**源码精确相等**重锚(复用 resize 那套,红线守住)。**不收编 002acc7/59b393e**:resize 在
+  `resize_at` 当刻 reflow 整栅、未必同 feed 带重印边界,两触发互补并存。
+  - **实测(延迟完成 50ms + 多行 trace,修前→修后 R→S)**:codex-issues 12→3、同步模式 13→4;
+    codex-formula 同步 10→9;resize-endflash 7→7、resize-repro 28→28(**无改善**);
+    alt 两份 1→1(与产品码无关,见工具误报)。全部**不退化**(逐 capture ≤ 修前),终态渲染集不变。
+  - **仍未竟(下一阶段)= 多行「渐进式/整段重印」闪**(resize-endflash 的 aligned/pmatrix、
+    resize-repro 整批同帧回源、codex-issues 残留 pmatrix)。根因:这类重印**非原子**——块跨多个
+    pty chunk 渐进重印(opener 到、closer 未到的窗口),off-band 的 `exact_live_source_match` 对
+    "不完整/重排后网格"匹配不上 → drain 后**隐藏**记录 → 露源。off-band drain 本质是"藏起来等重锚",
+    对渐进窗口天然露源。**真解 = alt 的 suppress+remap(hold 旧栅 + 段映射 project_live_record 逐 proven-row
+    重锚)推广到 primary**(finish_alternate_repaint 那套,grid-based、已对多行 0 flip)。风险:段映射/
+    finish 是 alt 共享码,动它可能弄坏 alt 红线;且 resize-repro 的闪与 resize epoch 纠缠(需 resize 余波
+    也能跨渐进重印 hold 旧栅)。建议**隔离实现**(primary 专用 snapshot/finish,复用纯 helper,不碰 alt
+    函数),先在 headless 延迟模式验 alt 两份仍 crate-oracle 0 再上。
+  - **审因修正**:审因把此闪归因于"异步间隙"(同步回放假绿);实测多行块的闪在**同步模式也在**
+    (12→13 这类),只是旧 trace 多行盲 → 假绿。单行块的原子重印闪才是纯异步间隙(同步藏、延迟露)。
 - **zoom(font_rev/dpi)后部分公式回源码**:根因与 resize 不同——`set_layout_key→
   invalidate_layout` 不开 resize epoch,是检测竞态撞 M1.9p 首检(handoff「Codex 战线未闭环」
   第 2 条)。需要独立的 layout 变更保持触发;headless 无 zoom 录制素材,需先录。

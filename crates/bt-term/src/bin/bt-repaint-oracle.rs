@@ -24,24 +24,51 @@ struct ReplayChunk<'a> {
     resize_before: Option<(NonZeroU32, NonZeroU32)>,
 }
 
+/// A math task taken from the session, awaiting its deferred completion. Models the off-thread
+/// bt-math worker: the render/apply lands `math_latency` after the task was dispatched, never
+/// synchronously in the same feed (see `HeadlessOracle::math_latency`).
+struct DeferredMath {
+    ready_at: Instant,
+    task: SessionMathTask,
+}
+
 struct HeadlessOracle {
     session: DualPlaneSession,
     projection: ViewportProjection,
     engine: MathEngine,
     flash_oracle: FormulaFlashOracle,
     frame_sequence: usize,
+    started: Instant,
+    /// When `Some(latency)`, math completes `latency` after the task is dispatched instead of
+    /// synchronously inside the feed. This restores the real machine's async gap: a resize (or an
+    /// in-stream reprint) demotes a raster to stale and queues a relayout that lands one latency
+    /// later, so the protection-lift-vs-fresh-landing ordering the flash needs actually forms.
+    /// `None` keeps the historical synchronous behaviour (byte-identical regression runs).
+    math_latency: Option<Duration>,
+    /// Dispatched-but-not-yet-completed math tasks, ordered by arrival. Faithful to the real
+    /// worker: currency is re-checked at apply time, so a task whose generation/revision/layout
+    /// was bumped mid-flight is rejected exactly as it would be on the main thread.
+    deferred: Vec<DeferredMath>,
 }
 
 impl HeadlessOracle {
-    fn new(columns: NonZeroU32, rows: NonZeroU32) -> Self {
+    fn new(columns: NonZeroU32, rows: NonZeroU32, started: Instant) -> Self {
         let session = DualPlaneSession::new(columns, rows);
         let projection = session.new_projection(session.layout_key());
+        let math_latency = env::var("BT_PROBE_MATH_LATENCY_US")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .filter(|micros| *micros > 0)
+            .map(Duration::from_micros);
         Self {
             session,
             projection,
             engine: MathEngine::new(),
             flash_oracle: FormulaFlashOracle::default(),
             frame_sequence: 0,
+            started,
+            math_latency,
+            deferred: Vec::new(),
         }
     }
 
@@ -50,6 +77,12 @@ impl HeadlessOracle {
         observed_at: Instant,
         elapsed: Duration,
     ) -> Result<(), Box<dyn Error>> {
+        if self.math_latency.is_some() {
+            // Deadline-driven ticks between chunks (mirroring winit `WaitUntil`) already fired every
+            // internal deadline strictly before `observed_at`; run one more at exactly this instant.
+            self.tick(observed_at, elapsed)?;
+            return Ok(());
+        }
         // Mirror the app's timer: a resize epoch only releases live stability once the transaction
         // quiesces, so a replay that never drives this would suppress re-detection forever.
         let _ = self.session.finish_resize_if_quiescent(observed_at);
@@ -68,8 +101,112 @@ impl HeadlessOracle {
     ) -> Result<(), Box<dyn Error>> {
         self.session.feed_at(chunk, observed_at)?;
         self.publish("pty", elapsed)?;
-        if self.complete_pending_math() {
+        if self.math_latency.is_some() {
+            // Off-thread model: the reprint's damage has already dropped/held decorations; new
+            // detection tasks are only dispatched here and land one latency later, never now.
+            self.dispatch_delayed(observed_at);
+        } else if self.complete_pending_math() {
             self.publish("math-ready", elapsed)?;
+        }
+        Ok(())
+    }
+
+    /// Take every task the session currently has queued and stamp it with a completion deadline one
+    /// latency in the future. The task leaves the session's queue exactly as the real worker takes
+    /// it; only its result is deferred.
+    fn dispatch_delayed(&mut self, now: Instant) {
+        let latency = self.math_latency.expect("delayed dispatch without latency");
+        while let Some(task) = self.session.take_math_worker_task() {
+            self.deferred.push(DeferredMath {
+                ready_at: now + latency,
+                task,
+            });
+        }
+    }
+
+    /// Apply every deferred task whose deadline has passed, rendering it now and handing the result
+    /// back to the session (which re-checks currency and rejects stale results, just like the app).
+    fn apply_matured(&mut self, now: Instant) -> bool {
+        let mut changed = false;
+        let mut index = 0;
+        while index < self.deferred.len() {
+            if self.deferred[index].ready_at > now {
+                index += 1;
+                continue;
+            }
+            let DeferredMath { task, .. } = self.deferred.remove(index);
+            changed |= match task {
+                SessionMathTask::Frozen(mut task) => {
+                    let result = render_detection_task(&self.engine, &mut task, FOREGROUND_RGB);
+                    self.session.complete_worker_result(task, result)
+                }
+                SessionMathTask::Live(mut task) => {
+                    let result =
+                        render_live_detection_task(&self.engine, &mut task, FOREGROUND_RGB);
+                    self.session.complete_live_worker_result(task, result)
+                }
+            };
+        }
+        changed
+    }
+
+    fn next_internal_deadline(&self) -> Option<Instant> {
+        // A synchronized update is deliberately excluded: these captures balance every `2026h` with
+        // an in-band `2026l`, so `feed_at` commits each update at its own chunk exactly as recorded.
+        // Driving the timeout here would preempt an update whose ESU is only a chunk away, desyncing
+        // the replay — the historical (synchronous) oracle never drove it either.
+        [
+            self.deferred.iter().map(|d| d.ready_at).min(),
+            self.session.resize_finish_deadline(),
+            self.session.live_stability_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// One event-loop wake at `now`: apply matured completions, close a quiesced resize
+    /// transaction, release live stability, and dispatch whatever new detection those unblock —
+    /// mirroring the app's `about_to_wait` ordering.
+    fn tick(&mut self, now: Instant, elapsed: Duration) -> Result<(), Box<dyn Error>> {
+        if self.apply_matured(now) {
+            self.publish("math-ready", elapsed)?;
+        }
+        if self.session.finish_resize_if_quiescent(now)? {
+            self.publish("resize-finish", elapsed)?;
+        }
+        self.session.advance_live_stability(now);
+        self.dispatch_delayed(now);
+        Ok(())
+    }
+
+    /// Advance the replay clock through every internal deadline strictly before `target`, ticking at
+    /// each, so the post-quiescence gap physically exists in the replay and a reprint chunk can land
+    /// after protection has lifted.
+    fn drive_until(&mut self, target: Instant) -> Result<(), Box<dyn Error>> {
+        let mut guard = 0_u32;
+        while let Some(next) = self.next_internal_deadline().filter(|d| *d < target) {
+            let elapsed = next.saturating_duration_since(self.started);
+            self.tick(next, elapsed)?;
+            guard += 1;
+            if guard > 1_000_000 {
+                return Err(io::Error::other("delayed replay failed to converge").into());
+            }
+        }
+        Ok(())
+    }
+
+    /// Drain all remaining deferred work after the last chunk so the final resting state converges,
+    /// exactly as the app eventually settles once output stops.
+    fn drain_to_quiescence(&mut self) -> Result<(), Box<dyn Error>> {
+        let mut guard = 0_u32;
+        while let Some(next) = self.next_internal_deadline() {
+            let elapsed = next.saturating_duration_since(self.started);
+            self.tick(next, elapsed)?;
+            guard += 1;
+            if guard > 1_000_000 {
+                return Err(io::Error::other("delayed replay failed to drain").into());
+            }
         }
         Ok(())
     }
@@ -95,18 +232,21 @@ impl HeadlessOracle {
     fn publish(&mut self, event: &str, elapsed: Duration) -> Result<(), Box<dyn Error>> {
         self.session.refresh_projection(&mut self.projection);
         let frame = self.session.viewport_frame(&mut self.projection)?;
-        let (state, rendered_sources, source_rows, occluded_sources) = {
+        let (state, rendered_sources, source_rows, source_plane, occluded_sources) = {
             let observation = self.flash_oracle.observe(&frame);
             (
                 observation.state,
                 observation.rendered_sources.clone(),
                 observation.source_rows.clone(),
+                observation.source_plane.clone(),
                 observation.occluded_sources.clone(),
             )
         };
         let flash_detected = self.flash_oracle.flash_detected();
+        // `source_plane` retains the delimiter-free body rows a multi-line block drops from
+        // `source_rows`, so trace_blocks.py can count a split-body revert as a real R->S flip.
         println!(
-            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} occluded={:?} flash={} detections={} invalidations={}",
+            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} occluded={:?} flash={} detections={} invalidations={} source_plane={:?}",
             self.frame_sequence,
             elapsed.as_micros(),
             state,
@@ -116,6 +256,7 @@ impl HeadlessOracle {
             flash_detected,
             self.session.live_detection_count(),
             self.session.live_invalidation_count(),
+            source_plane,
         );
         let dump = env::var_os("BT_PROBE_VERBOSE").is_some() && state == FormulaFrameState::Mixed;
         let geometry = env::var_os("BT_PROBE_GEOMETRY").is_some()
@@ -339,12 +480,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let columns = env_dimension("BT_PROBE_COLUMNS", 120)?;
     let rows = env_dimension("BT_PROBE_ROWS", 40)?;
     let started = Instant::now();
-    let mut oracle = HeadlessOracle::new(columns, rows);
+    let mut oracle = HeadlessOracle::new(columns, rows, started);
+    let delayed = oracle.math_latency.is_some();
     let mut final_elapsed = Duration::ZERO;
 
     for chunk in chunks {
         final_elapsed = chunk.elapsed;
         let observed_at = started + chunk.elapsed;
+        if delayed {
+            // Fire every internal deadline that falls before this chunk arrives, so a queued
+            // relayout can land and a resize can quiesce before the next PTY bytes.
+            oracle.drive_until(observed_at)?;
+        }
         if let Some((columns, rows)) = chunk.resize_before {
             oracle.session.resize_at(columns, rows, observed_at)?;
             // The marker is written when the PTY itself is resized, so both the local resize and
@@ -353,9 +500,17 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .session
                 .mark_pty_resize_requested_at(columns, rows, observed_at);
             oracle.publish("resize", chunk.elapsed)?;
+            if delayed {
+                // The resize demotes rasters to stale and queues relayouts; dispatch them so they
+                // land one latency later rather than instantly.
+                oracle.dispatch_delayed(observed_at);
+            }
         }
         oracle.advance_before(observed_at, chunk.elapsed)?;
         oracle.feed(chunk.bytes, observed_at, chunk.elapsed)?;
+    }
+    if delayed {
+        oracle.drain_to_quiescence()?;
     }
     final_elapsed = final_elapsed.saturating_add(LIVE_MATH_STABLE_INTERVAL);
     oracle.advance_before(started + final_elapsed, final_elapsed)?;

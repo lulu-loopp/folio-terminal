@@ -17,7 +17,39 @@ import sys
 
 FRAME_RE = re.compile(
     r"frame=(\d+).*?rendered=(\[.*?\]) source_rows=(\[.*?\]) occluded=(\[.*?\])"
+    r"(?:.*?source_plane=(\"(?:[^\"\\]|\\.)*\"))?"
 )
+
+_UNESCAPE = {
+    "n": "\n", "t": "\t", "r": "\r", "0": "\0", '"': '"', "\\": "\\", "'": "'",
+}
+
+
+def _decode_rust_debug(literal):
+    """Decode a Rust `{:?}` string literal (surrounding quotes included) to text.
+
+    Rust Debug keeps printable Unicode (CJK, math) literal and only escapes control
+    characters, quotes and backslashes, so a small hand-rolled unescape is enough and
+    avoids ast.literal_eval choking on `\\u{...}` forms.
+    """
+    body = literal[1:-1]
+    out = []
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\":
+            out.append(ch)
+            i += 1
+            continue
+        nxt = body[i + 1] if i + 1 < len(body) else ""
+        if nxt == "u" and i + 2 < len(body) and body[i + 2] == "{":
+            end = body.index("}", i + 3)
+            out.append(chr(int(body[i + 3:end], 16)))
+            i = end + 1
+        else:
+            out.append(_UNESCAPE.get(nxt, nxt))
+            i += 2
+    return "".join(out)
 
 
 def norm(s):
@@ -35,29 +67,50 @@ def parse(path):
             rendered = [norm(x) for x in ast.literal_eval(m.group(2))]
             source_rows = [norm(x) for x in ast.literal_eval(m.group(3))]
             occluded = [norm(x) for x in ast.literal_eval(m.group(4))]
-            frames.append((frame, rendered, source_rows, occluded))
+            source_plane = _decode_rust_debug(m.group(5)) if m.group(5) else ""
+            frames.append((frame, rendered, source_rows, occluded, source_plane))
     return frames
 
 
-def source_exposes(source, source_rows):
-    """A rendered source is exposed if a bare source row equals its body/delimited form."""
-    body = source
-    # Strip leading/trailing $$ delimiters if the rendered source string carries them.
+def _environment_name(source):
+    head = source.split(r"\begin{", 1)
+    if len(head) < 2:
+        return None
+    name = head[1].split("}", 1)
+    return name[0] if len(name) == 2 else None
+
+
+def source_exposes(source, source_rows, source_plane):
+    """Mirror bt-term's `source_rows_expose`: a rendered source is exposed if a bare row equals
+    its body/delimited form, or — for a multi-line block whose delimiter-free body rows are
+    dropped from `source_rows` — if the whole cell plane still contains the environment or the
+    delimited body."""
+    body = source.strip()
+    if not body:
+        return False
     for row in source_rows:
         r = row.strip()
         if not r:
             continue
         if r == body:
             return True
-        inner = None
-        if r.startswith("$$") and r.endswith("$$") and len(r) > 4:
-            inner = r[2:-2].strip()
-        if inner is not None and inner == body:
+        if r.startswith("$$") and r.endswith("$$") and len(r) > 4 and r[2:-2].strip() == body:
             return True
-        # multi-line: the closer/opener alone is "$$"; match if body starts/ends near it.
-        if r == "$$" and (body.startswith("$$") or body.endswith("$$") or "\n" in source):
-            # ambiguous lone delimiter; only count if body contains no other rendered match
-            pass
+        if r.startswith(r"\[") and r.endswith(r"\]") and len(r) > 4 and r[2:-2].strip() == body:
+            return True
+    plane = " ".join(source_plane.split()) if source_plane else ""
+    env = _environment_name(body)
+    if env and (r"\begin{%s}" % env) in source and \
+            (r"\begin{%s}" % env) in source_plane and (r"\end{%s}" % env) in source_plane:
+        return True
+    # Multi-line delimiter-on-its-own-line body: the plane retains rows source_rows drops. Match
+    # the normalized (whitespace-collapsed) body against the normalized plane.
+    if plane:
+        nbody = " ".join(body.split())
+        for delimited in (f"$$ {nbody} $$", f"$${nbody}$$",
+                          r"\[ %s \]" % nbody, r"\[%s\]" % nbody):
+            if " ".join(delimited.split()) in plane:
+                return True
     return False
 
 
@@ -81,7 +134,7 @@ def main():
     flip_frames = {}    # source -> list of frames where R->S happened
     ever_rendered = set()
 
-    for (frame, rendered, source_rows, occluded) in frames:
+    for (frame, rendered, source_rows, occluded, source_plane) in frames:
         rendered_set = set(rendered)
         occluded_set = set(occluded)
         ever_rendered |= rendered_set
@@ -94,7 +147,7 @@ def main():
                 continue
             if s in occluded_set:
                 continue
-            if source_exposes(s, source_rows):
+            if source_exposes(s, source_rows, source_plane):
                 if state.get(s) == RENDERED:
                     flips[s] = flips.get(s, 0) + 1
                     flip_frames.setdefault(s, []).append(frame)
