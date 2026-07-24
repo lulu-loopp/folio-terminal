@@ -1374,16 +1374,48 @@ impl DualPlaneSession {
     }
 
     /// Primary preserves live formulas across a window resize by holding the same off-band queue
-    /// alternate uses, but only while a resize transaction is open. Codex reflows and then reprints
-    /// its whole transcript, so proven blocks would otherwise revert to source between the reflow
-    /// and re-detection. The queue is re-anchored by exact source equality every frame and cleared
-    /// once the transaction quiesces, at which point fresh detection is authoritative again.
+    /// alternate uses. Codex reflows and then reprints its whole transcript, so proven blocks would
+    /// otherwise revert to source between the reflow and re-detection. The queue is re-anchored by
+    /// exact source equality every frame.
+    ///
+    /// The window spans the resize transaction *and its aftermath*: a resize demotes every proven
+    /// raster to a stale artifact and queues a fresh relayout for the reflowed grid (bt-math is
+    /// async, so the fresh raster lands one or more stability intervals later). Ending preservation
+    /// the instant the epoch quiesces left those re-anchored stale records unprotected, so the first
+    /// post-resize repaint — whose rebuilt-grid fingerprints no longer match — dropped them to
+    /// source until re-detection caught up (the "resize-completes" flash). A stale artifact retires
+    /// only when its fresh render replaces it in place (`apply_live_worker_completion` installs the
+    /// new record with `stale_artifact: None`), a render failure clears it, or its source stops
+    /// matching the grid — never on a clock. So preservation stays engaged while any live decoration
+    /// is still awaiting that fresh relayout, exactly the alternate-screen stale-artifact semantics.
     fn primary_resize_preservation_active(&self) -> bool {
-        self.live_screen == ScreenId::Primary && self.resize_epoch.is_active()
+        self.live_screen == ScreenId::Primary
+            && (self.resize_epoch.is_active() || self.has_pending_resize_relayout())
+    }
+
+    /// A live decoration demoted to a stale artifact (its fresh raster taken, a relayout queued) is
+    /// mid-flight after a layout change: it renders the old raster until the fresh one lands. While
+    /// any such record remains — resident in `live_decorations` or drained off-band into
+    /// `offscreen_decorations` — primary keeps preserving so a repaint cannot drop it to source
+    /// before the replacement arrives. The off-band queue must be included: a repaint invalidates
+    /// the resident record into the queue first, and were the queue not counted, preservation would
+    /// collapse on the very next invalidation in the same feed and wipe the record it just drained.
+    /// Records holding a live artifact retire on invalidation as before, so steady-state primary
+    /// output (no pending relayout) is unaffected.
+    fn has_pending_resize_relayout(&self) -> bool {
+        self.live_decorations
+            .values()
+            .chain(self.offscreen_decorations.iter())
+            .any(|record| record.artifact.is_none() && record.stale_artifact.is_some())
     }
 
     fn retain_offscreen_record(&mut self, record: LiveDecorationRecord) {
-        if !self.offscreen_preservation_active() {
+        // A stale-pending record (raster demoted to stale, fresh relayout queued) is always retained
+        // off-band: it is mid-flight after a layout change and must survive until its replacement
+        // lands, even in the brief window after a resize epoch closes but before preservation would
+        // otherwise re-engage. Records carrying a live artifact still obey the global window.
+        let stale_pending = record.artifact.is_none() && record.stale_artifact.is_some();
+        if !self.offscreen_preservation_active() && !stale_pending {
             return;
         }
         if self.offscreen_decorations.len() == MAX_OFFSCREEN_RECORDS {
@@ -1573,7 +1605,13 @@ impl DualPlaneSession {
             let Some(record) = self.live_decorations.remove(&start) else {
                 continue;
             };
-            if self.offscreen_preservation_active()
+            // The record is already out of `live_decorations` here, so a preservation check that
+            // scans it (`has_pending_resize_relayout`) can no longer see it. A stale-pending record
+            // — mid-relayout after a resize — must be preserved on its own account regardless, or
+            // the last such record on the grid would be dropped to source the instant the epoch
+            // closes (the resize-completes flash). `retain_offscreen_record` mirrors this.
+            let stale_pending = record.artifact.is_none() && record.stale_artifact.is_some();
+            if (self.offscreen_preservation_active() || stale_pending)
                 && (record.artifact.is_some() || record.stale_artifact.is_some())
             {
                 self.retain_offscreen_record(record);
@@ -7344,6 +7382,126 @@ mod tests {
         let settled = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(settled.math_blocks.len(), 1);
         assert_eq!(settled.math_blocks[0].display, MathBlockDisplay::Rendered);
+    }
+
+    #[test]
+    fn primary_resize_keeps_formula_rendered_through_the_post_quiescence_repaint() {
+        // Regression for the residual resize-completes flash. 002acc7 preserves formulas *during*
+        // the drag, but its preservation ended the instant the epoch quiesced. A resize demotes the
+        // proven raster to a stale artifact and queues an async relayout (bt-math is off-thread), so
+        // for one or more stability intervals after quiescence the block renders from its stale
+        // raster. Codex repaints its whole transcript once the resize settles, and that repaint —
+        // whose rebuilt-grid fingerprints no longer match — used to drop the still-stale record to
+        // source until re-detection caught up: the whole formula flashed back to `$$x$$`. The stale
+        // artifact must instead survive every repaint until its fresh relayout replaces it in place.
+        let raster40 = synthetic_raster(40, 40);
+        let raster41 = synthetic_raster(41, 40);
+        let mut oracle = crate::FormulaFlashOracle::default();
+
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(b"intro\r\n$$x$$\r\nbarrier", start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, raster40.clone()),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&before).state,
+            crate::FormulaFrameState::Rendered
+        );
+
+        // The window resize reflows the grid and opens the transaction; Codex clears and reprints
+        // its transcript, both staged inside the transaction (holding the epoch open).
+        let t = start + Duration::from_millis(210);
+        session.resize_at(nz(41), nz(12), t).unwrap();
+        session.mark_pty_resize_requested_at(nz(41), nz(12), t);
+        session
+            .feed_at(b"\x1b[2J\x1b[3J\x1b[H", t + Duration::from_millis(10))
+            .unwrap();
+        session
+            .feed_at(b"intro\r\n$$x$$\r\nbarrier", t + Duration::from_millis(20))
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let staged = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&staged).state,
+            crate::FormulaFrameState::Rendered,
+            "the block stays rendered (as a stale artifact) while the transaction is open"
+        );
+
+        // Output goes quiet: the transaction quiesces. The relayout queued by the reflow has NOT
+        // completed yet, so the block is still rendering from its stale raster here.
+        let finish_at = t + Duration::from_millis(280);
+        assert!(session.finish_resize_if_quiescent(finish_at).unwrap());
+        assert!(!session.resize_epoch.is_active());
+        assert!(
+            session.has_pending_resize_relayout(),
+            "the resize relayout has not landed, so preservation must remain engaged past the epoch"
+        );
+        session.refresh_projection(&mut projection);
+        let quiesced = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&quiesced).state,
+            crate::FormulaFrameState::Rendered
+        );
+
+        // The post-resize repaint — the exact frame that used to flash. It damages the formula rows
+        // while the epoch is already closed and the fresh raster is still pending.
+        session
+            .feed_at(
+                b"\x1b[H\x1b[2Jintro\r\n$$x$$\r\nbarrier",
+                finish_at + Duration::from_millis(5),
+            )
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let after_repaint = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&after_repaint).state,
+            crate::FormulaFrameState::Rendered,
+            "the post-quiescence repaint must not drop the stale formula to source"
+        );
+
+        // The reflowed grid settles; fresh detection reruns and its relayout lands, replacing the
+        // stale raster in place. Tolerate the odd rejected stale-generation task from the reflow.
+        session.advance_live_stability(
+            finish_at + Duration::from_millis(5) + LIVE_MATH_STABLE_INTERVAL,
+        );
+        while let Some(mut task) = session.take_live_worker_task() {
+            if resolve_live_detection_task(&mut task) {
+                session.complete_live_worker_result(task, Ok(raster41.clone()));
+            } else {
+                session.complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+            }
+        }
+        session.refresh_projection(&mut projection);
+        let settled = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            oracle.observe(&settled).state,
+            crate::FormulaFrameState::Rendered
+        );
+        assert!(
+            session
+                .live_decorations
+                .values()
+                .all(|record| record.artifact.is_some() && record.stale_artifact.is_none()),
+            "the fresh relayout must replace the stale raster in place, retiring the stale artifact"
+        );
+        assert!(
+            !session.has_pending_resize_relayout(),
+            "with the fresh raster installed, the aftermath preservation window closes"
+        );
+
+        // Nothing in the whole sequence exposed the formula's source.
+        assert!(
+            !oracle.flash_detected(),
+            "no frame flashed the formula back to source: {:?}",
+            oracle.flashed_sources()
+        );
     }
 
     #[test]
