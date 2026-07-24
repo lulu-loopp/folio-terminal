@@ -93,3 +93,29 @@ _最后更新:2026-07-23,HEAD `241e74b`_
   **CC 修好后应置 false**。`\[`/`\\` 被吃同源。
 - Codex CLI 是**主屏 TUI**(非 alt),用 `\x1b[3J` 清 scrollback = "输出被吃掉"是它主动清、
   按 xterm 标准执行,非我方 bug。Codex 的公式支持是**单独战线**(未做)。
+
+## Codex CLI 战线(2026-07-23/24 开工,四提交落地)
+
+- `55f5c41` **锚顶滚动区捕获**:Codex(ratatui inline viewport)靠 top=1 的 DECSTBM 区域滚动提交定稿行,
+  xterm/alacritty 语义该进 scrollback(vendored grid `region.start==0` 就推史,grid/mod.rs:308);我们
+  scope 分类曾要求区域底=屏底 → 全部 Ignore → **吞输出+滚不动**。已对齐 grid 事实(过 row 0 即
+  FullScreen scope)。变异红验证。**重复是 Codex 自己的**(最终 reflow 后原始字节里回复印了两遍,
+  MCP 警告插入触发,不修)。
+- `8aae44a` **列表符定界符**:Codex 把回复放列表项里,`• $$` 开头 → 配对整体错位全不渲染。
+  `delimiter_start` 跳过一个渲染态列表符(• ◦ ▪ ●),守卫全保持。
+- `f407a24` **frozen 宽字符 spacer 样式**:CJK 背景条冻结后碎成条纹(spacer 丢背景),已修+回归。
+- oracle 新探针:`BT_PROBE_DOCDUMP`(重建完整 scrollback+模拟 app 调度报每页渲染/失败)、
+  `BT_PROBE_FROZEN`/`BT_PROBE_STYLES`(canonical frozen 行+样式)。录制:`.tmp-repaint-capture/
+  codex-formula.vt`(135×40)、`codex-issues.vt`(121×32)。
+
+### Codex 战线未闭环(下次接着)
+
+1. **某些块不渲染(用户 image18 cases 块)**:检测器(探针验证)与 frozen 管线(模拟调度回放,每页
+   2-3 块渲染 0 失败)都健康。codex-issues.vt 里两个不渲染块:一个=录制结束时 closer 未定稿(正确);
+   一个=**`$$ i\hbar\frac{\partial}{\partial t}\Psi=\hat{H}\Psi $$` live 渲染失败**(MathFailurePlacement,
+   Live anchor rows23-25)——**真线索:bt-math 对该输入 render error,查 `\hbar`/MiTeX**。cases 块本身
+   未再复现;若再遇,用 BT_PROBE_FROZEN 拿 canonical 行判逻辑行形态。
+2. **缩放(zoom)后部分公式回源码**:layout(font_rev/dpi)变更 → live 记录 layout 不匹配被丢弃重检测的
+   竞态,部分块撞 M1.9p 首检回源码。headless 可复现(改 LayoutKey 重投影)。
+3. **缩放后跳到底**:zoom 路径未保持滚动锚。与 2 同区(bt-app zoom 处理+projection 锚)。
+4. Codex 输出裸 LaTeX(无定界符)和 `[ ... ]`(被吃反斜杠的 `\[`)不渲染=忠实行为,非 bug。
