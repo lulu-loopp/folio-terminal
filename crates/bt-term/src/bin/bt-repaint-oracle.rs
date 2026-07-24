@@ -135,7 +135,31 @@ impl HeadlessOracle {
         self.session.refresh_projection(&mut self.projection);
         let mut emitted_offset = i64::MIN;
         loop {
+            // Emulate the app's frame loop: reviewing a page schedules its frozen math artifacts,
+            // the worker completes them, and the next frame shows the rendered state.
             let frame = self.session.viewport_frame(&mut self.projection)?;
+            self.session.schedule_visible_artifacts(&frame);
+            self.complete_pending_math();
+            self.session.refresh_projection(&mut self.projection);
+            let frame = self.session.viewport_frame(&mut self.projection)?;
+            let rendered_history = frame
+                .math_blocks
+                .iter()
+                .filter(|block| {
+                    block.display == bt_viewport::MathBlockDisplay::Rendered
+                        && matches!(block.anchor, bt_viewport::MathBlockAnchor::History { .. })
+                })
+                .count();
+            let failures = frame.math_failures.len();
+            if rendered_history != 0 || failures != 0 {
+                eprintln!(
+                    "PAGE offset={} rendered_history={rendered_history} failures={failures}",
+                    self.projection.scroll_offset_rows(),
+                );
+                for failure in &frame.math_failures {
+                    eprintln!("FAIL {:?}", failure);
+                }
+            }
             let offset = self.projection.scroll_offset_rows() as i64;
             let rows = frame.rows.get() as i64;
             let columns = frame.columns.get() as usize;
@@ -334,6 +358,17 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if env::var_os("BT_PROBE_DOCDUMP").is_some() {
         oracle.document_dump()?;
+    }
+
+    if env::var_os("BT_PROBE_FROZEN").is_some() {
+        for line in oracle.session.transcript().frozen() {
+            eprintln!("FROZEN[{}] |{}", line.id.0, line.text);
+            if env::var_os("BT_PROBE_STYLES").is_some() {
+                for span in &line.styles {
+                    eprintln!("  STYLE {span:?}");
+                }
+            }
+        }
     }
 
     if oracle.flash_oracle.flash_detected() {

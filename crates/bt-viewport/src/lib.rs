@@ -2173,17 +2173,27 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
             generation: line.source_generation,
         };
         let end = endpoint(&start, Bias::After);
+        // The spacer column belongs to the same on-screen cell as its wide glyph: it must carry
+        // the glyph's style (background, hyperlink) exactly like the live grid's spacer does, or
+        // a background bar behind CJK text breaks into per-glyph stripes once the line freezes
+        // into history.
+        let spacer = (width == 2).then(|| {
+            let mut spacer_style = cell.style.clone();
+            spacer_style.flags.remove(CellFlags::WIDE_CHAR);
+            CapturedCell {
+                wide_spacer: true,
+                style: spacer_style,
+                hyperlink: cell.hyperlink.clone(),
+                ..CapturedCell::default()
+            }
+        });
         let row = rows.last_mut().unwrap();
         row.cells.push(cell);
         row.anchors.push(CellAnchor {
             start: start.clone(),
             end: end.clone(),
         });
-        if width == 2 {
-            let spacer = CapturedCell {
-                wide_spacer: true,
-                ..CapturedCell::default()
-            };
+        if let Some(spacer) = spacer {
             row.cells.push(spacer);
             row.anchors.push(CellAnchor { start, end });
         }
@@ -3666,5 +3676,34 @@ mod tests {
     fn frozen_wrap_count_respects_cluster_boundaries_instead_of_dividing_total_width() {
         assert_eq!(frozen_visual_line_count("中中中", 3), 3);
         assert_eq!(frozen_visual_line_count("a中", 3), 1);
+    }
+    #[test]
+    fn frozen_wide_glyph_spacer_keeps_the_glyph_background() {
+        // A background bar behind CJK text (Codex prompt echo) must stay continuous after the
+        // line freezes into history: the wide glyph's spacer column carries the same style.
+        let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
+        let mut wide = CapturedCell::plain("请");
+        wide.style.flags.insert(CellFlags::WIDE_CHAR);
+        wide.style.background = bt_transcript::TerminalColor::Rgb(41, 41, 41);
+        let mut live_spacer = CapturedCell {
+            wide_spacer: true,
+            ..CapturedCell::default()
+        };
+        live_spacer.style.background = bt_transcript::TerminalColor::Rgb(41, 41, 41);
+        let result = store.capture(CapturedRow {
+            cells: vec![wide, live_spacer],
+            continues: false,
+            shell_mark: None,
+        });
+        let frozen = &result.finalized[0].line;
+        let rows = layout_frozen_line(frozen, 4);
+        let spacer = &rows[0].cells[1];
+        assert!(spacer.wide_spacer);
+        assert_eq!(
+            spacer.style.background,
+            bt_transcript::TerminalColor::Rgb(41, 41, 41),
+            "the spacer column must keep its glyph's background"
+        );
+        assert!(!spacer.style.flags.contains(CellFlags::WIDE_CHAR));
     }
 }
