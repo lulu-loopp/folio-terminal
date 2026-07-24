@@ -204,9 +204,15 @@ _最后更新:2026-07-24,HEAD `33fb866`_
     (仅 grid 行)返 None、精确匹配对不连续全源失败 → 丢投影。这是 `0848375` bridge 的地界:
     **正解 = 重印窗口与 bridge/occlusion 整合,顶部裁进 history 的记录用 `clipped_top` 重投影
     而非丢弃**(session↔viewport 双侧改,值得独立一单)。基线里这族也闪(被重印闪淹没),非回归。
-- **zoom(font_rev/dpi)后部分公式回源码**:根因与 resize 不同——`set_layout_key→
-  invalidate_layout` 不开 resize epoch,是检测竞态撞 M1.9p 首检(handoff「Codex 战线未闭环」
-  第 2 条)。需要独立的 layout 变更保持触发;headless 无 zoom 录制素材,需先录。
-- **zoom 后跳到底**:与上同区(bt-app zoom 路径未保持滚动锚)。
+- ~~**zoom 后部分公式回源码 + 旧栅残片**~~ → 已修 `6b906db`,且**翻了挂账假设**:不是检测竞态,
+  是呈现层——`sync_live_math_artifacts` 只收 `render_scale_milli==1000`,zoom 把 live 光栅降为
+  按 DPI 比例缩放的 stale 后被拒 → 整个异步重排版窗口回源;band 塌回一行盖不住旧像素 = 残片。
+  修=接受缩放刻度 stale(band 按缩放高保留、整栅原子呈现);无需新触发,stale-pending 记录态
+  已覆盖窗口、退场全确定事件。两条 zoom 钉死测试按 bt-app 真实调用序列双向驱动,修前红。
+  非 DPI 录制构造性无影响(native 刻度是 no-op,回放逐字节同)。
+- **zoom 后跳到底**(仍挂账):bt-app `reconcile_authoritative_dpi`/projection 滚动锚,需独立一单
+  (类比 33fb866 的 review_hold 跨 zoom 重排版保持回看偏移)。
+- **共享边**(记录在案,非 zoom 特有):若重排后精确源码锚不上,off-band 记录在 resize 静止时被清
+  → 回源。与 resize 路径同边(Codex 重印同文,实际都能锚上),既有行为未恶化。
 - 若 resize epoch 在重印到达前先静止(Codex 实测不会,重印即时且撑住 epoch),hold 会释放到
   空底——不劣于 a66eb84 且仍确定性;记录在案。
