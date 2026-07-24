@@ -119,3 +119,27 @@ _最后更新:2026-07-23,HEAD `241e74b`_
    竞态,部分块撞 M1.9p 首检回源码。headless 可复现(改 LayoutKey 重投影)。
 3. **缩放后跳到底**:zoom 路径未保持滚动锚。与 2 同区(bt-app zoom 处理+projection 锚)。
 4. Codex 输出裸 LaTeX(无定界符)和 `[ ... ]`(被吃反斜杠的 `\[`)不渲染=忠实行为,非 bug。
+
+### Resize 战线(2026-07-24 续,c2ee5ab 收口)
+
+- `eec71a6` **resize 录制/回放基建**:`BT_PTY_DUMP` 的 chunks 清单记 `# RESIZE cols rows elapsed_us`
+  标记(bt-pty resize 路径写入,`#` 前缀向后兼容),oracle 在标记点 `resize_at` +
+  `mark_pty_resize_requested_at`,并每步驱动 `finish_resize_if_quiescent`(**不驱动 epoch 会让回放中
+  resize 后重检测永久停摆、掩盖真相**——这个坑修在 c2ee5ab 里)。
+- `c2ee5ab` **`# $$` 重排配对**:Codex resize 重排把 `$$` opener 打成 ATX 标题(`# $$`/`• # $$`,
+  12 个全在 RESIZE 标记后 0.1-0.2s)。拒绝畸形 opener → 整条消息配对错位 → 闭符跨 `#` 行错配**把
+  `#` 排成公式**。`delimiter_start` 跳标题符(可叠列表符),守卫全保持;resize-repro.vt 回放终态全
+  Rendered、错配块消失。
+- **用户确认**:拖拽后短暂过渡能回来;CC(alt)resize 公式保持 ✓。
+
+### Resize 残留(下次专项)
+
+1. **随机个别块滞留源码**(image24,`$$\sum...$$` 块,周围块都渲染):**回放收敛全渲染复现不了**
+   ——是交互态竞态。嫌疑:①resize 风暴后 staging 缝隙行无公式管线(staged 行不走 math 装饰,
+   若 codex 之后无输出关闭 candidate 则永滞);②app timer 与稳定时钟的漏行。**下次**:让用户带
+   `BT_RESIZE_TRACE`+dump 录到滞留现场,回放时打印 staging_len/staged 行判 ①;或 oracle 加
+   wheel 交互回放。注意 codex-issues.vt 里滞留的也是 `\sum` 块(当时判"录制尾未定稿"——两次都是
+   它,可能非巧合)。
+2. **resize 后跳底**:Codex(primary)= 固有(每次 resize `2J+3J` 清史重印,被看内容物理消失,WT
+   同样)。CC(alt)= 我们 local overflow review 态在 resize 时重置——**可尝试保留**(内容在 alt
+   上由 CC 原样重绘,锚定语义上可续),属打磨项。
