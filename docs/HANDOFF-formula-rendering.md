@@ -140,6 +140,8 @@ _最后更新:2026-07-23,HEAD `241e74b`_
    `BT_RESIZE_TRACE`+dump 录到滞留现场,回放时打印 staging_len/staged 行判 ①;或 oracle 加
    wheel 交互回放。注意 codex-issues.vt 里滞留的也是 `\sum` 块(当时判"录制尾未定稿"——两次都是
    它,可能非巧合)。
-2. **resize 后跳底**:Codex(primary)= 固有(每次 resize `2J+3J` 清史重印,被看内容物理消失,WT
-   同样)。CC(alt)= 我们 local overflow review 态在 resize 时重置——**可尝试保留**(内容在 alt
-   上由 CC 原样重绘,锚定语义上可续),属打磨项。
+2. **resize 后跳底(用户澄清:主体是 Codex/primary,CC 无此困扰)**:机制=Codex resize 用
+   `2J+3J` 清史+全量重印,我们在清史瞬间把 scroll offset clamp 到 0 → 跳底;但重印马上把等价
+   内容填回历史——内容并没消失。**可修方向(非启发式)**:回看态(is_scrolled)下 ED3 不重置滚动
+   偏移,offset 数值保持、历史重建后视口自然落回约原位置(不猜时序,只是不抛弃用户滚动意图)。
+   注意空历史期间 offset>max 的显示语义(暂显空白/live)与真 clear(用户主动 cls)场景的行为核对。
