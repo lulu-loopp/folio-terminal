@@ -1,6 +1,6 @@
 # Handoff:公式渲染(M1.9 线)— 下个 session 从这里接手
 
-_最后更新:2026-07-23,HEAD `241e74b`_
+_最后更新:2026-07-24,HEAD `33fb866`_
 
 ## 当前状态:**M1.9 公式线全部收线,用户真机确认「CC 没什么问题了」**
 
@@ -133,27 +133,52 @@ _最后更新:2026-07-23,HEAD `241e74b`_
 - **用户确认**:拖拽后短暂过渡能回来;CC(alt)resize 公式保持 ✓。
 - `a66eb84` **回看位移跨 transcript 重写保持**:锚死于清史(Codex reflow)时存
   `displaced_review_rows`,重印填回历史后逐帧重新锚定复位;任何主动滚动接管清除。真 cls 场景
-  用户一碰滚轮即回旧行为。回归+变异红。**已知观感**:恢复过程可见"跳一下再回来"(空历史窗口
-  期间只能显示底部;要消掉需帧保持/过渡策略,打磨项)。
-- **primary resize 公式闪回源码一下(alt 不闪)**:根因=`resize_at` 对 primary 走
-  `invalidate_all_live_decorations()`(全失效),alt 走 snapshot+stale-artifact 保持(M1.9)。
-  改进方向=primary 也走 stale-artifact 式跨 resize 保持(M1.9q 遗留的 primary 版),打磨项。
+  用户一碰滚轮即回旧行为。回归+变异红。~~已知观感:恢复过程可见"跳一下再回来"~~ → 已修
+  `33fb866`(见下)。
+- ~~**primary resize 公式闪回源码一下(alt 不闪)**~~ → 已修 `002acc7`(见下):根因=`resize_at`
+  对 primary 走 `invalidate_all_live_decorations()`(全失效),alt 走 snapshot+stale-artifact
+  保持(M1.9)。
 
-### Resize 残留(下次专项)
+### Resize 残留 → 三项全落地(2026-07-24,opus 子 agent 三连)
 
-1. **个别块永久滞留源码 = 块被劈在 frozen/live 边界两侧(机制已闭环,2026-07-24)**:三次目击
-   全是 `$$\sum...$$` 块(image24/25 + codex-issues.vt)→ 非随机,**位置性**。证据链:
-   codex-issues.vt 终态 frozen 恰停在 `\sum` body(FROZEN[297]),closer `$$` 在 live 屏
-   (DOC[105-107] 源码可见);staging 空(STAGED probe=0);检测器对该文本两变体都检出(probe);
-   frozen 管线健康。机制:**opener+body 已定稿、closer 还在 live 网格** → frozen 侧见未闭合块
-   (拒=对)、live 侧见无 opener 尾巴(M1.9p 拒=对)→ 两侧都不渲染;Codex 空闲边界静止 → 永滞。
-   回放收敛全渲染=收割时机不同、边界落点不同。**修复方向(下次,真功能项)**:primary 版跨界渲染
-   ——live 检测的 primary 上下文本就含 frozen tail(session.rs advance 注释),检测能证出完整块;
-   缺的是**跨 History/Live 两域的 band 呈现**(viewport 现有 History/Live 两种 math placement,
-   需要跨界 band 或"冻结侧持 opener、live 侧渲整块"的呈现设计)。是 M1.9t(alt 跨内部窗格)的
-   primary 对应物。
-2. **resize 后跳底(用户澄清:主体是 Codex/primary,CC 无此困扰)**:机制=Codex resize 用
-   `2J+3J` 清史+全量重印,我们在清史瞬间把 scroll offset clamp 到 0 → 跳底;但重印马上把等价
-   内容填回历史——内容并没消失。**可修方向(非启发式)**:回看态(is_scrolled)下 ED3 不重置滚动
-   偏移,offset 数值保持、历史重建后视口自然落回约原位置(不猜时序,只是不抛弃用户滚动意图)。
-   注意空历史期间 offset>max 的显示语义(暂显空白/live)与真 clear(用户主动 cls)场景的行为核对。
+1. `0848375` **滞留源码块修复 = primary 跨界 bridge**:劈在 frozen/live 边界的块
+   (opener+body 已冻、closer 在 live)现在作为**单一 MathBlockPlacement 从 frozen history
+   行升入 live band** 渲染。检测层:`live_occurrence_segments` 把 frozen-tail 片段映射为
+   `MathSourceLine::Transcript(id)`(真实已证文本,不违 M1.9p),锚定在 live 部分、frozen 段
+   作前缀;守卫:≥1 live 行、frozen 行须为连续前导段、staging 空、live 部分起于 grid row 0、
+   前缀恰为连续 history tail 且无行已是渲染态 history artifact,不满足回源码(绝不错渲)。
+   codex-issues.vt 终态劈裂 `\sum` 块渲染、`i\hbar...\hat{H}\Psi` 旧挂账 live 失败块也渲染,
+   codex-formula ever-rendered 3→4,四录制 R→S flips 全 0。钉死测试:detect 两条 + viewport
+   `boundary_split_block_renders_as_one_bridge_across_frozen_and_live`。
+2. `002acc7` **primary resize 闪回修复 = off-band 保持推广双屏**:alt 的 off-band 队列
+   (`offscreen_decorations`,精确 `original_source` 相等才重锚)推广到 primary,仅
+   `resize_epoch.is_active()` 期间启用;`invalidate_all_live_decorations` 在窗口内改为
+   drain 进队列而非清除(守卫在函数内部,所有清除点全覆盖);`mark_pty_resize_requested_at`
+   末尾二次 retain+restore(vendor reconcile 在 resize_at 后 bump grid generation,不补
+   会差一代被 viewport 丢弃——第一版就栽在这);`finish_resize_if_quiescent` 清队列。
+   重排损毁的 opener(`# $$` 等)精确相等不中 → 正当回源重检测,非闪。resize-repro.vt 三个
+   快速拖拽帧公式保持渲染(此前整屏回源);144s+ 的 Source 帧核实为 resize 前(129s)即已
+   暴露的流内重印闪,非 resize 引起(见下方挂账)。钉死测试
+   `primary_resize_preserves_live_formula_as_stale_instead_of_flashing_to_source`(替换了
+   断言旧"resize 即全失效"行为的过时 M1.9e 测试)。
+3. `33fb866` **回看恢复跳动修复 = 状态驱动 frame hold**:`review_hold = primary ∧
+   resize epoch active ∧ displaced_review_rows.is_some()`(viewport 算,bt-app
+   `publish_frame_inner` 读到 hold 且有 last_presented_frame 就跳过 publish → 旧帧驻屏)。
+   进入/退出全由确定状态驱动:重锚复位、用户滚动/输入接管、resize 静止三者任一释放,无定时器。
+   **真 cls 天然区分**:用户 cls 不开 resize 事务 → hold 不启用,行为同 a66eb84。时序恰合:
+   重印在 vendor resize 事务内 staging、`finish_resize_if_quiescent` 收割处正是 bt-app
+   republish 处 → hold 跨 清史→重印→收割 全程,释放帧即复位帧,底部帧从未呈现。六条钉死测试
+   (viewport 状态机 2 + bt-term 真字节全程 3 + bt-app 呈现 1)。
+
+### 当前挂账(都不紧急)
+
+- **流内重印闪(非 resize)**:Codex 在流中途 `2J`/重印(resize-repro ~45.7s、codex-issues
+  ~225s 的 pmatrix 闪)会把 live 块全失效短暂回源。修法方向 = alt 的 clear+home repaint
+  snapshot 机制的 primary 版(比 resize 保持更大的独立项,002acc7 的保持窗口只覆盖 resize
+  epoch 内)。
+- **zoom(font_rev/dpi)后部分公式回源码**:根因与 resize 不同——`set_layout_key→
+  invalidate_layout` 不开 resize epoch,是检测竞态撞 M1.9p 首检(handoff「Codex 战线未闭环」
+  第 2 条)。需要独立的 layout 变更保持触发;headless 无 zoom 录制素材,需先录。
+- **zoom 后跳到底**:与上同区(bt-app zoom 路径未保持滚动锚)。
+- 若 resize epoch 在重印到达前先静止(Codex 实测不会,重印即时且撑住 epoch),hold 会释放到
+  空底——不劣于 a66eb84 且仍确定性;记录在案。
