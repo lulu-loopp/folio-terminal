@@ -25,5 +25,5 @@ pub use session::{
     DualPlaneSession, HeldUnbackedRecord, LIVE_MATH_READABLE_SCALE_MILLI,
     LIVE_MATH_STABLE_INTERVAL, LIVE_MIN_VISIBLE_TEXT_ROWS, MathLayoutOptions, ResizeTraceEvent,
     ResizeTraceKind, ResizeTraceRowOrigin, SPIKE_CELL_HEIGHT_SUBPIXELS, SessionError,
-    SessionMathTask, render_detection_task, render_live_detection_task,
+    SessionMathTask, decoration_state_label, render_detection_task, render_live_detection_task,
 };
