@@ -461,13 +461,22 @@ impl OwnershipRecorder {
                     RawFate::Rejected(reason) => TokenFate::Rejected(reason),
                     RawFate::Orphan(kind) => TokenFate::Orphan(kind),
                 };
-                // The scanner reads a clipped-open closer as a fresh opener, so the recorder filed
-                // it as a streaming tail or as the (rejected) opener of a spurious forward pair.
-                // Reclassify that exact delimiter as the clipped-open orphan so the containment gate
-                // sees the round-3 topology. Never overrides a genuinely owned block.
+                // The clip-aware scanner (batch 2) consumes a clipped-open closer as an above-window
+                // closer (`OpenerAboveWindow`), containing the round-3 topology: the grid re-pairs
+                // cleanly and no orphan spills. When it has done so, that fate is authoritative — keep
+                // it. This reclassification is only the defensive fallback for a path that computed
+                // `clipped_open_index` for the ledger but scanned WITHOUT the clip evidence (so the
+                // recorder filed the delimiter as a streaming tail or a spurious-forward-pair
+                // rejection): surface it as the clipped-open orphan so the containment gate still sees
+                // an unhandled round-3 clip. Never overrides a genuinely owned block, nor a contained
+                // above-window closer.
                 if clipped_open_index == Some(raw.logical_index)
                     && matches!(raw.kind, StructuralDelimiterKind::Dollars)
                     && !matches!(fate, TokenFate::Owned { .. })
+                    && !matches!(
+                        fate,
+                        TokenFate::Rejected(LegitimateRejection::OpenerAboveWindow)
+                    )
                 {
                     fate = TokenFate::Orphan(OrphanKind::ClippedOpen);
                 }

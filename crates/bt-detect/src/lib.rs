@@ -797,7 +797,7 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
     initial_context: DetectionContext,
     options: DetectionOptions,
 ) -> MathScanResult {
-    scan_math_blocks_impl(lines, initial_context, options, None, None)
+    scan_math_blocks_impl(lines, initial_context, options, None, None, None)
 }
 
 /// `live_grid_boundary` is the logical index of the first live-grid line when this scan spans a
@@ -816,6 +816,7 @@ fn scan_math_blocks_impl<'a>(
     initial_context: DetectionContext,
     options: DetectionOptions,
     live_grid_boundary: Option<usize>,
+    clipped_open_index: Option<u32>,
     mut recorder: Option<&mut OwnershipRecorder>,
 ) -> MathScanResult {
     let lines = lines.into_iter().collect::<Vec<_>>();
@@ -850,6 +851,33 @@ fn scan_math_blocks_impl<'a>(
             if let Some(rec) = recorder.as_deref_mut() {
                 record_code_context_delimiter(rec, index, text);
             }
+            continue;
+        }
+        // Row-0 clip resync (④ / evidence-driven ②). `clipped_open_index` is the decidable evidence
+        // that the live grid's row 0 is inside a display block whose opener scrolled above grid row 0
+        // (Codex's in-place scroll-region compression) and that the parser reached the frozen→live
+        // seam in the CLOSED phase — so this first grid `$$` is really that block's CLOSER, not a
+        // fresh opener. Reading it as an opener consumes it into a spurious forward pair and shifts
+        // every following grid `$$` by one, stranding the whole screen below (the round-3
+        // compress-rewrite topology). Consume it here as an above-window closer: a legitimate
+        // occlusion whose opener is off-screen-up and unrenderable in this window (never synthesized,
+        // never forced-closed globally, no source re-anchor — the M1.9p mirror of the `0848375`
+        // frozen→live bridge). The grid then re-pairs from a clean closed state and every block below
+        // — including one freshly streamed with no prior hold — is detected and rendered. Any active
+        // opening at this exact index is an upstream-poison phantom (the clip evidence proved the seam
+        // is closed); it is abandoned into the same account. This never fires for a pure-grid or
+        // frozen-only context, nor when the seam carries a genuine opener (`clipped_open_index` is
+        // then `None`), nor when grid row 0 is itself a valid opener.
+        if clipped_open_index == u32::try_from(index).ok() {
+            if let Some(rec) = recorder.as_deref_mut() {
+                rec.close_rejected(
+                    index,
+                    delimiter_start(text),
+                    StructuralDelimiterKind::Dollars,
+                    LegitimateRejection::OpenerAboveWindow,
+                );
+            }
+            opening = None;
             continue;
         }
         // Swallow-radius bound. A math *environment* body can never legally contain a `$$`/`\[`
@@ -1185,6 +1213,7 @@ fn grid_dollars_opens_valid_block(
         lines[index..].iter().copied(),
         DetectionContext::default(),
         options,
+        None,
         None,
         None,
     )
@@ -1590,8 +1619,17 @@ pub fn detect_live_math_blocks_in_context<'a>(
     initial_context: DetectionContext,
     options: DetectionOptions,
     live_grid_boundary: Option<usize>,
+    clipped_open_index: Option<u32>,
 ) -> Vec<DetectedMathBlock> {
-    scan_math_blocks_impl(lines, initial_context, options, live_grid_boundary, None).blocks
+    scan_math_blocks_impl(
+        lines,
+        initial_context,
+        options,
+        live_grid_boundary,
+        clipped_open_index,
+        None,
+    )
+    .blocks
 }
 
 /// Document-level detection red gate (the tool-gap the live-norender audit filed). Counts display
@@ -1609,11 +1647,13 @@ pub fn live_detection_isolation_gap(
 ) -> usize {
     let logical = live_logical_lines(inputs);
     let boundary = live_grid_boundary_index(&logical, inputs);
+    let clipped = clipped_open_index(&logical, boundary, &initial_context, options);
     let full = detect_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context,
         options,
         boundary,
+        clipped,
     );
     // A block the full context renders as a `0848375` frozen→live bridge carries its frozen opener
     // (and any leading body) as a PREFIX of its render source; the grid-only re-scan, lacking those
@@ -1680,6 +1720,7 @@ pub fn live_detection_ownership_ledger(
         initial_context,
         options,
         boundary,
+        clipped,
         Some(&mut recorder),
     );
     recorder.finish(boundary, source_of, clipped)
@@ -1810,11 +1851,18 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
         return false;
     };
     let live_grid_boundary = live_grid_boundary_index(&logical, &task.inputs);
+    let clipped = clipped_open_index(
+        &logical,
+        live_grid_boundary,
+        &task.initial_context,
+        task.options,
+    );
     let detected = detect_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         task.initial_context.clone(),
         task.options,
         live_grid_boundary,
+        clipped,
     )
     .into_iter()
     .find(|block| block.end == candidate_id);
@@ -1838,11 +1886,13 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
     let logical = live_logical_lines(&inputs);
     let row_to_logical = live_grid_logical_ids(&logical, &inputs);
     let live_grid_boundary = live_grid_boundary_index(&logical, &inputs);
+    let clipped = clipped_open_index(&logical, live_grid_boundary, &initial_context, options);
     let blocks = detect_live_math_blocks_in_context(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context.clone(),
         options,
         live_grid_boundary,
+        clipped,
     )
     .into_iter()
     .map(|block| (block.end, block))
@@ -3235,8 +3285,16 @@ abla f",
             grid(4, "$$"),
         ];
         let inputs = boundary_inputs(&rows);
+        let logical = live_logical_lines(&inputs);
+        let boundary = live_grid_boundary_index(&logical, &inputs);
+        let clipped = clipped_open_index(
+            &logical,
+            boundary,
+            &DetectionContext::default(),
+            DetectionOptions::default(),
+        );
         let blocks = detect_live_math_blocks_in_context(
-            live_logical_lines(&inputs)
+            logical
                 .iter()
                 .map(|line| (line.id, line.text.clone()))
                 .collect::<Vec<_>>()
@@ -3244,7 +3302,8 @@ abla f",
                 .map(|(id, text)| (*id, text.as_str())),
             DetectionContext::default(),
             DetectionOptions::default(),
-            live_grid_boundary_index(&live_logical_lines(&inputs), &inputs),
+            boundary,
+            clipped,
         );
         let ledger = live_detection_ownership_ledger(
             &inputs,
@@ -3363,60 +3422,74 @@ abla f",
         assert!(verdict.detected >= 2, "both clean blocks resolve");
     }
 
-    /// RED containment (the batch-2 baseline): the compress-rewrite / stream-mispair topology — grid
-    /// row 0 is inside a block body whose opener scrolled above it, and the scanner reaches the seam
-    /// in the closed phase, so the first grid `$$` (really a closer) is misread as a fresh opener.
-    /// That is a `ClippedOpen` orphan; hold-independent; reds the containment gate.
+    /// CONTAINED (batch 2, ④ + evidence-driven ②). This was the batch-2 baseline RED test
+    /// (`clipped_open_grid_is_an_unannotated_orphan_that_reds_containment`): the compress-rewrite /
+    /// round-3 topology — grid row 0 is inside a display block whose opener scrolled above it, and the
+    /// parser reaches the seam in the closed phase, so the first grid `$$` is really that block's
+    /// CLOSER. Batch 2 makes the clip-aware scanner consume it as a legitimate above-window closer
+    /// (occlusion; never a synthesized opener, never a global force-closed), so the grid re-pairs from
+    /// a clean closed state and every block BELOW the clip is detected and renders — the unit analogue
+    /// of `\zeta` recovering in compress-rewrite.vt. The former assertions (`clipped_open`, `orphans >=
+    /// 1`, `red`) encoded the pre-fix RED state this batch exists to flip; they are replaced, not
+    /// weakened, by the contained-state assertions below.
     #[test]
-    fn clipped_open_grid_is_an_unannotated_orphan_that_reds_containment() {
+    fn clipped_open_closer_is_contained_and_the_block_below_re_pairs() {
         let ledger = ledger_of(
             &[
                 hist(1, "intro paragraph text"),
                 grid(0, r"\int_{-\infty}^{\infty}"),
                 grid(1, "f(t)"),
-                grid(2, "$$"), // the clipped block's closer, misread as an opener
-                grid(3, "the quick brown fox jumps"),
-                grid(4, "$$"),
+                grid(2, "$$"), // clipped block's closer — consumed as an above-window closer
+                grid(3, "$$"), // a fresh block below the clip...
+                grid(4, r"\gamma = 2"),
+                grid(5, "$$"), // ...re-pairs cleanly and is detected
             ],
             DetectionContext::default(),
         );
         let verdict = ledger.containment(&[]);
         assert!(
-            verdict.clipped_open,
-            "the round-3 clip topology must be seen"
+            has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+            "the clipped closer is contained as an above-window closer"
         );
-        assert!(verdict.orphans >= 1, "an unannotated clipped-open orphan");
-        assert!(verdict.red, "containment reds on the spilled orphan");
+        assert_eq!(verdict.orphans, 0, "the clip does not spill an orphan");
+        assert!(
+            !verdict.red,
+            "a contained clip is not a containment failure"
+        );
+        assert!(
+            !verdict.clipped_open,
+            "no uncontained clipped-open orphan remains"
+        );
+        assert_eq!(
+            verdict.detected, 1,
+            "the block below the clip re-pairs and is detected"
+        );
     }
 
-    /// Containment isolation semantics. The SAME clipped-open orphan is tolerated once a
-    /// source-integrity annotation names its exact source row (known upstream damage, precisely
-    /// isolated → green), while an UNannotated orphan still reds. This is the two-layer gate: a
-    /// fixed recording with a documented upstream defect can go green; a new, spilled orphan cannot.
+    /// Containment isolation semantics on a GENUINE orphan (`UnbalancedResidue`). This replaces the
+    /// batch-2 baseline test (`source_integrity_annotation_isolates_known_damage_but_new_orphan_still
+    /// _reds`), whose clipped-open scenario no longer produces an orphan (it is contained above). The
+    /// two-layer gate still needs coverage against a real orphan, so it is exercised here on a lone
+    /// `$$` opener whose closer was replaced by a self-contained `$$…$$` on the next line — odd-parity
+    /// residue that is neither a clip, a bridge, nor a phantom. Unannotated it reds; an annotation
+    /// naming its exact row tolerates it (green); a mismatched annotation still reds.
     #[test]
-    fn source_integrity_annotation_isolates_known_damage_but_new_orphan_still_reds() {
+    fn source_integrity_annotation_isolates_a_genuine_unbalanced_residue_orphan() {
         let ledger = ledger_of(
-            &[
-                hist(1, "intro paragraph text"),
-                grid(0, r"\int_{-\infty}^{\infty}"),
-                grid(1, "f(t)"),
-                grid(2, "$$"),
-                grid(3, "the quick brown fox jumps"),
-                grid(4, "$$"),
-            ],
+            &[grid(0, "$$"), grid(1, "$$x = y$$")],
             DetectionContext::default(),
         );
-        // Unannotated: red.
-        assert!(ledger.containment(&[]).red);
-        // Annotate the exact orphan source row (grid row 2): tolerated, green.
+        let verdict = ledger.containment(&[]);
+        assert!(verdict.orphans >= 1, "a lone unpaired opener is an orphan");
+        assert!(verdict.red);
         let orphan_line = ledger
             .orphan_entries()
             .next()
             .and_then(|entry| entry.source_line)
-            .expect("clipped-open orphan carries a source row");
+            .expect("the residue orphan carries a source row");
         let annotated = ledger.containment(&[SourceIntegrityAnnotation {
             source_line: orphan_line,
-            note: "compression reflow ate the Fourier opener above grid row 0".to_owned(),
+            note: "upstream reflow dropped the closer".to_owned(),
         }]);
         assert_eq!(annotated.orphans, 0);
         assert_eq!(annotated.annotated_damage, 1);
@@ -3424,7 +3497,6 @@ abla f",
             !annotated.red,
             "precisely isolated upstream damage is not a failure"
         );
-        // A DIFFERENT annotation does not cover this orphan: still red.
         let mismatched = ledger.containment(&[SourceIntegrityAnnotation {
             source_line: MathSourceLine::LiveGrid(99),
             note: "unrelated".to_owned(),
@@ -3433,6 +3505,57 @@ abla f",
             mismatched.red,
             "an unannotated orphan is a containment failure"
         );
+    }
+
+    /// False-positive guard: a live grid whose row 0 is itself a valid `$$` opener is an ordinary grid
+    /// block, never a clip. `clipped_open_index` requires the first grid `$$` to be PRECEDED by grid
+    /// body rows (row 0 mid-body); a `$$` at row 0 fails that, so the clip branch stays inert and the
+    /// block is detected normally — no spurious above-window closer.
+    #[test]
+    fn grid_opener_at_row_zero_is_not_a_clip() {
+        let ledger = ledger_of(
+            &[
+                hist(1, "some neutral prose line"),
+                grid(0, "$$"),
+                grid(1, r"\gamma = 2"),
+                grid(2, "$$"),
+            ],
+            DetectionContext::default(),
+        );
+        let verdict = ledger.containment(&[]);
+        assert_eq!(verdict.detected, 1, "an ordinary grid block is detected");
+        assert!(!verdict.clipped_open);
+        assert_eq!(verdict.orphans, 0);
+        assert!(
+            !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+            "a row-0 opener must not be read as an above-window closer"
+        );
+    }
+
+    /// False-positive guard (M1.9k prose red line): grid row 0 that is natural-language PROSE is not a
+    /// clipped math body, so the first grid `$$` below it is NOT consumed as an above-window closer.
+    /// The clip predicate requires the pre-`$$` grid rows to be a valid display body; prose fails it,
+    /// the clip stays inert, and no prose is typeset as a clipped block.
+    #[test]
+    fn prose_grid_row_zero_is_not_a_clipped_body() {
+        let ledger = ledger_of(
+            &[
+                hist(1, "intro paragraph text"),
+                grid(0, "the quick brown fox jumps over"),
+                grid(1, "$$"),
+            ],
+            DetectionContext::default(),
+        );
+        assert!(
+            !has_reason(&ledger, LegitimateRejection::OpenerAboveWindow),
+            "prose row 0 must not turn the `$$` into a clip closer"
+        );
+        assert!(has_reason(
+            &ledger,
+            LegitimateRejection::StreamingUnclosedTail
+        ));
+        assert!(!ledger.containment(&[]).clipped_open);
+        assert_eq!(ledger.containment(&[]).orphans, 0);
     }
 
     /// A determinant identity line `=ad-bc` is display math, not prose: the earlier prose heuristic
@@ -3481,6 +3604,7 @@ abla f",
             DetectionContext::default(),
             DetectionOptions::default(),
             Some(7),
+            None,
         );
         assert!(
             blocks
