@@ -220,6 +220,22 @@ _最后更新:2026-07-24,HEAD `33fb866`_
   修=frozen→live 边界重同步:frozen 前缀的悬空 Dollars 开符,拼合 body 过 `valid_display_body`
   才算真桥,否则废弃、网格重新配对。**oracle 新红门 `isolation_gap`**(孤立可证但缺席检测,
   `ISOLATION_GAP final/max`)。live-norender 0/5→5/5。
+  **架构重构三批(2026-07-25,审因×3+Codex 复核定稿后实施)**:
+  - `85776a7` 定稿文档:第三轮审因(全局 toggle 对无界单符损伤结构性不稳)+ Codex 复核
+    (认证检查点+归属账本、红门拆分、顺序⑥→①④②→③)。注意 codex-review 文件是 wrapper
+    合流输出(含 shell 转写),评审正文在文件后段。
+  - `54c8d55` **批⑥ 归属账本+红门拆分**:每个结构定界符在扫描器真实判定点记归属
+    (Owned/合法拒绝枚举/Orphan),recorder 以 Option 穿线、产品调用 no-op(账本不可能偏离
+    检测,有钉死)。oracle 红门拆两层:`BT_PROBE_ANNOTATIONS` 精确标注上游字节损伤(报告不红)
+    + `BT_PROBE_OWNERSHIP` 终态未标注 orphan 硬红。18 回放逐字节零行为变更。
+  - `8e62e4c` **批④② 剪切证据收容**:缝口相位可证 closed+网格首 `$$` 前为合法数学体+其间无
+    开符 → 该 `$$` 按 above-window closer 收容(0848375 桥的镜像,不合成开符不强制相位),
+    下游干净重配对。compress-rewrite 红门转绿(detected 7→10,滞留 `\zeta` 渲染)。
+    ①认证检查点播种按证据划阶挂账(语料上收容已全绿,①余值=窗口性能+更远毒源加固)。
+  - `e50a455` **批③ HeldUnbacked 诚实**:resident 带栅记录若当前扫描不再 own 其源码 →
+    上报 `held_unbacked`(帧字段+终态摘要+明细),显示行为逐字节不变;`BT_PROBE_HELD_UNBACKED`
+    终态未标注硬红,瞬态只作信号。compress-rewrite 终态 1 例=合法长存(Fourier 开符出窗,
+    M1.9p 正当不可重导出,pre-clip hold 撑显示),标注即绿。off-band 队列有意不计(从不上屏)。
   **`3875209` 收敛性修正(3da6d64 首版回归,审修 stream-mispair.vt)**:废弃判定曾不收敛——
   `=ad-bc` 被旧散文启发按 `-` 切成两"词"→跨界真块 body 误判散文→真开符被废→下方整屏 `$$`
   错一位卡死(环境抢跑渲染+裸 `$$`+半行残片三形态同根)。修:①废弃仅当"网格 `$$` 当新开符
