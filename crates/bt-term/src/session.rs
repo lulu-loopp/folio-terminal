@@ -462,6 +462,16 @@ pub struct DualPlaneSession {
     view_generation: ViewGeneration,
     grid_generation: GridGeneration,
     stale_results: usize,
+    /// Frozen candidates whose in-flight scan was dropped (`block_is_current == false`) while the
+    /// record was still the exact attempt we scheduled (`Frozen + Pending`, versions unchanged).
+    /// The scheduler keeps no in-flight/retry record once `take` hands a task out, and
+    /// `schedule_scan` no-ops on any non-`None` decoration, so such a drop would strand the block
+    /// at source forever (only a width resize's layout bump rescues it). Re-arming is DEFERRED to a
+    /// quiescent checkpoint (`rearm_stranded_pending`) rather than done at the drop site, so the
+    /// per-frame visible scheduler never chases a still-reflowing/reprinting source into a
+    /// reschedule storm. The value is the stranded attempt's `VersionStamp`, so a re-arm re-opens
+    /// only that exact attempt and never cancels a newer scan the record moved on to. Empty at rest.
+    stranded_pending: BTreeMap<TranscriptId, VersionStamp>,
     primary_parked: bool,
     cell_height_subpixels: NonZeroI64,
     cell_width_subpixels: NonZeroI64,
@@ -593,6 +603,7 @@ impl DualPlaneSession {
             view_generation: ViewGeneration(1),
             grid_generation: GridGeneration(1),
             stale_results: 0,
+            stranded_pending: BTreeMap::new(),
             primary_parked: false,
             cell_height_subpixels,
             cell_width_subpixels: NonZeroI64::new(9 * SUBPIXELS_PER_PX).unwrap(),
@@ -2083,9 +2094,12 @@ impl DualPlaneSession {
             return self.complete_worker_result(task, Err(MathRenderError::NotDetected));
         }
         let placeholder = bt_detect::render_placeholder(&task);
+        let candidate_id = task.candidate_id;
+        let versions = task.versions;
         let accepted = self.apply_worker_completion(task, Some(placeholder), None);
         if !accepted {
             self.stale_results += 1;
+            self.account_stranded_pending(candidate_id, versions);
         }
         accepted
     }
@@ -2106,6 +2120,7 @@ impl DualPlaneSession {
         let accepted = self.apply_worker_completion(task.clone(), artifact, failure_reason);
         if !accepted {
             self.stale_results += 1;
+            self.account_stranded_pending(task.candidate_id, task.versions);
         } else if std::env::var_os("BT_PERF_TRACE").is_some() {
             if let Some(elapsed) = render_time {
                 eprintln!(
@@ -2397,6 +2412,60 @@ impl DualPlaneSession {
             })
     }
 
+    /// Record a dropped worker completion whose candidate is still the exact attempt we scheduled
+    /// (`Frozen + Pending` at the same versions) as stranded. This is the only path that leaves a
+    /// candidate frozen at `Pending`: `apply_worker_completion` returns `false` at the
+    /// `block_is_current` check without touching the record, when a multi-line block's scan is in
+    /// flight and one of its *non-candidate* input lines changed or was evicted (a scrollback quota
+    /// eviction while scrolling, or a transient ED3/reprint rewrite). The candidate's own line is
+    /// unchanged, so the version gate never self-heals it. We do not re-arm here — re-arming at the
+    /// drop site is what turned the original fix into a regression: the per-frame visible scheduler
+    /// re-issues any `None` frozen candidate, so an immediate `Pending -> None` here would, whenever
+    /// the source is still in motion (resize reflow / reprint), be re-scheduled next frame, dropped
+    /// again mid-motion, and re-armed again — a reschedule storm that re-runs block detection over
+    /// the whole range every frame and tears neighbouring bands. Instead we only remember the id and
+    /// flip it to `None` once the source is quiescent (`rearm_stranded_pending`).
+    fn account_stranded_pending(&mut self, candidate_id: TranscriptId, versions: VersionStamp) {
+        if let Some(record) = self.decorations.get(&candidate_id)
+            && record.source == SourceLifecycle::Frozen
+            && record.decoration == DecorationLifecycle::Pending
+            && record.versions == versions
+        {
+            self.stranded_pending.insert(candidate_id, versions);
+        }
+    }
+
+    /// Re-arm stranded frozen candidates for re-scheduling, but only once the source is quiescent so
+    /// the re-issue cannot chase a still-changing block. `schedule_visible_artifacts` (our only
+    /// caller) already guarantees the resize epoch is idle; here we additionally require no active
+    /// reprint window, no buffering synchronized update, and no active staging tail — the same
+    /// conditions under which a fresh scan sees a settled source. Each stranded id is flipped
+    /// `Pending -> None` exactly once (the set is consumed); the surrounding scheduler then issues a
+    /// single fresh scan against current source. If that scan is itself dropped because new output
+    /// has since changed the block, `account_stranded_pending` re-records it and it waits for the
+    /// next quiescent frame — never a per-frame loop, because a drop requires a resolved block whose
+    /// source moved after the scan was scheduled, which cannot happen while output is quiet. A block
+    /// whose opener truly evicted re-issues as a lone closer, fails detection, and settles `Failed`
+    /// (terminal) — the stuck-`Pending` liveness hole is closed without ever re-rendering wrong math.
+    fn rearm_stranded_pending(&mut self) {
+        if self.stranded_pending.is_empty()
+            || self.primary_repaint_in_progress
+            || self.active_staging_tail.is_some()
+            || self.synchronized_update_deadline().is_some()
+        {
+            return;
+        }
+        for (id, versions) in std::mem::take(&mut self.stranded_pending) {
+            if let Some(record) = self.decorations.get_mut(&id)
+                && record.source == SourceLifecycle::Frozen
+                && record.decoration == DecorationLifecycle::Pending
+                && record.versions == versions
+            {
+                record.decoration = DecorationLifecycle::None;
+            }
+        }
+    }
+
     pub fn math_resident_bytes(&self) -> usize {
         let frozen = self
             .decorations
@@ -2506,6 +2575,10 @@ impl DualPlaneSession {
         if self.primary_parked || !self.resize_epoch.decorations_allowed() {
             return 0;
         }
+        // Deferred re-arm of blocks stranded at `Pending` by a dropped completion. The resize epoch
+        // is idle here (guard above); `rearm_stranded_pending` adds the remaining quiescence
+        // requirements before flipping any candidate back to `None` for the scan loop below.
+        self.rearm_stranded_pending();
         let columns = frame.columns.get() as usize;
         if columns == 0 {
             return 0;
@@ -9749,6 +9822,137 @@ mod tests {
         assert!(
             !projection.review_hold(),
             "a user clear opens no resize transaction, so presentation shows the empty bottom"
+        );
+    }
+
+    /// Strand a multi-line block's frozen closer at `Pending` by dropping its in-flight scan: the
+    /// closer's scan spans the whole block, but the opener (a non-candidate input line) is evicted
+    /// from history while the scan is in flight, so the delivered result fails `block_is_current`
+    /// and is dropped. Returns the session (with the closer recorded as stranded) and the closer id.
+    fn strand_frozen_closer_pending() -> (DualPlaneSession, TranscriptId) {
+        let mut session =
+            DualPlaneSession::with_frozen_quota(nz(40), nz(2), NonZeroUsize::new(8).unwrap());
+        session
+            .feed(b"\\begin{align}\r\nx &= y\r\n\\end{align}\r\nafter\r\nmore\r\n")
+            .unwrap();
+
+        let opener = *session
+            .document()
+            .entries()
+            .iter()
+            .find(|(_, entry)| entry.line.text.contains("\\begin{"))
+            .map(|(id, _)| id)
+            .expect("frozen opener");
+        let closer = *session
+            .document()
+            .entries()
+            .iter()
+            .find(|(_, entry)| entry.line.text.contains("\\end{"))
+            .map(|(id, _)| id)
+            .expect("frozen closer");
+
+        // Hold the closer's multi-line scan (the task whose inputs span the whole block).
+        let mut held = None;
+        while let Some(task) = session.take_worker_task() {
+            if task.candidate_id == closer && task.inputs.iter().any(|input| input.id == opener) {
+                held = Some(task);
+                break;
+            }
+        }
+        let task = held.expect("closer scan spanning the block");
+        assert_eq!(
+            session.decoration(closer).map(|record| record.decoration),
+            Some(DecorationLifecycle::Pending),
+            "closer is the in-flight scan candidate",
+        );
+
+        // Evict the opener from history while the scan is in flight, keeping the closer resident.
+        let mut guard = 0;
+        while session.document().entries().contains_key(&opener) {
+            session.feed(b"filler\r\n").unwrap();
+            guard += 1;
+            assert!(guard < 256, "opener never evicted");
+            assert!(
+                session.document().entries().contains_key(&closer),
+                "closer evicted before opener; tighten the corpus",
+            );
+        }
+
+        // Deliver the now-stale result. `block_is_current` fails on the missing opener, so the
+        // completion is correctly not accepted (the stale raster must never land).
+        assert!(
+            !session.complete_worker_task(task),
+            "a result whose block lost a source line must not be accepted",
+        );
+        (session, closer)
+    }
+
+    #[test]
+    fn dropped_multiline_completion_defers_rearm_then_recovers_at_quiescence() {
+        // The liveness hole: a dropped completion left the closer frozen at `Pending` forever
+        // (`schedule_scan` no-ops on any non-`None` decoration), showing raw source until a width
+        // resize's layout bump — the reported "scrolling never rescues it, resizing does". The
+        // correct fix records the strand and flips it to `None` only at a quiescent frame, so the
+        // block re-enters scheduling from current source. It must NOT re-arm at the drop site (that
+        // is what let the reopen fix storm a still-moving source).
+        let (mut session, closer) = strand_frozen_closer_pending();
+
+        // Deferred, not reopened at the drop site.
+        assert_eq!(
+            session.decoration(closer).map(|record| record.decoration),
+            Some(DecorationLifecycle::Pending),
+            "a dropped completion must be remembered, not re-armed at the drop site",
+        );
+        assert!(
+            session.stranded_pending.contains_key(&closer),
+            "the stranded closer must be recorded for a deferred re-arm",
+        );
+
+        // A quiescent re-arm reopens it for re-scheduling exactly once. RED before the fix: the
+        // closer stays `Pending` and is never re-issued.
+        session.rearm_stranded_pending();
+        assert_eq!(
+            session.decoration(closer).map(|record| record.decoration),
+            Some(DecorationLifecycle::None),
+            "at quiescence a stranded closer must reopen for re-scheduling, not freeze at source",
+        );
+        assert!(
+            session.stranded_pending.is_empty(),
+            "the re-arm consumes the strand; a fresh drop would re-record it",
+        );
+    }
+
+    #[test]
+    fn stranded_rearm_is_suppressed_while_the_source_is_in_motion() {
+        // The churn guard. Re-arming a stranded `Pending` candidate while the source is still
+        // reflowing/reprinting lets the per-frame visible scheduler re-issue it, drop it again
+        // mid-motion, and re-arm again — a reschedule storm that re-runs block detection over the
+        // whole range every frame and tears neighbouring bands (the reopen regression). The re-arm
+        // must be gated on quiescence.
+        let (mut session, closer) = strand_frozen_closer_pending();
+        assert!(session.stranded_pending.contains_key(&closer));
+
+        // A primary reprint window is open: re-arm is a no-op, so no fresh scan is issued into the
+        // moving source and the strand is retained for later.
+        session.primary_repaint_in_progress = true;
+        session.rearm_stranded_pending();
+        assert_eq!(
+            session.decoration(closer).map(|record| record.decoration),
+            Some(DecorationLifecycle::Pending),
+            "re-arm must not fire while a reprint window is open",
+        );
+        assert!(
+            session.stranded_pending.contains_key(&closer),
+            "the strand must be retained until the source is quiescent",
+        );
+
+        // Once the window closes, the same re-arm proceeds.
+        session.primary_repaint_in_progress = false;
+        session.rearm_stranded_pending();
+        assert_eq!(
+            session.decoration(closer).map(|record| record.decoration),
+            Some(DecorationLifecycle::None),
+            "re-arm proceeds once the reprint window closes",
         );
     }
 }
