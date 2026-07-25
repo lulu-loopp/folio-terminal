@@ -1226,6 +1226,21 @@ impl DualPlaneSession {
         bt_detect::live_detection_isolation_gap(&inputs, initial_context, self.detection_options())
     }
 
+    /// Batch ⑥ token-ownership ledger for the current live region: every structural `$$`/`\[`/`\]`/
+    /// environment delimiter accounted as owned by a detected block, one of the enumerated legitimate
+    /// rejections, or an orphan. Feeds the split source-integrity / detector-containment red gate.
+    /// Read-only instrumentation over the exact detection the session already runs; it never mutates
+    /// detection or presentation.
+    pub fn live_detection_ownership_ledger(&self) -> bt_detect::OwnershipLedger {
+        let inputs = self.live_detection_context();
+        let initial_context = self.live_initial_detection_context(&inputs);
+        bt_detect::live_detection_ownership_ledger(
+            &inputs,
+            initial_context,
+            self.detection_options(),
+        )
+    }
+
     fn begin_alternate_repaint(&self, bytes: &[u8]) -> Option<AlternateRepaintSnapshot> {
         let snapshot_boundary = contains_clear_home_snapshot_boundary(bytes);
         snapshot_boundary

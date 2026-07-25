@@ -52,6 +52,14 @@ struct HeadlessOracle {
     /// Peak document-level detection gap seen across the run: on-screen blocks provable by a clean
     /// grid-only re-scan but absent from the full history+grid detection. See the summary line.
     max_isolation_gap: usize,
+    /// Batch ⑥ detector-containment. Peak count of UNANNOTATED ownership orphans seen across the
+    /// run, whether the clipped-open topology ever appeared, and the recording's source-integrity
+    /// annotations (known upstream byte damage, precisely isolated so it does not red the gate).
+    /// Only tracked per-frame when `BT_PROBE_OWNERSHIP` is set; the final-state verdict is always
+    /// computed. See `OWNERSHIP_LEDGER`.
+    max_orphans: usize,
+    ever_clipped_open: bool,
+    annotations: Vec<bt_detect::SourceIntegrityAnnotation>,
 }
 
 impl HeadlessOracle {
@@ -73,6 +81,9 @@ impl HeadlessOracle {
             math_latency,
             deferred: Vec::new(),
             max_isolation_gap: 0,
+            max_orphans: 0,
+            ever_clipped_open: false,
+            annotations: Vec::new(),
         }
     }
 
@@ -249,6 +260,17 @@ impl HeadlessOracle {
         let flash_detected = self.flash_oracle.flash_detected();
         let isolation_gap = self.session.live_detection_isolation_gap();
         self.max_isolation_gap = self.max_isolation_gap.max(isolation_gap);
+        // Per-frame detector-containment (batch ⑥). Opt-in: the ledger re-runs the scan, so track it
+        // per frame only under BT_PROBE_OWNERSHIP; the final-state verdict is always computed below.
+        // Hold-independent — a masked-by-holds strand still surfaces as an orphan here.
+        if env::var_os("BT_PROBE_OWNERSHIP").is_some() {
+            let verdict = self
+                .session
+                .live_detection_ownership_ledger()
+                .containment(&self.annotations);
+            self.max_orphans = self.max_orphans.max(verdict.orphans);
+            self.ever_clipped_open |= verdict.clipped_open;
+        }
         // `source_plane` retains the delimiter-free body rows a multi-line block drops from
         // `source_rows`, so trace_blocks.py can count a split-body revert as a real R->S flip.
         // `isolation_gap` is the document-level detection red gate: on-screen blocks provable by a
@@ -490,6 +512,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let rows = env_dimension("BT_PROBE_ROWS", 40)?;
     let started = Instant::now();
     let mut oracle = HeadlessOracle::new(columns, rows, started);
+    // Optional source-integrity annotations (batch ⑥ layer 1): a sidecar naming known upstream
+    // byte-damaged source rows so the containment gate tolerates exactly those orphans. Absent =
+    // no annotations (every orphan reds). One record per line: `history <id> <note>` or
+    // `grid <row> <note>`; `#` comments and blank lines ignored.
+    if let Some(path) = env::var_os("BT_PROBE_ANNOTATIONS") {
+        oracle.annotations = load_source_integrity_annotations(Path::new(&path))?;
+    }
     let delayed = oracle.math_latency.is_some();
     let mut final_elapsed = Duration::ZERO;
 
@@ -578,6 +607,53 @@ fn main() -> Result<(), Box<dyn Error>> {
         oracle.max_isolation_gap
     );
 
+    // Batch ⑥ split red gate. The ownership ledger accounts every structural delimiter as owned by a
+    // detected block, a legitimate rejection, or an orphan (hold-independent). The two layers:
+    //   * source-integrity — known upstream byte damage, annotated per recording, reported not red;
+    //   * detector-containment — any UNANNOTATED orphan is a containment failure and reds the exit.
+    let final_ledger = oracle.session.live_detection_ownership_ledger();
+    let verdict = final_ledger.containment(&oracle.annotations);
+    eprintln!(
+        "OWNERSHIP_LEDGER detected={} rejections={} orphans={} annotated={} clipped_open={} max_orphans={} ever_clipped_open={}",
+        verdict.detected,
+        verdict.legitimate_rejections,
+        verdict.orphans,
+        verdict.annotated_damage,
+        verdict.clipped_open,
+        oracle.max_orphans,
+        oracle.ever_clipped_open,
+    );
+    for entry in final_ledger.orphan_entries() {
+        let annotated = entry.source_line.is_some_and(|line| {
+            oracle
+                .annotations
+                .iter()
+                .any(|annotation| annotation.source_line == line)
+        });
+        eprintln!(
+            "  ORPHAN kind={:?} source_line={:?} logical_index={} dependency=[{},{}] annotated={annotated}",
+            entry.fate,
+            entry.source_line,
+            entry.logical_index,
+            entry.dependency_start,
+            entry.dependency_end,
+        );
+    }
+    for annotation in &oracle.annotations {
+        eprintln!(
+            "  SOURCE_INTEGRITY source_line={:?} note={:?}",
+            annotation.source_line, annotation.note
+        );
+    }
+    if env::var_os("BT_PROBE_OWNERSHIP_DUMP").is_some() {
+        for entry in &final_ledger.entries {
+            eprintln!(
+                "  LEDGER li={} kind={:?} fate={:?} source_line={:?}",
+                entry.logical_index, entry.kind, entry.fate, entry.source_line
+            );
+        }
+    }
+
     if oracle.flash_oracle.flash_detected() {
         return Err(io::Error::other(format!(
             "formula repaint flash detected for {:?}",
@@ -585,7 +661,56 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
+
+    // Enforce the detector-containment gate as a real exit criterion (opt-in so it never surprises an
+    // unrelated regression run, and so the batch-2 baseline recordings can be driven explicitly). The
+    // hard gate is the FINAL-state verdict: a hold-independent unannotated orphan that persists to
+    // quiescence is a genuine strand. A transient mid-stream orphan (a block whose opener is on the
+    // grid before its body and closer have streamed in) is legitimate and resolves, so `max_orphans`
+    // is a reported diagnostic, not a gate — reddening it would false-fail a healthy streaming run.
+    if env::var_os("BT_PROBE_OWNERSHIP").is_some() && verdict.red {
+        return Err(io::Error::other(format!(
+            "detector-containment failure: {} unannotated orphan(s) stranded at final state (clipped_open={})",
+            verdict.orphans, verdict.clipped_open
+        ))
+        .into());
+    }
     Ok(())
+}
+
+/// Parse a source-integrity annotation sidecar. Each non-comment line is `history <id> <note>` or
+/// `grid <row> <note>`, naming a reconstructed source row known to carry (or to be missing) an
+/// upstream-damaged delimiter. These are documentation of layer-1 damage; the containment gate
+/// tolerates an orphan only when its exact source row is named here.
+fn load_source_integrity_annotations(
+    path: &Path,
+) -> Result<Vec<bt_detect::SourceIntegrityAnnotation>, Box<dyn Error>> {
+    let text = fs::read_to_string(path)?;
+    let mut annotations = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(3, char::is_whitespace);
+        let kind = parts.next().unwrap_or_default();
+        let number = parts.next().unwrap_or_default();
+        let note = parts.next().unwrap_or_default().to_owned();
+        let source_line = match kind {
+            "history" => {
+                bt_detect::MathSourceLine::Transcript(bt_transcript::TranscriptId(number.parse()?))
+            }
+            "grid" => bt_detect::MathSourceLine::LiveGrid(number.parse()?),
+            other => {
+                return Err(io::Error::other(format!(
+                    "unknown annotation kind {other:?} (expected `history` or `grid`)"
+                ))
+                .into());
+            }
+        };
+        annotations.push(bt_detect::SourceIntegrityAnnotation { source_line, note });
+    }
+    Ok(annotations)
 }
 
 fn parse_chunks<'a>(

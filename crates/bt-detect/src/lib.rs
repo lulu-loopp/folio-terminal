@@ -1,5 +1,12 @@
 //! Conservative block-level `$$...$$` detection and the dual lifecycle/version gate.
 
+mod ledger;
+pub use ledger::{
+    ContainmentVerdict, LedgerEntry, LegitimateRejection, OrphanKind, OwnershipLedger,
+    SourceIntegrityAnnotation, StructuralDelimiterKind, TokenFate,
+};
+use ledger::{OwnershipRecorder, source_line_of, structural_kind};
+
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use bt_doc::{DecorationIntent, HistoryDocument};
@@ -790,7 +797,7 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
     initial_context: DetectionContext,
     options: DetectionOptions,
 ) -> MathScanResult {
-    scan_math_blocks_impl(lines, initial_context, options, None)
+    scan_math_blocks_impl(lines, initial_context, options, None, None)
 }
 
 /// `live_grid_boundary` is the logical index of the first live-grid line when this scan spans a
@@ -809,6 +816,7 @@ fn scan_math_blocks_impl<'a>(
     initial_context: DetectionContext,
     options: DetectionOptions,
     live_grid_boundary: Option<usize>,
+    mut recorder: Option<&mut OwnershipRecorder>,
 ) -> MathScanResult {
     let lines = lines.into_iter().collect::<Vec<_>>();
     let mut result = MathScanResult::default();
@@ -818,6 +826,11 @@ fn scan_math_blocks_impl<'a>(
         delimiter,
         body_start: 0,
     });
+    if opening.is_some()
+        && let Some(rec) = recorder.as_deref_mut()
+    {
+        rec.seed_carried_opening();
+    }
     for (index, (_, text)) in lines.iter().enumerate() {
         if opening.is_none() && commonmark_indented_code(text) {
             continue;
@@ -834,6 +847,9 @@ fn scan_math_blocks_impl<'a>(
             continue;
         }
         if fence.is_some() {
+            if let Some(rec) = recorder.as_deref_mut() {
+                record_code_context_delimiter(rec, index, text);
+            }
             continue;
         }
         // Swallow-radius bound. A math *environment* body can never legally contain a `$$`/`\[`
@@ -856,6 +872,9 @@ fn scan_math_blocks_impl<'a>(
             })
         {
             opening = None;
+            if let Some(rec) = recorder.as_deref_mut() {
+                rec.abandon_pending(LegitimateRejection::EnvironmentSwallowAbandoned);
+            }
         }
         // Frozen→live `$$` boundary resync. A Dollars opening whose opener lies in the frozen
         // prefix (or before the scanned window entirely) meeting its candidate closer on a
@@ -903,6 +922,9 @@ fn scan_math_blocks_impl<'a>(
             };
             if abandon_stale_dollars {
                 opening = None;
+                if let Some(rec) = recorder.as_deref_mut() {
+                    rec.abandon_pending(LegitimateRejection::PhantomOpenerAbandoned);
+                }
             }
         }
         if opening
@@ -917,7 +939,21 @@ fn scan_math_blocks_impl<'a>(
             opening = None;
             let body = &text[body_start..body_end];
             let original = &text[open_start..close_end];
-            if valid_display_body(body, body, options) {
+            let valid = valid_display_body(body, body, options);
+            if let Some(rec) = recorder.as_deref_mut() {
+                // The pending opener loses its closer to this self-contained block: it is genuinely
+                // unpaired (an odd-parity residue), not a legitimate rejection.
+                rec.orphan_pending();
+                rec.self_contained(
+                    index,
+                    open_start,
+                    body_end,
+                    StructuralDelimiterKind::Dollars,
+                    StructuralDelimiterKind::Dollars,
+                    valid,
+                );
+            }
+            if valid {
                 let id = lines[index].0;
                 result.blocks.push(DetectedMathBlock {
                     start: id,
@@ -949,7 +985,18 @@ fn scan_math_blocks_impl<'a>(
             } else {
                 body
             };
-            if !valid_display_body(body, render, options) {
+            let valid = valid_display_body(body, render, options);
+            if let Some(rec) = recorder.as_deref_mut() {
+                rec.self_contained(
+                    index,
+                    open_start,
+                    body_end,
+                    structural_kind(&delimiter, true),
+                    structural_kind(&delimiter, false),
+                    valid,
+                );
+            }
+            if !valid {
                 continue;
             }
             let id = lines[index].0;
@@ -986,9 +1033,18 @@ fn scan_math_blocks_impl<'a>(
             && let Some((body_end, close_end)) = closing_delimiter(text, &active.delimiter)
         {
             let active = opening.take().expect("active opening was just observed");
+            let closer_kind = structural_kind(&active.delimiter, false);
             let Some(start_index) = active.start_index else {
                 // The opener is before this bounded window. Its exact state proves that this is a
                 // closer, but the missing source means there is no occurrence to render.
+                if let Some(rec) = recorder.as_deref_mut() {
+                    rec.close_rejected(
+                        index,
+                        body_end,
+                        closer_kind,
+                        LegitimateRejection::OpenerAboveWindow,
+                    );
+                }
                 continue;
             };
             let body = joined_range(&lines, start_index, index, active.body_start, body_end);
@@ -1009,7 +1065,20 @@ fn scan_math_blocks_impl<'a>(
                     options.restore_stripped_environment_newlines,
                 ),
             };
-            if !valid_display_body(&body, &render, options) {
+            let valid = valid_display_body(&body, &render, options);
+            if let Some(rec) = recorder.as_deref_mut() {
+                if valid {
+                    rec.close_owned(index, body_end, closer_kind, start_index, index);
+                } else {
+                    rec.close_rejected(
+                        index,
+                        body_end,
+                        closer_kind,
+                        LegitimateRejection::GuardRejectedBody,
+                    );
+                }
+            }
+            if !valid {
                 continue;
             }
             result.blocks.push(DetectedMathBlock {
@@ -1038,15 +1107,27 @@ fn scan_math_blocks_impl<'a>(
         let Some((delimiter, body_start)) = opening_delimiter(text) else {
             continue;
         };
+        let open_byte = delimiter_start(text);
         if delimiter == DisplayDelimiter::Dollars
             && initial_context.prefix == PrefixKnowledge::Ambiguous
         {
+            if let Some(rec) = recorder.as_deref_mut() {
+                rec.reject_single(
+                    index,
+                    open_byte,
+                    StructuralDelimiterKind::Dollars,
+                    LegitimateRejection::AmbiguousPrefixSuppressed,
+                );
+            }
             result.ambiguous.push(AmbiguousMathBlock {
                 start: lines[index].0,
                 end: lines[index].0,
                 delimiter_kind: delimiter,
             });
             continue;
+        }
+        if let Some(rec) = recorder.as_deref_mut() {
+            rec.open(index, open_byte, structural_kind(&delimiter, true));
         }
         opening = Some(ActiveOpening {
             start_index: Some(index),
@@ -1055,6 +1136,35 @@ fn scan_math_blocks_impl<'a>(
         });
     }
     result
+}
+
+/// Record a structural display delimiter that appears inside a CommonMark fenced code context as a
+/// legitimate code-context rejection. Only the leading owns-the-line form is recognised (`$$`,
+/// `\[`, `\]`); inline `$…$` inside code is never structural. Best-effort: unrecorded code-context
+/// delimiters are inert and never affect the containment verdict.
+fn record_code_context_delimiter(recorder: &mut OwnershipRecorder, index: usize, text: &str) {
+    let trimmed = text.trim_start_matches(' ');
+    let (kind, byte) = if trimmed.starts_with("$$") {
+        (StructuralDelimiterKind::Dollars, text.len() - trimmed.len())
+    } else if trimmed.starts_with(r"\[") {
+        (
+            StructuralDelimiterKind::BracketOpen,
+            text.len() - trimmed.len(),
+        )
+    } else if trimmed.trim_end().ends_with(r"\]") {
+        (
+            StructuralDelimiterKind::BracketClose,
+            text.trim_end().len() - 2,
+        )
+    } else {
+        return;
+    };
+    recorder.reject_single(
+        index,
+        byte,
+        kind,
+        LegitimateRejection::CommonMarkCodeContext,
+    );
 }
 
 /// True when the grid `$$` at `index`, re-interpreted as a fresh display opener, pairs forward into
@@ -1075,6 +1185,7 @@ fn grid_dollars_opens_valid_block(
         lines[index..].iter().copied(),
         DetectionContext::default(),
         options,
+        None,
         None,
     )
     .blocks
@@ -1480,7 +1591,7 @@ pub fn detect_live_math_blocks_in_context<'a>(
     options: DetectionOptions,
     live_grid_boundary: Option<usize>,
 ) -> Vec<DetectedMathBlock> {
-    scan_math_blocks_impl(lines, initial_context, options, live_grid_boundary).blocks
+    scan_math_blocks_impl(lines, initial_context, options, live_grid_boundary, None).blocks
 }
 
 /// Document-level detection red gate (the tool-gap the live-norender audit filed). Counts display
@@ -1536,6 +1647,90 @@ pub fn live_detection_isolation_gap(
             !full_sources.iter().any(|full| full.ends_with(grid_source))
         })
         .count()
+}
+
+/// Build the token-ownership ledger for one reconstructed live region (frozen prefix + live grid).
+/// This re-runs the authoritative `scan_math_blocks_impl` with the recorder attached — the same
+/// control flow the product uses with `None` — so every fate is the one the real detector assigned,
+/// never a second heuristic. The result feeds the split source-integrity / detector-containment red
+/// gate (batch ⑥) and, via its lineage and dependency-interval fields, the certified-checkpoint work
+/// of batch 2.
+pub fn live_detection_ownership_ledger(
+    inputs: &[LiveDetectionInput],
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+) -> OwnershipLedger {
+    let logical = live_logical_lines(inputs);
+    let boundary = live_grid_boundary_index(&logical, inputs);
+    let clipped = clipped_open_index(&logical, boundary, &initial_context, options);
+
+    // Lineage: a logical line's source row is its first physical fragment's input source.
+    let source_of = |index: u32| -> Option<MathSourceLine> {
+        logical.get(index as usize).and_then(|line| {
+            line.fragments
+                .first()
+                .and_then(|fragment| inputs.get(fragment.input_index))
+                .map(source_line_of)
+        })
+    };
+
+    let mut recorder = OwnershipRecorder::default();
+    let _ = scan_math_blocks_impl(
+        logical.iter().map(|line| (line.id, line.text.as_str())),
+        initial_context,
+        options,
+        boundary,
+        Some(&mut recorder),
+    );
+    recorder.finish(boundary, source_of, clipped)
+}
+
+/// Detect the round-3 clipped-open topology: the live grid's row 0 is inside a display block body
+/// whose opener scrolled above it, and the scanner reaches the seam in the closed phase (no opener
+/// carried). Returns the logical index of the first grid `$$` — really the clipped block's closer —
+/// so the ledger can mark it a `ClippedOpen` orphan. Decidable purely from the reconstructed rows
+/// and the parser phase at the boundary; hold-independent, exactly what `isolation_gap` cannot see.
+fn clipped_open_index(
+    logical: &[LiveLogicalLine],
+    boundary: Option<usize>,
+    initial_context: &DetectionContext,
+    options: DetectionOptions,
+) -> Option<u32> {
+    let b = boundary?;
+    // Parser phase at the seam. If a Dollars opener is carried in (`opening.is_some()`) the block's
+    // opener is accounted above the window (a genuine bridge / carry, not a clip); if inside a code
+    // fence there is no structural math. Only a CLOSED phase at the seam can misread a clipped
+    // closer as a fresh opener.
+    let mut context = initial_context.clone();
+    for line in &logical[..b] {
+        advance_detection_context(&mut context, line.id, &line.text);
+    }
+    if context.opening.is_some() || context.fence.is_some() {
+        return None;
+    }
+    // The first grid `$$` must be a lone closer-shaped delimiter, and it must be preceded by grid
+    // body rows (row 0 is mid-body). A grid whose first `$$` sits at row 0, or is a self-contained
+    // `$$…$$`, is an ordinary grid opener, not a clip.
+    let first_dollars = (b..logical.len()).find(|&i| {
+        let text = logical[i].text.as_str();
+        let start = delimiter_start(text);
+        text[start..].trim_end() == "$$"
+    })?;
+    if first_dollars == b {
+        return None;
+    }
+    // No display opener may appear among the body rows before it (that would put the opener in the
+    // grid), and those rows must form a valid display body (real math, not prose/blank) — the proof
+    // that row 0 is genuinely inside a block.
+    if (b..first_dollars).any(|i| opening_delimiter(logical[i].text.as_str()).is_some()) {
+        return None;
+    }
+    let body = logical[b..first_dollars]
+        .iter()
+        .map(|line| line.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    valid_display_body(&body, &body, options).then_some(first_dollars as u32)
 }
 
 /// Run the authoritative detector on a worker-owned frozen snapshot. The session thread only
@@ -2990,6 +3185,254 @@ abla f",
                 cell_boundaries: scalar_boundaries(text),
             })
             .collect()
+    }
+
+    // ---- Batch ⑥ ownership ledger + split red gate ----
+
+    fn hist(id: u64, text: &str) -> (LiveDetectionSource, &str) {
+        (
+            LiveDetectionSource::History {
+                id: TranscriptId(id),
+            },
+            text,
+        )
+    }
+
+    fn grid(row: u32, text: &str) -> (LiveDetectionSource, &str) {
+        (LiveDetectionSource::Grid { row, revision: 1 }, text)
+    }
+
+    fn ledger_of(rows: &[(LiveDetectionSource, &str)], ctx: DetectionContext) -> OwnershipLedger {
+        let inputs = boundary_inputs(rows);
+        live_detection_ownership_ledger(&inputs, ctx, DetectionOptions::default())
+    }
+
+    fn has_reason(ledger: &OwnershipLedger, reason: LegitimateRejection) -> bool {
+        ledger
+            .entries
+            .iter()
+            .any(|entry| entry.fate == TokenFate::Rejected(reason.clone()))
+    }
+
+    /// Fidelity pin: the ledger is threaded through the REAL scanner, so its owned-block count must
+    /// equal the authoritative detector's block count on the same input. If the recorder ever
+    /// diverged from detection, this fails — which is the guarantee that the ledger observes rather
+    /// than re-derives, and that the `None` product path stays byte-identical.
+    #[test]
+    fn ledger_owned_blocks_match_the_authoritative_detector() {
+        let rows = [
+            hist(100, "$$"),
+            hist(101, r"\det"),
+            hist(102, r"\begin{pmatrix}"),
+            hist(103, r"a & b\"),
+            hist(104, "c & d"),
+            hist(105, r"\end{pmatrix}"),
+            hist(106, "=ad-bc"),
+            grid(0, "$$"),
+            grid(1, ""),
+            grid(2, "$$"),
+            grid(3, r"\nabla^2 u=x"),
+            grid(4, "$$"),
+        ];
+        let inputs = boundary_inputs(&rows);
+        let blocks = detect_live_math_blocks_in_context(
+            live_logical_lines(&inputs)
+                .iter()
+                .map(|line| (line.id, line.text.clone()))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|(id, text)| (*id, text.as_str())),
+            DetectionContext::default(),
+            DetectionOptions::default(),
+            live_grid_boundary_index(&live_logical_lines(&inputs), &inputs),
+        );
+        let ledger = live_detection_ownership_ledger(
+            &inputs,
+            DetectionContext::default(),
+            DetectionOptions::default(),
+        );
+        assert_eq!(
+            ledger.detected(),
+            blocks.len(),
+            "ledger owned-block count must equal the detector's block count"
+        );
+        assert_eq!(
+            ledger.containment(&[]).orphans,
+            0,
+            "healthy input has no orphans"
+        );
+    }
+
+    /// A `$$…$$` pair whose body is natural-language prose is a legitimate `GuardRejectedBody`, not
+    /// an orphan — the M1.9k prose red line, accounted parity-neutrally.
+    #[test]
+    fn prose_body_pair_is_a_legitimate_guard_rejection_not_an_orphan() {
+        let ledger = ledger_of(
+            &[
+                grid(0, "$$"),
+                grid(1, "the quick brown fox jumps"),
+                grid(2, "$$"),
+            ],
+            DetectionContext::default(),
+        );
+        assert!(has_reason(&ledger, LegitimateRejection::GuardRejectedBody));
+        assert_eq!(ledger.containment(&[]).orphans, 0);
+        assert_eq!(ledger.detected(), 0);
+    }
+
+    /// A `$$` inside a fenced code block is inert text: a `CommonMarkCodeContext` rejection.
+    #[test]
+    fn code_fenced_dollars_is_a_legitimate_code_context_rejection() {
+        let ledger = ledger_of(
+            &[grid(0, "```text"), grid(1, "$$"), grid(2, "```")],
+            DetectionContext::default(),
+        );
+        assert!(has_reason(
+            &ledger,
+            LegitimateRejection::CommonMarkCodeContext
+        ));
+        assert_eq!(ledger.containment(&[]).orphans, 0);
+    }
+
+    /// M1.9p: a symmetric multi-line `$$` opener under an `Ambiguous` scrollback prefix is refused,
+    /// recorded as `AmbiguousPrefixSuppressed`, never an orphan.
+    #[test]
+    fn ambiguous_prefix_dollars_is_suppressed_not_orphaned() {
+        let ledger = ledger_of(
+            &[grid(0, "$$"), grid(1, "x = y")],
+            DetectionContext::ambiguous(),
+        );
+        assert!(has_reason(
+            &ledger,
+            LegitimateRejection::AmbiguousPrefixSuppressed
+        ));
+        assert_eq!(ledger.containment(&[]).orphans, 0);
+    }
+
+    /// A closer whose opener is carried in from the initial context (above the window) is
+    /// `OpenerAboveWindow` — owned by an existing occurrence, not this window; never an orphan.
+    #[test]
+    fn closer_for_an_above_window_opener_is_legitimate() {
+        let mut ctx = DetectionContext::default();
+        advance_detection_context(&mut ctx, TranscriptId(1), "$$");
+        let ledger = ledger_of(&[grid(0, r"\gamma = 2"), grid(1, "$$")], ctx);
+        assert!(has_reason(&ledger, LegitimateRejection::OpenerAboveWindow));
+        assert_eq!(ledger.containment(&[]).orphans, 0);
+    }
+
+    /// A trailing `$$` opener still streaming at the end of a pure-grid region is the single
+    /// legitimate `StreamingUnclosedTail`, not an orphan.
+    #[test]
+    fn trailing_unclosed_opener_is_a_streaming_tail() {
+        let ledger = ledger_of(
+            &[grid(0, "$$"), grid(1, "x = 1")],
+            DetectionContext::default(),
+        );
+        assert!(has_reason(
+            &ledger,
+            LegitimateRejection::StreamingUnclosedTail
+        ));
+        assert_eq!(ledger.containment(&[]).orphans, 0);
+    }
+
+    /// GREEN containment: an odd-`$$` frozen-history reflow (a lost opener) is contained by the
+    /// resync — the phantom frozen opener is abandoned (`PhantomOpenerAbandoned`) and the live grid
+    /// re-pairs cleanly. The damage does not spill: zero orphans (the live-norender class).
+    #[test]
+    fn contained_phantom_abandon_leaves_no_orphan() {
+        let ledger = ledger_of(
+            &[
+                hist(1, "$$"),
+                hist(2, r"\alpha = 1"),
+                hist(3, "$$"),
+                hist(4, "$$"), // dangling phantom opener from a reflow
+                hist(5, "some prose here now"),
+                grid(0, "$$"),
+                grid(1, r"\gamma = 2"),
+                grid(2, "$$"),
+            ],
+            DetectionContext::default(),
+        );
+        assert!(has_reason(
+            &ledger,
+            LegitimateRejection::PhantomOpenerAbandoned
+        ));
+        let verdict = ledger.containment(&[]);
+        assert_eq!(verdict.orphans, 0, "contained damage must not red the gate");
+        assert!(!verdict.red);
+        assert!(verdict.detected >= 2, "both clean blocks resolve");
+    }
+
+    /// RED containment (the batch-2 baseline): the compress-rewrite / stream-mispair topology — grid
+    /// row 0 is inside a block body whose opener scrolled above it, and the scanner reaches the seam
+    /// in the closed phase, so the first grid `$$` (really a closer) is misread as a fresh opener.
+    /// That is a `ClippedOpen` orphan; hold-independent; reds the containment gate.
+    #[test]
+    fn clipped_open_grid_is_an_unannotated_orphan_that_reds_containment() {
+        let ledger = ledger_of(
+            &[
+                hist(1, "intro paragraph text"),
+                grid(0, r"\int_{-\infty}^{\infty}"),
+                grid(1, "f(t)"),
+                grid(2, "$$"), // the clipped block's closer, misread as an opener
+                grid(3, "the quick brown fox jumps"),
+                grid(4, "$$"),
+            ],
+            DetectionContext::default(),
+        );
+        let verdict = ledger.containment(&[]);
+        assert!(
+            verdict.clipped_open,
+            "the round-3 clip topology must be seen"
+        );
+        assert!(verdict.orphans >= 1, "an unannotated clipped-open orphan");
+        assert!(verdict.red, "containment reds on the spilled orphan");
+    }
+
+    /// Containment isolation semantics. The SAME clipped-open orphan is tolerated once a
+    /// source-integrity annotation names its exact source row (known upstream damage, precisely
+    /// isolated → green), while an UNannotated orphan still reds. This is the two-layer gate: a
+    /// fixed recording with a documented upstream defect can go green; a new, spilled orphan cannot.
+    #[test]
+    fn source_integrity_annotation_isolates_known_damage_but_new_orphan_still_reds() {
+        let ledger = ledger_of(
+            &[
+                hist(1, "intro paragraph text"),
+                grid(0, r"\int_{-\infty}^{\infty}"),
+                grid(1, "f(t)"),
+                grid(2, "$$"),
+                grid(3, "the quick brown fox jumps"),
+                grid(4, "$$"),
+            ],
+            DetectionContext::default(),
+        );
+        // Unannotated: red.
+        assert!(ledger.containment(&[]).red);
+        // Annotate the exact orphan source row (grid row 2): tolerated, green.
+        let orphan_line = ledger
+            .orphan_entries()
+            .next()
+            .and_then(|entry| entry.source_line)
+            .expect("clipped-open orphan carries a source row");
+        let annotated = ledger.containment(&[SourceIntegrityAnnotation {
+            source_line: orphan_line,
+            note: "compression reflow ate the Fourier opener above grid row 0".to_owned(),
+        }]);
+        assert_eq!(annotated.orphans, 0);
+        assert_eq!(annotated.annotated_damage, 1);
+        assert!(
+            !annotated.red,
+            "precisely isolated upstream damage is not a failure"
+        );
+        // A DIFFERENT annotation does not cover this orphan: still red.
+        let mismatched = ledger.containment(&[SourceIntegrityAnnotation {
+            source_line: MathSourceLine::LiveGrid(99),
+            note: "unrelated".to_owned(),
+        }]);
+        assert!(
+            mismatched.red,
+            "an unannotated orphan is a containment failure"
+        );
     }
 
     /// A determinant identity line `=ad-bc` is display math, not prose: the earlier prose heuristic
