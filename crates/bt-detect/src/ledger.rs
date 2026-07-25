@@ -146,6 +146,13 @@ pub struct OwnershipLedger {
     pub entries: Vec<LedgerEntry>,
     /// The frozen→live seam: first grid logical index, if the window spans a frozen prefix.
     pub boundary: Option<u32>,
+    /// `original_source` of every display block the authoritative scan Owned this pass, in
+    /// detection order — one string per `TokenFate::Owned` pair (batch ③). This is the exact key the
+    /// presentation layer preserves holds on, so a still-displayed hold is *backed* iff its source
+    /// appears here and *`HeldUnbacked`* (the detector no longer accounts the block a hold is showing)
+    /// when it does not. Filled by `live_detection_ownership_ledger` from the same scan the recorder
+    /// observed; empty on a recorder that was finalized without it.
+    pub owned_block_sources: Vec<String>,
 }
 
 impl OwnershipLedger {
@@ -178,6 +185,16 @@ impl OwnershipLedger {
 
     pub fn orphans(&self) -> usize {
         self.orphan_entries().count()
+    }
+
+    /// Whether the authoritative scan currently Owns a display block with this exact
+    /// `original_source`. Batch ③: the presentation layer preserves a hold by exact source equality,
+    /// so a still-displayed record whose source this returns `false` for is a `HeldUnbacked` strand —
+    /// shown by a hold while detection no longer accounts it.
+    pub fn owns_source(&self, original_source: &str) -> bool {
+        self.owned_block_sources
+            .iter()
+            .any(|source| source == original_source)
     }
 
     /// Split the orphans by whether a source-integrity annotation covers them, and produce the
@@ -494,6 +511,9 @@ impl OwnershipRecorder {
         OwnershipLedger {
             entries,
             boundary: boundary.map(|b| b as u32),
+            // Filled by `live_detection_ownership_ledger` from the same scan's detected blocks; the
+            // recorder itself never sees block source text.
+            owned_block_sources: Vec::new(),
         }
     }
 }

@@ -1715,7 +1715,7 @@ pub fn live_detection_ownership_ledger(
     };
 
     let mut recorder = OwnershipRecorder::default();
-    let _ = scan_math_blocks_impl(
+    let result = scan_math_blocks_impl(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context,
         options,
@@ -1723,7 +1723,17 @@ pub fn live_detection_ownership_ledger(
         clipped,
         Some(&mut recorder),
     );
-    recorder.finish(boundary, source_of, clipped)
+    let mut ledger = recorder.finish(boundary, source_of, clipped);
+    // Batch ③: carry the display blocks the same scan Owned, keyed by the exact `original_source` the
+    // presentation layer preserves holds on. Inline `$…$` runs never enter a hold, so they are
+    // excluded here — this vector is exactly the Owned structural-display set (`ledger.detected()`).
+    ledger.owned_block_sources = result
+        .blocks
+        .iter()
+        .filter(|block| block.span.mode == MathMode::Display)
+        .map(|block| block.span.original_source.clone())
+        .collect();
+    ledger
 }
 
 /// Detect the round-3 clipped-open topology: the live grid's row 0 is inside a display block body
@@ -3320,6 +3330,44 @@ abla f",
             0,
             "healthy input has no orphans"
         );
+    }
+
+    /// Batch ③: the ledger carries the exact `original_source` of every Owned display block, so a
+    /// still-displayed hold can be judged backed by the same source-equality key holds re-anchor on.
+    /// A detected block's source is owned; a prose-rejected pair's source is not — a hold on the
+    /// latter would be `HeldUnbacked`. `owned_block_sources` is exactly the Owned display set.
+    #[test]
+    fn owned_block_sources_back_detected_display_blocks_only() {
+        let rows = [
+            grid(0, "$$"),
+            grid(1, r"\nabla^2 u = x"),
+            grid(2, "$$"),
+            grid(3, "$$"),
+            grid(4, "the quick brown fox jumps over"),
+            grid(5, "$$"),
+        ];
+        let ledger = ledger_of(&rows, DetectionContext::default());
+        let inputs = boundary_inputs(&rows);
+        let blocks = detect_live_math_blocks_in_context(
+            live_logical_lines(&inputs)
+                .iter()
+                .map(|line| (line.id, line.text.clone()))
+                .collect::<Vec<_>>()
+                .iter()
+                .map(|(id, text)| (*id, text.as_str())),
+            DetectionContext::default(),
+            DetectionOptions::default(),
+            live_grid_boundary_index(&live_logical_lines(&inputs), &inputs),
+            None,
+        );
+        assert_eq!(ledger.detected(), 1);
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(ledger.owned_block_sources.len(), ledger.detected());
+        // The detected block's exact source is owned — a hold on it is backed.
+        assert!(ledger.owns_source(&blocks[0].span.original_source));
+        // The prose-rejected pair is NOT owned — a hold on it would be HeldUnbacked.
+        assert!(!ledger.owns_source("$$\nthe quick brown fox jumps over\n$$"));
+        assert!(!ledger.owns_source("$$never detected$$"));
     }
 
     /// A `$$…$$` pair whose body is natural-language prose is a legitimate `GuardRejectedBody`, not

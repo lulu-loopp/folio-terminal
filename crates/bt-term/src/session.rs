@@ -287,6 +287,28 @@ struct LiveDecorationRecord {
     failure_reason: Option<String>,
 }
 
+/// A formula still shown on screen — a resident live decoration, a stale artifact awaiting relayout,
+/// or an off-band hold — whose exact source the current detection scan no longer Owns (batch ③,
+/// review §4). Pure diagnostic: reporting a `HeldUnbacked` never changes what is displayed. A
+/// transient one is legitimate (a reprint/resize momentarily hides the source, or a block streams in
+/// before it closes); one that persists to a quiescent final state is the "detector died, hold
+/// survives" strand the third-round audit named — a hold masking dead detection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HeldUnbackedRecord {
+    /// The block opener's reconstructed source row (frozen-prefix head, else the live band start),
+    /// so a known-legitimate long-lived form can be exempted by an exact source-line annotation
+    /// rather than a blanket waiver.
+    pub source_line: MathSourceLine,
+    /// The exact hold key: the source the presentation layer preserves this record on.
+    pub original_source: String,
+    pub screen: ScreenId,
+    pub band_start_row: u32,
+    pub band_end_row: u32,
+    /// The record is mid-relayout (its raster demoted to a stale artifact) rather than holding a live
+    /// artifact — a common legitimate transient shape while a fresh relayout is in flight.
+    pub stale: bool,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct SegmentedRowMapping {
     content_delta: i64,
@@ -1239,6 +1261,44 @@ impl DualPlaneSession {
             initial_context,
             self.detection_options(),
         )
+    }
+
+    /// Batch ③ (review §4): every formula still *painted* — a resident live decoration holding a live
+    /// or a stale artifact — whose exact source the current detection scan no longer Owns. Consumes
+    /// the batch-⑥ ownership ledger's Owned display set: a held record is *backed* when its
+    /// `original_source` (the very key holds re-anchor on, `restore_offscreen_decorations`) is among
+    /// the currently-detected blocks, and `HeldUnbacked` otherwise — a hold showing a block the
+    /// detector no longer accounts (the "红门绿、真机红" masking the audit named).
+    ///
+    /// Scope is the *resident* decorations, the exact set `decorate_math_frame` paints. The off-band
+    /// queue (`offscreen_decorations`) is a preservation buffer that is never painted — at quiescence
+    /// it holds records scrolled off the alternate viewport, which are not on screen and must not be
+    /// mistaken for a masking hold. A record with neither artifact shows source, not a raster, and
+    /// likewise cannot mask detection.
+    ///
+    /// Read-only over the detection the session already runs; it mutates no decoration, so display and
+    /// preservation are byte-identical with or without this call. A record on a screen other than the
+    /// live one is not part of the current detection window and is not judged.
+    pub fn held_unbacked_records(&self) -> Vec<HeldUnbackedRecord> {
+        let owned = self.live_detection_ownership_ledger();
+        self.live_decorations
+            .values()
+            .filter(|record| record.screen == self.live_screen)
+            .filter(|record| record.artifact.is_some() || record.stale_artifact.is_some())
+            .filter(|record| !owned.owns_source(&record.span.original_source))
+            .map(|record| HeldUnbackedRecord {
+                source_line: record
+                    .frozen_prefix
+                    .first()
+                    .map(|id| MathSourceLine::Transcript(*id))
+                    .unwrap_or(MathSourceLine::LiveGrid(record.start.row)),
+                original_source: record.span.original_source.clone(),
+                screen: record.screen,
+                band_start_row: record.band_start_row,
+                band_end_row: record.band_end_row,
+                stale: record.artifact.is_none() && record.stale_artifact.is_some(),
+            })
+            .collect()
     }
 
     fn begin_alternate_repaint(&self, bytes: &[u8]) -> Option<AlternateRepaintSnapshot> {
@@ -8266,6 +8326,112 @@ mod tests {
             "no frame flashed the formula back to source: {:?}",
             oracle.flashed_sources()
         );
+    }
+
+    /// Batch ③ backed case: a live formula that is both detected and displayed is never reported
+    /// `HeldUnbacked` — the ledger Owns its exact source, so the hold is honestly backed. This also
+    /// pins that the report is pure observation: producing it leaves the frame byte-identical.
+    #[test]
+    fn a_rendered_live_formula_is_backed_not_held_unbacked() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let before = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(before.math_blocks[0].display, MathBlockDisplay::Rendered);
+
+        // The block is detected AND painted: the hold is backed, so nothing is HeldUnbacked.
+        assert!(
+            session.held_unbacked_records().is_empty(),
+            "a detected, displayed formula is backed"
+        );
+
+        // Observation only: the report does not perturb display.
+        session.refresh_projection(&mut projection);
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            crate::observe_formula_frame(&after).state,
+            crate::FormulaFrameState::Rendered
+        );
+        assert_eq!(before.math_blocks.len(), after.math_blocks.len());
+    }
+
+    /// Batch ③ unbacked case (the audit's masking mechanism): a resize opens the preservation window,
+    /// then the reflow reprints the transcript with a stray unbalanced `$$` opener above the block —
+    /// the exact odd-parity poison the three audits name. The block's source `$$x$$` is still literally
+    /// on the grid, so the hold re-anchors and keeps rendering (display is UNCHANGED, the hold is
+    /// honest about the pixels), but the detector's global toggle is now off-phase and no longer PAIRS
+    /// it into a block. That divergence — a hold showing a formula the settled detector no longer
+    /// accounts — is reported exactly as `HeldUnbacked`, the observable the flash oracle cannot see.
+    #[test]
+    fn a_hold_over_a_parity_poisoned_block_is_reported_held_unbacked_without_changing_display() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        // A multi-line block whose opener and closer sit on separate rows — the shape a stray `$$`
+        // can role-shift (a single-line `$$x$$` always wins self-contained detection and cannot be
+        // desynced, so the masking mechanism needs the delimiters split across rows).
+        session
+            .feed_at(b"$$\r\ny=1\r\n$$\r\nbarrier", start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        assert!(session.held_unbacked_records().is_empty());
+        let held_source = "$$\ny=1\n$$".to_owned();
+
+        // A resize opens the preservation window; the reflow clears scrollback and reprints the same
+        // block but injects a stray unbalanced `$$` opener above it — the exact odd-parity poison the
+        // three audits name. Now the stray `$$` opens, the block's real opener closes it into an empty
+        // (rejected) body, and the block's real closer is left dangling: the block no longer pairs.
+        let t = start + Duration::from_millis(210);
+        session.resize_at(nz(41), nz(12), t).unwrap();
+        session.mark_pty_resize_requested_at(nz(41), nz(12), t);
+        session
+            .feed_at(b"\x1b[2J\x1b[3J\x1b[H", t + Duration::from_millis(10))
+            .unwrap();
+        session
+            .feed_at(
+                b"$$\r\n$$\r\ny=1\r\n$$\r\nbarrier",
+                t + Duration::from_millis(20),
+            )
+            .unwrap();
+
+        // Display behaviour is unchanged: the block's source `$$\ny=1\n$$` is still literally on the
+        // grid, so the hold re-anchors and keeps rendering its raster.
+        let mut projection = session.new_projection(session.layout_key());
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            frame
+                .math_blocks
+                .iter()
+                .any(|block| block.display == MathBlockDisplay::Rendered),
+            "the hold must keep rendering the block — display is untouched by this batch"
+        );
+
+        // ...but the settled detector no longer Owns that block: reported as exactly one HeldUnbacked
+        // — a hold masking dead detection, the observable the flash oracle cannot see.
+        assert!(
+            !session
+                .live_detection_ownership_ledger()
+                .owns_source(&held_source),
+            "the poison genuinely desynced the detector off the block the hold is showing"
+        );
+        let unbacked = session.held_unbacked_records();
+        assert_eq!(
+            unbacked.len(),
+            1,
+            "the masked-dead-detection strand must surface exactly once"
+        );
+        assert_eq!(unbacked[0].original_source, held_source);
     }
 
     #[test]

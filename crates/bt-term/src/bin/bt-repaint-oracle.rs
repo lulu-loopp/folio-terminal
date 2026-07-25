@@ -60,6 +60,12 @@ struct HeadlessOracle {
     max_orphans: usize,
     ever_clipped_open: bool,
     annotations: Vec<bt_detect::SourceIntegrityAnnotation>,
+    /// Batch ③ stale-hold honesty. Peak count of UNANNOTATED `HeldUnbacked` records seen across the
+    /// run: a formula still displayed (live decoration / stale artifact / off-band hold) whose exact
+    /// source the current detection scan no longer Owns. A transient spike is legitimate (reprint /
+    /// resize / stream-in); a nonzero FINAL value is the hold-masks-dead-detection strand. Tracked
+    /// every frame (the field is emitted per frame); the final-state verdict drives the opt-in gate.
+    max_held_unbacked: usize,
 }
 
 impl HeadlessOracle {
@@ -84,6 +90,7 @@ impl HeadlessOracle {
             max_orphans: 0,
             ever_clipped_open: false,
             annotations: Vec::new(),
+            max_held_unbacked: 0,
         }
     }
 
@@ -271,13 +278,23 @@ impl HeadlessOracle {
             self.max_orphans = self.max_orphans.max(verdict.orphans);
             self.ever_clipped_open |= verdict.clipped_open;
         }
+        // Batch ③ stale-hold honesty. Every displayed formula whose exact source the current scan no
+        // longer Owns is `HeldUnbacked` — a hold potentially masking dead detection. Annotated
+        // known-legitimate long-lived forms are excluded (precise, never blanket). Reported per frame;
+        // a transient spike is legitimate, the final-state count drives the opt-in gate below.
+        let held_unbacked = self.session.held_unbacked_records();
+        let held_unbacked_count = held_unbacked
+            .iter()
+            .filter(|record| !held_unbacked_is_annotated(record, &self.annotations))
+            .count();
+        self.max_held_unbacked = self.max_held_unbacked.max(held_unbacked_count);
         // `source_plane` retains the delimiter-free body rows a multi-line block drops from
         // `source_rows`, so trace_blocks.py can count a split-body revert as a real R->S flip.
         // `isolation_gap` is the document-level detection red gate: on-screen blocks provable by a
         // clean grid-only re-scan yet missing from the full detection (a poisoned-history desync the
         // flash oracle cannot see). A healthy frame is 0.
         println!(
-            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} occluded={:?} flash={} detections={} invalidations={} isolation_gap={isolation_gap} source_plane={:?}",
+            "frame={} elapsed_us={} event={event} state={:?} rendered={:?} source_rows={:?} occluded={:?} flash={} detections={} invalidations={} isolation_gap={isolation_gap} source_plane={:?} held_unbacked={held_unbacked_count}",
             self.frame_sequence,
             elapsed.as_micros(),
             state,
@@ -654,6 +671,34 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    // Batch ③ stale-hold honesty (review §4). Report every formula still displayed at the final,
+    // quiescent state whose exact source the current scan no longer Owns — a hold masking dead
+    // detection. Annotated known-legitimate long-lived forms are counted separately, never as a
+    // blanket waiver. `final` is the hold-masking strand count; `max` is the peak transient across the
+    // run. Display behaviour is unchanged: this only observes.
+    let final_held_unbacked = oracle.session.held_unbacked_records();
+    let final_unannotated = final_held_unbacked
+        .iter()
+        .filter(|record| !held_unbacked_is_annotated(record, &oracle.annotations))
+        .count();
+    let final_annotated = final_held_unbacked.len() - final_unannotated;
+    eprintln!(
+        "HELD_UNBACKED final={final_unannotated} annotated={final_annotated} max={}",
+        oracle.max_held_unbacked
+    );
+    for record in &final_held_unbacked {
+        let annotated = held_unbacked_is_annotated(record, &oracle.annotations);
+        eprintln!(
+            "  HELD_UNBACKED source_line={:?} screen={:?} band=[{},{}] stale={} annotated={annotated} source={:?}",
+            record.source_line,
+            record.screen,
+            record.band_start_row,
+            record.band_end_row,
+            record.stale,
+            record.original_source,
+        );
+    }
+
     if oracle.flash_oracle.flash_detected() {
         return Err(io::Error::other(format!(
             "formula repaint flash detected for {:?}",
@@ -675,7 +720,33 @@ fn main() -> Result<(), Box<dyn Error>> {
         ))
         .into());
     }
+
+    // Batch ③ stale-hold gate (opt-in). `HeldUnbacked` is a signal, not a hard red in flight: it
+    // legitimately appears mid-reprint / mid-resize / mid-stream, exactly the transients the holds
+    // exist to bridge. Only a `HeldUnbacked` that PERSISTS to the quiescent final state — a hold still
+    // showing a formula the settled detector no longer accounts — is a genuine masked-dead-detection
+    // strand and reds the exit. Known-legitimate long-lived forms are exempted precisely by source
+    // annotation (`final_annotated`), never by a blanket waiver, so a NEW unannotated strand still
+    // reds. Opt-in so it never surprises an unrelated regression run.
+    if env::var_os("BT_PROBE_HELD_UNBACKED").is_some() && final_unannotated > 0 {
+        return Err(io::Error::other(format!(
+            "stale-hold failure: {final_unannotated} unannotated HeldUnbacked formula(s) still displayed at final state with no backing detection"
+        ))
+        .into());
+    }
     Ok(())
+}
+
+/// A `HeldUnbacked` record is a known-legitimate long-lived form when a source-integrity annotation
+/// names its exact opener source row. Batch ③ reuses the batch-⑥ annotation sidecar so a documented
+/// strand is exempted precisely, never by a blanket waiver.
+fn held_unbacked_is_annotated(
+    record: &bt_term::HeldUnbackedRecord,
+    annotations: &[bt_detect::SourceIntegrityAnnotation],
+) -> bool {
+    annotations
+        .iter()
+        .any(|annotation| annotation.source_line == record.source_line)
 }
 
 /// Parse a source-integrity annotation sidecar. Each non-comment line is `history <id> <note>` or
