@@ -1,14 +1,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     error::Error,
-    fmt::{self, Write as _},
-    fs::OpenOptions,
+    fmt,
     hash::{DefaultHasher, Hash, Hasher},
-    io::Write as _,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
-    path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 use bt_detect::{
@@ -512,11 +509,6 @@ pub struct DualPlaneSession {
     math_failure_validate_count: u64,
     math_failure_convert_count: u64,
     math_failure_compile_count: u64,
-    /// `BT_DECOR_TRACE=<path>` real-machine decoration-state trace target, resolved once at
-    /// construction. `None` (variable unset) makes `trace_decorations` a single `Option` check and
-    /// return — zero hot-path cost. See `trace_decorations`.
-    decor_trace: Option<PathBuf>,
-    decor_trace_frame: u64,
 }
 
 impl DualPlaneSession {
@@ -629,8 +621,6 @@ impl DualPlaneSession {
             math_failure_validate_count: 0,
             math_failure_convert_count: 0,
             math_failure_compile_count: 0,
-            decor_trace: std::env::var_os("BT_DECOR_TRACE").map(PathBuf::from),
-            decor_trace_frame: 0,
         }
     }
 
@@ -1084,81 +1074,6 @@ impl DualPlaneSession {
             if *remaining == 0 {
                 self.resize_trace_started = None;
             }
-        }
-    }
-
-    /// Env-gated (`BT_DECOR_TRACE=<path>`) real-machine decoration-state trace. When the variable is
-    /// unset this is a single `Option` check and return — zero hot-path cost, nothing is touched.
-    /// When set, each invocation appends one snapshot: every frozen math record (any non-`None`
-    /// decoration, or a source line that is still a display-math candidate) with its lifecycle
-    /// state, failure reason, and source excerpt, followed by every live decoration. A user
-    /// reproducing a stuck-source block on their machine then reads the offending record's exact
-    /// state straight from the file — the `Pending` liveness hole, a `Failed` render, a `None`
-    /// candidate that never re-scheduled — instead of relying on a replay that does not reproduce
-    /// the timing race. No lock is taken and the frozen/live maps are only read.
-    pub fn trace_decorations(&mut self) {
-        let Some(path) = self.decor_trace.clone() else {
-            return;
-        };
-        self.decor_trace_frame += 1;
-        let epoch_us = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_micros());
-        let mut out = String::new();
-        let _ = write!(
-            out,
-            "DECOR_TRACE frame={} epoch_us={epoch_us} screen={:?} resize={}",
-            self.decor_trace_frame,
-            self.live_screen,
-            if self.resize_epoch.is_active() {
-                "active"
-            } else {
-                "idle"
-            },
-        );
-        out.push('\n');
-        for (id, record) in &self.decorations {
-            let source = self
-                .document
-                .entries()
-                .get(id)
-                .map(|entry| entry.line.text.as_str())
-                .unwrap_or("");
-            if record.decoration == DecorationLifecycle::None && !may_contain_display_math(source) {
-                continue;
-            }
-            let _ = write!(
-                out,
-                "  FROZEN id={} state={} reason={} src=\"{}\"",
-                id.0,
-                decoration_state_label(record.decoration),
-                record.failure_reason.as_deref().unwrap_or("-"),
-                decor_trace_excerpt(source),
-            );
-            out.push('\n');
-        }
-        for (row, record) in &self.live_decorations {
-            let state = if record.failure_reason.is_some() {
-                "failed"
-            } else if record.artifact.is_some() {
-                "rendered"
-            } else if record.stale_artifact.is_some() {
-                "stale"
-            } else {
-                "pending"
-            };
-            let _ = write!(
-                out,
-                "  LIVE row={row} band={}-{} state={state} reason={} src=\"{}\"",
-                record.band_start_row,
-                record.band_end_row,
-                record.failure_reason.as_deref().unwrap_or("-"),
-                decor_trace_excerpt(&record.span.original_source),
-            );
-            out.push('\n');
-        }
-        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = file.write_all(out.as_bytes());
         }
     }
 
@@ -2168,12 +2083,9 @@ impl DualPlaneSession {
             return self.complete_worker_result(task, Err(MathRenderError::NotDetected));
         }
         let placeholder = bt_detect::render_placeholder(&task);
-        let candidate_id = task.candidate_id;
-        let versions = task.versions;
         let accepted = self.apply_worker_completion(task, Some(placeholder), None);
         if !accepted {
             self.stale_results += 1;
-            self.reopen_stranded_pending(candidate_id, versions);
         }
         accepted
     }
@@ -2194,7 +2106,6 @@ impl DualPlaneSession {
         let accepted = self.apply_worker_completion(task.clone(), artifact, failure_reason);
         if !accepted {
             self.stale_results += 1;
-            self.reopen_stranded_pending(task.candidate_id, task.versions);
         } else if std::env::var_os("BT_PERF_TRACE").is_some() {
             if let Some(elapsed) = render_time {
                 eprintln!(
@@ -2484,31 +2395,6 @@ impl DualPlaneSession {
                     && record.decoration == bt_doc::DecorationLifecycle::Pending
                     && record.versions == task.versions
             })
-    }
-
-    /// A lost worker completion must never freeze its candidate in `Pending`. The scheduler keeps
-    /// no in-flight or retry record for a task once `take` hands it out, and `schedule_scan` no-ops
-    /// on any non-`None` decoration, so a dropped result would strand the block at source until an
-    /// unrelated version bump reset it — in practice only a width resize, via `layout_changed`
-    /// (`Pending -> None`). That is exactly the reported "scrolling never rescues it, resizing
-    /// does" symptom. Note this is not the version gate: every VersionStamp bump pairs with a
-    /// per-record reset (`source/detector/layout/view_changed`) that already clears `Pending -> None`,
-    /// so the gate is self-healing. The real hole is a completion dropped with the versions still
-    /// matching — most reachably `block_is_current == false`, when a multi-line block's scan is in
-    /// flight and one of its source lines is deleted (scrollback eviction, ED3 history clear) before
-    /// the result lands. When the candidate is still the exact attempt we scheduled (`Frozen` +
-    /// `Pending` at the same versions), return it to `None` so the visible-page scheduler re-issues
-    /// from current source. Records that already moved on — reset, completed, failed, suppressed, or
-    /// re-scheduled at newer versions — are left untouched: this restores re-queue eligibility only,
-    /// it never accepts the stale result.
-    fn reopen_stranded_pending(&mut self, candidate_id: TranscriptId, versions: VersionStamp) {
-        if let Some(record) = self.decorations.get_mut(&candidate_id)
-            && record.source == SourceLifecycle::Frozen
-            && record.decoration == DecorationLifecycle::Pending
-            && record.versions == versions
-        {
-            record.decoration = DecorationLifecycle::None;
-        }
     }
 
     pub fn math_resident_bytes(&self) -> usize {
@@ -5015,37 +4901,6 @@ fn live_detection_signature(context_signature: u64, candidate_row: u32) -> u64 {
     hasher.finish()
 }
 
-/// Stable lifecycle label shared by the runtime `BT_DECOR_TRACE` snapshot and the oracle's
-/// `BT_PROBE_FROZEN` dump so both name a record's state identically.
-pub fn decoration_state_label(decoration: DecorationLifecycle) -> &'static str {
-    match decoration {
-        DecorationLifecycle::None => "none",
-        DecorationLifecycle::Pending => "pending",
-        DecorationLifecycle::Ready => "ready",
-        DecorationLifecycle::Failed => "failed",
-        DecorationLifecycle::Suppressed => "suppressed",
-    }
-}
-
-/// One-line, bounded source excerpt for a decoration trace: trimmed, control characters neutralized,
-/// and capped so a runaway line cannot bloat the trace file.
-fn decor_trace_excerpt(source: &str) -> String {
-    const MAX: usize = 96;
-    let mut out = String::with_capacity(MAX.min(source.len()));
-    for ch in source.trim().chars() {
-        if out.chars().count() >= MAX {
-            out.push('…');
-            break;
-        }
-        out.push(if ch.is_control() || ch == '"' {
-            ' '
-        } else {
-            ch
-        });
-    }
-    out
-}
-
 fn may_contain_display_math(text: &str) -> bool {
     text.contains("$$")
         || text.contains(r"\[")
@@ -6419,88 +6274,6 @@ mod tests {
             record.decoration == DecorationLifecycle::Ready
                 && record.block_end.is_some_and(|end| end.0 > 1)
         }));
-    }
-
-    #[test]
-    fn dropped_worker_completion_reopens_stranded_pending_instead_of_freezing_it() {
-        // A multi-line block's frozen scan carries every source line as a task input. If one of
-        // those input lines is deleted (scrollback eviction / ED3 history clear) while the closer's
-        // scan is in flight, the delivered result is dropped by `block_is_current`. The scheduler
-        // keeps no in-flight/retry record and `schedule_scan` no-ops on any non-`None` decoration,
-        // so before the fix the closer froze in `Pending`, showing raw source forever; only a width
-        // resize (`layout_changed`: Pending -> None) could reset it — the reported "scrolling never
-        // helps, resizing does" symptom. No VersionStamp field moved here, so this is a genuine
-        // liveness hole, distinct from the self-healing version gate.
-        // Two grid rows force the block to scroll into frozen history; the quota lets a handful of
-        // later lines evict the opener out from under the in-flight scan.
-        let mut session =
-            DualPlaneSession::with_frozen_quota(nz(40), nz(2), NonZeroUsize::new(8).unwrap());
-        session
-            .feed(b"\\begin{align}\r\nx &= y\r\n\\end{align}\r\nafter\r\nmore\r\n")
-            .unwrap();
-
-        let opener = *session
-            .document()
-            .entries()
-            .iter()
-            .find(|(_, entry)| entry.line.text.contains("\\begin{"))
-            .map(|(id, _)| id)
-            .expect("frozen opener");
-        let closer = *session
-            .document()
-            .entries()
-            .iter()
-            .find(|(_, entry)| entry.line.text.contains("\\end{"))
-            .map(|(id, _)| id)
-            .expect("frozen closer");
-
-        // Hold the closer's multi-line scan (the task whose inputs span the whole block).
-        let mut held = None;
-        while let Some(task) = session.take_worker_task() {
-            if task.candidate_id == closer && task.inputs.iter().any(|input| input.id == opener) {
-                held = Some(task);
-                break;
-            }
-        }
-        let task = held.expect("closer scan spanning the block");
-        assert_eq!(
-            session.decoration(closer).map(|record| record.decoration),
-            Some(DecorationLifecycle::Pending),
-            "closer is the in-flight scan candidate",
-        );
-
-        // Evict the opener from history while the scan is in flight, keeping the closer resident.
-        let mut guard = 0;
-        while session.document().entries().contains_key(&opener) {
-            session.feed(b"filler\r\n").unwrap();
-            guard += 1;
-            assert!(guard < 256, "opener never evicted");
-            assert!(
-                session.document().entries().contains_key(&closer),
-                "closer evicted before opener; tighten the corpus",
-            );
-        }
-        assert_eq!(
-            session.decoration(closer).map(|record| record.decoration),
-            Some(DecorationLifecycle::Pending),
-            "evicting an unrelated input must not disturb the in-flight closer state",
-        );
-
-        // Deliver the now-stale result. `block_is_current` fails on the missing opener, so the
-        // completion is correctly not accepted (the stale raster must never land).
-        let accepted = session.complete_worker_task(task);
-        assert!(
-            !accepted,
-            "a result whose block lost a source line must not be accepted",
-        );
-
-        // The liveness invariant: a lost completion must reopen the candidate for re-scheduling
-        // (`None`), never freeze it in `Pending`. RED before the fix (stuck Pending), GREEN after.
-        assert_eq!(
-            session.decoration(closer).map(|record| record.decoration),
-            Some(DecorationLifecycle::None),
-            "a dropped completion must reopen the candidate, not strand it in Pending",
-        );
     }
 
     fn synthetic_raster(width_px: u32, height_px: u32) -> MathRaster {

@@ -599,10 +599,6 @@ impl Runtime {
     }
 
     fn publish_frame_inner(&mut self, trigger: FrameTrigger, skip_unchanged: bool) -> Result<bool> {
-        // Real-machine decoration-state trace (`BT_DECOR_TRACE=<path>`). Runs on every frame trigger
-        // — including held/skipped frames — so a persistent stuck-source block is captured even when
-        // the presented frame does not change. Zero cost when the variable is unset.
-        self.session.trace_decorations();
         dispatch_pending_math_tasks(
             &mut self.session,
             &self.math_worker.tasks,

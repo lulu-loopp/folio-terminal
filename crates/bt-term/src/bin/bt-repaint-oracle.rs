@@ -423,84 +423,6 @@ impl HeadlessOracle {
         Ok(())
     }
 
-    /// Faithful review-state render audit (scheduling-loss red gate). Unlike `document_dump`, this
-    /// never re-schedules: it walks the settled document top-to-bottom exactly as a reviewer would
-    /// see it right now, reading only the decoration state the live replay already produced. A block
-    /// whose frozen detection scan was swallowed (e.g. ingested inside a resize suppression window
-    /// and never re-issued) therefore surfaces here as raw source rows, where `document_dump`'s
-    /// fresh per-page scheduling would silently render it. A healthy settled state is `source_rows=0`.
-    fn review_render_audit(&mut self) -> Result<(), Box<dyn Error>> {
-        self.projection.scroll_to_top();
-        self.session.refresh_projection(&mut self.projection);
-        let mut emitted_offset = i64::MIN;
-        let mut total_source_rows = 0usize;
-        let mut total_rendered_history = 0usize;
-        let mut pages = 0usize;
-        loop {
-            // No schedule_visible_artifacts, no complete_pending_math: the settled decoration state
-            // is read as-is, so a stranded (unscheduled) block shows its source instead of a raster.
-            let frame = self.session.viewport_frame(&mut self.projection)?;
-            let rendered_history = frame
-                .math_blocks
-                .iter()
-                .filter(|block| {
-                    block.display == bt_viewport::MathBlockDisplay::Rendered
-                        && matches!(block.anchor, bt_viewport::MathBlockAnchor::History { .. })
-                })
-                .count();
-            let offset = self.projection.scroll_offset_rows() as i64;
-            let rows = frame.rows.get() as i64;
-            let columns = frame.columns.get() as usize;
-            let frame_start = -offset;
-            let mut page_source_rows = Vec::new();
-            for (row, cells) in frame.cells.chunks(columns).enumerate() {
-                let absolute = frame_start + row as i64;
-                if absolute < emitted_offset {
-                    continue;
-                }
-                emitted_offset = absolute + 1;
-                let text = cells
-                    .iter()
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>();
-                let trimmed = text.trim();
-                // A settled review page shows rendered rasters over the math span; a raw structural
-                // delimiter surviving on a history row means that block was never decorated.
-                if trimmed.contains("$$")
-                    || trimmed.contains(r"\begin{")
-                    || trimmed.contains(r"\end{")
-                    || trimmed.contains(r"\[")
-                    || trimmed.contains(r"\]")
-                {
-                    page_source_rows.push((absolute, trimmed.to_owned()));
-                }
-            }
-            if rendered_history != 0 || !page_source_rows.is_empty() {
-                eprintln!(
-                    "REVIEW_PAGE offset={} rendered_history={rendered_history} source_rows={}",
-                    -frame_start,
-                    page_source_rows.len(),
-                );
-                for (absolute, text) in &page_source_rows {
-                    eprintln!("  SRC[{absolute}] |{text}");
-                }
-            }
-            total_source_rows += page_source_rows.len();
-            total_rendered_history += rendered_history;
-            pages += 1;
-            if offset == 0 {
-                break;
-            }
-            let step = i32::try_from(rows.min(offset)).unwrap_or(i32::MAX);
-            self.projection.scroll_by_rows(-step);
-            self.session.refresh_projection(&mut self.projection);
-        }
-        eprintln!(
-            "REVIEW_AUDIT pages={pages} rendered_history={total_rendered_history} source_rows={total_source_rows}"
-        );
-        Ok(())
-    }
-
     fn dump_geometry(&self, frame: &ViewportFrame) {
         for block in &frame.math_blocks {
             if block.display != bt_viewport::MathBlockDisplay::Rendered {
@@ -664,10 +586,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         oracle.document_dump()?;
     }
 
-    if env::var_os("BT_PROBE_REVIEW").is_some() {
-        oracle.review_render_audit()?;
-    }
-
     if env::var_os("BT_PROBE_STAGED").is_some() {
         for staged in oracle.session.transcript().staged_rows() {
             let text = staged
@@ -688,24 +606,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     if env::var_os("BT_PROBE_FROZEN").is_some() {
         for line in oracle.session.transcript().frozen() {
-            // Each frozen row's decoration state and failure reason, so a replay directly names why a
-            // block shows source: `pending` (the scheduling-loss liveness hole), `failed` with the
-            // bt-math reason, `suppressed`, or a `none` candidate that never re-scheduled. Mirrors the
-            // runtime `BT_DECOR_TRACE` labels.
-            let (state, reason) =
-                oracle
-                    .session
-                    .decoration(line.id)
-                    .map_or(("absent", "-"), |record| {
-                        (
-                            bt_term::decoration_state_label(record.decoration),
-                            record.failure_reason.as_deref().unwrap_or("-"),
-                        )
-                    });
-            eprintln!(
-                "FROZEN[{}] state={state} reason={reason} |{}",
-                line.id.0, line.text
-            );
+            eprintln!("FROZEN[{}] |{}", line.id.0, line.text);
             if env::var_os("BT_PROBE_STYLES").is_some() {
                 for span in &line.styles {
                     eprintln!("  STYLE {span:?}");
