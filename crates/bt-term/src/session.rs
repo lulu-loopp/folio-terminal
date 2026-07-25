@@ -1,11 +1,14 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     error::Error,
-    fmt,
+    fmt::{self, Write as _},
+    fs::OpenOptions,
     hash::{DefaultHasher, Hash, Hasher},
+    io::Write as _,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
+    path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bt_detect::{
@@ -519,6 +522,11 @@ pub struct DualPlaneSession {
     math_failure_validate_count: u64,
     math_failure_convert_count: u64,
     math_failure_compile_count: u64,
+    /// `BT_DECOR_TRACE=<path>` real-machine decoration-state trace target, resolved once at
+    /// construction. `None` (variable unset) makes `trace_decorations` a single `Option` check and
+    /// return — zero hot-path cost. See `trace_decorations`.
+    decor_trace: Option<PathBuf>,
+    decor_trace_frame: u64,
 }
 
 impl DualPlaneSession {
@@ -632,6 +640,8 @@ impl DualPlaneSession {
             math_failure_validate_count: 0,
             math_failure_convert_count: 0,
             math_failure_compile_count: 0,
+            decor_trace: std::env::var_os("BT_DECOR_TRACE").map(PathBuf::from),
+            decor_trace_frame: 0,
         }
     }
 
@@ -1085,6 +1095,81 @@ impl DualPlaneSession {
             if *remaining == 0 {
                 self.resize_trace_started = None;
             }
+        }
+    }
+
+    /// Env-gated (`BT_DECOR_TRACE=<path>`) real-machine decoration-state trace. When the variable is
+    /// unset this is a single `Option` check and return — zero hot-path cost, nothing is touched.
+    /// When set, each invocation appends one snapshot: every frozen math record (any non-`None`
+    /// decoration, or a source line that is still a display-math candidate) with its lifecycle
+    /// state, failure reason, and source excerpt, followed by every live decoration. A user
+    /// reproducing a stuck-source block on their machine then reads the offending record's exact
+    /// state straight from the file — the `Pending` liveness hole, a `Failed` render, a `None`
+    /// candidate that never re-scheduled — instead of relying on a replay that does not reproduce
+    /// the timing race. No lock is taken and the frozen/live maps are only read.
+    pub fn trace_decorations(&mut self) {
+        let Some(path) = self.decor_trace.clone() else {
+            return;
+        };
+        self.decor_trace_frame += 1;
+        let epoch_us = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_micros());
+        let mut out = String::new();
+        let _ = write!(
+            out,
+            "DECOR_TRACE frame={} epoch_us={epoch_us} screen={:?} resize={}",
+            self.decor_trace_frame,
+            self.live_screen,
+            if self.resize_epoch.is_active() {
+                "active"
+            } else {
+                "idle"
+            },
+        );
+        out.push('\n');
+        for (id, record) in &self.decorations {
+            let source = self
+                .document
+                .entries()
+                .get(id)
+                .map(|entry| entry.line.text.as_str())
+                .unwrap_or("");
+            if record.decoration == DecorationLifecycle::None && !may_contain_display_math(source) {
+                continue;
+            }
+            let _ = write!(
+                out,
+                "  FROZEN id={} state={} reason={} src=\"{}\"",
+                id.0,
+                decoration_state_label(record.decoration),
+                record.failure_reason.as_deref().unwrap_or("-"),
+                decor_trace_excerpt(source),
+            );
+            out.push('\n');
+        }
+        for (row, record) in &self.live_decorations {
+            let state = if record.failure_reason.is_some() {
+                "failed"
+            } else if record.artifact.is_some() {
+                "rendered"
+            } else if record.stale_artifact.is_some() {
+                "stale"
+            } else {
+                "pending"
+            };
+            let _ = write!(
+                out,
+                "  LIVE row={row} band={}-{} state={state} reason={} src=\"{}\"",
+                record.band_start_row,
+                record.band_end_row,
+                record.failure_reason.as_deref().unwrap_or("-"),
+                decor_trace_excerpt(&record.span.original_source),
+            );
+            out.push('\n');
+        }
+        if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = file.write_all(out.as_bytes());
         }
     }
 
@@ -4972,6 +5057,37 @@ fn live_detection_signature(context_signature: u64, candidate_row: u32) -> u64 {
     context_signature.hash(&mut hasher);
     candidate_row.hash(&mut hasher);
     hasher.finish()
+}
+
+/// Stable lifecycle label shared by the runtime `BT_DECOR_TRACE` snapshot and the oracle's
+/// `BT_PROBE_FROZEN` dump so both name a record's state identically.
+pub fn decoration_state_label(decoration: DecorationLifecycle) -> &'static str {
+    match decoration {
+        DecorationLifecycle::None => "none",
+        DecorationLifecycle::Pending => "pending",
+        DecorationLifecycle::Ready => "ready",
+        DecorationLifecycle::Failed => "failed",
+        DecorationLifecycle::Suppressed => "suppressed",
+    }
+}
+
+/// One-line, bounded source excerpt for a decoration trace: trimmed, control characters neutralized,
+/// and capped so a runaway line cannot bloat the trace file.
+fn decor_trace_excerpt(source: &str) -> String {
+    const MAX: usize = 96;
+    let mut out = String::with_capacity(MAX.min(source.len()));
+    for ch in source.trim().chars() {
+        if out.chars().count() >= MAX {
+            out.push('…');
+            break;
+        }
+        out.push(if ch.is_control() || ch == '"' {
+            ' '
+        } else {
+            ch
+        });
+    }
+    out
 }
 
 fn may_contain_display_math(text: &str) -> bool {
