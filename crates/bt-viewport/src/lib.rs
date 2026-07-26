@@ -16,7 +16,7 @@ use bt_doc::{
 };
 use bt_transcript::{
     CapturedCell, CapturedRow, CellFlags, FrozenLine, GraphemeOffset, SourceGeneration, StagedRow,
-    TranscriptId,
+    StagingId, TranscriptId,
 };
 use bt_unicode::{cluster_width, graphemes};
 
@@ -149,6 +149,9 @@ pub struct ProjectedLiveMathArtifact {
     /// immediately preceding the live band; projection renders the whole occurrence as one block
     /// bridging the history and live domains.
     pub frozen_prefix: Vec<TranscriptId>,
+    /// Proven source rows between `frozen_prefix` and the live band which are still owned by the
+    /// transcript staging plane. Exact staging ids keep the bridge causal while rows finalize.
+    pub staging_prefix: Vec<StagingId>,
     pub generation: GridGeneration,
     pub artifact: ProjectedMathArtifact,
 }
@@ -210,9 +213,9 @@ pub struct MathBlockPlacement {
     /// Present only for live-grid math; survives repaint placement changes and distinguishes equal
     /// source text belonging to different occurrences.
     pub live_occurrence_id: Option<LiveMathOccurrenceId>,
-    /// Number of frozen transcript (scrollback) visual rows this block owns above its live band. A
-    /// boundary-split block bridges both domains, so its top sits in the history region above the
-    /// live band start; zero for every ordinary block, whose top aligns to its own band start.
+    /// Number of transcript-prefix visual rows this block owns above its live band, including rows
+    /// which are still in staging. A boundary-split block bridges both domains, so its top sits
+    /// above the live band start; zero for an ordinary block.
     pub frozen_prefix_rows: u32,
     /// Projection-layer clip provenance: logical band rows above / below the exactly-matched grid
     /// slice. These are the counts the band-height budget consumes; carrying them on the placement
@@ -1218,51 +1221,66 @@ impl ViewportProjection {
         let mut visible_heights = Vec::with_capacity(expected_rows);
         let mut math_blocks = Vec::new();
 
-        // A boundary-split formula owns frozen scrollback rows (its opener/body) above the live
-        // band that holds its closer. Resolve each such block's history geometry once: the frozen
-        // prefix must be exactly the contiguous history tail, immediately adjacent to the live grid
-        // (no staging between), and the live portion must begin at grid row zero. Anything else is
-        // not a clean boundary split and is left to render as source.
+        // A boundary-split formula owns an exact transcript prefix above the live band that holds
+        // its closer. Some prefix rows may still be in staging. Resolve each block once: finalized
+        // ids must be the contiguous history tail, staging ids must be the complete staging plane,
+        // and the live portion must begin at grid row zero. Anything else is not a clean boundary
+        // split and is left to render as source.
         let mut bridge_geometry: HashMap<LiveMathOccurrenceId, (usize, u32)> = HashMap::new();
-        if primary && staging_rows == 0 {
+        let mut frozen_prefix_geometry: HashMap<LiveMathOccurrenceId, usize> = HashMap::new();
+        if primary {
             let ordered = self.ordered_ids.len();
             for live_math in &self.live_math_artifacts {
-                if live_math.frozen_prefix.is_empty()
+                if (live_math.frozen_prefix.is_empty() && live_math.staging_prefix.is_empty())
                     || live_math.screen != screen
                     || live_math.generation != self.grid_generation
                     || live_math.band_start_row != 0
                 {
                     continue;
                 }
-                let prefix = live_math.frozen_prefix.len();
-                if prefix == 0 || prefix > ordered {
-                    continue;
-                }
-                if self.ordered_ids[ordered - prefix..] != live_math.frozen_prefix[..] {
-                    continue;
-                }
-                // The frozen prefix must be plain source rows. A prefix id that is itself a rendered
-                // history math block means the frozen and live detectors paired differently (a
-                // transient reflow ambiguity): rendering that as one bridged block would double-claim
-                // the row, so it stays source until the state settles into a clean split.
-                if live_math
-                    .frozen_prefix
+                let abs_top = if live_math.frozen_prefix.is_empty() {
+                    history_rows
+                } else {
+                    let prefix = live_math.frozen_prefix.len();
+                    if prefix > ordered
+                        || self.ordered_ids[ordered - prefix..] != live_math.frozen_prefix[..]
+                    {
+                        continue;
+                    }
+                    // A finalized prefix must be plain source. A rendered history artifact means
+                    // frozen and live detection paired differently and cannot share one band.
+                    if live_math
+                        .frozen_prefix
+                        .iter()
+                        .any(|id| self.math_artifacts.contains_key(id))
+                    {
+                        continue;
+                    }
+                    let first_index = ordered - prefix;
+                    let abs_top = usize::try_from(self.visual_row_heights.prefix_sum(first_index))
+                        .unwrap_or(0);
+                    frozen_prefix_geometry.insert(live_math.occurrence_id, abs_top);
+                    abs_top
+                };
+                // Staging may hold an unrelated in-progress logical line. It is not part of this
+                // occurrence and must neither be swallowed nor prevent the exact frozen prefix
+                // above it from being occluded. Only make one geometrically continuous bridge when
+                // the complete staging plane is itself the occurrence's proven staging prefix.
+                if staged_rows
                     .iter()
-                    .any(|id| self.math_artifacts.contains_key(id))
+                    .map(|row| row.id)
+                    .ne(live_math.staging_prefix.iter().copied())
                 {
                     continue;
                 }
-                let first_index = ordered - prefix;
-                let abs_top =
-                    usize::try_from(self.visual_row_heights.prefix_sum(first_index)).unwrap_or(0);
-                let frozen_rows = u32::try_from(history_rows.saturating_sub(abs_top)).unwrap_or(0);
-                if abs_top >= history_rows || frozen_rows == 0 {
+                let prefix_rows = u32::try_from(live_base.saturating_sub(abs_top)).unwrap_or(0);
+                if abs_top >= live_base || prefix_rows == 0 {
                     continue;
                 }
-                bridge_geometry.insert(live_math.occurrence_id, (abs_top, frozen_rows));
+                bridge_geometry.insert(live_math.occurrence_id, (abs_top, prefix_rows));
             }
         }
-        let mut bridge_frozen_blank: Vec<usize> = Vec::new();
+        let mut bridge_prefix_blank: Vec<(usize, usize)> = Vec::new();
 
         if primary && window_start < history_rows {
             let first_index = self
@@ -1450,9 +1468,17 @@ impl ViewportProjection {
                             artifact.height_subpixels,
                             artifact.vertical_padding_subpixels,
                         );
-                        bridge_frozen_blank.push(abs_top);
+                        bridge_prefix_blank.push((abs_top, live_base));
                         (top, combined_height, content_offset, frozen_rows)
                     } else {
+                        if let Some(&abs_top) = frozen_prefix_geometry.get(&live_math.occurrence_id)
+                        {
+                            // Exact frozen ownership is independent from bridge geometry. An
+                            // unrelated staged line may sit between history and the live band; keep
+                            // that line visible while still swallowing the occurrence's proven
+                            // frozen source prefix.
+                            bridge_prefix_blank.push((abs_top, history_rows));
+                        }
                         let band_height = self.live_row_prefix[block_last + 1]
                             .saturating_sub(self.live_row_prefix[block_first]);
                         let total_rows = live_math
@@ -1549,11 +1575,10 @@ impl ViewportProjection {
                 }
             }
 
-            // Suppress the frozen scrollback source of every emitted boundary-split block: its
-            // opener/body rows sit in the history region above and are drawn over by the bridged
-            // block image. Only rows within the visible history window are touched.
-            for abs_top in bridge_frozen_blank.drain(..) {
-                for absolute in abs_top.max(window_start)..history_rows {
+            // Suppress every proven prefix row of an emitted boundary-split block, whether already
+            // finalized in history or still in staging. Only rows inside the visible window change.
+            for (abs_top, abs_end) in bridge_prefix_blank.drain(..) {
+                for absolute in abs_top.max(window_start)..abs_end {
                     let Some(index) = absolute.checked_sub(window_start) else {
                         continue;
                     };
@@ -2749,6 +2774,7 @@ mod tests {
                     occluded_source_rows: 0,
                     occluded_visible_rows: Vec::new(),
                     frozen_prefix: Vec::new(),
+                    staging_prefix: Vec::new(),
                     generation: GridGeneration(1),
                     artifact: ProjectedMathArtifact {
                         key: format!("display-x-{band_start_row}-{band_end_row}"),
@@ -2868,6 +2894,7 @@ mod tests {
                 occluded_source_rows,
                 occluded_visible_rows: Vec::new(),
                 frozen_prefix: Vec::new(),
+                staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
                     key: "display-x".to_owned(),
@@ -3013,10 +3040,8 @@ mod tests {
         );
     }
 
-    /// A `$$…$$` block whose opener and body committed to frozen scrollback while its closer stayed
-    /// in the live grid renders as ONE block bridging both domains: the frozen source rows and the
-    /// live closer are suppressed, and the placement spans upward from the frozen rows through the
-    /// live band, never revealing bare `$$` source.
+    /// A `$$…$$` block whose opener finalized while its next exact source row is still staging and
+    /// its closer stayed in the live grid renders as ONE block bridging all three planes.
     #[test]
     fn boundary_split_block_renders_as_one_bridge_across_frozen_and_live() {
         let width = 32;
@@ -3025,18 +3050,16 @@ mod tests {
             .capture(CapturedRow::plain("$$", false))
             .finalized
             .remove(0);
-        let body = store
-            .capture(CapturedRow::plain(
-                r"\sum_{k=1}^{n}k=\frac{n(n+1)}{2}",
-                false,
-            ))
-            .finalized
-            .remove(0);
         let mut document = HistoryDocument::default();
         document.finalize_transaction(opener);
-        document.finalize_transaction(body);
         let frozen_prefix = document.entries().keys().copied().collect::<Vec<_>>();
-        assert_eq!(frozen_prefix.len(), 2);
+        assert_eq!(frozen_prefix.len(), 1);
+        let staging_id = StagingId(77);
+        let staged_body = format!("{:<width$}", "A=", width = width as usize);
+        let staged = [StagedRow {
+            id: staging_id,
+            row: CapturedRow::plain(&staged_body, true),
+        }];
 
         let mut projection = ViewportProjection::new(
             key(width),
@@ -3061,6 +3084,7 @@ mod tests {
                 occluded_source_rows: 0,
                 occluded_visible_rows: Vec::new(),
                 frozen_prefix: frozen_prefix.clone(),
+                staging_prefix: vec![staging_id],
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
                     key: "sum".to_owned(),
@@ -3087,7 +3111,7 @@ mod tests {
         let frame = projection
             .continuous_frame(
                 &document,
-                &[],
+                &staged,
                 live_rows,
                 GridCursor {
                     row: 0,
@@ -3141,7 +3165,7 @@ mod tests {
             "bridge bottom must reach the live closer row bottom"
         );
 
-        // No bare `$$` delimiter survives: the frozen opener/body and the live closer are all
+        // No prefix source survives: the finalized opener, staging body and live closer are all
         // suppressed by the single rendered block.
         let column_count = width as usize;
         for (row, cells) in frame.cells.chunks(column_count).enumerate() {
@@ -3150,10 +3174,48 @@ mod tests {
                 .map(|cell| cell.text.as_str())
                 .collect::<String>();
             assert!(
-                !text.contains("$$") && !text.contains("sum"),
+                !text.contains("$$") && !text.contains("A="),
                 "row {row} still shows split-block source: {text:?}"
             );
         }
+
+        let wrong_staged = [StagedRow {
+            id: StagingId(78),
+            row: CapturedRow::plain(&staged_body, true),
+        }];
+        projection.scroll_to_top();
+        let unproven = projection
+            .continuous_frame(
+                &document,
+                &wrong_staged,
+                vec![CapturedRow::plain(&closer, false)]
+                    .into_iter()
+                    .chain(vec![CapturedRow::plain(&blank, false); 11])
+                    .collect(),
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        assert!(
+            unproven.cells.chunks(column_count).any(|cells| cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .contains("A=")),
+            "a mismatched staging row must remain ordinary text rather than being guessed into the bridge"
+        );
+        assert!(
+            !unproven.cells.chunks(column_count).any(|cells| cells
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect::<String>()
+                .contains("$$")),
+            "an unrelated staged row must not stop the exact frozen source prefix from being swallowed"
+        );
     }
 
     #[test]
@@ -3178,6 +3240,7 @@ mod tests {
             occluded_source_rows: 0,
             occluded_visible_rows: Vec::new(),
             frozen_prefix: Vec::new(),
+            staging_prefix: Vec::new(),
             generation,
             artifact: ProjectedMathArtifact {
                 key: key.to_owned(),
@@ -3248,6 +3311,7 @@ mod tests {
                 occluded_source_rows: 0,
                 occluded_visible_rows: Vec::new(),
                 frozen_prefix: Vec::new(),
+                staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
                     key: key.to_owned(),

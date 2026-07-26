@@ -271,6 +271,9 @@ struct LiveDecorationRecord {
     /// top to bottom, immediately preceding the live band; the presentation layer bridges the two
     /// domains into one rendered block so a boundary-split formula does not stall as source.
     frozen_prefix: Vec<TranscriptId>,
+    /// Exact captured source rows which have left the live grid but have not finalized into
+    /// transcript ids yet. Ordered by staging lineage immediately after `frozen_prefix`.
+    staging_prefix: Vec<StagingId>,
     /// Rows from the proven owned band that currently sit above alternate-screen row zero.
     /// Projection keeps their geometry but clips their pixels and terminal cells.
     clipped_top_rows: u32,
@@ -333,6 +336,7 @@ struct AlternateRepaintSnapshot {
 
 #[derive(Clone, Debug)]
 struct PendingLiveArtifactHandoff {
+    occurrence_id: LiveMathOccurrenceId,
     span: MathSpan,
     artifact: PlaceholderArtifact,
     layout: LayoutKey,
@@ -340,6 +344,13 @@ struct PendingLiveArtifactHandoff {
     candidate_staging: StagingId,
     candidate_start: Option<TranscriptId>,
     expected_frozen_lines: u64,
+    /// Proven source rows captured from the top of this still-live occurrence, in source order.
+    /// These staging ids are populated before the terminal grid shifts; as they finalize, their
+    /// transcript ids become the live record's frozen prefix so projection can bridge and suppress
+    /// the complete source immediately instead of leaking it above the retained raster.
+    prefix_staging: Vec<StagingId>,
+    finalized_prefix_staging: usize,
+    frozen_prefix: Vec<TranscriptId>,
 }
 
 #[derive(Debug)]
@@ -2401,6 +2412,7 @@ impl DualPlaneSession {
                 band_start_row: task.band_start_row,
                 band_end_row: task.band_end_row,
                 frozen_prefix,
+                staging_prefix: Vec::new(),
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 detection_revision: task.detection_revision,
@@ -3106,6 +3118,7 @@ impl DualPlaneSession {
                         occluded_source_rows: record.placement.occluded_source_rows,
                         occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
                         frozen_prefix: record.frozen_prefix.clone(),
+                        staging_prefix: record.staging_prefix.clone(),
                         generation: record.generation,
                         artifact,
                     })
@@ -3794,14 +3807,15 @@ impl DualPlaneSession {
             match row {
                 RowDirective::Capture { live_row, row } => {
                     let grapheme_offsets = captured_grapheme_offsets(&row);
+                    let captured_row = row.clone();
                     let result = self.transcript.capture(row);
-                    captured_staging.insert(live_row, result.staging_id);
                     let generation = self.transcript.source_generation();
                     removals.push(LiveRowRemoval {
                         row: live_row,
                         staging: Some((result.staging_id, generation)),
                         grapheme_offsets,
                     });
+                    captured_staging.insert(live_row, (result.staging_id, captured_row));
                     captured.push(result);
                 }
                 RowDirective::DiscardFromTop { live_row } => {
@@ -3818,7 +3832,9 @@ impl DualPlaneSession {
             return Ok(());
         }
 
-        self.remember_live_artifact_handoffs(&captured_staging);
+        if preserve_full_screen_scroll {
+            self.remember_live_artifact_handoffs(&captured_staging);
+        }
         if !preserve_full_screen_scroll {
             self.invalidate_all_live_decorations();
         }
@@ -3899,12 +3915,40 @@ impl DualPlaneSession {
         }
     }
 
-    fn remember_live_artifact_handoffs(&mut self, captured_rows: &BTreeMap<u32, StagingId>) {
+    fn remember_live_artifact_handoffs(
+        &mut self,
+        captured_rows: &BTreeMap<u32, (StagingId, CapturedRow)>,
+    ) {
         if self.live_screen != ScreenId::Primary {
             return;
         }
+        let mut staging_prefix_updates = Vec::new();
         for record in self.live_decorations.values() {
-            let Some(candidate_staging) = captured_rows.get(&record.start.row).copied() else {
+            let captured_source = record
+                .identity
+                .source_rows
+                .iter()
+                .enumerate()
+                .filter_map(|(index, proven)| {
+                    let target = record
+                        .placement
+                        .logical_band_start
+                        .checked_add(i64::from(proven.band_offset))?;
+                    let row = u32::try_from(target).ok()?;
+                    let (staging, captured) = captured_rows.get(&row)?;
+                    let (text, cell_boundaries) = captured_row_text_and_boundaries(captured);
+                    let captured = LiveDetectionInput {
+                        source: LiveDetectionSource::Grid { row, revision: 0 },
+                        text,
+                        continues: captured.continues,
+                        cell_boundaries,
+                    };
+                    proven
+                        .exactly_matches(&captured)
+                        .then_some((index, *staging))
+                })
+                .collect::<Vec<_>>();
+            let Some(&(first_index, candidate_staging)) = captured_source.first() else {
                 continue;
             };
             if record.layout != self.layout_key
@@ -3915,24 +3959,70 @@ impl DualPlaneSession {
             let Some(artifact) = record.artifact.as_ref() else {
                 continue;
             };
-            if self
+            if let Some(pending) = self
                 .pending_live_handoffs
+                .iter_mut()
+                .find(|pending| pending.occurrence_id == record.identity.occurrence_id)
+            {
+                let next = pending.prefix_staging.len();
+                if first_index != next
+                    || captured_source
+                        .iter()
+                        .enumerate()
+                        .any(|(offset, (index, _))| *index != next.saturating_add(offset))
+                {
+                    continue;
+                }
+                pending
+                    .prefix_staging
+                    .extend(captured_source.iter().map(|(_, staging)| *staging));
+                staging_prefix_updates.push((
+                    pending.occurrence_id,
+                    pending.prefix_staging[pending.finalized_prefix_staging..].to_vec(),
+                ));
+                continue;
+            }
+            // A record first detected as a frozen/live bridge already has a history prefix whose
+            // staging lineage predates this handoff. Do not reconstruct that lineage from text.
+            // This path only grows a prefix from row zero of an all-live, already-proven occurrence.
+            if !record.frozen_prefix.is_empty() || first_index != 0 {
+                continue;
+            }
+            if captured_source
                 .iter()
-                .any(|pending| pending.artifact.key == artifact.key)
+                .enumerate()
+                .any(|(index, (source_index, _))| *source_index != index)
             {
                 continue;
             }
-            self.pending_live_handoffs.push(PendingLiveArtifactHandoff {
+            let pending = PendingLiveArtifactHandoff {
+                occurrence_id: record.identity.occurrence_id,
                 span: record.span.clone(),
                 artifact: artifact.clone(),
                 layout: record.layout,
                 detection_revision: record.detection_revision,
                 candidate_staging,
                 candidate_start: None,
-                expected_frozen_lines: u64::from(
-                    record.end.row.saturating_sub(record.start.row) + 1,
-                ),
-            });
+                expected_frozen_lines: u64::try_from(record.identity.source_rows.len())
+                    .unwrap_or(u64::MAX),
+                prefix_staging: captured_source
+                    .iter()
+                    .map(|(_, staging)| *staging)
+                    .collect(),
+                finalized_prefix_staging: 0,
+                frozen_prefix: Vec::new(),
+            };
+            staging_prefix_updates.push((pending.occurrence_id, pending.prefix_staging.clone()));
+            self.pending_live_handoffs.push(pending);
+        }
+        for (occurrence_id, staging_prefix) in staging_prefix_updates {
+            if let Some(record) = self
+                .live_decorations
+                .values_mut()
+                .find(|record| record.identity.occurrence_id == occurrence_id)
+            {
+                record.staging_prefix = staging_prefix;
+            }
         }
     }
 
@@ -3951,6 +4041,7 @@ impl DualPlaneSession {
             source.transition(SourceLifecycle::Frozen)?;
         }
         let id = finalized.line.id;
+        let mut live_prefix_updates = Vec::new();
         for pending in &mut self.pending_live_handoffs {
             if pending.candidate_start.is_none()
                 && finalized
@@ -3960,8 +4051,42 @@ impl DualPlaneSession {
             {
                 pending.candidate_start = Some(id);
             }
+            let before = pending.finalized_prefix_staging;
+            while pending
+                .prefix_staging
+                .get(pending.finalized_prefix_staging)
+                .is_some_and(|staging| {
+                    finalized
+                        .mappings
+                        .iter()
+                        .any(|mapping| mapping.staging_id == *staging)
+                })
+            {
+                pending.finalized_prefix_staging =
+                    pending.finalized_prefix_staging.saturating_add(1);
+            }
+            if pending.finalized_prefix_staging != before {
+                if pending.frozen_prefix.last() != Some(&id) {
+                    pending.frozen_prefix.push(id);
+                }
+                live_prefix_updates.push((
+                    pending.occurrence_id,
+                    pending.frozen_prefix.clone(),
+                    pending.prefix_staging[pending.finalized_prefix_staging..].to_vec(),
+                ));
+            }
         }
         self.document.finalize_transaction(finalized);
+        for (occurrence_id, frozen_prefix, staging_prefix) in live_prefix_updates {
+            if let Some(record) = self
+                .live_decorations
+                .values_mut()
+                .find(|record| record.identity.occurrence_id == occurrence_id)
+            {
+                record.frozen_prefix = frozen_prefix;
+                record.staging_prefix = staging_prefix;
+            }
+        }
         self.schedule_detection(id);
         self.try_handoff_live_artifact(id);
         self.staging_sources
@@ -9673,6 +9798,94 @@ mod tests {
         assert_eq!(session.live_detection_count, detections);
         assert_eq!(session.frozen_detection_count, frozen_detections);
         assert_eq!(session.live_invalidation_count, invalidations);
+    }
+
+    #[test]
+    fn primary_live_scroll_bridges_every_frozen_source_prefix_row_before_full_handoff() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(16));
+        session
+            .feed_at(
+                b"$$\r\nA=\r\n\\begin{pmatrix}\r\na & b\\\\\r\nc & d\r\n\\end{pmatrix}\r\n$$\r\ntail-1\r\ntail-2\r\ntail-3\r\ntail-4\r\ntail-5\r\ntail-6\r\ntail-7\r\ntail-8\r\ntail-9",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            1
+        );
+
+        // Two full-screen scrolls commit the opener and the `A=` body row to history while the
+        // remaining five source rows stay live. The raster is still the one proven for all seven
+        // rows, so the frozen prefix and live band must be projected as one bridge immediately.
+        session
+            .feed_at(b"\r\nmore", start + Duration::from_millis(210))
+            .unwrap();
+        session
+            .feed_at(b"\r\nfinal", start + Duration::from_millis(220))
+            .unwrap();
+        let record = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.render_source.contains(r"\begin{pmatrix}"))
+            .expect("the partially frozen occurrence keeps its live raster");
+        assert_eq!(
+            record.frozen_prefix.len(),
+            2,
+            "both committed source rows belong to the retained occurrence"
+        );
+        assert_eq!((record.band_start_row, record.band_end_row), (0, 4));
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let block = frame
+            .math_blocks
+            .iter()
+            .find(|block| block.source.contains(r"\begin{pmatrix}"))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the split occurrence renders as one block; blocks={:?} prefix={:?} staging={} frozen={} record=({:?} {:?} {:?} {:?} {} {}) rows={:?}",
+                    frame.math_blocks,
+                    record.frozen_prefix,
+                    session.transcript().staging_len(),
+                    session.transcript().frozen().len(),
+                    record.screen,
+                    record.generation,
+                    record.start,
+                    record.end,
+                    record.artifact.is_some(),
+                    record.show_source,
+                    frame
+                        .row_map
+                        .iter()
+                        .map(|row| row.live_grid_row)
+                        .collect::<Vec<_>>(),
+                )
+            });
+        assert_eq!(
+            block.frozen_prefix_rows, 2,
+            "projection must bridge the complete frozen prefix into the live band"
+        );
+
+        let rows = frame
+            .cells
+            .chunks(frame.columns.get() as usize)
+            .take(2)
+            .map(|cells| {
+                cells
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter().all(|row| row.trim().is_empty()),
+            "the bridged raster must suppress both frozen source rows, got {rows:?}"
+        );
     }
 
     #[test]
