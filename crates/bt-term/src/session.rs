@@ -6,6 +6,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     io::Write as _,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
+    ops::Bound,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -16,7 +17,8 @@ use bt_detect::{
     DetectionTask, LiveDetectionInput, LiveDetectionSource, LiveDetectionTask,
     MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine, MathSpan, PlaceholderArtifact,
     StaleArtifact, advance_detection_context, detect_math_blocks_with_options,
-    resolve_detection_task, resolve_live_detection_task, resolve_live_detection_tasks,
+    frozen_resync_scan_with_options, resolve_detection_task, resolve_live_detection_task,
+    resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -516,6 +518,15 @@ pub struct DualPlaneSession {
     pending_live_handoffs: Vec<PendingLiveArtifactHandoff>,
     frozen_detection_context: DetectionContext,
     frozen_detection_contexts: BTreeMap<TranscriptId, DetectionContext>,
+    /// Certified repair frontier (review §B): the last frozen id through which the resync scanner
+    /// has proven the parser phase is CLEANLY neutral — every structural delimiter up to it is owned
+    /// by a valid block and nothing is left open. A frozen candidate's scan window is anchored at the
+    /// first id past this frontier (a proven `Known` neutral start), so the shared phantom witness can
+    /// abandon a lost-opener `$$` and re-synchronise the blocks below without the poisoned dumb-parity
+    /// `required_start` (which the frontier demotes to a cheap fallback hint). `None` means nothing is
+    /// certified yet (the anchor is the earliest resident line). Advances monotonically within a source
+    /// revision; reset only on a staging clear.
+    frozen_certified_through: Option<TranscriptId>,
     frozen_detection_count: u64,
     live_detection_count: u64,
     live_invalidation_count: u64,
@@ -634,6 +645,7 @@ impl DualPlaneSession {
             pending_live_handoffs: Vec::new(),
             frozen_detection_context: DetectionContext::default(),
             frozen_detection_contexts: BTreeMap::new(),
+            frozen_certified_through: None,
             frozen_detection_count: 0,
             live_detection_count: 0,
             live_invalidation_count: 0,
@@ -2462,6 +2474,7 @@ impl DualPlaneSession {
         else {
             return false;
         };
+        let rendered = artifact.is_some();
         let applied = match artifact {
             Some(artifact) => {
                 self.document.set_decoration(
@@ -2484,7 +2497,36 @@ impl DualPlaneSession {
         if applied {
             record.show_source = show_source;
         }
+        // A resolved multi-line block owns its interior rows as body. A structural delimiter inside
+        // it (e.g. the `\begin{aligned}` of a `$$…\begin{aligned}…\end{aligned}…$$` block) is never a
+        // sub-block; suppress any stale standalone render left on one — which the certified-frontier
+        // recovery can now produce when the enclosing `$$` opener was a phantom until its forward
+        // block landed — so the block's artifact does not double-render over an inner environment.
+        if applied && rendered {
+            self.suppress_block_interior(task.transcript_id, task.block_end);
+        }
         applied
+    }
+
+    /// Suppress the frozen decorations of structural-delimiter rows strictly inside a resolved block
+    /// `(start, end)`. They are block body, never independent blocks, so a residual standalone render
+    /// on one must not be painted over the enclosing block's artifact.
+    fn suppress_block_interior(&mut self, start: TranscriptId, end: TranscriptId) {
+        if start >= end {
+            return;
+        }
+        let interior: Vec<TranscriptId> = self
+            .document
+            .entries()
+            .range((Bound::Excluded(start), Bound::Excluded(end)))
+            .filter(|(_, entry)| may_contain_display_math(&entry.line.text))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in interior {
+            if let Some(record) = self.decorations.get_mut(&id) {
+                record.suppress();
+            }
+        }
     }
 
     fn worker_task_is_current(&self, task: &DetectionTask) -> bool {
@@ -4028,6 +4070,14 @@ impl DualPlaneSession {
         self.frozen_detection_contexts
             .insert(id, self.frozen_detection_context.clone());
         advance_detection_context(&mut self.frozen_detection_context, id, &entry.line.text);
+        // Cheap prefilter: a certified-clean boundary is always dumb-parity-neutral too (the two agree
+        // wherever there is no phantom to abandon), so only pay for the resync certification scan at a
+        // dumb-neutral line. This keeps normal frozen ingestion O(1) per line — the resync only runs at
+        // block boundaries over the small uncertified segment — while a phantom-poisoned stretch still
+        // certifies once its forward block lands.
+        if self.frozen_detection_context.is_neutral() {
+            self.advance_frozen_frontier(id);
+        }
         self.decorations
             .insert(id, DecorationRecord::frozen(versions));
         // Ordinary frozen lines take only the allocation-free delimiter prefilter. A candidate
@@ -4046,12 +4096,21 @@ impl DualPlaneSession {
             self.pending_live_handoffs.clear();
             self.frozen_detection_context = DetectionContext::default();
             self.frozen_detection_contexts.clear();
+            self.frozen_certified_through = None;
         }
         let removed_set = removed.iter().copied().collect::<BTreeSet<_>>();
         self.scheduler.remove_sources(&removed_set);
         for id in removed {
             self.decorations.remove(id);
             self.frozen_detection_contexts.remove(id);
+        }
+        // A removed line may sit at or before the certified frontier; re-certify from scratch rather
+        // than trust a frontier whose proving segment no longer exists.
+        if self
+            .frozen_certified_through
+            .is_some_and(|through| removed_set.iter().any(|id| *id <= through))
+        {
+            self.frozen_certified_through = None;
         }
     }
 
@@ -4146,11 +4205,142 @@ impl DualPlaneSession {
         }
     }
 
+    /// First resident id strictly past the certified repair frontier — the anchor for a resync
+    /// window, and a proven `Known` neutral start. `None` when there are no resident lines.
+    fn frozen_certified_anchor(&self) -> Option<TranscriptId> {
+        match self.frozen_certified_through {
+            None => self.document.entries().keys().next().copied(),
+            Some(through) => self
+                .document
+                .entries()
+                .range((Bound::Excluded(through), Bound::Unbounded))
+                .next()
+                .map(|(id, _)| *id),
+        }
+    }
+
+    /// Advance the certified repair frontier (review §B) after `newest` freezes. The frontier passes
+    /// a line only when the resync scan of the whole uncertified segment `[anchor..=newest]` ends
+    /// CLEANLY neutral: nothing left open AND every structural delimiter owned by a resolved block.
+    /// A lone orphan (an `\end{env}` whose opener was eaten, prose carrying a literal `$$`) or a
+    /// still-provisional phantom leaves an uncovered delimiter, so the frontier waits behind it —
+    /// which is correct: certifying past such a point could be revised by later evidence, and the
+    /// scan from a proven-neutral anchor stays bounded by the source-byte cap regardless. The frontier
+    /// is monotonic; it only ever moves forward within a source revision.
+    fn advance_frozen_frontier(&mut self, newest: TranscriptId) {
+        let Some(anchor) = self.frozen_certified_anchor() else {
+            return;
+        };
+        if anchor > newest || !self.frozen_anchor_is_neutral(anchor) {
+            return;
+        }
+        let options = self.detection_options();
+        let mut segment: Vec<(TranscriptId, String)> = Vec::new();
+        let mut bytes = 0usize;
+        for (id, entry) in self.document.entries().range(anchor..=newest) {
+            bytes = bytes
+                .saturating_add(entry.line.text.len())
+                .saturating_add(1);
+            if bytes > MAX_MATH_SOURCE_BYTES {
+                // The uncertified segment outran the proof-epoch budget; leave the frontier where it
+                // is (schedule_scan uses a bounded fallback window for candidates inside it).
+                return;
+            }
+            segment.push((*id, entry.line.text.clone()));
+        }
+        if segment.is_empty() {
+            return;
+        }
+        let (blocks, final_neutral) = frozen_resync_scan_with_options(
+            segment.iter().map(|(id, text)| (*id, text.as_str())),
+            DetectionContext::default(),
+            options,
+        );
+        if !final_neutral {
+            return;
+        }
+        let covered = |id: TranscriptId| {
+            blocks
+                .iter()
+                .any(|block| block.start <= id && id <= block.end)
+        };
+        let clean = segment
+            .iter()
+            .all(|(id, text)| !may_contain_display_math(text) || covered(*id));
+        if clean {
+            self.frozen_certified_through = Some(newest);
+        }
+    }
+
+    /// The certified anchor is only a sound `Known` neutral start when its own recorded parser
+    /// snapshot is neutral. At a clean frontier point the dumb parity and the resync agree, so this
+    /// holds; it fails safe for a mid-block first line left by a partial history eviction (no proven
+    /// neutral prefix), in which case the caller falls back to the `required_start` hint.
+    fn frozen_anchor_is_neutral(&self, anchor: TranscriptId) -> bool {
+        self.frozen_detection_contexts
+            .get(&anchor)
+            .is_some_and(DetectionContext::is_neutral)
+    }
+
+    /// Gather the resync window `[anchor..=candidate_id]` as worker inputs, or `None` if it does not
+    /// span exactly that range or exceeds the source-byte cap (the proof-epoch budget).
+    fn frozen_window_inputs(
+        &self,
+        anchor: TranscriptId,
+        candidate_id: TranscriptId,
+    ) -> Option<Vec<DetectionInput>> {
+        let mut inputs = Vec::new();
+        let mut source_bytes = 0usize;
+        for (id, entry) in self.document.entries().range(anchor..=candidate_id) {
+            source_bytes = source_bytes
+                .saturating_add(entry.line.text.len())
+                .saturating_add(1);
+            if source_bytes > MAX_MATH_SOURCE_BYTES.saturating_add(1) {
+                return None;
+            }
+            inputs.push(DetectionInput {
+                id: *id,
+                text: entry.line.text.clone(),
+                cell_boundaries: frozen_cell_boundaries(&entry.line),
+            });
+        }
+        (inputs.first().is_some_and(|input| input.id == anchor)
+            && inputs.last().is_some_and(|input| input.id == candidate_id))
+        .then_some(inputs)
+    }
+
     fn schedule_scan(&mut self, candidate_id: TranscriptId) {
         let detection_options = self.detection_options();
         let Some(candidate_context) = self.frozen_detection_contexts.get(&candidate_id) else {
             return;
         };
+        // Certified-frontier window (review §B): anchor the scan at the proven-neutral frontier and
+        // let the worker's resync abandon a lost-opener `$$` phantom, instead of trusting the
+        // poisoned dumb-parity `required_start`. Used only when the window fits the source-byte cap
+        // from a proven-`Known` neutral anchor; otherwise fall back to the `required_start` hint.
+        if let Some(anchor) = self.frozen_certified_anchor()
+            && anchor <= candidate_id
+            && self.frozen_anchor_is_neutral(anchor)
+            && let Some(inputs) = self.frozen_window_inputs(anchor, candidate_id)
+        {
+            let Some(mut task) = self.decorations.get_mut(&candidate_id).and_then(|record| {
+                record.schedule_scan(
+                    candidate_id,
+                    DetectionContext::default(),
+                    Arc::from(inputs),
+                    detection_options,
+                )
+            }) else {
+                return;
+            };
+            task.cell_width_subpixels = self.cell_width_subpixels.get();
+            task.cell_height_subpixels = self.cell_height_subpixels.get();
+            task.ascii_baseline_subpixels =
+                self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get);
+            self.frozen_detection_count = self.frozen_detection_count.saturating_add(1);
+            self.enqueue_task(task);
+            return;
+        }
         let required_start = candidate_context.required_start(candidate_id);
         let mut initial_context = candidate_context.clone();
         let mut inputs = Vec::new();

@@ -797,7 +797,16 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
     initial_context: DetectionContext,
     options: DetectionOptions,
 ) -> MathScanResult {
-    scan_math_blocks_impl(lines, initial_context, options, None, None, None)
+    scan_math_blocks_impl(
+        lines,
+        initial_context,
+        options,
+        None,
+        None,
+        None,
+        false,
+        None,
+    )
 }
 
 /// `live_grid_boundary` is the logical index of the first live-grid line when this scan spans a
@@ -811,6 +820,10 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
 /// achieves, done deterministically. It never fires for a pure-grid context (an alternate screen,
 /// or a primary with empty history — `live_grid_boundary` is then `None`) nor for a block whose
 /// opener is itself in the grid.
+// The single authoritative scanner threads several orthogonal, independently-optional knobs (seam
+// boundary, clip evidence, ownership recorder, frozen resync, final-phase readout); public callers
+// reach it through the small purpose-named wrappers above, never this raw signature.
+#[allow(clippy::too_many_arguments)]
 fn scan_math_blocks_impl<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
     initial_context: DetectionContext,
@@ -818,9 +831,17 @@ fn scan_math_blocks_impl<'a>(
     live_grid_boundary: Option<usize>,
     clipped_open_index: Option<u32>,
     mut recorder: Option<&mut OwnershipRecorder>,
+    frozen_resync: bool,
+    final_neutral: Option<&mut bool>,
 ) -> MathScanResult {
     let lines = lines.into_iter().collect::<Vec<_>>();
     let mut result = MathScanResult::default();
+    // Frozen certified-boundary resync is only sound from a proven-neutral (`Known`) prefix: it is
+    // the whole-history mirror of the live seam resync, resolving a lost-opener `$$` parity phantom
+    // by the same body-invalid + forward-valid witness. Under an `Ambiguous` scrollback prefix the
+    // direction of a symmetric `$$` is genuinely undecidable (M1.9p), so the resync must stay off and
+    // the ambiguous opener is suppressed as it always has been — never re-paired on a guess.
+    let frozen_resync = frozen_resync && initial_context.prefix == PrefixKnowledge::Known;
     let mut fence = initial_context.fence;
     let mut opening = initial_context.opening.map(|(_, delimiter)| ActiveOpening {
         start_index: None,
@@ -914,41 +935,33 @@ fn scan_math_blocks_impl<'a>(
         if let Some(boundary) = live_grid_boundary
             && index >= boundary
         {
-            let abandon_stale_dollars = if let Some(active) = opening.as_ref() {
-                active.delimiter == DisplayDelimiter::Dollars
-                    && active.start_index.is_none_or(|start| start < boundary)
-                    && closing_delimiter(text, &active.delimiter).is_some_and(|(body_end, _)| {
-                        let frozen_body_invalid = match active.start_index {
-                            Some(start) => {
-                                let body =
-                                    joined_range(&lines, start, index, active.body_start, body_end);
-                                let render = restore_stripped_environment_newlines(
-                                    &body,
-                                    options.restore_stripped_environment_newlines,
-                                );
-                                !valid_display_body(&body, &render, options)
-                            }
-                            None => true,
-                        };
-                        // Convergence guard. Abandoning the stale opening re-reads this grid `$$`
-                        // as a *fresh opener*; that is only sound when the `$$` genuinely opens the
-                        // next block (a lost-opener parity phantom, where the frozen opening was
-                        // spurious). If instead this `$$` is the real closer of a complete block
-                        // that straddles the seam — its body merely tripping the body check (e.g. a
-                        // `=ad-bc` line the prose heuristic over-reads, an over-length body, a Jump
-                        // chip) — abandoning would turn its own closer into an opener and shift
-                        // every following grid block by one, stranding the whole screen at source
-                        // with no recovery until a reprint. So only abandon when re-pairing this
-                        // `$$` forward actually yields a valid display block; otherwise keep the
-                        // opening and let the normal closer path consume this `$$`, dropping only
-                        // the single unrenderable block and preserving parity for everything below.
-                        frozen_body_invalid
-                            && grid_dollars_opens_valid_block(&lines, index, options)
-                    })
-            } else {
-                false
-            };
+            let abandon_stale_dollars = opening.as_ref().is_some_and(|active| {
+                active.start_index.is_none_or(|start| start < boundary)
+                    && phantom_opener_witness(&lines, active, index, text, options)
+            });
             if abandon_stale_dollars {
+                opening = None;
+                if let Some(rec) = recorder.as_deref_mut() {
+                    rec.abandon_pending(LegitimateRejection::PhantomOpenerAbandoned);
+                }
+            }
+        }
+        // Frozen certified-boundary resync (the FrozenResyncWitness gate, review §A). A frozen-only
+        // scan has no live seam, so the live boundary guard above never fires; but a history reflow
+        // that ate one `$$` opener leaves the same lost-opener parity phantom — a stale `$$` opening
+        // whose body through its candidate closer is not valid math while that `$$` genuinely opens
+        // the next block. The *same* body-invalid + forward-valid witness proves the phantom without
+        // guessing direction. It runs only from a `Known` prefix (see `frozen_resync` above), so the
+        // carried opening is always an in-window opener (`start_index` is `Some`) and the symmetric
+        // `$$` ambiguity M1.9p forbids resolving never arises. Abandoning the phantom re-reads this
+        // `$$` as a fresh opener, re-synchronising every block below it — the deterministic mirror of
+        // the zoom reprint that rescues these blocks by hand.
+        if frozen_resync {
+            let abandon_phantom = opening.as_ref().is_some_and(|active| {
+                active.start_index.is_some()
+                    && phantom_opener_witness(&lines, active, index, text, options)
+            });
+            if abandon_phantom {
                 opening = None;
                 if let Some(rec) = recorder.as_deref_mut() {
                     rec.abandon_pending(LegitimateRejection::PhantomOpenerAbandoned);
@@ -1163,6 +1176,13 @@ fn scan_math_blocks_impl<'a>(
             body_start,
         });
     }
+    // The resync-corrected parser phase after the last line. A caller certifying a repair frontier
+    // (session frozen scheduling, review §B) treats `opening.is_none() && fence.is_none()` as a
+    // proven-neutral boundary: the scanned segment resolved to complete blocks with nothing left
+    // open, so a window anchored just past it begins from a `Known` neutral state.
+    if let Some(slot) = final_neutral {
+        *slot = opening.is_none() && fence.is_none();
+    }
     result
 }
 
@@ -1195,6 +1215,43 @@ fn record_code_context_delimiter(recorder: &mut OwnershipRecorder, index: usize,
     );
 }
 
+/// The lost-opener parity-phantom witness (review §A `FrozenResyncWitness`), shared by the live
+/// frozen→live seam resync and the frozen certified-boundary resync so both convergence rules stay
+/// one predicate. `active` is a stale `$$` opening about to meet its candidate closer on `text` at
+/// logical `index`. Returns true iff both decidable conditions hold, neither of which guesses the
+/// `$$`'s direction. First, **body-invalid**: the joined body from the stale opening through this
+/// closer is *not* valid display math (an empty/blank body, prose, CJK prose, oversize, or the Jump
+/// chip). A genuine block never trips this, so the pairing being consumed here is spurious. Second,
+/// **forward-valid**: re-reading this `$$` as a *fresh opener* pairs forward into a valid display
+/// block, i.e. the real block starts here. This is the `3875209` convergence guard — if the `$$`
+/// were instead the true closer of a straddling block whose body merely tripped the body check,
+/// forward re-pairing would not yield a valid block and the opening is kept, so the single
+/// unrenderable block drops itself and parity below is preserved. When both hold the stale opening
+/// is a phantom and abandoning it lets `index` re-pair cleanly.
+fn phantom_opener_witness(
+    lines: &[(TranscriptId, &str)],
+    active: &ActiveOpening,
+    index: usize,
+    text: &str,
+    options: DetectionOptions,
+) -> bool {
+    active.delimiter == DisplayDelimiter::Dollars
+        && closing_delimiter(text, &active.delimiter).is_some_and(|(body_end, _)| {
+            let frozen_body_invalid = match active.start_index {
+                Some(start) => {
+                    let body = joined_range(lines, start, index, active.body_start, body_end);
+                    let render = restore_stripped_environment_newlines(
+                        &body,
+                        options.restore_stripped_environment_newlines,
+                    );
+                    !valid_display_body(&body, &render, options)
+                }
+                None => true,
+            };
+            frozen_body_invalid && grid_dollars_opens_valid_block(lines, index, options)
+        })
+}
+
 /// True when the grid `$$` at `index`, re-interpreted as a fresh display opener, pairs forward into
 /// a valid display block. This is the signature of a lost-opener parity phantom: the frozen opening
 /// carried into the grid was spurious, and this `$$` really opens the next block, so abandoning the
@@ -1215,6 +1272,8 @@ fn grid_dollars_opens_valid_block(
         options,
         None,
         None,
+        None,
+        false,
         None,
     )
     .blocks
@@ -1628,8 +1687,56 @@ pub fn detect_live_math_blocks_in_context<'a>(
         live_grid_boundary,
         clipped_open_index,
         None,
+        false,
+        None,
     )
     .blocks
+}
+
+/// Frozen-history variant that resolves a lost-opener `$$` parity phantom left by a history reflow
+/// (review §A). Unlike the live seam resync it has no `live_grid_boundary`; instead, from a proven
+/// `Known` prefix, it applies the shared `phantom_opener_witness` at every candidate closer so an
+/// eaten `$$` opener upstream no longer desynchronises every block below it. Under an `Ambiguous`
+/// prefix the resync is inert (M1.9p): the scan is byte-identical to `detect_math_blocks_in_context`.
+pub fn detect_frozen_math_blocks_in_context_with_options<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+) -> Vec<DetectedMathBlock> {
+    scan_math_blocks_impl(
+        lines,
+        initial_context,
+        options,
+        None,
+        None,
+        None,
+        true,
+        None,
+    )
+    .blocks
+}
+
+/// Frozen resync scan that also reports whether the parser phase is neutral after the last line, so
+/// the session can advance its certified repair frontier (review §B). `final_neutral` is true when
+/// the scanned segment resolved to complete blocks with no delimiter left open — a proven boundary
+/// from which the next window may begin in a `Known` neutral state.
+pub fn frozen_resync_scan_with_options<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
+    initial_context: DetectionContext,
+    options: DetectionOptions,
+) -> (Vec<DetectedMathBlock>, bool) {
+    let mut final_neutral = false;
+    let result = scan_math_blocks_impl(
+        lines,
+        initial_context,
+        options,
+        None,
+        None,
+        None,
+        true,
+        Some(&mut final_neutral),
+    );
+    (result.blocks, final_neutral)
 }
 
 /// Document-level detection red gate (the tool-gap the live-norender audit filed). Counts display
@@ -1722,6 +1829,8 @@ pub fn live_detection_ownership_ledger(
         boundary,
         clipped,
         Some(&mut recorder),
+        false,
+        None,
     );
     let mut ledger = recorder.finish(boundary, source_of, clipped);
     // Batch ③: carry the display blocks the same scan Owned, keyed by the exact `original_source` the
@@ -1790,7 +1899,12 @@ pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
     if task.resolved {
         return true;
     }
-    let detected = detect_math_blocks_in_context_with_options(
+    // The frozen worker scan applies the certified-boundary resync (review §A/§B): the session
+    // anchors this window at a proven-neutral frontier, so an eaten `$$` opener upstream is
+    // abandoned by the shared witness rather than shifting every following block's pairing by one.
+    // For a clean window the resync is a no-op and the result is byte-identical to the ordinary
+    // frozen scan; under an `Ambiguous` prefix (a cap-bounded fallback window) it is inert (M1.9p).
+    let detected = detect_frozen_math_blocks_in_context_with_options(
         task.inputs
             .iter()
             .map(|input| (input.id, input.text.as_str())),
@@ -3468,6 +3582,162 @@ abla f",
         assert_eq!(verdict.orphans, 0, "contained damage must not red the gate");
         assert!(!verdict.red);
         assert!(verdict.detected >= 2, "both clean blocks resolve");
+    }
+
+    // ---- Frozen certified-boundary resync (review §A `FrozenResyncWitness`) ----
+    //
+    // The scroll-strand class: a history reflow ate one `$$` opener, leaving a lost-opener parity
+    // phantom in PURE frozen history (no live seam, so the live-boundary resync never fires). The
+    // frozen resync applies the same body-invalid + forward-valid witness from a `Known` prefix, so
+    // an eaten opener no longer shifts every following `$$` by one and strands each clean block.
+
+    /// Core recovery: the block below an eaten `$$` opener is stranded by the naive scan and
+    /// recovered by the frozen resync, while the orphan closer is never fabricated into a wrapper.
+    #[test]
+    fn frozen_resync_recovers_the_block_below_an_eaten_dollar_opener() {
+        let lines = [
+            (TranscriptId(1), r"\begin{pmatrix}"),
+            (TranscriptId(2), "a & b"),
+            (TranscriptId(3), r"\end{pmatrix}"),
+            (TranscriptId(4), "$$"), // orphan closer — its opener `$$` was eaten by the reflow
+            (TranscriptId(5), ""),
+            (TranscriptId(6), "$$"), // the real opener of the block below
+            (TranscriptId(7), "E = mc^2"),
+            (TranscriptId(8), "$$"), // the real closer
+        ];
+        // Baseline reproduces the poison: the phantom pairs (4,6) over a blank body and strands the
+        // clean block below.
+        let baseline = detect_math_blocks(lines);
+        assert!(
+            !baseline
+                .iter()
+                .any(|block| block.span.render_source.contains("E = mc^2")),
+            "baseline must reproduce the strand (clean block below the eaten opener is lost)"
+        );
+        // The frozen resync abandons the phantom `$$` (id 4) and re-pairs (6,8) cleanly.
+        let resync = detect_frozen_math_blocks_in_context_with_options(
+            lines,
+            DetectionContext::default(),
+            DetectionOptions::default(),
+        );
+        assert!(
+            resync
+                .iter()
+                .any(|block| block.span.render_source.contains("E = mc^2")),
+            "frozen resync must recover the block below the eaten opener"
+        );
+        // The pmatrix still renders standalone; the orphan `$$` is never made an opener (no
+        // fabricated wrapper — M1.9p).
+        assert!(
+            resync
+                .iter()
+                .any(|block| matches!(block.span.delimiter_kind, DelimiterKind::Environment(_))),
+            "the surviving environment renders on its own"
+        );
+        assert!(
+            resync
+                .iter()
+                .all(|block| block.start != TranscriptId(4) && block.end != TranscriptId(4)),
+            "the orphan closer must never anchor a block"
+        );
+    }
+
+    /// M1.9p: under an `Ambiguous` scrollback prefix the symmetric `$$` direction is undecidable,
+    /// so the resync stays inert — byte-identical to the ordinary ambiguous scan, never a guess.
+    #[test]
+    fn frozen_resync_is_inert_under_an_ambiguous_prefix() {
+        let lines = [
+            (TranscriptId(1), "$$"),
+            (TranscriptId(2), "some prose paragraph here"),
+            (TranscriptId(3), "$$"),
+            (TranscriptId(4), "E = mc^2"),
+            (TranscriptId(5), "$$"),
+        ];
+        let resynced = detect_frozen_math_blocks_in_context_with_options(
+            lines,
+            DetectionContext::ambiguous(),
+            DetectionOptions::default(),
+        );
+        let baseline = detect_math_blocks_in_context(lines, DetectionContext::ambiguous());
+        assert_eq!(
+            resynced, baseline,
+            "the resync must be byte-identical to the ambiguous baseline"
+        );
+    }
+
+    /// The forward-valid arm of the witness forbids rendering prose: when the "block below" an
+    /// orphan closer is prose (no valid forward block), the phantom is NOT abandoned into it.
+    #[test]
+    fn frozen_resync_never_renders_prose_when_it_cannot_re_pair_forward() {
+        let lines = [
+            (TranscriptId(1), r"\begin{pmatrix}"),
+            (TranscriptId(2), "a & b"),
+            (TranscriptId(3), r"\end{pmatrix}"),
+            (TranscriptId(4), "$$"),
+            (TranscriptId(5), "ordinary english prose sentence here"),
+            (TranscriptId(6), "$$"),
+        ];
+        let resync = detect_frozen_math_blocks_in_context_with_options(
+            lines,
+            DetectionContext::default(),
+            DetectionOptions::default(),
+        );
+        assert!(
+            resync
+                .iter()
+                .all(|block| !block.span.render_source.contains("prose")),
+            "prose between an orphan closer and the next $$ must never render"
+        );
+    }
+
+    /// A lone trailing `$$` (the id=171 strand-tail form) stays source: it opens nothing and the
+    /// resync never fabricates a body for it.
+    #[test]
+    fn frozen_resync_keeps_a_lone_trailing_dollar_as_source() {
+        let lines = [
+            (TranscriptId(1), "$$"),
+            (TranscriptId(2), "E = mc^2"),
+            (TranscriptId(3), "$$"),
+            (TranscriptId(4), "$$"), // lone trailing opener — a streaming tail, never a block
+        ];
+        let resync = detect_frozen_math_blocks_in_context_with_options(
+            lines,
+            DetectionContext::default(),
+            DetectionOptions::default(),
+        );
+        assert_eq!(resync.len(), 1, "only the genuine E=mc^2 block resolves");
+        assert!(
+            resync.iter().all(|block| block.end != TranscriptId(4)),
+            "the trailing $$ never closes a block"
+        );
+    }
+
+    /// Convergence guard (shared with the live seam, `3875209`): a genuine block whose body merely
+    /// trips the prose heuristic is a real closer, not a phantom — re-reading it forward yields no
+    /// valid block, so it is never abandoned and parity below is preserved.
+    #[test]
+    fn frozen_resync_does_not_abandon_a_real_closer_whose_body_looks_prose() {
+        // `= ad - bc` is real math the whitespace-word prose guard tolerates; a following clean
+        // block must still resolve, proving no spurious abandon shifted parity.
+        let lines = [
+            (TranscriptId(1), "$$"),
+            (TranscriptId(2), "M = a - b"),
+            (TranscriptId(3), "$$"),
+            (TranscriptId(4), ""),
+            (TranscriptId(5), "$$"),
+            (TranscriptId(6), "E = mc^2"),
+            (TranscriptId(7), "$$"),
+        ];
+        let resync = detect_frozen_math_blocks_in_context_with_options(
+            lines,
+            DetectionContext::default(),
+            DetectionOptions::default(),
+        );
+        assert_eq!(
+            resync.len(),
+            2,
+            "both genuine blocks resolve, parity intact"
+        );
     }
 
     /// CONTAINED (batch 2, ④ + evidence-driven ②). This was the batch-2 baseline RED test
