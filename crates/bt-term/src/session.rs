@@ -3227,6 +3227,8 @@ impl DualPlaneSession {
                 occluded_visible_rows: Vec::new(),
                 live_occurrence_id: None,
                 frozen_prefix_rows: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
             });
         }
 
@@ -3295,6 +3297,8 @@ impl DualPlaneSession {
                 occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
                 live_occurrence_id: Some(record.identity.occurrence_id),
                 frozen_prefix_rows: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
             });
         }
 
@@ -3357,6 +3361,8 @@ impl DualPlaneSession {
                 occluded_visible_rows: Vec::new(),
                 live_occurrence_id: None,
                 frozen_prefix_rows: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
             });
         }
 
@@ -3425,6 +3431,8 @@ impl DualPlaneSession {
                 occluded_visible_rows: Vec::new(),
                 live_occurrence_id: Some(record.identity.occurrence_id),
                 frozen_prefix_rows: 0,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
             });
         }
 

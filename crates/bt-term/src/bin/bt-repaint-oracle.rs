@@ -66,6 +66,14 @@ struct HeadlessOracle {
     /// resize / stream-in); a nonzero FINAL value is the hold-masks-dead-detection strand. Tracked
     /// every frame (the field is emitted per frame); the final-state verdict drives the opt-in gate.
     max_held_unbacked: usize,
+    /// Zoom/reflow stale-window band-alignment gate. Peak per-frame count of primary Rendered live
+    /// blocks whose clip height falls short of their artifact height WITHOUT a genuine-clip context
+    /// (bottom-edge run-off or occlusion) — the half-band fragment a phantom top clip leaves in the
+    /// stale preview window. Frame transient == wall-clock persistent during idle, so any nonzero
+    /// value is a defect the user sees; the gate reds on the peak, not just the final state.
+    max_clip_misalign: usize,
+    /// A human-readable exemplar of the worst clip-misalignment placement seen, for the report.
+    clip_misalign_worst: Option<String>,
 }
 
 impl HeadlessOracle {
@@ -91,7 +99,65 @@ impl HeadlessOracle {
             ever_clipped_open: false,
             annotations: Vec::new(),
             max_held_unbacked: 0,
+            max_clip_misalign: 0,
+            clip_misalign_worst: None,
         }
+    }
+
+    /// Frame-level red gate for the zoom/reflow stale-window residue. A primary Rendered live block
+    /// whose clip height is short of its artifact height is only legitimate when a genuine clip
+    /// context is present: a bottom-edge run-off (the band ends on the last live row) or occlusion.
+    /// Every other short clip is a phantom top clip — the stale identity out-counting the reflowed
+    /// occurrence's rows — which the user sees as a half-band / stray fragment. Boundary-split
+    /// bridges (`frozen_prefix_rows > 0`) legitimately carry a combined height and are exempt.
+    fn audit_clip_alignment(&mut self, frame: &ViewportFrame) {
+        let last_live_row = frame.rows.get().saturating_sub(1);
+        let mut violations = 0usize;
+        for block in &frame.math_blocks {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+                continue;
+            }
+            let bt_viewport::MathBlockAnchor::Live { band_end_row, .. } = block.anchor else {
+                continue;
+            };
+            if block.frozen_prefix_rows > 0 {
+                continue;
+            }
+            if block.clip_height_subpixels >= block.artifact.height_subpixels {
+                continue;
+            }
+            let genuine_bottom_clip =
+                block.clipped_bottom_rows > 0 && band_end_row == last_live_row;
+            let occluded =
+                block.occluded_source_rows > 0 || !block.occluded_visible_rows.is_empty();
+            if genuine_bottom_clip || occluded {
+                continue;
+            }
+            violations += 1;
+            if self.clip_misalign_worst.is_none() {
+                let source_head = block
+                    .source
+                    .replace('\n', " ")
+                    .chars()
+                    .take(28)
+                    .collect::<String>();
+                self.clip_misalign_worst = Some(format!(
+                    "frame={} band={:?}..={band_end_row} clip_h={} art_h={} clip_top={} clip_bot={} occ={} scale={} src=\"{source_head}\"",
+                    self.frame_sequence,
+                    match block.anchor {
+                        bt_viewport::MathBlockAnchor::Live { band_start_row, .. } => band_start_row,
+                        _ => 0,
+                    },
+                    block.clip_height_subpixels,
+                    block.artifact.height_subpixels,
+                    block.clipped_top_rows,
+                    block.clipped_bottom_rows,
+                    block.occluded_source_rows,
+                    block.artifact.render_scale_milli,
+                ));
+            }
+        }
+        self.max_clip_misalign = self.max_clip_misalign.max(violations);
     }
 
     fn advance_before(
@@ -318,6 +384,7 @@ impl HeadlessOracle {
         if geometry {
             self.dump_geometry(&frame);
         }
+        self.audit_clip_alignment(&frame);
         self.frame_sequence = self.frame_sequence.saturating_add(1);
         Ok(())
     }
@@ -525,12 +592,16 @@ impl HeadlessOracle {
                 .take(24)
                 .collect::<String>();
             eprintln!(
-                "GEOM frame={} occ_id={:?} band={}..={} occ_rows={} top_sub={} content_off={} clip_h={} art_h={} pad={} src=\"{}\"",
+                "GEOM frame={} occ_id={:?} band={}..={} occ_rows={} clip_top={} clip_bot={} frozen_prefix={} scale={} top_sub={} content_off={} clip_h={} art_h={} pad={} src=\"{}\"",
                 self.frame_sequence,
                 occurrence,
                 band_start,
                 band_end,
                 block.occluded_source_rows,
+                block.clipped_top_rows,
+                block.clipped_bottom_rows,
+                block.frozen_prefix_rows,
+                block.artifact.render_scale_milli,
                 block.top_subpixels,
                 block.content_offset_subpixels,
                 block.clip_height_subpixels,
@@ -830,6 +901,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     if env::var_os("BT_PROBE_HELD_UNBACKED").is_some() && final_unannotated > 0 {
         return Err(io::Error::other(format!(
             "stale-hold failure: {final_unannotated} unannotated HeldUnbacked formula(s) still displayed at final state with no backing detection"
+        ))
+        .into());
+    }
+
+    // Zoom/reflow stale-window band-alignment gate. `max` is the peak per-frame count of primary
+    // Rendered live blocks clipped short of their artifact without a genuine-clip context (a phantom
+    // top clip leaving a half-band fragment). Because an idle stale window persists on screen until
+    // the next output, the peak — not just the final state — is the user-visible defect, so the gate
+    // reds on `max`. Opt-in so it never surprises an unrelated regression run.
+    eprintln!(
+        "CLIP_AUDIT max_misalign={} worst={}",
+        oracle.max_clip_misalign,
+        oracle.clip_misalign_worst.as_deref().unwrap_or("none")
+    );
+    if env::var_os("BT_PROBE_CLIP_AUDIT").is_some() && oracle.max_clip_misalign > 0 {
+        return Err(io::Error::other(format!(
+            "stale-window clip misalignment: {} primary block(s) clipped short of their artifact with no genuine-clip context (worst: {})",
+            oracle.max_clip_misalign,
+            oracle.clip_misalign_worst.as_deref().unwrap_or("none")
         ))
         .into());
     }

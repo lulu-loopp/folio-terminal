@@ -214,6 +214,12 @@ pub struct MathBlockPlacement {
     /// boundary-split block bridges both domains, so its top sits in the history region above the
     /// live band start; zero for every ordinary block, whose top aligns to its own band start.
     pub frozen_prefix_rows: u32,
+    /// Projection-layer clip provenance: logical band rows above / below the exactly-matched grid
+    /// slice. These are the counts the band-height budget consumes; carrying them on the placement
+    /// lets frame-level auditing distinguish a genuine edge clip from a reprojection transient
+    /// without re-deriving the projection. Zero for a wholly-matched block.
+    pub clipped_top_rows: u32,
+    pub clipped_bottom_rows: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1306,6 +1312,8 @@ impl ViewportProjection {
                                 occluded_visible_rows: Vec::new(),
                                 live_occurrence_id: None,
                                 frozen_prefix_rows: 0,
+                                clipped_top_rows: 0,
+                                clipped_bottom_rows: 0,
                             });
                             (
                                 (0..line_rows)
@@ -1506,6 +1514,8 @@ impl ViewportProjection {
                     occluded_visible_rows: live_math.occluded_visible_rows.clone(),
                     live_occurrence_id: Some(live_math.occurrence_id),
                     frozen_prefix_rows: frozen_rows,
+                    clipped_top_rows: live_math.clipped_top_rows,
+                    clipped_bottom_rows: live_math.clipped_bottom_rows,
                 });
 
                 let visible_first = block_first.max(first);
@@ -2009,13 +2019,27 @@ impl ViewportProjection {
             let (rows, top_pad_rows) = if screen == ScreenId::Alternate {
                 (full_clipped_rows, artifact.clipped_top_rows)
             } else {
-                let genuine_top_clip =
-                    artifact.clipped_top_rows > 0 && artifact.band_start_row == 0;
+                // The bottom edge is a real horizon: nothing exists below the last live row, so a
+                // block ending there with clipped rows is genuinely running off the bottom and its
+                // reduced band is correct. The top edge is NOT the mirror of that horizon. A band
+                // pinned to live row zero does not prove the occurrence extends above it: a primary
+                // block reaching this loop owns every source row inside the live grid, because
+                // genuine upward extension into scrollback is projected as a boundary-split bridge
+                // (skipped above) and a top hidden behind fixed chrome surfaces as occlusion (kept
+                // below). So a reported clipped-top on such a block is never a genuine top reveal —
+                // it is a reprojection transient during a reprint/reflow/zoom whose stale identity
+                // out-counts the reflowed occurrence's rows. Spreading the artifact across those
+                // phantom top rows and taking the middle slice is exactly what clipped the integral
+                // limit and cut the pmatrix in half. Only a genuine bottom run-off or occlusion
+                // keeps the reduced band; otherwise primary floors to the full artifact so the
+                // whole reflowed occurrence previews (its own rows, full raster) instead of a
+                // half-band fragment. `band_start_row == 0` is deliberately absent here — it was the
+                // buggy top mirror this closes.
                 let genuine_bottom_clip =
                     artifact.clipped_bottom_rows > 0 && artifact.band_end_row == last_live_row;
                 let occluded =
                     artifact.occluded_source_rows > 0 || !artifact.occluded_visible_rows.is_empty();
-                if genuine_top_clip || genuine_bottom_clip || occluded {
+                if genuine_bottom_clip || occluded {
                     (full_clipped_rows, artifact.clipped_top_rows)
                 } else {
                     (visible_rows, 0)
@@ -2899,15 +2923,52 @@ mod tests {
         );
     }
 
-    /// Legal clip 1 — the M1.9v top reveal: the block's top scrolled above live row zero, so the
-    /// band legitimately shows only its lower rows. The reduced clip is correct and must stay exactly
-    /// as HEAD produced it (two of the three cell rows), never floored.
+    /// The top-edge mirror gap (closes 976a6aa's `genuine_top_clip = clipped_top>0 && band_start==0`).
+    /// On primary a non-bridge block reporting a clipped-top while its band sits pinned to live row
+    /// zero is NOT a genuine reveal: genuine upward extension into scrollback is a boundary-split
+    /// bridge (which never reaches this loop) and a top behind fixed chrome is occlusion (a separate
+    /// suppressor). So band-touching-row-zero is a reprojection/reflow/zoom transient whose stale
+    /// identity out-counts the reflowed occurrence — the fake top clip that halved the pmatrix and
+    /// dropped the integral's lower limit in the zoom-stale window. Primary now floors it to the full
+    /// artifact so the whole block previews; only the alternate screen (below) and occlusion keep the
+    /// reduced band. HEAD asserted the reduced two-cell clip here; that assertion encoded the bug.
     #[test]
-    fn primary_genuine_top_clip_is_unchanged() {
-        // band 0..=1 with one clipped-top row: distributed(3 cells, 3)[1..3] == 2 cells.
-        let (clip, _art_h, _frame) =
+    fn primary_phantom_top_clip_floors_to_artifact_height() {
+        // band 0..=1 with one clipped-top row and no bottom-edge/occlusion evidence: floors to art.
+        let (clip, art_h, _frame) =
             project_single_live_block(ScreenId::Primary, 12, 0, 1, 1, 0, 0, 3);
-        assert_eq!(clip, 2 * cell_height().get());
+        assert_eq!(
+            clip, art_h,
+            "a non-bridge primary block pinned to row zero has no genuine top clip and must floor"
+        );
+    }
+
+    /// The top-clip fix is primary-only: the alternate screen is on its own expand-only + upward-
+    /// reveal-fold path (line ~2053) and the floor change never touches it. On the exact phantom-top
+    /// input the primary case floors above, alt yields its pre-existing geometry — byte-identical
+    /// before and after the fix (corroborated by the alt captures replaying byte-identical). This
+    /// pins that value so a future primary-side change cannot silently leak into the alt path.
+    #[test]
+    fn alternate_top_clip_input_is_unchanged_by_primary_floor() {
+        // band 0..=1 with one clipped-top row on alt: the reveal-fold folds the clipped-top slice
+        // into the first band row, so the band measures the full artifact height (three cells) — this
+        // is HEAD's alt output on this input and the primary-only floor leaves it exactly as-is.
+        let (clip, art_h, _frame) =
+            project_single_live_block(ScreenId::Alternate, 12, 0, 1, 1, 0, 0, 3);
+        assert_eq!(clip, art_h);
+        assert_eq!(clip, 3 * cell_height().get());
+    }
+
+    /// Row-span consistent (no clipped rows) — the ordinary wholly-visible block: the band already
+    /// spans exactly the artifact and neither branch reduces it. The fix leaves this untouched (the
+    /// 6b906db scaled-preview happy path lands here once its relayout matches), so a matched block
+    /// keeps its full clip both before and after.
+    #[test]
+    fn primary_matched_rowspan_keeps_full_artifact() {
+        // band 3..=5 (three rows) with no clipped rows: band == art, no reduction on either side.
+        let (clip, art_h, _frame) =
+            project_single_live_block(ScreenId::Primary, 12, 3, 5, 0, 0, 0, 3);
+        assert_eq!(clip, art_h);
     }
 
     /// Legal clip 2 — a real bottom-edge run-off: the band ends at the last live row and the block
