@@ -1988,10 +1988,39 @@ impl ViewportProjection {
                 .band_end_row
                 .saturating_sub(artifact.band_start_row)
                 .saturating_add(1);
-            let rows = artifact
+            // The primary band's height budget normally spans every clipped row (the reveal extent
+            // above and below the grid). That is correct only while the clipped rows are genuinely
+            // off a grid edge. A clipped count reported while the visible band sits wholly inside
+            // the grid — neither reaching live row zero nor the last live row, and without cross-
+            // boundary occlusion — is a transient reprojection artifact: the block is entirely on
+            // screen and the detector momentarily under-counted its own rows during a reprint or
+            // reflow. Spreading the artifact height across those phantom rows collapses the band
+            // below the artifact, and the raster then clips short of its own descent (the first-
+            // render missing integral limit / half-cut Maxwell block). In that lone case primary
+            // sizes the band from the visible rows alone, flooring it to the artifact height exactly
+            // as the alternate screen already does. Whenever a genuine edge clip (M1.9v top reveal,
+            // bottom-edge run-off) or occlusion is present the reduced band is legitimate and the
+            // HEAD sizing is kept to the subpixel; boundary-split bridges never reach this loop.
+            let last_live_row = self.live_rows.get().saturating_sub(1);
+            let full_clipped_rows = artifact
                 .clipped_top_rows
                 .saturating_add(visible_rows)
                 .saturating_add(artifact.clipped_bottom_rows);
+            let (rows, top_pad_rows) = if screen == ScreenId::Alternate {
+                (full_clipped_rows, artifact.clipped_top_rows)
+            } else {
+                let genuine_top_clip =
+                    artifact.clipped_top_rows > 0 && artifact.band_start_row == 0;
+                let genuine_bottom_clip =
+                    artifact.clipped_bottom_rows > 0 && artifact.band_end_row == last_live_row;
+                let occluded =
+                    artifact.occluded_source_rows > 0 || !artifact.occluded_visible_rows.is_empty();
+                if genuine_top_clip || genuine_bottom_clip || occluded {
+                    (full_clipped_rows, artifact.clipped_top_rows)
+                } else {
+                    (visible_rows, 0)
+                }
+            };
             let source_band_height =
                 i64::from(rows).saturating_mul(self.cell_height_subpixels.get());
             let presentation_height = if screen == ScreenId::Alternate {
@@ -2006,7 +2035,7 @@ impl ViewportProjection {
                 if let Some(height) =
                     per_row_height.get_mut(artifact.band_start_row.saturating_add(offset) as usize)
                     && let Some(distributed) =
-                        heights.get(artifact.clipped_top_rows.saturating_add(offset) as usize)
+                        heights.get(top_pad_rows.saturating_add(offset) as usize)
                 {
                     *height = *distributed;
                 }
@@ -2769,6 +2798,158 @@ mod tests {
                 assert_ne!(band_end_row, 3, "downward borrowing must be covered");
             }
         }
+    }
+
+    /// Project a single live math block through `sync_live_math_artifacts` + `continuous_frame` and
+    /// return `(clip_height, artifact_height, frame)`. The artifact is `art_cells` cell-heights tall
+    /// so the row distribution is exact.
+    #[allow(clippy::too_many_arguments)]
+    fn project_single_live_block(
+        screen: ScreenId,
+        live_rows: u32,
+        band_start_row: u32,
+        band_end_row: u32,
+        clipped_top_rows: u32,
+        clipped_bottom_rows: u32,
+        occluded_source_rows: u32,
+        art_cells: u32,
+    ) -> (i64, i64, ViewportFrame) {
+        let art_h = i64::from(art_cells) * cell_height().get();
+        let height_px = (art_cells * 18) as usize;
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(live_rows),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.sync_live_math_artifacts(
+            screen,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(1),
+                screen,
+                start: GridPoint {
+                    row: band_start_row,
+                    column: 0,
+                },
+                end: GridPoint {
+                    row: band_end_row,
+                    column: 4,
+                },
+                band_start_row,
+                band_end_row,
+                clipped_top_rows,
+                clipped_bottom_rows,
+                occluded_source_rows,
+                occluded_visible_rows: Vec::new(),
+                frozen_prefix: Vec::new(),
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    key: "display-x".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; height_px * 4]),
+                    width_px: 1,
+                    height_px: height_px as u32,
+                    height_subpixels: art_h,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: "x".to_owned(),
+                },
+            }],
+        );
+        let frame = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                vec![CapturedRow::plain("        ", false); live_rows as usize],
+                GridCursor {
+                    row: live_rows - 1,
+                    column: 0,
+                    visible: true,
+                },
+                screen,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+        assert_eq!(frame.math_blocks.len(), 1, "block must be emitted");
+        let block = &frame.math_blocks[0];
+        assert_eq!(block.display, MathBlockDisplay::Rendered);
+        (block.clip_height_subpixels, art_h, frame.clone())
+    }
+
+    /// The first-render / transition-frame defect: a display block sitting wholly inside the live
+    /// grid is transiently under-counted (its closer rows momentarily fail to match during a
+    /// reprint), so the detector reports clipped-bottom rows while the band ends mid-grid. HEAD
+    /// spreads the full artifact across the phantom rows and clips the raster short of its own
+    /// descent (the missing integral lower limit / half-cut Maxwell block). With no genuine edge
+    /// clip and no occlusion, primary now floors the band to the artifact height so the whole block
+    /// shows, exactly as the alternate screen already does.
+    #[test]
+    fn primary_collapsed_band_floors_to_artifact_height() {
+        // Artifact is three cells tall; the band collapsed to a single mid-grid row (band 4..=4)
+        // with two spurious clipped-bottom rows. last live row is 11, so the band touches no edge.
+        let (clip, art_h, _frame) =
+            project_single_live_block(ScreenId::Primary, 12, 4, 4, 0, 2, 0, 3);
+        assert_eq!(
+            clip, art_h,
+            "a wholly-visible collapsed band must floor its clip to the artifact height"
+        );
+    }
+
+    /// Legal clip 1 — the M1.9v top reveal: the block's top scrolled above live row zero, so the
+    /// band legitimately shows only its lower rows. The reduced clip is correct and must stay exactly
+    /// as HEAD produced it (two of the three cell rows), never floored.
+    #[test]
+    fn primary_genuine_top_clip_is_unchanged() {
+        // band 0..=1 with one clipped-top row: distributed(3 cells, 3)[1..3] == 2 cells.
+        let (clip, _art_h, _frame) =
+            project_single_live_block(ScreenId::Primary, 12, 0, 1, 1, 0, 0, 3);
+        assert_eq!(clip, 2 * cell_height().get());
+    }
+
+    /// Legal clip 2 — a real bottom-edge run-off: the band ends at the last live row and the block
+    /// continues below the grid. The reduced clip is correct and stays exactly as HEAD (two cells),
+    /// never floored to the full artifact.
+    #[test]
+    fn primary_genuine_bottom_edge_clip_is_unchanged() {
+        // band 10..=11 (11 is the last live row) with one clipped-bottom row: 2 cells.
+        let (clip, _art_h, _frame) =
+            project_single_live_block(ScreenId::Primary, 12, 10, 11, 0, 1, 0, 3);
+        assert_eq!(clip, 2 * cell_height().get());
+    }
+
+    /// Legal clip 3 — cross-boundary occlusion: even with a collapsed band that would otherwise
+    /// floor, the presence of occluded source rows keeps HEAD sizing to the subpixel (the reduced
+    /// band is deliberate). Same inputs as the collapse test but with an occluded row.
+    #[test]
+    fn primary_occluded_collapsed_band_stays_head() {
+        let (clip, _art_h, _frame) =
+            project_single_live_block(ScreenId::Primary, 12, 4, 4, 0, 2, 1, 3);
+        assert_eq!(
+            clip,
+            cell_height().get(),
+            "occlusion is a legal clip context and must suppress the floor"
+        );
+    }
+
+    /// The floor is primary-only: the identical collapsed inputs leave the alternate screen's
+    /// expand-only geometry untouched (its clip stays the single collapsed cell HEAD produced),
+    /// while primary floors to the full artifact. This pins that the alternate path is unchanged.
+    #[test]
+    fn alternate_collapsed_band_is_unchanged_relative_to_primary() {
+        let (primary_clip, art_h, _p) =
+            project_single_live_block(ScreenId::Primary, 12, 4, 4, 0, 2, 0, 3);
+        let (alt_clip, _art_h, _a) =
+            project_single_live_block(ScreenId::Alternate, 12, 4, 4, 0, 2, 0, 3);
+        assert_eq!(primary_clip, art_h, "primary floors");
+        assert_eq!(
+            alt_clip,
+            cell_height().get(),
+            "alternate geometry is untouched by the primary floor"
+        );
     }
 
     /// A `$$…$$` block whose opener and body committed to frozen scrollback while its closer stayed
