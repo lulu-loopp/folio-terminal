@@ -4181,6 +4181,18 @@ impl DualPlaneSession {
                 detection_revision: self.detection_revision,
             },
         );
+        // The exact live occurrence has now transferred its existing raster and ownership to the
+        // complete frozen outer block. Close the same interior-record race as an ordinary frozen
+        // worker completion does in `apply_worker_completion`: `\begin{env}` / `\end{env}` rows may
+        // already have queued scans from the earlier streaming prefix, but they are body of this
+        // Dollars block and must become Suppressed before those completions can land independently.
+        //
+        // This is not reconcile re-installation. The outer record above is the one deterministic
+        // live→frozen handoff of an exact source-equivalent raster; suppression only records that its
+        // strict interior has no separate presentation owner. No raster is rebuilt, no band is
+        // recomputed, and a true bare environment (with no enclosing handed-off block) never reaches
+        // this call.
+        self.suppress_block_interior(block.start, block.end);
         if closing_id != block.start
             && let Some(candidate) = self.decorations.get_mut(&closing_id)
         {
@@ -9886,6 +9898,106 @@ mod tests {
             rows.iter().all(|row| row.trim().is_empty()),
             "the bridged raster must suppress both frozen source rows, got {rows:?}"
         );
+    }
+
+    #[test]
+    fn multiline_handoff_suppresses_inner_environment_before_queued_workers_can_land() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(8));
+        session
+            .feed_at(
+                b"$$\r\nA=\r\n\\begin{pmatrix}\r\na & b\\\\\r\nc & d\r\n\\end{pmatrix}\r\n$$\r\ntail",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            1
+        );
+        let live_raster = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.delimiter_kind == DelimiterKind::Dollars)
+            .and_then(|record| record.artifact.as_ref())
+            .map(|artifact| Arc::clone(&artifact.rgba))
+            .expect("the complete outer $$ block renders live");
+
+        // Freeze the seven source rows one by one. The `\begin` and `\end` candidates acquire
+        // queued frozen scans before the closing `$$` matures the exact live-raster handoff.
+        for index in 0..7 {
+            session
+                .feed_at(
+                    format!("\r\nscroll-{index}").as_bytes(),
+                    start + Duration::from_millis(210 + index * 10),
+                )
+                .unwrap();
+        }
+        assert!(
+            session.live_decorations.is_empty(),
+            "the fully frozen occurrence must leave the live map"
+        );
+        let outer_id = {
+            let (outer_id, outer) = session
+                .decorations
+                .iter()
+                .find(|(_, record)| {
+                    record
+                        .span
+                        .as_ref()
+                        .is_some_and(|span| span.delimiter_kind == DelimiterKind::Dollars)
+                        && record.artifact.is_some()
+                })
+                .expect("the outer owner receives the handed-off raster");
+            assert_eq!(outer.decoration, DecorationLifecycle::Ready);
+            assert!(Arc::ptr_eq(
+                &outer.artifact.as_ref().unwrap().rgba,
+                &live_raster
+            ));
+            *outer_id
+        };
+
+        let inner_ids = session
+            .document
+            .entries()
+            .iter()
+            .filter(|(_, entry)| {
+                entry.line.text.contains(r"\begin{pmatrix}")
+                    || entry.line.text.contains(r"\end{pmatrix}")
+            })
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+        assert_eq!(inner_ids.len(), 2);
+        for id in &inner_ids {
+            assert_eq!(
+                session.decorations[id].decoration,
+                DecorationLifecycle::Suppressed,
+                "the handoff owner must suppress inner structural rows before their queued workers land"
+            );
+        }
+
+        // Late completions are stale against Suppressed records and cannot replace or overlap the
+        // exact outer owner. This is ownership transfer of the existing raster, not a re-render.
+        while let Some(mut task) = session.take_worker_task() {
+            let resolved = resolve_detection_task(&mut task);
+            let result = resolved.then(|| synthetic_raster(32, 36));
+            let _ = session.complete_worker_result(
+                task,
+                result.ok_or(MathRenderError::NotDetected),
+            );
+        }
+        let outer = &session.decorations[&outer_id];
+        assert_eq!(outer.decoration, DecorationLifecycle::Ready);
+        assert!(Arc::ptr_eq(
+            &outer.artifact.as_ref().unwrap().rgba,
+            &live_raster
+        ));
+        for id in inner_ids {
+            assert_eq!(
+                session.decorations[&id].decoration,
+                DecorationLifecycle::Suppressed
+            );
+        }
     }
 
     #[test]

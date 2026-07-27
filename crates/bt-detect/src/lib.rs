@@ -2890,6 +2890,81 @@ mod tests {
     }
 
     #[test]
+    fn streamed_dollars_wrapped_environment_resolves_only_as_the_complete_outer_block() {
+        let arrivals = [
+            "$$",
+            r"\begin{aligned}",
+            "x &= y",
+            r"\end{aligned}",
+            "$$",
+        ];
+        for end in 1..arrivals.len() {
+            assert!(
+                detect_lines(&arrivals[..end]).is_empty(),
+                "an incomplete streamed prefix must not let the inner environment run ahead: {:?}",
+                &arrivals[..end]
+            );
+        }
+
+        let complete = detect_lines(&arrivals);
+        assert_eq!(complete.len(), 1);
+        assert_eq!(complete[0].span.delimiter_kind, DelimiterKind::Dollars);
+        assert_eq!(
+            complete[0].span.original_source,
+            "$$\n\\begin{aligned}\nx &= y\n\\end{aligned}\n$$"
+        );
+        assert_eq!(
+            complete[0].span.render_source,
+            "\\begin{aligned}\nx &= y\n\\end{aligned}"
+        );
+    }
+
+    #[test]
+    fn streamed_bare_environment_still_resolves_independently() {
+        let arrivals = [r"\begin{pmatrix}", "a & b", r"\end{pmatrix}"];
+        for end in 1..arrivals.len() {
+            assert!(detect_lines(&arrivals[..end]).is_empty());
+        }
+
+        let complete = detect_lines(&arrivals);
+        assert_eq!(complete.len(), 1);
+        assert_eq!(
+            complete[0].span.delimiter_kind,
+            DelimiterKind::Environment("pmatrix".to_owned())
+        );
+        assert_eq!(
+            complete[0].span.original_source,
+            "\\begin{pmatrix}\na & b\n\\end{pmatrix}"
+        );
+    }
+
+    #[test]
+    fn dollars_wrapped_environment_does_not_bypass_the_prose_guard() {
+        assert!(
+            detect_lines(&[
+                "$$",
+                r"\begin{aligned}",
+                "this is ordinary english prose that must remain source",
+                r"\end{aligned}",
+                "$$",
+            ])
+            .is_empty(),
+            "an outer $$ owner must not turn an environment-shaped prose block into math"
+        );
+        assert!(
+            detect_lines(&[
+                "$$",
+                r"\begin{aligned}",
+                "这是一段普通的中文散文绝不能被排成公式",
+                r"\end{aligned}",
+                "$$",
+            ])
+            .is_empty(),
+            "the CJK prose guard must remain active under an outer $$ owner"
+        );
+    }
+
+    #[test]
     fn prose_body_is_still_rejected_even_when_the_closer_carries_punctuation() {
         // The loosened closer must not become a prose loophole: tolerating `\end{pmatrix},` for
         // *pairing* still leaves the prose-body guard to reject an environment whose interior is
