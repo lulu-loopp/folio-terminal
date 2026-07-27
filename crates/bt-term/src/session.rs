@@ -749,6 +749,10 @@ impl DualPlaneSession {
             restore_stripped_environment_newlines: self
                 .math_layout_options
                 .restore_stripped_environment_newlines,
+            restore_stripped_inline_environment_newlines: self.live_screen == ScreenId::Primary
+                && self
+                    .math_layout_options
+                    .restore_stripped_environment_newlines,
             reject_claude_code_jump_chip_overlay: self
                 .math_layout_options
                 .reject_claude_code_jump_chip_overlay,
@@ -2153,16 +2157,7 @@ impl DualPlaneSession {
                     SessionMathTask::Live(mut task) => {
                         if resolve_live_detection_task(&mut task) {
                             let artifact = live_placeholder(&task);
-                            let occupied = self.occupied_live_band_rows(task.start.row);
-                            size_resolved_live_task_band(
-                                &mut task,
-                                math_presentation_height_subpixels(
-                                    artifact.height_subpixels,
-                                    self.math_vertical_padding_subpixels(),
-                                ),
-                                self.cell_height_subpixels.get(),
-                                &occupied,
-                            );
+                            size_resolved_live_task_band(&mut task);
                             self.apply_live_worker_completion(task, Some(artifact), None);
                         }
                     }
@@ -2263,19 +2258,8 @@ impl DualPlaneSession {
         let artifact = result
             .ok()
             .map(|raster| artifact_from_live_raster(&task, raster));
-        if task.resolved
-            && let Some(artifact) = artifact.as_ref()
-        {
-            let occupied = self.occupied_live_band_rows(task.start.row);
-            size_resolved_live_task_band(
-                &mut task,
-                math_presentation_height_subpixels(
-                    artifact.height_subpixels,
-                    self.math_vertical_padding_subpixels(),
-                ),
-                self.cell_height_subpixels.get(),
-                &occupied,
-            );
+        if task.resolved && artifact.is_some() {
+            size_resolved_live_task_band(&mut task);
         } else {
             task.band_start_row = task.start.row;
             task.band_end_row = task.end.row;
@@ -2321,14 +2305,6 @@ impl DualPlaneSession {
                 self.math_failure_compile_count,
             );
         }
-    }
-
-    fn occupied_live_band_rows(&self, replacing_start: u32) -> BTreeSet<u32> {
-        self.live_decorations
-            .values()
-            .filter(|record| record.start.row != replacing_start)
-            .flat_map(|record| record.band_start_row..=record.band_end_row)
-            .collect()
     }
 
     fn apply_live_worker_completion(
@@ -5283,12 +5259,7 @@ fn extend_live_task_band(task: &mut LiveDetectionTask) {
     }
 }
 
-fn size_resolved_live_task_band(
-    task: &mut LiveDetectionTask,
-    artifact_height_subpixels: i64,
-    cell_height_subpixels: i64,
-    occupied_rows: &BTreeSet<u32>,
-) {
+fn size_resolved_live_task_band(task: &mut LiveDetectionTask) {
     let is_bridge = task
         .span
         .cell_segments
@@ -5300,76 +5271,17 @@ fn size_resolved_live_task_band(
         // formula below its source instead of over it, so the live band stays exactly the closer.
         task.band_start_row = task.start.row;
         task.band_end_row = task.end.row;
-    } else if task.screen == ScreenId::Primary && task.span.mode == MathMode::Display {
-        size_live_task_band_for_artifact(
-            task,
-            artifact_height_subpixels,
-            cell_height_subpixels,
-            occupied_rows,
-        );
     } else {
-        // Alternate-screen ownership is the exact source band. Presentation may expand its pixel
-        // height, but it never borrows terminal rows or shrinks their coordinate identity.
+        // Presentation ownership is the exact source band on both screens. Primary used to borrow
+        // up to two adjacent whitespace-only rows to spread a tall raster over more terminal rows.
+        // Those rows are not detector-proven source: in a TUI they are often the intentional blank
+        // separator between formula blocks or a textless, styled input-box/chrome row. Once
+        // `suppress_math_source_cell` began resetting complete cells, borrowing erased that styling;
+        // even before then it collapsed separators and let the raster's clip extend into chrome.
+        // Free height already expands an exact source row in the projection-local prefix map, so no
+        // neighbouring terminal row is needed for geometry.
         task.band_start_row = task.start.row;
         task.band_end_row = task.end.row;
-    }
-}
-
-fn size_live_task_band_for_artifact(
-    task: &mut LiveDetectionTask,
-    artifact_height_subpixels: i64,
-    cell_height_subpixels: i64,
-    occupied_rows: &BTreeSet<u32>,
-) {
-    let source_rows = task.end.row.saturating_sub(task.start.row) + 1;
-    let height = artifact_height_subpixels.max(1);
-    let required_rows = u32::try_from(
-        height
-            .saturating_add(cell_height_subpixels - 1)
-            .div_euclid(cell_height_subpixels),
-    )
-    .unwrap_or(u32::MAX);
-    let mut needed = required_rows
-        .saturating_sub(source_rows)
-        .min(LIVE_MATH_MAX_BORROWED_BLANK_ROWS);
-    task.band_start_row = task.start.row;
-    task.band_end_row = task.end.row;
-
-    // Preserve the established downward preference, then use contiguous blank rows above when the
-    // lower neighbour is occupied. Upward rows are admitted only when they are blank and not in an
-    // already-owned band, which is the missing non-overlap proof: unlike the old downward-only
-    // argument, blankness alone is insufficient because a previous block may have borrowed it.
-    for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS {
-        if needed == 0 {
-            break;
-        }
-        let Some(row) = task.end.row.checked_add(offset) else {
-            break;
-        };
-        let Some(input) = live_grid_input(&task.inputs, row) else {
-            break;
-        };
-        if occupied_rows.contains(&row) || !input.text.chars().all(char::is_whitespace) {
-            break;
-        }
-        task.band_end_row = row;
-        needed -= 1;
-    }
-    for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS {
-        if needed == 0 {
-            break;
-        }
-        let Some(row) = task.start.row.checked_sub(offset) else {
-            break;
-        };
-        let Some(input) = live_grid_input(&task.inputs, row) else {
-            break;
-        };
-        if occupied_rows.contains(&row) || !input.text.chars().all(char::is_whitespace) {
-            break;
-        }
-        task.band_start_row = row;
-        needed -= 1;
     }
 }
 
@@ -6556,6 +6468,7 @@ mod tests {
             session.detection_options(),
             DetectionOptions {
                 restore_stripped_environment_newlines: false,
+                restore_stripped_inline_environment_newlines: false,
                 reject_claude_code_jump_chip_overlay: false,
             }
         );
@@ -8317,7 +8230,7 @@ mod tests {
     }
 
     #[test]
-    fn live_band_borrows_only_contiguous_blank_rows_and_invalidates_on_write() {
+    fn primary_live_band_owns_exact_source_and_preserves_adjacent_blank_rows() {
         let start = Instant::now();
         let mut primary = DualPlaneSession::new(nz(40), nz(12));
         primary.feed_at(b"$$x$$\r\n\r\nbarrier", start).unwrap();
@@ -8327,28 +8240,52 @@ mod tests {
             1
         );
         let record = primary.live_decorations.get(&0).unwrap();
-        assert_eq!((record.band_start_row, record.band_end_row), (0, 1));
+        assert_eq!((record.band_start_row, record.band_end_row), (0, 0));
         let mut projection = primary.new_projection(primary.layout_key());
-        let borrowed = primary.viewport_frame(&mut projection).unwrap();
-        assert_eq!(borrowed.math_blocks.len(), 1);
+        let exact = primary.viewport_frame(&mut projection).unwrap();
+        assert_eq!(exact.math_blocks.len(), 1);
         assert_eq!(
-            borrowed.math_blocks[0].clip_height_subpixels,
+            exact.math_blocks[0].clip_height_subpixels,
             math_presentation_height_subpixels(
                 40 * SUBPIXELS_PER_PX,
                 default_math_padding_subpixels(),
             )
         );
-        assert_eq!(borrowed.math_blocks[0].artifact.render_scale_milli, 1000);
+        assert_eq!(exact.math_blocks[0].artifact.render_scale_milli, 1000);
+        let separator = exact
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(1))
+            .unwrap();
+        assert_eq!(
+            separator.height_subpixels,
+            SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
+            "the blank separator keeps its own terminal row instead of being absorbed by math"
+        );
 
         primary
             .feed_at(
-                b"\x1b[2;1Hborrowed-row-now-used",
+                b"\x1b[2;1Hseparator-row-now-used",
                 start + Duration::from_millis(210),
             )
             .unwrap();
-        let reverted = primary.viewport_frame(&mut projection).unwrap();
-        assert!(reverted.math_blocks.is_empty());
-        assert!(reverted.cells.iter().any(|cell| cell.text == "$"));
+        let preserved = primary.viewport_frame(&mut projection).unwrap();
+        assert_eq!(preserved.math_blocks.len(), 1);
+        let separator_frame_row = preserved
+            .row_map
+            .iter()
+            .position(|row| row.live_grid_row == Some(1))
+            .unwrap();
+        let columns = preserved.columns.get() as usize;
+        let separator_text = preserved.cells
+            [separator_frame_row * columns..(separator_frame_row + 1) * columns]
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+        assert!(
+            separator_text.contains("separator-row-now-used"),
+            "a neighbouring non-source row remains native terminal content"
+        );
 
         let mut inflight = DualPlaneSession::new(nz(40), nz(12));
         inflight.feed_at(b"$$x$$\r\n\r\nbarrier", start).unwrap();
@@ -8361,7 +8298,14 @@ mod tests {
                 start + Duration::from_millis(210),
             )
             .unwrap();
-        assert!(!inflight.complete_live_worker_result(task, Ok(synthetic_raster(40, 40))));
+        assert!(inflight.complete_live_worker_result(task, Ok(synthetic_raster(40, 40))));
+        assert_eq!(
+            inflight
+                .live_decorations
+                .get(&0)
+                .map(|record| { (record.band_start_row, record.band_end_row) }),
+            Some((0, 0))
+        );
 
         let mut blocked = DualPlaneSession::new(nz(40), nz(12));
         blocked.feed_at(b"$$x$$\r\nbarrier\r\n", start).unwrap();
@@ -8395,8 +8339,8 @@ mod tests {
         );
         assert_eq!(
             capped.live_decorations.get(&0).unwrap().band_end_row,
-            2,
-            "the third contiguous blank row remains outside the two-row borrowing cap"
+            0,
+            "every blank separator remains outside the detector-proven source band"
         );
 
         let mut alternate = DualPlaneSession::new(nz(40), nz(12));
@@ -8431,14 +8375,14 @@ mod tests {
             1
         );
         let record = upward.live_decorations.get(&1).unwrap();
-        assert_eq!((record.band_start_row, record.band_end_row), (0, 1));
+        assert_eq!((record.band_start_row, record.band_end_row), (1, 1));
         upward
             .feed_at(
                 b"\x1b[1;1Hupper-row-now-used",
                 start + Duration::from_millis(210),
             )
             .unwrap();
-        assert!(upward.live_decorations.is_empty());
+        assert_eq!(upward.live_decorations.len(), 1);
     }
 
     #[test]
@@ -8612,7 +8556,7 @@ mod tests {
     }
 
     #[test]
-    fn live_visible_text_floor_renders_a_screenful_and_stably_prefers_newest_blocks() {
+    fn live_visible_text_floor_is_per_block_and_keeps_every_bounded_occurrence() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(24));
         session
@@ -8674,7 +8618,10 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        assert_eq!(selected, vec![vec!["new".to_owned()]; 3]);
+        assert_eq!(
+            selected,
+            vec![vec!["old".to_owned(), "middle".to_owned(), "new".to_owned()]; 3]
+        );
     }
 
     #[test]

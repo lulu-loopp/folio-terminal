@@ -80,6 +80,15 @@ struct HeadlessOracle {
     max_occlusion_residue_cells: usize,
     /// A human-readable exemplar of the worst source-occlusion residue frame.
     occlusion_residue_worst: Option<String>,
+    /// Peak count of live band rows outside a rendered occurrence's exact source rows. Such rows
+    /// are separators or TUI chrome, not presentation-owned formula source.
+    max_borrowed_band_rows: usize,
+    /// Peak count of pairs of rendered live bands sharing a terminal row.
+    max_overlapping_live_bands: usize,
+    /// Visible display-source rows in the most recently published frame.
+    final_visible_source_rows: usize,
+    /// A human-readable exemplar for either layout-ownership violation.
+    layout_worst: Option<String>,
 }
 
 impl HeadlessOracle {
@@ -109,6 +118,10 @@ impl HeadlessOracle {
             clip_misalign_worst: None,
             max_occlusion_residue_cells: 0,
             occlusion_residue_worst: None,
+            max_borrowed_band_rows: 0,
+            max_overlapping_live_bands: 0,
+            final_visible_source_rows: 0,
+            layout_worst: None,
         }
     }
 
@@ -251,6 +264,69 @@ impl HeadlessOracle {
                 elapsed.as_micros(),
             ));
         }
+    }
+
+    /// Geometry/ownership red gate for the residue recording. A live raster may expand the pixel
+    /// height of its exact source rows, but it must not claim neighbouring blank separators or
+    /// textless input chrome, and two blocks must never share one terminal row. Both violations
+    /// were directly visible in the historical frame geometry even though formula-state stdout was
+    /// otherwise byte-identical across the suspect commits.
+    fn audit_live_band_ownership(&mut self, frame: &ViewportFrame) {
+        let mut bands = Vec::new();
+        let mut borrowed = 0usize;
+        for block in &frame.math_blocks {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+                continue;
+            }
+            let bt_viewport::MathBlockAnchor::Live {
+                screen,
+                start,
+                end,
+                band_start_row,
+                band_end_row,
+                generation,
+            } = block.anchor
+            else {
+                continue;
+            };
+            let outside = start
+                .row
+                .saturating_sub(band_start_row)
+                .saturating_add(band_end_row.saturating_sub(end.row));
+            borrowed = borrowed.saturating_add(outside as usize);
+            if outside != 0 && self.layout_worst.is_none() {
+                self.layout_worst = Some(format!(
+                    "frame={} source={}..={} band={band_start_row}..={band_end_row} src={:?}",
+                    self.frame_sequence,
+                    start.row,
+                    end.row,
+                    block
+                        .source
+                        .replace('\n', " ")
+                        .chars()
+                        .take(28)
+                        .collect::<String>(),
+                ));
+            }
+            bands.push((screen, generation, band_start_row, band_end_row));
+        }
+        let mut overlaps = 0usize;
+        for (index, left) in bands.iter().enumerate() {
+            for right in &bands[index + 1..] {
+                if left.0 == right.0 && left.1 == right.1 && left.2 <= right.3 && right.2 <= left.3
+                {
+                    overlaps = overlaps.saturating_add(1);
+                    if self.layout_worst.is_none() {
+                        self.layout_worst = Some(format!(
+                            "frame={} overlapping_bands={}..={} and {}..={}",
+                            self.frame_sequence, left.2, left.3, right.2, right.3,
+                        ));
+                    }
+                }
+            }
+        }
+        self.max_borrowed_band_rows = self.max_borrowed_band_rows.max(borrowed);
+        self.max_overlapping_live_bands = self.max_overlapping_live_bands.max(overlaps);
     }
 
     fn advance_before(
@@ -424,6 +500,7 @@ impl HeadlessOracle {
             )
         };
         let flash_detected = self.flash_oracle.flash_detected();
+        self.final_visible_source_rows = source_rows.len();
         let isolation_gap = self.session.live_detection_isolation_gap();
         self.max_isolation_gap = self.max_isolation_gap.max(isolation_gap);
         // Per-frame detector-containment (batch ⑥). Opt-in: the ledger re-runs the scan, so track it
@@ -479,6 +556,7 @@ impl HeadlessOracle {
         }
         self.audit_clip_alignment(&frame);
         self.audit_occlusion_residue(&frame, elapsed);
+        self.audit_live_band_ownership(&frame);
         self.frame_sequence = self.frame_sequence.saturating_add(1);
         Ok(())
     }
@@ -975,6 +1053,13 @@ fn main() -> Result<(), Box<dyn Error>> {
         oracle.max_clip_misalign,
         oracle.clip_misalign_worst.as_deref().unwrap_or("none")
     );
+    eprintln!(
+        "LAYOUT_AUDIT max_borrowed_band_rows={} max_overlapping_live_bands={} final_visible_source_rows={} worst={}",
+        oracle.max_borrowed_band_rows,
+        oracle.max_overlapping_live_bands,
+        oracle.final_visible_source_rows,
+        oracle.layout_worst.as_deref().unwrap_or("none"),
+    );
     if env::var_os("BT_PROBE_OCCLUSION_AUDIT").is_some() && oracle.max_occlusion_residue_cells > 0 {
         return Err(io::Error::other(format!(
             "terminal presentation residue under rendered math: {} cell(s) (worst: {})",
@@ -988,6 +1073,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             "stale-window clip misalignment: {} primary block(s) clipped short of their artifact with no genuine-clip context (worst: {})",
             oracle.max_clip_misalign,
             oracle.clip_misalign_worst.as_deref().unwrap_or("none")
+        ))
+        .into());
+    }
+    if env::var_os("BT_PROBE_LAYOUT_AUDIT").is_some()
+        && (oracle.max_borrowed_band_rows > 0
+            || oracle.max_overlapping_live_bands > 0
+            || oracle.final_visible_source_rows > 0)
+    {
+        return Err(io::Error::other(format!(
+            "live formula layout ownership failed: borrowed_rows={} overlaps={} final_source_rows={} (worst: {})",
+            oracle.max_borrowed_band_rows,
+            oracle.max_overlapping_live_bands,
+            oracle.final_visible_source_rows,
+            oracle.layout_worst.as_deref().unwrap_or("none"),
         ))
         .into());
     }

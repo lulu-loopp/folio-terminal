@@ -24,6 +24,9 @@ pub struct DetectionOptions {
     /// inside a LaTeX math environment. Set this to `false` once Claude Code emits the original
     /// `\\\\` faithfully; disabling it preserves renderer input byte-for-byte.
     pub restore_stripped_environment_newlines: bool,
+    /// Restore a stripped separator inside a one-line tabular environment. The terminal session
+    /// enables this only on primary: alternate-screen replay is a byte-pinned compatibility path.
+    pub restore_stripped_inline_environment_newlines: bool,
     /// Reject a display-math candidate containing Claude Code's exact scroll-review overlay text.
     /// Disable this once Claude Code no longer writes that chip into terminal content rows.
     pub reject_claude_code_jump_chip_overlay: bool,
@@ -33,6 +36,7 @@ impl Default for DetectionOptions {
     fn default() -> Self {
         Self {
             restore_stripped_environment_newlines: true,
+            restore_stripped_inline_environment_newlines: true,
             reject_claude_code_jump_chip_overlay: true,
         }
     }
@@ -980,7 +984,12 @@ fn scan_math_blocks_impl<'a>(
             opening = None;
             let body = &text[body_start..body_end];
             let original = &text[open_start..close_end];
-            let valid = valid_display_body(body, body, options);
+            let render = restore_stripped_environment_newlines(
+                body,
+                options.restore_stripped_environment_newlines,
+                options.restore_stripped_inline_environment_newlines,
+            );
+            let valid = valid_display_body(body, &render, options);
             if let Some(rec) = recorder.as_deref_mut() {
                 // The pending opener loses its closer to this self-contained block: it is genuinely
                 // unpaired (an odd-parity residue), not a legitimate rejection.
@@ -1008,7 +1017,7 @@ fn scan_math_blocks_impl<'a>(
                             byte_end: close_end,
                         },
                         original.to_owned(),
-                        body.to_owned(),
+                        render,
                         delimiter,
                     ),
                 });
@@ -1026,7 +1035,12 @@ fn scan_math_blocks_impl<'a>(
             } else {
                 body
             };
-            let valid = valid_display_body(body, render, options);
+            let render = restore_stripped_environment_newlines(
+                render,
+                options.restore_stripped_environment_newlines,
+                options.restore_stripped_inline_environment_newlines,
+            );
+            let valid = valid_display_body(body, &render, options);
             if let Some(rec) = recorder.as_deref_mut() {
                 rec.self_contained(
                     index,
@@ -1053,7 +1067,7 @@ fn scan_math_blocks_impl<'a>(
                         byte_end: close_end,
                     },
                     original.to_owned(),
-                    render.to_owned(),
+                    render,
                     delimiter,
                 ),
             });
@@ -1100,10 +1114,12 @@ fn scan_math_blocks_impl<'a>(
                 DisplayDelimiter::Environment(_) => restore_stripped_environment_newlines(
                     &original,
                     options.restore_stripped_environment_newlines,
+                    options.restore_stripped_inline_environment_newlines,
                 ),
                 _ => restore_stripped_environment_newlines(
                     &body,
                     options.restore_stripped_environment_newlines,
+                    options.restore_stripped_inline_environment_newlines,
                 ),
             };
             let valid = valid_display_body(&body, &render, options);
@@ -1243,6 +1259,7 @@ fn phantom_opener_witness(
                     let render = restore_stripped_environment_newlines(
                         &body,
                         options.restore_stripped_environment_newlines,
+                        options.restore_stripped_inline_environment_newlines,
                     );
                     !valid_display_body(&body, &render, options)
                 }
@@ -1370,6 +1387,7 @@ fn joined_range(
 
 #[derive(Clone, Debug)]
 struct MathEnvironmentRange {
+    name: String,
     content_start: usize,
     close_start: usize,
 }
@@ -1381,8 +1399,12 @@ struct MathEnvironmentRange {
 /// This function only sees detector-joined logical lines. Live-grid soft wraps have already been
 /// merged before `joined_range` creates these `\n` boundaries. Original terminal source remains
 /// untouched; this output is renderer input only.
-fn restore_stripped_environment_newlines(source: &str, enabled: bool) -> String {
-    if !enabled || !source.contains('\n') {
+fn restore_stripped_environment_newlines(
+    source: &str,
+    enabled: bool,
+    inline_enabled: bool,
+) -> String {
+    if !enabled {
         return source.to_owned();
     }
 
@@ -1406,6 +1428,7 @@ fn restore_stripped_environment_newlines(source: &str, enabled: bool) -> String 
         {
             let (_, content_start) = stack.pop().expect("matching environment is active");
             environments.push(MathEnvironmentRange {
+                name: environment,
                 content_start,
                 close_start: byte,
             });
@@ -1445,6 +1468,78 @@ fn restore_stripped_environment_newlines(source: &str, enabled: bool) -> String 
         }
         line_start = newline + 1;
     }
+
+    // Claude Code also collapses a row separator inside a one-line environment, where there is no
+    // logical-line boundary for the rule above to use. Recover only inside tabular math
+    // environments and only at a table-shaped boundary: the current row already has an `&`, the
+    // following cell reaches another `&`, and an apparent command after the slash is at most one
+    // bare cell character. This repairs `a&b\c&d` / `a & b \ c & d` without touching real commands
+    // such as `\frac`, `\cos`, or `\cdot`. As above, terminal/source bytes remain exact; the added
+    // slash exists only in renderer input and the workaround is controlled by the existing switch.
+    for environment in environments.iter().filter(|_| inline_enabled) {
+        if !matches!(
+            environment.name.as_str(),
+            "array"
+                | "matrix"
+                | "pmatrix"
+                | "bmatrix"
+                | "Bmatrix"
+                | "vmatrix"
+                | "Vmatrix"
+                | "cases"
+                | "aligned"
+                | "alignedat"
+                | "gathered"
+                | "split"
+        ) {
+            continue;
+        }
+        let mut row_start = environment.content_start;
+        let mut byte = environment.content_start;
+        while byte < environment.close_start {
+            if source.as_bytes()[byte] != b'\\' || delimiter_is_escaped(source, byte) {
+                byte += source[byte..].chars().next().map_or(1, char::len_utf8);
+                continue;
+            }
+            if source[byte..].starts_with(r"\\") {
+                row_start = byte + 2;
+                byte += 2;
+                continue;
+            }
+            let physical_line_start = source[row_start..byte]
+                .rfind('\n')
+                .map_or(row_start, |newline| row_start + newline + 1);
+            let before = &source[physical_line_start..byte];
+            let remaining = &source[byte + 1..environment.close_start];
+            let after = remaining
+                .find('\n')
+                .map_or(remaining, |newline| &remaining[..newline]);
+            let trimmed_after = after.trim_start();
+            let Some(next_ampersand) = trimmed_after.find('&') else {
+                byte += 1;
+                continue;
+            };
+            let next_cell = trimmed_after[..next_ampersand].trim();
+            let command_len = after
+                .as_bytes()
+                .iter()
+                .take_while(|byte| byte.is_ascii_alphabetic())
+                .count();
+            let single_bare_cell =
+                command_len <= 1 && (command_len == 0 || next_cell.chars().count() == 1);
+            if before.contains('&')
+                && !next_cell.is_empty()
+                && single_bare_cell
+                && !next_cell.contains(['\\', '{', '}'])
+            {
+                insertions.push(byte);
+                row_start = byte + 1;
+            }
+            byte += 1;
+        }
+    }
+    insertions.sort_unstable();
+    insertions.dedup();
     if insertions.is_empty() {
         return source.to_owned();
     }
@@ -3139,7 +3234,7 @@ abla f",
         );
         assert_eq!(detected[0].span.render_source, "foo \\\nbar");
         assert_eq!(
-            restore_stripped_environment_newlines(r"$$x \$$", true),
+            restore_stripped_environment_newlines(r"$$x \$$", true, true),
             r"$$x \$$"
         );
     }
@@ -3165,6 +3260,44 @@ abla f",
             assert!(
                 detected[0].span.render_source.contains("a & b \\\\\nc & d"),
                 "{}",
+                detected[0].span.render_source
+            );
+        }
+    }
+
+    #[test]
+    fn stripped_single_line_matrix_separator_is_restored_only_in_renderer_input() {
+        for source in [
+            r"$$A=\begin{pmatrix}a&b\c&d\end{pmatrix}$$",
+            r"$$A=\begin{pmatrix}a & b \ c & d\end{pmatrix}$$",
+        ] {
+            let detected = detect_math_blocks([(TranscriptId(1), source)]);
+            assert_eq!(detected.len(), 1, "{source}");
+            assert_eq!(
+                detected[0].span.original_source, source,
+                "copy/source presentation must retain the exact terminal bytes"
+            );
+            assert!(detected[0].span.render_source.contains(r"\begin{pmatrix}a"));
+            assert!(
+                detected[0].span.render_source.contains(r"\\c&")
+                    || detected[0].span.render_source.contains(r"\\ c &"),
+                "{}",
+                detected[0].span.render_source
+            );
+        }
+
+        for source in [
+            r"$$\begin{pmatrix}a&\cos x&b\end{pmatrix}$$",
+            r"$$\begin{pmatrix}a&\frac{1}{2}&b\end{pmatrix}$$",
+            r"$$\begin{pmatrix}a&\cdot&b\end{pmatrix}$$",
+        ] {
+            let detected = detect_math_blocks([(TranscriptId(1), source)]);
+            assert_eq!(detected.len(), 1);
+            assert!(
+                !detected[0].span.render_source.contains(r"\\cos")
+                    && !detected[0].span.render_source.contains(r"\\frac")
+                    && !detected[0].span.render_source.contains(r"\\cdot"),
+                "a real command was mistaken for a stripped row separator: {}",
                 detected[0].span.render_source
             );
         }

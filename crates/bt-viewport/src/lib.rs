@@ -1950,19 +1950,23 @@ impl ViewportProjection {
             // application's input/status rows at the bottom.
             candidates
         } else {
-            let mut remaining = i64::from(
+            let per_block_limit = i64::from(
                 self.live_rows
                     .get()
                     .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
             )
             .saturating_mul(self.cell_height_subpixels.get());
-            let mut accepted = Vec::new();
-            // Primary keeps its existing visible-text floor and newest/lower-block preference.
-            for artifact in candidates.into_iter().rev() {
+            // Free-height overflow is locally reviewable and bottom anchoring preserves the
+            // terminal's last rows. Applying this limit cumulatively made otherwise valid older
+            // formulas fall back to source merely because several blocks shared one live grid.
+            // Keep the safety floor as an individual-block bound, while allowing every bounded,
+            // proven occurrence to participate in the prefix map.
+            candidates
+                .into_iter()
+                .filter(|artifact| {
                 // A boundary-split block occupies only its live band on the grid; the bulk of its
                 // height is carried by the frozen scrollback rows it already owns above. It is
-                // charged its live-band height (never the full image) against the visible-text
-                // floor and does not expand live rows below.
+                // measured by its live-band height (never the full image).
                 let box_height = if artifact.frozen_prefix.is_empty() {
                     artifact.artifact.height_subpixels.max(1)
                 } else {
@@ -1979,30 +1983,19 @@ impl ViewportProjection {
                 // layout changed under a zoom; it stays pinned (scaled to approximate the new size)
                 // rather than flashing to source while its fresh relayout is off-thread. Its box
                 // height is already the scaled height, so the visible-text floor stays honest.
-                if box_height <= remaining {
-                    remaining = remaining.saturating_sub(box_height);
-                    accepted.push(artifact);
-                } else if std::env::var_os("BT_PERF_TRACE").is_some() {
-                    let reason = if box_height
-                        > i64::from(
-                            self.live_rows
-                                .get()
-                                .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS),
-                        )
-                        .saturating_mul(self.cell_height_subpixels.get())
-                    {
-                        "block-exceeds-visible-text-floor"
-                    } else {
-                        "newer-blocks-reserved-visible-text-floor"
-                    };
+                let accepted = box_height <= per_block_limit;
+                if !accepted && std::env::var_os("BT_PERF_TRACE").is_some() {
                     eprintln!(
-                        "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} remaining_subpixels={} min_text_rows={} reason={reason}",
-                        artifact.start.row, box_height, remaining, LIVE_MIN_VISIBLE_TEXT_ROWS,
+                        "BT_PERF_TRACE live_math_event=source-fallback row={} box_subpixels={} per_block_limit_subpixels={} min_text_rows={} reason=block-exceeds-visible-text-floor",
+                        artifact.start.row,
+                        box_height,
+                        per_block_limit,
+                        LIVE_MIN_VISIBLE_TEXT_ROWS,
                     );
                 }
-            }
-            accepted.reverse();
-            accepted
+                accepted
+            })
+            .collect()
         };
         let mut per_row_height =
             vec![self.cell_height_subpixels.get(); self.live_rows.get() as usize];
