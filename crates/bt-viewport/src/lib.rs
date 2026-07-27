@@ -1549,9 +1549,7 @@ impl ViewportProjection {
                 for live_row in visible_first..=visible_last {
                     let row = &mut visible[visible_live_start + live_row - first];
                     for cell in &mut row.cells {
-                        cell.text.clear();
-                        cell.wide_spacer = false;
-                        cell.style.flags.remove(CellFlags::WIDE_CHAR);
+                        suppress_math_source_cell(cell);
                     }
                 }
                 for (live_row, clear_ranges) in &live_math.occluded_visible_rows {
@@ -1567,9 +1565,7 @@ impl ViewportProjection {
                         let start = (*start as usize).min(row.cells.len());
                         let end = (*end as usize).min(row.cells.len());
                         for cell in &mut row.cells[start..end] {
-                            cell.text.clear();
-                            cell.wide_spacer = false;
-                            cell.style.flags.remove(CellFlags::WIDE_CHAR);
+                            suppress_math_source_cell(cell);
                         }
                     }
                 }
@@ -1586,9 +1582,7 @@ impl ViewportProjection {
                         break;
                     };
                     for cell in &mut row.cells {
-                        cell.text.clear();
-                        cell.wide_spacer = false;
-                        cell.style.flags.remove(CellFlags::WIDE_CHAR);
+                        suppress_math_source_cell(cell);
                     }
                 }
             }
@@ -2365,6 +2359,15 @@ fn blank_visual_row(columns: usize, anchor: impl Fn(usize, Bias) -> ContentAncho
     }
 }
 
+/// Remove every terminal-rendered aspect of one source-proven formula cell while leaving its
+/// semantic `CellAnchor` (stored beside the cell in `VisualRow`) untouched. Clearing only `text`
+/// is insufficient: an empty UNDERLINE/INVERSE/non-default-background cell still paints pixels
+/// underneath the transparent formula raster. Callers choose the exact owned cells, so application
+/// overlays outside those ranges keep their glyphs and highlight styling byte-for-byte.
+fn suppress_math_source_cell(cell: &mut CapturedCell) {
+    *cell = CapturedCell::default();
+}
+
 fn captured_row_is_blank(row: &CapturedRow) -> bool {
     row.cells
         .iter()
@@ -2996,6 +2999,115 @@ mod tests {
         let (clip, art_h, _frame) =
             project_single_live_block(ScreenId::Primary, 12, 3, 5, 0, 0, 0, 3);
         assert_eq!(clip, art_h);
+    }
+
+    /// A Codex Markdown heading can style a `# $$` opener and the formula's first body row with
+    /// SGR underline. Hiding only the cell text leaves that textless underline as a long rule behind
+    /// the transparent math raster. The whole owned band and only the proven ranges of an occluded
+    /// source row must become presentation-blank; an application overlay between those ranges keeps
+    /// both its glyphs and highlight style.
+    #[test]
+    fn live_math_occlusion_clears_cell_presentation_without_erasing_overlay() {
+        let width = 12usize;
+        let rows = 12u32;
+        let mut projection = ViewportProjection::new(
+            key(width as u32),
+            DetectionRevision(1),
+            nz32(rows),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(1),
+                screen: ScreenId::Primary,
+                start: GridPoint { row: 1, column: 0 },
+                end: GridPoint { row: 3, column: 4 },
+                band_start_row: 1,
+                band_end_row: 3,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 1,
+                occluded_visible_rows: vec![(4, vec![(0, 4), (7, width as u32)])],
+                frozen_prefix: Vec::new(),
+                staging_prefix: Vec::new(),
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    key: "underlined-heading-formula".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; 54 * 4]),
+                    width_px: 1,
+                    height_px: 54,
+                    height_subpixels: 3 * cell_height().get(),
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: "\\operatorname{Var}(X)".to_owned(),
+                },
+            }],
+        );
+
+        let mut live = vec![CapturedRow::plain(&" ".repeat(width), false); rows as usize];
+        for row in &mut live[1..=4] {
+            for cell in &mut row.cells {
+                cell.style.flags.insert(CellFlags::UNDERLINE);
+                cell.style.background = bt_transcript::TerminalColor::Rgb(30, 31, 32);
+                cell.hyperlink = Some("https://source.invalid".to_owned());
+            }
+        }
+        let overlay_cells = &mut live[4].cells[4..7];
+        for (cell, text) in overlay_cells.iter_mut().zip(["J", "M", "P"]) {
+            cell.text = text.to_owned();
+            cell.style.flags = CellFlags::BOLD;
+            cell.style.background = bt_transcript::TerminalColor::Rgb(41, 41, 41);
+            cell.hyperlink = None;
+        }
+        let expected_overlay = overlay_cells.to_vec();
+
+        let frame = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                live,
+                GridCursor {
+                    row: rows - 1,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Primary,
+            )
+            .unwrap();
+        let row_cells = |live_row: u32| {
+            let frame_row = frame
+                .row_map
+                .iter()
+                .position(|row| row.live_grid_row == Some(live_row))
+                .unwrap();
+            &frame.cells[frame_row * width..(frame_row + 1) * width]
+        };
+        for live_row in 1..=3 {
+            assert!(
+                row_cells(live_row)
+                    .iter()
+                    .all(|cell| *cell == CapturedCell::default()),
+                "rendered band row {live_row} retained terminal presentation"
+            );
+        }
+        assert!(
+            row_cells(4)[..4]
+                .iter()
+                .chain(&row_cells(4)[7..])
+                .all(|cell| *cell == CapturedCell::default()),
+            "source-proven occlusion ranges retained terminal presentation"
+        );
+        assert_eq!(
+            &row_cells(4)[4..7],
+            expected_overlay.as_slice(),
+            "the Jump-chip overlay between proven source ranges must stay byte-for-byte intact"
+        );
     }
 
     /// Legal clip 2 — a real bottom-edge run-off: the band ends at the last live row and the block

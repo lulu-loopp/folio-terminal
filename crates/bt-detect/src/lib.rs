@@ -2891,13 +2891,7 @@ mod tests {
 
     #[test]
     fn streamed_dollars_wrapped_environment_resolves_only_as_the_complete_outer_block() {
-        let arrivals = [
-            "$$",
-            r"\begin{aligned}",
-            "x &= y",
-            r"\end{aligned}",
-            "$$",
-        ];
+        let arrivals = ["$$", r"\begin{aligned}", "x &= y", r"\end{aligned}", "$$"];
         for end in 1..arrivals.len() {
             assert!(
                 detect_lines(&arrivals[..end]).is_empty(),

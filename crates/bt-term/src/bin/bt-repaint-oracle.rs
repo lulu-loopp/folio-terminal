@@ -74,6 +74,12 @@ struct HeadlessOracle {
     max_clip_misalign: usize,
     /// A human-readable exemplar of the worst clip-misalignment placement seen, for the report.
     clip_misalign_worst: Option<String>,
+    /// Peak number of non-blank terminal presentation cells left underneath a rendered math band
+    /// (or inside one of its source-proven occlusion ranges). Text is not the only terminal ink:
+    /// underline/inverse/background state on an empty cell still draws pixels behind the raster.
+    max_occlusion_residue_cells: usize,
+    /// A human-readable exemplar of the worst source-occlusion residue frame.
+    occlusion_residue_worst: Option<String>,
 }
 
 impl HeadlessOracle {
@@ -101,6 +107,8 @@ impl HeadlessOracle {
             max_held_unbacked: 0,
             max_clip_misalign: 0,
             clip_misalign_worst: None,
+            max_occlusion_residue_cells: 0,
+            occlusion_residue_worst: None,
         }
     }
 
@@ -158,6 +166,91 @@ impl HeadlessOracle {
             }
         }
         self.max_clip_misalign = self.max_clip_misalign.max(violations);
+    }
+
+    /// Frame-level red gate for terminal ink surviving underneath a rendered formula. Formula
+    /// source suppression must clear the complete `CapturedCell` presentation in the owned band,
+    /// and the exact proven cells in an occluded row. Otherwise textless SGR state (most visibly
+    /// UNDERLINE) is still rendered as a long horizontal line through the transparent math raster.
+    fn audit_occlusion_residue(&mut self, frame: &ViewportFrame, elapsed: Duration) {
+        let columns = frame.columns.get() as usize;
+        let blank = bt_transcript::CapturedCell::default();
+        let mut residue = 0usize;
+        let mut sources = Vec::new();
+        for block in &frame.math_blocks {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+                continue;
+            }
+            let bt_viewport::MathBlockAnchor::Live {
+                band_start_row,
+                band_end_row,
+                ..
+            } = block.anchor
+            else {
+                continue;
+            };
+            let before = residue;
+            for (frame_row, mapped) in frame.row_map.iter().enumerate() {
+                let Some(live_row) = mapped.live_grid_row else {
+                    continue;
+                };
+                let ranges = if (band_start_row..=band_end_row).contains(&live_row) {
+                    vec![(0usize, columns)]
+                } else {
+                    block
+                        .occluded_visible_rows
+                        .iter()
+                        .find(|(row, _)| *row == live_row)
+                        .map(|(_, ranges)| {
+                            ranges
+                                .iter()
+                                .map(|(start, end)| {
+                                    ((*start as usize).min(columns), (*end as usize).min(columns))
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let row_start = frame_row.saturating_mul(columns);
+                for (start, end) in ranges {
+                    if start >= end {
+                        continue;
+                    }
+                    residue += frame.cells[row_start + start..row_start + end]
+                        .iter()
+                        .filter(|cell| **cell != blank)
+                        .count();
+                }
+            }
+            if residue > before {
+                sources.push(
+                    block
+                        .source
+                        .replace('\n', " ")
+                        .chars()
+                        .take(28)
+                        .collect::<String>(),
+                );
+            }
+        }
+        if residue == 0 {
+            return;
+        }
+        if env::var_os("BT_PROBE_OCCLUSION_AUDIT").is_some() {
+            eprintln!(
+                "OCCLUSION_RESIDUE frame={} elapsed_us={} cells={residue} sources={sources:?}",
+                self.frame_sequence,
+                elapsed.as_micros(),
+            );
+        }
+        if residue > self.max_occlusion_residue_cells {
+            self.max_occlusion_residue_cells = residue;
+            self.occlusion_residue_worst = Some(format!(
+                "frame={} elapsed_us={} cells={residue} sources={sources:?}",
+                self.frame_sequence,
+                elapsed.as_micros(),
+            ));
+        }
     }
 
     fn advance_before(
@@ -385,6 +478,7 @@ impl HeadlessOracle {
             self.dump_geometry(&frame);
         }
         self.audit_clip_alignment(&frame);
+        self.audit_occlusion_residue(&frame, elapsed);
         self.frame_sequence = self.frame_sequence.saturating_add(1);
         Ok(())
     }
@@ -869,6 +963,35 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    // Emit the geometry and source-occlusion summaries before the historical flash gate. A replay
+    // may contain an unrelated known R->S flip; that must not hide these independent diagnostics.
+    eprintln!(
+        "OCCLUSION_AUDIT max_residue_cells={} worst={}",
+        oracle.max_occlusion_residue_cells,
+        oracle.occlusion_residue_worst.as_deref().unwrap_or("none")
+    );
+    eprintln!(
+        "CLIP_AUDIT max_misalign={} worst={}",
+        oracle.max_clip_misalign,
+        oracle.clip_misalign_worst.as_deref().unwrap_or("none")
+    );
+    if env::var_os("BT_PROBE_OCCLUSION_AUDIT").is_some() && oracle.max_occlusion_residue_cells > 0 {
+        return Err(io::Error::other(format!(
+            "terminal presentation residue under rendered math: {} cell(s) (worst: {})",
+            oracle.max_occlusion_residue_cells,
+            oracle.occlusion_residue_worst.as_deref().unwrap_or("none")
+        ))
+        .into());
+    }
+    if env::var_os("BT_PROBE_CLIP_AUDIT").is_some() && oracle.max_clip_misalign > 0 {
+        return Err(io::Error::other(format!(
+            "stale-window clip misalignment: {} primary block(s) clipped short of their artifact with no genuine-clip context (worst: {})",
+            oracle.max_clip_misalign,
+            oracle.clip_misalign_worst.as_deref().unwrap_or("none")
+        ))
+        .into());
+    }
+
     if oracle.flash_oracle.flash_detected() {
         return Err(io::Error::other(format!(
             "formula repaint flash detected for {:?}",
@@ -905,24 +1028,6 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into());
     }
 
-    // Zoom/reflow stale-window band-alignment gate. `max` is the peak per-frame count of primary
-    // Rendered live blocks clipped short of their artifact without a genuine-clip context (a phantom
-    // top clip leaving a half-band fragment). Because an idle stale window persists on screen until
-    // the next output, the peak — not just the final state — is the user-visible defect, so the gate
-    // reds on `max`. Opt-in so it never surprises an unrelated regression run.
-    eprintln!(
-        "CLIP_AUDIT max_misalign={} worst={}",
-        oracle.max_clip_misalign,
-        oracle.clip_misalign_worst.as_deref().unwrap_or("none")
-    );
-    if env::var_os("BT_PROBE_CLIP_AUDIT").is_some() && oracle.max_clip_misalign > 0 {
-        return Err(io::Error::other(format!(
-            "stale-window clip misalignment: {} primary block(s) clipped short of their artifact with no genuine-clip context (worst: {})",
-            oracle.max_clip_misalign,
-            oracle.clip_misalign_worst.as_deref().unwrap_or("none")
-        ))
-        .into());
-    }
     Ok(())
 }
 

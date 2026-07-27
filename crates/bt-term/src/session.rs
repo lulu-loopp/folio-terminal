@@ -9981,10 +9981,8 @@ mod tests {
         while let Some(mut task) = session.take_worker_task() {
             let resolved = resolve_detection_task(&mut task);
             let result = resolved.then(|| synthetic_raster(32, 36));
-            let _ = session.complete_worker_result(
-                task,
-                result.ok_or(MathRenderError::NotDetected),
-            );
+            let _ =
+                session.complete_worker_result(task, result.ok_or(MathRenderError::NotDetected));
         }
         let outer = &session.decorations[&outer_id];
         assert_eq!(outer.decoration, DecorationLifecycle::Ready);
