@@ -1705,11 +1705,56 @@ impl DualPlaneSession {
         let mut occupied = BTreeSet::new();
         let mut relayout_tasks = Vec::new();
         let mut unresolved = Vec::new();
+
+        // A record still resident on a *different* grid generation than the snapshot holds for the
+        // same occurrence was re-seated during the window by an exact-source proof against the
+        // settled grid — the batched top-anchored scroll in `preserve_live_after_top_scroll`. That
+        // verdict is stronger than anything this fingerprint reprojection can derive from a snapshot
+        // taken before the scroll: it already knows where every proven row went, and it also knows
+        // which occurrences left the grid entirely. Seat those residents first so they own their
+        // rows, then let the snapshot only fill in occurrences the reprint tore down without proof;
+        // a resurrected pre-scroll copy loses the row it no longer owns and falls off-band instead
+        // of painting over its successor. A record the window never touched still carries the
+        // snapshot generation, so it goes through reprojection exactly as before and the in-stream
+        // reprint remap is unchanged.
+        let snapshot_generations = snapshot
+            .decorations
+            .iter()
+            .chain(snapshot.dormant_decorations.iter())
+            .map(|record| (record.identity.occurrence_id, record.generation))
+            .collect::<BTreeMap<_, _>>();
+        // The snapshot carries its own clone of every record that was already off-band when the
+        // window opened, and every record the window drained off-band was resident at that moment
+        // and so is cloned too. Retire those originals now: without this the reprojection pushes a
+        // second copy of each next to the one still queued, and each further window doubles the
+        // queue again — MAX_OFFSCREEN_RECORDS worth of duplicate exact-source scans per feed.
+        // Records first seen after the snapshot are not in it and stay queued.
+        self.offscreen_decorations
+            .retain(|record| !snapshot_generations.contains_key(&record.identity.occurrence_id));
+        let mut reproven = BTreeSet::new();
+        for (_, record) in std::mem::take(&mut self.live_decorations) {
+            if snapshot_generations
+                .get(&record.identity.occurrence_id)
+                .is_some_and(|generation| *generation == record.generation)
+            {
+                continue;
+            }
+            reproven.insert(record.identity.occurrence_id);
+            if let Some(record) =
+                insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
+            {
+                unresolved.push(record);
+            }
+        }
         for record in snapshot
             .decorations
             .into_iter()
             .chain(snapshot.dormant_decorations)
         {
+            if reproven.contains(&record.identity.occurrence_id) {
+                // Its re-proven successor is already seated above; this pre-scroll copy is stale.
+                continue;
+            }
             let projected = (!row_mappings.is_empty())
                 .then(|| {
                     project_live_record_uniquely(
@@ -1957,6 +2002,11 @@ impl DualPlaneSession {
             record.band_end_row = band_end_row;
             record.clipped_top_rows = 0;
             record.clipped_bottom_rows = 0;
+            // The re-anchor proved this occurrence's *complete* source inside the live grid, so no
+            // part of it is frozen any more: a prefix carried over from the anchor it lost would
+            // name history lines this placement does not span.
+            record.frozen_prefix.clear();
+            record.staging_prefix.clear();
             record.placement.logical_band_start = logical_band_start;
             record.placement.occluded_source_rows = 0;
             record.placement.occluded_visible_rows.clear();
@@ -2492,6 +2542,9 @@ impl DualPlaneSession {
         // block landed — so the block's artifact does not double-render over an inner environment.
         if applied && rendered {
             self.suppress_block_interior(task.transcript_id, task.block_end);
+            // The frozen pipeline has now paired this block on durable transcript ids. Any live
+            // record still bridging over those lines is a superseded duplicate of it.
+            self.retire_stale_bridge_prefixes(false);
         }
         applied
     }
@@ -3632,6 +3685,14 @@ impl DualPlaneSession {
         events: Vec<AdapterEvent>,
         observed_at: Instant,
     ) -> Result<(), SessionError> {
+        // A parse quantum is fed to the vendor terminal whole, so by the time these removal facts
+        // are applied the grid already holds the *end* of the quantum. A top-anchored region that
+        // committed several rows in one write therefore produces several removal events against one
+        // settled grid: proving each record after each single-row event would compare a one-row
+        // shift against a grid that already moved further and fail every record. Accumulate the
+        // rows a preserved top scroll removed and prove the survivors once, against that settled
+        // grid, with the exact total delta.
+        let mut pending_top_scroll = 0_usize;
         for event in events {
             self.trace_adapter_event(&event, observed_at);
             let full_screen_output_scroll = match &event {
@@ -3652,17 +3713,31 @@ impl DualPlaneSession {
                 }
                 _ => None,
             };
-            match classify(event) {
+            let preserve_full_screen_scroll = matches!(
+                full_screen_output_scroll,
+                Some((RemovalScreen::Primary | RemovalScreen::Alternate, count))
+                    if count != 0
+            );
+            let directive = classify(event);
+            let batches_top_scroll = preserve_full_screen_scroll
+                && !self.resize_epoch.is_active()
+                && matches!(directive, LifecycleDirective::RowsRemoved { .. });
+            if !batches_top_scroll {
+                self.flush_top_scroll_batch(&mut pending_top_scroll);
+            }
+            match directive {
                 LifecycleDirective::RowsRemoved { rows } => {
                     if self.resize_epoch.is_active() {
                         self.rebase_vendor_owned_rows(rows);
                     } else {
-                        let preserve_full_screen_scroll = matches!(
-                            full_screen_output_scroll,
-                            Some((RemovalScreen::Primary | RemovalScreen::Alternate, count))
-                                if count != 0
-                        );
-                        self.apply_removed_rows(rows, preserve_full_screen_scroll)?;
+                        let removed = self.apply_removed_rows(
+                            rows,
+                            preserve_full_screen_scroll,
+                            pending_top_scroll,
+                        )?;
+                        if preserve_full_screen_scroll {
+                            pending_top_scroll = pending_top_scroll.saturating_add(removed);
+                        }
                     }
                 }
                 LifecycleDirective::ClearHistoryAndStaging => {
@@ -3706,7 +3781,18 @@ impl DualPlaneSession {
                 }
             }
         }
+        self.flush_top_scroll_batch(&mut pending_top_scroll);
         Ok(())
+    }
+
+    /// Prove and re-seat the live decorations a batched top-anchored scroll displaced, then reset
+    /// the batch. The grid is settled at this point, so the accumulated row count is the exact
+    /// delta between where each proven record was and where its source now sits.
+    fn flush_top_scroll_batch(&mut self, pending: &mut usize) {
+        let removed = std::mem::take(pending);
+        if removed != 0 {
+            self.preserve_live_after_top_scroll(removed);
+        }
     }
 
     fn rebase_vendor_owned_rows(&mut self, rows: Vec<RowDirective>) {
@@ -3771,11 +3857,14 @@ impl DualPlaneSession {
         Ok(())
     }
 
+    /// Returns the number of live rows this event removed, so a preserved top scroll can batch its
+    /// decoration proof across every removal event in the same parse quantum.
     fn apply_removed_rows(
         &mut self,
         rows: Vec<RowDirective>,
         preserve_full_screen_scroll: bool,
-    ) -> Result<(), SessionError> {
+        batched_top_scroll_rows: usize,
+    ) -> Result<usize, SessionError> {
         let mut removals = Vec::new();
         let mut captured = Vec::<CaptureResult>::new();
         let mut captured_staging = BTreeMap::new();
@@ -3805,11 +3894,11 @@ impl DualPlaneSession {
             }
         }
         if removals.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         if preserve_full_screen_scroll {
-            self.remember_live_artifact_handoffs(&captured_staging);
+            self.remember_live_artifact_handoffs(&captured_staging, batched_top_scroll_rows);
         }
         if !preserve_full_screen_scroll {
             self.invalidate_all_live_decorations();
@@ -3828,10 +3917,7 @@ impl DualPlaneSession {
         }
         let evicted = self.transcript.take_evictions();
         self.delete_history(&evicted, false);
-        if preserve_full_screen_scroll {
-            self.preserve_live_after_top_scroll(removals.len());
-        }
-        Ok(())
+        Ok(removals.len())
     }
 
     fn preserve_live_after_top_scroll(&mut self, removed_rows: usize) {
@@ -3891,13 +3977,19 @@ impl DualPlaneSession {
         }
     }
 
+    /// `batched_top_scroll_rows` is how many rows earlier removal events in this same parse quantum
+    /// already took off the top without yet re-seating the records (see `flush_top_scroll_batch`).
+    /// Record placements are still expressed against the pre-batch grid, so the row a proven source
+    /// line occupies now is its logical target minus that pending shift.
     fn remember_live_artifact_handoffs(
         &mut self,
         captured_rows: &BTreeMap<u32, (StagingId, CapturedRow)>,
+        batched_top_scroll_rows: usize,
     ) {
         if self.live_screen != ScreenId::Primary {
             return;
         }
+        let pending_shift = i64::try_from(batched_top_scroll_rows).unwrap_or(i64::MAX);
         let mut staging_prefix_updates = Vec::new();
         for record in self.live_decorations.values() {
             let captured_source = record
@@ -3909,7 +4001,8 @@ impl DualPlaneSession {
                     let target = record
                         .placement
                         .logical_band_start
-                        .checked_add(i64::from(proven.band_offset))?;
+                        .checked_add(i64::from(proven.band_offset))?
+                        .checked_sub(pending_shift)?;
                     let row = u32::try_from(target).ok()?;
                     let (staging, captured) = captured_rows.get(&row)?;
                     let (text, cell_boundaries) = captured_row_text_and_boundaries(captured);
@@ -4063,6 +4156,7 @@ impl DualPlaneSession {
                 record.staging_prefix = staging_prefix;
             }
         }
+        self.retire_stale_bridge_prefixes(false);
         self.schedule_detection(id);
         self.try_handoff_live_artifact(id);
         self.staging_sources
@@ -4225,6 +4319,23 @@ impl DualPlaneSession {
             self.decorations.remove(id);
             self.frozen_detection_contexts.remove(id);
         }
+        // A live record's frozen prefix names transcript lines that must still exist for the bridge
+        // to span them. Scrollback eviction and Codex's `ESC [ 3 J` delete those lines outright, and
+        // a prefix that survives its own lines is neither a bridge (the viewport rejects it — the
+        // ids are no longer the history tail) nor an honest live-only band: it suppresses the
+        // free-height budget the clipped-top rows need and the raster clips short of its own ink.
+        // A prefix is all-or-nothing, so losing any line retires the whole prefix; the rows above
+        // the grid remain counted as clipped, which is what they now are.
+        for pending in &mut self.pending_live_handoffs {
+            if pending
+                .frozen_prefix
+                .iter()
+                .any(|id| removed_set.contains(id))
+            {
+                pending.frozen_prefix.clear();
+            }
+        }
+        self.retire_stale_bridge_prefixes(clear_staging);
         // A removed line may sit at or before the certified frontier; re-certify from scratch rather
         // than trust a frontier whose proving segment no longer exists.
         if self
@@ -4232,6 +4343,82 @@ impl DualPlaneSession {
             .is_some_and(|through| removed_set.iter().any(|id| *id <= through))
         {
             self.frozen_certified_through = None;
+        }
+    }
+
+    /// A live record's bridge prefix is a claim on transcript lines that sit immediately above live
+    /// row zero. That claim holds only while those exact ids are the contiguous *tail* of history:
+    /// the lines are deleted (eviction, Codex's `ESC [ 3 J`), or other lines are frozen after them
+    /// (a reprint re-emits the same text under fresh ids, or a neighbouring block's rows land in
+    /// between), and the occurrence no longer adjoins the grid.
+    ///
+    /// A stale claim is not inert. Presentation reads a non-empty prefix as "this band is a bridge,
+    /// sized across both planes", skips the free-height budget, and then the viewport rejects the
+    /// bridge because the ids are not the tail — so the raster clips short of its own ink inside a
+    /// band that is not a bridge either, and the block's real frozen source shows above it. It also
+    /// blocks `remember_live_artifact_handoffs` from rebuilding a fresh lineage, so the prefix can
+    /// never recover on its own. Retiring it restores both.
+    ///
+    /// Called wherever history changes: a line finalizes into the document, or lines are deleted.
+    fn retire_stale_bridge_prefixes(&mut self, clear_staging: bool) {
+        // A prefix line that has become a *rendered* history block means the frozen pipeline has
+        // finished pairing this occurrence on its own. The two cannot share one band, and the frozen
+        // artifact is the one anchored to durable transcript ids, so the live record is a superseded
+        // duplicate: keeping it paints a one-row clip of the same raster over the history rendering.
+        // This is a handoff completing, not an invalidation, so it is not counted as one.
+        let superseded = self
+            .live_decorations
+            .iter()
+            .filter(|(_, record)| {
+                record.frozen_prefix.iter().any(|id| {
+                    self.decorations.get(id).is_some_and(|frozen| {
+                        !frozen.show_source
+                            && frozen.artifact.is_some()
+                            && frozen
+                                .span
+                                .as_ref()
+                                .is_some_and(|span| span.mode == MathMode::Display)
+                    })
+                })
+            })
+            .map(|(start, _)| *start)
+            .collect::<Vec<_>>();
+        for start in superseded {
+            self.live_decorations.remove(&start);
+        }
+        let document = &self.document;
+        let snapshots = self
+            .primary_repaint_snapshot
+            .iter_mut()
+            .chain(self.alternate_repaint_snapshot.iter_mut())
+            .flat_map(|snapshot| {
+                snapshot
+                    .decorations
+                    .iter_mut()
+                    .chain(snapshot.dormant_decorations.iter_mut())
+            });
+        for record in self
+            .live_decorations
+            .values_mut()
+            .chain(self.offscreen_decorations.iter_mut())
+            .chain(snapshots)
+        {
+            if clear_staging {
+                record.staging_prefix.clear();
+            }
+            if record.frozen_prefix.is_empty() {
+                continue;
+            }
+            let is_history_tail = document
+                .entries()
+                .keys()
+                .rev()
+                .take(record.frozen_prefix.len())
+                .eq(record.frozen_prefix.iter().rev());
+            if !is_history_tail {
+                record.frozen_prefix.clear();
+                record.staging_prefix.clear();
+            }
         }
     }
 
@@ -5877,6 +6064,16 @@ fn project_live_record(
         u32::try_from(i64::from(record.band_start_row).saturating_sub(logical_band_start)).ok()?;
     record.clipped_bottom_rows =
         u32::try_from(logical_band_end.saturating_sub(i64::from(record.band_end_row))).ok()?;
+    // A bridge prefix is only meaningful directly above live row zero — that is the geometry the
+    // viewport composes, and its precondition. A projection that seats this band lower has proven
+    // the rows it owns inside the grid at a place no history line adjoins, so the prefix claim is
+    // void. Leaving it attached is not neutral: the presentation reads a non-empty prefix as "this
+    // band is a bridge, sized elsewhere" and skips the free-height budget, so the raster clips short
+    // of its own ink inside a band that is not a bridge either.
+    if record.band_start_row != 0 {
+        record.frozen_prefix.clear();
+        record.staging_prefix.clear();
+    }
     record.placement.occluded_source_rows = occluded_source_rows;
     record.placement.occluded_visible_rows = occluded_visible_rows;
     record.span = span;
@@ -9845,6 +10042,187 @@ mod tests {
             rows.iter().all(|row| row.trim().is_empty()),
             "the bridged raster must suppress both frozen source rows, got {rows:?}"
         );
+    }
+
+    /// A bridge prefix names transcript lines. Codex clears its own scrollback (`ESC [ 3 J`) all the
+    /// time, and a prefix outliving its lines is neither a bridge — the viewport rejects ids that
+    /// are no longer the history tail — nor an honest live-only band, because the stale claim also
+    /// suppresses the free-height budget the clipped rows need and the raster clips short of its own
+    /// ink. Losing any prefix line must retire the whole prefix.
+    #[test]
+    fn clearing_history_retires_a_live_bridge_prefix_that_no_longer_has_lines() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(
+                b"lead-0\r\nlead-1\r\n$$\r\nf(x)=\\frac{1}{\\sigma\\sqrt{2\\pi}}\r\n\\exp\\left(-\\frac{(x-\\mu)^2}{2\\sigma^2}\\right)\r\n$$",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            1
+        );
+        let mut bytes = b"\x1b[?2026h\x1b[1;10r\x1b[10;1H".to_vec();
+        for row in 0..3 {
+            bytes.extend_from_slice(b"\r\n");
+            bytes.extend_from_slice(format!("new-{row}").as_bytes());
+        }
+        bytes.extend_from_slice(b"\x1b[r\x1b[?2026l");
+        session
+            .feed_at(&bytes, start + Duration::from_millis(210))
+            .unwrap();
+        assert_eq!(
+            session
+                .live_decorations
+                .values()
+                .map(|record| record.frozen_prefix.len())
+                .collect::<Vec<_>>(),
+            vec![1],
+            "the scrolled-away opener must be the bridge prefix"
+        );
+
+        session
+            .feed_at(b"\x1b[3J", start + Duration::from_millis(240))
+            .unwrap();
+        assert!(
+            session
+                .live_decorations
+                .values()
+                .chain(session.offscreen_decorations.iter())
+                .all(|record| record.frozen_prefix.is_empty() && record.staging_prefix.is_empty()),
+            "clearing history must retire every prefix claim, got {:?}",
+            session
+                .live_decorations
+                .values()
+                .chain(session.offscreen_decorations.iter())
+                .map(|record| (record.frozen_prefix.clone(), record.staging_prefix.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// The plain-shift half of the same fact, and the broadest form of it: *any* write that scrolls
+    /// more than one row in a single parse quantum — three newlines in one `write`, no DECSTBM, no
+    /// synchronized update — must shift a proven band by three, not invalidate it. Proving each
+    /// removal event separately against the already-settled grid compared a one-row shift against a
+    /// grid that had moved three and dropped every record; with no repaint window open there is no
+    /// fingerprint remap to rescue them afterwards, so the formula simply reverts to source.
+    #[test]
+    fn a_multi_row_synchronized_commit_shifts_a_live_formula_instead_of_dropping_it() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(16));
+        session
+            .feed_at(
+                b"lead-0\r\nlead-1\r\nlead-2\r\nlead-3\r\nlead-4\r\n$$\r\nf(x)=\\frac{1}{\\sigma\\sqrt{2\\pi}}\r\n\\exp\\left(-\\frac{(x-\\mu)^2}{2\\sigma^2}\\right)\r\n$$",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            1
+        );
+        let band = |session: &DualPlaneSession| {
+            session
+                .live_decorations
+                .values()
+                .find(|record| record.span.original_source.contains(r"\sigma\sqrt"))
+                .map(|record| (record.artifact.is_some(), record.band_start_row))
+        };
+        assert_eq!(band(&session), Some((true, 5)));
+
+        let mut bytes = b"\x1b[16;1H".to_vec();
+        for row in 0..3 {
+            bytes.extend_from_slice(b"\r\n");
+            bytes.extend_from_slice(format!("new-{row}").as_bytes());
+        }
+        session
+            .feed_at(&bytes, start + Duration::from_millis(210))
+            .unwrap();
+        assert_eq!(
+            band(&session),
+            Some((true, 2)),
+            "a three-row scroll in one write must shift the proven band, not invalidate it"
+        );
+    }
+
+    /// Codex's inline TUI commits transcript rows through a top-anchored DECSTBM region whose
+    /// bottom margin is the composer's top, and it emits the whole frame — set region, several
+    /// row commits, restore region — inside one DEC 2026 synchronized update, which reaches the
+    /// session as one parse quantum. The vendor terminal has already applied every row of that
+    /// quantum by the time its removal facts are handled, so proving each removal against the
+    /// settled grid one row at a time compares a one-row shift against a grid that already moved
+    /// three, and every proven record fails and drops to source. That is the reported breakage:
+    /// half-rendered/half-source wedged together while Codex streams, healed only by a zoom.
+    ///
+    /// The block here is wholly inside the scroll region (the real geometry: Codex never writes
+    /// transcript below its own margin), and the scrolls carry its opener across live row zero so
+    /// the surviving record must be a frozen/live bridge, not merely a shifted band.
+    #[test]
+    fn top_anchored_synchronized_scroll_keeps_a_multiline_formula_bridge_rendered() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(
+                b"lead-0\r\nlead-1\r\n$$\r\nf(x)=\\frac{1}{\\sigma\\sqrt{2\\pi}}\r\n\\exp\\left(-\\frac{(x-\\mu)^2}{2\\sigma^2}\\right)\r\n$$",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            1
+        );
+        let gaussian = |session: &DualPlaneSession| {
+            session
+                .live_decorations
+                .values()
+                .find(|record| record.span.original_source.contains(r"\sigma\sqrt"))
+                .map(|record| {
+                    (
+                        record.artifact.is_some(),
+                        record.band_start_row,
+                        record.band_end_row,
+                        record.frozen_prefix.len() + record.staging_prefix.len(),
+                    )
+                })
+        };
+        assert_eq!(
+            gaussian(&session),
+            Some((true, 2, 6, 0)),
+            "the gaussian raster must be resident before scrolling"
+        );
+
+        // Three rows committed inside one synchronized update, twice over. The block starts at grid
+        // row 2, so the first frame already carries its opener into history and the second leaves
+        // only the closer live — the deepest bridge the occurrence can hold before it retires.
+        for index in 0..2_u64 {
+            let at = start + Duration::from_millis(210 + index * 10);
+            let mut frame = b"\x1b[1;10r\x1b[10;1H".to_vec();
+            for row in 0..3_u64 {
+                frame.extend_from_slice(b"\r\n");
+                frame.extend_from_slice(format!("new-{index}-{row}").as_bytes());
+            }
+            frame.extend_from_slice(b"\x1b[r");
+            let mut bytes = b"\x1b[?2026h".to_vec();
+            bytes.extend_from_slice(&frame);
+            bytes.extend_from_slice(b"\x1b[?2026l");
+            session.feed_at(&bytes, at).unwrap();
+            let Some((rendered, band_start, band_end, prefix_rows)) = gaussian(&session) else {
+                panic!("synchronized frame {index} dropped the gaussian record entirely");
+            };
+            assert!(rendered, "synchronized frame {index} dropped the raster");
+            // The band shrinks from the top by the full three rows the frame committed, and every
+            // source row that left the grid joins the bridge prefix. The prefix counts logical
+            // lines, so the soft-wrapped `\exp…` body row contributes one id for its two grid rows.
+            let expected = [(0_u32, 3_u32, 1_usize), (0, 0, 3)][index as usize];
+            assert_eq!(
+                (band_start, band_end, prefix_rows),
+                expected,
+                "synchronized frame {index} must keep one bridged occurrence, not a re-anchored fragment"
+            );
+        }
     }
 
     #[test]
