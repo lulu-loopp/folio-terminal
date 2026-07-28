@@ -22,6 +22,7 @@ mod windows_impl {
         ffi::c_void,
         sync::{Arc, Mutex, OnceLock},
     };
+    use windows::core::PCWSTR;
 
     use windows::Win32::{
         Foundation::{
@@ -39,12 +40,12 @@ mod windows_impl {
         UI::{
             HiDpi::GetDpiForWindow,
             Input::KeyboardAndMouse::GetKeyboardLayout,
-            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+            Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW},
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
                 GCLP_HBRBACKGROUND, GetCursorPos, GetWindowRect, MF_STRING, PostMessageW,
-                SPI_GETWHEELSCROLLLINES, SetCaretPos, SetClassLongPtrW, SystemParametersInfoW,
-                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+                SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL, SetCaretPos, SetClassLongPtrW,
+                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
             },
         },
     };
@@ -62,6 +63,39 @@ mod windows_impl {
     const WHEEL_PAGESCROLL: u32 = u32::MAX;
     const DEFERRED_MATH_MENU_MESSAGE: u32 = WM_APP + 0x4b7;
     const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
+
+    /// Ask Windows to open one already-policy-checked target with its registered default handler.
+    /// Scheme allowlisting deliberately belongs to the caller; this bridge only supplies the
+    /// audited UTF-16 and ShellExecuteW boundary.
+    pub fn shell_execute(hwnd: NonZeroIsize, target: &str) -> Result<(), String> {
+        if target.contains('\0') {
+            return Err("ShellExecuteW target contains an embedded NUL".to_owned());
+        }
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
+        operation.push(0);
+        let mut target = target.encode_utf16().collect::<Vec<_>>();
+        target.push(0);
+        // SAFETY: both strings are live, NUL-terminated UTF-16 buffers for the duration of the
+        // synchronous call. No parameters or working directory are supplied, so the URI is never
+        // reparsed as a command line. `hwnd` is winit's live top-level window.
+        let result = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code <= 32 {
+            Err(format!("ShellExecuteW failed with code {code}"))
+        } else {
+            Ok(())
+        }
+    }
 
     pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
         let mut lines = 0u32;
@@ -598,5 +632,5 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     ImeSystemCaret, MathContextMenu, clipboard_text, get_dpi_for_window, get_window_rect,
-    install_window_class_background, set_clipboard_text, wheel_scroll_amount,
+    install_window_class_background, set_clipboard_text, shell_execute, wheel_scroll_amount,
 };

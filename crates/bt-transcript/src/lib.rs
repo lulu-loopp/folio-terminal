@@ -9,6 +9,154 @@ pub const DEFAULT_STAGING_QUOTA: NonZeroUsize = NonZeroUsize::new(4096).unwrap()
 /// Spike-only value; M0 must replace it with a measured or configured quota.
 pub const SPIKE_DEFAULT_FROZEN_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HyperlinkRange {
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+/// Recognize deliberately narrow bare web URLs without changing transcript source text.
+///
+/// Candidates must begin at a conservative prose boundary, use `http://` or `https://`, and
+/// contain an unambiguous host. In particular, single-label hosts are rejected except for the
+/// explicitly supported `localhost` development case.
+pub fn detect_http_urls(text: &str) -> Vec<HyperlinkRange> {
+    let bytes = text.as_bytes();
+    let mut ranges = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let Some(scheme_len) = http_scheme_len(&bytes[cursor..]) else {
+            cursor += 1;
+            continue;
+        };
+        if cursor != 0 && !is_url_leading_boundary(bytes[cursor - 1]) {
+            cursor += scheme_len;
+            continue;
+        }
+        let mut end = cursor + scheme_len;
+        while end < bytes.len() && !is_url_terminator(bytes[end]) {
+            end += 1;
+        }
+        while end > cursor + scheme_len
+            && matches!(
+                bytes[end - 1],
+                b')' | b'.' | b',' | b';' | b':' | b'!' | b'?'
+            )
+        {
+            end -= 1;
+        }
+        if bare_http_url_is_valid(&text[cursor..end], scheme_len) {
+            ranges.push(HyperlinkRange {
+                byte_start: cursor,
+                byte_end: end,
+            });
+            cursor = end;
+        } else {
+            cursor += scheme_len;
+        }
+    }
+    ranges
+}
+
+fn http_scheme_len(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .starts_with(b"http://")
+        .then_some(7)
+        .or_else(|| bytes.starts_with(b"https://").then_some(8))
+}
+
+fn is_url_leading_boundary(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'(' | b'[' | b'{' | b'<')
+}
+
+fn is_url_terminator(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`' | b'<' | b'>')
+}
+
+fn bare_http_url_is_valid(candidate: &str, scheme_len: usize) -> bool {
+    if !candidate.is_ascii()
+        || candidate
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte == b'\\')
+    {
+        return false;
+    }
+    let remainder = &candidate[scheme_len..];
+    let authority_end = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..authority_end];
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let Some(host) = authority_host(authority) else {
+        return false;
+    };
+    host.eq_ignore_ascii_case("localhost")
+        || valid_ipv4(host)
+        || host.contains(':')
+        || valid_dns_name(host)
+}
+
+fn authority_host(authority: &str) -> Option<&str> {
+    if let Some(bracketed) = authority.strip_prefix('[') {
+        let close = bracketed.find(']')?;
+        let host = &bracketed[..close];
+        let suffix = &bracketed[close + 1..];
+        if host.is_empty()
+            || host.parse::<std::net::Ipv6Addr>().is_err()
+            || (!suffix.is_empty() && !valid_port(suffix.strip_prefix(':')?))
+        {
+            return None;
+        }
+        return Some(host);
+    }
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    if host.is_empty() || port.is_some_and(|port| !valid_port(port)) {
+        return None;
+    }
+    Some(host)
+}
+
+fn valid_port(port: &str) -> bool {
+    !port.is_empty()
+        && port.bytes().all(|byte| byte.is_ascii_digit())
+        && port.parse::<u16>().is_ok_and(|port| port != 0)
+}
+
+fn valid_ipv4(host: &str) -> bool {
+    let mut parts = host.split('.');
+    (0..4).all(|_| {
+        parts
+            .next()
+            .is_some_and(|part| !part.is_empty() && part.parse::<u8>().is_ok())
+    }) && parts.next().is_none()
+}
+
+fn valid_dns_name(host: &str) -> bool {
+    host.contains('.')
+        && host.len() <= 253
+        && host
+            .rsplit('.')
+            .next()
+            .is_some_and(|label| label.bytes().any(|byte| byte.is_ascii_alphabetic()))
+        && host.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && label
+                    .as_bytes()
+                    .first()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+                && label
+                    .as_bytes()
+                    .last()
+                    .is_some_and(u8::is_ascii_alphanumeric)
+        })
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TranscriptId(pub u64);
 
@@ -638,6 +786,38 @@ mod tests {
         assert_eq!(store.take_evictions(), vec![TranscriptId(1)]);
         assert_eq!(store.tombstones(), &[TranscriptId(1)]);
     }
+
+    #[test]
+    fn bare_http_urls_strip_terminal_prose_punctuation() {
+        let text = "See (https://example.test/a?q=1). Then \"http://localhost:3000/x!\"";
+        let ranges = detect_http_urls(text);
+        assert_eq!(
+            ranges
+                .iter()
+                .map(|range| &text[range.byte_start..range.byte_end])
+                .collect::<Vec<_>>(),
+            ["https://example.test/a?q=1", "http://localhost:3000/x"]
+        );
+    }
+
+    #[test]
+    fn bare_http_urls_require_conservative_boundaries_and_hosts() {
+        let text = concat!(
+            "xhttps://example.test ",
+            "ftp://example.test ",
+            "http://intranet ",
+            "http://localhost:0 ",
+            "http://localhost:65536 ",
+            "https://good.example"
+        );
+        let ranges = detect_http_urls(text);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(
+            &text[ranges[0].byte_start..ranges[0].byte_end],
+            "https://good.example"
+        );
+    }
+
     #[test]
     fn trailing_spaces_with_a_painted_background_survive_freezing() {
         // Codex echoes the user's prompt on a background bar that extends past the text with

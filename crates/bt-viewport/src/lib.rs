@@ -15,8 +15,8 @@ use bt_doc::{
     HistoryDocument, LayoutKey, MathMode, ScreenId, ViewGeneration, compare_anchors,
 };
 use bt_transcript::{
-    CapturedCell, CapturedRow, CellFlags, FrozenLine, GraphemeOffset, SourceGeneration, StagedRow,
-    StagingId, TranscriptId,
+    CapturedCell, CapturedRow, CellFlags, FrozenLine, GraphemeOffset, HyperlinkRange,
+    SourceGeneration, StagedRow, StagingId, TranscriptId, detect_http_urls,
 };
 use bt_unicode::{cluster_width, graphemes};
 
@@ -82,6 +82,13 @@ pub struct GridCursor {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CellAnchor {
+    pub start: ContentAnchor,
+    pub end: ContentAnchor,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HyperlinkHit {
+    pub uri: String,
     pub start: ContentAnchor,
     pub end: ContentAnchor,
 }
@@ -432,6 +439,62 @@ impl ViewportFrame {
             Bias::Before => anchors.start.clone(),
             Bias::After => anchors.end.clone(),
         }))
+    }
+
+    /// Return the complete contiguous link span under one grid cell. Explicit OSC 8 and inferred
+    /// HTTP(S) links share this path, so hover and click resolve through the same frame anchors as
+    /// selection.
+    pub fn hyperlink_at(&self, row: u32, column: u32) -> Option<HyperlinkHit> {
+        if row >= self.rows.get() || column >= self.columns.get() {
+            return None;
+        }
+        let index = row as usize * self.columns.get() as usize + column as usize;
+        let uri = self.cells.get(index)?.hyperlink.as_ref()?;
+        let mut first = index;
+        while first > 0 && self.cells[first - 1].hyperlink.as_deref() == Some(uri.as_str()) {
+            first -= 1;
+        }
+        let mut last = index + 1;
+        while last < self.cells.len() && self.cells[last].hyperlink.as_deref() == Some(uri.as_str())
+        {
+            last += 1;
+        }
+        Some(HyperlinkHit {
+            uri: uri.clone(),
+            start: self.cell_anchors.get(first)?.start.clone(),
+            end: self.cell_anchors.get(last - 1)?.end.clone(),
+        })
+    }
+
+    /// Add the ordinary terminal underline flag to the active link in this frame only. Source
+    /// cells and transcript styles remain unchanged.
+    pub fn underline_hyperlink(&mut self, hyperlink: &HyperlinkHit) -> bool {
+        let Some(index) = self.cells.iter().enumerate().find_map(|(index, cell)| {
+            (cell.hyperlink.as_deref() == Some(hyperlink.uri.as_str())
+                && self.cell_anchors[index].start == hyperlink.start)
+                .then_some(index)
+        }) else {
+            return false;
+        };
+        let mut first = index;
+        while first > 0
+            && self.cells[first - 1].hyperlink.as_deref() == Some(hyperlink.uri.as_str())
+        {
+            first -= 1;
+        }
+        let mut last = index + 1;
+        while last < self.cells.len()
+            && self.cells[last].hyperlink.as_deref() == Some(hyperlink.uri.as_str())
+        {
+            last += 1;
+        }
+        if self.cell_anchors[last - 1].end != hyperlink.end {
+            return false;
+        }
+        for cell in &mut self.cells[first..last] {
+            cell.style.flags.insert(CellFlags::UNDERLINE);
+        }
+        true
     }
 
     /// Expand a cell hit to a word using the terminal selection delimiter policy. Whitespace and
@@ -2421,10 +2484,9 @@ fn captured_visual_row(
             end: anchor(lead, Bias::After),
         });
     }
-    VisualRow {
-        cells: row.cells.clone(),
-        anchors,
-    }
+    let mut cells = row.cells.clone();
+    apply_implicit_hyperlinks(&mut cells);
+    VisualRow { cells, anchors }
 }
 
 fn captured_staged_visual_row(
@@ -2451,9 +2513,42 @@ fn captured_staged_visual_row(
             end: anchor(Bias::After),
         });
     }
-    VisualRow {
-        cells: staged.row.cells.clone(),
-        anchors,
+    let mut cells = staged.row.cells.clone();
+    apply_implicit_hyperlinks(&mut cells);
+    VisualRow { cells, anchors }
+}
+
+fn apply_implicit_hyperlinks(cells: &mut [CapturedCell]) {
+    let mut text = String::new();
+    let mut byte_ranges = Vec::with_capacity(cells.len());
+    for cell in cells.iter() {
+        let start = text.len();
+        if !cell.wide_spacer {
+            text.push_str(&cell.text);
+        }
+        byte_ranges.push(start..text.len());
+    }
+    for range in detect_http_urls(&text) {
+        let affected = byte_ranges
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| cell.start < range.byte_end && range.byte_start < cell.end)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        if affected.is_empty()
+            || affected
+                .iter()
+                .any(|index| cells[*index].hyperlink.is_some())
+        {
+            continue;
+        }
+        let uri = text[range.byte_start..range.byte_end].to_owned();
+        for index in affected {
+            cells[index].hyperlink = Some(uri.clone());
+            if index + 1 < cells.len() && cells[index + 1].wide_spacer {
+                cells[index + 1].hyperlink = Some(uri.clone());
+            }
+        }
     }
 }
 
@@ -2502,6 +2597,16 @@ fn word_class(cell: &CapturedCell) -> WordClass {
 }
 
 fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
+    let implicit_links = detect_http_urls(&line.text)
+        .into_iter()
+        .filter(|range| {
+            !line.styles.iter().any(|span| {
+                span.hyperlink.is_some()
+                    && (span.byte_start as usize) < range.byte_end
+                    && range.byte_start < span.byte_end as usize
+            })
+        })
+        .collect::<Vec<_>>();
     let mut rows = vec![VisualRow {
         cells: Vec::with_capacity(columns),
         anchors: Vec::with_capacity(columns),
@@ -2533,6 +2638,11 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
         if let Some(span) = span {
             cell.style = span.style.clone();
             cell.hyperlink.clone_from(&span.hyperlink);
+        }
+        if cell.hyperlink.is_none()
+            && let Some(range) = implicit_link_at(&implicit_links, byte_start as usize)
+        {
+            cell.hyperlink = Some(line.text[range.byte_start..range.byte_end].to_owned());
         }
         if width == 2 {
             cell.style.flags.insert(CellFlags::WIDE_CHAR);
@@ -2572,6 +2682,13 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
     let end_offset = line.grapheme_boundaries.len().saturating_sub(1);
     pad_frozen_row(rows.last_mut().unwrap(), line, columns, end_offset);
     rows
+}
+
+fn implicit_link_at(ranges: &[HyperlinkRange], byte: usize) -> Option<HyperlinkRange> {
+    ranges
+        .iter()
+        .copied()
+        .find(|range| range.byte_start <= byte && byte < range.byte_end)
 }
 
 fn pad_frozen_row(row: &mut VisualRow, line: &FrozenLine, columns: usize, offset: usize) {
@@ -2779,6 +2896,96 @@ mod tests {
                 expected: 2,
                 actual: 1,
             })
+        );
+    }
+
+    #[test]
+    fn implicit_links_fill_only_cells_not_owned_by_osc_8() {
+        let mut cells =
+            CapturedRow::plain("https://shown.example https://plain.example).", false).cells;
+        for cell in &mut cells[..21] {
+            cell.hyperlink = Some("file:///real-target".to_owned());
+        }
+        apply_implicit_hyperlinks(&mut cells);
+
+        assert!(
+            cells[..21]
+                .iter()
+                .all(|cell| cell.hyperlink.as_deref() == Some("file:///real-target"))
+        );
+        let implicit = "https://plain.example";
+        assert!(
+            cells[22..43]
+                .iter()
+                .all(|cell| cell.hyperlink.as_deref() == Some(implicit))
+        );
+        assert_eq!(cells[43].hyperlink, None, "trailing ')' is not linked");
+        assert_eq!(cells[44].hyperlink, None, "trailing '.' is not linked");
+    }
+
+    #[test]
+    fn frozen_implicit_link_survives_reflow_without_mutating_source() {
+        let text = "https://example.test/path".to_owned();
+        let line = FrozenLine {
+            id: TranscriptId(7),
+            source_generation: SourceGeneration(3),
+            grapheme_boundaries: (0..=text.len() as u32).collect(),
+            text: text.clone(),
+            styles: Vec::new(),
+            fragments: Vec::new(),
+            shell_marks: Vec::new(),
+            wrap_split: false,
+        };
+        let rows = layout_frozen_line(&line, 8);
+        let linked_text = rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .filter(|cell| cell.hyperlink.as_deref() == Some(text.as_str()))
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+
+        assert_eq!(linked_text, text);
+        assert_eq!(line.text, text, "recognition is projection-only");
+    }
+
+    #[test]
+    fn hyperlink_hit_exposes_real_target_and_underlines_the_complete_span() {
+        let mut cells = CapturedRow::plain("trusted label", false).cells;
+        for cell in &mut cells {
+            cell.hyperlink = Some("https://actual.example/login".to_owned());
+        }
+        let projection = ViewportProjection::new(
+            key(13),
+            DetectionRevision(1),
+            nz32(1),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut frame = projection
+            .live_frame(
+                nz32(13),
+                vec![CapturedRow {
+                    cells,
+                    continues: false,
+                    shell_mark: None,
+                }],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+            )
+            .unwrap();
+
+        let hit = frame.hyperlink_at(0, 4).unwrap();
+        assert_eq!(hit.uri, "https://actual.example/login");
+        assert!(frame.underline_hyperlink(&hit));
+        assert!(
+            frame
+                .cells
+                .iter()
+                .all(|cell| cell.style.flags.contains(CellFlags::UNDERLINE))
         );
     }
 

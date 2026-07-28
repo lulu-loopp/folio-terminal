@@ -26,7 +26,9 @@ use bt_term::{
     render_live_detection_task,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
-use bt_viewport::{MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection};
+use bt_viewport::{
+    HyperlinkHit, MathBlockAnchor, ViewSelection, ViewportFrame, ViewportProjection,
+};
 use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
@@ -50,6 +52,7 @@ const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
 /// M0-alpha's single-session frozen-line budget; later configuration work may expose it.
 const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
+const HYPERLINK_HOVER_DELAY: Duration = Duration::from_millis(400);
 const MATH_WORKER_STOPPED_NOTICE: &str =
     "Formula rendering stopped; terminal input and output remain available";
 const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
@@ -201,6 +204,7 @@ struct Runtime {
     pixel_wheel_remainder: f64,
     pending_pty_resize: Option<PendingPtyResize>,
     pending_resize_present: Option<GridSize>,
+    hyperlink_hover: HyperlinkHover,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
     pending_math_context_anchor: Option<MathBlockAnchor>,
@@ -311,6 +315,8 @@ struct SelectionDrag {
     origin_row: u32,
     origin_column: u32,
     origin: ViewSelection,
+    hyperlink: Option<HyperlinkHit>,
+    open_hyperlink_on_release: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -341,6 +347,116 @@ impl ClickTracker {
         self.last_at = Some(now);
         self.last_cell = Some((row, column));
         self.count
+    }
+}
+
+#[derive(Default)]
+struct HyperlinkHover {
+    candidate: Option<HyperlinkHit>,
+    show_at: Option<Instant>,
+    active: Option<HyperlinkHit>,
+    blocked: bool,
+}
+
+impl HyperlinkHover {
+    fn observe(&mut self, hit: Option<HyperlinkHit>, now: Instant) -> bool {
+        if self.active.is_some() && hit.as_ref() == self.active.as_ref() {
+            self.candidate = None;
+            self.show_at = None;
+            return false;
+        }
+        if self.candidate.is_some() && hit.as_ref() == self.candidate.as_ref() {
+            return false;
+        }
+        let active_changed = self.active.take().is_some();
+        self.blocked = false;
+        self.candidate = hit;
+        self.show_at = self.candidate.as_ref().map(|_| now + HYPERLINK_HOVER_DELAY);
+        active_changed
+    }
+
+    fn activate_if_due(&mut self, now: Instant) -> bool {
+        if self.show_at.is_none_or(|deadline| now < deadline) {
+            return false;
+        }
+        self.show_at = None;
+        self.active = self.candidate.take();
+        self.blocked = false;
+        self.active.is_some()
+    }
+
+    fn show_blocked(&mut self, hyperlink: HyperlinkHit) {
+        self.candidate = None;
+        self.show_at = None;
+        self.active = Some(hyperlink);
+        self.blocked = true;
+    }
+
+    fn clear(&mut self) -> bool {
+        self.candidate = None;
+        self.show_at = None;
+        self.blocked = false;
+        self.active.take().is_some()
+    }
+
+    fn status_text(&self, columns: usize) -> Option<String> {
+        let uri = self
+            .active
+            .as_ref()?
+            .uri
+            .chars()
+            .map(|character| {
+                if character.is_control() {
+                    '\u{fffd}'
+                } else {
+                    character
+                }
+            })
+            .collect::<Vec<_>>();
+        if columns == 0 {
+            return None;
+        }
+        let suffix = if self.blocked { " · blocked" } else { "" };
+        let suffix_len = suffix.chars().count();
+        if columns <= suffix_len {
+            return Some("blocked".chars().take(columns).collect());
+        }
+        let target_columns = columns - suffix_len;
+        let mut status = if uri.len() > target_columns {
+            uri.into_iter()
+                .take(target_columns.saturating_sub(1))
+                .chain(['…'])
+                .collect::<String>()
+        } else {
+            uri.into_iter().collect()
+        };
+        status.push_str(suffix);
+        Some(status)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HyperlinkActivation {
+    None,
+    Open,
+    Blocked,
+}
+
+fn hyperlink_activation(control: bool, click_no_drag: bool, uri: &str) -> HyperlinkActivation {
+    if !control || !click_no_drag {
+        return HyperlinkActivation::None;
+    }
+    let allowed = uri.split_once(':').is_some_and(|(scheme, remainder)| {
+        (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https"))
+            && remainder.starts_with("//")
+            && remainder.len() > 2
+    }) && !uri
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace());
+    if allowed {
+        HyperlinkActivation::Open
+    } else {
+        HyperlinkActivation::Blocked
     }
 }
 
@@ -541,6 +657,7 @@ impl Runtime {
             pixel_wheel_remainder: 0.0,
             pending_pty_resize: None,
             pending_resize_present: None,
+            hyperlink_hover: HyperlinkHover::default(),
             math_hover_anchor: None,
             math_hover_clear_at: None,
             pending_math_context_anchor: None,
@@ -640,6 +757,13 @@ impl Runtime {
                 &mut self.math_worker_running,
                 &mut self.math_worker_notice_pending,
             );
+        }
+        if let Some(hyperlink) = self.hyperlink_hover.active.as_ref()
+            && terminal_frame.underline_hyperlink(hyperlink)
+        {
+            terminal_frame.status_text = self
+                .hyperlink_hover
+                .status_text(terminal_frame.columns.get() as usize);
         }
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
             terminal_frame.status_text = Some(notice.to_owned());
@@ -914,6 +1038,52 @@ impl Runtime {
         self.renderer.math_hit_test(frame, position.x, position.y)
     }
 
+    fn hyperlink_hit(&self, hit: bt_render::GridHit) -> Option<HyperlinkHit> {
+        self.last_presented_frame
+            .as_ref()?
+            .hyperlink_at(hit.row, hit.column)
+    }
+
+    fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
+        if self.hyperlink_hover.activate_if_due(now) {
+            self.publish_interaction_frame()?;
+        }
+        Ok(())
+    }
+
+    fn pointer_left(&mut self) -> Result<()> {
+        self.pointer_position = None;
+        let hyperlink_changed = self.hyperlink_hover.clear();
+        if self.math_hover_anchor.is_some() {
+            self.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
+        }
+        if hyperlink_changed {
+            self.publish_interaction_frame()?;
+        }
+        Ok(())
+    }
+
+    fn activate_hyperlink(&mut self, hyperlink: HyperlinkHit) -> Result<()> {
+        match hyperlink_activation(true, true, &hyperlink.uri) {
+            HyperlinkActivation::None => {}
+            HyperlinkActivation::Open => {
+                let result = window_hwnd(&self.window).and_then(|hwnd| {
+                    bt_platform::shell_execute(hwnd, &hyperlink.uri)
+                        .map_err(|error| anyhow!(error))
+                        .context("open HTTP hyperlink in the system browser")
+                });
+                if let Err(error) = result {
+                    eprintln!("recoverable hyperlink open failure: {error:#}");
+                }
+            }
+            HyperlinkActivation::Blocked => {
+                self.hyperlink_hover.show_blocked(hyperlink);
+                self.publish_interaction_frame()?;
+            }
+        }
+        Ok(())
+    }
+
     fn update_math_hover(&mut self, now: Instant) -> Result<Option<MathHit>> {
         let hit = self.math_hit();
         if let Some(hit) = hit.as_ref() {
@@ -1043,6 +1213,8 @@ impl Runtime {
             .last_presented_frame
             .as_ref()
             .context("missing frame for mouse hit")?;
+        let hyperlink = frame.hyperlink_at(hit.row, hit.column);
+        let open_hyperlink_on_release = self.modifiers.control_key() && hyperlink.is_some();
         // Local hits are clamped to a continuous frame, which supplies anchors for every grid cell.
         let (mode, origin, initial) = match count {
             2 => {
@@ -1087,6 +1259,8 @@ impl Runtime {
             origin_row: hit.row,
             origin_column: hit.column,
             origin,
+            hyperlink,
+            open_hyperlink_on_release,
         }));
         self.publish_interaction_frame()
     }
@@ -1142,8 +1316,18 @@ impl Runtime {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.pointer_position = Some(position);
-        let math_hit = self.update_math_hover(Instant::now())?;
-        let Some(hit) = self.frame_hit() else {
+        let now = Instant::now();
+        let math_hit = self.update_math_hover(now)?;
+        let hit = self.frame_hit();
+        let hyperlink = hit
+            .filter(|_| {
+                math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
+            })
+            .and_then(|hit| self.hyperlink_hit(hit));
+        if self.hyperlink_hover.observe(hyperlink, now) {
+            self.publish_interaction_frame()?;
+        }
+        let Some(hit) = hit else {
             return Ok(());
         };
         if math_hit.is_some() || matches!(self.mouse_route, Some(MouseRoute::MathBlock)) {
@@ -1259,19 +1443,35 @@ impl Runtime {
             ElementState::Pressed if button == MouseButton::Left => self.begin_local_selection(hit),
             ElementState::Released => {
                 self.extend_local_selection(hit)?;
-                let single_click = matches!(
-                    self.mouse_route,
-                    Some(MouseRoute::Local(SelectionDrag {
+                let release_hyperlink = self.hyperlink_hit(hit);
+                let (single_click, hyperlink_to_open) =
+                    if let Some(MouseRoute::Local(SelectionDrag {
                         mode: SelectionDragMode::Linear,
                         origin_row,
                         origin_column,
+                        hyperlink,
+                        open_hyperlink_on_release,
                         ..
-                    })) if (origin_row, origin_column) == (hit.row, hit.column)
-                );
+                    })) = self.mouse_route.as_ref()
+                        && (*origin_row, *origin_column) == (hit.row, hit.column)
+                    {
+                        (
+                            true,
+                            open_hyperlink_on_release
+                                .then(|| hyperlink.clone())
+                                .flatten()
+                                .filter(|pressed| release_hyperlink.as_ref() == Some(pressed)),
+                        )
+                    } else {
+                        (false, None)
+                    };
                 self.mouse_route = None;
                 if single_click {
                     self.clear_selection();
                     self.publish_interaction_frame()?;
+                }
+                if let Some(hyperlink) = hyperlink_to_open {
+                    self.activate_hyperlink(hyperlink)?;
                 }
                 Ok(())
             }
@@ -1850,13 +2050,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 Ok(())
             }
             WindowEvent::CursorMoved { position, .. } => runtime.pointer_moved(position),
-            WindowEvent::CursorLeft { .. } => {
-                runtime.pointer_position = None;
-                if runtime.math_hover_anchor.is_some() {
-                    runtime.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
-                }
-                Ok(())
-            }
+            WindowEvent::CursorLeft { .. } => runtime.pointer_left(),
             WindowEvent::MouseInput { state, button, .. } => runtime.mouse_input(state, button),
             WindowEvent::MouseWheel { delta, .. } => runtime.mouse_wheel(delta),
             WindowEvent::Resized(size) => runtime.resize(size),
@@ -1919,6 +2113,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        if let Err(error) = runtime.activate_hyperlink_hover_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.clear_math_hover_if_due(now) {
             self.fail(event_loop, error);
             return;
@@ -1932,6 +2130,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             runtime.session.resize_finish_deadline(),
             runtime.session.synchronized_update_deadline(),
             runtime.session.live_stability_deadline(),
+            runtime.hyperlink_hover.show_at,
             runtime.math_hover_clear_at,
         ]
         .into_iter()
@@ -2313,6 +2512,115 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use winit::keyboard::{Key, NamedKey};
+
+    fn hyperlink_hit(uri: &str) -> HyperlinkHit {
+        HyperlinkHit {
+            uri: uri.to_owned(),
+            start: bt_doc::ContentAnchor::Live {
+                screen: bt_doc::ScreenId::Primary,
+                point: bt_doc::GridPoint { row: 1, column: 2 },
+                bias: Bias::Before,
+                generation: bt_doc::GridGeneration(1),
+            },
+            end: bt_doc::ContentAnchor::Live {
+                screen: bt_doc::ScreenId::Primary,
+                point: bt_doc::GridPoint { row: 1, column: 5 },
+                bias: Bias::After,
+                generation: bt_doc::GridGeneration(1),
+            },
+        }
+    }
+
+    #[test]
+    fn hyperlink_activation_requires_ctrl_and_click_without_drag() {
+        assert_eq!(
+            hyperlink_activation(true, true, "https://example.test/path"),
+            HyperlinkActivation::Open
+        );
+        assert_eq!(
+            hyperlink_activation(true, true, "HTTP://localhost:3000"),
+            HyperlinkActivation::Open
+        );
+        assert_eq!(
+            hyperlink_activation(false, true, "https://example.test"),
+            HyperlinkActivation::None
+        );
+        assert_eq!(
+            hyperlink_activation(true, false, "https://example.test"),
+            HyperlinkActivation::None
+        );
+    }
+
+    #[test]
+    fn hyperlink_activation_blocks_every_non_http_scheme_and_unsafe_target() {
+        for uri in [
+            "file:///C:/secret.txt",
+            "mailto:person@example.test",
+            "custom://payload",
+            "https://example.test/\nspoof",
+        ] {
+            assert_eq!(
+                hyperlink_activation(true, true, uri),
+                HyperlinkActivation::Blocked,
+                "{uri:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hyperlink_hover_delay_and_departure_are_event_driven() {
+        let start = Instant::now();
+        let link = hyperlink_hit("file:///actual-target");
+        let mut hover = HyperlinkHover::default();
+
+        assert!(!hover.observe(Some(link.clone()), start));
+        assert!(!hover.activate_if_due(start + Duration::from_millis(399)));
+        assert!(hover.activate_if_due(start + Duration::from_millis(400)));
+        assert_eq!(
+            hover.status_text(80).as_deref(),
+            Some("file:///actual-target")
+        );
+        assert!(hover.observe(None, start + Duration::from_millis(401)));
+        assert!(hover.active.is_none());
+        assert!(hover.show_at.is_none());
+
+        hover.show_blocked(link);
+        assert_eq!(
+            hover.status_text(80).as_deref(),
+            Some("file:///actual-target · blocked")
+        );
+        assert_eq!(
+            hover.status_text(20).as_deref(),
+            Some("file:///a… · blocked"),
+            "narrow chrome keeps the real target prefix and the blocked verdict visible"
+        );
+    }
+
+    #[test]
+    fn osc_8_display_text_hits_the_real_target_uri() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(24).unwrap(), NonZeroU32::new(2).unwrap());
+        session
+            .feed(b"\x1b]8;;https://actual.example/login\x1b\\trusted label\x1b]8;;\x1b\\")
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let mut frame = session.viewport_frame(&mut projection).unwrap();
+
+        let hit = frame.hyperlink_at(0, 4).unwrap();
+        assert_eq!(hit.uri, "https://actual.example/login");
+        assert!(frame.underline_hyperlink(&hit));
+        assert!(frame.cells[..13].iter().all(|cell| {
+            cell.style
+                .flags
+                .contains(bt_transcript::CellFlags::UNDERLINE)
+        }));
+        assert!(
+            !frame.cells[13]
+                .style
+                .flags
+                .contains(bt_transcript::CellFlags::UNDERLINE)
+        );
+    }
 
     struct PtyPresentationHarness {
         session: DualPlaneSession,
@@ -3233,6 +3541,39 @@ mod tests {
             forwarded.row, 3,
             "the stale row correctly misses live row 1"
         );
+    }
+
+    #[test]
+    fn tracked_tui_mouse_keeps_priority_over_ctrl_link_gesture() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+        session.feed(b"\x1b[?1000h\x1b[?1006h").unwrap();
+        let hit = bt_render::GridHit { row: 1, column: 2 };
+        let mut route = None;
+        let forwarded = route_forwarded_mouse_button(
+            &mut route,
+            ElementState::Pressed,
+            input::MouseProtocolButton::Left,
+            hit,
+            session.terminal_modes(),
+            ModifiersState::CONTROL,
+        );
+        assert!(forwarded.is_some());
+        assert!(matches!(route, Some(MouseRoute::Forward(_))));
+
+        let mut shifted_route = None;
+        assert!(
+            route_forwarded_mouse_button(
+                &mut shifted_route,
+                ElementState::Pressed,
+                input::MouseProtocolButton::Left,
+                hit,
+                session.terminal_modes(),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+            )
+            .is_none()
+        );
+        assert!(shifted_route.is_none());
     }
 
     #[test]
