@@ -8,10 +8,23 @@ _最后更新:2026-07-28,HEAD `a85ed32`_
 复核,收官笔 `a85ed32` = "输出时滚动"族终局:quantum 批量证明+快照不推翻已证重锚+桥前缀退役)。
 
 **剩余挂账(用户判定为小问题,下次可接)**:
-1. **zoom 时稍卡** — 性能专项未做;fingerprint 界已守(1.59<2.25),off-band 每窗翻倍白烧已修,
-   剩余卡顿需 profile 定位(嫌疑:zoom 全量重排版/重投影本身)。
-2. **zoom 完成后闪一下** — 已定位过的族:zoom 结束时 stale→fresh 换装 + Codex 干净重印的组合,
-   与账上"resize 释放共享边"(a85ed32 的 2 个转换换边新红同源)一并处理。
+1. ~~**zoom 时稍卡**~~ → 确诊完成 `23da689`(bt-zoom-perf harness,release 分段计时):字体重测
+   0.6-0.9ms、stale 光栅 GPU 采样零逐帧重上传(首帧 cache fill <1ms)全洗清;真大头=off-thread
+   Typst 重排窗口 79-124ms/次(不阻塞事件线程,决定 stale 窗口长度)+ 同步 canonical resize/reflow
+   1-11ms。无「大头+低风险」可修项,产品路径未动(候选「空 parser tail 免第二克隆」微基准赢、
+   端到端 A/B 无稳定收益,已回退)。**后续二选**:①真机窗口 BT_PERF_TRACE 追 headless 里两次
+   ~0.5s queue.submit 尖峰(driver/backlog 信号,置信度中);②跨 DPI raster cache/prewarm
+   (架构项,消 Typst 窗口)。
+2. ~~**zoom 完成后闪一下**~~ → 已修 `398725b`:根因=`finish_resize_if_quiescent` 静止边清
+   off-band 队列,把「静止」当成「fresh 光栅完成」——zoom 的干净重印晚于静止判定到达时,唯一
+   精确源码见证被丢,重印落地即露源。修=队列释放保留 stale DPI 过渡记录(与其它 drain 点的
+   stale-pending 语义对齐,确定事件退场);宽度型 resize 保持原释放。钉死测试修前红;24 录制
+   双模逐字节 no-op(zoom 不进 PTY 字节,回放测不到,属预期)。a85ed32 的 2 个转换换边新红
+   查实=**同 DPI resize 收尾换边**(scroll-strand 延迟 frame2510:宽块 `A=pmatrix` 回源、
+   窄块同帧渲染,invalidations=0,离 resize 极远),另单处理(下条)。
+2b. **同 DPI resize 收尾换边**(scroll-strand 延迟红 + resize-endflash 同步红)——占有权
+   从宽块切到窄块的转换换边,渲染集合不变;待续修或给忠实行为几何论证。盲目延长同 DPI 保持
+   会在普通 reflow 录制里制造新换边(Codex 实测过),需精细修。
 3. perf-check ISOLATION_GAP=1(既有)、bridge 判定唯一化(投影层猜 vs visible_frame 真判的
    架构耦合,终局项)、①认证检查点播种(性能加固)、bt-render 选区 band 既有红。
 4. Codex CLI 上游忠实行为不修:吃 `\\`/`\[`/`\,`/`=`、reflow 自毁转录、代码块拷贝显源。
