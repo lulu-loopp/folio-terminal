@@ -603,6 +603,9 @@ impl Runtime {
         // — including held/skipped frames — so a persistent stuck-source block is captured even when
         // the presented frame does not change. Zero cost when the variable is unset.
         self.session.trace_decorations();
+        if matches!(trigger.source, FrameSource::Keyboard) {
+            self.session.release_presentation_hold_for_user_input();
+        }
         dispatch_pending_math_tasks(
             &mut self.session,
             &self.math_worker.tasks,
@@ -614,15 +617,12 @@ impl Runtime {
             .session
             .viewport_frame(&mut self.projection)
             .context("project terminal grid into viewport frame")?;
-        // Frame hold: a resize-driven transcript rewrite (Codex clears scrollback then reprints)
-        // cleared the history the reviewer was anchored to. The displacement is preserved and will
-        // re-anchor once the reprint refills history a moment later; presenting the interim frame
-        // would flash the view to the bottom and back. Hold the last presented frame across that
-        // window instead. The hold is bounded entirely by projection state — it ends the frame the
-        // displacement re-anchors or an explicit scroll/keystroke supersedes it (both clear
-        // `displaced_review_rows`), and it never engages for a user clear (no resize transaction),
-        // so a genuine cls still snaps to the empty bottom.
-        if self.projection.review_hold() && self.last_presented_frame.is_some() {
+        // State-driven frame hold. Review displacement holds a vanished scroll anchor during a
+        // resize reprint. Independently, an unmatched off-band stale-pending DPI record holds the
+        // previous complete formula frame while a proven primary reprint is between clear and exact
+        // source re-anchor. Both release through projection/session facts (re-anchor, explicit user
+        // takeover, or hard lifecycle retirement), never a timer.
+        if self.projection.presentation_hold() && self.last_presented_frame.is_some() {
             return Ok(false);
         }
         if self.session.schedule_visible_artifacts(&terminal_frame) != 0 {
@@ -980,7 +980,9 @@ impl Runtime {
     }
 
     fn return_to_live_for_input(&mut self) -> bool {
-        let changed = self.session.view_selection().is_some() || self.projection.is_scrolled();
+        let changed = self.session.view_selection().is_some()
+            || self.projection.is_scrolled()
+            || self.session.release_presentation_hold_for_user_input();
         self.clear_selection();
         self.projection.scroll_to_bottom();
         changed
@@ -2345,10 +2347,8 @@ mod tests {
         fn publish_pty_frame(&mut self) -> bool {
             self.session.refresh_projection(&mut self.projection);
             let frame = self.session.viewport_frame(&mut self.projection).unwrap();
-            // Mirror publish_frame_inner's frame hold: while a resize reflow has displaced the
-            // review anchor and the reprint has not re-anchored it, hold the last presented frame
-            // instead of publishing the bottom-snapped interim.
-            if self.projection.review_hold() && self.last_presented.is_some() {
+            // Mirror publish_frame_inner's combined review/exact-source presentation hold.
+            if self.projection.presentation_hold() && self.last_presented.is_some() {
                 return false;
             }
             if pty_frame_is_unchanged(
@@ -2474,6 +2474,118 @@ mod tests {
             20,
             "presentation resumes exactly at the restored review displacement"
         );
+    }
+
+    #[test]
+    fn a_late_zoom_reprint_keeps_the_last_formula_frame_until_exact_source_reanchors() {
+        let start = Instant::now();
+        let mut harness = PtyPresentationHarness::new(40, 24);
+        harness
+            .session
+            .feed_at(b"intro\r\n$$x$$\r\nbarrier", start)
+            .unwrap();
+        assert_eq!(
+            harness
+                .session
+                .advance_live_stability(start + bt_term::LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        let mut initial_task = harness.session.take_live_worker_task().unwrap();
+        let initial_raster =
+            render_live_detection_task(&MathEngine::new(), &mut initial_task, foreground_rgb())
+                .expect("initial formula rasterizes");
+        assert!(
+            harness
+                .session
+                .complete_live_worker_result(initial_task, Ok(initial_raster))
+        );
+        assert!(harness.publish_pty_frame());
+        assert!(harness.present_pending());
+        assert_eq!(
+            harness.last_presented.as_ref().unwrap().math_blocks.len(),
+            1
+        );
+
+        // Match reconcile_authoritative_dpi: metrics, grid resize, then the new-DPI layout key.
+        let zoom_at = start + Duration::from_millis(210);
+        harness.session.set_cell_height_subpixels(
+            NonZeroI64::new(14 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
+        );
+        harness
+            .session
+            .set_cell_width_subpixels(NonZeroI64::new(7 * bt_viewport::SUBPIXELS_PER_PX).unwrap());
+        harness.session.set_ascii_baseline_subpixels(
+            NonZeroI64::new(11 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
+        );
+        harness
+            .session
+            .resize_at(
+                NonZeroU32::new(52).unwrap(),
+                NonZeroU32::new(32).unwrap(),
+                zoom_at,
+            )
+            .unwrap();
+        harness.session.mark_pty_resize_requested_at(
+            NonZeroU32::new(52).unwrap(),
+            NonZeroU32::new(32).unwrap(),
+            zoom_at,
+        );
+        harness.session.set_layout_key(bt_doc::LayoutKey {
+            width_cells: NonZeroU32::new(52).unwrap(),
+            dpi_milli: NonZeroU32::new(800).unwrap(),
+            font_rev: 1,
+            theme_rev: harness.session.layout_key().theme_rev,
+        });
+        let delayed_relayout = harness.session.take_live_worker_task().unwrap();
+        assert!(harness.publish_pty_frame());
+        assert!(harness.present_pending());
+        assert!(
+            harness
+                .session
+                .finish_resize_if_quiescent(zoom_at + Duration::from_millis(300))
+                .unwrap()
+        );
+
+        let publications_before_gap = harness.publications;
+        harness
+            .session
+            .feed_at(
+                b"\x1b[2J\x1b[H\x1b[3Jintro\r\n$",
+                zoom_at + Duration::from_millis(310),
+            )
+            .unwrap();
+        assert!(
+            !harness.publish_pty_frame(),
+            "publish_frame_inner must skip the diagnosed incomplete reprint frame"
+        );
+        assert!(!harness.present_pending());
+        assert_eq!(harness.publications, publications_before_gap);
+        assert_eq!(
+            harness.last_presented.as_ref().unwrap().math_blocks.len(),
+            1,
+            "the swapchain remains on the last complete formula frame"
+        );
+
+        harness
+            .session
+            .feed_at(b"$x$$\r\nbarrier", zoom_at + Duration::from_millis(324))
+            .unwrap();
+        let reanchor_published = harness.publish_pty_frame();
+        assert!(
+            !harness.projection.presentation_hold(),
+            "exact-source re-anchor releases the hold immediately"
+        );
+        if reanchor_published {
+            assert!(harness.present_pending());
+        }
+        assert_eq!(
+            harness.last_presented.as_ref().unwrap().math_blocks.len(),
+            1
+        );
+
+        // The re-anchored stale frame may be content-identical to last_presented and therefore need
+        // no publication. Either way, no incomplete grid frame entered the presentation slot.
+        drop(delayed_relayout);
     }
 
     #[test]

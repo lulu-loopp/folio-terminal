@@ -721,6 +721,11 @@ pub struct ViewportProjection {
     /// flashing to the bottom. It clears deterministically — when the displacement re-anchors, or
     /// when any explicit scroll/input supersedes the displacement — never on a timer.
     review_hold: bool,
+    /// Session-owned exact-source preservation is waiting off-band for a post-zoom primary reprint
+    /// to restore the source it can prove. The off-band raster cannot be painted at an unproven
+    /// position, so presentation holds its previous complete frame until the session re-anchors or
+    /// deterministically retires that record.
+    exact_source_reprint_hold: bool,
     live_overflow_offset_rows: usize,
     last_live_overflow_rows: usize,
     unread_rows: usize,
@@ -766,6 +771,7 @@ impl ViewportProjection {
             displaced_review_rows: None,
             resize_reflow_active: false,
             review_hold: false,
+            exact_source_reprint_hold: false,
             live_overflow_offset_rows: 0,
             last_live_overflow_rows: 0,
             unread_rows: 0,
@@ -845,6 +851,20 @@ impl ViewportProjection {
     /// displacement re-anchors or an explicit scroll/input supersedes it.
     pub fn review_hold(&self) -> bool {
         self.review_hold
+    }
+
+    /// Push the session's exact-source decoration hold into projection state. This is deliberately
+    /// a fact supplied by the session rather than inferred from cells: only the decoration owner
+    /// knows that an unmatched off-band record is a stale-pending DPI transition.
+    pub fn set_exact_source_reprint_hold(&mut self, active: bool) {
+        self.exact_source_reprint_hold = active;
+    }
+
+    /// Whether presentation must keep the last complete frame. The two reasons are independent:
+    /// review displacement holds a vanished scroll anchor, while exact-source reprint hold covers a
+    /// decoration that cannot legally paint until its proven source reappears.
+    pub fn presentation_hold(&self) -> bool {
+        self.review_hold || self.exact_source_reprint_hold
     }
 
     pub fn cell_height_subpixels(&self) -> NonZeroI64 {
@@ -4350,6 +4370,32 @@ mod tests {
         assert!(
             !projection.review_hold(),
             "a vanished anchor with no open resize transaction never holds"
+        );
+    }
+
+    #[test]
+    fn exact_source_reprint_hold_participates_in_the_combined_presentation_hold() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(256).unwrap());
+        let (mut projection, _document) = reviewing_projection(&mut store);
+
+        projection.scroll_to_bottom();
+        assert!(!projection.review_hold());
+        assert!(!projection.presentation_hold());
+
+        projection.set_exact_source_reprint_hold(true);
+        assert!(
+            projection.presentation_hold(),
+            "an unmatched exact-source decoration holds even at bottom follow"
+        );
+        assert!(
+            !projection.review_hold(),
+            "the decoration reason remains independent of review displacement"
+        );
+
+        projection.set_exact_source_reprint_hold(false);
+        assert!(
+            !projection.presentation_hold(),
+            "the session's deterministic release removes the combined hold"
         );
     }
 

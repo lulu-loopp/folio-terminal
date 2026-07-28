@@ -521,6 +521,15 @@ pub struct DualPlaneSession {
     /// same-content repaint leaves it false, so the window closes without paying for the segmented
     /// reprojection — nothing moved, every resident record is already correctly placed.
     primary_repaint_dirty: bool,
+    /// Occurrences whose stale-pending DPI raster is currently unmatched off-band after a proven
+    /// primary reprint boundary. Presentation holds the last complete frame while any such exact
+    /// source witness remains unmatched. Occurrence identity makes retirement final: a later,
+    /// unrelated DPI record cannot inherit an old hold.
+    primary_reprint_hold_occurrences: BTreeMap<LiveMathOccurrenceId, PrimaryReprintHistoryFloor>,
+    /// Transcript tail before the currently open primary reprint. A frozen decoration may replace
+    /// an unmatched live occurrence only when its durable id is newer than this watermark; this
+    /// prevents an older equal-source formula elsewhere in history from spuriously releasing hold.
+    primary_reprint_history_floor: Option<PrimaryReprintHistoryFloor>,
     alternate_content_end_row: Option<u32>,
     /// User presentation choices are content state, not decoration-instance state. Entries are
     /// created only by an explicit toggle and live for the session, so alternate-screen repaint,
@@ -550,6 +559,9 @@ pub struct DualPlaneSession {
     decor_trace: Option<PathBuf>,
     decor_trace_frame: u64,
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PrimaryReprintHistoryFloor(Option<TranscriptId>);
 
 impl DualPlaneSession {
     pub fn new(columns: NonZeroU32, rows: NonZeroU32) -> Self {
@@ -651,6 +663,8 @@ impl DualPlaneSession {
             primary_repaint_in_progress: false,
             primary_repaint_snapshot: None,
             primary_repaint_dirty: false,
+            primary_reprint_hold_occurrences: BTreeMap::new(),
+            primary_reprint_history_floor: None,
             alternate_content_end_row: None,
             math_source_preferences: HashMap::new(),
             pending_live_handoffs: Vec::new(),
@@ -806,6 +820,14 @@ impl DualPlaneSession {
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
+        let primary_reprint_boundary = self.live_screen == ScreenId::Primary
+            && !self.terminal.modes().alternate_screen
+            && contains_clear_home_snapshot_boundary(bytes);
+        if primary_reprint_boundary && self.primary_reprint_history_floor.is_none() {
+            self.primary_reprint_history_floor = Some(PrimaryReprintHistoryFloor(
+                self.document.entries().keys().next_back().copied(),
+            ));
+        }
         if self.alternate_repaint_snapshot.is_none() {
             self.alternate_repaint_snapshot = self.begin_alternate_repaint(bytes);
         }
@@ -819,7 +841,7 @@ impl DualPlaneSession {
         // its damage until the commit, so the flag stays engaged (it re-arms below on every feed)
         // until the update closes; the snapshot, taken once when the window opens, spans it.
         if self.live_screen == ScreenId::Primary
-            && (self.primary_repaint_in_progress || contains_clear_home_snapshot_boundary(bytes))
+            && (self.primary_repaint_in_progress || primary_reprint_boundary)
         {
             self.primary_repaint_in_progress = true;
             // The reprint window and the resize transaction (`primary_resize_preservation_active`,
@@ -866,6 +888,7 @@ impl DualPlaneSession {
             self.primary_repaint_in_progress = false;
             self.primary_repaint_snapshot = None;
             self.primary_repaint_dirty = false;
+            self.primary_reprint_history_floor = None;
             self.invalidate_all_live_decorations();
         } else if self.synchronized_update_deadline().is_none() {
             if let Some(snapshot) = self.alternate_repaint_snapshot.take() {
@@ -878,10 +901,12 @@ impl DualPlaneSession {
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         if result.is_ok() {
             self.restore_offscreen_decorations();
+            self.reconcile_primary_reprint_presentation_hold(primary_reprint_boundary);
             // The reprint has landed and its records are re-anchored: end preservation unless a
             // synchronized update is still buffering the repaint (its damage arrives at the commit).
             if self.synchronized_update_deadline().is_none() {
                 self.primary_repaint_in_progress = false;
+                self.primary_reprint_history_floor = None;
             }
         }
         result
@@ -997,6 +1022,7 @@ impl DualPlaneSession {
             return Ok(false);
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
+        let primary_reprint_boundary = self.primary_repaint_in_progress;
         let events = self.terminal.finish_synchronized_update();
         let damage = self.terminal.take_damage();
         if let Err(error) = self.apply_events(events, observed_at) {
@@ -1005,6 +1031,7 @@ impl DualPlaneSession {
             self.primary_repaint_in_progress = false;
             self.primary_repaint_snapshot = None;
             self.primary_repaint_dirty = false;
+            self.primary_reprint_history_floor = None;
             self.invalidate_all_live_decorations();
             return Err(error);
         }
@@ -1018,8 +1045,10 @@ impl DualPlaneSession {
         }
         self.alternate_repaint_in_progress = false;
         self.restore_offscreen_decorations();
+        self.reconcile_primary_reprint_presentation_hold(primary_reprint_boundary);
         // The synchronized-update reprint has committed and re-anchored: end primary preservation.
         self.primary_repaint_in_progress = false;
+        self.primary_reprint_history_floor = None;
         Ok(true)
     }
 
@@ -1095,12 +1124,8 @@ impl DualPlaneSession {
         // occurrences in ordinary resize/reflow recordings without helping a DPI zoom.
         // (Alternate keeps its whole queue across repaints, so it is left untouched.)
         if self.live_screen == ScreenId::Primary {
-            self.offscreen_decorations.retain(|record| {
-                record.artifact.is_none()
-                    && record.stale_artifact.as_ref().is_some_and(|stale| {
-                        stale.rendered_layout.dpi_milli != record.layout.dpi_milli
-                    })
-            });
+            self.offscreen_decorations
+                .retain(stale_pending_dpi_transition);
         }
         self.schedule_existing_artifacts();
         Ok(true)
@@ -1931,6 +1956,88 @@ impl DualPlaneSession {
             .any(|record| record.artifact.is_none() && record.stale_artifact.is_some())
     }
 
+    fn primary_reprint_presentation_hold(&self) -> bool {
+        self.live_screen == ScreenId::Primary
+            && !self.terminal.modes().alternate_screen
+            && self.offscreen_decorations.iter().any(|record| {
+                self.primary_reprint_hold_occurrences
+                    .contains_key(&record.identity.occurrence_id)
+                    && stale_pending_dpi_transition(record)
+            })
+    }
+
+    fn reconcile_primary_reprint_presentation_hold(&mut self, boundary_observed: bool) {
+        let mut pending = self
+            .offscreen_decorations
+            .iter()
+            .filter(|record| stale_pending_dpi_transition(record))
+            .map(|record| record.identity.occurrence_id)
+            .collect::<BTreeSet<_>>();
+        if boundary_observed && let Some(floor) = self.primary_reprint_history_floor {
+            for occurrence in &pending {
+                self.primary_reprint_hold_occurrences
+                    .entry(*occurrence)
+                    .or_insert(floor);
+            }
+        }
+        self.retire_offscreen_records_replaced_by_frozen();
+        pending = self
+            .offscreen_decorations
+            .iter()
+            .filter(|record| stale_pending_dpi_transition(record))
+            .map(|record| record.identity.occurrence_id)
+            .collect();
+        self.primary_reprint_hold_occurrences
+            .retain(|occurrence, _| pending.contains(occurrence));
+    }
+
+    /// A clean reprint can move a proven live formula wholly into immutable history after zoom-in.
+    /// In that case exact-live re-anchoring can never succeed. A completed frozen detection for the
+    /// same byte-exact source is the durable successor, but only when its transcript id was allocated
+    /// after this occurrence's reprint watermark: an older equal formula is not ownership evidence.
+    fn retire_offscreen_records_replaced_by_frozen(&mut self) {
+        let retired = self
+            .offscreen_decorations
+            .iter()
+            .filter_map(|record| {
+                let occurrence = record.identity.occurrence_id;
+                let floor = self.primary_reprint_hold_occurrences.get(&occurrence)?;
+                self.decorations
+                    .iter()
+                    .any(|(id, frozen)| {
+                        floor.0.is_none_or(|floor| *id > floor)
+                            && frozen.source == SourceLifecycle::Frozen
+                            && frozen.block_end.is_some()
+                            && !matches!(
+                                frozen.decoration,
+                                DecorationLifecycle::None | DecorationLifecycle::Pending
+                            )
+                            && frozen.span.as_ref().is_some_and(|span| {
+                                span.mode == record.span.mode
+                                    && span.original_source == record.span.original_source
+                            })
+                    })
+                    .then_some(occurrence)
+            })
+            .collect::<BTreeSet<_>>();
+        if retired.is_empty() {
+            return;
+        }
+        self.offscreen_decorations
+            .retain(|record| !retired.contains(&record.identity.occurrence_id));
+        self.primary_reprint_hold_occurrences
+            .retain(|occurrence, _| !retired.contains(occurrence));
+    }
+
+    /// Explicit keyboard/paste/IME takeover releases a presentation hold without guessing when the
+    /// producer might finish repainting. The off-band record remains available for a later exact
+    /// re-anchor, but it no longer prevents the user's requested frame from being published.
+    pub fn release_presentation_hold_for_user_input(&mut self) -> bool {
+        let released = self.primary_reprint_presentation_hold();
+        self.primary_reprint_hold_occurrences.clear();
+        released
+    }
+
     fn retain_offscreen_record(&mut self, record: LiveDecorationRecord) {
         // A stale-pending record (raster demoted to stale, fresh relayout queued) is always retained
         // off-band: it is mid-flight after a layout change and must survive until its replacement
@@ -2559,6 +2666,9 @@ impl DualPlaneSession {
             // record still bridging over those lines is a superseded duplicate of it.
             self.retire_stale_bridge_prefixes(false);
         }
+        if applied {
+            self.retire_offscreen_records_replaced_by_frozen();
+        }
         applied
     }
 
@@ -3119,6 +3229,7 @@ impl DualPlaneSession {
         // only while a resize transaction is open; a user clear is not. The projection gates its
         // frame hold on this so a genuine clear still snaps to the (empty) bottom.
         projection.set_resize_reflow_active(self.resize_epoch.is_active());
+        projection.set_exact_source_reprint_hold(self.primary_reprint_presentation_hold());
         projection.set_selection(self.view_selection());
         projection.sync_math_artifacts(self.decorations.iter().filter_map(|(id, record)| {
             (!record.show_source
@@ -4282,6 +4393,7 @@ impl DualPlaneSession {
             candidate.decoration = DecorationLifecycle::None;
         }
         self.scheduler.remove_sources(&BTreeSet::from([closing_id]));
+        self.retire_offscreen_records_replaced_by_frozen();
     }
 
     fn schedule_detection(&mut self, id: TranscriptId) {
@@ -5124,6 +5236,14 @@ fn layout_scale_milli(rendered: LayoutKey, current: LayoutKey) -> u32 {
         .checked_div(rendered.dpi_milli.get())
         .unwrap_or(1000)
         .max(1)
+}
+
+fn stale_pending_dpi_transition(record: &LiveDecorationRecord) -> bool {
+    record.artifact.is_none()
+        && record
+            .stale_artifact
+            .as_ref()
+            .is_some_and(|stale| stale.rendered_layout.dpi_milli != record.layout.dpi_milli)
 }
 
 fn project_artifact(
@@ -7526,6 +7646,248 @@ mod tests {
             inflight.len(),
             2,
             "both fresh completions remain deliberately delayed across the asserted gap"
+        );
+    }
+
+    #[test]
+    fn late_post_quiescence_zoom_reprint_holds_its_incomplete_clear_frame() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(24));
+        session
+            .feed_at(b"intro\r\n$$x$$\r\nbarrier", start)
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 1);
+
+        let zoom_at = start + Duration::from_millis(210);
+        apply_zoom(&mut session, nz(52), nz(32), 14, nz(800), zoom_at);
+        let delayed_relayout = session.take_live_worker_task().unwrap();
+        assert!(
+            session
+                .finish_resize_if_quiescent(zoom_at + Duration::from_millis(300))
+                .unwrap()
+        );
+
+        // The late clean reprint begins with its clear and only a prefix of the formula row. The
+        // exact-source record is now off-band, so this is the diagnosed presentation gap: the grid
+        // contains an incomplete source row and cannot paint the held raster yet.
+        session
+            .feed_at(
+                b"\x1b[2J\x1b[H\x1b[3Jintro\r\n$",
+                zoom_at + Duration::from_millis(310),
+            )
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let gap = session.viewport_frame(&mut projection).unwrap();
+        assert!(gap.math_blocks.is_empty());
+        assert!(
+            projection.presentation_hold(),
+            "the incomplete post-quiescence reprint frame must be held at presentation"
+        );
+        assert!(
+            !projection.review_hold(),
+            "this bottom-follow hold is decoration-owned, not review displacement"
+        );
+
+        // The next chunk completes the exact source. Re-anchoring is deterministic and does not
+        // wait for the deliberately delayed fresh-DPI worker completion.
+        session
+            .feed_at(b"$x$$\r\nbarrier", zoom_at + Duration::from_millis(324))
+            .unwrap();
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 1);
+        assert!(!projection.presentation_hold());
+        drop(delayed_relayout);
+    }
+
+    #[test]
+    fn frozen_reprint_owner_retires_a_zoom_hold_after_the_formula_leaves_live_grid() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 1);
+
+        // Zoom-in reduces the live grid. Keep the fresh-DPI live result deliberately in flight so
+        // the proven old raster is the exact stale-pending occurrence that presentation holds.
+        let zoom_at = start + Duration::from_millis(210);
+        apply_zoom(&mut session, nz(40), nz(6), 18, nz(1250), zoom_at);
+        let delayed_live_relayout = session.take_live_worker_task().unwrap();
+        assert!(
+            session
+                .finish_resize_if_quiescent(zoom_at + Duration::from_millis(300))
+                .unwrap()
+        );
+
+        // The delayed clean reprint rewrites the whole transcript, then enough ordinary rows to
+        // freeze the formula out of the six-row live grid. Its exact live match can never return.
+        // Until frozen detection claims the newly finalized source, the incomplete ownership
+        // transfer is still a real presentation gap and must remain held.
+        session
+            .feed_at(
+                b"\x1b[2J\x1b[H\x1b[3J$$x$$\r\none\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix\r\nseven\r\neight",
+                zoom_at + Duration::from_millis(310),
+            )
+            .unwrap();
+        let _ = present(&mut session, &mut projection);
+        assert!(projection.presentation_hold());
+        assert!(
+            session
+                .document()
+                .entries()
+                .values()
+                .any(|entry| entry.line.text == "$$x$$"),
+            "the reprinted exact source must now be frozen history"
+        );
+        assert!(
+            (0..session.terminal.dimensions().1.get())
+                .filter_map(|row| session.terminal.visible_row(row))
+                .all(|row| captured_row_text_and_boundaries(&row).0 != "$$x$$"),
+            "the formula must no longer have any exact live-grid anchor"
+        );
+
+        let mut frozen_task = session
+            .take_worker_task()
+            .expect("frozen detection must claim the reprinted formula");
+        assert!(resolve_detection_task(&mut frozen_task));
+        assert!(session.complete_worker_result(frozen_task, Ok(synthetic_raster(40, 40))));
+        let _ = present(&mut session, &mut projection);
+        assert!(
+            !projection.presentation_hold(),
+            "the new frozen exact-source owner deterministically replaces the off-band occurrence"
+        );
+
+        for index in 0..4 {
+            session
+                .feed_at(
+                    format!("tail-{index}\r\n").as_bytes(),
+                    zoom_at + Duration::from_millis(320 + index),
+                )
+                .unwrap();
+            let _ = present(&mut session, &mut projection);
+            assert!(
+                !projection.presentation_hold(),
+                "ordinary streaming output must remain publishable after frozen ownership transfers"
+            );
+        }
+        drop(delayed_live_relayout);
+    }
+
+    #[test]
+    fn late_zoom_reprint_hold_yields_to_user_input_and_a_screen_lifecycle_boundary() {
+        for release_to_alternate in [false, true] {
+            let start = Instant::now();
+            let mut session = DualPlaneSession::new(nz(40), nz(24));
+            session
+                .feed_at(b"intro\r\n$$x$$\r\nbarrier", start)
+                .unwrap();
+            session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+            assert_eq!(
+                complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+                1
+            );
+            let mut projection = session.new_projection(session.layout_key());
+            zoom_frame_is_all_rendered(&mut session, &mut projection, 1);
+
+            let zoom_at = start + Duration::from_millis(210);
+            apply_zoom(&mut session, nz(52), nz(32), 14, nz(800), zoom_at);
+            let delayed_relayout = session.take_live_worker_task().unwrap();
+            assert!(
+                session
+                    .finish_resize_if_quiescent(zoom_at + Duration::from_millis(300))
+                    .unwrap()
+            );
+            session
+                .feed_at(
+                    b"\x1b[2J\x1b[H\x1b[3Jintro\r\n$",
+                    zoom_at + Duration::from_millis(310),
+                )
+                .unwrap();
+            let _ = present(&mut session, &mut projection);
+            assert!(projection.presentation_hold());
+
+            if release_to_alternate {
+                session
+                    .feed_at(b"\x1b[?1049h", zoom_at + Duration::from_millis(311))
+                    .unwrap();
+                let _ = present(&mut session, &mut projection);
+                assert!(
+                    !projection.presentation_hold(),
+                    "alternate-screen entry is a hard presentation boundary"
+                );
+            } else {
+                assert!(session.release_presentation_hold_for_user_input());
+                let _ = present(&mut session, &mut projection);
+                assert!(
+                    !projection.presentation_hold(),
+                    "explicit user takeover releases without a timer"
+                );
+                assert!(
+                    !session.release_presentation_hold_for_user_input(),
+                    "release is idempotent once the occurrence set is cleared"
+                );
+            }
+            drop(delayed_relayout);
+        }
+    }
+
+    #[test]
+    fn ordinary_cls_and_alternate_repaint_never_enter_the_dpi_exact_source_hold() {
+        let start = Instant::now();
+
+        let mut primary = DualPlaneSession::new(nz(40), nz(12));
+        primary
+            .feed_at(b"intro\r\n$$x$$\r\nbarrier", start)
+            .unwrap();
+        primary.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut primary, synthetic_raster(40, 40)),
+            1
+        );
+        let mut primary_projection = primary.new_projection(primary.layout_key());
+        primary
+            .feed_at(b"\x1b[2J\x1b[H\x1b[3J", start + Duration::from_millis(10))
+            .unwrap();
+        let cleared = present(&mut primary, &mut primary_projection);
+        assert!(cleared.math_blocks.is_empty());
+        assert!(
+            !primary_projection.presentation_hold(),
+            "a real cls has no stale-pending DPI occurrence and must publish"
+        );
+
+        let mut alternate = DualPlaneSession::new(nz(40), nz(12));
+        alternate
+            .feed_at(b"\x1b[?1049hintro\r\n$$x$$\r\nbarrier", start)
+            .unwrap();
+        alternate.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut alternate, synthetic_raster(40, 40)),
+            1
+        );
+        let mut alternate_projection = alternate.new_projection(alternate.layout_key());
+        alternate.set_layout_key(LayoutKey {
+            dpi_milli: nz(800),
+            ..alternate.layout_key()
+        });
+        alternate
+            .feed_at(
+                b"\x1b[2J\x1b[H\x1b[3Jintro\r\n$",
+                start + Duration::from_millis(10),
+            )
+            .unwrap();
+        let _ = present(&mut alternate, &mut alternate_projection);
+        assert!(
+            !alternate_projection.presentation_hold(),
+            "alternate repaint semantics remain outside the primary-only hold"
         );
     }
 
