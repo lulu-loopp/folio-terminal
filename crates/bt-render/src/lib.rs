@@ -5099,7 +5099,7 @@ mod tests {
             .status_text
             .as_deref()
             .expect("negative-top live frame must publish rows-above status");
-        assert!(status.ends_with(" rows above"));
+        assert!(status.ends_with(" rows above · Shift+wheel"));
         let terminal_last_row = session.terminal().visible_row(23).unwrap().cells;
         assert_eq!(
             &selected.cells[23 * 40..24 * 40],
