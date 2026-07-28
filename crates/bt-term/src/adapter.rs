@@ -22,6 +22,7 @@ use bt_transcript::CapturedRow;
 use crate::cell_capture::{
     CapturedRowFingerprint, captured_row_fingerprint, snapshot, to_captured_row,
 };
+use crate::inline_image::{InlineImageStreamAction, Osc1337Scanner};
 
 pub const SCROLLBACK_LINES: usize = 0;
 
@@ -114,6 +115,12 @@ pub enum AdapterEvent {
     Deccolm,
     PrimaryParked,
     PrimaryRestored,
+    InlineImage {
+        screen: RemovalScreen,
+        row: u32,
+        column: u32,
+        encoded: Vec<u8>,
+    },
 }
 
 /// Stable, vendor-free damage fact consumed by the live decoration lifecycle. Column bounds are
@@ -178,6 +185,7 @@ pub struct TerminalAdapter {
     parser_tail: Vec<u8>,
     parser_sync_active: bool,
     parser_dcs_active: bool,
+    osc1337_scanner: Osc1337Scanner,
     resize_canonical: Option<ResizeCanonical>,
     columns: NonZeroU32,
     rows: NonZeroU32,
@@ -260,6 +268,7 @@ impl TerminalAdapter {
             parser_tail: Vec::new(),
             parser_sync_active: false,
             parser_dcs_active: false,
+            osc1337_scanner: Osc1337Scanner::default(),
             resize_canonical: None,
             columns,
             rows,
@@ -276,13 +285,55 @@ impl TerminalAdapter {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<AdapterEvent> {
+        let mut events = Vec::new();
+        for action in self.osc1337_scanner.scan(bytes) {
+            match action {
+                InlineImageStreamAction::Bytes(bytes) => {
+                    self.advance_terminal_bytes(&bytes);
+                    events.extend(self.drain_transcript_events());
+                }
+                InlineImageStreamAction::Image(encoded) => {
+                    let cursor = self.cursor();
+                    let screen = if self.modes().alternate_screen {
+                        RemovalScreen::Alternate
+                    } else {
+                        RemovalScreen::Primary
+                    };
+                    self.write_inline_image_placeholder(b"[image]");
+                    events.extend(self.drain_transcript_events());
+                    events.push(AdapterEvent::InlineImage {
+                        screen,
+                        row: cursor.row,
+                        column: cursor.column,
+                        encoded,
+                    });
+                }
+                InlineImageStreamAction::TooLarge => {
+                    self.write_inline_image_placeholder(b"[image:too-large]");
+                    events.extend(self.drain_transcript_events());
+                }
+            }
+        }
+        events
+    }
+
+    fn advance_terminal_bytes(&mut self, bytes: &[u8]) {
         self.processor.advance(&mut self.term, bytes);
         if let Some(canonical) = self.resize_canonical.as_mut() {
             canonical.processor.advance(&mut canonical.term, bytes);
             discard_listener_output(&canonical.listener);
         }
         self.observe_parser_boundary(bytes);
-        self.drain_transcript_events()
+    }
+
+    fn write_inline_image_placeholder(&mut self, label: &[u8]) {
+        let remaining = self
+            .columns
+            .get()
+            .saturating_sub(self.cursor().column)
+            .max(1) as usize;
+        let visible = &label[..label.len().min(remaining)];
+        self.advance_terminal_bytes(visible);
     }
 
     /// Consume damage exactly once after a parser/resize action. `Term::damage` also accounts for
@@ -1369,5 +1420,34 @@ mod tests {
             terminal.feed(b"\x1b[2J\x1b[1;1Hhello");
             assert!(terminal.visible_text().iter().any(|line| line == "hello"));
         }
+    }
+
+    #[test]
+    fn osc_1337_inline_image_is_emitted_once_across_feed_boundaries() {
+        let mut terminal = TerminalAdapter::new(nz(40), nz(4));
+        assert!(terminal.feed(b"pre\x1b]1337;Fi").is_empty());
+        assert!(terminal.feed(b"le=inline=1;name=eA==:YW").is_empty());
+        let events = terminal.feed(b"JjZA==\x1b\\post");
+        assert_eq!(
+            events,
+            vec![AdapterEvent::InlineImage {
+                screen: RemovalScreen::Primary,
+                row: 0,
+                column: 3,
+                encoded: b"YWJjZA==".to_vec(),
+            }]
+        );
+        assert_eq!(terminal.visible_text()[0], "pre[image]post");
+    }
+
+    #[test]
+    fn osc_1337_inline_zero_is_ignored_without_a_placeholder() {
+        let mut terminal = TerminalAdapter::new(nz(40), nz(4));
+        assert!(
+            terminal
+                .feed(b"left\x1b]1337;File=inline=0:YWJj\x07right")
+                .is_empty()
+        );
+        assert_eq!(terminal.visible_text()[0], "leftright");
     }
 }

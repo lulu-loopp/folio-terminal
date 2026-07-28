@@ -121,12 +121,19 @@ pub struct ProjectedMathArtifact {
     pub height_subpixels: i64,
     pub baseline_subpixels: i64,
     pub mode: MathMode,
+    pub kind: RgbaArtifactKind,
     /// Symmetric presentation breathing outside the alpha-tight texture. This is lifecycle-scale
     /// geometry, not part of the shared RGBA artifact.
     pub vertical_padding_subpixels: i64,
     /// Presentation scale for a same-source stale raster. Fresh artifacts use 1000.
     pub render_scale_milli: u32,
     pub source: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RgbaArtifactKind {
+    Math,
+    InlineImage { animated: bool },
 }
 
 /// A rendered artifact tied to transient grid coordinates. Unlike history artifacts, this never
@@ -3026,6 +3033,7 @@ mod tests {
                         height_subpixels: 50 * SUBPIXELS_PER_PX,
                         baseline_subpixels: 0,
                         mode: MathMode::Display,
+                        kind: RgbaArtifactKind::Math,
                         vertical_padding_subpixels: 0,
                         render_scale_milli: 1000,
                         source: "x".to_owned(),
@@ -3172,6 +3180,7 @@ mod tests {
                     height_subpixels: art_h,
                     baseline_subpixels: 0,
                     mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
                     vertical_padding_subpixels: 0,
                     render_scale_milli: 1000,
                     source: "x".to_owned(),
@@ -3308,6 +3317,7 @@ mod tests {
                     height_subpixels: 3 * cell_height().get(),
                     baseline_subpixels: 0,
                     mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
                     vertical_padding_subpixels: 0,
                     render_scale_milli: 1000,
                     source: "\\operatorname{Var}(X)".to_owned(),
@@ -3541,6 +3551,7 @@ mod tests {
                     height_subpixels: 40 * SUBPIXELS_PER_PX,
                     baseline_subpixels: 0,
                     mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
                     vertical_padding_subpixels: 0,
                     render_scale_milli: 1000,
                     source: r"\sum_{k=1}^{n}k=\frac{n(n+1)}{2}".to_owned(),
@@ -3698,6 +3709,7 @@ mod tests {
                 height_subpixels: 50 * SUBPIXELS_PER_PX,
                 baseline_subpixels: 0,
                 mode: MathMode::Display,
+                kind: RgbaArtifactKind::Math,
                 vertical_padding_subpixels: 0,
                 render_scale_milli: 1000,
                 source: "x".to_owned(),
@@ -3770,6 +3782,7 @@ mod tests {
                     height_subpixels: box_height,
                     baseline_subpixels: 0,
                     mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
                     vertical_padding_subpixels: padding,
                     render_scale_milli: 1000,
                     source: key.to_owned(),
@@ -4070,6 +4083,7 @@ mod tests {
             height_subpixels: 35 * SUBPIXELS_PER_PX,
             baseline_subpixels: 0,
             mode: MathMode::Display,
+            kind: RgbaArtifactKind::Math,
             vertical_padding_subpixels: 0,
             render_scale_milli: 1000,
             source: "x^2 + y^2".to_owned(),

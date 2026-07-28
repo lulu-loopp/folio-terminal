@@ -112,11 +112,19 @@ pub enum RowDirective {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LifecycleDirective {
-    RowsRemoved { rows: Vec<RowDirective> },
+    RowsRemoved {
+        rows: Vec<RowDirective>,
+    },
     ClearHistoryAndStaging,
     InvalidateStaging,
     ParkPrimary,
     RestorePrimary,
+    InlineImage {
+        screen: RemovalScreen,
+        row: u32,
+        column: u32,
+        encoded: Vec<u8>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -146,6 +154,17 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
         AdapterEvent::Reset | AdapterEvent::Deccolm => LifecycleDirective::InvalidateStaging,
         AdapterEvent::PrimaryParked => LifecycleDirective::ParkPrimary,
         AdapterEvent::PrimaryRestored => LifecycleDirective::RestorePrimary,
+        AdapterEvent::InlineImage {
+            screen,
+            row,
+            column,
+            encoded,
+        } => LifecycleDirective::InlineImage {
+            screen,
+            row,
+            column,
+            encoded,
+        },
     }
 }
 

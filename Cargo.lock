@@ -354,11 +354,13 @@ name = "bt-term"
 version = "0.0.0"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "bt-detect",
  "bt-doc",
  "bt-math",
  "bt-transcript",
  "bt-viewport",
+ "image",
  "proptest",
  "unicode-width",
 ]

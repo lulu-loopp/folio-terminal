@@ -50,9 +50,11 @@ dbg_macro = "deny"
 # 0.26.0 patch and quietly take our capture hooks out of the build
 alacritty_terminal = "=0.26.0"
 anyhow = "1"
+base64 = "0.22"
 bitflags = "2"
 bytemuck = { version = "1", features = ["derive"] }
 glyphon = "0.12"
+image = { version = "=0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 mitex = "=0.2.4"
 mitex-spec-gen = "=0.2.4"
 pollster = "0.4"

@@ -46,6 +46,9 @@ use crate::{
         TerminalModes,
     },
     cell_capture::CapturedRowFingerprint,
+    inline_image::{
+        DecodedInlineImage, InlineImageDecodeError, InlineImageTask, decode_inline_image,
+    },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
 };
@@ -57,6 +60,7 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 const MAX_OFFSCREEN_RECORDS: usize = 128;
+const INLINE_IMAGE_WORKER_QUEUE_CAP: usize = 4;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
 const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
@@ -114,6 +118,38 @@ impl MathSourcePreferenceKey {
 pub enum SessionMathTask {
     Frozen(DetectionTask),
     Live(LiveDetectionTask),
+}
+
+#[derive(Clone, Debug)]
+pub enum SessionDecorationTask {
+    Math(Box<SessionMathTask>),
+    InlineImage(InlineImageTask),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlineImageRecordView {
+    pub occurrence_id: u64,
+    pub content_key: Option<String>,
+    pub animated: bool,
+    pub native_width_px: Option<u32>,
+    pub native_height_px: Option<u32>,
+    pub display_rows: Option<u32>,
+    pub failed: bool,
+}
+
+#[derive(Clone, Debug)]
+struct InlineImageRecord {
+    occurrence_id: u64,
+    anchor: AnchorId,
+    artifact: Option<DecodedInlineImage>,
+    failed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct InlineImageGeometry {
+    display_scale_milli: u32,
+    display_height_subpixels: i64,
+    display_rows: u32,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -497,6 +533,9 @@ pub struct DualPlaneSession {
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
+    inline_image_tasks: VecDeque<InlineImageTask>,
+    inline_images: BTreeMap<u64, InlineImageRecord>,
+    next_inline_image_occurrence_id: u64,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
     next_live_occurrence_id: u64,
     offscreen_decorations: VecDeque<LiveDecorationRecord>,
@@ -655,6 +694,9 @@ impl DualPlaneSession {
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
+            inline_image_tasks: VecDeque::new(),
+            inline_images: BTreeMap::new(),
+            next_inline_image_occurrence_id: 1,
             live_decorations: BTreeMap::new(),
             next_live_occurrence_id: 1,
             offscreen_decorations: VecDeque::new(),
@@ -788,6 +830,34 @@ impl DualPlaneSession {
 
     pub fn frozen_detection_count(&self) -> u64 {
         self.frozen_detection_count
+    }
+
+    pub fn inline_image_records(&self) -> Vec<InlineImageRecordView> {
+        self.inline_images
+            .values()
+            .map(|record| {
+                let display_rows = record
+                    .artifact
+                    .as_ref()
+                    .and_then(|artifact| self.inline_image_geometry(record, artifact))
+                    .map(|geometry| geometry.display_rows);
+                InlineImageRecordView {
+                    occurrence_id: record.occurrence_id,
+                    content_key: record
+                        .artifact
+                        .as_ref()
+                        .map(|artifact| artifact.key.clone()),
+                    animated: record
+                        .artifact
+                        .as_ref()
+                        .is_some_and(|artifact| artifact.animated),
+                    native_width_px: record.artifact.as_ref().map(|artifact| artifact.width_px),
+                    native_height_px: record.artifact.as_ref().map(|artifact| artifact.height_px),
+                    display_rows,
+                    failed: record.failed,
+                }
+            })
+            .collect()
     }
 
     pub fn live_invalidation_count(&self) -> u64 {
@@ -2403,17 +2473,23 @@ impl DualPlaneSession {
 
     pub fn run_workers(&mut self) {
         loop {
-            while let Some(task) = self.take_math_worker_task() {
+            while let Some(task) = self.take_decoration_worker_task() {
                 match task {
-                    SessionMathTask::Frozen(task) => {
-                        self.complete_worker_task(task);
-                    }
-                    SessionMathTask::Live(mut task) => {
-                        if resolve_live_detection_task(&mut task) {
-                            let artifact = live_placeholder(&task);
-                            size_resolved_live_task_band(&mut task);
-                            self.apply_live_worker_completion(task, Some(artifact), None);
+                    SessionDecorationTask::Math(task) => match *task {
+                        SessionMathTask::Frozen(task) => {
+                            self.complete_worker_task(task);
                         }
+                        SessionMathTask::Live(mut task) => {
+                            if resolve_live_detection_task(&mut task) {
+                                let artifact = live_placeholder(&task);
+                                size_resolved_live_task_band(&mut task);
+                                self.apply_live_worker_completion(task, Some(artifact), None);
+                            }
+                        }
+                    },
+                    SessionDecorationTask::InlineImage(task) => {
+                        let result = decode_inline_image(task.clone());
+                        self.complete_inline_image_result(task, result);
                     }
                 }
             }
@@ -2439,6 +2515,39 @@ impl DualPlaneSession {
         self.take_worker_task()
             .map(SessionMathTask::Frozen)
             .or_else(|| self.take_live_worker_task().map(SessionMathTask::Live))
+    }
+
+    pub fn take_decoration_worker_task(&mut self) -> Option<SessionDecorationTask> {
+        self.take_math_worker_task()
+            .map(|task| SessionDecorationTask::Math(Box::new(task)))
+            .or_else(|| {
+                self.inline_image_tasks
+                    .pop_front()
+                    .map(SessionDecorationTask::InlineImage)
+            })
+    }
+
+    pub fn complete_inline_image_result(
+        &mut self,
+        task: InlineImageTask,
+        result: Result<DecodedInlineImage, InlineImageDecodeError>,
+    ) -> bool {
+        let Some(record) = self.inline_images.get_mut(&task.occurrence_id) else {
+            return false;
+        };
+        match result {
+            Ok(artifact) if artifact.occurrence_id == task.occurrence_id => {
+                record.artifact = Some(artifact);
+                record.failed = false;
+            }
+            Ok(_) => return false,
+            Err(_) => {
+                record.artifact = None;
+                record.failed = true;
+            }
+        }
+        self.bump_view_generation();
+        true
     }
 
     pub fn complete_worker_task(&mut self, task: DetectionTask) -> bool {
@@ -3315,25 +3424,40 @@ impl DualPlaneSession {
         projection.set_resize_reflow_active(self.resize_epoch.is_active());
         projection.set_exact_source_reprint_hold(self.primary_reprint_presentation_hold());
         projection.set_selection(self.view_selection());
-        projection.sync_math_artifacts(self.decorations.iter().filter_map(|(id, record)| {
-            (!record.show_source
-                && record
-                    .span
-                    .as_ref()
-                    .is_some_and(|span| span.mode == MathMode::Display))
-            .then(|| projected_frozen_artifact(record, self.math_vertical_padding_subpixels()))
-            .flatten()
-            .map(|artifact| (*id, artifact))
+        let mut frozen_artifacts = self
+            .decorations
+            .iter()
+            .filter_map(|(id, record)| {
+                (!record.show_source
+                    && record
+                        .span
+                        .as_ref()
+                        .is_some_and(|span| span.mode == MathMode::Display))
+                .then(|| projected_frozen_artifact(record, self.math_vertical_padding_subpixels()))
+                .flatten()
+                .map(|artifact| (*id, artifact))
+            })
+            .collect::<Vec<_>>();
+        frozen_artifacts.extend(self.inline_images.values().filter_map(|record| {
+            let ContentAnchor::History { id, .. } = self.document.anchor(record.anchor).ok()?
+            else {
+                return None;
+            };
+            let artifact = record.artifact.as_ref()?;
+            self.projected_inline_image(record, artifact, *id)
+                .map(|artifact| (*id, artifact))
         }));
+        projection.sync_math_artifacts(frozen_artifacts);
         self.sync_live_projection_artifacts(projection);
         projection.apply_detection_revision(self.detection_revision, &self.document);
         projection.project(&self.document);
     }
 
     fn sync_live_projection_artifacts(&self, projection: &mut ViewportProjection) {
-        projection.sync_live_math_artifacts(
-            self.live_screen,
-            self.live_decorations.values().filter_map(|record| {
+        let mut live_artifacts = self
+            .live_decorations
+            .values()
+            .filter_map(|record| {
                 (!record.show_source && record.span.mode == MathMode::Display)
                     .then(|| {
                         projected_live_artifact(
@@ -3361,8 +3485,137 @@ impl DualPlaneSession {
                         generation: record.generation,
                         artifact,
                     })
-            }),
-        );
+            })
+            .collect::<Vec<_>>();
+        live_artifacts.extend(self.inline_images.values().filter_map(|record| {
+            let ContentAnchor::Live {
+                screen,
+                point,
+                generation,
+                ..
+            } = self.document.anchor(record.anchor).ok()?
+            else {
+                return None;
+            };
+            if *screen != self.live_screen || *generation != self.grid_generation {
+                return None;
+            }
+            let decoded = record.artifact.as_ref()?;
+            let artifact = self.projected_inline_image(record, decoded, TranscriptId(0))?;
+            Some(ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(record.occurrence_id),
+                screen: *screen,
+                start: *point,
+                end: *point,
+                band_start_row: point.row,
+                band_end_row: point.row,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix: Vec::new(),
+                staging_prefix: Vec::new(),
+                generation: *generation,
+                artifact,
+            })
+        }));
+        projection.sync_live_math_artifacts(self.live_screen, live_artifacts);
+    }
+
+    fn projected_inline_image(
+        &self,
+        record: &InlineImageRecord,
+        decoded: &DecodedInlineImage,
+        end: TranscriptId,
+    ) -> Option<ProjectedMathArtifact> {
+        let geometry = self.inline_image_geometry(record, decoded)?;
+        Some(ProjectedMathArtifact {
+            key: decoded.key.clone(),
+            end,
+            rgba: Arc::clone(&decoded.rgba),
+            width_px: decoded.width_px,
+            height_px: decoded.height_px,
+            height_subpixels: geometry.display_height_subpixels,
+            baseline_subpixels: 0,
+            mode: MathMode::Display,
+            kind: bt_viewport::RgbaArtifactKind::InlineImage {
+                animated: decoded.animated,
+            },
+            vertical_padding_subpixels: 0,
+            render_scale_milli: geometry.display_scale_milli,
+            source: "[image]".to_owned(),
+        })
+    }
+
+    fn inline_image_geometry(
+        &self,
+        record: &InlineImageRecord,
+        decoded: &DecodedInlineImage,
+    ) -> Option<InlineImageGeometry> {
+        let column = match self.document.anchor(record.anchor).ok()? {
+            ContentAnchor::Live { point, .. } => point.column,
+            ContentAnchor::History { offset, .. } | ContentAnchor::Staging { offset, .. } => {
+                offset.0
+            }
+        };
+        let available_columns = self
+            .layout_key
+            .width_cells
+            .get()
+            .saturating_sub(column)
+            .max(1);
+        let available_width_px = i64::from(available_columns)
+            .saturating_mul(self.cell_width_subpixels.get())
+            .div_euclid(SUBPIXELS_PER_PX)
+            .max(1) as u64;
+        let viewport_height_subpixels = i64::from(self.terminal.dimensions().1.get())
+            .saturating_mul(self.cell_height_subpixels.get());
+        let two_thirds_height_px = viewport_height_subpixels
+            .saturating_mul(2)
+            .div_euclid(3)
+            .div_euclid(SUBPIXELS_PER_PX)
+            .max(1) as u64;
+        let text_floor_rows = self
+            .terminal
+            .dimensions()
+            .1
+            .get()
+            .saturating_sub(LIVE_MIN_VISIBLE_TEXT_ROWS)
+            .max(1);
+        let text_floor_height_px = i64::from(text_floor_rows)
+            .saturating_mul(self.cell_height_subpixels.get())
+            .div_euclid(SUBPIXELS_PER_PX)
+            .max(1) as u64;
+        let max_height_px = two_thirds_height_px.min(text_floor_height_px);
+        let width_scale = available_width_px
+            .saturating_mul(1000)
+            .checked_div(u64::from(decoded.width_px))?;
+        let height_scale = max_height_px
+            .saturating_mul(1000)
+            .checked_div(u64::from(decoded.height_px))?;
+        let display_scale_milli = u64::from(self.layout_key.dpi_milli.get())
+            .min(width_scale)
+            .min(height_scale)
+            .clamp(1, u64::from(u32::MAX)) as u32;
+        let display_height_subpixels = i64::from(decoded.height_px)
+            .saturating_mul(i64::from(display_scale_milli))
+            .saturating_mul(SUBPIXELS_PER_PX)
+            .saturating_add(999)
+            .div_euclid(1000)
+            .max(1);
+        let display_rows = u32::try_from(
+            display_height_subpixels
+                .saturating_add(self.cell_height_subpixels.get() - 1)
+                .div_euclid(self.cell_height_subpixels.get()),
+        )
+        .unwrap_or(u32::MAX)
+        .max(1);
+        Some(InlineImageGeometry {
+            display_scale_milli,
+            display_height_subpixels,
+            display_rows,
+        })
     }
 
     fn decorate_math_frame(&self, frame: &mut ViewportFrame) {
@@ -3379,8 +3632,36 @@ impl DualPlaneSession {
         });
 
         for placement in &mut frame.math_blocks {
+            if matches!(
+                placement.artifact.kind,
+                bt_viewport::RgbaArtifactKind::InlineImage { .. }
+            ) {
+                let column = match &placement.anchor {
+                    MathBlockAnchor::Live { start, .. } => Some(start.column),
+                    MathBlockAnchor::History { start, .. } => {
+                        self.inline_images.values().find_map(|record| {
+                            let ContentAnchor::History { id, offset, .. } =
+                                self.document.anchor(record.anchor).ok()?
+                            else {
+                                return None;
+                            };
+                            (*id == *start).then_some(offset.0)
+                        })
+                    }
+                }
+                .unwrap_or(0);
+                placement.left_subpixels =
+                    i64::from(column).saturating_mul(self.cell_width_subpixels.get());
+                placement.toolbar_visible = false;
+                placement.horizontal_overflow = HorizontalOverflowOwner::Block;
+                placement.horizontal_scroll_px = 0;
+                placement.vertical_scroll_px = 0;
+                placement.clip_height_subpixels = placement.artifact.height_subpixels;
+                continue;
+            }
             if placement.display == MathBlockDisplay::Rendered
                 && placement.artifact.mode == MathMode::Display
+                && placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
             {
                 placement.left_subpixels = self.display_math_left_inset_subpixels();
             }
@@ -3960,6 +4241,18 @@ impl DualPlaneSession {
                     self.transcript.invalidate_staging();
                     self.staging_sources.clear();
                     self.active_staging_tail = None;
+                    let retired = self
+                        .inline_images
+                        .values()
+                        .filter_map(|record| {
+                            matches!(
+                                self.document.anchor(record.anchor).ok(),
+                                Some(ContentAnchor::Live { .. } | ContentAnchor::Staging { .. })
+                            )
+                            .then_some(record.occurrence_id)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    self.retire_inline_images(&retired);
                     self.document
                         .delete_transaction(&[], true, self.grid_generation);
                 }
@@ -3987,12 +4280,71 @@ impl DualPlaneSession {
                     self.grid_generation.0 += 1;
                     self.document
                         .capture_rows_transaction(&[], self.grid_generation);
+                    let retired = self
+                        .inline_images
+                        .values()
+                        .filter_map(|record| {
+                            matches!(
+                                self.document.anchor(record.anchor).ok(),
+                                Some(ContentAnchor::Live {
+                                    screen: ScreenId::Alternate,
+                                    ..
+                                })
+                            )
+                            .then_some(record.occurrence_id)
+                        })
+                        .collect::<BTreeSet<_>>();
+                    self.retire_inline_images(&retired);
                     self.bump_view_generation();
                 }
+                LifecycleDirective::InlineImage {
+                    screen,
+                    row,
+                    column,
+                    encoded,
+                } => self.register_inline_image(screen, row, column, encoded),
             }
         }
         self.flush_top_scroll_batch(&mut pending_top_scroll);
         Ok(())
+    }
+
+    fn register_inline_image(
+        &mut self,
+        screen: RemovalScreen,
+        row: u32,
+        column: u32,
+        encoded: Vec<u8>,
+    ) {
+        let screen = match screen {
+            RemovalScreen::Primary => ScreenId::Primary,
+            RemovalScreen::Alternate => ScreenId::Alternate,
+        };
+        let occurrence_id = self.next_inline_image_occurrence_id;
+        self.next_inline_image_occurrence_id =
+            self.next_inline_image_occurrence_id.saturating_add(1);
+        let anchor = self.document.register_anchor(ContentAnchor::Live {
+            screen,
+            point: GridPoint { row, column },
+            bias: Bias::Before,
+            generation: self.grid_generation,
+        });
+        self.inline_images.insert(
+            occurrence_id,
+            InlineImageRecord {
+                occurrence_id,
+                anchor,
+                artifact: None,
+                failed: false,
+            },
+        );
+        if self.inline_image_tasks.len() == INLINE_IMAGE_WORKER_QUEUE_CAP {
+            self.inline_image_tasks.pop_front();
+        }
+        self.inline_image_tasks.push_back(InlineImageTask {
+            occurrence_id,
+            encoded,
+        });
     }
 
     /// Prove and re-seat the live decorations a batched top-anchored scroll displaced, then reset
@@ -4514,6 +4866,20 @@ impl DualPlaneSession {
     }
 
     fn delete_history(&mut self, removed: &[TranscriptId], clear_staging: bool) {
+        let removed_set = removed.iter().copied().collect::<BTreeSet<_>>();
+        let retired_images = self
+            .inline_images
+            .values()
+            .filter_map(|record| {
+                let retired = match self.document.anchor(record.anchor).ok() {
+                    Some(ContentAnchor::History { id, .. }) => removed_set.contains(id),
+                    Some(ContentAnchor::Staging { .. }) => clear_staging,
+                    _ => false,
+                };
+                retired.then_some(record.occurrence_id)
+            })
+            .collect::<BTreeSet<_>>();
+        self.retire_inline_images(&retired_images);
         self.document
             .delete_transaction(removed, clear_staging, self.grid_generation);
         if clear_staging {
@@ -4524,7 +4890,6 @@ impl DualPlaneSession {
             self.frozen_detection_contexts.clear();
             self.frozen_certified_through = None;
         }
-        let removed_set = removed.iter().copied().collect::<BTreeSet<_>>();
         self.scheduler.remove_sources(&removed_set);
         for id in removed {
             self.decorations.remove(id);
@@ -4555,6 +4920,16 @@ impl DualPlaneSession {
         {
             self.frozen_certified_through = None;
         }
+    }
+
+    fn retire_inline_images(&mut self, occurrences: &BTreeSet<u64>) {
+        if occurrences.is_empty() {
+            return;
+        }
+        self.inline_images
+            .retain(|occurrence, _| !occurrences.contains(occurrence));
+        self.inline_image_tasks
+            .retain(|task| !occurrences.contains(&task.occurrence_id));
     }
 
     /// A live record's bridge prefix is a claim on transcript lines that sit immediately above live
@@ -5408,6 +5783,7 @@ fn project_artifact_at_scale(
             .saturating_mul(i64::from(scale_milli))
             / 1000,
         mode: artifact.mode,
+        kind: bt_viewport::RgbaArtifactKind::Math,
         vertical_padding_subpixels,
         render_scale_milli: scale_milli,
         source,
@@ -11662,6 +12038,223 @@ mod tests {
             session.decoration(closer).map(|record| record.decoration),
             Some(DecorationLifecycle::None),
             "re-arm proceeds once the reprint window closes",
+        );
+    }
+
+    fn decoded_test_image(
+        occurrence_id: u64,
+        width_px: u32,
+        height_px: u32,
+        animated: bool,
+    ) -> DecodedInlineImage {
+        DecodedInlineImage {
+            occurrence_id,
+            key: format!("image:test-{occurrence_id}"),
+            rgba: Arc::from(vec![0x7f; width_px as usize * height_px as usize * 4]),
+            width_px,
+            height_px,
+            animated,
+        }
+    }
+
+    #[test]
+    fn inline_image_geometry_uses_dpi_width_fit_and_two_thirds_height_cap() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
+        session.set_cell_width_subpixels(cell);
+        session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(task.occurrence_id, 200, 300, false)),
+        ));
+
+        let record = &session.inline_image_records()[0];
+        assert_eq!(record.display_rows, Some(4));
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let placement = frame
+            .math_blocks
+            .iter()
+            .find(|placement| {
+                matches!(
+                    placement.artifact.kind,
+                    bt_viewport::RgbaArtifactKind::InlineImage { .. }
+                )
+            })
+            .expect("decoded image projects through the shared RGBA placement");
+        assert_eq!(placement.artifact.render_scale_milli, 133);
+        assert_eq!(placement.artifact.height_subpixels, 40_858);
+        assert_eq!(placement.clip_height_subpixels, 40_858);
+    }
+
+    #[test]
+    fn inline_image_width_fit_and_zoom_scale_reuse_the_content_texture() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(20), nz(20), cell);
+        session.set_cell_width_subpixels(cell);
+        session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(task.occurrence_id, 400, 10, false)),
+        ));
+        let mut projection = session.new_projection(session.layout_key());
+        let first = session.viewport_frame(&mut projection).unwrap();
+        let first = first
+            .math_blocks
+            .iter()
+            .find(|placement| placement.artifact.key.starts_with("image:"))
+            .unwrap();
+        assert_eq!(first.artifact.render_scale_milli, 500);
+        let key = first.artifact.key.clone();
+        let decoded = session
+            .inline_images
+            .get(&task.occurrence_id)
+            .and_then(|record| record.artifact.as_ref())
+            .unwrap();
+        assert_eq!(decoded.key, key);
+
+        let mut zoom = DualPlaneSession::with_cell_height(nz(20), nz(20), cell);
+        zoom.set_cell_width_subpixels(cell);
+        zoom.feed(b"\x1b]1337;File=inline=1:BBBB\x07").unwrap();
+        let SessionDecorationTask::InlineImage(zoom_task) =
+            zoom.take_decoration_worker_task().unwrap()
+        else {
+            panic!("second OSC 1337 must enqueue an image worker task");
+        };
+        assert!(zoom.complete_inline_image_result(
+            zoom_task.clone(),
+            Ok(decoded_test_image(zoom_task.occurrence_id, 10, 10, false,)),
+        ));
+        let mut zoom_projection = zoom.new_projection(zoom.layout_key());
+        let before_zoom = zoom.viewport_frame(&mut zoom_projection).unwrap();
+        let before_zoom = before_zoom
+            .math_blocks
+            .iter()
+            .find(|placement| placement.artifact.key.starts_with("image:"))
+            .unwrap();
+        assert_eq!(before_zoom.artifact.render_scale_milli, 1000);
+        let zoom_key = before_zoom.artifact.key.clone();
+        zoom.set_layout_key(LayoutKey {
+            dpi_milli: nz(2000),
+            ..zoom.layout_key()
+        });
+        let zoomed = zoom.viewport_frame(&mut zoom_projection).unwrap();
+        let zoomed = zoomed
+            .math_blocks
+            .iter()
+            .find(|placement| placement.artifact.key == zoom_key)
+            .unwrap();
+        assert_eq!(zoomed.artifact.render_scale_milli, 2000);
+        assert_eq!(
+            zoomed.artifact.key, zoom_key,
+            "zoom scales the held texture without re-decoding or rekeying pixels"
+        );
+    }
+
+    #[test]
+    fn malformed_inline_image_completion_leaves_a_text_placeholder() {
+        let mut session = DualPlaneSession::new(nz(30), nz(4));
+        session
+            .feed(b"\x1b]1337;File=inline=1:not_base64!\x07")
+            .unwrap();
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        let result = decode_inline_image(task.clone());
+        assert_eq!(result, Err(InlineImageDecodeError::InvalidBase64));
+        assert!(session.complete_inline_image_result(task, result));
+        assert!(session.inline_image_records()[0].failed);
+        assert!(
+            session
+                .terminal()
+                .visible_text()
+                .iter()
+                .any(|row| row.contains("[image]"))
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        assert!(
+            session
+                .viewport_frame(&mut projection)
+                .unwrap()
+                .math_blocks
+                .iter()
+                .all(|placement| !matches!(
+                    placement.artifact.kind,
+                    bt_viewport::RgbaArtifactKind::InlineImage { .. }
+                ))
+        );
+    }
+
+    #[test]
+    fn inline_image_anchor_migrates_to_history_without_decode_or_texture_identity_churn() {
+        let mut session = DualPlaneSession::with_cell_height(
+            nz(20),
+            nz(4),
+            NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap(),
+        );
+        session
+            .feed(b"\x1b]1337;File=inline=1:AAAA\x07\r\n")
+            .unwrap();
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        let key = format!("image:test-{}", task.occurrence_id);
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(task.occurrence_id, 10, 10, true)),
+        ));
+        session.feed(b"one\r\ntwo\r\nthree\r\nfour\r\n").unwrap();
+
+        let record = session.inline_images.get(&task.occurrence_id).unwrap();
+        assert!(
+            matches!(
+                session.document.anchor(record.anchor).unwrap(),
+                ContentAnchor::History { .. }
+            ),
+            "the normal document capture transaction must migrate the image anchor"
+        );
+        assert_eq!(
+            record
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.key.as_str()),
+            Some(key.as_str())
+        );
+        assert!(session.take_decoration_worker_task().is_none());
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            frame.math_blocks.iter().any(|placement| {
+                placement.artifact.key == key
+                    && matches!(
+                        placement.artifact.kind,
+                        bt_viewport::RgbaArtifactKind::InlineImage { animated: true }
+                    )
+            }),
+            "history frame did not project image; blocks={:?} origin={:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|placement| (&placement.artifact.key, placement.artifact.kind))
+                .collect::<Vec<_>>(),
+            frame.viewport_origin,
         );
     }
 }

@@ -315,6 +315,7 @@ mod tests {
                 height_subpixels: 1,
                 baseline_subpixels: 0,
                 mode: MathMode::Display,
+                kind: bt_viewport::RgbaArtifactKind::Math,
                 vertical_padding_subpixels: 0,
                 render_scale_milli: 1000,
                 source: "x".to_owned(),

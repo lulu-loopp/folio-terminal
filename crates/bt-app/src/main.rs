@@ -22,8 +22,8 @@ use bt_render::{
     frame_content_digest, frame_is_alternate_screen, theme_revision,
 };
 use bt_term::{
-    DualPlaneSession, MouseTracking, SessionMathTask, TerminalModes, render_detection_task,
-    render_live_detection_task,
+    DualPlaneSession, MouseTracking, SessionDecorationTask, SessionMathTask, TerminalModes,
+    decode_inline_image, render_detection_task, render_live_detection_task,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
@@ -64,13 +64,23 @@ enum AppEvent {
 }
 
 struct MathWorkerResult {
-    task: SessionMathTask,
-    result: std::result::Result<MathRaster, MathRenderError>,
+    completion: DecorationWorkerCompletion,
 }
 
 struct MathWorkerTask {
-    task: SessionMathTask,
+    task: SessionDecorationTask,
     foreground_rgb: [u8; 3],
+}
+
+enum DecorationWorkerCompletion {
+    Math {
+        task: Box<SessionMathTask>,
+        result: std::result::Result<MathRaster, MathRenderError>,
+    },
+    InlineImage {
+        task: bt_term::InlineImageTask,
+        result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
+    },
 }
 
 struct MathWorker {
@@ -91,18 +101,31 @@ impl MathWorker {
                         task,
                         foreground_rgb,
                     } = work;
-                    let (task, result) = match task {
-                        SessionMathTask::Frozen(mut task) => {
-                            let result = render_detection_task(&engine, &mut task, foreground_rgb);
-                            (SessionMathTask::Frozen(task), result)
-                        }
-                        SessionMathTask::Live(mut task) => {
-                            let result =
-                                render_live_detection_task(&engine, &mut task, foreground_rgb);
-                            (SessionMathTask::Live(task), result)
+                    let completion = match task {
+                        SessionDecorationTask::Math(task) => match *task {
+                            SessionMathTask::Frozen(mut task) => {
+                                let result =
+                                    render_detection_task(&engine, &mut task, foreground_rgb);
+                                DecorationWorkerCompletion::Math {
+                                    task: Box::new(SessionMathTask::Frozen(task)),
+                                    result,
+                                }
+                            }
+                            SessionMathTask::Live(mut task) => {
+                                let result =
+                                    render_live_detection_task(&engine, &mut task, foreground_rgb);
+                                DecorationWorkerCompletion::Math {
+                                    task: Box::new(SessionMathTask::Live(task)),
+                                    result,
+                                }
+                            }
+                        },
+                        SessionDecorationTask::InlineImage(task) => {
+                            let result = decode_inline_image(task.clone());
+                            DecorationWorkerCompletion::InlineImage { task, result }
                         }
                     };
-                    if result_tx.send(MathWorkerResult { task, result }).is_err() {
+                    if result_tx.send(MathWorkerResult { completion }).is_err() {
                         break;
                     }
                     let _ = proxy.send_event(AppEvent::MathReady);
@@ -145,7 +168,7 @@ fn dispatch_pending_math_tasks(
     if !*running {
         return false;
     }
-    while let Some(task) = session.take_math_worker_task() {
+    while let Some(task) = session.take_decoration_worker_task() {
         if tasks
             .send(MathWorkerTask {
                 task,
@@ -820,13 +843,18 @@ impl Runtime {
         loop {
             match self.math_worker.results.try_recv() {
                 Ok(completion) => {
-                    changed |= match completion.task {
-                        SessionMathTask::Frozen(task) => {
-                            self.session.complete_worker_result(task, completion.result)
+                    changed |= match completion.completion {
+                        DecorationWorkerCompletion::Math { task, result } => match *task {
+                            SessionMathTask::Frozen(task) => {
+                                self.session.complete_worker_result(task, result)
+                            }
+                            SessionMathTask::Live(task) => {
+                                self.session.complete_live_worker_result(task, result)
+                            }
+                        },
+                        DecorationWorkerCompletion::InlineImage { task, result } => {
+                            self.session.complete_inline_image_result(task, result)
                         }
-                        SessionMathTask::Live(task) => self
-                            .session
-                            .complete_live_worker_result(task, completion.result),
                     };
                 }
                 Err(mpsc::TryRecvError::Empty) => break,

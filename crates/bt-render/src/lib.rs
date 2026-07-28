@@ -1833,6 +1833,9 @@ impl Renderer {
             });
         }
         frame.math_blocks.iter().rev().find_map(|placement| {
+            if placement.artifact.kind != bt_viewport::RgbaArtifactKind::Math {
+                return None;
+            }
             let geometry = self.math_block_geometry(frame, placement)?;
             let target = if geometry.eye.is_some_and(|rect| point_in_rect(point, rect)) {
                 MathHitTarget::ToggleSource
