@@ -676,14 +676,15 @@ fn ascii_line_looks_like_prose(line: &str) -> bool {
     let mut words = 0usize;
     let mut multi_letter_words = 0usize;
     // A natural-language word is set off by whitespace and is an uninterrupted run of letters,
-    // optionally wrapped in punctuation (`word,` / `(word)`). A whitespace token whose interior
-    // mixes letters with math connectives — `ad-bc`, `mc^2`, `x_i`, `a=b` — is a math operand group,
-    // not a prose word, and must not be counted: `-`, `=`, `^`, `_`, digits and the like separate
-    // operands, not words. (The earlier version split on every non-letter, so `=ad-bc` read as the
-    // two "words" `ad`/`bc` and a genuine `$$…=ad-bc…$$` block was rejected as prose.) Trim only the
-    // outer punctuation, then require the remaining core to be a single letter run.
+    // optionally wrapped in punctuation (`word,` / `(word)`). A whitespace token that mixes letters
+    // with math connectives or digits — `ad-bc`, `mc^2`, `x_i`, `a=b`, `2ab` — is a math operand
+    // group, not a prose word, and must not be counted. (One earlier version split on every
+    // non-letter, so `=ad-bc` read as the two "words" `ad`/`bc`; the next trimmed every non-letter
+    // off the ends, so the coefficient token `2ab` read as the word `ab` and a genuine
+    // `$$…+ 2ab +…$$` block was rejected as prose.) Trim only outer punctuation — digits are
+    // operand material, never word wrapping — then require the whole remaining core to be letters.
     for token in line.split_ascii_whitespace() {
-        let core = token.trim_matches(|character: char| !character.is_ascii_alphabetic());
+        let core = token.trim_matches(|character: char| character.is_ascii_punctuation());
         if !core.is_empty() && core.bytes().all(|byte| byte.is_ascii_alphabetic()) {
             words += 1;
             multi_letter_words += usize::from(core.len() > 1);
@@ -4089,9 +4090,16 @@ abla f",
             r"\det\begin{pmatrix}a&b\\c&d\end{pmatrix}=ad-bc"
         ));
         assert!(!block_body_looks_like_prose("E = mc^2"));
+        // Real-machine regression (repro-unified.vt, 2026-07-28): the coefficient token `2ab` was
+        // end-trimmed to the "word" `ab`, so this command-free algebra line counted one multi-letter
+        // word plus the single-letter operands and the whole block was rejected as prose — the only
+        // never-rendered block on the user's screen. A token containing a digit is an operand group.
+        assert!(!block_body_looks_like_prose("(a+b)^2 = a^2 + 2ab + b^2"));
         // Genuine natural-language lines must still be caught (M1.9k prose red line).
         assert!(block_body_looks_like_prose("the quick brown fox jumps"));
         assert!(block_body_looks_like_prose("See figure below now"));
+        // Digit-carrying words do not launder prose: enough pure words remain to convict.
+        assert!(block_body_looks_like_prose("see section2 for more details"));
     }
 
     /// Streaming-arrival regression (`stream-mispair.vt`). A complete `$$ \det …=ad-bc $$` block
