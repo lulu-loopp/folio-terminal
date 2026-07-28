@@ -64,6 +64,22 @@ impl HistoryDocument {
         self.anchors.get(&id).ok_or(AnchorError::UnknownAnchor)
     }
 
+    /// Re-seat one registered persistent anchor as part of a caller-owned reconciliation
+    /// transaction. Selection anchors use `replace_selection`; decoration identities use this
+    /// narrower single-anchor operation.
+    pub fn replace_anchor(
+        &mut self,
+        id: AnchorId,
+        anchor: ContentAnchor,
+    ) -> Result<(), AnchorError> {
+        let registered = self
+            .anchors
+            .get_mut(&id)
+            .ok_or(AnchorError::UnknownAnchor)?;
+        *registered = anchor;
+        Ok(())
+    }
+
     /// Resolve a viewport-owned staging coordinate through the same causal mapping used to migrate
     /// registered persistent anchors. This keeps scroll anchors semantic without making every
     /// viewport anchor part of the document's persistent anchor registry.

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use bt_viewport::{LiveMathOccurrenceId, MathBlockDisplay, ViewportFrame};
+use bt_viewport::{LiveMathOccurrenceId, MathBlockDisplay, RgbaArtifactKind, ViewportFrame};
 
 /// Headless classification of one frame's formula presentation. This is diagnostic state only;
 /// render and detection decisions remain owned by the normal session pipeline.
@@ -34,14 +34,19 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
     let rendered_sources = frame
         .math_blocks
         .iter()
-        .filter(|block| block.display == MathBlockDisplay::Rendered)
+        .filter(|block| {
+            block.display == MathBlockDisplay::Rendered
+                && block.artifact.kind == RgbaArtifactKind::Math
+        })
         .map(|block| block.source.clone())
         .collect::<Vec<_>>();
     let occluded_sources = frame
         .math_blocks
         .iter()
         .filter(|block| {
-            block.display == MathBlockDisplay::Rendered && block.occluded_source_rows != 0
+            block.display == MathBlockDisplay::Rendered
+                && block.artifact.kind == RgbaArtifactKind::Math
+                && block.occluded_source_rows != 0
         })
         .map(|block| block.source.clone())
         .collect::<Vec<_>>();
@@ -49,7 +54,8 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
         .math_blocks
         .iter()
         .filter_map(|block| {
-            (block.display == MathBlockDisplay::Rendered)
+            (block.display == MathBlockDisplay::Rendered
+                && block.artifact.kind == RgbaArtifactKind::Math)
                 .then_some(block.live_occurrence_id)
                 .flatten()
                 .map(|id| (id, block.source.clone()))
@@ -59,7 +65,9 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
         .math_blocks
         .iter()
         .filter_map(|block| {
-            (block.display == MathBlockDisplay::Rendered && block.occluded_source_rows != 0)
+            (block.display == MathBlockDisplay::Rendered
+                && block.artifact.kind == RgbaArtifactKind::Math
+                && block.occluded_source_rows != 0)
                 .then_some(block.live_occurrence_id)
                 .flatten()
         })
@@ -141,6 +149,7 @@ impl FormulaFlashOracle {
                 .iter()
                 .filter(|block| {
                     block.display == MathBlockDisplay::Rendered
+                        && block.artifact.kind == RgbaArtifactKind::Math
                         && block.live_occurrence_id.is_none()
                 })
                 .map(|block| block.source.clone()),

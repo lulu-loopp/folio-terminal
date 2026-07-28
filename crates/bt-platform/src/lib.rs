@@ -20,6 +20,8 @@ pub enum WheelScrollAmount {
 mod windows_impl {
     use std::{
         ffi::c_void,
+        os::windows::ffi::OsStrExt,
+        path::Path,
         sync::{Arc, Mutex, OnceLock},
     };
     use windows::core::PCWSTR;
@@ -95,6 +97,69 @@ mod windows_impl {
         } else {
             Ok(())
         }
+    }
+
+    /// Open one worker-validated local image with its registered default handler.
+    ///
+    /// The caller must obtain `path` from a successful image decode record, never directly from
+    /// terminal text. This bridge independently enforces the slice's immutable syntax policy
+    /// (drive-rooted, supported extension, no embedded NUL) and supplies no parameters or working
+    /// directory, preventing command-line reinterpretation. It performs no event-thread file I/O.
+    pub fn open_local_file(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
+        validate_local_image_path(path)?;
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
+        operation.push(0);
+        let mut target = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        target.push(0);
+        // SAFETY: the worker-success capability supplied an existing decoded image path, and both
+        // buffers remain live and NUL-terminated for this synchronous call. Parameters and working
+        // directory are null, so Windows never receives a command line to reparse.
+        let result = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code <= 32 {
+            Err(format!("ShellExecuteW failed with code {code}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_local_image_path(path: &Path) -> Result<(), String> {
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if units.contains(&0) {
+            return Err("local image path contains an embedded NUL".to_owned());
+        }
+        let text = path.as_os_str().to_string_lossy();
+        let bytes = text.as_bytes();
+        if bytes.len() < 3
+            || !bytes[0].is_ascii_alphabetic()
+            || bytes[1] != b':'
+            || !matches!(bytes[2], b'\\' | b'/')
+        {
+            return Err("local image path must be drive-rooted and absolute".to_owned());
+        }
+        let allowed_extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "webp" | "gif"
+                )
+            });
+        if !allowed_extension {
+            return Err("local image path extension is not supported".to_owned());
+        }
+        Ok(())
     }
 
     pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
@@ -565,8 +630,9 @@ mod windows_impl {
     mod tests {
         use super::{
             CLIPBOARD_OPEN_RETRY_DELAYS, DeferredMenuState, primary_language_id,
-            retry_open_clipboard,
+            retry_open_clipboard, validate_local_image_path,
         };
+        use std::path::Path;
 
         #[test]
         fn clipboard_open_retry_is_bounded_and_can_recover() {
@@ -626,11 +692,22 @@ mod windows_impl {
             assert_eq!(state.take_result(), Some(Ok(true)));
             assert!(state.begin_request());
         }
+
+        #[test]
+        fn local_file_bridge_rejects_every_path_outside_the_image_slice() {
+            assert!(validate_local_image_path(Path::new(r"C:\tmp\image.png")).is_ok());
+            assert!(validate_local_image_path(Path::new("C:/tmp/IMAGE.JPEG")).is_ok());
+            assert!(validate_local_image_path(Path::new(r"relative\image.png")).is_err());
+            assert!(validate_local_image_path(Path::new(r"\\server\share\image.png")).is_err());
+            assert!(validate_local_image_path(Path::new(r"C:\tmp\image.svg")).is_err());
+            assert!(validate_local_image_path(Path::new("C:\\tmp\\bad\0.png")).is_err());
+        }
     }
 }
 
 #[cfg(windows)]
 pub use windows_impl::{
     ImeSystemCaret, MathContextMenu, clipboard_text, get_dpi_for_window, get_window_rect,
-    install_window_class_background, set_clipboard_text, shell_execute, wheel_scroll_amount,
+    install_window_class_background, open_local_file, set_clipboard_text, shell_execute,
+    wheel_scroll_amount,
 };

@@ -9,8 +9,9 @@ use std::{
 
 use bt_math::MathEngine;
 use bt_term::{
-    DualPlaneSession, FormulaFlashOracle, FormulaFrameState, LIVE_MATH_STABLE_INTERVAL,
-    SessionMathTask, render_detection_task, render_live_detection_task,
+    DualPlaneSession, FormulaFlashOracle, FormulaFrameState, InlineImageDecoder,
+    LIVE_MATH_STABLE_INTERVAL, MathLayoutOptions, SessionDecorationTask, SessionMathTask,
+    render_detection_task, render_live_detection_task,
 };
 use bt_viewport::{ViewportFrame, ViewportProjection};
 
@@ -36,6 +37,8 @@ struct HeadlessOracle {
     session: DualPlaneSession,
     projection: ViewportProjection,
     engine: MathEngine,
+    image_decoder: InlineImageDecoder,
+    image_paths_enabled: bool,
     flash_oracle: FormulaFlashOracle,
     frame_sequence: usize,
     started: Instant,
@@ -93,7 +96,14 @@ struct HeadlessOracle {
 
 impl HeadlessOracle {
     fn new(columns: NonZeroU32, rows: NonZeroU32, started: Instant) -> Self {
-        let session = DualPlaneSession::new(columns, rows);
+        let image_paths_enabled = env::var_os("BT_PROBE_IMAGE_PATHS").is_some();
+        let mut session = DualPlaneSession::new(columns, rows);
+        if image_paths_enabled {
+            session.set_math_layout_options(MathLayoutOptions {
+                detect_image_paths: true,
+                ..MathLayoutOptions::default()
+            });
+        }
         let projection = session.new_projection(session.layout_key());
         let math_latency = env::var("BT_PROBE_MATH_LATENCY_US")
             .ok()
@@ -104,6 +114,8 @@ impl HeadlessOracle {
             session,
             projection,
             engine: MathEngine::new(),
+            image_decoder: InlineImageDecoder::default(),
+            image_paths_enabled,
             flash_oracle: FormulaFlashOracle::default(),
             frame_sequence: 0,
             started,
@@ -135,7 +147,9 @@ impl HeadlessOracle {
         let last_live_row = frame.rows.get().saturating_sub(1);
         let mut violations = 0usize;
         for block in &frame.math_blocks {
-            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered
+                || block.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+            {
                 continue;
             }
             let bt_viewport::MathBlockAnchor::Live { band_end_row, .. } = block.anchor else {
@@ -191,7 +205,9 @@ impl HeadlessOracle {
         let mut residue = 0usize;
         let mut sources = Vec::new();
         for block in &frame.math_blocks {
-            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered
+                || block.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+            {
                 continue;
             }
             let bt_viewport::MathBlockAnchor::Live {
@@ -275,7 +291,9 @@ impl HeadlessOracle {
         let mut bands = Vec::new();
         let mut borrowed = 0usize;
         for block in &frame.math_blocks {
-            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered
+                || block.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+            {
                 continue;
             }
             let bt_viewport::MathBlockAnchor::Live {
@@ -362,6 +380,9 @@ impl HeadlessOracle {
             // Off-thread model: the reprint's damage has already dropped/held decorations; new
             // detection tasks are only dispatched here and land one latency later, never now.
             self.dispatch_delayed(observed_at);
+            if self.complete_pending_images() {
+                self.publish("image-ready", elapsed)?;
+            }
         } else if self.complete_pending_math() {
             self.publish("math-ready", elapsed)?;
         }
@@ -434,6 +455,9 @@ impl HeadlessOracle {
         }
         self.session.advance_live_stability(now);
         self.dispatch_delayed(now);
+        if self.complete_pending_images() {
+            self.publish("image-ready", elapsed)?;
+        }
         Ok(())
     }
 
@@ -482,6 +506,26 @@ impl HeadlessOracle {
                     self.session.complete_live_worker_result(task, result)
                 }
             };
+        }
+        changed |= self.complete_pending_images();
+        changed
+    }
+
+    fn complete_pending_images(&mut self) -> bool {
+        if !self.image_paths_enabled {
+            return false;
+        }
+        let mut changed = false;
+        while let Some(task) = self.session.take_decoration_worker_task() {
+            match task {
+                SessionDecorationTask::InlineImage(task) => {
+                    let result = self.image_decoder.decode(task.clone());
+                    changed |= self.session.complete_inline_image_result(task, result);
+                }
+                SessionDecorationTask::Math(_) => {
+                    unreachable!("math queues were drained before image completion")
+                }
+            }
         }
         changed
     }
@@ -544,10 +588,10 @@ impl HeadlessOracle {
         );
         let dump = env::var_os("BT_PROBE_VERBOSE").is_some() && state == FormulaFrameState::Mixed;
         let geometry = env::var_os("BT_PROBE_GEOMETRY").is_some()
-            && frame
-                .math_blocks
-                .iter()
-                .any(|block| block.display == bt_viewport::MathBlockDisplay::Rendered);
+            && frame.math_blocks.iter().any(|block| {
+                block.display == bt_viewport::MathBlockDisplay::Rendered
+                    && block.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+            });
         if dump {
             self.dump_frame(&frame);
         }
@@ -581,6 +625,7 @@ impl HeadlessOracle {
                 .iter()
                 .filter(|block| {
                     block.display == bt_viewport::MathBlockDisplay::Rendered
+                        && block.artifact.kind == bt_viewport::RgbaArtifactKind::Math
                         && matches!(block.anchor, bt_viewport::MathBlockAnchor::History { .. })
                 })
                 .count();
@@ -633,7 +678,10 @@ impl HeadlessOracle {
             let min_top = frame
                 .math_blocks
                 .iter()
-                .filter(|block| block.display == bt_viewport::MathBlockDisplay::Rendered)
+                .filter(|block| {
+                    block.display == bt_viewport::MathBlockDisplay::Rendered
+                        && block.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                })
                 .map(|block| {
                     block
                         .top_subpixels
@@ -649,7 +697,10 @@ impl HeadlessOracle {
                 frame
                     .math_blocks
                     .iter()
-                    .filter(|b| b.display == bt_viewport::MathBlockDisplay::Rendered)
+                    .filter(|b| {
+                        b.display == bt_viewport::MathBlockDisplay::Rendered
+                            && b.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                    })
                     .count(),
             );
             if offset == last_offset {
@@ -684,6 +735,7 @@ impl HeadlessOracle {
                 .iter()
                 .filter(|block| {
                     block.display == bt_viewport::MathBlockDisplay::Rendered
+                        && block.artifact.kind == bt_viewport::RgbaArtifactKind::Math
                         && matches!(block.anchor, bt_viewport::MathBlockAnchor::History { .. })
                 })
                 .count();
@@ -742,7 +794,9 @@ impl HeadlessOracle {
 
     fn dump_geometry(&self, frame: &ViewportFrame) {
         for block in &frame.math_blocks {
-            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered
+                || block.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+            {
                 continue;
             }
             let (band_start, band_end, occurrence) = match block.anchor {

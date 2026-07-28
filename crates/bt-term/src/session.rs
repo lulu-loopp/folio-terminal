@@ -47,7 +47,8 @@ use crate::{
     },
     cell_capture::CapturedRowFingerprint,
     inline_image::{
-        DecodedInlineImage, InlineImageDecodeError, InlineImageTask, decode_inline_image,
+        DecodedInlineImage, InlineImageDecodeError, InlineImageSource, InlineImageTask,
+        decode_inline_image, detect_local_image_path_candidates,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
@@ -61,6 +62,7 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 const MAX_OFFSCREEN_RECORDS: usize = 128;
 const INLINE_IMAGE_WORKER_QUEUE_CAP: usize = 4;
+const LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP: usize = 64;
 /// Two trailing blank rows add at most 36 px at the baseline metrics: enough for common display
 /// math while preventing a single formula from consuming an arbitrarily large blank separator.
 const LIVE_MATH_MAX_BORROWED_BLANK_ROWS: u32 = 2;
@@ -85,6 +87,9 @@ pub struct MathLayoutOptions {
     pub restore_stripped_environment_newlines: bool,
     /// Reject Claude Code's exact Jump-to-bottom overlay when it is written into a math row.
     pub reject_claude_code_jump_chip_overlay: bool,
+    /// Detect drive-rooted image paths printed as terminal text. Product code opts in; deterministic
+    /// replay and generic session construction stay closed unless explicitly enabled.
+    pub detect_image_paths: bool,
 }
 
 impl Default for MathLayoutOptions {
@@ -95,6 +100,7 @@ impl Default for MathLayoutOptions {
             vertical_padding_cell_milli: DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI,
             restore_stripped_environment_newlines: true,
             reject_claude_code_jump_chip_overlay: true,
+            detect_image_paths: false,
         }
     }
 }
@@ -135,12 +141,24 @@ pub struct InlineImageRecordView {
     pub native_height_px: Option<u32>,
     pub display_rows: Option<u32>,
     pub failed: bool,
+    pub local_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug)]
+enum InlineImageRecordKind {
+    Osc1337,
+    LocalPath {
+        path: PathBuf,
+        source_text: String,
+        start_anchor: AnchorId,
+    },
 }
 
 #[derive(Clone, Debug)]
 struct InlineImageRecord {
     occurrence_id: u64,
-    anchor: AnchorId,
+    end_anchor: AnchorId,
+    kind: InlineImageRecordKind,
     artifact: Option<DecodedInlineImage>,
     failed: bool,
 }
@@ -150,6 +168,23 @@ struct InlineImageGeometry {
     display_scale_milli: u32,
     display_height_subpixels: i64,
     display_rows: u32,
+}
+
+#[derive(Clone, Debug)]
+struct DetectedLiveImagePath {
+    path: PathBuf,
+    source_text: String,
+    start: GridPoint,
+    end: GridPoint,
+    stable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct LiveImagePathSegment {
+    row: u32,
+    byte_start: usize,
+    byte_end: usize,
+    boundaries: Vec<(u32, u32)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -534,6 +569,7 @@ pub struct DualPlaneSession {
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
     inline_image_tasks: VecDeque<InlineImageTask>,
+    local_image_path_tasks: VecDeque<InlineImageTask>,
     inline_images: BTreeMap<u64, InlineImageRecord>,
     next_inline_image_occurrence_id: u64,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
@@ -695,6 +731,7 @@ impl DualPlaneSession {
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
             inline_image_tasks: VecDeque::new(),
+            local_image_path_tasks: VecDeque::new(),
             inline_images: BTreeMap::new(),
             next_inline_image_occurrence_id: 1,
             live_decorations: BTreeMap::new(),
@@ -797,6 +834,17 @@ impl DualPlaneSession {
     }
 
     pub fn set_math_layout_options(&mut self, options: MathLayoutOptions) {
+        if self.math_layout_options.detect_image_paths && !options.detect_image_paths {
+            let retired = self
+                .inline_images
+                .values()
+                .filter_map(|record| {
+                    matches!(record.kind, InlineImageRecordKind::LocalPath { .. })
+                        .then_some(record.occurrence_id)
+                })
+                .collect::<BTreeSet<_>>();
+            self.retire_inline_images(&retired);
+        }
         self.math_layout_options = options;
     }
 
@@ -855,9 +903,30 @@ impl DualPlaneSession {
                     native_height_px: record.artifact.as_ref().map(|artifact| artifact.height_px),
                     display_rows,
                     failed: record.failed,
+                    local_path: match &record.kind {
+                        InlineImageRecordKind::Osc1337 => None,
+                        InlineImageRecordKind::LocalPath { path, .. } => Some(path.clone()),
+                    },
                 }
             })
             .collect()
+    }
+
+    /// Resolve a click capability only from a local-path record whose worker validation and decode
+    /// succeeded. Path-looking terminal text that is pending or failed is intentionally inert.
+    pub fn decoded_local_image_path_at(&self, anchor: &ContentAnchor) -> Option<PathBuf> {
+        self.inline_images.values().find_map(|record| {
+            record.artifact.as_ref()?;
+            let InlineImageRecordKind::LocalPath {
+                path, start_anchor, ..
+            } = &record.kind
+            else {
+                return None;
+            };
+            let start = self.document.anchor(*start_anchor).ok()?;
+            let end = self.document.anchor(record.end_anchor).ok()?;
+            content_anchor_between(anchor, start, end).then(|| path.clone())
+        })
     }
 
     pub fn live_invalidation_count(&self) -> u64 {
@@ -970,6 +1039,9 @@ impl DualPlaneSession {
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         if result.is_ok() {
+            // Re-seat already-known path occurrences immediately after an atomic repaint. New
+            // candidates and retirement still wait for the ordinary stability gate below.
+            self.reconcile_live_image_paths(false, &vec![false; self.live_rows.len()]);
             self.restore_offscreen_decorations();
             self.reconcile_primary_reprint_presentation_hold(primary_reprint_boundary);
             // The reprint has landed and its records are re-anchored: end preservation unless a
@@ -1378,6 +1450,7 @@ impl DualPlaneSession {
                 row.settled_revision = Some(row.revision);
             }
         }
+        self.reconcile_live_image_paths(true, &stable);
 
         let inputs = self.live_detection_context();
         let initial_context = self.live_initial_detection_context(&inputs);
@@ -2525,6 +2598,11 @@ impl DualPlaneSession {
                     .pop_front()
                     .map(SessionDecorationTask::InlineImage)
             })
+            .or_else(|| {
+                self.local_image_path_tasks
+                    .pop_front()
+                    .map(SessionDecorationTask::InlineImage)
+            })
     }
 
     pub fn complete_inline_image_result(
@@ -3439,7 +3517,10 @@ impl DualPlaneSession {
             })
             .collect::<Vec<_>>();
         frozen_artifacts.extend(self.inline_images.values().filter_map(|record| {
-            let ContentAnchor::History { id, .. } = self.document.anchor(record.anchor).ok()?
+            if !matches!(record.kind, InlineImageRecordKind::Osc1337) {
+                return None;
+            }
+            let ContentAnchor::History { id, .. } = self.document.anchor(record.end_anchor).ok()?
             else {
                 return None;
             };
@@ -3448,6 +3529,18 @@ impl DualPlaneSession {
                 .map(|artifact| (*id, artifact))
         }));
         projection.sync_math_artifacts(frozen_artifacts);
+        projection.sync_inline_path_artifacts(self.inline_images.values().filter_map(|record| {
+            if !matches!(record.kind, InlineImageRecordKind::LocalPath { .. }) {
+                return None;
+            }
+            let ContentAnchor::History { id, .. } = self.document.anchor(record.end_anchor).ok()?
+            else {
+                return None;
+            };
+            let artifact = record.artifact.as_ref()?;
+            self.projected_inline_image(record, artifact, *id)
+                .map(|artifact| (*id, artifact))
+        }));
         self.sync_live_projection_artifacts(projection);
         projection.apply_detection_revision(self.detection_revision, &self.document);
         projection.project(&self.document);
@@ -3493,7 +3586,7 @@ impl DualPlaneSession {
                 point,
                 generation,
                 ..
-            } = self.document.anchor(record.anchor).ok()?
+            } = self.document.anchor(record.end_anchor).ok()?
             else {
                 return None;
             };
@@ -3502,12 +3595,26 @@ impl DualPlaneSession {
             }
             let decoded = record.artifact.as_ref()?;
             let artifact = self.projected_inline_image(record, decoded, TranscriptId(0))?;
+            let start = match &record.kind {
+                InlineImageRecordKind::LocalPath { start_anchor, .. } => {
+                    match self.document.anchor(*start_anchor).ok()? {
+                        ContentAnchor::Live {
+                            screen: start_screen,
+                            point,
+                            generation: start_generation,
+                            ..
+                        } if start_screen == screen && start_generation == generation => *point,
+                        _ => return None,
+                    }
+                }
+                InlineImageRecordKind::Osc1337 => *point,
+            };
             Some(ProjectedLiveMathArtifact {
                 occurrence_id: LiveMathOccurrenceId(record.occurrence_id),
                 screen: *screen,
-                start: *point,
+                start,
                 end: *point,
-                band_start_row: point.row,
+                band_start_row: start.row,
                 band_end_row: point.row,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
@@ -3539,12 +3646,24 @@ impl DualPlaneSession {
             height_subpixels: geometry.display_height_subpixels,
             baseline_subpixels: 0,
             mode: MathMode::Display,
-            kind: bt_viewport::RgbaArtifactKind::InlineImage {
-                animated: decoded.animated,
+            kind: match record.kind {
+                InlineImageRecordKind::Osc1337 => bt_viewport::RgbaArtifactKind::InlineImage {
+                    animated: decoded.animated,
+                },
+                InlineImageRecordKind::LocalPath { .. } => {
+                    bt_viewport::RgbaArtifactKind::LocalImagePath {
+                        animated: decoded.animated,
+                    }
+                }
             },
             vertical_padding_subpixels: 0,
             render_scale_milli: geometry.display_scale_milli,
-            source: "[image]".to_owned(),
+            source: match &record.kind {
+                InlineImageRecordKind::Osc1337 => "[image]".to_owned(),
+                InlineImageRecordKind::LocalPath { path, .. } => {
+                    path.as_os_str().to_string_lossy().into_owned()
+                }
+            },
         })
     }
 
@@ -3553,7 +3672,11 @@ impl DualPlaneSession {
         record: &InlineImageRecord,
         decoded: &DecodedInlineImage,
     ) -> Option<InlineImageGeometry> {
-        let column = match self.document.anchor(record.anchor).ok()? {
+        let display_anchor = match record.kind {
+            InlineImageRecordKind::Osc1337 => record.end_anchor,
+            InlineImageRecordKind::LocalPath { start_anchor, .. } => start_anchor,
+        };
+        let column = match self.document.anchor(display_anchor).ok()? {
             ContentAnchor::Live { point, .. } => point.column,
             ContentAnchor::History { offset, .. } | ContentAnchor::Staging { offset, .. } => {
                 offset.0
@@ -3635,13 +3758,25 @@ impl DualPlaneSession {
             if matches!(
                 placement.artifact.kind,
                 bt_viewport::RgbaArtifactKind::InlineImage { .. }
+                    | bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
             ) {
                 let column = match &placement.anchor {
                     MathBlockAnchor::Live { start, .. } => Some(start.column),
                     MathBlockAnchor::History { start, .. } => {
                         self.inline_images.values().find_map(|record| {
+                            let display_anchor = match &record.kind {
+                                InlineImageRecordKind::Osc1337 => record.end_anchor,
+                                InlineImageRecordKind::LocalPath {
+                                    path, start_anchor, ..
+                                } if path.as_os_str().to_string_lossy()
+                                    == placement.source.as_str() =>
+                                {
+                                    *start_anchor
+                                }
+                                InlineImageRecordKind::LocalPath { .. } => return None,
+                            };
                             let ContentAnchor::History { id, offset, .. } =
-                                self.document.anchor(record.anchor).ok()?
+                                self.document.anchor(display_anchor).ok()?
                             else {
                                 return None;
                             };
@@ -4246,7 +4381,7 @@ impl DualPlaneSession {
                         .values()
                         .filter_map(|record| {
                             matches!(
-                                self.document.anchor(record.anchor).ok(),
+                                self.document.anchor(record.end_anchor).ok(),
                                 Some(ContentAnchor::Live { .. } | ContentAnchor::Staging { .. })
                             )
                             .then_some(record.occurrence_id)
@@ -4285,7 +4420,7 @@ impl DualPlaneSession {
                         .values()
                         .filter_map(|record| {
                             matches!(
-                                self.document.anchor(record.anchor).ok(),
+                                self.document.anchor(record.end_anchor).ok(),
                                 Some(ContentAnchor::Live {
                                     screen: ScreenId::Alternate,
                                     ..
@@ -4333,7 +4468,8 @@ impl DualPlaneSession {
             occurrence_id,
             InlineImageRecord {
                 occurrence_id,
-                anchor,
+                end_anchor: anchor,
+                kind: InlineImageRecordKind::Osc1337,
                 artifact: None,
                 failed: false,
             },
@@ -4343,8 +4479,267 @@ impl DualPlaneSession {
         }
         self.inline_image_tasks.push_back(InlineImageTask {
             occurrence_id,
-            encoded,
+            source: InlineImageSource::Osc1337(encoded),
         });
+    }
+
+    fn reconcile_live_image_paths(&mut self, create_and_retire: bool, stable: &[bool]) {
+        if !self.math_layout_options.detect_image_paths {
+            return;
+        }
+        let candidates = self.detected_live_image_paths(stable);
+        let screen = self.live_screen;
+        let generation = self.grid_generation;
+        let mut existing = self
+            .inline_images
+            .iter()
+            .filter_map(|(occurrence, record)| {
+                let InlineImageRecordKind::LocalPath {
+                    path,
+                    source_text,
+                    start_anchor,
+                } = &record.kind
+                else {
+                    return None;
+                };
+                let ContentAnchor::Live {
+                    screen: anchor_screen,
+                    point: start,
+                    generation: anchor_generation,
+                    ..
+                } = self.document.anchor(*start_anchor).ok()?
+                else {
+                    return None;
+                };
+                (*anchor_screen == screen && *anchor_generation == generation).then_some((
+                    *occurrence,
+                    path.clone(),
+                    source_text.clone(),
+                    *start,
+                ))
+            })
+            .collect::<Vec<_>>();
+        existing.sort_by_key(|(_, _, _, point)| (point.row, point.column));
+        let mut matched = BTreeSet::new();
+
+        for candidate in candidates {
+            let matched_occurrence =
+                existing
+                    .iter()
+                    .find_map(|(occurrence, path, source_text, _)| {
+                        (!matched.contains(occurrence)
+                            && *path == candidate.path
+                            && *source_text == candidate.source_text)
+                            .then_some(*occurrence)
+                    });
+            if let Some(occurrence) = matched_occurrence {
+                matched.insert(occurrence);
+                let Some(record) = self.inline_images.get(&occurrence) else {
+                    continue;
+                };
+                let InlineImageRecordKind::LocalPath { start_anchor, .. } = &record.kind else {
+                    continue;
+                };
+                let start_anchor = *start_anchor;
+                let end_anchor = record.end_anchor;
+                let _ = self.document.replace_anchor(
+                    start_anchor,
+                    ContentAnchor::Live {
+                        screen,
+                        point: candidate.start,
+                        bias: Bias::Before,
+                        generation,
+                    },
+                );
+                let _ = self.document.replace_anchor(
+                    end_anchor,
+                    ContentAnchor::Live {
+                        screen,
+                        point: candidate.end,
+                        bias: Bias::After,
+                        generation,
+                    },
+                );
+            } else if create_and_retire && candidate.stable {
+                let occurrence = self.register_local_image_path(
+                    candidate.path,
+                    candidate.source_text,
+                    ContentAnchor::Live {
+                        screen,
+                        point: candidate.start,
+                        bias: Bias::Before,
+                        generation,
+                    },
+                    ContentAnchor::Live {
+                        screen,
+                        point: candidate.end,
+                        bias: Bias::After,
+                        generation,
+                    },
+                );
+                matched.insert(occurrence);
+            }
+        }
+
+        if !create_and_retire {
+            return;
+        }
+        let retired = existing
+            .into_iter()
+            .filter_map(|(occurrence, _, _, start)| {
+                (!matched.contains(&occurrence)
+                    && stable.get(start.row as usize).copied().unwrap_or(false))
+                .then_some(occurrence)
+            })
+            .collect::<BTreeSet<_>>();
+        self.retire_inline_images(&retired);
+    }
+
+    fn detected_live_image_paths(&self, stable: &[bool]) -> Vec<DetectedLiveImagePath> {
+        let mut detected = Vec::new();
+        let mut logical_text = String::new();
+        let mut segments = Vec::<LiveImagePathSegment>::new();
+        for row in 0..self.live_rows.len() as u32 {
+            let Some(captured) = self.terminal.visible_row(row) else {
+                continue;
+            };
+            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let byte_start = logical_text.len();
+            logical_text.push_str(&text);
+            segments.push(LiveImagePathSegment {
+                row,
+                byte_start,
+                byte_end: logical_text.len(),
+                boundaries,
+            });
+            if captured.continues {
+                continue;
+            }
+            let line_stable = segments
+                .iter()
+                .all(|segment| stable.get(segment.row as usize).copied().unwrap_or(false));
+            for candidate in detect_local_image_path_candidates(&logical_text) {
+                let Some(start) = live_path_point(&segments, candidate.byte_start, false) else {
+                    continue;
+                };
+                let Some(end) = live_path_point(&segments, candidate.byte_end, true) else {
+                    continue;
+                };
+                detected.push(DetectedLiveImagePath {
+                    path: PathBuf::from(candidate.path),
+                    source_text: logical_text.clone(),
+                    start,
+                    end,
+                    stable: line_stable,
+                });
+            }
+            logical_text.clear();
+            segments.clear();
+        }
+        detected
+    }
+
+    fn detect_frozen_image_paths(&mut self, id: TranscriptId) {
+        if !self.math_layout_options.detect_image_paths {
+            return;
+        }
+        let Some(line) = self
+            .document
+            .entries()
+            .get(&id)
+            .map(|entry| entry.line.clone())
+        else {
+            return;
+        };
+        for candidate in detect_local_image_path_candidates(&line.text) {
+            let path = PathBuf::from(candidate.path);
+            let already_registered = self.inline_images.values().any(|record| {
+                let InlineImageRecordKind::LocalPath {
+                    path: existing_path,
+                    source_text,
+                    ..
+                } = &record.kind
+                else {
+                    return false;
+                };
+                existing_path == &path
+                    && source_text == &line.text
+                    && matches!(
+                        self.document.anchor(record.end_anchor).ok(),
+                        Some(ContentAnchor::History {
+                            id: anchor_id, ..
+                        }) if *anchor_id == id
+                    )
+            });
+            if already_registered {
+                continue;
+            }
+            let Some(start_offset) =
+                grapheme_offset_at_byte(&line.grapheme_boundaries, candidate.byte_start)
+            else {
+                continue;
+            };
+            let Some(end_offset) =
+                grapheme_offset_at_byte(&line.grapheme_boundaries, candidate.byte_end)
+            else {
+                continue;
+            };
+            self.register_local_image_path(
+                path,
+                line.text.clone(),
+                ContentAnchor::History {
+                    id,
+                    offset: start_offset,
+                    bias: Bias::Before,
+                    generation: line.source_generation,
+                },
+                ContentAnchor::History {
+                    id,
+                    offset: end_offset,
+                    bias: Bias::After,
+                    generation: line.source_generation,
+                },
+            );
+        }
+    }
+
+    fn register_local_image_path(
+        &mut self,
+        path: PathBuf,
+        source_text: String,
+        start: ContentAnchor,
+        end: ContentAnchor,
+    ) -> u64 {
+        let occurrence_id = self.next_inline_image_occurrence_id;
+        self.next_inline_image_occurrence_id =
+            self.next_inline_image_occurrence_id.saturating_add(1);
+        let start_anchor = self.document.register_anchor(start);
+        let end_anchor = self.document.register_anchor(end);
+        self.inline_images.insert(
+            occurrence_id,
+            InlineImageRecord {
+                occurrence_id,
+                end_anchor,
+                kind: InlineImageRecordKind::LocalPath {
+                    path: path.clone(),
+                    source_text,
+                    start_anchor,
+                },
+                artifact: None,
+                failed: false,
+            },
+        );
+        if self.local_image_path_tasks.len() == LOCAL_IMAGE_PATH_WORKER_QUEUE_CAP
+            && let Some(dropped) = self.local_image_path_tasks.pop_front()
+            && let Some(record) = self.inline_images.get_mut(&dropped.occurrence_id)
+        {
+            record.failed = true;
+        }
+        self.local_image_path_tasks.push_back(InlineImageTask {
+            occurrence_id,
+            source: InlineImageSource::LocalPath(path),
+        });
+        occurrence_id
     }
 
     /// Prove and re-seat the live decorations a batched top-anchored scroll displaced, then reset
@@ -4719,6 +5114,7 @@ impl DualPlaneSession {
             }
         }
         self.retire_stale_bridge_prefixes(false);
+        self.detect_frozen_image_paths(id);
         self.schedule_detection(id);
         self.try_handoff_live_artifact(id);
         self.staging_sources
@@ -4871,7 +5267,7 @@ impl DualPlaneSession {
             .inline_images
             .values()
             .filter_map(|record| {
-                let retired = match self.document.anchor(record.anchor).ok() {
+                let retired = match self.document.anchor(record.end_anchor).ok() {
                     Some(ContentAnchor::History { id, .. }) => removed_set.contains(id),
                     Some(ContentAnchor::Staging { .. }) => clear_staging,
                     _ => false,
@@ -4929,6 +5325,8 @@ impl DualPlaneSession {
         self.inline_images
             .retain(|occurrence, _| !occurrences.contains(occurrence));
         self.inline_image_tasks
+            .retain(|task| !occurrences.contains(&task.occurrence_id));
+        self.local_image_path_tasks
             .retain(|task| !occurrences.contains(&task.occurrence_id));
     }
 
@@ -6998,6 +7396,135 @@ fn frozen_cell_boundaries(line: &FrozenLine) -> Vec<(u32, u32)> {
         boundaries.push((byte_end, cell));
     }
     boundaries
+}
+
+fn live_path_point(
+    segments: &[LiveImagePathSegment],
+    byte: usize,
+    prefer_previous_boundary: bool,
+) -> Option<GridPoint> {
+    let segment = if prefer_previous_boundary {
+        segments
+            .iter()
+            .find(|segment| segment.byte_start <= byte && byte <= segment.byte_end)
+    } else {
+        segments
+            .iter()
+            .rev()
+            .find(|segment| segment.byte_start <= byte && byte < segment.byte_end)
+            .or_else(|| segments.last().filter(|segment| byte == segment.byte_end))
+    }?;
+    let local = u32::try_from(byte.saturating_sub(segment.byte_start)).ok()?;
+    let column = segment
+        .boundaries
+        .iter()
+        .rev()
+        .find(|(boundary, _)| *boundary <= local)
+        .map(|(_, column)| *column)?;
+    Some(GridPoint {
+        row: segment.row,
+        column,
+    })
+}
+
+fn grapheme_offset_at_byte(boundaries: &[u32], byte: usize) -> Option<GraphemeOffset> {
+    let byte = u32::try_from(byte).ok()?;
+    boundaries
+        .binary_search(&byte)
+        .ok()
+        .and_then(|index| u32::try_from(index).ok())
+        .map(GraphemeOffset)
+}
+
+fn content_anchor_between(
+    candidate: &ContentAnchor,
+    start: &ContentAnchor,
+    end: &ContentAnchor,
+) -> bool {
+    match (candidate, start, end) {
+        (
+            ContentAnchor::History {
+                id,
+                offset,
+                generation,
+                ..
+            },
+            ContentAnchor::History {
+                id: start_id,
+                offset: start_offset,
+                generation: start_generation,
+                ..
+            },
+            ContentAnchor::History {
+                id: end_id,
+                offset: end_offset,
+                generation: end_generation,
+                ..
+            },
+        ) => {
+            id == start_id
+                && id == end_id
+                && generation == start_generation
+                && generation == end_generation
+                && start_offset <= offset
+                && offset < end_offset
+        }
+        (
+            ContentAnchor::Staging {
+                id,
+                offset,
+                generation,
+                ..
+            },
+            ContentAnchor::Staging {
+                id: start_id,
+                offset: start_offset,
+                generation: start_generation,
+                ..
+            },
+            ContentAnchor::Staging {
+                id: end_id,
+                offset: end_offset,
+                generation: end_generation,
+                ..
+            },
+        ) => {
+            id == start_id
+                && id == end_id
+                && generation == start_generation
+                && generation == end_generation
+                && start_offset <= offset
+                && offset < end_offset
+        }
+        (
+            ContentAnchor::Live {
+                screen,
+                point,
+                generation,
+                ..
+            },
+            ContentAnchor::Live {
+                screen: start_screen,
+                point: start_point,
+                generation: start_generation,
+                ..
+            },
+            ContentAnchor::Live {
+                screen: end_screen,
+                point: end_point,
+                generation: end_generation,
+                ..
+            },
+        ) => {
+            screen == start_screen
+                && screen == end_screen
+                && generation == start_generation
+                && generation == end_generation
+                && (point.row, point.column) >= (start_point.row, start_point.column)
+                && (point.row, point.column) < (end_point.row, end_point.column)
+        }
+        _ => false,
+    }
 }
 
 /// A chunk is a full-screen repaint transaction when it either clears-and-homes, or opens a DEC
@@ -12222,7 +12749,7 @@ mod tests {
         let record = session.inline_images.get(&task.occurrence_id).unwrap();
         assert!(
             matches!(
-                session.document.anchor(record.anchor).unwrap(),
+                session.document.anchor(record.end_anchor).unwrap(),
                 ContentAnchor::History { .. }
             ),
             "the normal document capture transaction must migrate the image anchor"
@@ -12256,5 +12783,243 @@ mod tests {
                 .collect::<Vec<_>>(),
             frame.viewport_origin,
         );
+    }
+
+    fn temporary_path_image() -> (PathBuf, PathBuf) {
+        use base64::Engine as _;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-session-path-image-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("one pixel.png");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        std::fs::write(&path, png).unwrap();
+        (directory, path)
+    }
+
+    fn enable_path_detection(session: &mut DualPlaneSession) {
+        session.set_math_layout_options(MathLayoutOptions {
+            detect_image_paths: true,
+            ..MathLayoutOptions::default()
+        });
+    }
+
+    #[test]
+    fn local_path_image_keeps_source_text_and_appends_a_worker_decoded_band() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        session.feed_at(line.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("stable absolute image path must enqueue the decoration worker");
+        };
+        let record = session.inline_images.get(&task.occurrence_id).unwrap();
+        let InlineImageRecordKind::LocalPath { start_anchor, .. } = record.kind else {
+            panic!("candidate must retain local-path provenance");
+        };
+        let start = session.document.anchor(start_anchor).unwrap().clone();
+        assert_eq!(
+            session.decoded_local_image_path_at(&start),
+            None,
+            "pending text is not an activation capability"
+        );
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(session.complete_inline_image_result(task, result));
+        assert_eq!(
+            session.decoded_local_image_path_at(&start),
+            Some(path.clone())
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(session.terminal().visible_text()[0], line);
+        let placement = frame
+            .math_blocks
+            .iter()
+            .find(|placement| {
+                matches!(
+                    placement.artifact.kind,
+                    bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+                )
+            })
+            .expect("decoded local image path must project");
+        let source_row = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(0))
+            .unwrap();
+        assert!(
+            placement.top_subpixels
+                >= source_row
+                    .top_subpixels
+                    .saturating_add(session.cell_height_subpixels.get()),
+            "image must begin below the still-visible path row: image_top={} row_top={} cell={} anchor={:?}",
+            placement.top_subpixels,
+            source_row.top_subpixels,
+            session.cell_height_subpixels.get(),
+            placement.anchor,
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn nonexistent_path_fails_quietly_and_never_becomes_clickable() {
+        let mut session = DualPlaneSession::new(nz(120), nz(6));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let missing = std::env::temp_dir().join(format!(
+            "betterterminal-missing-{}-{}.png",
+            std::process::id(),
+            started.elapsed().as_nanos()
+        ));
+        let line = format!("[Image: source: \"{}\"]", missing.display());
+        session.feed_at(line.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("path candidate must be validated by the worker");
+        };
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(result.is_err());
+        assert!(session.complete_inline_image_result(task, result));
+        let record = session.inline_images.values().next().unwrap();
+        let InlineImageRecordKind::LocalPath { start_anchor, .. } = record.kind else {
+            panic!("expected local path record");
+        };
+        assert!(
+            session
+                .decoded_local_image_path_at(session.document.anchor(start_anchor).unwrap())
+                .is_none()
+        );
+        assert!(record.failed);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(session.terminal().visible_text()[0], line);
+        assert!(frame.math_blocks.iter().all(|placement| !matches!(
+            placement.artifact.kind,
+            bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+        )));
+    }
+
+    #[test]
+    fn path_detection_disabled_is_a_strict_noop() {
+        let mut session = DualPlaneSession::new(nz(100), nz(5));
+        let started = Instant::now();
+        session
+            .feed_at(
+                br#"[Image: source: "C:\machine-dependent\recording.png"]"#,
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert!(session.inline_images.is_empty());
+        assert!(session.local_image_path_tasks.is_empty());
+        assert!(session.take_decoration_worker_task().is_none());
+    }
+
+    #[test]
+    fn alternate_repaint_reuses_the_ready_path_occurrence_without_flash_or_decode() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        let enter = format!("\u{1b}[?1049h{line}");
+        session.feed_at(enter.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("alternate path must enqueue");
+        };
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(session.complete_inline_image_result(task, result));
+        let key = session.inline_image_records()[0]
+            .content_key
+            .clone()
+            .unwrap();
+
+        let repaint = format!("\u{1b}[?2026h\u{1b}[2J\u{1b}[H{line}\u{1b}[?2026l");
+        session
+            .feed_at(
+                repaint.as_bytes(),
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert_eq!(session.inline_image_records().len(), 1);
+        assert!(session.take_decoration_worker_task().is_none());
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(frame.math_blocks.iter().any(|placement| {
+            placement.artifact.key == key
+                && matches!(
+                    placement.artifact.kind,
+                    bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+                )
+        }));
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn repeated_same_path_creates_distinct_bands_backed_by_one_cached_file_read() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        session
+            .feed_at(format!("{line}\r\n{line}").as_bytes(), started)
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let mut tasks = Vec::new();
+        while let Some(SessionDecorationTask::InlineImage(task)) =
+            session.take_decoration_worker_task()
+        {
+            tasks.push(task);
+        }
+        assert_eq!(tasks.len(), 2);
+        let first = decoder.decode(tasks[0].clone()).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let second = decoder.decode(tasks[1].clone()).unwrap();
+        assert_eq!(first.key, second.key);
+        assert_ne!(first.occurrence_id, second.occurrence_id);
+        assert!(session.complete_inline_image_result(tasks[0].clone(), Ok(first)));
+        assert!(session.complete_inline_image_result(tasks[1].clone(), Ok(second)));
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            frame
+                .math_blocks
+                .iter()
+                .filter(|placement| matches!(
+                    placement.artifact.kind,
+                    bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+                ))
+                .count(),
+            2
+        );
+        std::fs::remove_dir(&directory).unwrap();
     }
 }

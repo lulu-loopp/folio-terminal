@@ -22,8 +22,8 @@ use bt_render::{
     frame_content_digest, frame_is_alternate_screen, theme_revision,
 };
 use bt_term::{
-    DualPlaneSession, MouseTracking, SessionDecorationTask, SessionMathTask, TerminalModes,
-    decode_inline_image, render_detection_task, render_live_detection_task,
+    DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, SessionDecorationTask,
+    SessionMathTask, TerminalModes, render_detection_task, render_live_detection_task,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
@@ -96,6 +96,7 @@ impl MathWorker {
             .name("bt-math-worker".to_owned())
             .spawn(move || {
                 let engine = MathEngine::new();
+                let mut image_decoder = InlineImageDecoder::default();
                 while let Ok(work) = task_rx.recv() {
                     let MathWorkerTask {
                         task,
@@ -121,7 +122,7 @@ impl MathWorker {
                             }
                         },
                         SessionDecorationTask::InlineImage(task) => {
-                            let result = decode_inline_image(task.clone());
+                            let result = image_decoder.decode(task.clone());
                             DecorationWorkerCompletion::InlineImage { task, result }
                         }
                     };
@@ -340,6 +341,8 @@ struct SelectionDrag {
     origin: ViewSelection,
     hyperlink: Option<HyperlinkHit>,
     open_hyperlink_on_release: bool,
+    local_image_path: Option<PathBuf>,
+    open_local_image_on_release: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -481,6 +484,14 @@ fn hyperlink_activation(control: bool, click_no_drag: bool, uri: &str) -> Hyperl
     } else {
         HyperlinkActivation::Blocked
     }
+}
+
+fn local_image_activation(
+    control: bool,
+    click_no_drag: bool,
+    worker_verified_path: Option<&std::path::Path>,
+) -> bool {
+    control && click_no_drag && worker_verified_path.is_some()
 }
 
 #[derive(Debug, Default)]
@@ -630,6 +641,10 @@ impl Runtime {
         );
         session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
         session.set_ascii_baseline_subpixels(renderer.metrics().ascii_baseline_subpixels());
+        session.set_math_layout_options(MathLayoutOptions {
+            detect_image_paths: true,
+            ..MathLayoutOptions::default()
+        });
         session.set_layout_key(LayoutKey {
             width_cells: columns,
             dpi_milli: renderer.metrics().dpi_milli(),
@@ -1072,6 +1087,15 @@ impl Runtime {
             .hyperlink_at(hit.row, hit.column)
     }
 
+    fn local_image_path_hit(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
+        let anchor = self
+            .last_presented_frame
+            .as_ref()?
+            .anchor_at(hit.row, hit.column, Bias::Before)
+            .ok()??;
+        self.session.decoded_local_image_path_at(&anchor)
+    }
+
     fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
         if self.hyperlink_hover.activate_if_due(now) {
             self.publish_interaction_frame()?;
@@ -1110,6 +1134,17 @@ impl Runtime {
             }
         }
         Ok(())
+    }
+
+    fn activate_local_image_path(&self, path: &std::path::Path) {
+        let result = window_hwnd(&self.window).and_then(|hwnd| {
+            bt_platform::open_local_file(hwnd, path)
+                .map_err(|error| anyhow!(error))
+                .context("open decoded local image in the system viewer")
+        });
+        if let Err(error) = result {
+            eprintln!("recoverable local image open failure: {error:#}");
+        }
     }
 
     fn update_math_hover(&mut self, now: Instant) -> Result<Option<MathHit>> {
@@ -1237,12 +1272,18 @@ impl Runtime {
         let count = self
             .click_tracker
             .register(hit.row, hit.column, Instant::now());
+        let local_image_path = self.local_image_path_hit(hit);
         let frame = self
             .last_presented_frame
             .as_ref()
             .context("missing frame for mouse hit")?;
         let hyperlink = frame.hyperlink_at(hit.row, hit.column);
         let open_hyperlink_on_release = self.modifiers.control_key() && hyperlink.is_some();
+        let open_local_image_on_release = local_image_activation(
+            self.modifiers.control_key(),
+            true,
+            local_image_path.as_deref(),
+        );
         // Local hits are clamped to a continuous frame, which supplies anchors for every grid cell.
         let (mode, origin, initial) = match count {
             2 => {
@@ -1289,6 +1330,8 @@ impl Runtime {
             origin,
             hyperlink,
             open_hyperlink_on_release,
+            local_image_path,
+            open_local_image_on_release,
         }));
         self.publish_interaction_frame()
     }
@@ -1472,13 +1515,16 @@ impl Runtime {
             ElementState::Released => {
                 self.extend_local_selection(hit)?;
                 let release_hyperlink = self.hyperlink_hit(hit);
-                let (single_click, hyperlink_to_open) =
+                let release_local_image_path = self.local_image_path_hit(hit);
+                let (single_click, hyperlink_to_open, local_image_to_open) =
                     if let Some(MouseRoute::Local(SelectionDrag {
                         mode: SelectionDragMode::Linear,
                         origin_row,
                         origin_column,
                         hyperlink,
                         open_hyperlink_on_release,
+                        local_image_path,
+                        open_local_image_on_release,
                         ..
                     })) = self.mouse_route.as_ref()
                         && (*origin_row, *origin_column) == (hit.row, hit.column)
@@ -1489,9 +1535,15 @@ impl Runtime {
                                 .then(|| hyperlink.clone())
                                 .flatten()
                                 .filter(|pressed| release_hyperlink.as_ref() == Some(pressed)),
+                            open_local_image_on_release
+                                .then(|| local_image_path.clone())
+                                .flatten()
+                                .filter(|pressed| {
+                                    release_local_image_path.as_ref() == Some(pressed)
+                                }),
                         )
                     } else {
-                        (false, None)
+                        (false, None, None)
                     };
                 self.mouse_route = None;
                 if single_click {
@@ -1500,6 +1552,9 @@ impl Runtime {
                 }
                 if let Some(hyperlink) = hyperlink_to_open {
                     self.activate_hyperlink(hyperlink)?;
+                }
+                if let Some(path) = local_image_to_open {
+                    self.activate_local_image_path(&path);
                 }
                 Ok(())
             }
@@ -2577,6 +2632,15 @@ mod tests {
             hyperlink_activation(true, false, "https://example.test"),
             HyperlinkActivation::None
         );
+    }
+
+    #[test]
+    fn local_image_activation_requires_ctrl_click_and_worker_success_capability() {
+        let verified = std::path::Path::new(r"C:\tmp\decoded.png");
+        assert!(local_image_activation(true, true, Some(verified)));
+        assert!(!local_image_activation(false, true, Some(verified)));
+        assert!(!local_image_activation(true, false, Some(verified)));
+        assert!(!local_image_activation(true, true, None));
     }
 
     #[test]

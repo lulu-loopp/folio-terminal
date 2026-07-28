@@ -134,6 +134,7 @@ pub struct ProjectedMathArtifact {
 pub enum RgbaArtifactKind {
     Math,
     InlineImage { animated: bool },
+    LocalImagePath { animated: bool },
 }
 
 /// A rendered artifact tied to transient grid coordinates. Unlike history artifacts, this never
@@ -336,6 +337,7 @@ impl ViewportFrame {
             // top deliberately sits above the live band start rather than aligning to it. The other
             // band invariants (order, bottom, non-overlap of live rows outside the band) still hold.
             if block.frozen_prefix_rows == 0
+                && !matches!(block.artifact.kind, RgbaArtifactKind::LocalImagePath { .. })
                 && let Some(band_start) = self
                     .row_map
                     .iter()
@@ -761,6 +763,7 @@ pub struct ViewportProjection {
     cache: HashMap<LayoutCacheKey, MeasuredLayout>,
     artifact_heights: HashMap<TranscriptId, i64>,
     math_artifacts: HashMap<TranscriptId, ProjectedMathArtifact>,
+    inline_path_artifacts: HashMap<TranscriptId, Vec<ProjectedMathArtifact>>,
     live_math_artifacts: Vec<ProjectedLiveMathArtifact>,
     live_row_prefix: Vec<i64>,
     ordered_ids: Vec<TranscriptId>,
@@ -823,6 +826,7 @@ impl ViewportProjection {
             cache: HashMap::new(),
             artifact_heights: HashMap::new(),
             math_artifacts: HashMap::new(),
+            inline_path_artifacts: HashMap::new(),
             live_math_artifacts: Vec::new(),
             live_row_prefix: (0..=live_rows.get())
                 .map(|row| i64::from(row).saturating_mul(cell_height_subpixels.get()))
@@ -1394,15 +1398,113 @@ impl ViewportProjection {
                     && row_base < window_end
                     && let Some(entry) = document.entries().get(id)
                 {
-                    let (laid_out, laid_out_heights) =
-                        if let Some(artifact) = self.math_artifacts.get(id) {
+                    let (laid_out, laid_out_heights) = if let Some(artifact) =
+                        self.math_artifacts.get(id)
+                    {
+                        let max_offset =
+                            entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
+                        let local_start = window_start.saturating_sub(row_base);
+                        let row_heights =
+                            distributed_row_heights(artifact.height_subpixels, line_rows);
+                        let visible_top = frame_top_subpixels
+                            .saturating_add(visible_heights.iter().copied().sum::<i64>());
+                        math_blocks.push(MathBlockPlacement {
+                            start: *id,
+                            anchor: MathBlockAnchor::History {
+                                start: *id,
+                                end: artifact.end,
+                            },
+                            source: artifact.source.clone(),
+                            artifact: artifact.clone(),
+                            top_subpixels: visible_top.saturating_sub(
+                                row_heights[..local_start.min(row_heights.len())]
+                                    .iter()
+                                    .copied()
+                                    .sum::<i64>(),
+                            ),
+                            left_subpixels: 0,
+                            content_offset_subpixels: artifact.vertical_padding_subpixels,
+                            clip_height_subpixels: artifact.height_subpixels,
+                            display: MathBlockDisplay::Rendered,
+                            horizontal_overflow: HorizontalOverflowOwner::Block,
+                            horizontal_scroll_px: 0,
+                            vertical_scroll_px: 0,
+                            toolbar_visible: false,
+                            occluded_source_rows: 0,
+                            occluded_visible_rows: Vec::new(),
+                            live_occurrence_id: None,
+                            frozen_prefix_rows: 0,
+                            clipped_top_rows: 0,
+                            clipped_bottom_rows: 0,
+                        });
+                        (
+                            (0..line_rows)
+                                .map(|_| {
+                                    blank_visual_row(column_count, |_, bias| {
+                                        ContentAnchor::History {
+                                            id: *id,
+                                            offset: if bias == Bias::Before {
+                                                GraphemeOffset(0)
+                                            } else {
+                                                GraphemeOffset(max_offset)
+                                            },
+                                            bias,
+                                            generation: entry.line.source_generation,
+                                        }
+                                    })
+                                })
+                                .collect::<Vec<_>>(),
+                            row_heights,
+                        )
+                    } else {
+                        let mut rows = layout_frozen_line(&entry.line, column_count);
+                        let source_rows = rows.len();
+                        let mut heights = vec![self.cell_height_subpixels.get(); source_rows];
+                        let path_artifacts = self
+                            .inline_path_artifacts
+                            .get(id)
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]);
+                        for artifact in path_artifacts {
+                            let artifact_rows = usize::try_from(
+                                artifact
+                                    .height_subpixels
+                                    .max(1)
+                                    .saturating_add(self.cell_height_subpixels.get() - 1)
+                                    .div_euclid(self.cell_height_subpixels.get()),
+                            )
+                            .unwrap_or(usize::MAX);
                             let max_offset =
                                 entry.line.grapheme_boundaries.len().saturating_sub(1) as u32;
-                            let local_start = window_start.saturating_sub(row_base);
-                            let row_heights =
-                                distributed_row_heights(artifact.height_subpixels, line_rows);
-                            let visible_top = frame_top_subpixels
-                                .saturating_add(visible_heights.iter().copied().sum::<i64>());
+                            rows.extend((0..artifact_rows).map(|_| {
+                                blank_visual_row(column_count, |_, bias| ContentAnchor::History {
+                                    id: *id,
+                                    offset: GraphemeOffset(max_offset),
+                                    bias,
+                                    generation: entry.line.source_generation,
+                                })
+                            }));
+                            heights.extend(distributed_row_heights(
+                                artifact.height_subpixels,
+                                artifact_rows,
+                            ));
+                        }
+                        let local_start = window_start.saturating_sub(row_base);
+                        let line_visible_top = frame_top_subpixels
+                            .saturating_add(visible_heights.iter().copied().sum::<i64>());
+                        let line_top = line_visible_top.saturating_sub(
+                            heights
+                                .iter()
+                                .take(local_start.min(heights.len()))
+                                .copied()
+                                .sum::<i64>(),
+                        );
+                        let mut image_top = line_top.saturating_add(
+                            i64::try_from(source_rows)
+                                .unwrap_or(i64::MAX)
+                                .saturating_mul(self.cell_height_subpixels.get()),
+                        );
+                        for artifact in path_artifacts {
                             math_blocks.push(MathBlockPlacement {
                                 start: *id,
                                 anchor: MathBlockAnchor::History {
@@ -1411,14 +1513,9 @@ impl ViewportProjection {
                                 },
                                 source: artifact.source.clone(),
                                 artifact: artifact.clone(),
-                                top_subpixels: visible_top.saturating_sub(
-                                    row_heights[..local_start.min(row_heights.len())]
-                                        .iter()
-                                        .copied()
-                                        .sum::<i64>(),
-                                ),
+                                top_subpixels: image_top,
                                 left_subpixels: 0,
-                                content_offset_subpixels: artifact.vertical_padding_subpixels,
+                                content_offset_subpixels: 0,
                                 clip_height_subpixels: artifact.height_subpixels,
                                 display: MathBlockDisplay::Rendered,
                                 horizontal_overflow: HorizontalOverflowOwner::Block,
@@ -1432,30 +1529,10 @@ impl ViewportProjection {
                                 clipped_top_rows: 0,
                                 clipped_bottom_rows: 0,
                             });
-                            (
-                                (0..line_rows)
-                                    .map(|_| {
-                                        blank_visual_row(column_count, |_, bias| {
-                                            ContentAnchor::History {
-                                                id: *id,
-                                                offset: if bias == Bias::Before {
-                                                    GraphemeOffset(0)
-                                                } else {
-                                                    GraphemeOffset(max_offset)
-                                                },
-                                                bias,
-                                                generation: entry.line.source_generation,
-                                            }
-                                        })
-                                    })
-                                    .collect::<Vec<_>>(),
-                                row_heights,
-                            )
-                        } else {
-                            let rows = layout_frozen_line(&entry.line, column_count);
-                            let heights = vec![self.cell_height_subpixels.get(); rows.len()];
-                            (rows, heights)
-                        };
+                            image_top = image_top.saturating_add(artifact.height_subpixels);
+                        }
+                        (rows, heights)
+                    };
                     for (local_row, row) in laid_out.iter().enumerate() {
                         validate_visual_row(row, column_count, "history", row_base + local_row)?;
                     }
@@ -1510,6 +1587,7 @@ impl ViewportProjection {
                 self.live_row_prefix[live_row + 1].saturating_sub(self.live_row_prefix[live_row])
             }));
 
+            let mut path_image_offsets = HashMap::<u32, i64>::new();
             for live_math in &self.live_math_artifacts {
                 if live_math.screen != screen
                     || live_math.generation != self.grid_generation
@@ -1535,7 +1613,24 @@ impl ViewportProjection {
                 // pinned old-layout preview, not an error.
                 debug_assert!(artifact.render_scale_milli >= 1);
                 let (top_subpixels, clip_height_subpixels, content_offset_subpixels, frozen_rows) =
-                    if let Some(&(abs_top, frozen_rows)) =
+                    if matches!(artifact.kind, RgbaArtifactKind::LocalImagePath { .. }) {
+                        let absolute_start = live_base.saturating_add(block_last);
+                        let row_top = frame_top_subpixels.saturating_add(
+                            continuous_row_top_subpixels(
+                                absolute_start,
+                                live_base,
+                                &self.live_row_prefix,
+                                cell_height,
+                            )
+                            .saturating_sub(window_top_subpixels),
+                        );
+                        let offset = path_image_offsets
+                            .entry(live_math.band_end_row)
+                            .or_default();
+                        let top = row_top.saturating_add(cell_height).saturating_add(*offset);
+                        *offset = offset.saturating_add(artifact.height_subpixels);
+                        (top, artifact.height_subpixels, 0, 0)
+                    } else if let Some(&(abs_top, frozen_rows)) =
                         bridge_geometry.get(&live_math.occurrence_id)
                     {
                         // Boundary-split block: its owned band starts in the frozen history rows
@@ -1643,6 +1738,13 @@ impl ViewportProjection {
                     clipped_bottom_rows: live_math.clipped_bottom_rows,
                 });
 
+                if matches!(
+                    live_math.artifact.kind,
+                    RgbaArtifactKind::LocalImagePath { .. }
+                ) {
+                    continue;
+                }
+
                 let visible_first = block_first.max(first);
                 let visible_last = block_last.min(last.saturating_sub(1));
                 for live_row in visible_first..=visible_last {
@@ -1737,7 +1839,24 @@ impl ViewportProjection {
                 mapped
             })
             .collect::<Vec<_>>();
+        let mut local_path_offsets = HashMap::<u32, i64>::new();
         for placement in &mut math_blocks {
+            if matches!(
+                placement.artifact.kind,
+                RgbaArtifactKind::LocalImagePath { .. }
+            ) && let MathBlockAnchor::Live { band_end_row, .. } = placement.anchor
+                && let Some(mapped) = row_map
+                    .iter()
+                    .find(|mapped| mapped.live_grid_row == Some(band_end_row))
+            {
+                let offset = local_path_offsets.entry(band_end_row).or_default();
+                placement.top_subpixels = mapped
+                    .top_subpixels
+                    .saturating_add(self.cell_height_subpixels.get())
+                    .saturating_add(*offset);
+                *offset = offset.saturating_add(placement.artifact.height_subpixels);
+                continue;
+            }
             if let MathBlockAnchor::Live { band_start_row, .. } = placement.anchor
                 && let Some((band_index, mapped)) = row_map
                     .iter()
@@ -2032,6 +2151,32 @@ impl ViewportProjection {
             .collect();
         self.math_artifacts = next;
     }
+
+    /// Synchronize images appended below path-bearing transcript lines. Unlike display math and
+    /// OSC image placeholders, these artifacts add height without suppressing or replacing source.
+    pub fn sync_inline_path_artifacts(
+        &mut self,
+        artifacts: impl IntoIterator<Item = (TranscriptId, ProjectedMathArtifact)>,
+    ) {
+        let mut next = HashMap::<TranscriptId, Vec<ProjectedMathArtifact>>::new();
+        for (id, artifact) in artifacts {
+            next.entry(id).or_default().push(artifact);
+        }
+        let changed = self
+            .inline_path_artifacts
+            .keys()
+            .chain(next.keys())
+            .copied()
+            .filter(|id| self.inline_path_artifacts.get(id) != next.get(id))
+            .collect::<HashSet<_>>();
+        if !changed.is_empty() {
+            self.cache
+                .retain(|key, _| !changed.contains(&key.span.start));
+            self.projection_dirty = true;
+        }
+        self.inline_path_artifacts = next;
+    }
+
     pub fn sync_live_math_artifacts(
         &mut self,
         screen: ScreenId,
@@ -2063,6 +2208,12 @@ impl ViewportProjection {
             candidates
                 .into_iter()
                 .filter(|artifact| {
+                if matches!(
+                    artifact.artifact.kind,
+                    RgbaArtifactKind::LocalImagePath { .. }
+                ) {
+                    return true;
+                }
                 // A boundary-split block occupies only its live band on the grid; the bulk of its
                 // height is carried by the frozen scrollback rows it already owns above. It is
                 // measured by its live-band height (never the full image).
@@ -2099,6 +2250,15 @@ impl ViewportProjection {
         let mut per_row_height =
             vec![self.cell_height_subpixels.get(); self.live_rows.get() as usize];
         for artifact in &accepted {
+            if matches!(
+                artifact.artifact.kind,
+                RgbaArtifactKind::LocalImagePath { .. }
+            ) {
+                if let Some(height) = per_row_height.get_mut(artifact.band_end_row as usize) {
+                    *height = height.saturating_add(artifact.artifact.height_subpixels);
+                }
+                continue;
+            }
             // A boundary-split block never expands its live rows: its rendered image spans the
             // frozen scrollback rows above plus its live band, and projection sizes that bridged
             // span directly. Its live band keeps natural row heights here.
@@ -2292,13 +2452,35 @@ impl ViewportProjection {
                             height,
                         }
                     } else {
-                        let visual_lines = frozen_visual_line_count(
+                        let source_visual_lines = frozen_visual_line_count(
                             &entry.line.text,
                             self.layout_key.width_cells.get() as usize,
                         ) as u32;
+                        let (image_visual_lines, image_height) = self
+                            .inline_path_artifacts
+                            .get(id)
+                            .into_iter()
+                            .flatten()
+                            .fold((0_u32, 0_i64), |(rows, height), artifact| {
+                                let artifact_rows = u32::try_from(
+                                    artifact
+                                        .height_subpixels
+                                        .max(1)
+                                        .saturating_add(self.cell_height_subpixels.get() - 1)
+                                        .div_euclid(self.cell_height_subpixels.get()),
+                                )
+                                .unwrap_or(u32::MAX);
+                                (
+                                    rows.saturating_add(artifact_rows),
+                                    height.saturating_add(artifact.height_subpixels),
+                                )
+                            });
+                        let visual_lines = source_visual_lines.saturating_add(image_visual_lines);
                         MeasuredLayout {
                             visual_lines,
-                            height: visual_lines as i64 * self.cell_height_subpixels.get(),
+                            height: i64::from(source_visual_lines)
+                                .saturating_mul(self.cell_height_subpixels.get())
+                                .saturating_add(image_height),
                         }
                     }
                 };

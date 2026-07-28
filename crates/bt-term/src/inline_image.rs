@@ -1,4 +1,11 @@
-use std::{fmt, io::Cursor, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt,
+    fs::File,
+    io::{Cursor, Read},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use image::{ImageFormat, ImageReader, Limits, codecs::png::PngDecoder};
@@ -14,7 +21,13 @@ const MAX_OSC_1337_FILE_HEADER_BYTES: usize = 4 * 1024;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineImageTask {
     pub occurrence_id: u64,
-    pub encoded: Vec<u8>,
+    pub source: InlineImageSource,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InlineImageSource {
+    Osc1337(Vec<u8>),
+    LocalPath(PathBuf),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -34,6 +47,8 @@ pub struct DecodedInlineImage {
 pub enum InlineImageDecodeError {
     InvalidBase64,
     TooLarge,
+    InvalidPath,
+    Io(String),
     UnsupportedFormat,
     Decode(String),
     InvalidDimensions,
@@ -44,6 +59,8 @@ impl fmt::Display for InlineImageDecodeError {
         match self {
             Self::InvalidBase64 => formatter.write_str("invalid base64 image payload"),
             Self::TooLarge => formatter.write_str("inline image exceeds its decode limit"),
+            Self::InvalidPath => formatter.write_str("local image path is not admissible"),
+            Self::Io(error) => write!(formatter, "local image read failed: {error}"),
             Self::UnsupportedFormat => {
                 formatter.write_str("inline image format is not supported in v1")
             }
@@ -57,25 +74,104 @@ impl fmt::Display for InlineImageDecodeError {
 
 impl std::error::Error for InlineImageDecodeError {}
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DecodedImagePayload {
+    key: String,
+    rgba: Arc<[u8]>,
+    width_px: u32,
+    height_px: u32,
+    animated: bool,
+}
+
+/// Stateful decoration-worker decoder. Local paths are keyed lexically after slash/case
+/// normalization, so repeated occurrences reuse the one bounded read and decoded pixel artifact.
+/// The cache deliberately has no invalidation: file watching belongs to the later M2 buffer model.
+#[derive(Debug, Default)]
+pub struct InlineImageDecoder {
+    local_path_cache: HashMap<String, Result<DecodedImagePayload, InlineImageDecodeError>>,
+}
+
+impl InlineImageDecoder {
+    pub fn decode(
+        &mut self,
+        task: InlineImageTask,
+    ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
+        let payload = match &task.source {
+            InlineImageSource::Osc1337(encoded) => decode_osc_payload(encoded)?,
+            InlineImageSource::LocalPath(path) => {
+                let cache_key = normalized_local_path_key(path);
+                if let Some(cached) = self.local_path_cache.get(&cache_key) {
+                    cached.clone()?
+                } else {
+                    let decoded = read_and_decode_local_image(path);
+                    self.local_path_cache.insert(cache_key, decoded.clone());
+                    decoded?
+                }
+            }
+        };
+        Ok(DecodedInlineImage {
+            occurrence_id: task.occurrence_id,
+            key: payload.key,
+            rgba: payload.rgba,
+            width_px: payload.width_px,
+            height_px: payload.height_px,
+            animated: payload.animated,
+        })
+    }
+}
+
 pub fn decode_inline_image(
     task: InlineImageTask,
 ) -> Result<DecodedInlineImage, InlineImageDecodeError> {
+    InlineImageDecoder::default().decode(task)
+}
+
+fn decode_osc_payload(encoded: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
     let decoded_len =
-        decoded_len_upper_bound(&task.encoded).ok_or(InlineImageDecodeError::InvalidBase64)?;
+        decoded_len_upper_bound(encoded).ok_or(InlineImageDecodeError::InvalidBase64)?;
     if decoded_len > MAX_INLINE_IMAGE_BYTES {
         return Err(InlineImageDecodeError::TooLarge);
     }
 
     let mut bytes = vec![0_u8; decoded_len];
     let written = STANDARD
-        .decode_slice(&task.encoded, &mut bytes)
+        .decode_slice(encoded, &mut bytes)
         .map_err(|_| InlineImageDecodeError::InvalidBase64)?;
     bytes.truncate(written);
     if bytes.len() > MAX_INLINE_IMAGE_BYTES {
         return Err(InlineImageDecodeError::TooLarge);
     }
+    decode_image_bytes(&bytes)
+}
 
-    let mut reader = ImageReader::new(Cursor::new(bytes.as_slice()))
+fn read_and_decode_local_image(path: &Path) -> Result<DecodedImagePayload, InlineImageDecodeError> {
+    if !is_admissible_local_image_path(path) {
+        return Err(InlineImageDecodeError::InvalidPath);
+    }
+    let mut file =
+        File::open(path).map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
+    if !metadata.is_file() {
+        return Err(InlineImageDecodeError::InvalidPath);
+    }
+    if metadata.len() > MAX_INLINE_IMAGE_BYTES as u64 {
+        return Err(InlineImageDecodeError::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.by_ref()
+        .take(MAX_INLINE_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| InlineImageDecodeError::Io(error.to_string()))?;
+    if bytes.len() > MAX_INLINE_IMAGE_BYTES {
+        return Err(InlineImageDecodeError::TooLarge);
+    }
+    decode_image_bytes(&bytes)
+}
+
+fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
+    let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|error| InlineImageDecodeError::Decode(error.to_string()))?;
     let format = reader
@@ -89,7 +185,7 @@ pub fn decode_inline_image(
     }
     let animated = match format {
         ImageFormat::Gif => true,
-        ImageFormat::Png => PngDecoder::new(Cursor::new(bytes.as_slice()))
+        ImageFormat::Png => PngDecoder::new(Cursor::new(bytes))
             .and_then(|decoder| decoder.is_apng())
             .map_err(|error| InlineImageDecodeError::Decode(error.to_string()))?,
         _ => false,
@@ -115,14 +211,118 @@ pub fn decode_inline_image(
         return Err(InlineImageDecodeError::InvalidDimensions);
     }
 
-    Ok(DecodedInlineImage {
-        occurrence_id: task.occurrence_id,
-        key: format!("image:{:032x}", content_hash_128(&bytes)),
+    Ok(DecodedImagePayload {
+        key: format!("image:{:032x}", content_hash_128(bytes)),
         rgba: Arc::from(rgba.into_raw()),
         width_px,
         height_px,
         animated,
     })
+}
+
+fn normalized_local_path_key(path: &Path) -> String {
+    path.as_os_str()
+        .to_string_lossy()
+        .replace('/', "\\")
+        .to_ascii_lowercase()
+}
+
+fn is_admissible_local_image_path(path: &Path) -> bool {
+    let text = path.as_os_str().to_string_lossy();
+    is_windows_drive_absolute(&text)
+        && !text.contains('\0')
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(
+                    extension.to_ascii_lowercase().as_str(),
+                    "png" | "jpg" | "jpeg" | "webp" | "gif"
+                )
+            })
+}
+
+fn is_windows_drive_absolute(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalImagePathCandidate {
+    pub path: String,
+    pub byte_start: usize,
+    pub byte_end: usize,
+}
+
+/// Allocation-light lexical candidate scan for the event thread. It recognizes only drive-rooted
+/// Windows paths. Unquoted paths stop at whitespace or `]`; quoted paths may contain whitespace
+/// and must have a closing quote. Existence, size, content format, and decode remain worker-only.
+pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
+    let bytes = text.as_bytes();
+    let mut candidates = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let quoted = bytes[cursor] == b'"';
+        let start = if quoted {
+            cursor.saturating_add(1)
+        } else {
+            cursor
+        };
+        if !is_drive_prefix_at(bytes, start) || (!quoted && !candidate_start_boundary(bytes, start))
+        {
+            cursor += 1;
+            continue;
+        }
+        let end = if quoted {
+            bytes[start..]
+                .iter()
+                .position(|byte| *byte == b'"')
+                .map(|offset| start + offset)
+        } else {
+            Some(
+                bytes[start..]
+                    .iter()
+                    .position(|byte| byte.is_ascii_whitespace() || *byte == b']')
+                    .map_or(bytes.len(), |offset| start + offset),
+            )
+        };
+        let Some(end) = end.filter(|end| *end > start) else {
+            cursor += 1;
+            continue;
+        };
+        let path = &text[start..end];
+        if is_admissible_local_image_path(Path::new(path)) {
+            candidates.push(LocalImagePathCandidate {
+                path: path.to_owned(),
+                byte_start: start,
+                byte_end: end,
+            });
+        }
+        cursor = if quoted {
+            end.saturating_add(1)
+        } else {
+            end.max(cursor.saturating_add(1))
+        };
+    }
+    candidates
+}
+
+fn is_drive_prefix_at(bytes: &[u8], start: usize) -> bool {
+    bytes.get(start).is_some_and(u8::is_ascii_alphabetic)
+        && bytes.get(start + 1) == Some(&b':')
+        && bytes
+            .get(start + 2)
+            .is_some_and(|byte| matches!(*byte, b'\\' | b'/'))
+}
+
+fn candidate_start_boundary(bytes: &[u8], start: usize) -> bool {
+    start == 0
+        || bytes.get(start.saturating_sub(1)).is_some_and(|byte| {
+            byte.is_ascii_whitespace() || matches!(*byte, b'[' | b'(' | b'=' | b':' | b'\'')
+        })
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -380,6 +580,7 @@ fn content_hash_128(bytes: &[u8]) -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     // 1x1 opaque red PNG.
     const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
@@ -388,7 +589,7 @@ mod tests {
     fn png_decodes_to_rgba_artifact_with_content_identity() {
         let decoded = decode_inline_image(InlineImageTask {
             occurrence_id: 7,
-            encoded: PNG.as_bytes().to_vec(),
+            source: InlineImageSource::Osc1337(PNG.as_bytes().to_vec()),
         })
         .unwrap();
         assert_eq!(decoded.occurrence_id, 7);
@@ -402,7 +603,9 @@ mod tests {
     fn gif_decodes_only_its_first_frame_and_marks_the_record_animated() {
         let decoded = decode_inline_image(InlineImageTask {
             occurrence_id: 8,
-            encoded: b"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==".to_vec(),
+            source: InlineImageSource::Osc1337(
+                b"R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==".to_vec(),
+            ),
         })
         .unwrap();
         assert_eq!((decoded.width_px, decoded.height_px), (1, 1));
@@ -431,7 +634,7 @@ mod tests {
         png.splice(insert_at..insert_at, animation_chunks);
         let decoded = decode_inline_image(InlineImageTask {
             occurrence_id: 9,
-            encoded: STANDARD.encode(png).into_bytes(),
+            source: InlineImageSource::Osc1337(STANDARD.encode(png).into_bytes()),
         })
         .unwrap();
         assert_eq!((decoded.width_px, decoded.height_px), (1, 1));
@@ -467,7 +670,7 @@ mod tests {
         assert_eq!(
             decode_inline_image(InlineImageTask {
                 occurrence_id: 1,
-                encoded: b"not base64!".to_vec(),
+                source: InlineImageSource::Osc1337(b"not base64!".to_vec()),
             }),
             Err(InlineImageDecodeError::InvalidBase64)
         );
@@ -475,10 +678,118 @@ mod tests {
         assert_eq!(
             decode_inline_image(InlineImageTask {
                 occurrence_id: 2,
-                encoded: vec![b'A'; encoded_len],
+                source: InlineImageSource::Osc1337(vec![b'A'; encoded_len]),
             }),
             Err(InlineImageDecodeError::TooLarge)
         );
+    }
+
+    #[test]
+    fn local_path_candidate_boundaries_are_conservative_and_cc_exact() {
+        assert_eq!(
+            detect_local_image_path_candidates(r#"[Image: source: C:\Users\weiyi\Pictures\1.png]"#),
+            vec![LocalImagePathCandidate {
+                path: r"C:\Users\weiyi\Pictures\1.png".to_owned(),
+                byte_start: 16,
+                byte_end: 45,
+            }]
+        );
+        assert_eq!(
+            detect_local_image_path_candidates(
+                r#"[Image: source: "C:\Users\weiyi\My Pictures\one two.WEBP"]"#
+            )[0]
+            .path,
+            r"C:\Users\weiyi\My Pictures\one two.WEBP"
+        );
+        assert_eq!(
+            detect_local_image_path_candidates(r"source=C:/tmp/picture.jpeg]ignored.png")[0].path,
+            "C:/tmp/picture.jpeg"
+        );
+        for rejected in [
+            r"[Image: source: relative\image.png]",
+            r"[Image: source: \\server\share\image.png]",
+            r"[Image: source: C:\tmp\image.svg]",
+            r#"[Image: source: "C:\tmp\unterminated image.png]"#,
+            r"prefixXC:\tmp\image.png",
+        ] {
+            assert!(
+                detect_local_image_path_candidates(rejected).is_empty(),
+                "unexpected candidate in {rejected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn local_decoder_reads_once_and_reuses_content_identity_for_each_occurrence() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-inline-path-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("image.png");
+        std::fs::write(&path, STANDARD.decode(PNG).unwrap()).unwrap();
+
+        let mut decoder = InlineImageDecoder::default();
+        let first = decoder
+            .decode(InlineImageTask {
+                occurrence_id: 31,
+                source: InlineImageSource::LocalPath(path.clone()),
+            })
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let second = decoder
+            .decode(InlineImageTask {
+                occurrence_id: 32,
+                source: InlineImageSource::LocalPath(path),
+            })
+            .unwrap();
+        assert_eq!(first.key, second.key);
+        assert_eq!(first.rgba, second.rgba);
+        assert_eq!(first.occurrence_id, 31);
+        assert_eq!(second.occurrence_id, 32);
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn local_decoder_quietly_rejects_non_images_and_files_over_eight_mib() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-inline-path-reject-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let fake = directory.join("not-an-image.png");
+        std::fs::write(&fake, b"plain terminal text").unwrap();
+        let oversized = directory.join("oversized.webp");
+        let file = std::fs::File::create(&oversized).unwrap();
+        file.set_len(MAX_INLINE_IMAGE_BYTES as u64 + 1).unwrap();
+
+        let mut decoder = InlineImageDecoder::default();
+        assert_eq!(
+            decoder.decode(InlineImageTask {
+                occurrence_id: 41,
+                source: InlineImageSource::LocalPath(fake.clone()),
+            }),
+            Err(InlineImageDecodeError::UnsupportedFormat)
+        );
+        assert_eq!(
+            decoder.decode(InlineImageTask {
+                occurrence_id: 42,
+                source: InlineImageSource::LocalPath(oversized.clone()),
+            }),
+            Err(InlineImageDecodeError::TooLarge)
+        );
+
+        std::fs::remove_file(fake).unwrap();
+        std::fs::remove_file(oversized).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]

@@ -22,8 +22,9 @@ pub use diagnostics::{
     FormulaFlashOracle, FormulaFrameObservation, FormulaFrameState, observe_formula_frame,
 };
 pub use inline_image::{
-    DecodedInlineImage, InlineImageDecodeError, InlineImageTask, MAX_INLINE_IMAGE_BYTES,
-    decode_inline_image,
+    DecodedInlineImage, InlineImageDecodeError, InlineImageDecoder, InlineImageSource,
+    InlineImageTask, LocalImagePathCandidate, MAX_INLINE_IMAGE_BYTES, decode_inline_image,
+    detect_local_image_path_candidates,
 };
 pub use lifecycle::{
     LIFECYCLE_RULES, LifecycleDirective, LifecycleRule, MatchValue, ResizePlan, RowAction,
