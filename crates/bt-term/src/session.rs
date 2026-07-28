@@ -895,7 +895,7 @@ impl DualPlaneSession {
                 self.finish_alternate_repaint(snapshot);
             }
             if let Some(snapshot) = self.primary_repaint_snapshot.take() {
-                self.finish_primary_repaint(snapshot);
+                self.finish_primary_repaint(snapshot, false);
             }
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
@@ -944,6 +944,10 @@ impl DualPlaneSession {
             );
         }
         let alternate_resize = self.snapshot_alternate_repaint(false);
+        let primary_resize = alternate_resize
+            .is_none()
+            .then(|| self.snapshot_primary_resize_transition())
+            .flatten();
         self.alternate_repaint_in_progress = alternate_resize.is_some();
         let events = self.terminal.resize(columns, rows);
         let _ = self.terminal.take_damage();
@@ -974,7 +978,14 @@ impl DualPlaneSession {
         if let Some(snapshot) = alternate_resize {
             self.finish_alternate_repaint(snapshot);
         }
-        self.restore_offscreen_decorations();
+        // Keep the established whole-source restore for ordinary records. Transition-family
+        // records stay deferred for the scoped geometric projector below; exact restore can
+        // otherwise seat the narrower environment first and suppress the outer owner's proof.
+        if primary_resize.is_some() {
+            self.restore_offscreen_decorations_except_resize_transition();
+        } else {
+            self.restore_offscreen_decorations();
+        }
         if plan.begin_transaction {
             self.trace_resize_event(
                 observed_at,
@@ -991,6 +1002,16 @@ impl DualPlaneSession {
             ..self.layout_key
         };
         self.set_layout_key(next_layout);
+        if let Some(snapshot) = primary_resize {
+            // A terminal resize is itself a deterministic primary-grid repaint. Exact whole-source
+            // matching is insufficient when reflow changes row boundaries or continuation
+            // indentation, even though several byte/cell-exact rows still prove the occurrence's
+            // new placement. Reuse the primary repaint projector before publishing the resize
+            // frame; its unique row proof preserves only unambiguous records, and unresolved ones
+            // remain off-band for the existing exact-source fallback.
+            self.finish_primary_repaint(snapshot, true);
+            self.restore_offscreen_decorations();
+        }
         Ok(())
     }
 
@@ -1041,7 +1062,7 @@ impl DualPlaneSession {
             self.finish_alternate_repaint(snapshot);
         }
         if let Some(snapshot) = self.primary_repaint_snapshot.take() {
-            self.finish_primary_repaint(snapshot);
+            self.finish_primary_repaint(snapshot, false);
         }
         self.alternate_repaint_in_progress = false;
         self.restore_offscreen_decorations();
@@ -1059,6 +1080,9 @@ impl DualPlaneSession {
         observed_at: Instant,
     ) -> bool {
         let reconciled = self.resize_epoch.is_active();
+        let primary_reconcile = reconciled
+            .then(|| self.snapshot_primary_resize_transition())
+            .flatten();
         self.resize_epoch.final_request_sent(observed_at);
         self.trace_resize_event(
             observed_at,
@@ -1078,7 +1102,16 @@ impl DualPlaneSession {
             // one generation behind the frame the app is about to publish. Re-anchor them against
             // the now-settled grid so proven blocks render immediately instead of flashing to
             // source for the post-reconcile frame. Primary-only; alternate keeps its own path.
-            if self.primary_resize_preservation_active() {
+            if let Some(snapshot) = primary_reconcile {
+                // Reconciliation is a second deterministic reflow boundary after `resize_at`.
+                // Preserve the just-projected occurrence by the same unique row proof; draining it
+                // and attempting only a whole-source match loses blocks whose continuation
+                // indentation changed at this edge.
+                self.retain_live_decorations_offscreen();
+                self.restore_offscreen_decorations_except_resize_transition();
+                self.finish_primary_repaint(snapshot, true);
+                self.restore_offscreen_decorations();
+            } else if self.primary_resize_preservation_active() {
                 self.retain_live_decorations_offscreen();
                 self.restore_offscreen_decorations();
             }
@@ -1697,6 +1730,37 @@ impl DualPlaneSession {
         })
     }
 
+    /// Resize adds geometric preservation only for the quantified transition-side family: two
+    /// distinct source owners with the same rendered formula (the resident outer block and the
+    /// narrower environment which can replace it). A dormant historical pair cannot switch the
+    /// visible side and must not activate this path. Keeping the snapshot itself scoped leaves
+    /// ordinary resize records on the established exact-source path, including its ordering and
+    /// `HELD_UNBACKED` audit behavior.
+    fn snapshot_primary_resize_transition(&self) -> Option<AlternateRepaintSnapshot> {
+        let mut snapshot = self.snapshot_primary_repaint()?;
+        let occurrences = resize_transition_side_occurrences(
+            snapshot
+                .decorations
+                .iter()
+                .chain(snapshot.dormant_decorations.iter()),
+        );
+        let resident_outer_owner = snapshot.decorations.iter().any(|record| {
+            occurrences.contains(&record.identity.occurrence_id)
+                && record.span.original_source.trim_start().starts_with("$$")
+        });
+        if !resident_outer_owner {
+            return None;
+        }
+        snapshot
+            .decorations
+            .retain(|record| occurrences.contains(&record.identity.occurrence_id));
+        snapshot
+            .dormant_decorations
+            .retain(|record| occurrences.contains(&record.identity.occurrence_id));
+        (!snapshot.decorations.is_empty() || !snapshot.dormant_decorations.is_empty())
+            .then_some(snapshot)
+    }
+
     /// Close a primary in-stream reprint window by reprojecting every proven record the snapshot
     /// held (resident and off-band) onto the reflowed grid, using the proven-row fingerprint
     /// segmented mapping alternate uses (`segmented_row_mapping` + `project_live_record`) rather
@@ -1721,8 +1785,12 @@ impl DualPlaneSession {
     /// Isolated from `finish_alternate_repaint`: the forced identity mapping, and the absence of
     /// alternate's content-end-row / borrowed-band handling and bounded re-detection, are primary
     /// specific. Alternate's path is untouched.
-    fn finish_primary_repaint(&mut self, snapshot: AlternateRepaintSnapshot) {
-        let dirty = std::mem::take(&mut self.primary_repaint_dirty);
+    fn finish_primary_repaint(
+        &mut self,
+        snapshot: AlternateRepaintSnapshot,
+        resize_transition_side_only: bool,
+    ) {
+        let dirty = resize_transition_side_only || std::mem::take(&mut self.primary_repaint_dirty);
         if self.live_screen != ScreenId::Primary || self.terminal.modes().alternate_screen {
             return;
         }
@@ -1870,7 +1938,6 @@ impl DualPlaneSession {
             }
         }
         self.live_decorations = preserved;
-
         // Reseat the row fingerprints/candidate signatures under each preserved band so the next
         // damage compares against the reflowed grid, exactly as `finish_alternate_repaint` does.
         for record in self.live_decorations.values() {
@@ -2176,6 +2243,23 @@ impl DualPlaneSession {
         for task in relayout_tasks {
             self.enqueue_live_task(task);
         }
+    }
+
+    fn restore_offscreen_decorations_except_resize_transition(&mut self) {
+        let occurrences = resize_transition_side_occurrences(self.offscreen_decorations.iter());
+        let mut deferred = VecDeque::new();
+        let mut ordinary = VecDeque::new();
+        while let Some(record) = self.offscreen_decorations.pop_front() {
+            if occurrences.contains(&record.identity.occurrence_id) {
+                deferred.push_back(record);
+            } else {
+                ordinary.push_back(record);
+            }
+        }
+        self.offscreen_decorations = ordinary;
+        self.restore_offscreen_decorations();
+        deferred.append(&mut self.offscreen_decorations);
+        self.offscreen_decorations = deferred;
     }
 
     fn observe_live_damage(&mut self, damage: TerminalDamage, observed_at: Instant) {
@@ -5248,6 +5332,37 @@ fn stale_pending_dpi_transition(record: &LiveDecorationRecord) -> bool {
             .is_some_and(|stale| stale.rendered_layout.dpi_milli != record.layout.dpi_milli)
 }
 
+fn resize_transition_side_occurrences<'a>(
+    records: impl Iterator<Item = &'a LiveDecorationRecord>,
+) -> BTreeSet<LiveMathOccurrenceId> {
+    let records = records.collect::<Vec<_>>();
+    records
+        .iter()
+        .filter(|record| {
+            records.iter().any(|other| {
+                record.identity.occurrence_id != other.identity.occurrence_id
+                    && record.span.original_source != other.span.original_source
+                    && record.span.original_source.trim_start().starts_with("$$")
+                        != other.span.original_source.trim_start().starts_with("$$")
+                    && record
+                        .span
+                        .render_source
+                        .trim()
+                        .lines()
+                        .map(str::trim)
+                        .eq(other.span.render_source.trim().lines().map(str::trim))
+                    && record.span.mode == other.span.mode
+            })
+        })
+        .map(|record| record.identity.occurrence_id)
+        .collect()
+}
+
+fn is_outer_environment_record(record: &LiveDecorationRecord) -> bool {
+    record.span.original_source.trim_start().starts_with("$$")
+        && record.span.original_source.contains(r"\begin{")
+}
+
 fn project_artifact(
     artifact: &PlaceholderArtifact,
     rendered_layout: LayoutKey,
@@ -5953,16 +6068,49 @@ fn project_live_record_uniquely(
             initial_context.clone(),
             Arc::clone(&inputs),
         ) {
-            Some(RecordProjection::Visible(record)) => visible.push(record),
+            Some(RecordProjection::Visible(record)) => {
+                let support = projected_exact_source_row_support(&record);
+                debug_assert!(support != 0);
+                visible.push((support, record));
+            }
             Some(RecordProjection::Dormant(record)) => dormant.push(record),
             None => {}
         }
     }
     if visible.len() == 1 {
-        return visible.pop().map(RecordProjection::Visible);
+        return visible
+            .pop()
+            .map(|(_, record)| RecordProjection::Visible(record));
     }
     if visible.len() > 1 {
-        return None;
+        if !is_outer_environment_record(record) {
+            return None;
+        }
+        // A top-edge transition can make both the transaction's proven moving delta and primary's
+        // forced identity mapping technically Visible. The real `scroll-strand.vt` shape is the
+        // minimal counterexample: delta -2 retains five byte-exact rows of an outer
+        // `$$ A= \begin{pmatrix} ... $$` block, while identity retains only its closing `$$`
+        // because that row now contains the following block's opening `$$`. Treating every
+        // Visible candidate as an equal ambiguity drops the outer owner and lets the inner
+        // environment take over.
+        //
+        // This does not loosen projection or source equality: every candidate here has already
+        // passed `project_live_record`, including its exact row/cell proof and boundary-only
+        // mismatch rule. Select only a unique strongest proof by the number of the occurrence's
+        // source rows that remain byte/boundary-exact at that placement. A tie stays ambiguous and
+        // returns `None`, preserving the no-wrong-raster guard.
+        let strongest = visible.iter().map(|(support, _)| *support).max()?;
+        let winners = visible
+            .iter()
+            .filter(|(support, _)| *support == strongest)
+            .count();
+        if winners != 1 {
+            return None;
+        }
+        return visible
+            .into_iter()
+            .find(|(support, _)| *support == strongest)
+            .map(|(_, record)| RecordProjection::Visible(record));
     }
 
     if let Some(identity_mapping) = identity_row_mapping(record, mappings, &inputs)
@@ -5982,6 +6130,28 @@ fn project_live_record_uniquely(
     (dormant.len() == 1)
         .then(|| dormant.pop().map(RecordProjection::Dormant))
         .flatten()
+}
+
+fn projected_exact_source_row_support(record: &LiveDecorationRecord) -> usize {
+    record
+        .identity
+        .source_rows
+        .iter()
+        .filter(|proven| {
+            let Some(target) = record
+                .placement
+                .logical_band_start
+                .checked_add(i64::from(proven.band_offset))
+            else {
+                return false;
+            };
+            let Ok(target) = u32::try_from(target) else {
+                return false;
+            };
+            live_grid_input(&record.inputs, target)
+                .is_some_and(|input| proven.exactly_matches(input))
+        })
+        .count()
 }
 
 /// A partially visible proven occurrence may be the only rows in its local screen segment which
@@ -9327,6 +9497,75 @@ mod tests {
         assert_eq!(settled.math_blocks[0].display, MathBlockDisplay::Rendered);
     }
 
+    /// `resize-endflash.vt` frames 2836/3411: a display block whose opener has already crossed the
+    /// top edge has no complete source left in the live grid. A same-DPI width resize nevertheless
+    /// leaves the remaining proven rows byte/cell-exact, first across local reflow and then across
+    /// ConPTY reconciliation. Both deterministic boundaries must keep the clipped owner; falling
+    /// back to whole-source matching at either one exposes the aligned body for one frame.
+    #[test]
+    fn primary_resize_reconcile_keeps_partially_clipped_outer_owner() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(20));
+        session
+            .feed_at(
+                b"$$\r\n\\begin{aligned}\r\nx&=1\\\\\r\ny&=2\\\\\r\nz&=3\\\\\r\nw&=4\r\n\\end{aligned}\r\n$$\r\n\r\n\\begin{aligned}\r\nx&=1\\\\\r\ny&=2\\\\\r\nz&=3\\\\\r\nw&=4\r\n\\end{aligned}\r\nbelow",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(60, 64)),
+            2
+        );
+        let source = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.original_source.trim_start().starts_with("$$"))
+            .map(|record| record.span.original_source.clone())
+            .unwrap();
+        assert!(
+            resize_transition_side_occurrences(session.live_decorations.values())
+                .iter()
+                .any(|occurrence| {
+                    session.live_decorations.values().any(|record| {
+                        record.identity.occurrence_id == *occurrence
+                            && record.span.original_source == source
+                    })
+                }),
+            "the fixture must contain a render-equivalent outer/narrow owner pair"
+        );
+
+        // Move only the opener above the live grid. The remaining seven rows are the exact proof;
+        // a complete-grid source search is deliberately impossible from this point onward.
+        session
+            .feed_at(
+                b"\x1b[?2026h\x1b[1;20r\x1b[1S\x1b[r\x1b[?2026l",
+                start + Duration::from_millis(200),
+            )
+            .unwrap();
+        let clipped = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.original_source == source)
+            .expect("the top-scroll projection must retain the outer owner");
+        assert_eq!(clipped.clipped_top_rows, 1);
+
+        let resized_at = start + Duration::from_millis(210);
+        session.resize_at(nz(61), nz(20), resized_at).unwrap();
+        session.mark_pty_resize_requested_at(nz(61), nz(20), resized_at);
+
+        let retained = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.original_source == source)
+            .expect("resize and reconcile must preserve the uniquely projected clipped owner");
+        assert!(retained.stale_artifact.is_some());
+        assert!(
+            projected_live_artifact(retained, session.layout_key, 0).is_some(),
+            "the retained stale raster must remain paintable while relayout is pending"
+        );
+    }
+
     #[test]
     fn primary_resize_keeps_formula_rendered_through_the_post_quiescence_repaint() {
         // Regression for the residual resize-completes flash. 002acc7 preserves formulas *during*
@@ -10492,6 +10731,63 @@ mod tests {
         assert!(
             rows.iter().all(|row| row.trim().is_empty()),
             "the bridged raster must suppress both frozen source rows, got {rows:?}"
+        );
+    }
+
+    /// `scroll-strand.vt` frame 2510: the outer Dollars block begins at live row zero, and one
+    /// synchronized Codex frame scrolls the top-anchored region by two rows. The opener and `A=`
+    /// line freeze together while the byte-identical pmatrix body remains live. This is the
+    /// intersection of the batched-scroll and frozen-prefix paths: the already-proven outer
+    /// occurrence must keep ownership as one clipped bridge, rather than disappear and let the
+    /// inner environment be re-detected as a narrower replacement.
+    #[test]
+    fn synchronized_two_row_scroll_keeps_row_zero_outer_block_as_one_bridge() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(16));
+        session
+            .feed_at(
+                b"$$\r\nA=\r\n\\begin{pmatrix}\r\na & b\\\\\r\nc & d\r\n\\end{pmatrix}\r\n$$\r\n\r\n$$\r\ny=1\r\n$$\r\nprompt",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
+            2
+        );
+        let outer_source = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.delimiter_kind == DelimiterKind::Dollars)
+            .map(|record| record.span.original_source.clone())
+            .expect("the complete outer Dollars block renders before the scroll");
+
+        // Byte-for-byte shape from the recording's critical transaction: synchronized-update
+        // open, top-anchored scroll region, two-line SU, restore margins, commit.
+        session
+            .feed_at(
+                b"\x1b[?2026h\x1b[1;12r\x1b[2S\x1b[r\x1b[?2026l",
+                start + Duration::from_millis(210),
+            )
+            .unwrap();
+
+        let outer = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.original_source == outer_source)
+            .expect("the partially frozen outer occurrence must keep its raster");
+        assert!(outer.artifact.is_some());
+        assert_eq!(
+            outer.clipped_top_rows, 2,
+            "the opener and A= row are clipped above the live grid"
+        );
+        assert_eq!((outer.band_start_row, outer.band_end_row), (0, 4));
+        assert!(
+            session.live_decorations.values().all(|record| {
+                !matches!(record.span.delimiter_kind, DelimiterKind::Environment(_))
+                    || !record.span.original_source.contains(r"\begin{pmatrix}")
+            }),
+            "the inner pmatrix must not take ownership from the retained outer block"
         );
     }
 
