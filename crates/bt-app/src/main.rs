@@ -623,6 +623,14 @@ impl Runtime {
         // source re-anchor. Both release through projection/session facts (re-anchor, explicit user
         // takeover, or hard lifecycle retirement), never a timer.
         if self.projection.presentation_hold() && self.last_presented_frame.is_some() {
+            if self.trace_perf {
+                eprintln!(
+                    "BT_PERF_TRACE hold=presentation source={:?} review={} exact_source={}",
+                    trigger.source,
+                    u8::from(self.projection.review_hold()),
+                    u8::from(self.projection.exact_source_reprint_hold()),
+                );
+            }
             return Ok(false);
         }
         if self.session.schedule_visible_artifacts(&terminal_frame) != 0 {

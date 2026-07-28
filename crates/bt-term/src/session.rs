@@ -3270,6 +3270,8 @@ impl DualPlaneSession {
                         clipped_bottom_rows: record.clipped_bottom_rows,
                         occluded_source_rows: record.placement.occluded_source_rows,
                         occluded_visible_rows: record.placement.occluded_visible_rows.clone(),
+                        transition_stale: record.artifact.is_none()
+                            && record.stale_artifact.is_some(),
                         frozen_prefix: record.frozen_prefix.clone(),
                         staging_prefix: record.staging_prefix.clone(),
                         generation: record.generation,

@@ -144,6 +144,9 @@ pub struct ProjectedLiveMathArtifact {
     pub occluded_source_rows: u32,
     /// Occluded terminal rows whose cells still carry this occurrence's proven source prefix.
     pub occluded_visible_rows: Vec<(u32, Vec<(u32, u32)>)>,
+    /// The artifact is the exact occurrence's previous-layout raster while a replacement relayout
+    /// is pending. Same-DPI width changes can therefore be stale even when render scale is 1000.
+    pub transition_stale: bool,
     /// Frozen transcript rows (opener/body) already committed to scrollback while the closer is
     /// still in the live grid. Empty for an ordinary all-live block. Ordered top to bottom and
     /// immediately preceding the live band; projection renders the whole occurrence as one block
@@ -865,6 +868,12 @@ impl ViewportProjection {
     /// decoration that cannot legally paint until its proven source reappears.
     pub fn presentation_hold(&self) -> bool {
         self.review_hold || self.exact_source_reprint_hold
+    }
+
+    /// Diagnostic split for the app's env-gated publication trace. Product gating should continue
+    /// to use `presentation_hold`, which composes this with resize-review displacement.
+    pub fn exact_source_reprint_hold(&self) -> bool {
+        self.exact_source_reprint_hold
     }
 
     pub fn cell_height_subpixels(&self) -> NonZeroI64 {
@@ -2041,13 +2050,24 @@ impl ViewportProjection {
             // render missing integral limit / half-cut Maxwell block). In that lone case primary
             // sizes the band from the visible rows alone, flooring it to the artifact height exactly
             // as the alternate screen already does. Whenever a genuine edge clip (M1.9v top reveal,
-            // bottom-edge run-off) or occlusion is present the reduced band is legitimate and the
-            // HEAD sizing is kept to the subpixel; boundary-split bridges never reach this loop.
+            // bottom-edge run-off) or a fresh artifact's occlusion is present the reduced band is
+            // legitimate and the HEAD sizing is kept to the subpixel; boundary-split bridges never
+            // reach this loop. A transition-stale primary raster is the exception: its occluded rows
+            // are the still-exact remainder of the old layout, so the preview must retain them until
+            // the replacement artifact arrives.
             let last_live_row = self.live_rows.get().saturating_sub(1);
             let full_clipped_rows = artifact
                 .clipped_top_rows
                 .saturating_add(visible_rows)
                 .saturating_add(artifact.clipped_bottom_rows);
+            let genuine_bottom_clip =
+                artifact.clipped_bottom_rows > 0 && artifact.band_end_row == last_live_row;
+            let occluded =
+                artifact.occluded_source_rows > 0 || !artifact.occluded_visible_rows.is_empty();
+            let stale_reflow_preview = screen == ScreenId::Primary
+                && artifact.transition_stale
+                && occluded
+                && !genuine_bottom_clip;
             let (rows, top_pad_rows) = if screen == ScreenId::Alternate {
                 (full_clipped_rows, artifact.clipped_top_rows)
             } else {
@@ -2063,15 +2083,12 @@ impl ViewportProjection {
                 // out-counts the reflowed occurrence's rows. Spreading the artifact across those
                 // phantom top rows and taking the middle slice is exactly what clipped the integral
                 // limit and cut the pmatrix in half. Only a genuine bottom run-off or occlusion
-                // keeps the reduced band; otherwise primary floors to the full artifact so the
-                // whole reflowed occurrence previews (its own rows, full raster) instead of a
-                // half-band fragment. `band_start_row == 0` is deliberately absent here — it was the
-                // buggy top mirror this closes.
-                let genuine_bottom_clip =
-                    artifact.clipped_bottom_rows > 0 && artifact.band_end_row == last_live_row;
-                let occluded =
-                    artifact.occluded_source_rows > 0 || !artifact.occluded_visible_rows.is_empty();
-                if genuine_bottom_clip || occluded {
+                // keeps the reduced band, except for an exact transition-stale raster whose hidden
+                // old-layout rows remain part of the deterministic preview. Otherwise primary
+                // floors to the full artifact so the whole reflowed occurrence previews (its own
+                // rows, full raster) instead of a half-band fragment. `band_start_row == 0` is
+                // deliberately absent here — it was the buggy top mirror this closes.
+                if genuine_bottom_clip || (occluded && !stale_reflow_preview) {
                     (full_clipped_rows, artifact.clipped_top_rows)
                 } else {
                     (visible_rows, 0)
@@ -2789,6 +2806,7 @@ mod tests {
                     clipped_bottom_rows: 0,
                     occluded_source_rows: 0,
                     occluded_visible_rows: Vec::new(),
+                    transition_stale: false,
                     frozen_prefix: Vec::new(),
                     staging_prefix: Vec::new(),
                     generation: GridGeneration(1),
@@ -2880,6 +2898,31 @@ mod tests {
         occluded_source_rows: u32,
         art_cells: u32,
     ) -> (i64, i64, ViewportFrame) {
+        project_single_live_block_with_staleness(
+            screen,
+            live_rows,
+            band_start_row,
+            band_end_row,
+            clipped_top_rows,
+            clipped_bottom_rows,
+            occluded_source_rows,
+            art_cells,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project_single_live_block_with_staleness(
+        screen: ScreenId,
+        live_rows: u32,
+        band_start_row: u32,
+        band_end_row: u32,
+        clipped_top_rows: u32,
+        clipped_bottom_rows: u32,
+        occluded_source_rows: u32,
+        art_cells: u32,
+        transition_stale: bool,
+    ) -> (i64, i64, ViewportFrame) {
         let art_h = i64::from(art_cells) * cell_height().get();
         let height_px = (art_cells * 18) as usize;
         let mut projection = ViewportProjection::new(
@@ -2909,6 +2952,7 @@ mod tests {
                 clipped_bottom_rows,
                 occluded_source_rows,
                 occluded_visible_rows: Vec::new(),
+                transition_stale,
                 frozen_prefix: Vec::new(),
                 staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
@@ -3044,6 +3088,7 @@ mod tests {
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 1,
                 occluded_visible_rows: vec![(4, vec![(0, 4), (7, width as u32)])],
+                transition_stale: false,
                 frozen_prefix: Vec::new(),
                 staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
@@ -3148,6 +3193,74 @@ mod tests {
         );
     }
 
+    /// A primary zoom/reflow preview can retain a complete aligned raster after the application has
+    /// repainted only one of its six source rows at a new width. The other five rows are inside the
+    /// grid but outside the repaint's mutable region, so ordinary occlusion geometry would assign
+    /// the band only one sixth of the stale artifact and leave the reported bottom glyph fragment.
+    /// A stale preview instead keeps its complete free height, ending at the same band bottom so
+    /// following fixed rows remain unmoved. Alternate keeps its established fixed-grid clipping.
+    #[test]
+    fn primary_stale_mid_grid_occlusion_keeps_the_complete_artifact_clip() {
+        let (clip, art_h, frame) = project_single_live_block_with_staleness(
+            ScreenId::Primary,
+            32,
+            11,
+            11,
+            0,
+            5,
+            5,
+            6,
+            true,
+        );
+        assert_eq!(
+            clip, art_h,
+            "primary stale reflow preview must not collapse to one source row"
+        );
+        assert_eq!(
+            frame.math_blocks[0].top_subpixels + clip,
+            12 * cell_height().get()
+        );
+    }
+
+    /// Legal clipping stays exact: a fresh application overlay owns the reduced region, and a
+    /// stale occurrence genuinely running beyond the terminal bottom has no revealable rows.
+    #[test]
+    fn fresh_occlusion_and_genuine_stale_bottom_clip_are_unchanged() {
+        for screen in [ScreenId::Primary, ScreenId::Alternate] {
+            let (fresh_clip, _, _) = project_single_live_block(screen, 32, 11, 11, 0, 5, 5, 6);
+            assert_eq!(
+                fresh_clip,
+                cell_height().get(),
+                "{screen:?} fresh occlusion"
+            );
+
+            let (edge_clip, _, _) =
+                project_single_live_block_with_staleness(screen, 32, 31, 31, 0, 5, 5, 6, true);
+            assert_eq!(
+                edge_clip,
+                cell_height().get(),
+                "{screen:?} true terminal-bottom clip"
+            );
+        }
+
+        let (alternate_stale, _, _) = project_single_live_block_with_staleness(
+            ScreenId::Alternate,
+            32,
+            11,
+            11,
+            0,
+            5,
+            5,
+            6,
+            true,
+        );
+        assert_eq!(
+            alternate_stale,
+            cell_height().get(),
+            "alternate stale occlusion geometry remains byte-identical"
+        );
+    }
+
     /// The floor is primary-only: the identical collapsed inputs leave the alternate screen's
     /// expand-only geometry untouched (its clip stays the single collapsed cell HEAD produced),
     /// while primary floors to the full artifact. This pins that the alternate path is unchanged.
@@ -3208,6 +3321,7 @@ mod tests {
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
                 occluded_visible_rows: Vec::new(),
+                transition_stale: false,
                 frozen_prefix: frozen_prefix.clone(),
                 staging_prefix: vec![staging_id],
                 generation: GridGeneration(1),
@@ -3364,6 +3478,7 @@ mod tests {
             clipped_bottom_rows: 0,
             occluded_source_rows: 0,
             occluded_visible_rows: Vec::new(),
+            transition_stale: false,
             frozen_prefix: Vec::new(),
             staging_prefix: Vec::new(),
             generation,
@@ -3435,6 +3550,7 @@ mod tests {
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
                 occluded_visible_rows: Vec::new(),
+                transition_stale: false,
                 frozen_prefix: Vec::new(),
                 staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
@@ -4380,9 +4496,11 @@ mod tests {
 
         projection.scroll_to_bottom();
         assert!(!projection.review_hold());
+        assert!(!projection.exact_source_reprint_hold());
         assert!(!projection.presentation_hold());
 
         projection.set_exact_source_reprint_hold(true);
+        assert!(projection.exact_source_reprint_hold());
         assert!(
             projection.presentation_hold(),
             "an unmatched exact-source decoration holds even at bottom follow"
@@ -4393,6 +4511,7 @@ mod tests {
         );
 
         projection.set_exact_source_reprint_hold(false);
+        assert!(!projection.exact_source_reprint_hold());
         assert!(
             !projection.presentation_hold(),
             "the session's deterministic release removes the combined hold"

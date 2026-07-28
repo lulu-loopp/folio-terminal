@@ -19,6 +19,7 @@ const HEADLESS_HEIGHT: u32 = 1_000;
 const STALE_REPEAT_FRAMES: usize = 5;
 
 struct ReplayChunk<'a> {
+    sequence: u64,
     elapsed: Duration,
     bytes: &'a [u8],
     resize_before: Option<(NonZeroU32, NonZeroU32)>,
@@ -103,11 +104,20 @@ fn main() -> Result<()> {
         parse_chunks(&input, &fs::read_to_string(&chunks_path)?)?
     } else {
         vec![ReplayChunk {
+            sequence: 0,
             elapsed: Duration::ZERO,
             bytes: &input,
             resize_before: None,
         }]
     };
+    let stop_sequence = env::var("BT_ZOOM_PERF_STOP_SEQUENCE")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .context("BT_ZOOM_PERF_STOP_SEQUENCE must be an integer")
+        })
+        .transpose()?;
 
     let started = Instant::now();
     let mut session = DualPlaneSession::new(columns, rows);
@@ -115,6 +125,9 @@ fn main() -> Result<()> {
     let engine = MathEngine::new();
     let mut last_elapsed = Duration::ZERO;
     for chunk in chunks {
+        if stop_sequence.is_some_and(|stop| chunk.sequence > stop) {
+            break;
+        }
         last_elapsed = chunk.elapsed;
         let observed_at = started + chunk.elapsed;
         let _ = session.finish_resize_if_quiescent(observed_at);
@@ -133,6 +146,7 @@ fn main() -> Result<()> {
     complete_pending_math(&mut session, &engine);
     session.refresh_projection(&mut projection);
     let steady_frame = session.viewport_frame(&mut projection)?;
+    print_geometry("steady", &steady_frame);
 
     let mut probe = pollster::block_on(HeadlessRenderProbe::new(
         HEADLESS_WIDTH,
@@ -145,9 +159,34 @@ fn main() -> Result<()> {
     }
     let base_dimensions = session.terminal().dimensions();
     let zoomed_dimensions = (
-        scale_dimension(base_dimensions.0, 5, 4),
-        scale_dimension(base_dimensions.1, 5, 4),
+        env_dimension("BT_ZOOM_PERF_TARGET_COLUMNS")?
+            .unwrap_or_else(|| scale_dimension(base_dimensions.0, 5, 4)),
+        env_dimension("BT_ZOOM_PERF_TARGET_ROWS")?
+            .unwrap_or_else(|| scale_dimension(base_dimensions.1, 5, 4)),
     );
+    let zoom_out_scale = env::var("BT_ZOOM_PERF_TARGET_SCALE")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<f64>()
+                .context("BT_ZOOM_PERF_TARGET_SCALE must be a number")
+        })
+        .transpose()?
+        .unwrap_or(0.8);
+    if let Some(rows) = env::var("BT_ZOOM_PERF_SCROLL_ROWS")
+        .ok()
+        .map(|value| {
+            value
+                .parse::<i32>()
+                .context("BT_ZOOM_PERF_SCROLL_ROWS must be an integer")
+        })
+        .transpose()?
+    {
+        projection.scroll_by_rows(rows);
+        session.refresh_projection(&mut projection);
+        let reviewed_frame = session.viewport_frame(&mut projection)?;
+        print_geometry("reviewed-steady", &reviewed_frame);
+    }
     eprintln!(
         "BT_ZOOM_PERF_SETUP case={} bytes={} frozen_rows={} base={}x{} zoomed={}x{} steady_math_blocks={} adapter={:?}",
         input_path
@@ -169,7 +208,7 @@ fn main() -> Result<()> {
     for index in 0..samples {
         let out = index % 2 == 0;
         let (scale, dimensions) = if out {
-            (0.8, zoomed_dimensions)
+            (zoom_out_scale, zoomed_dimensions)
         } else {
             (1.0, base_dimensions)
         };
@@ -242,6 +281,7 @@ fn run_zoom_sample(
     let projection_elapsed = started.elapsed();
     let started = Instant::now();
     let stale_frame = session.viewport_frame(projection)?;
+    print_geometry("stale", &stale_frame);
     let frame_build = started.elapsed();
     let started = Instant::now();
     let stale_render_sample = if render_frames {
@@ -278,6 +318,7 @@ fn run_zoom_sample(
     let fresh_projection = started.elapsed();
     let started = Instant::now();
     let fresh_frame = session.viewport_frame(projection)?;
+    print_geometry("fresh", &fresh_frame);
     let fresh_frame_build = started.elapsed();
     let started = Instant::now();
     let fresh_render_sample = if render_frames {
@@ -499,6 +540,46 @@ fn parse_dimension(value: Option<&str>, name: &str) -> Result<NonZeroU32> {
     NonZeroU32::new(value).with_context(|| format!("{name} must be non-zero"))
 }
 
+fn env_dimension(name: &str) -> Result<Option<NonZeroU32>> {
+    env::var(name)
+        .ok()
+        .map(|value| {
+            let value = value
+                .parse::<u32>()
+                .with_context(|| format!("{name} must be an integer"))?;
+            NonZeroU32::new(value).with_context(|| format!("{name} must be non-zero"))
+        })
+        .transpose()
+}
+
+fn print_geometry(stage: &str, frame: &bt_viewport::ViewportFrame) {
+    if env::var_os("BT_ZOOM_PERF_GEOMETRY").is_none() {
+        return;
+    }
+    eprintln!(
+        "BT_ZOOM_GEOMETRY stage={stage} rows={} scroll_offset={} blocks={}",
+        frame.rows,
+        frame.scroll_offset_rows,
+        frame.math_blocks.len()
+    );
+    for block in &frame.math_blocks {
+        eprintln!(
+            "BT_ZOOM_GEOMETRY stage={stage} source={:?} display={:?} top={} content_off={} clip_h={} art_h={} scale={} clip_top={} clip_bottom={} occluded={} band={:?}",
+            block.source.chars().take(40).collect::<String>(),
+            block.display,
+            block.top_subpixels,
+            block.content_offset_subpixels,
+            block.clip_height_subpixels,
+            block.artifact.height_subpixels,
+            block.artifact.render_scale_milli,
+            block.clipped_top_rows,
+            block.clipped_bottom_rows,
+            block.occluded_source_rows,
+            block.anchor,
+        );
+    }
+}
+
 fn scale_dimension(value: NonZeroU32, numerator: u32, denominator: u32) -> NonZeroU32 {
     let scaled = value
         .get()
@@ -570,6 +651,7 @@ fn parse_chunks<'a>(input: &'a [u8], manifest: &str) -> Result<Vec<ReplayChunk<'
             format!("chunk manifest line {} exceeds input bytes", line_index + 1)
         })?;
         chunks.push(ReplayChunk {
+            sequence,
             elapsed,
             bytes,
             resize_before: pending_resize.take(),
