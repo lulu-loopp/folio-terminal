@@ -1083,11 +1083,24 @@ impl DualPlaneSession {
         // tracing every unrelated frame for the remainder of the session.
         self.resize_trace_post_end_frames_remaining = Some(16);
         self.resize_epoch.mark_quiescent();
-        // The transaction is over: fresh detection is authoritative again, so drop any primary
-        // formulas still held off-band whose exact source never reappeared on the reflowed grid.
-        // (Alternate keeps its queue across repaints, so it is left untouched.)
+        // The transaction is over: fresh detection is authoritative again, so drop ordinary
+        // primary holds whose exact source never reappeared on the reflowed grid. A stale-pending
+        // DPI-transition record is different: its old-DPI raster is the in-flight relayout witness,
+        // and Codex's byte-identical clean reprint can arrive just after this quiescence edge. Keep
+        // that bounded, off-band witness until exact-source re-anchoring installs it or a hard
+        // lifecycle boundary retires it; it is never painted while unmatched. Clearing it here made
+        // quiescence itself masquerade as the fresh-raster completion event and exposed source
+        // through the remaining worker interval (the zoom-end flash). Width-only resize rasters
+        // retain the established quiescence release: extending those holds creates extra transition
+        // occurrences in ordinary resize/reflow recordings without helping a DPI zoom.
+        // (Alternate keeps its whole queue across repaints, so it is left untouched.)
         if self.live_screen == ScreenId::Primary {
-            self.offscreen_decorations.clear();
+            self.offscreen_decorations.retain(|record| {
+                record.artifact.is_none()
+                    && record.stale_artifact.as_ref().is_some_and(|stale| {
+                        stale.rendered_layout.dpi_milli != record.layout.dpi_milli
+                    })
+            });
         }
         self.schedule_existing_artifacts();
         Ok(true)
@@ -7439,6 +7452,80 @@ mod tests {
         assert!(
             scales.iter().all(|scale| *scale == 1000),
             "the fresh raster renders at native readable scale: {scales:?}"
+        );
+    }
+
+    #[test]
+    fn zoom_quiescence_does_not_release_stale_formula_before_a_late_clean_reprint() {
+        // Real-machine zoom-end regression (2026-07-28): the resize-side clear can arrive while the
+        // resize epoch is active, but Codex's clean transcript reprint can land only after the
+        // quiescence edge. The old-DPI raster is already demoted to stale and its fresh bt-math
+        // relayout is still off-thread. Releasing the resize preservation queue at quiescence drops
+        // the only exact-source witness; the late, byte-identical reprint then exposes source until
+        // the delayed relayout completes.
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(24));
+        let transcript = b"intro line here\r\n$$x$$\r\nmid line\r\n$$y$$\r\nbarrier";
+        session.feed_at(transcript, start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            2
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+
+        let zoom_at = start + Duration::from_millis(210);
+        apply_zoom(&mut session, nz(52), nz(32), 14, nz(800), zoom_at);
+        zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+        let mut inflight = Vec::new();
+        while let Some(task) = session.take_live_worker_task() {
+            inflight.push(task);
+        }
+        assert_eq!(
+            inflight.len(),
+            2,
+            "both fresh-DPI relayouts are now off-thread"
+        );
+
+        // The clear half lands during the resize transaction. Its records cannot re-anchor yet
+        // because the replacement source is deliberately late, so they wait off-band while their
+        // fresh worker completions remain queued.
+        session
+            .feed_at(b"\x1b[H\x1b[2J\x1b[3J", zoom_at + Duration::from_millis(10))
+            .unwrap();
+        assert!(
+            session.has_pending_resize_relayout(),
+            "the fresh-DPI worker result is still delayed"
+        );
+        assert!(
+            !session.offscreen_decorations.is_empty(),
+            "the stale raster must wait off-band for the clean reprint"
+        );
+
+        // Resize silence wins the race. This edge must not discard a stale-pending exact-source
+        // witness merely because the corresponding reprint has not arrived yet.
+        let finish_at = zoom_at + Duration::from_millis(300);
+        assert!(session.finish_resize_if_quiescent(finish_at).unwrap());
+        assert!(
+            session.has_pending_resize_relayout(),
+            "quiescence is not the fresh-raster completion event"
+        );
+
+        // Codex now emits the exact same transcript. Before the fix this frame is Source: the
+        // quiescence edge cleared the off-band record, so only a new detection/render could recover.
+        session
+            .feed_at(transcript, finish_at + Duration::from_millis(10))
+            .unwrap();
+        let scales = zoom_frame_is_all_rendered(&mut session, &mut projection, 2);
+        assert!(
+            scales.iter().all(|scale| *scale == 800),
+            "the old raster remains scaled stale until the delayed fresh completion: {scales:?}"
+        );
+        assert_eq!(
+            inflight.len(),
+            2,
+            "both fresh completions remain deliberately delayed across the asserted gap"
         );
     }
 
