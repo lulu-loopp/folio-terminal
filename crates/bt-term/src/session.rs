@@ -1450,14 +1450,34 @@ impl DualPlaneSession {
                 row.settled_revision = Some(row.revision);
             }
         }
-        self.reconcile_live_image_paths(true, &stable);
+        self.schedule_live_artifacts(&stable)
+    }
+
+    /// Schedule new live-grid decoration records from rows which have already passed the ordinary
+    /// damage-derived stability window. The only additional gate is the terminal's current,
+    /// published-grid cursor fact: while DECTCEM exposes the cursor, the complete WRAPLINE-linked
+    /// logical line containing it is ineligible for a new image or math band.
+    ///
+    /// Existing records are deliberately outside this policy. Image occurrences are matched and
+    /// re-anchored before the creation gate below; live math preservation/projection likewise never
+    /// calls this method. A hidden cursor yields no suppressed line because full-screen TUIs often
+    /// hide it while painting non-input content.
+    fn schedule_live_artifacts(&mut self, stable: &[bool]) -> usize {
+        let image_tasks_before = self.local_image_path_tasks.len();
+        self.reconcile_live_image_paths(true, stable);
 
         let inputs = self.live_detection_context();
         let initial_context = self.live_initial_detection_context(&inputs);
-        let candidates = live_candidate_rows(&inputs, initial_context.clone(), &stable);
+        let candidates = live_candidate_rows(&inputs, initial_context.clone(), stable);
         let context_signature = live_detection_context_signature(&inputs);
+        let suppressed_line = self.visible_cursor_logical_line();
         let mut new_tasks = Vec::new();
         for candidate_row in candidates {
+            if suppressed_line
+                .is_some_and(|(start, end)| start <= candidate_row && candidate_row <= end)
+            {
+                continue;
+            }
             let signature = live_detection_signature(context_signature, candidate_row);
             let state = &mut self.live_rows[candidate_row as usize];
             if state.candidate_signature == Some(signature) {
@@ -1502,6 +1522,18 @@ impl DualPlaneSession {
             new_tasks.push(task);
         }
         resolve_live_detection_tasks(&mut new_tasks);
+        new_tasks.retain(|task| {
+            let suppressed = task.resolved
+                && suppressed_line.is_some_and(|(start, end)| {
+                    ranges_intersect(task.start.row, task.end.row, start, end)
+                });
+            if suppressed && let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
+                // Cursor movement does not damage the source row. Leave the signature open so the
+                // next published frame can schedule this already-settled candidate immediately.
+                state.candidate_signature = None;
+            }
+            !suppressed
+        });
         let scheduled = new_tasks.len();
         for task in new_tasks {
             self.enqueue_live_task(task);
@@ -1513,7 +1545,58 @@ impl DualPlaneSession {
                 self.live_detection_count, self.live_invalidation_count
             );
         }
-        scheduled
+        scheduled.saturating_add(
+            self.local_image_path_tasks
+                .len()
+                .saturating_sub(image_tasks_before),
+        )
+    }
+
+    /// Inclusive physical-row bounds for the visible cursor's logical line. `CapturedRow::continues`
+    /// is the vendor WRAPLINE fact for "this row continues into the next"; walking it in both
+    /// directions makes a cursor on either half of a soft-wrapped input suppress the whole line.
+    fn visible_cursor_logical_line(&self) -> Option<(u32, u32)> {
+        let cursor = self.terminal.cursor();
+        let row_count = u32::try_from(self.live_rows.len()).unwrap_or(u32::MAX);
+        if !cursor.visible || cursor.row >= row_count {
+            return None;
+        }
+
+        let mut start = cursor.row;
+        while start > 0
+            && self
+                .terminal
+                .visible_row(start - 1)
+                .is_some_and(|row| row.continues)
+        {
+            start -= 1;
+        }
+
+        let mut end = cursor.row;
+        while end.saturating_add(1) < row_count
+            && self
+                .terminal
+                .visible_row(end)
+                .is_some_and(|row| row.continues)
+        {
+            end += 1;
+        }
+        Some((start, end))
+    }
+
+    fn new_live_decoration_is_cursor_suppressed(&self, task: &LiveDetectionTask) -> bool {
+        let replaces_existing = self.live_decorations.values().any(|record| {
+            record.screen == task.screen
+                && record.start == task.start
+                && record.end == task.end
+                && record.span.original_source == task.span.original_source
+        });
+        !replaces_existing
+            && self
+                .visible_cursor_logical_line()
+                .is_some_and(|(start, end)| {
+                    ranges_intersect(task.start.row, task.end.row, start, end)
+                })
     }
 
     fn live_detection_context(&self) -> Arc<[LiveDetectionInput]> {
@@ -2778,6 +2861,15 @@ impl DualPlaneSession {
             self.live_decorations.remove(&task.start.row);
             return true;
         }
+        if self.new_live_decoration_is_cursor_suppressed(&task) {
+            if let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
+                // The task was valid, but presentation policy rejected creating its record at this
+                // cursor state. Keep the stable row eligible for the first frame after the cursor
+                // leaves its WRAPLINE-linked logical line.
+                state.candidate_signature = None;
+            }
+            return true;
+        }
         let preference_key = MathSourcePreferenceKey::from_span(&task.span);
         let show_source = self
             .math_source_preferences
@@ -3137,13 +3229,22 @@ impl DualPlaneSession {
         if self.primary_parked || !self.resize_epoch.decorations_allowed() {
             return 0;
         }
+        // Cursor-only movement does not damage a row and therefore has no stability deadline of its
+        // own. Revisit already-settled live candidates at every actual frame boundary so leaving a
+        // logical input line unlocks it deterministically, without an input-event guess or timer.
+        let stable = self
+            .live_rows
+            .iter()
+            .map(|row| row.settled_revision == Some(row.revision))
+            .collect::<Vec<_>>();
+        let live_scheduled = self.schedule_live_artifacts(&stable);
         // Deferred re-arm of blocks stranded at `Pending` by a dropped completion. The resize epoch
         // is idle here (guard above); `rearm_stranded_pending` adds the remaining quiescence
         // requirements before flipping any candidate back to `None` for the scan loop below.
         self.rearm_stranded_pending();
         let columns = frame.columns.get() as usize;
         if columns == 0 {
-            return 0;
+            return live_scheduled;
         }
         let visible = frame
             .cell_anchors
@@ -3154,7 +3255,7 @@ impl DualPlaneSession {
             })
             .collect::<BTreeSet<_>>();
         if visible.is_empty() {
-            return 0;
+            return live_scheduled;
         }
 
         let mut candidates = visible
@@ -3190,7 +3291,7 @@ impl DualPlaneSession {
         for id in candidates {
             self.schedule_scan(id);
         }
-        self.frozen_detection_count.saturating_sub(before) as usize
+        live_scheduled.saturating_add(self.frozen_detection_count.saturating_sub(before) as usize)
     }
 
     pub fn set_view_selection(&mut self, selection: Option<ViewSelection>) {
@@ -4560,7 +4661,14 @@ impl DualPlaneSession {
                         generation,
                     },
                 );
-            } else if create_and_retire && candidate.stable {
+            } else if create_and_retire
+                && candidate.stable
+                && !self
+                    .visible_cursor_logical_line()
+                    .is_some_and(|(start, end)| {
+                        ranges_intersect(candidate.start.row, candidate.end.row, start, end)
+                    })
+            {
                 let occurrence = self.register_local_image_path(
                     candidate.path,
                     candidate.source_text,
@@ -6278,6 +6386,10 @@ fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetec
     })
 }
 
+fn ranges_intersect(left_start: u32, left_end: u32, right_start: u32, right_end: u32) -> bool {
+    left_start <= right_end && right_start <= left_end
+}
+
 /// Frozen transcript rows this occurrence's opener/body already committed to scrollback, ordered
 /// top to bottom. These are the leading `MathSourceLine::Transcript` segments of a boundary-split
 /// block; an ordinary all-live occurrence yields an empty prefix. Consecutive segments on one
@@ -7786,6 +7898,10 @@ mod tests {
             .get()
             .saturating_mul(i64::from(DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI))
             / 1000
+    }
+
+    fn hide_cursor(session: &mut DualPlaneSession, observed_at: Instant) {
+        session.feed_at(b"\x1b[?25l", observed_at).unwrap();
     }
 
     fn mapping_inputs(rows: &[&str]) -> Vec<LiveDetectionInput> {
@@ -9307,6 +9423,7 @@ mod tests {
         session
             .feed_at(b"\x1b[?1049h```text\r\n$$x$$\r\n$$y$$", start)
             .unwrap();
+        hide_cursor(&mut session, start);
 
         assert_eq!(
             session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL),
@@ -9337,6 +9454,7 @@ mod tests {
                 start,
             )
             .unwrap();
+        hide_cursor(&mut session, start);
         assert!(
             !session.alternate_detection_context.is_neutral(),
             "the removed opener must remain the exact state before visible row 0"
@@ -9407,6 +9525,7 @@ mod tests {
             session
                 .feed_at(format!("\x1b[?1049h{source}").as_bytes(), start)
                 .unwrap();
+            hide_cursor(&mut session, start);
             assert!(
                 session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
                 "{source} was not scheduled"
@@ -9435,6 +9554,7 @@ mod tests {
                     start,
                 )
                 .unwrap();
+            hide_cursor(&mut session, start);
             assert!(
                 session.alternate_detection_context.is_neutral(),
                 "ordinary removed rows leave a proven-neutral prefix: {source}"
@@ -9465,6 +9585,7 @@ mod tests {
         session
             .feed_at(b"```rust\r\nfrozen-inside\r\n$$x$$", start)
             .unwrap();
+        hide_cursor(&mut session, start);
         assert!(
             session
                 .document
@@ -9502,6 +9623,7 @@ mod tests {
                 .collect::<String>();
             long.feed_at(format!("{prefix}{source}").as_bytes(), start)
                 .unwrap();
+            hide_cursor(&mut long, start);
             assert!(
                 long.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
                 "long-history candidate was not scheduled: {source}"
@@ -9521,6 +9643,7 @@ mod tests {
                     start,
                 )
                 .unwrap();
+            hide_cursor(&mut tombstoned, start);
             assert!(!tombstoned.transcript.tombstones().is_empty());
             assert!(
                 tombstoned.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
@@ -9546,6 +9669,7 @@ mod tests {
         session
             .feed_at(b"\x1b[2J\x1b[H$$x^2$$", start + Duration::from_millis(10))
             .unwrap();
+        hide_cursor(&mut session, start + Duration::from_millis(10));
         assert_eq!(
             session.advance_live_stability(start + Duration::from_millis(210)),
             1
@@ -9574,6 +9698,7 @@ mod tests {
         for columns in [40, 5] {
             let mut session = DualPlaneSession::new(nz(columns), nz(4));
             session.feed_at(b"$$x+y$$", start).unwrap();
+            hide_cursor(&mut session, start);
             assert!(
                 session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL) >= 1,
                 "width {columns} did not schedule a delimiter candidate"
@@ -9694,6 +9819,7 @@ mod tests {
                 start + Duration::from_millis(220),
             )
             .unwrap();
+        hide_cursor(&mut session, start + Duration::from_millis(220));
         assert_eq!(
             session.advance_live_stability(start + Duration::from_millis(420)),
             1
@@ -10252,6 +10378,7 @@ mod tests {
         session
             .feed_at(b"\x1b[1;1H\x1b[2K$$x$$", start + Duration::from_millis(10))
             .unwrap();
+        hide_cursor(&mut session, start + Duration::from_millis(10));
         assert_eq!(
             session.advance_live_stability(start + Duration::from_millis(210)),
             1
@@ -11343,6 +11470,7 @@ mod tests {
         session
             .feed_at(b"\x1b[?1049h$$\r\nx + y\r\n$$", start)
             .unwrap();
+        hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
             complete_detected_live_tasks(&mut session, synthetic_raster(80, 70)),
@@ -11378,6 +11506,7 @@ mod tests {
 
         let mut tiny = DualPlaneSession::new(nz(40), nz(1));
         tiny.feed_at(b"$$tiny$$", start).unwrap();
+        hide_cursor(&mut tiny, start);
         tiny.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
             complete_detected_live_tasks(&mut tiny, synthetic_raster(40, 40)),
@@ -11395,6 +11524,7 @@ mod tests {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(16), nz(12));
         session.feed_at(b"$$x^2$$", start).unwrap();
+        hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
             complete_detected_live_tasks(&mut session, synthetic_raster(400, 18)),
@@ -11709,6 +11839,7 @@ mod tests {
                 start,
             )
             .unwrap();
+        hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
             complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
@@ -11768,6 +11899,7 @@ mod tests {
                 start,
             )
             .unwrap();
+        hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
             complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
@@ -11819,6 +11951,7 @@ mod tests {
                 start,
             )
             .unwrap();
+        hide_cursor(&mut session, start);
         session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
         assert_eq!(
             complete_detected_live_tasks(&mut session, synthetic_raster(40, 54)),
@@ -12812,6 +12945,238 @@ mod tests {
         });
     }
 
+    fn feed_ascii_one_byte_at_a_time(
+        session: &mut DualPlaneSession,
+        text: &str,
+        started: Instant,
+    ) -> Instant {
+        let mut observed_at = started;
+        for byte in text.bytes() {
+            session.feed_at(&[byte], observed_at).unwrap();
+            observed_at += Duration::from_millis(1);
+        }
+        observed_at
+    }
+
+    #[test]
+    fn visible_cursor_input_line_suppresses_new_path_and_math_until_enter() {
+        let (directory, path) = temporary_path_image();
+        let started = Instant::now();
+
+        let mut image = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut image);
+        let image_line = format!("[Image: source: \"{}\"]", path.display());
+        let image_typed_at = feed_ascii_one_byte_at_a_time(&mut image, &image_line, started);
+        assert_eq!(image.visible_cursor_logical_line(), Some((0, 0)));
+        assert_eq!(
+            image.advance_live_stability(image_typed_at + LIVE_MATH_STABLE_INTERVAL),
+            0
+        );
+        assert!(image.inline_images.is_empty());
+        assert!(image.take_decoration_worker_task().is_none());
+
+        let image_entered_at = image_typed_at + LIVE_MATH_STABLE_INTERVAL;
+        image.feed_at(b"\r\nPS> ", image_entered_at).unwrap();
+        assert_eq!(image.visible_cursor_logical_line(), Some((1, 1)));
+        assert_eq!(
+            image.advance_live_stability(image_entered_at + LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        assert_eq!(image.inline_images.len(), 1);
+        assert!(matches!(
+            image.take_decoration_worker_task(),
+            Some(SessionDecorationTask::InlineImage(_))
+        ));
+
+        let mut math = DualPlaneSession::new(nz(80), nz(8));
+        let math_typed_at = feed_ascii_one_byte_at_a_time(&mut math, "$$x+1$$", started);
+        assert_eq!(math.visible_cursor_logical_line(), Some((0, 0)));
+        assert_eq!(
+            math.advance_live_stability(math_typed_at + LIVE_MATH_STABLE_INTERVAL),
+            0
+        );
+        assert!(math.live_decorations.is_empty());
+        assert!(math.take_live_worker_task().is_none());
+
+        let math_entered_at = math_typed_at + LIVE_MATH_STABLE_INTERVAL;
+        math.feed_at(b"\r\nPS> ", math_entered_at).unwrap();
+        assert_eq!(
+            math.advance_live_stability(math_entered_at + LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut math, synthetic_raster(32, 18)),
+            1
+        );
+        assert_eq!(math.live_decorations.len(), 1);
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn soft_wrapped_path_is_suppressed_when_cursor_is_on_its_lower_half() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(20), nz(12));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        let typed_at = feed_ascii_one_byte_at_a_time(&mut session, &line, started);
+        let cursor = session.terminal.cursor();
+        let logical_line = session.visible_cursor_logical_line().unwrap();
+        assert_eq!(logical_line.0, 0);
+        assert_eq!(logical_line.1, cursor.row);
+        assert!(cursor.row > 0, "fixture must soft-wrap onto a lower row");
+        let stable = vec![true; session.live_rows.len()];
+        let candidate = session.detected_live_image_paths(&stable).remove(0);
+        assert!(candidate.start.row < cursor.row);
+        assert!(candidate.end.row <= cursor.row);
+
+        session.advance_live_stability(typed_at + LIVE_MATH_STABLE_INTERVAL);
+        assert!(session.inline_images.is_empty());
+        assert!(session.take_decoration_worker_task().is_none());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn alternate_bottom_input_path_is_suppressed_while_output_path_renders() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        session
+            .feed_at(
+                format!("\x1b[?1049h{line}\x1b[8;1H{line}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(session.visible_cursor_logical_line(), Some((7, 7)));
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        assert_eq!(session.inline_images.len(), 1);
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("the upper output path must enqueue");
+        };
+        let record = session.inline_images.get(&task.occurrence_id).unwrap();
+        let InlineImageRecordKind::LocalPath { start_anchor, .. } = record.kind else {
+            panic!("expected a local path record");
+        };
+        assert!(matches!(
+            session.document.anchor(start_anchor).unwrap(),
+            ContentAnchor::Live {
+                point: GridPoint { row: 0, .. },
+                ..
+            }
+        ));
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(session.complete_inline_image_result(task, result));
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(frame.math_blocks.iter().any(|placement| matches!(
+            placement.artifact.kind,
+            bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+        )));
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn alternate_repaint_cursor_crossing_keeps_an_existing_math_band() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session
+            .feed_at(b"\x1b[?1049h$$x$$\r\nprompt", started)
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+            1
+        );
+        let occurrence = session
+            .live_decorations
+            .values()
+            .next()
+            .unwrap()
+            .identity
+            .occurrence_id;
+
+        session
+            .feed_at(
+                b"\x1b[?2026h\x1b[2J\x1b[H$$x$$\x1b[?2026l",
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert_eq!(session.visible_cursor_logical_line(), Some((0, 0)));
+        assert_eq!(session.live_decorations.len(), 1);
+        let record = session.live_decorations.values().next().unwrap();
+        assert_eq!(record.identity.occurrence_id, occurrence);
+        assert!(record.artifact.is_some());
+        let mut projection = session.new_projection(session.layout_key());
+        assert_eq!(
+            session
+                .viewport_frame(&mut projection)
+                .unwrap()
+                .math_blocks
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn worker_completion_rechecks_cursor_line_before_creating_a_record() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session.feed_at(b"$$x$$\r\nprompt", started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let mut task = session.take_live_worker_task().unwrap();
+        assert!(resolve_live_detection_task(&mut task));
+
+        session
+            .feed_at(b"\x1b[1;1H", started + LIVE_MATH_STABLE_INTERVAL)
+            .unwrap();
+        assert!(session.complete_live_worker_result(task, Ok(synthetic_raster(32, 18))));
+        assert!(session.live_decorations.is_empty());
+        assert_eq!(session.live_rows[0].candidate_signature, None);
+
+        session
+            .feed_at(
+                b"\x1b[2;1H",
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert!(
+            session.advance_live_stability(
+                started + LIVE_MATH_STABLE_INTERVAL * 2 + Duration::from_millis(1)
+            ) >= 1
+        );
+        assert!(session.take_live_worker_task().is_some());
+    }
+
+    #[test]
+    fn hidden_cursor_does_not_suppress_full_screen_tui_math() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session.feed_at(b"$$x$$\x1b[?25l", started).unwrap();
+        assert_eq!(session.visible_cursor_logical_line(), None);
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+            1
+        );
+    }
+
     #[test]
     fn local_path_image_keeps_source_text_and_appends_a_worker_decoded_band() {
         let (directory, path) = temporary_path_image();
@@ -12819,7 +13184,9 @@ mod tests {
         enable_path_detection(&mut session);
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
-        session.feed_at(line.as_bytes(), started).unwrap();
+        session
+            .feed_at(format!("{line}\r\nprompt").as_bytes(), started)
+            .unwrap();
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -12889,7 +13256,9 @@ mod tests {
             started.elapsed().as_nanos()
         ));
         let line = format!("[Image: source: \"{}\"]", missing.display());
-        session.feed_at(line.as_bytes(), started).unwrap();
+        session
+            .feed_at(format!("{line}\r\nprompt").as_bytes(), started)
+            .unwrap();
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -12942,7 +13311,7 @@ mod tests {
         enable_path_detection(&mut session);
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
-        let enter = format!("\u{1b}[?1049h{line}");
+        let enter = format!("\u{1b}[?1049h{line}\r\nprompt");
         session.feed_at(enter.as_bytes(), started).unwrap();
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         let SessionDecorationTask::InlineImage(task) =
@@ -12989,7 +13358,7 @@ mod tests {
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         session
-            .feed_at(format!("{line}\r\n{line}").as_bytes(), started)
+            .feed_at(format!("{line}\r\n{line}\r\nprompt").as_bytes(), started)
             .unwrap();
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         let mut decoder = crate::inline_image::InlineImageDecoder::default();

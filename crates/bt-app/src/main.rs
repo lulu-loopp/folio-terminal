@@ -3193,7 +3193,7 @@ mod tests {
         let start = Instant::now();
         let mut session =
             DualPlaneSession::new(NonZeroU32::new(40).unwrap(), NonZeroU32::new(2).unwrap());
-        session.feed_at(b"$$x$$", start).unwrap();
+        session.feed_at(b"$$x$$\x1b[?25l", start).unwrap();
         assert_eq!(
             session.advance_live_stability(start + bt_term::LIVE_MATH_STABLE_INTERVAL),
             1
