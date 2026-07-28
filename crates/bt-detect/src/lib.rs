@@ -1481,12 +1481,19 @@ fn restore_stripped_environment_newlines(
         if !matches!(
             environment.name.as_str(),
             "array"
+                | "align"
+                | "align*"
+                | "alignat"
+                | "alignat*"
+                | "flalign"
+                | "flalign*"
                 | "matrix"
                 | "pmatrix"
                 | "bmatrix"
                 | "Bmatrix"
                 | "vmatrix"
                 | "Vmatrix"
+                | "smallmatrix"
                 | "cases"
                 | "aligned"
                 | "alignedat"
@@ -3197,6 +3204,14 @@ mod tests {
                 r"\end{aligned}"
             )
         );
+
+        let inline = r"$$\begin{align}a&=b\c&=d\end{align}$$";
+        let detected = detect_math_blocks_with_options([(TranscriptId(1), inline)], options);
+        assert_eq!(detected.len(), 1);
+        assert_eq!(
+            detected[0].span.render_source,
+            r"\begin{align}a&=b\c&=d\end{align}"
+        );
     }
 
     #[test]
@@ -3302,6 +3317,54 @@ abla f",
                 detected[0].span.render_source
             );
         }
+    }
+
+    #[test]
+    fn stripped_single_line_separator_is_restored_in_all_tabular_math_environments() {
+        for environment in [
+            "smallmatrix",
+            "vmatrix",
+            "cases",
+            "aligned",
+            "align",
+            "align*",
+            "alignat",
+            "alignat*",
+            "flalign",
+            "flalign*",
+        ] {
+            let source = format!(r"$$\begin{{{environment}}}a&b\c&d\end{{{environment}}}$$");
+            let detected = detect_math_blocks([(TranscriptId(1), source.as_str())]);
+            assert_eq!(detected.len(), 1, "{environment}");
+            assert_eq!(
+                detected[0].span.original_source, source,
+                "{environment}: source bytes changed"
+            );
+            assert!(
+                detected[0].span.render_source.contains(r"a&b\\c&d"),
+                "{environment}: {}",
+                detected[0].span.render_source
+            );
+        }
+
+        let nested = r"$$\begin{aligned}A&=\begin{vmatrix}a&b\c&d\end{vmatrix}\x&=y\end{aligned}$$";
+        let detected = detect_math_blocks([(TranscriptId(1), nested)]);
+        assert_eq!(detected.len(), 1);
+        assert_eq!(
+            detected[0].span.render_source,
+            r"\begin{aligned}A&=\begin{vmatrix}a&b\\c&d\end{vmatrix}\\x&=y\end{aligned}"
+        );
+
+        let restored = restore_stripped_environment_newlines(
+            r"\begin{smallmatrix}a&b\c&d\end{smallmatrix}",
+            true,
+            true,
+        );
+        assert_eq!(
+            restore_stripped_environment_newlines(&restored, true, true),
+            restored,
+            "inline recovery must be idempotent"
+        );
     }
 
     #[test]
