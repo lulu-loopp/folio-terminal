@@ -170,6 +170,11 @@ impl CellMetrics {
         NonZeroI64::new(value.max(1)).expect("cell height is clamped above zero")
     }
 
+    pub fn cell_width_subpixels(&self) -> NonZeroI64 {
+        let value = (self.cell_width_px * SUBPIXELS_PER_PX as f32).round() as i64;
+        NonZeroI64::new(value.max(1)).expect("cell width is clamped above zero")
+    }
+
     pub fn ascii_baseline_subpixels(&self) -> NonZeroI64 {
         let value = (self.ascii_baseline_px * SUBPIXELS_PER_PX as f32).round() as i64;
         NonZeroI64::new(value.max(1)).expect("measured ASCII baseline is above zero")
@@ -1318,6 +1323,7 @@ pub struct RenderProbeSample {
     pub shape_cache_miss: Duration,
     pub atlas_prepare_upload: Duration,
     pub encode_submit: Duration,
+    pub math_prepare_upload: Duration,
     pub rows_reshaped: u64,
     pub row_cache_hits: u64,
     pub row_cache_misses: u64,
@@ -1331,6 +1337,10 @@ pub struct RenderProbeSample {
     pub wide_evictions: u64,
     pub narrow_resident_bytes: usize,
     pub wide_resident_bytes: usize,
+    pub math_texture_uploads: u64,
+    pub math_texture_upload_bytes: usize,
+    pub math_texture_evictions: u64,
+    pub math_texture_resident_bytes: usize,
     /// glyphon 0.12 exposes no atlas occupancy or mutation counters. These remain `None` rather
     /// than converting requested glyphs or elapsed time into invented hit/upload estimates.
     pub atlas_hits: Option<u64>,
@@ -1353,6 +1363,10 @@ pub struct HeadlessRenderProbe {
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     status_text_renderer: TextRenderer,
+    math_bind_group_layout: wgpu::BindGroupLayout,
+    math_sampler: wgpu::Sampler,
+    math_textures: ByteLru<String, CachedMathTexture>,
+    math_texture_evictions: u64,
     metrics: CellMetrics,
     text_rows: Vec<Arc<ComposedRow>>,
     status_overlay: Option<Arc<ComposedRow>>,
@@ -1401,6 +1415,7 @@ impl HeadlessRenderProbe {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let status_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let (_, math_bind_group_layout, math_sampler) = create_math_pipeline(&device, format);
         let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("BetterTerminal replay probe target"),
             size: wgpu::Extent3d {
@@ -1424,6 +1439,10 @@ impl HeadlessRenderProbe {
             atlas,
             text_renderer,
             status_text_renderer,
+            math_bind_group_layout,
+            math_sampler,
+            math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
+            math_texture_evictions: 0,
             metrics,
             text_rows: Vec::new(),
             status_overlay: None,
@@ -1445,6 +1464,18 @@ impl HeadlessRenderProbe {
 
     pub fn max_texture_dimension_2d(&self) -> u32 {
         self.max_texture_dimension_2d
+    }
+
+    pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
+        self.metrics = CellMetrics::measure(&mut self.font_system, scale_factor)?;
+        self.text_rows.clear();
+        self.status_overlay = None;
+        self.composed_row_cache.clear();
+        self.font_revision = self.font_revision.saturating_add(1);
+        self.narrow_shaping_cache.clear();
+        self.wide_shaping_cache.clear();
+        self.math_textures.clear();
+        Ok(self.metrics)
     }
 
     pub fn prepare_frame(
@@ -1500,6 +1531,9 @@ impl HeadlessRenderProbe {
         )
         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
         let atlas_prepared_at = Instant::now();
+        let math_evictions_before = self.math_texture_evictions;
+        let (math_texture_uploads, math_texture_upload_bytes) = self.prepare_math_textures(frame);
+        let math_prepared_at = Instant::now();
         let view = self.target.create_view(&Default::default());
         let mut encoder = self
             .device
@@ -1537,7 +1571,8 @@ impl HeadlessRenderProbe {
             row_compose: text_stats.elapsed,
             shape_cache_miss: text_stats.narrow.miss_time + text_stats.wide.miss_time,
             atlas_prepare_upload: atlas_prepared_at - rows_prepared_at,
-            encode_submit: submitted_at - atlas_prepared_at,
+            encode_submit: submitted_at - math_prepared_at,
+            math_prepare_upload: math_prepared_at - atlas_prepared_at,
             rows_reshaped: text_stats.rows_reshaped,
             row_cache_hits: text_stats.row_cache.hits,
             row_cache_misses: text_stats.row_cache.misses,
@@ -1551,6 +1586,12 @@ impl HeadlessRenderProbe {
             wide_evictions: text_stats.wide.evictions,
             narrow_resident_bytes: text_stats.narrow.resident_bytes,
             wide_resident_bytes: text_stats.wide.resident_bytes,
+            math_texture_uploads,
+            math_texture_upload_bytes,
+            math_texture_evictions: self
+                .math_texture_evictions
+                .saturating_sub(math_evictions_before),
+            math_texture_resident_bytes: self.math_textures.resident_bytes(),
             atlas_hits: None,
             atlas_misses: None,
             atlas_grows: None,
@@ -1567,6 +1608,96 @@ impl HeadlessRenderProbe {
                 .map(|row| row.wide_glyphs.len() as u64)
                 .sum(),
         })
+    }
+
+    fn prepare_math_textures(&mut self, frame: &ViewportFrame) -> (u64, usize) {
+        let mut uploads = 0_u64;
+        let mut upload_bytes = 0_usize;
+        for placement in &frame.math_blocks {
+            if placement.display == MathBlockDisplay::Source {
+                continue;
+            }
+            let key = &placement.artifact.key;
+            if self.math_textures.get(key).is_some() {
+                continue;
+            }
+            let Some(texture) = self.upload_math_texture(&placement.artifact) else {
+                continue;
+            };
+            uploads = uploads.saturating_add(1);
+            upload_bytes = upload_bytes.saturating_add(placement.artifact.rgba.len());
+            let (_, evictions) =
+                self.math_textures
+                    .insert(key.clone(), texture, placement.artifact.rgba.len());
+            self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+        }
+        (uploads, upload_bytes)
+    }
+
+    fn upload_math_texture(
+        &self,
+        artifact: &bt_viewport::ProjectedMathArtifact,
+    ) -> Option<CachedMathTexture> {
+        let expected = artifact.width_px as usize * artifact.height_px as usize * 4;
+        if artifact.width_px == 0 || artifact.height_px == 0 || artifact.rgba.len() != expected {
+            return None;
+        }
+        let tile_limit = self.max_texture_dimension_2d.max(1);
+        let mut tiles = Vec::new();
+        for y in (0..artifact.height_px).step_by(tile_limit as usize) {
+            let height = (artifact.height_px - y).min(tile_limit);
+            for x in (0..artifact.width_px).step_by(tile_limit as usize) {
+                let width = (artifact.width_px - x).min(tile_limit);
+                let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
+                for row in y..y + height {
+                    let start = (row as usize * artifact.width_px as usize + x as usize) * 4;
+                    let end = start + width as usize * 4;
+                    bytes.extend_from_slice(&artifact.rgba[start..end]);
+                }
+                let texture = self.device.create_texture_with_data(
+                    &self.queue,
+                    &wgpu::TextureDescriptor {
+                        label: Some("headless math block texture tile"),
+                        size: wgpu::Extent3d {
+                            width,
+                            height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    },
+                    wgpu::util::TextureDataOrder::LayerMajor,
+                    &bytes,
+                );
+                let view = texture.create_view(&Default::default());
+                let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("headless math block texture bind group"),
+                    layout: &self.math_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.math_sampler),
+                        },
+                    ],
+                });
+                tiles.push(MathTextureTile {
+                    bind_group,
+                    x_px: x,
+                    y_px: y,
+                    width_px: width,
+                    height_px: height,
+                });
+            }
+        }
+        Some(CachedMathTexture { tiles })
     }
 }
 

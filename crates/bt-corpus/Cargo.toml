@@ -27,5 +27,9 @@ path = "src/bin/bt-record.rs"
 name = "bt-replay"
 path = "src/bin/bt-replay.rs"
 
+[[bin]]
+name = "bt-zoom-perf"
+path = "src/bin/bt-zoom-perf.rs"
+
 [lints]
 workspace = true

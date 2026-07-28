@@ -13,6 +13,10 @@ pub use adapter::{
     TerminalModes,
 };
 pub use bt_detect::DetectionTask;
+#[doc(hidden)]
+pub use bt_doc::LayoutKey;
+#[doc(hidden)]
+pub use bt_math::MathEngine;
 pub use diagnostics::{
     FormulaFlashOracle, FormulaFrameObservation, FormulaFrameState, observe_formula_frame,
 };
