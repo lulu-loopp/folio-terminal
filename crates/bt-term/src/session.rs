@@ -566,16 +566,6 @@ pub struct DualPlaneSession {
     math_layout_options: MathLayoutOptions,
     live_screen: ScreenId,
     cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
-    /// Published logical lines currently covered by the positional edit gate. At most the cursor
-    /// line plus CUP's preceding-nonblank extension, hence bounded by the live grid.
-    active_edit_taints: Vec<LiveEditTaint>,
-    /// Submitted edit-line instances still resident in the live grid. Overlapping entries replace
-    /// each other, so this is bounded by the physical row count.
-    committed_live_edit_taints: Vec<LiveEditTaint>,
-    /// Removed tainted rows awaiting logical-line finalization. Transcript staging quota bounds it.
-    edit_tainted_staging: BTreeMap<StagingId, EditTaintedRow>,
-    /// Durable edit-line identities. Pruned with transcript eviction/clear, so frozen quota bounds it.
-    edit_tainted_transcript: BTreeSet<TranscriptId>,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
@@ -661,45 +651,6 @@ struct CursorLogicalLineMemory {
 struct CursorLineSuppression {
     cursor_line: (u32, u32),
     preceding_nonblank_line: Option<(u32, u32)>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct EditTaintedRow {
-    text: String,
-    continues: bool,
-}
-
-impl EditTaintedRow {
-    fn from_captured(row: &CapturedRow) -> Self {
-        Self {
-            text: captured_row_text(row),
-            continues: row.continues,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct LiveEditTaint {
-    screen: ScreenId,
-    start: u32,
-    rows: Vec<EditTaintedRow>,
-}
-
-impl LiveEditTaint {
-    fn end(&self) -> u32 {
-        self.start
-            .saturating_add(u32::try_from(self.rows.len().saturating_sub(1)).unwrap_or(u32::MAX))
-    }
-
-    fn intersects(&self, start: u32, end: u32) -> bool {
-        ranges_intersect(start, end, self.start, self.end())
-    }
-
-    fn row_matches(&self, row: u32, content: &EditTaintedRow) -> bool {
-        row.checked_sub(self.start)
-            .and_then(|offset| self.rows.get(offset as usize))
-            == Some(content)
-    }
 }
 
 impl CursorLineSuppression {
@@ -805,10 +756,6 @@ impl DualPlaneSession {
             math_layout_options: MathLayoutOptions::default(),
             live_screen: ScreenId::Primary,
             cursor_logical_line_memory: None,
-            active_edit_taints: Vec::new(),
-            committed_live_edit_taints: Vec::new(),
-            edit_tainted_staging: BTreeMap::new(),
-            edit_tainted_transcript: BTreeSet::new(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
@@ -1044,7 +991,6 @@ impl DualPlaneSession {
         let cursor_memory_reprint_boundary = contains_clear_home_snapshot_boundary(bytes);
         if cursor_memory_reprint_boundary {
             self.cursor_logical_line_memory = None;
-            self.clear_live_edit_taints();
         }
         let primary_reprint_boundary = self.live_screen == ScreenId::Primary
             && !self.terminal.modes().alternate_screen
@@ -1098,11 +1044,9 @@ impl DualPlaneSession {
         if self.terminal.modes().alternate_screen && contains_clear_home_snapshot_boundary(bytes) {
             self.alternate_detection_context = DetectionContext::default();
         }
-        let mut cursor_stream_progressed = false;
         let result = (|| {
             for chunk in bytes.chunks(PARSE_QUANTUM) {
                 let events = self.terminal.feed(chunk);
-                cursor_stream_progressed |= self.terminal.cursor_stream_line_progressed();
                 let damage = self.terminal.take_damage();
                 self.apply_events(events, observed_at)?;
                 self.observe_live_damage(damage, observed_at);
@@ -1112,7 +1056,6 @@ impl DualPlaneSession {
         })();
         if result.is_err() {
             self.cursor_logical_line_memory = None;
-            self.clear_live_edit_taints();
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
             self.primary_repaint_in_progress = false;
@@ -1146,7 +1089,6 @@ impl DualPlaneSession {
             // cursor again; ESU or the parser timeout records the committed cursor instead.
             if !(cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
                 self.remember_visible_cursor_logical_line();
-                self.update_edit_taints_after_feed(cursor_stream_progressed);
             }
         }
         result
@@ -1173,7 +1115,6 @@ impl DualPlaneSession {
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
         if plan.begin_transaction {
             self.cursor_logical_line_memory = None;
-            self.clear_live_edit_taints();
             self.begin_resize_transaction(observed_at)?;
             self.resize_epoch.changed(observed_at);
             self.grid_generation.0 += 1;
@@ -1579,9 +1520,7 @@ impl DualPlaneSession {
         let cursor_suppression = self.cursor_line_suppression();
         let mut new_tasks = Vec::new();
         for candidate_row in candidates {
-            if cursor_suppression.is_some_and(|suppression| suppression.contains(candidate_row))
-                || self.live_edit_taint_intersects(candidate_row, candidate_row)
-            {
+            if cursor_suppression.is_some_and(|suppression| suppression.contains(candidate_row)) {
                 continue;
             }
             let signature = live_detection_signature(context_signature, candidate_row);
@@ -1630,9 +1569,9 @@ impl DualPlaneSession {
         resolve_live_detection_tasks(&mut new_tasks);
         new_tasks.retain(|task| {
             let suppressed = task.resolved
-                && (cursor_suppression.is_some_and(|suppression| {
+                && cursor_suppression.is_some_and(|suppression| {
                     suppression.intersects(task.start.row, task.end.row)
-                }) || self.live_edit_taint_intersects(task.start.row, task.end.row));
+                });
             if suppressed && let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
                 // Cursor movement does not damage the source row. Leave the signature open so the
                 // next published frame can schedule this already-settled candidate immediately.
@@ -1759,104 +1698,7 @@ impl DualPlaneSession {
         })
     }
 
-    fn capture_live_edit_taint(&self, range: (u32, u32)) -> Option<LiveEditTaint> {
-        let rows = (range.0..=range.1)
-            .map(|row| {
-                self.terminal
-                    .visible_row(row)
-                    .map(|captured| EditTaintedRow::from_captured(&captured))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        Some(LiveEditTaint {
-            screen: self.live_screen,
-            start: range.0,
-            rows,
-        })
-    }
-
-    fn current_active_edit_taints(&self) -> Vec<LiveEditTaint> {
-        let Some(suppression) = self.cursor_line_suppression() else {
-            return Vec::new();
-        };
-        std::iter::once(suppression.cursor_line)
-            .chain(suppression.preceding_nonblank_line)
-            .filter_map(|range| self.capture_live_edit_taint(range))
-            .collect()
-    }
-
-    fn commit_live_edit_taint(&mut self, taint: LiveEditTaint) {
-        if taint.rows.is_empty() {
-            return;
-        }
-        self.committed_live_edit_taints.retain(|resident| {
-            resident.screen != taint.screen || !resident.intersects(taint.start, taint.end())
-        });
-        self.committed_live_edit_taints.push(taint);
-        debug_assert!(
-            self.committed_live_edit_taints.len() <= self.live_rows.len(),
-            "overlap replacement bounds committed edit taints by live rows"
-        );
-    }
-
-    /// Promote the final contents of every published edit line when terminal execution advances by
-    /// LF/VT/FF, then remember the newly published cursor gate. No timer or keyboard inference is
-    /// involved: both facts come from the terminal parser and its final grid.
-    fn update_edit_taints_after_feed(&mut self, cursor_stream_progressed: bool) {
-        if cursor_stream_progressed {
-            for active in std::mem::take(&mut self.active_edit_taints) {
-                if active.screen != self.live_screen {
-                    continue;
-                }
-                // PSReadLine may repaint the accepted command in the same quantum as Enter. Read
-                // the final cells at the same row identity and retain the taint only on content
-                // equality. If output replaced that row before LF, it is a new instance and must
-                // not inherit the positional edit gate.
-                let unchanged = self
-                    .capture_live_edit_taint((active.start, active.end()))
-                    .as_ref()
-                    == Some(&active);
-                if unchanged {
-                    self.commit_live_edit_taint(active);
-                }
-            }
-        }
-        self.active_edit_taints = self.current_active_edit_taints();
-    }
-
-    fn clear_live_edit_taints(&mut self) {
-        self.active_edit_taints.clear();
-        self.committed_live_edit_taints.clear();
-    }
-
-    fn clear_all_edit_taints(&mut self) {
-        self.clear_live_edit_taints();
-        self.edit_tainted_staging.clear();
-        self.edit_tainted_transcript.clear();
-    }
-
-    fn reconcile_committed_live_edit_taints(&mut self) {
-        let terminal = &self.terminal;
-        let screen = self.live_screen;
-        self.committed_live_edit_taints.retain(|taint| {
-            taint.screen == screen
-                && (taint.start..=taint.end())
-                    .zip(&taint.rows)
-                    .all(|(row, expected)| {
-                        terminal.visible_row(row).is_some_and(|actual| {
-                            EditTaintedRow::from_captured(&actual) == *expected
-                        })
-                    })
-        });
-    }
-
-    fn live_edit_taint_intersects(&self, start: u32, end: u32) -> bool {
-        self.active_edit_taints
-            .iter()
-            .chain(&self.committed_live_edit_taints)
-            .any(|taint| taint.screen == self.live_screen && taint.intersects(start, end))
-    }
-
-    fn new_live_decoration_is_edit_suppressed(&self, task: &LiveDetectionTask) -> bool {
+    fn new_live_decoration_is_cursor_suppressed(&self, task: &LiveDetectionTask) -> bool {
         let replaces_existing = self.live_decorations.values().any(|record| {
             record.screen == task.screen
                 && record.start == task.start
@@ -1864,10 +1706,9 @@ impl DualPlaneSession {
                 && record.span.original_source == task.span.original_source
         });
         !replaces_existing
-            && (self
+            && self
                 .cursor_line_suppression()
                 .is_some_and(|suppression| suppression.intersects(task.start.row, task.end.row))
-                || self.live_edit_taint_intersects(task.start.row, task.end.row))
     }
 
     fn live_detection_context(&self) -> Arc<[LiveDetectionInput]> {
@@ -2767,7 +2608,6 @@ impl DualPlaneSession {
         };
         if screen != self.live_screen {
             self.cursor_logical_line_memory = None;
-            self.clear_live_edit_taints();
             self.invalidate_all_live_decorations();
             // A screen switch is a hard boundary: never carry the previous screen's off-band
             // preservation queue across it, even if a resize transaction on the old screen kept
@@ -2826,10 +2666,6 @@ impl DualPlaneSession {
             }
             self.invalidate_live_row(row);
         }
-        // A committed exemption is tied to the exact logical-line instance. Repainting equal text
-        // (including PSReadLine's Enter redraw) preserves it; any content/wrap change retires the
-        // whole line before the next stability pass can create a decoration.
-        self.reconcile_committed_live_edit_taints();
     }
 
     fn invalidate_live_row(&mut self, row: u32) {
@@ -3138,7 +2974,7 @@ impl DualPlaneSession {
             self.live_decorations.remove(&task.start.row);
             return true;
         }
-        if self.new_live_decoration_is_edit_suppressed(&task) {
+        if self.new_live_decoration_is_cursor_suppressed(&task) {
             if let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
                 // The task was valid, but presentation policy rejected creating its record at this
                 // cursor state. Keep the stable row eligible for the first frame after the cursor
@@ -4614,7 +4450,6 @@ impl DualPlaneSession {
         if vendor_candidate_rows != 0 {
             for staged in self.transcript.take_unclosed_candidate() {
                 self.staging_sources.remove(&staged.id);
-                self.edit_tainted_staging.remove(&staged.id);
             }
             self.active_staging_tail = None;
         }
@@ -4700,15 +4535,6 @@ impl DualPlaneSession {
         let mut pending_top_scroll = 0_usize;
         for event in events {
             self.trace_adapter_event(&event, observed_at);
-            match &event {
-                AdapterEvent::GridScrolled | AdapterEvent::ScreenCleared => {
-                    self.clear_live_edit_taints();
-                }
-                AdapterEvent::ClearHistory | AdapterEvent::Reset | AdapterEvent::Deccolm => {
-                    self.clear_all_edit_taints();
-                }
-                _ => {}
-            }
             let full_screen_output_scroll = match &event {
                 AdapterEvent::RowsRemoved { context, rows }
                     if context.cause == RemovalCause::NormalScroll
@@ -4765,8 +4591,6 @@ impl DualPlaneSession {
                 }
                 LifecycleDirective::InvalidateStaging => {
                     self.cursor_logical_line_memory = None;
-                    self.clear_live_edit_taints();
-                    self.edit_tainted_staging.clear();
                     self.terminal.clear_resize_transaction_history();
                     self.transcript.invalidate_staging();
                     self.staging_sources.clear();
@@ -4788,7 +4612,6 @@ impl DualPlaneSession {
                 }
                 LifecycleDirective::ParkPrimary => {
                     self.cursor_logical_line_memory = None;
-                    self.clear_live_edit_taints();
                     self.invalidate_all_live_decorations();
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
@@ -4802,7 +4625,6 @@ impl DualPlaneSession {
                 }
                 LifecycleDirective::RestorePrimary => {
                     self.cursor_logical_line_memory = None;
-                    self.clear_live_edit_taints();
                     self.invalidate_all_live_decorations();
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
@@ -4964,7 +4786,6 @@ impl DualPlaneSession {
                 && !self.cursor_line_suppression().is_some_and(|suppression| {
                     suppression.intersects(candidate.start.row, candidate.end.row)
                 })
-                && !self.live_edit_taint_intersects(candidate.start.row, candidate.end.row)
             {
                 let occurrence = self.register_local_image_path(
                     candidate.path,
@@ -5045,9 +4866,7 @@ impl DualPlaneSession {
     }
 
     fn detect_frozen_image_paths(&mut self, id: TranscriptId) {
-        if !self.math_layout_options.detect_image_paths
-            || self.edit_tainted_transcript.contains(&id)
-        {
+        if !self.math_layout_options.detect_image_paths {
             return;
         }
         let Some(line) = self
@@ -5221,40 +5040,6 @@ impl DualPlaneSession {
         Ok(())
     }
 
-    fn removed_row_is_edit_tainted(&self, live_row: u32, row: &CapturedRow) -> bool {
-        let content = EditTaintedRow::from_captured(row);
-        self.active_edit_taints
-            .iter()
-            .any(|taint| taint.screen == self.live_screen && taint.intersects(live_row, live_row))
-            || self.committed_live_edit_taints.iter().any(|taint| {
-                taint.screen == self.live_screen && taint.row_matches(live_row, &content)
-            })
-    }
-
-    fn rebase_live_edit_taints_after_top_removal(&mut self, removed_rows: usize) {
-        let Ok(removed_rows) = u32::try_from(removed_rows) else {
-            self.clear_live_edit_taints();
-            return;
-        };
-        let rebase = |taints: &mut Vec<LiveEditTaint>| {
-            taints.retain_mut(|taint| {
-                if taint.end() < removed_rows {
-                    return false;
-                }
-                if taint.start < removed_rows {
-                    let removed_from_taint = (removed_rows - taint.start) as usize;
-                    taint.rows.drain(..removed_from_taint.min(taint.rows.len()));
-                    taint.start = 0;
-                } else {
-                    taint.start -= removed_rows;
-                }
-                !taint.rows.is_empty()
-            });
-        };
-        rebase(&mut self.active_edit_taints);
-        rebase(&mut self.committed_live_edit_taints);
-    }
-
     /// Returns the number of live rows this event removed, so a preserved top scroll can batch its
     /// decoration proof across every removal event in the same parse quantum.
     fn apply_removed_rows(
@@ -5271,14 +5056,7 @@ impl DualPlaneSession {
                 RowDirective::Capture { live_row, row } => {
                     let grapheme_offsets = captured_grapheme_offsets(&row);
                     let captured_row = row.clone();
-                    let edit_tainted = self.removed_row_is_edit_tainted(live_row, &row);
                     let result = self.transcript.capture(row);
-                    if edit_tainted {
-                        self.edit_tainted_staging.insert(
-                            result.staging_id,
-                            EditTaintedRow::from_captured(&captured_row),
-                        );
-                    }
                     let generation = self.transcript.source_generation();
                     removals.push(LiveRowRemoval {
                         row: live_row,
@@ -5310,11 +5088,6 @@ impl DualPlaneSession {
         }
         self.live_tasks.clear();
         self.grid_generation.0 += 1;
-        if preserve_full_screen_scroll {
-            self.rebase_live_edit_taints_after_top_removal(removals.len());
-        } else {
-            self.clear_live_edit_taints();
-        }
         self.document
             .capture_rows_transaction(&removals, self.grid_generation);
         for result in captured {
@@ -5520,16 +5293,6 @@ impl DualPlaneSession {
             source.transition(SourceLifecycle::Frozen)?;
         }
         let id = finalized.line.id;
-        let edit_tainted = finalized
-            .mappings
-            .iter()
-            .any(|mapping| self.edit_tainted_staging.contains_key(&mapping.staging_id));
-        for mapping in &finalized.mappings {
-            self.edit_tainted_staging.remove(&mapping.staging_id);
-        }
-        if edit_tainted {
-            self.edit_tainted_transcript.insert(id);
-        }
         let mut live_prefix_updates = Vec::new();
         for pending in &mut self.pending_live_handoffs {
             if pending.candidate_start.is_none()
@@ -5719,11 +5482,7 @@ impl DualPlaneSession {
             .insert(id, DecorationRecord::frozen(versions));
         // Ordinary frozen lines take only the allocation-free delimiter prefilter. A candidate
         // snapshots immutable source here; the worker owns fence/pairing/escape/size detection.
-        if may_contain_math
-            && !self.edit_tainted_transcript.contains(&id)
-            && !self.primary_parked
-            && self.resize_epoch.decorations_allowed()
-        {
+        if may_contain_math && !self.primary_parked && self.resize_epoch.decorations_allowed() {
             self.schedule_scan(id);
         }
     }
@@ -5748,7 +5507,6 @@ impl DualPlaneSession {
         if clear_staging {
             self.staging_sources.clear();
             self.active_staging_tail = None;
-            self.edit_tainted_staging.clear();
             self.pending_live_handoffs.clear();
             self.frozen_detection_context = DetectionContext::default();
             self.frozen_detection_contexts.clear();
@@ -5756,7 +5514,6 @@ impl DualPlaneSession {
         }
         self.scheduler.remove_sources(&removed_set);
         for id in removed {
-            self.edit_tainted_transcript.remove(id);
             self.decorations.remove(id);
             self.frozen_detection_contexts.remove(id);
         }
@@ -5950,11 +5707,7 @@ impl DualPlaneSession {
             .document
             .entries()
             .iter()
-            .filter_map(|(id, entry)| {
-                (may_contain_display_math(&entry.line.text)
-                    && !self.edit_tainted_transcript.contains(id))
-                .then_some(*id)
-            })
+            .filter_map(|(id, entry)| may_contain_display_math(&entry.line.text).then_some(*id))
             .collect::<Vec<_>>();
         for id in candidates {
             self.schedule_scan(id);
@@ -6075,9 +5828,6 @@ impl DualPlaneSession {
     }
 
     fn schedule_scan(&mut self, candidate_id: TranscriptId) {
-        if self.edit_tainted_transcript.contains(&candidate_id) {
-            return;
-        }
         let detection_options = self.detection_options();
         let Some(candidate_context) = self.frozen_detection_contexts.get(&candidate_id) else {
             return;
@@ -6183,16 +5933,8 @@ impl DualPlaneSession {
         let Some(row) = self.terminal.visible_row(0) else {
             return;
         };
-        if self
-            .edit_tainted_staging
-            .get(&id)
-            .is_some_and(|expected| *expected != EditTaintedRow::from_captured(&row))
-        {
-            self.edit_tainted_staging.remove(&id);
-        }
         if !self.transcript.rewrite_staged(id, row) {
             self.active_staging_tail = None;
-            self.edit_tainted_staging.remove(&id);
         }
     }
 }
@@ -13541,11 +13283,14 @@ mod tests {
         session.feed_at(b"\r\nPS> ", entered_at).unwrap();
         assert_eq!(
             session.advance_live_stability(entered_at + LIVE_MATH_STABLE_INTERVAL),
-            0,
-            "submitted multiline edit content remains permanently exempt"
+            1,
+            "execution/new prompt must release the old multiline edit buffer"
         );
-        assert!(session.inline_images.is_empty());
-        assert!(session.take_decoration_worker_task().is_none());
+        assert_eq!(session.inline_images.len(), 1);
+        assert!(matches!(
+            session.take_decoration_worker_task(),
+            Some(SessionDecorationTask::InlineImage(_))
+        ));
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
@@ -13667,7 +13412,7 @@ mod tests {
     }
 
     #[test]
-    fn visible_cursor_input_line_suppresses_new_path_and_math_before_and_after_enter() {
+    fn visible_cursor_input_line_suppresses_new_path_and_math_until_enter() {
         let (directory, path) = temporary_path_image();
         let started = Instant::now();
 
@@ -13688,10 +13433,13 @@ mod tests {
         assert_eq!(image.visible_cursor_logical_line(), Some((1, 1)));
         assert_eq!(
             image.advance_live_stability(image_entered_at + LIVE_MATH_STABLE_INTERVAL),
-            0
+            1
         );
-        assert!(image.inline_images.is_empty());
-        assert!(image.take_decoration_worker_task().is_none());
+        assert_eq!(image.inline_images.len(), 1);
+        assert!(matches!(
+            image.take_decoration_worker_task(),
+            Some(SessionDecorationTask::InlineImage(_))
+        ));
 
         let mut math = DualPlaneSession::new(nz(80), nz(8));
         let math_typed_at = feed_ascii_one_byte_at_a_time(&mut math, "$$x+1$$", started);
@@ -13707,149 +13455,13 @@ mod tests {
         math.feed_at(b"\r\nPS> ", math_entered_at).unwrap();
         assert_eq!(
             math.advance_live_stability(math_entered_at + LIVE_MATH_STABLE_INTERVAL),
-            0
-        );
-        assert!(math.take_live_worker_task().is_none());
-        assert!(math.live_decorations.is_empty());
-
-        std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
-    }
-
-    #[test]
-    fn submitted_edit_line_stays_plain_while_distinct_image_and_math_output_render() {
-        let (directory, path) = temporary_path_image();
-        let started = Instant::now();
-        let mut session = DualPlaneSession::new(nz(240), nz(8));
-        enable_path_detection(&mut session);
-        let command = format!(
-            "echo '[Image: source: \"{}\"] $$input_formula$$'",
-            path.display()
-        );
-        let typed_at = feed_ascii_one_byte_at_a_time(&mut session, &command, started);
-        assert_eq!(
-            session.advance_live_stability(typed_at + LIVE_MATH_STABLE_INTERVAL),
-            0,
-            "the published edit line must first pass through cursor suppression"
-        );
-
-        let entered_at = typed_at + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1);
-        let output = format!(
-            "\r\n[Image: source: \"{}\"]\r\n$$output_formula$$\r\nPS> ",
-            path.display()
-        );
-        session.feed_at(output.as_bytes(), entered_at).unwrap();
-        assert_eq!(
-            session.advance_live_stability(entered_at + LIVE_MATH_STABLE_INTERVAL),
-            2,
-            "only the distinct image output and formula output may create bands"
+            1
         );
         assert_eq!(
-            session.inline_images.len(),
-            1,
-            "the command echo must not create a duplicate image occurrence"
+            complete_detected_live_tasks(&mut math, synthetic_raster(32, 18)),
+            1
         );
-        let image_record = session.inline_images.values().next().unwrap();
-        let InlineImageRecordKind::LocalPath { start_anchor, .. } = image_record.kind else {
-            panic!("expected one local image output record");
-        };
-        assert!(matches!(
-            session.document.anchor(start_anchor).unwrap(),
-            ContentAnchor::Live {
-                point: GridPoint { row: 1, .. },
-                ..
-            }
-        ));
-        let math_task = session.take_live_worker_task().unwrap();
-        assert_eq!(math_task.span.original_source, "$$output_formula$$");
-        assert!(session.take_live_worker_task().is_none());
-
-        std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
-    }
-
-    #[test]
-    fn submitted_edit_taint_migrates_to_frozen_id_without_tainting_equal_output_instance() {
-        let (directory, path) = temporary_path_image();
-        let started = Instant::now();
-        let mut session = DualPlaneSession::new(nz(240), nz(3));
-        enable_path_detection(&mut session);
-        let line = format!("echo '[Image: source: \"{}\"] $$same$$'", path.display());
-        let typed_at = feed_ascii_one_byte_at_a_time(&mut session, &line, started);
-        session.advance_live_stability(typed_at + LIVE_MATH_STABLE_INTERVAL);
-
-        let entered_at = typed_at + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1);
-        session
-            .feed_at(
-                format!("\r\n{line}\r\nfiller-1\r\nfiller-2\r\nfiller-3\r\n").as_bytes(),
-                entered_at,
-            )
-            .unwrap();
-        let equal_ids = session
-            .document
-            .entries()
-            .iter()
-            .filter_map(|(id, entry)| (entry.line.text == line).then_some(*id))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            equal_ids.len(),
-            2,
-            "the command echo and a byte-equal true output line must both freeze"
-        );
-
-        let frozen_image_ids = session
-            .inline_images
-            .values()
-            .filter_map(|record| {
-                let InlineImageRecordKind::LocalPath { start_anchor, .. } = record.kind else {
-                    return None;
-                };
-                match session.document.anchor(start_anchor).ok()? {
-                    ContentAnchor::History { id, .. } => Some(*id),
-                    _ => None,
-                }
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            frozen_image_ids,
-            vec![equal_ids[1]],
-            "taint belongs to the first line instance, never to its text globally"
-        );
-        let math_candidates = std::iter::from_fn(|| session.take_worker_task())
-            .map(|task| task.candidate_id)
-            .collect::<Vec<_>>();
-        assert_eq!(math_candidates, vec![equal_ids[1]]);
-
-        std::fs::remove_file(&path).unwrap();
-        std::fs::remove_dir(&directory).unwrap();
-    }
-
-    #[test]
-    fn rewriting_a_submitted_edit_row_releases_its_old_taint() {
-        let (directory, path) = temporary_path_image();
-        let started = Instant::now();
-        let mut session = DualPlaneSession::new(nz(240), nz(8));
-        enable_path_detection(&mut session);
-        let old = format!("echo '[Image: source: \"{}\"]'", path.display());
-        let typed_at = feed_ascii_one_byte_at_a_time(&mut session, &old, started);
-        let entered_at = typed_at + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1);
-        session.feed_at(b"\r\nPS> ", entered_at).unwrap();
-
-        let replacement = format!("[Image: source: \"{}\"]", path.display());
-        session
-            .feed_at(
-                format!("\x1b[1;1H\x1b[2K{replacement}\x1b[3;1Houtput").as_bytes(),
-                entered_at + Duration::from_millis(1),
-            )
-            .unwrap();
-        assert_eq!(
-            session.advance_live_stability(
-                entered_at + Duration::from_millis(1) + LIVE_MATH_STABLE_INTERVAL
-            ),
-            1,
-            "different content in the same grid row is a new line instance"
-        );
-        assert_eq!(session.inline_images.len(), 1);
+        assert_eq!(math.live_decorations.len(), 1);
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
