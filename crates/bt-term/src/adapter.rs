@@ -188,6 +188,7 @@ pub struct TerminalAdapter {
     parser_sync_active: bool,
     parser_dcs_active: bool,
     cursor_row_positioned_explicitly: bool,
+    cursor_stream_line_progressed: bool,
     osc1337_scanner: Osc1337Scanner,
     resize_canonical: Option<ResizeCanonical>,
     columns: NonZeroU32,
@@ -210,6 +211,7 @@ struct BoundaryPerformer {
     dcs_hook: bool,
     dcs_put: bool,
     cursor_row_positioned_explicitly: Option<bool>,
+    cursor_stream_line_progressed: bool,
 }
 
 impl Perform for BoundaryPerformer {
@@ -222,6 +224,8 @@ impl Perform for BoundaryPerformer {
 
     fn execute(&mut self, byte: u8) {
         self.complete = self.execute_at_ground || matches!(byte, 0x18 | 0x1a);
+        self.cursor_stream_line_progressed =
+            self.execute_at_ground && matches!(byte, b'\n' | b'\x0b' | b'\x0c');
         if matches!(byte, b'\n' | b'\x0b' | b'\x0c' | b'\r') {
             self.cursor_row_positioned_explicitly = Some(false);
         }
@@ -309,6 +313,7 @@ impl TerminalAdapter {
             parser_sync_active: false,
             parser_dcs_active: false,
             cursor_row_positioned_explicitly: false,
+            cursor_stream_line_progressed: false,
             osc1337_scanner: Osc1337Scanner::default(),
             resize_canonical: None,
             columns,
@@ -326,6 +331,7 @@ impl TerminalAdapter {
     }
 
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<AdapterEvent> {
+        self.cursor_stream_line_progressed = false;
         let mut events = Vec::new();
         for action in self.osc1337_scanner.scan(bytes) {
             match action {
@@ -555,6 +561,12 @@ impl TerminalAdapter {
         self.cursor_row_positioned_explicitly
     }
 
+    /// Whether this parser quantum executed LF/VT/FF from ground state. This deterministic terminal
+    /// fact distinguishes command submission/output flow from editor-only cursor navigation.
+    pub(crate) fn cursor_stream_line_progressed(&self) -> bool {
+        self.cursor_stream_line_progressed
+    }
+
     /// Read DEC private modes from the vendor terminal, the single protocol-state authority.
     pub fn application_cursor_mode(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
@@ -633,6 +645,7 @@ impl TerminalAdapter {
             if let Some(explicit) = performer.cursor_row_positioned_explicitly {
                 self.cursor_row_positioned_explicitly = explicit;
             }
+            self.cursor_stream_line_progressed |= performer.cursor_stream_line_progressed;
 
             if performer.dcs_hook {
                 self.parser_dcs_active = true;

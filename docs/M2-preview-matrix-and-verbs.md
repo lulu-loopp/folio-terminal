@@ -86,7 +86,8 @@
 - **光标行抑制(用户裁决 2026-07-28)**:发布帧的可见光标所在逻辑行不新建任何内联
   decoration band(本节路径图片与公式同规则)。逻辑行按网格 WRAPLINE 因果关系向上、
   向下合并全部软换行物理行;所以路径在上半段、光标在下半段也必须抑制。primary 与
-  alternate 一致。光标离开后,候选仍须照常通过既有 damage-derived 稳定窗口才可创建。
+  alternate 一致。未发生提交的普通光标离开后,候选仍须照常通过既有 damage-derived
+  稳定窗口才可创建;提交过的编辑行适用下述“编辑税”永久豁免,不得走这条释放路径。
   DECTCEM 隐藏期间沿用该 screen 最近一次可见光标的 `(logical_start, logical_end)`
   **粘滞记忆**,防止 PSReadLine 的“藏光标→逐字符重画→亮光标”爆发被 PTY chunk
   边界从隐藏窗口劈开后绕过 gate。若该有效逻辑行(可见或粘滞)的全部物理行均为空,
@@ -101,6 +102,23 @@
   切换;光标在另一逻辑行重新可见则用新范围与落位种类替换旧值。禁用定时失效。
   全屏 TUI 进入/重印时本就清屏或切屏,因此长期 DECTCEM off 时没有陈旧输入行记忆,
   原“无输入行则不抑制”豁免保持。
+- **编辑税/提交后永久豁免(用户裁决 2026-07-28)**:一个逻辑行只要曾被上述光标行
+  gate 覆盖,随后终端执行流以 LF/VT/FF 提交/推进,该**行实例的最终内容**即永久拒绝
+  新建路径图片与公式 band——`input echo` 永远是 input,不能因光标离开、停留网格或
+  滚入历史而变成 output。提交判据只取 adapter 的 VT ground-state 执行事实,禁键盘
+  事件猜测与定时器。PSReadLine 在 Enter 同一量子重画命令时,仅内容(含 WRAPLINE)
+  相等才继承 taint;若执行流到来前该行已被不同内容覆盖,旧 taint 不得转嫁。
+- taint **绑行实例,不绑字符串**:live 阶段保存逻辑范围及逐物理行文本/WRAPLINE;
+  内容或换行形态不等即整条失效。正常内容滚动时,被捕获的 taint 随身份
+  `live row → StagingId → TranscriptId` 迁移;冻结图片扫描与公式扫描共同跳过该
+  transcript id。同样文本稍后作为另一行真输出,因 id/行实例不同而照常装饰。
+  clear/home、网格清屏/显式滚动、reset/DECCOLM、切屏等既有行身份边界清掉 live
+  taint;staging 失效同步清理 staging taint;ED3/历史淘汰同步清理对应 transcript
+  taint。
+- **内存界**:active 最多是光标逻辑行+CUP 空行扩展命中的上一逻辑行;已提交 live
+  taint 以重叠替换,最多占满当前网格物理行;staging taint 受 transcript staging
+  quota 约束;冻结 taint 与 resident transcript id 同生共死,受 frozen quota 约束。
+  因而集合不随会话累计输入文本无界增长。
 - 该规则**只 gate 新建**,不参与已有 occurrence 的匹配、保持、重锚、失效或投影。
   已渲染 band 即使在 alternate 应用重绘时被可见光标扫过也保持,不得塌陷或闪回源码。
   判据只读发布帧时刻的 cursor+WRAPLINE 网格状态及上述粘滞记忆,不以键盘/粘贴事件
