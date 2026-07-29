@@ -89,11 +89,18 @@
   alternate 一致。光标离开后,候选仍须照常通过既有 damage-derived 稳定窗口才可创建。
   DECTCEM 隐藏期间沿用该 screen 最近一次可见光标的 `(logical_start, logical_end)`
   **粘滞记忆**,防止 PSReadLine 的“藏光标→逐字符重画→亮光标”爆发被 PTY chunk
-  边界从隐藏窗口劈开后绕过 gate。记忆只由确定事件失效:网格滚动(行号意义变化;
-  含无 transcript removal payload 的显式 CSI S/T)、ED2 全清、clear/home 或 DEC
-  2026 重印边界、resize/reset/DECCOLM、primary/alternate 切换;光标在另一逻辑行
-  重新可见则用新范围替换旧范围。禁用定时失效。全屏 TUI 进入/重印时本就清屏或
-  切屏,因此长期 DECTCEM off 时没有陈旧输入行记忆,原“无输入行则不抑制”豁免保持。
+  边界从隐藏窗口劈开后绕过 gate。若该有效逻辑行(可见或粘滞)的全部物理行均为空,
+  且 adapter 逐字节 VT 观察器证明光标最近一次物理行落位来自 CUP/HVP(`CSI H/f`)
+  绝对定位,gate 同时扩展到其上方最近的非空逻辑行;中间空行跳过,命中的非空行按
+  WRAPLINE 整体合并。这覆盖 PSReadLine 把同一多行编辑缓冲逐行 CUP 绘制、最后把
+  光标显式放在空续行的形态。LF/VT/FF/CR 流推进、可打印字符自动换行及其它行移动
+  会把落位事实改为非 CUP/HVP,所以 `$$…$$\n` 流式输出后光标自然停在下一空行时,
+  刚完成的公式照常进入渲染,不得等下一次输出。记忆(含落位种类)只由确定事件失效:
+  网格滚动(行号意义变化;含无 transcript removal payload 的显式 CSI S/T)、ED2
+  全清、clear/home 或 DEC 2026 重印边界、resize/reset/DECCOLM、primary/alternate
+  切换;光标在另一逻辑行重新可见则用新范围与落位种类替换旧值。禁用定时失效。
+  全屏 TUI 进入/重印时本就清屏或切屏,因此长期 DECTCEM off 时没有陈旧输入行记忆,
+  原“无输入行则不抑制”豁免保持。
 - 该规则**只 gate 新建**,不参与已有 occurrence 的匹配、保持、重锚、失效或投影。
   已渲染 band 即使在 alternate 应用重绘时被可见光标扫过也保持,不得塌陷或闪回源码。
   判据只读发布帧时刻的 cursor+WRAPLINE 网格状态及上述粘滞记忆,不以键盘/粘贴事件

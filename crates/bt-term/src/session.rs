@@ -45,7 +45,7 @@ use crate::{
         AdapterEvent, RemovalCause, RemovalScope, RemovalScreen, TerminalAdapter, TerminalDamage,
         TerminalModes,
     },
-    cell_capture::CapturedRowFingerprint,
+    cell_capture::{CapturedRowFingerprint, captured_row_is_blank},
     inline_image::{
         DecodedInlineImage, InlineImageDecodeError, InlineImageSource, InlineImageTask,
         decode_inline_image, detect_local_image_path_candidates,
@@ -644,6 +644,26 @@ struct CursorLogicalLineMemory {
     screen: ScreenId,
     start: u32,
     end: u32,
+    explicitly_positioned: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CursorLineSuppression {
+    cursor_line: (u32, u32),
+    preceding_nonblank_line: Option<(u32, u32)>,
+}
+
+impl CursorLineSuppression {
+    fn contains(self, row: u32) -> bool {
+        self.intersects(row, row)
+    }
+
+    fn intersects(self, start: u32, end: u32) -> bool {
+        ranges_intersect(start, end, self.cursor_line.0, self.cursor_line.1)
+            || self
+                .preceding_nonblank_line
+                .is_some_and(|line| ranges_intersect(start, end, line.0, line.1))
+    }
 }
 
 impl DualPlaneSession {
@@ -1479,8 +1499,11 @@ impl DualPlaneSession {
     /// Schedule new live-grid decoration records from rows which have already passed the ordinary
     /// damage-derived stability window. The only additional gate is the terminal's published-grid
     /// cursor fact: while DECTCEM exposes the cursor, the complete WRAPLINE-linked logical line
-    /// containing it is ineligible for a new image or math band. While DECTCEM is temporarily off,
-    /// the last visible logical line remains the gate until a deterministic grid boundary clears it.
+    /// containing it is ineligible for a new image or math band. When that logical line is blank and
+    /// CUP/HVP most recently placed the cursor there, its nearest preceding nonblank logical line
+    /// joins the gate; natural LF/CR stream progression never enables that extension. While DECTCEM
+    /// is temporarily off, the last visible logical line and its placement kind remain the gate
+    /// until a deterministic grid boundary clears them.
     ///
     /// Existing records are deliberately outside this policy. Image occurrences are matched and
     /// re-anchored before the creation gate below; live math preservation/projection likewise never
@@ -1494,12 +1517,10 @@ impl DualPlaneSession {
         let initial_context = self.live_initial_detection_context(&inputs);
         let candidates = live_candidate_rows(&inputs, initial_context.clone(), stable);
         let context_signature = live_detection_context_signature(&inputs);
-        let suppressed_line = self.cursor_suppressed_logical_line();
+        let cursor_suppression = self.cursor_line_suppression();
         let mut new_tasks = Vec::new();
         for candidate_row in candidates {
-            if suppressed_line
-                .is_some_and(|(start, end)| start <= candidate_row && candidate_row <= end)
-            {
+            if cursor_suppression.is_some_and(|suppression| suppression.contains(candidate_row)) {
                 continue;
             }
             let signature = live_detection_signature(context_signature, candidate_row);
@@ -1548,8 +1569,8 @@ impl DualPlaneSession {
         resolve_live_detection_tasks(&mut new_tasks);
         new_tasks.retain(|task| {
             let suppressed = task.resolved
-                && suppressed_line.is_some_and(|(start, end)| {
-                    ranges_intersect(task.start.row, task.end.row, start, end)
+                && cursor_suppression.is_some_and(|suppression| {
+                    suppression.intersects(task.start.row, task.end.row)
                 });
             if suppressed && let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
                 // Cursor movement does not damage the source row. Leave the signature open so the
@@ -1615,22 +1636,65 @@ impl DualPlaneSession {
             .flatten()
     }
 
-    fn remember_visible_cursor_logical_line(&mut self) {
-        let Some((start, end)) = self.visible_cursor_logical_line() else {
-            return;
-        };
-        self.cursor_logical_line_memory = Some(CursorLogicalLineMemory {
+    fn visible_cursor_logical_line_memory(&self) -> Option<CursorLogicalLineMemory> {
+        let (start, end) = self.visible_cursor_logical_line()?;
+        Some(CursorLogicalLineMemory {
             screen: self.live_screen,
             start,
             end,
-        });
+            explicitly_positioned: self.terminal.cursor_row_was_explicitly_positioned(),
+        })
     }
 
-    fn cursor_suppressed_logical_line(&self) -> Option<(u32, u32)> {
-        self.visible_cursor_logical_line().or_else(|| {
+    fn remember_visible_cursor_logical_line(&mut self) {
+        let Some(memory) = self.visible_cursor_logical_line_memory() else {
+            return;
+        };
+        self.cursor_logical_line_memory = Some(memory);
+    }
+
+    fn effective_cursor_logical_line_memory(&self) -> Option<CursorLogicalLineMemory> {
+        self.visible_cursor_logical_line_memory().or_else(|| {
             self.cursor_logical_line_memory
                 .filter(|memory| memory.screen == self.live_screen)
-                .map(|memory| (memory.start, memory.end))
+        })
+    }
+
+    #[cfg(test)]
+    fn cursor_suppressed_logical_line(&self) -> Option<(u32, u32)> {
+        self.effective_cursor_logical_line_memory()
+            .map(|memory| (memory.start, memory.end))
+    }
+
+    fn logical_line_is_blank(&self, line: (u32, u32)) -> bool {
+        (line.0..=line.1).all(|row| {
+            self.terminal
+                .visible_row(row)
+                .is_some_and(|captured| captured_row_is_blank(&captured))
+        })
+    }
+
+    fn preceding_nonblank_logical_line(&self, start: u32) -> Option<(u32, u32)> {
+        let mut row = start.checked_sub(1)?;
+        loop {
+            let line = self.logical_line_containing(row)?;
+            if !self.logical_line_is_blank(line) {
+                return Some(line);
+            }
+            row = line.0.checked_sub(1)?;
+        }
+    }
+
+    fn cursor_line_suppression(&self) -> Option<CursorLineSuppression> {
+        let memory = self.effective_cursor_logical_line_memory()?;
+        let cursor_line = (memory.start, memory.end);
+        let preceding_nonblank_line = (memory.explicitly_positioned
+            && self.logical_line_is_blank(cursor_line))
+        .then(|| self.preceding_nonblank_logical_line(cursor_line.0))
+        .flatten();
+        Some(CursorLineSuppression {
+            cursor_line,
+            preceding_nonblank_line,
         })
     }
 
@@ -1643,10 +1707,8 @@ impl DualPlaneSession {
         });
         !replaces_existing
             && self
-                .cursor_suppressed_logical_line()
-                .is_some_and(|(start, end)| {
-                    ranges_intersect(task.start.row, task.end.row, start, end)
-                })
+                .cursor_line_suppression()
+                .is_some_and(|suppression| suppression.intersects(task.start.row, task.end.row))
     }
 
     fn live_detection_context(&self) -> Arc<[LiveDetectionInput]> {
@@ -4721,11 +4783,9 @@ impl DualPlaneSession {
                 );
             } else if create_and_retire
                 && candidate.stable
-                && !self
-                    .cursor_suppressed_logical_line()
-                    .is_some_and(|(start, end)| {
-                        ranges_intersect(candidate.start.row, candidate.end.row, start, end)
-                    })
+                && !self.cursor_line_suppression().is_some_and(|suppression| {
+                    suppression.intersects(candidate.start.row, candidate.end.row)
+                })
             {
                 let occurrence = self.register_local_image_path(
                     candidate.path,
@@ -13181,6 +13241,174 @@ mod tests {
             Some((2, 2)),
             "a newly published visible line replaces, rather than extends, the old memory"
         );
+    }
+
+    #[test]
+    fn psreadline_multiline_paste_suppresses_source_above_explicit_empty_cursor_line_until_enter() {
+        let (directory, png_path) = temporary_path_image();
+        let path = directory.join("multiline-paste.jpg");
+        std::fs::rename(&png_path, &path).unwrap();
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(240), nz(8));
+        enable_path_detection(&mut session);
+        let command = format!("echo \"[Image: source: {}]\"", path.display());
+        let mut typed = String::new();
+        let mut observed_at = started;
+
+        for character in command.chars() {
+            observed_at += Duration::from_millis(1);
+            typed.push(character);
+            let cursor_column = typed.chars().count() + 1;
+            let burst = format!("\x1b[?25l\x1b[2;1H\x1b[2K{typed}\x1b[2;{cursor_column}H\x1b[?25h");
+            for byte in burst.bytes() {
+                session.feed_at(&[byte], observed_at).unwrap();
+            }
+        }
+        // A pasted trailing newline makes PSReadLine publish a separate empty continuation row.
+        // The source row is not WRAPLINE-linked to it: the final cursor placement is an absolute
+        // CUP, exactly as recorded in paste-accept.vt.
+        for byte in b"\x1b[?25l\x1b[3;1H\x1b[?25h" {
+            session.feed_at(&[*byte], observed_at).unwrap();
+        }
+        assert_eq!(session.visible_cursor_logical_line(), Some((2, 2)));
+        assert_eq!(
+            session.advance_live_stability(observed_at + LIVE_MATH_STABLE_INTERVAL),
+            0,
+            "an explicit empty continuation line must extend the new-band gate to its source line"
+        );
+        assert!(session.inline_images.is_empty());
+        assert!(session.take_decoration_worker_task().is_none());
+
+        let entered_at = observed_at + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1);
+        session.feed_at(b"\r\nPS> ", entered_at).unwrap();
+        assert_eq!(
+            session.advance_live_stability(entered_at + LIVE_MATH_STABLE_INTERVAL),
+            1,
+            "execution/new prompt must release the old multiline edit buffer"
+        );
+        assert_eq!(session.inline_images.len(), 1);
+        assert!(matches!(
+            session.take_decoration_worker_task(),
+            Some(SessionDecorationTask::InlineImage(_))
+        ));
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn lf_stream_tail_on_empty_line_does_not_suppress_preceding_formula() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+
+        session.feed_at(b"$$streamed$$\n", started).unwrap();
+        assert_eq!(session.visible_cursor_logical_line(), Some((1, 1)));
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1,
+            "a natural LF stream tail must not borrow the preceding output line into the gate"
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+            1
+        );
+        assert_eq!(session.live_decorations.len(), 1);
+    }
+
+    #[test]
+    fn alternate_nonblank_input_line_does_not_suppress_output_above_it() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+
+        session
+            .feed_at(b"\x1b[?1049h$$output$$\x1b[8;1H> ", started)
+            .unwrap();
+        assert_eq!(session.visible_cursor_logical_line(), Some((7, 7)));
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1,
+            "a nonblank input row must keep the explicit-empty-line extension disabled"
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+            1
+        );
+        assert_eq!(session.live_decorations.len(), 1);
+    }
+
+    #[test]
+    fn editor_cup_to_empty_line_suppresses_new_band_above_but_keeps_existing_band() {
+        let started = Instant::now();
+        let mut gated = DualPlaneSession::new(nz(10), nz(8));
+        gated.feed_at(b"$$editing$$\x1b[4;1H", started).unwrap();
+        assert!(
+            gated.terminal.visible_row(0).unwrap().continues,
+            "the source fixture must span one WRAPLINE-linked logical line"
+        );
+        assert_eq!(gated.visible_cursor_logical_line(), Some((3, 3)));
+        assert_eq!(
+            gated.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            0,
+            "CUP on an empty row must skip blank rows and gate the nearest nonblank WRAPLINE whole"
+        );
+        assert!(gated.take_live_worker_task().is_none());
+
+        let mut existing = DualPlaneSession::new(nz(80), nz(8));
+        existing.feed_at(b"$$editing$$\n", started).unwrap();
+        existing.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut existing, synthetic_raster(32, 18)),
+            1
+        );
+        let occurrence = existing
+            .live_decorations
+            .values()
+            .next()
+            .unwrap()
+            .identity
+            .occurrence_id;
+
+        existing
+            .feed_at(
+                b"\x1b[2;1H",
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert_eq!(existing.live_decorations.len(), 1);
+        assert_eq!(
+            existing
+                .live_decorations
+                .values()
+                .next()
+                .unwrap()
+                .identity
+                .occurrence_id,
+            occurrence,
+            "cursor suppression gates creation only; it must not retire an existing band"
+        );
+    }
+
+    #[test]
+    fn explicit_empty_line_extension_survives_a_hidden_cursor_burst() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session
+            .feed_at(b"$$editing$$\x1b[2;1H\x1b[?25h", started)
+            .unwrap();
+        session
+            .feed_at(b"\x1b[?25l", started + Duration::from_millis(1))
+            .unwrap();
+
+        assert!(!session.terminal.cursor().visible);
+        assert_eq!(session.cursor_suppressed_logical_line(), Some((1, 1)));
+        assert_eq!(
+            session.advance_live_stability(
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1)
+            ),
+            0,
+            "the sticky line memory must carry the explicit CUP/HVP placement kind"
+        );
+        assert!(session.take_live_worker_task().is_none());
     }
 
     #[test]

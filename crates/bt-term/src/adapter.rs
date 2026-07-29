@@ -187,6 +187,7 @@ pub struct TerminalAdapter {
     parser_tail: Vec<u8>,
     parser_sync_active: bool,
     parser_dcs_active: bool,
+    cursor_row_positioned_explicitly: bool,
     osc1337_scanner: Osc1337Scanner,
     resize_canonical: Option<ResizeCanonical>,
     columns: NonZeroU32,
@@ -208,15 +209,22 @@ struct BoundaryPerformer {
     sync_end: bool,
     dcs_hook: bool,
     dcs_put: bool,
+    cursor_row_positioned_explicitly: Option<bool>,
 }
 
 impl Perform for BoundaryPerformer {
     fn print(&mut self, _character: char) {
         self.complete = true;
+        // A printable can autowrap and therefore land the cursor on another row. A later CUP/HVP
+        // in the same repaint burst restores the explicit fact.
+        self.cursor_row_positioned_explicitly = Some(false);
     }
 
     fn execute(&mut self, byte: u8) {
         self.complete = self.execute_at_ground || matches!(byte, 0x18 | 0x1a);
+        if matches!(byte, b'\n' | b'\x0b' | b'\x0c' | b'\r') {
+            self.cursor_row_positioned_explicitly = Some(false);
+        }
     }
 
     fn unhook(&mut self) {
@@ -244,10 +252,40 @@ impl Perform for BoundaryPerformer {
                 .is_some_and(|parameter| parameter == [2026]);
         self.sync_start = sync_mode && action == 'h';
         self.sync_end = sync_mode && action == 'l';
+        if intermediates.is_empty() {
+            self.cursor_row_positioned_explicitly = match action {
+                // CUP and HVP are the absolute row-placement family used by line editors.
+                'H' | 'f' => Some(true),
+                // Every other control which can land the cursor on another physical row is a
+                // non-qualifying placement. Horizontal-only motion deliberately leaves the last
+                // row-placement fact intact.
+                'A' | 'B' | 'E' | 'F' | 'L' | 'M' | 'S' | 'T' | 'd' | 'e' | 'r' | 'u' => {
+                    Some(false)
+                }
+                'J' if params
+                    .iter()
+                    .next()
+                    .is_some_and(|parameter| parameter == [2]) =>
+                {
+                    Some(false)
+                }
+                _ => None,
+            };
+        } else if intermediates == b"?"
+            && matches!(action, 'h' | 'l')
+            && params
+                .iter()
+                .any(|parameter| matches!(parameter, [3] | [47] | [1047] | [1049]))
+        {
+            self.cursor_row_positioned_explicitly = Some(false);
+        }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {
+    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         self.complete = true;
+        if matches!(byte, b'8' | b'D' | b'E' | b'M' | b'c') {
+            self.cursor_row_positioned_explicitly = Some(false);
+        }
     }
 }
 
@@ -270,6 +308,7 @@ impl TerminalAdapter {
             parser_tail: Vec::new(),
             parser_sync_active: false,
             parser_dcs_active: false,
+            cursor_row_positioned_explicitly: false,
             osc1337_scanner: Osc1337Scanner::default(),
             resize_canonical: None,
             columns,
@@ -377,6 +416,7 @@ impl TerminalAdapter {
         self.term.resize(GridSize { columns, rows });
         self.columns = columns;
         self.rows = rows;
+        self.cursor_row_positioned_explicitly = false;
         self.drain_transcript_events()
     }
 
@@ -509,6 +549,12 @@ impl TerminalAdapter {
         }
     }
 
+    /// Whether the cursor's most recent physical-row placement was CUP/HVP rather than stream
+    /// progression or another cursor-motion family.
+    pub(crate) fn cursor_row_was_explicitly_positioned(&self) -> bool {
+        self.cursor_row_positioned_explicitly
+    }
+
     /// Read DEC private modes from the vendor terminal, the single protocol-state authority.
     pub fn application_cursor_mode(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
@@ -584,6 +630,9 @@ impl TerminalAdapter {
             };
             self.parser_boundary
                 .advance(&mut performer, std::slice::from_ref(&byte));
+            if let Some(explicit) = performer.cursor_row_positioned_explicitly {
+                self.cursor_row_positioned_explicitly = explicit;
+            }
 
             if performer.dcs_hook {
                 self.parser_dcs_active = true;
@@ -811,6 +860,43 @@ mod tests {
                 screen: RemovalScreen::Primary,
                 scope: RemovalScope::FullScreen,
             })
+        );
+    }
+
+    #[test]
+    fn parser_boundary_distinguishes_cup_hvp_from_natural_row_progression() {
+        let mut terminal = TerminalAdapter::new(nz(80), nz(8));
+
+        terminal.feed(b"\x1b[");
+        assert!(!terminal.cursor_row_was_explicitly_positioned());
+        terminal.feed(b"3;1H");
+        assert!(terminal.cursor_row_was_explicitly_positioned());
+        terminal.feed(b"\x1b[?25h\x1b[0m");
+        assert!(
+            terminal.cursor_row_was_explicitly_positioned(),
+            "visibility and presentation controls do not reposition the cursor"
+        );
+
+        terminal.feed(b"\r\n");
+        assert!(
+            !terminal.cursor_row_was_explicitly_positioned(),
+            "CR/LF is natural stream progression, not an editor placement"
+        );
+        terminal.feed(b"\x1b[4;2f");
+        assert!(
+            terminal.cursor_row_was_explicitly_positioned(),
+            "HVP belongs to the same absolute-placement family as CUP"
+        );
+        terminal.feed(b"\x1b[B");
+        assert!(
+            !terminal.cursor_row_was_explicitly_positioned(),
+            "a later non-CUP row motion replaces the placement fact"
+        );
+        terminal.feed(b"\x1b[2;1H");
+        terminal.resize(nz(100), nz(10));
+        assert!(
+            !terminal.cursor_row_was_explicitly_positioned(),
+            "resize invalidates the old physical-row placement"
         );
     }
 
