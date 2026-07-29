@@ -87,11 +87,17 @@
   decoration band(本节路径图片与公式同规则)。逻辑行按网格 WRAPLINE 因果关系向上、
   向下合并全部软换行物理行;所以路径在上半段、光标在下半段也必须抑制。primary 与
   alternate 一致。光标离开后,候选仍须照常通过既有 damage-derived 稳定窗口才可创建。
-  DECTCEM 隐藏光标视为“没有可抑制输入行”:全屏 TUI 常在非输入绘制期间隐藏光标,
-  继续抑制会把确定的输出误判为编辑态。
+  DECTCEM 隐藏期间沿用该 screen 最近一次可见光标的 `(logical_start, logical_end)`
+  **粘滞记忆**,防止 PSReadLine 的“藏光标→逐字符重画→亮光标”爆发被 PTY chunk
+  边界从隐藏窗口劈开后绕过 gate。记忆只由确定事件失效:网格滚动(行号意义变化;
+  含无 transcript removal payload 的显式 CSI S/T)、ED2 全清、clear/home 或 DEC
+  2026 重印边界、resize/reset/DECCOLM、primary/alternate 切换;光标在另一逻辑行
+  重新可见则用新范围替换旧范围。禁用定时失效。全屏 TUI 进入/重印时本就清屏或
+  切屏,因此长期 DECTCEM off 时没有陈旧输入行记忆,原“无输入行则不抑制”豁免保持。
 - 该规则**只 gate 新建**,不参与已有 occurrence 的匹配、保持、重锚、失效或投影。
   已渲染 band 即使在 alternate 应用重绘时被可见光标扫过也保持,不得塌陷或闪回源码。
-  判据只读发布帧时刻的 cursor+WRAPLINE 网格状态,不以键盘/粘贴事件或另设定时器猜测。
+  判据只读发布帧时刻的 cursor+WRAPLINE 网格状态及上述粘滞记忆,不以键盘/粘贴事件
+  或另设定时器猜测。
 - **hover peek 升级位**:路径文本在抑制期间仍是原生可选/可复制文本;未来可把“成功
   解码路径的 hover 临时看图”升级为 §4 的本地无网络 peek,但它是独立呈现政策位,
   不得绕过光标行的新建 gate、提前落 band,也不得改变单击进入共享预览池的晋升路径。

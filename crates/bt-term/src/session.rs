@@ -565,6 +565,7 @@ pub struct DualPlaneSession {
     ascii_baseline_subpixels: Option<NonZeroI64>,
     math_layout_options: MathLayoutOptions,
     live_screen: ScreenId,
+    cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
@@ -637,6 +638,13 @@ pub struct DualPlaneSession {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct PrimaryReprintHistoryFloor(Option<TranscriptId>);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CursorLogicalLineMemory {
+    screen: ScreenId,
+    start: u32,
+    end: u32,
+}
 
 impl DualPlaneSession {
     pub fn new(columns: NonZeroU32, rows: NonZeroU32) -> Self {
@@ -727,6 +735,7 @@ impl DualPlaneSession {
             ascii_baseline_subpixels: None,
             math_layout_options: MathLayoutOptions::default(),
             live_screen: ScreenId::Primary,
+            cursor_logical_line_memory: None,
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
@@ -959,9 +968,13 @@ impl DualPlaneSession {
     /// Deterministic replay entry point. Production callers normally use `feed`; integration tests
     /// can supply a monotonic timestamp without sleeping through the resize silence window.
     pub fn feed_at(&mut self, bytes: &[u8], observed_at: Instant) -> Result<(), SessionError> {
+        let cursor_memory_reprint_boundary = contains_clear_home_snapshot_boundary(bytes);
+        if cursor_memory_reprint_boundary {
+            self.cursor_logical_line_memory = None;
+        }
         let primary_reprint_boundary = self.live_screen == ScreenId::Primary
             && !self.terminal.modes().alternate_screen
-            && contains_clear_home_snapshot_boundary(bytes);
+            && cursor_memory_reprint_boundary;
         if primary_reprint_boundary && self.primary_reprint_history_floor.is_none() {
             self.primary_reprint_history_floor = Some(PrimaryReprintHistoryFloor(
                 self.document.entries().keys().next_back().copied(),
@@ -1022,6 +1035,7 @@ impl DualPlaneSession {
             Ok(())
         })();
         if result.is_err() {
+            self.cursor_logical_line_memory = None;
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
             self.primary_repaint_in_progress = false;
@@ -1050,6 +1064,12 @@ impl DualPlaneSession {
                 self.primary_repaint_in_progress = false;
                 self.primary_reprint_history_floor = None;
             }
+            // An open synchronized repaint still publishes the pre-transaction grid. Its boundary
+            // invalidated the old cursor line above, so do not immediately memorize that stale
+            // cursor again; ESU or the parser timeout records the committed cursor instead.
+            if !(cursor_memory_reprint_boundary && self.synchronized_update_deadline().is_some()) {
+                self.remember_visible_cursor_logical_line();
+            }
         }
         result
     }
@@ -1074,6 +1094,7 @@ impl DualPlaneSession {
     ) -> Result<(), SessionError> {
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
         if plan.begin_transaction {
+            self.cursor_logical_line_memory = None;
             self.begin_resize_transaction(observed_at)?;
             self.resize_epoch.changed(observed_at);
             self.grid_generation.0 += 1;
@@ -1154,6 +1175,7 @@ impl DualPlaneSession {
             self.finish_primary_repaint(snapshot, true);
             self.restore_offscreen_decorations();
         }
+        self.remember_visible_cursor_logical_line();
         Ok(())
     }
 
@@ -1212,6 +1234,7 @@ impl DualPlaneSession {
         // The synchronized-update reprint has committed and re-anchored: end primary preservation.
         self.primary_repaint_in_progress = false;
         self.primary_reprint_history_floor = None;
+        self.remember_visible_cursor_logical_line();
         Ok(true)
     }
 
@@ -1454,14 +1477,15 @@ impl DualPlaneSession {
     }
 
     /// Schedule new live-grid decoration records from rows which have already passed the ordinary
-    /// damage-derived stability window. The only additional gate is the terminal's current,
-    /// published-grid cursor fact: while DECTCEM exposes the cursor, the complete WRAPLINE-linked
-    /// logical line containing it is ineligible for a new image or math band.
+    /// damage-derived stability window. The only additional gate is the terminal's published-grid
+    /// cursor fact: while DECTCEM exposes the cursor, the complete WRAPLINE-linked logical line
+    /// containing it is ineligible for a new image or math band. While DECTCEM is temporarily off,
+    /// the last visible logical line remains the gate until a deterministic grid boundary clears it.
     ///
     /// Existing records are deliberately outside this policy. Image occurrences are matched and
     /// re-anchored before the creation gate below; live math preservation/projection likewise never
-    /// calls this method. A hidden cursor yields no suppressed line because full-screen TUIs often
-    /// hide it while painting non-input content.
+    /// calls this method. Full-screen TUIs retain their exemption because entering/repainting them
+    /// clears or switches the grid before they keep DECTCEM off, leaving no remembered input line.
     fn schedule_live_artifacts(&mut self, stable: &[bool]) -> usize {
         let image_tasks_before = self.local_image_path_tasks.len();
         self.reconcile_live_image_paths(true, stable);
@@ -1470,7 +1494,7 @@ impl DualPlaneSession {
         let initial_context = self.live_initial_detection_context(&inputs);
         let candidates = live_candidate_rows(&inputs, initial_context.clone(), stable);
         let context_signature = live_detection_context_signature(&inputs);
-        let suppressed_line = self.visible_cursor_logical_line();
+        let suppressed_line = self.cursor_suppressed_logical_line();
         let mut new_tasks = Vec::new();
         for candidate_row in candidates {
             if suppressed_line
@@ -1552,17 +1576,16 @@ impl DualPlaneSession {
         )
     }
 
-    /// Inclusive physical-row bounds for the visible cursor's logical line. `CapturedRow::continues`
-    /// is the vendor WRAPLINE fact for "this row continues into the next"; walking it in both
-    /// directions makes a cursor on either half of a soft-wrapped input suppress the whole line.
-    fn visible_cursor_logical_line(&self) -> Option<(u32, u32)> {
-        let cursor = self.terminal.cursor();
+    /// Inclusive physical-row bounds for one row's logical line. `CapturedRow::continues` is the
+    /// vendor WRAPLINE fact for "this row continues into the next"; walking it in both directions
+    /// makes a cursor on either half of a soft-wrapped input suppress the whole line.
+    fn logical_line_containing(&self, row: u32) -> Option<(u32, u32)> {
         let row_count = u32::try_from(self.live_rows.len()).unwrap_or(u32::MAX);
-        if !cursor.visible || cursor.row >= row_count {
+        if row >= row_count {
             return None;
         }
 
-        let mut start = cursor.row;
+        let mut start = row;
         while start > 0
             && self
                 .terminal
@@ -1572,7 +1595,7 @@ impl DualPlaneSession {
             start -= 1;
         }
 
-        let mut end = cursor.row;
+        let mut end = row;
         while end.saturating_add(1) < row_count
             && self
                 .terminal
@@ -1584,6 +1607,33 @@ impl DualPlaneSession {
         Some((start, end))
     }
 
+    fn visible_cursor_logical_line(&self) -> Option<(u32, u32)> {
+        let cursor = self.terminal.cursor();
+        cursor
+            .visible
+            .then(|| self.logical_line_containing(cursor.row))
+            .flatten()
+    }
+
+    fn remember_visible_cursor_logical_line(&mut self) {
+        let Some((start, end)) = self.visible_cursor_logical_line() else {
+            return;
+        };
+        self.cursor_logical_line_memory = Some(CursorLogicalLineMemory {
+            screen: self.live_screen,
+            start,
+            end,
+        });
+    }
+
+    fn cursor_suppressed_logical_line(&self) -> Option<(u32, u32)> {
+        self.visible_cursor_logical_line().or_else(|| {
+            self.cursor_logical_line_memory
+                .filter(|memory| memory.screen == self.live_screen)
+                .map(|memory| (memory.start, memory.end))
+        })
+    }
+
     fn new_live_decoration_is_cursor_suppressed(&self, task: &LiveDetectionTask) -> bool {
         let replaces_existing = self.live_decorations.values().any(|record| {
             record.screen == task.screen
@@ -1593,7 +1643,7 @@ impl DualPlaneSession {
         });
         !replaces_existing
             && self
-                .visible_cursor_logical_line()
+                .cursor_suppressed_logical_line()
                 .is_some_and(|(start, end)| {
                     ranges_intersect(task.start.row, task.end.row, start, end)
                 })
@@ -2495,6 +2545,7 @@ impl DualPlaneSession {
             ScreenId::Primary
         };
         if screen != self.live_screen {
+            self.cursor_logical_line_memory = None;
             self.invalidate_all_live_decorations();
             // A screen switch is a hard boundary: never carry the previous screen's off-band
             // preservation queue across it, even if a resize transaction on the old screen kept
@@ -4454,6 +4505,7 @@ impl DualPlaneSession {
             }
             match directive {
                 LifecycleDirective::RowsRemoved { rows } => {
+                    self.cursor_logical_line_memory = None;
                     if self.resize_epoch.is_active() {
                         self.rebase_vendor_owned_rows(rows);
                     } else {
@@ -4467,12 +4519,16 @@ impl DualPlaneSession {
                         }
                     }
                 }
+                LifecycleDirective::GridCoordinatesInvalidated => {
+                    self.cursor_logical_line_memory = None;
+                }
                 LifecycleDirective::ClearHistoryAndStaging => {
                     self.terminal.clear_resize_transaction_history();
                     let removed = self.transcript.clear_history();
                     self.delete_history(&removed, true);
                 }
                 LifecycleDirective::InvalidateStaging => {
+                    self.cursor_logical_line_memory = None;
                     self.terminal.clear_resize_transaction_history();
                     self.transcript.invalidate_staging();
                     self.staging_sources.clear();
@@ -4493,6 +4549,7 @@ impl DualPlaneSession {
                         .delete_transaction(&[], true, self.grid_generation);
                 }
                 LifecycleDirective::ParkPrimary => {
+                    self.cursor_logical_line_memory = None;
                     self.invalidate_all_live_decorations();
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
@@ -4505,6 +4562,7 @@ impl DualPlaneSession {
                     self.bump_view_generation();
                 }
                 LifecycleDirective::RestorePrimary => {
+                    self.cursor_logical_line_memory = None;
                     self.invalidate_all_live_decorations();
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
@@ -4664,7 +4722,7 @@ impl DualPlaneSession {
             } else if create_and_retire
                 && candidate.stable
                 && !self
-                    .visible_cursor_logical_line()
+                    .cursor_suppressed_logical_line()
                     .is_some_and(|(start, end)| {
                         ranges_intersect(candidate.start.row, candidate.end.row, start, end)
                     })
@@ -7901,6 +7959,11 @@ mod tests {
     }
 
     fn hide_cursor(session: &mut DualPlaneSession, observed_at: Instant) {
+        // These legacy fixtures exercise detector/lifecycle behavior unrelated to prompt editing.
+        // They predate the cursor-line gate and use a hidden cursor solely to state that no input
+        // line exists. Install that precondition directly; dedicated tests below prove each real
+        // clear, scroll, and screen-switch event which retires the production memory.
+        session.cursor_logical_line_memory = None;
         session.feed_at(b"\x1b[?25l", observed_at).unwrap();
     }
 
@@ -12958,6 +13021,168 @@ mod tests {
         observed_at
     }
 
+    fn feed_psreadline_paste_bursts_until_cursor_hidden(
+        session: &mut DualPlaneSession,
+        text: &str,
+        started: Instant,
+    ) -> Instant {
+        session.feed_at(b"PS> ", started).unwrap();
+        let mut observed_at = started;
+        let mut typed = String::new();
+        let character_count = text.chars().count();
+        for (index, character) in text.chars().enumerate() {
+            observed_at += Duration::from_millis(1);
+            typed.push(character);
+            let cursor_column = "PS> ".chars().count() + typed.chars().count() + 1;
+            let burst = format!("\x1b[?25l\x1b[1;1H\x1b[2KPS> {typed}\x1b[1;{cursor_column}H");
+            session.feed_at(burst.as_bytes(), observed_at).unwrap();
+            if index + 1 != character_count {
+                // Match the real cursor-accept.vt chunking: every one of its twelve PSReadLine
+                // bursts ends a PTY chunk while DECTCEM is off, then re-enables it in a later chunk.
+                session.feed_at(b"\x1b[?25h", observed_at).unwrap();
+            }
+        }
+        observed_at
+    }
+
+    #[test]
+    fn psreadline_paste_hidden_chunk_keeps_input_line_suppressed_at_stability() {
+        let (directory, png_path) = temporary_path_image();
+        let path = directory.join("cursor-paste.jpg");
+        std::fs::rename(&png_path, &path).unwrap();
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(240), nz(8));
+        enable_path_detection(&mut session);
+        let command = format!("echo \"[Image: source: {}]\"", path.display());
+
+        let hidden_at =
+            feed_psreadline_paste_bursts_until_cursor_hidden(&mut session, &command, started);
+        assert!(!session.terminal.cursor().visible);
+        assert_eq!(
+            session.advance_live_stability(hidden_at + LIVE_MATH_STABLE_INTERVAL),
+            0,
+            "the hidden half of a PSReadLine repaint burst must retain the input-line gate"
+        );
+        assert!(
+            session.inline_images.is_empty(),
+            "a chunk boundary inside the cursor-hidden window must not create the path occurrence"
+        );
+        assert!(session.take_decoration_worker_task().is_none());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn psreadline_hidden_chunk_suppresses_in_flight_worker_completion() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session.feed_at(b"$$x$$\r\nprompt", started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let mut task = session.take_live_worker_task().unwrap();
+        assert!(resolve_live_detection_task(&mut task));
+
+        let cursor_at_source = started + LIVE_MATH_STABLE_INTERVAL;
+        session.feed_at(b"\x1b[1;1H", cursor_at_source).unwrap();
+        session
+            .feed_at(
+                b"\x1b[?25l\x1b[1;1H",
+                cursor_at_source + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert!(!session.terminal.cursor().visible);
+        assert!(session.complete_live_worker_result(task, Ok(synthetic_raster(32, 18))));
+        assert!(
+            session.live_decorations.is_empty(),
+            "completion inside the hidden half-burst must retain the source-line gate"
+        );
+        assert_eq!(session.live_rows[0].candidate_signature, None);
+    }
+
+    #[test]
+    fn hidden_cursor_memory_is_invalidated_by_grid_scroll() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session.feed_at(b"prompt", started).unwrap();
+        session
+            .feed_at(b"\x1b[?25l", started + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(session.cursor_suppressed_logical_line(), Some((0, 0)));
+
+        session
+            .feed_at(b"\x1b[S", started + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(
+            session.cursor_suppressed_logical_line(),
+            None,
+            "an explicit grid scroll changes row identity and must retire the remembered row"
+        );
+    }
+
+    #[test]
+    fn hidden_cursor_memory_is_invalidated_by_full_clear() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session.feed_at(b"prompt", started).unwrap();
+        session
+            .feed_at(b"\x1b[?25l", started + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(session.cursor_suppressed_logical_line(), Some((0, 0)));
+
+        session
+            .feed_at(b"\x1b[2J", started + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(
+            session.cursor_suppressed_logical_line(),
+            None,
+            "ED 2 is a semantic clear even when CUP arrives in another PTY chunk"
+        );
+    }
+
+    #[test]
+    fn primary_hidden_cursor_memory_does_not_cross_to_alternate_screen() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session.feed_at(b"prompt", started).unwrap();
+        session
+            .feed_at(b"\x1b[?25l", started + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(session.cursor_suppressed_logical_line(), Some((0, 0)));
+
+        session
+            .feed_at(b"\x1b[?1049h", started + Duration::from_millis(2))
+            .unwrap();
+        assert_eq!(session.live_screen, ScreenId::Alternate);
+        assert_eq!(
+            session.cursor_suppressed_logical_line(),
+            None,
+            "the primary screen's remembered row must not suppress alternate content"
+        );
+    }
+
+    #[test]
+    fn newly_visible_cursor_on_another_line_replaces_hidden_memory() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(8));
+        session.feed_at(b"prompt", started).unwrap();
+        session
+            .feed_at(b"\x1b[?25l", started + Duration::from_millis(1))
+            .unwrap();
+        assert_eq!(session.cursor_suppressed_logical_line(), Some((0, 0)));
+
+        session
+            .feed_at(b"\x1b[3;1H\x1b[?25h", started + Duration::from_millis(2))
+            .unwrap();
+        session
+            .feed_at(b"\x1b[?25l", started + Duration::from_millis(3))
+            .unwrap();
+        assert_eq!(
+            session.cursor_suppressed_logical_line(),
+            Some((2, 2)),
+            "a newly published visible line replaces, rather than extends, the old memory"
+        );
+    }
+
     #[test]
     fn visible_cursor_input_line_suppresses_new_path_and_math_until_enter() {
         let (directory, path) = temporary_path_image();
@@ -13165,10 +13390,19 @@ mod tests {
     fn hidden_cursor_does_not_suppress_full_screen_tui_math() {
         let started = Instant::now();
         let mut session = DualPlaneSession::new(nz(80), nz(8));
-        session.feed_at(b"$$x$$\x1b[?25l", started).unwrap();
+        session.feed_at(b"prompt", started).unwrap();
+        session
+            .feed_at(
+                b"\x1b[2J\x1b[H\x1b[?25l$$x$$",
+                started + Duration::from_millis(1),
+            )
+            .unwrap();
         assert_eq!(session.visible_cursor_logical_line(), None);
+        assert_eq!(session.cursor_suppressed_logical_line(), None);
         assert_eq!(
-            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            session.advance_live_stability(
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1)
+            ),
             1
         );
         assert_eq!(

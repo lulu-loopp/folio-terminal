@@ -115,6 +115,7 @@ pub enum LifecycleDirective {
     RowsRemoved {
         rows: Vec<RowDirective>,
     },
+    GridCoordinatesInvalidated,
     ClearHistoryAndStaging,
     InvalidateStaging,
     ParkPrimary,
@@ -150,6 +151,9 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
                 .map(|row| classify_row(context, row))
                 .collect(),
         },
+        AdapterEvent::GridScrolled | AdapterEvent::ScreenCleared => {
+            LifecycleDirective::GridCoordinatesInvalidated
+        }
         AdapterEvent::ClearHistory => LifecycleDirective::ClearHistoryAndStaging,
         AdapterEvent::Reset | AdapterEvent::Deccolm => LifecycleDirective::InvalidateStaging,
         AdapterEvent::PrimaryParked => LifecycleDirective::ParkPrimary,

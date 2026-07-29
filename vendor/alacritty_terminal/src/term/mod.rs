@@ -45,6 +45,8 @@ pub enum TranscriptEvent {
         cause: ScrollOutCause,
         rows: Vec<RemovedRow>,
     },
+    GridScrolled,
+    ScreenCleared,
     ClearHistory,
     Reset,
     Deccolm,
@@ -1078,6 +1080,11 @@ impl<T> Term<T> {
         lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
 
         let region = origin..self.scroll_region.end;
+        if lines != 0
+            && let Some(hook) = &self.transcript_hook
+        {
+            hook(TranscriptEvent::GridScrolled);
+        }
 
         // Scroll selection.
         self.selection = self
@@ -1121,6 +1128,14 @@ impl<T> Term<T> {
         // Report that effective removal count instead of indexing beyond the region.
         let removed_lines = cmp::min(lines, (self.scroll_region.end - origin).0 as usize);
         if removed_lines != 0 {
+            // Output and delete-line scrolls emit `ScrollOut` below, which already proves that row
+            // coordinates moved. CSI S deliberately has no removal payload, so it needs this
+            // allocation-free semantic fact of its own.
+            if operation == ScrollOperation::ExplicitScreen
+                && let Some(hook) = &self.transcript_hook
+            {
+                hook(TranscriptEvent::GridScrolled);
+            }
             let extends_resize_candidate = !self.resize_staging_candidate.is_empty()
                 && operation == ScrollOperation::Output
                 && !self.mode.contains(TermMode::ALT_SCREEN)
@@ -2427,6 +2442,11 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn clear_screen(&mut self, mode: ansi::ClearMode) {
         trace!("Clearing screen: {mode:?}");
+        if matches!(mode, ansi::ClearMode::All)
+            && let Some(hook) = &self.transcript_hook
+        {
+            hook(TranscriptEvent::ScreenCleared);
+        }
         if matches!(mode, ansi::ClearMode::Saved) {
             if let Some(hook) = &self.transcript_hook {
                 hook(TranscriptEvent::ClearHistory);

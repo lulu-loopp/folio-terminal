@@ -110,6 +110,8 @@ pub enum AdapterEvent {
         context: RemovalContext,
         rows: Vec<RemovedLiveRow>,
     },
+    GridScrolled,
+    ScreenCleared,
     ClearHistory,
     Reset,
     Deccolm,
@@ -561,6 +563,8 @@ impl TerminalAdapter {
                         })
                         .collect(),
                 },
+                TranscriptEvent::GridScrolled => AdapterEvent::GridScrolled,
+                TranscriptEvent::ScreenCleared => AdapterEvent::ScreenCleared,
                 TranscriptEvent::ClearHistory => AdapterEvent::ClearHistory,
                 TranscriptEvent::Reset => AdapterEvent::Reset,
                 TranscriptEvent::Deccolm => AdapterEvent::Deccolm,
@@ -739,7 +743,10 @@ mod tests {
             })
         );
         assert!(matches!(
-            &events[0],
+            events
+                .iter()
+                .find(|event| matches!(event, AdapterEvent::RowsRemoved { .. }))
+                .unwrap(),
             AdapterEvent::RowsRemoved { rows, .. }
                 if rows.first().is_some_and(|row| row.row.cells[0].text == "o")
         ));
@@ -786,7 +793,13 @@ mod tests {
         let mut terminal = TerminalAdapter::new(nz(8), nz(4));
         terminal.feed(b"a\r\nb\r\nc\r\nd");
 
-        assert!(terminal.feed(b"\x1b[S").is_empty());
+        let explicit = terminal.feed(b"\x1b[S");
+        assert!(explicit.contains(&AdapterEvent::GridScrolled));
+        assert!(
+            !explicit
+                .iter()
+                .any(|event| matches!(event, AdapterEvent::RowsRemoved { .. }))
+        );
         assert_eq!(terminal.visible_text(), ["b", "c", "d", ""]);
 
         // LF at the bottom remains output scroll and still carries exact removed cells.
