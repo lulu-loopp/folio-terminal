@@ -352,6 +352,10 @@ enum SelectionDragMode {
     Line,
 }
 
+fn should_copy_on_select_release(route: Option<&MouseRoute>, single_click: bool) -> bool {
+    !single_click && matches!(route, Some(MouseRoute::Local(_)))
+}
+
 #[derive(Default)]
 struct ClickTracker {
     last_at: Option<Instant>,
@@ -1252,15 +1256,18 @@ impl Runtime {
     fn copy_selection(&mut self) -> Result<()> {
         let window = Arc::clone(&self.window);
         if !copy_selection(&mut self.session, &mut self.projection, |text| {
-            window_hwnd(&window).and_then(|hwnd| {
-                bt_platform::set_clipboard_text(hwnd, text)
-                    .map_err(|error| anyhow!(error))
-                    .context("write terminal selection to clipboard")
-            })
+            write_terminal_clipboard_text(&window, text)
         }) {
             return Ok(());
         }
         self.publish_interaction_frame()
+    }
+
+    fn copy_selection_on_release(&self) {
+        let window = Arc::clone(&self.window);
+        write_selection_text(&self.session, true, |text| {
+            write_terminal_clipboard_text(&window, text)
+        });
     }
 
     fn scroll_view(&mut self, rows: i32) -> Result<()> {
@@ -1545,10 +1552,14 @@ impl Runtime {
                     } else {
                         (false, None, None)
                     };
+                let copy_on_select =
+                    should_copy_on_select_release(self.mouse_route.as_ref(), single_click);
                 self.mouse_route = None;
                 if single_click {
                     self.clear_selection();
                     self.publish_interaction_frame()?;
+                } else if copy_on_select {
+                    self.copy_selection_on_release();
                 }
                 if let Some(hyperlink) = hyperlink_to_open {
                     self.activate_hyperlink(hyperlink)?;
@@ -2256,15 +2267,37 @@ fn copy_selection(
     projection: &mut ViewportProjection,
     write: impl FnOnce(&str) -> Result<()>,
 ) -> bool {
-    let Some(text) = session.selection_text() else {
-        return false;
-    };
-    if !recoverable_clipboard_write(write(&text), "copy") {
+    if !write_selection_text(session, false, write) {
         return false;
     }
     session.set_view_selection(None);
     projection.set_selection(None);
     true
+}
+
+fn write_selection_text(
+    session: &DualPlaneSession,
+    ignore_empty: bool,
+    write: impl FnOnce(&str) -> Result<()>,
+) -> bool {
+    let Some(text) = session.selection_text() else {
+        return false;
+    };
+    if ignore_empty && text.is_empty() {
+        return false;
+    }
+    if !recoverable_clipboard_write(write(&text), "copy") {
+        return false;
+    }
+    true
+}
+
+fn write_terminal_clipboard_text(window: &Window, text: &str) -> Result<()> {
+    window_hwnd(window).and_then(|hwnd| {
+        bt_platform::set_clipboard_text(hwnd, text)
+            .map_err(|error| anyhow!(error))
+            .context("write terminal selection to clipboard")
+    })
 }
 
 fn recoverable_clipboard_write(result: Result<()>, action: &str) -> bool {
@@ -2612,6 +2645,41 @@ mod tests {
                 generation: bt_doc::GridGeneration(1),
             },
         }
+    }
+
+    fn local_selection_route(mode: SelectionDragMode) -> MouseRoute {
+        let hit = hyperlink_hit("https://example.test");
+        MouseRoute::Local(SelectionDrag {
+            mode,
+            origin_row: 1,
+            origin_column: 2,
+            origin: ViewSelection {
+                start: hit.start,
+                end: hit.end,
+            },
+            hyperlink: None,
+            open_hyperlink_on_release: false,
+            local_image_path: None,
+            open_local_image_on_release: false,
+        })
+    }
+
+    #[test]
+    fn selection_release_copy_policy_covers_drag_word_and_line_but_not_click_or_forwarding() {
+        for mode in [
+            SelectionDragMode::Linear,
+            SelectionDragMode::Word,
+            SelectionDragMode::Line,
+        ] {
+            let route = local_selection_route(mode);
+            assert!(should_copy_on_select_release(Some(&route), false));
+        }
+
+        let click = local_selection_route(SelectionDragMode::Linear);
+        assert!(!should_copy_on_select_release(Some(&click), true));
+        let forwarded = MouseRoute::Forward(input::MouseProtocolButton::Left);
+        assert!(!should_copy_on_select_release(Some(&forwarded), false));
+        assert!(!should_copy_on_select_release(None, false));
     }
 
     #[test]
@@ -3130,6 +3198,91 @@ mod tests {
         assert_eq!(clipboard, "retry me");
         assert!(session.view_selection().is_none());
         assert!(projection.selection().is_none());
+    }
+
+    #[test]
+    fn ctrl_c_keeps_its_existing_empty_text_write_and_clear_semantics() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(2).unwrap());
+        session.feed(b"   ").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let selection = ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(0, 2, Bias::After).unwrap().unwrap(),
+        };
+        session.set_view_selection(Some(selection.clone()));
+        projection.set_selection(Some(selection));
+        let mut writes = Vec::new();
+
+        assert!(copy_selection(&mut session, &mut projection, |text| {
+            writes.push(text.to_owned());
+            Ok(())
+        }));
+        assert_eq!(writes, [""]);
+        assert!(session.view_selection().is_none());
+        assert!(projection.selection().is_none());
+    }
+
+    #[test]
+    fn copy_on_select_writes_nonempty_text_and_keeps_the_selection() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(2).unwrap());
+        session.feed(b"drag me").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let selection = ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(0, 6, Bias::After).unwrap().unwrap(),
+        };
+        session.set_view_selection(Some(selection));
+        let mut clipboard = String::new();
+
+        assert!(write_selection_text(&session, true, |text| {
+            clipboard.push_str(text);
+            Ok(())
+        }));
+        assert_eq!(clipboard, "drag me");
+        assert_eq!(session.selection_text().as_deref(), Some("drag me"));
+    }
+
+    #[test]
+    fn copy_on_select_does_not_touch_the_clipboard_for_an_empty_selection() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(2).unwrap());
+        session.feed(b"click").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.anchor_at(0, 2, Bias::Before).unwrap().unwrap();
+        session.set_view_selection(Some(ViewSelection {
+            start: anchor.clone(),
+            end: anchor,
+        }));
+        let mut writes = 0;
+
+        assert!(!write_selection_text(&session, true, |_| {
+            writes += 1;
+            Ok(())
+        }));
+        assert_eq!(writes, 0);
+    }
+
+    #[test]
+    fn unavailable_clipboard_during_copy_on_select_keeps_the_selection() {
+        let mut session =
+            DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(2).unwrap());
+        session.feed(b"retry me").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        session.set_view_selection(Some(ViewSelection {
+            start: frame.anchor_at(0, 0, Bias::Before).unwrap().unwrap(),
+            end: frame.anchor_at(0, 7, Bias::After).unwrap().unwrap(),
+        }));
+
+        assert!(!write_selection_text(&session, true, |_| {
+            Err(anyhow!("injected clipboard owner contention"))
+        }));
+        assert_eq!(session.selection_text().as_deref(), Some("retry me"));
     }
 
     #[test]
