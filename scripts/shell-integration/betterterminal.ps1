@@ -33,7 +33,8 @@ $Global:__BetterTerminalShellIntegration = @{
 function Global:PSConsoleHostReadLine {
     $original = $Global:__BetterTerminalShellIntegration.OriginalReadLine
     $commandLine = & $original
-    [Console]::Write("`e]133;C`a")
+    # [char]27: Windows PowerShell 5.1 has no `e escape; this form works on both generations.
+    [Console]::Write(([string][char]27) + ']133;C' + [char]7)
     return $commandLine
 }
 
@@ -42,6 +43,8 @@ function Global:prompt {
     $lastSucceeded = $?
     $nativeExitCode = $Global:LASTEXITCODE
     $state = $Global:__BetterTerminalShellIntegration
+    $esc = [string][char]27
+    $bel = [string][char]7
     $out = ''
 
     if ($state.CommandStarted) {
@@ -52,12 +55,12 @@ function Global:prompt {
         } else {
             $exitCode = 1
         }
-        $out += "`e]133;D;$exitCode`a"
+        $out += $esc + ']133;D;' + $exitCode + $bel
     }
 
-    $out += "`e]133;A`a"
+    $out += $esc + ']133;A' + $bel
     $out += (& $state.OriginalPrompt)
-    $out += "`e]133;B`a"
+    $out += $esc + ']133;B' + $bel
     $state.CommandStarted = $true
     return $out
 }
