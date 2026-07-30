@@ -52,7 +52,7 @@ const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
 /// M0-alpha's single-session frozen-line budget; later configuration work may expose it.
 const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
-const HYPERLINK_HOVER_DELAY: Duration = Duration::from_millis(400);
+const HYPERLINK_HOVER_DELAY: Duration = Duration::from_millis(300);
 const MATH_WORKER_STOPPED_NOTICE: &str =
     "Formula rendering stopped; terminal input and output remain available";
 const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
@@ -400,9 +400,18 @@ impl HyperlinkHover {
         }
         let active_changed = self.active.take().is_some();
         self.blocked = false;
+        // The underline is the affordance and follows the candidate immediately; only the status
+        // tooltip waits out the hover delay. A candidate change therefore needs a republish too.
+        let candidate_changed = self.candidate.is_some() || hit.is_some();
         self.candidate = hit;
         self.show_at = self.candidate.as_ref().map(|_| now + HYPERLINK_HOVER_DELAY);
-        active_changed
+        active_changed || candidate_changed
+    }
+
+    /// The link whose span should render underlined right now: the settled hover if the tooltip is
+    /// up, otherwise the instant candidate under the pointer.
+    fn underline_target(&self) -> Option<&HyperlinkHit> {
+        self.active.as_ref().or(self.candidate.as_ref())
     }
 
     fn activate_if_due(&mut self, now: Instant) -> bool {
@@ -800,8 +809,9 @@ impl Runtime {
                 &mut self.math_worker_notice_pending,
             );
         }
-        if let Some(hyperlink) = self.hyperlink_hover.active.as_ref()
+        if let Some(hyperlink) = self.hyperlink_hover.underline_target()
             && terminal_frame.underline_hyperlink(hyperlink)
+            && self.hyperlink_hover.active.is_some()
         {
             terminal_frame.status_text = self
                 .hyperlink_hover
@@ -2733,15 +2743,20 @@ mod tests {
         let link = hyperlink_hit("file:///actual-target");
         let mut hover = HyperlinkHover::default();
 
-        assert!(!hover.observe(Some(link.clone()), start));
-        assert!(!hover.activate_if_due(start + Duration::from_millis(399)));
-        assert!(hover.activate_if_due(start + Duration::from_millis(400)));
+        // The underline is the immediate affordance: a fresh candidate republishes right away and
+        // is the underline target long before the tooltip deadline; only the status text waits.
+        assert!(hover.observe(Some(link.clone()), start));
+        assert_eq!(hover.underline_target(), Some(&link));
+        assert!(hover.active.is_none(), "tooltip must not appear instantly");
+        assert!(!hover.activate_if_due(start + Duration::from_millis(299)));
+        assert!(hover.activate_if_due(start + Duration::from_millis(300)));
         assert_eq!(
             hover.status_text(80).as_deref(),
             Some("file:///actual-target")
         );
-        assert!(hover.observe(None, start + Duration::from_millis(401)));
+        assert!(hover.observe(None, start + Duration::from_millis(301)));
         assert!(hover.active.is_none());
+        assert!(hover.underline_target().is_none());
         assert!(hover.show_at.is_none());
 
         hover.show_blocked(link);
