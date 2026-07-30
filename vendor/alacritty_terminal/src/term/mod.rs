@@ -1,5 +1,6 @@
 //! Exports the `Term` type which is a high-level API for the Grid.
 
+use std::collections::BTreeSet;
 use std::ops::{Index, IndexMut, Range};
 use std::sync::Arc;
 use std::{cmp, mem, ptr, slice, str};
@@ -74,7 +75,7 @@ enum ScrollOperation {
     DeleteLines,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum TranscriptScreen {
     Primary,
     Alternate,
@@ -428,6 +429,13 @@ pub struct Term<T> {
     /// BetterTerminal M-1 hook for structured transcript lifecycle events.
     transcript_hook: Option<Arc<dyn Fn(TranscriptEvent) + Send + Sync>>,
 
+    /// Physical rows which received printable terminal input since the last consumer drain.
+    ///
+    /// This is intentionally separate from render damage: cursor movement damages cells for
+    /// repainting but is not a grid write. BetterTerminal uses these facts to give OSC 133 command
+    /// boundaries end-exclusive semantics without inspecting or guessing from escape bytes.
+    input_writes: BTreeSet<(TranscriptScreen, usize)>,
+
     /// While true, the primary grid's native scrollback is the sole owner of the complete mutable
     /// resize tail. BetterTerminal harvests it exactly once when the transaction closes.
     resize_transaction: bool,
@@ -537,7 +545,13 @@ impl<T> Term<T> {
         let mut fork = self.clone();
         fork.event_proxy = event_proxy;
         fork.transcript_hook = None;
+        fork.input_writes.clear();
         fork
+    }
+
+    /// Drain rows which received printable input, preserving the active screen at write time.
+    pub fn take_input_writes(&mut self) -> Vec<(TranscriptScreen, usize)> {
+        mem::take(&mut self.input_writes).into_iter().collect()
     }
 
     /// Give the primary grid exclusive ownership of scroll-out for a resize transaction.
@@ -685,6 +699,7 @@ impl<T> Term<T> {
             scroll_region,
             event_proxy,
             transcript_hook: None,
+            input_writes: BTreeSet::new(),
             resize_transaction: false,
             resize_staging_candidate: Vec::new(),
             damage,
@@ -1795,15 +1810,29 @@ impl<T: EventListener> Handler for Term<T> {
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
-        if !self.mode.contains(TermMode::GRAPHEME_CLUSTERING) {
+        let written_line = if !self.mode.contains(TermMode::GRAPHEME_CLUSTERING) {
             self.grapheme = GraphemeState::default();
             let mut encoded = [0; 4];
             let scalar = c.encode_utf8(&mut encoded);
-            let _ = self.write_grapheme_at_cursor(scalar, cluster_width(scalar));
+            self.write_grapheme_at_cursor(scalar, cluster_width(scalar))
+                .map(|(lead, _)| lead.line)
+                .or(Some(self.grid.cursor.point.line))
         } else if self.can_extend_grapheme(c) {
             self.extend_grapheme(c);
+            Some(self.grapheme.lead.line)
         } else {
             self.start_grapheme(c);
+            (!self.grapheme.cluster.is_empty())
+                .then_some(self.grapheme.lead.line)
+                .or(Some(self.grid.cursor.point.line))
+        };
+        if let Some(row) = written_line.and_then(|line| usize::try_from(line.0).ok()) {
+            let screen = if self.mode.contains(TermMode::ALT_SCREEN) {
+                TranscriptScreen::Alternate
+            } else {
+                TranscriptScreen::Primary
+            };
+            self.input_writes.insert((screen, row));
         }
     }
 

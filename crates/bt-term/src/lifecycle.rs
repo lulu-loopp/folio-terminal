@@ -132,6 +132,10 @@ pub enum LifecycleDirective {
         column: u32,
         marker: crate::inline_image::ShellIntegrationMarker,
     },
+    GridWrites {
+        screen: RemovalScreen,
+        rows: Vec<u32>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -186,6 +190,9 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
             column,
             marker,
         },
+        AdapterEvent::GridWrites { screen, rows } => {
+            LifecycleDirective::GridWrites { screen, rows }
+        }
     }
 }
 

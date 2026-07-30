@@ -669,6 +669,9 @@ struct SemanticInputRegion {
     start: AnchorId,
     end: AnchorId,
     closed: bool,
+    /// Physical rows which received printable grid writes while this B..C region was active.
+    /// Generation is part of the fact so coordinates from before a reflow cannot alias a new row.
+    written_rows: BTreeSet<(u64, u32)>,
     /// Exact visible command text captured before a reflow. Coordinates are only a projection;
     /// this content witness is what re-seats the region after the vendor changes physical rows.
     witness: String,
@@ -1409,6 +1412,10 @@ impl DualPlaneSession {
             self.grid_generation.0 += 1;
             self.document
                 .capture_rows_transaction(&[], self.grid_generation);
+            // ConPTY reconciliation is the second deterministic reflow boundary. Re-seat both
+            // command anchors and their row-write facts in the new generation before a later C
+            // marker decides whether its line-start coordinate is end-exclusive.
+            self.reanchor_semantic_input_regions_after_resize();
             // The vendor reconcile can shift rows and always bumps the grid generation, which
             // strands the formulas `restore_offscreen_decorations` re-anchored inside `resize_at`
             // one generation behind the frame the app is about to publish. Re-anchor them against
@@ -1870,6 +1877,7 @@ impl DualPlaneSession {
                     start,
                     end,
                     closed: false,
+                    written_rows: BTreeSet::new(),
                     witness: String::new(),
                 });
                 self.shell_phases
@@ -1903,6 +1911,7 @@ impl DualPlaneSession {
             return;
         };
         let end = region.end;
+        let point = self.semantic_input_end_point(region_index, screen, point);
         let _ = self.document.replace_anchor(
             end,
             ContentAnchor::Live {
@@ -1916,6 +1925,67 @@ impl DualPlaneSession {
             region.closed = true;
         }
         self.refresh_semantic_region_witness(region_index);
+    }
+
+    fn semantic_input_end_point(
+        &self,
+        region_index: usize,
+        screen: ScreenId,
+        close: GridPoint,
+    ) -> GridPoint {
+        let Some(region) = self.semantic_input_regions.get(region_index) else {
+            return close;
+        };
+        if close.column != 0
+            || region
+                .written_rows
+                .contains(&(self.grid_generation.0, close.row))
+        {
+            return close;
+        }
+        let Ok(ContentAnchor::Live {
+            screen: start_screen,
+            point: start,
+            generation,
+            ..
+        }) = self.document.anchor(region.start)
+        else {
+            return close;
+        };
+        if *start_screen != screen || *generation != self.grid_generation {
+            return close;
+        }
+
+        region
+            .written_rows
+            .iter()
+            .rev()
+            .filter(|(generation, row)| {
+                *generation == self.grid_generation.0 && start.row <= *row && *row < close.row
+            })
+            .find_map(|(_, row)| {
+                let captured = self.terminal.visible_row(*row)?;
+                let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+                (!text.is_empty()).then(|| GridPoint {
+                    row: *row,
+                    column: boundaries.last().map_or(0, |(_, column)| *column),
+                })
+            })
+            .unwrap_or(*start)
+    }
+
+    fn record_semantic_input_writes(&mut self, screen: ScreenId, rows: Vec<u32>) {
+        let Some(ShellIntegrationPhase::Input(region_index)) =
+            self.shell_phases.get(&screen).copied()
+        else {
+            return;
+        };
+        let Some(region) = self.semantic_input_regions.get_mut(region_index) else {
+            return;
+        };
+        region
+            .written_rows
+            .extend(rows.into_iter().map(|row| (self.grid_generation.0, row)));
     }
 
     fn semantic_input_overlaps_live(
@@ -2202,6 +2272,14 @@ impl DualPlaneSession {
                     generation: self.grid_generation,
                 },
             );
+            if let Some(region) = self.semantic_input_regions.get_mut(index) {
+                let last_written_row = end.row.saturating_sub(u32::from(end.column == 0));
+                if start.row <= last_written_row {
+                    region.written_rows.extend(
+                        (start.row..=last_written_row).map(|row| (self.grid_generation.0, row)),
+                    );
+                }
+            }
         }
         self.reconcile_decorations_against_semantic_input();
     }
@@ -5261,6 +5339,13 @@ impl DualPlaneSession {
                         RemovalScreen::Alternate => ScreenId::Alternate,
                     };
                     self.handle_shell_integration_marker(screen, GridPoint { row, column }, marker);
+                }
+                LifecycleDirective::GridWrites { screen, rows } => {
+                    let screen = match screen {
+                        RemovalScreen::Primary => ScreenId::Primary,
+                        RemovalScreen::Alternate => ScreenId::Alternate,
+                    };
+                    self.record_semantic_input_writes(screen, rows);
                 }
             }
         }
@@ -14646,6 +14731,145 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn osc133_psreadline_crlf_before_c_keeps_first_output_line_decoratable() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(200), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let image = format!("[Image: source: \"{}\"]", path.display());
+        let command = format!("echo '{image} $$output$$'");
+        let command_echo = format!("PS> {command}");
+        let cup = format!("\x1b[1;{}H", command_echo.chars().count().saturating_add(1));
+        let stream = format!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07{command}{cup}\r\n\x1b[0m\x1b[0m\x1b]133;C\x07$$output$$\r\n{image}\r\n\x1b]133;D;0\x07"
+        );
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+
+        assert_eq!(
+            session.local_image_path_tasks.len(),
+            1,
+            "the first output line must own exactly one image task"
+        );
+        assert_eq!(
+            session.inline_images.len(),
+            1,
+            "the command echo must own no image occurrence"
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+            1,
+            "the first output line must own exactly one math decoration"
+        );
+        assert_eq!(session.live_decorations.len(), 1);
+        assert!(
+            session
+                .live_decorations
+                .values()
+                .all(|record| record.start.row == 1),
+            "the command echo must own zero math decorations"
+        );
+        assert!(
+            session.inline_images.values().all(|record| {
+                let InlineImageRecordKind::LocalPath { start_anchor, .. } = &record.kind else {
+                    return false;
+                };
+                matches!(
+                    session.document.anchor(*start_anchor),
+                    Ok(ContentAnchor::Live {
+                        point: GridPoint { row: 2, .. },
+                        ..
+                    })
+                )
+            }),
+            "the command echo must own zero image decorations"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn osc133_all_input_closers_treat_an_unwritten_line_start_as_end_exclusive() {
+        for closer in [
+            b"\x1b]133;C\x07".as_slice(),
+            b"\x1b]133;D;0\x07".as_slice(),
+            b"\x1b]133;A\x07".as_slice(),
+        ] {
+            let mut session = DualPlaneSession::new(nz(80), nz(4));
+            let started = Instant::now();
+            session
+                .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07echo ok\r\n", started)
+                .unwrap();
+            session.feed_at(closer, started).unwrap();
+
+            assert_eq!(session.semantic_input_regions.len(), 1);
+            let region = &session.semantic_input_regions[0];
+            let ContentAnchor::Live { point, bias, .. } =
+                session.document.anchor(region.end).unwrap()
+            else {
+                panic!("the compact fixture keeps its command region live")
+            };
+            assert_eq!(
+                *point,
+                GridPoint {
+                    row: 0,
+                    column: "PS> echo ok".len() as u32,
+                }
+            );
+            assert_eq!(*bias, Bias::After);
+        }
+    }
+
+    #[test]
+    fn osc133_line_start_with_an_input_write_is_not_retreated() {
+        let mut session = DualPlaneSession::new(nz(80), nz(4));
+        let started = Instant::now();
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07first\r\nsecond\r\x1b]133;C\x07",
+                started,
+            )
+            .unwrap();
+
+        let region = &session.semantic_input_regions[0];
+        let ContentAnchor::Live { point, bias, .. } = session.document.anchor(region.end).unwrap()
+        else {
+            panic!("the compact fixture keeps its command region live")
+        };
+        assert_eq!(*point, GridPoint { row: 1, column: 0 });
+        assert_eq!(*bias, Bias::After);
+    }
+
+    #[test]
+    fn osc133_duplicate_b_does_not_move_or_split_the_active_input_region() {
+        let mut session = DualPlaneSession::new(nz(80), nz(4));
+        let started = Instant::now();
+        session
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07echo ok", started)
+            .unwrap();
+        let start = session
+            .document
+            .anchor(session.semantic_input_regions[0].start)
+            .unwrap()
+            .clone();
+        session.feed_at(b"\x1b]133;B\x07", started).unwrap();
+
+        assert_eq!(session.semantic_input_regions.len(), 1);
+        assert_eq!(
+            session
+                .document
+                .anchor(session.semantic_input_regions[0].start)
+                .unwrap(),
+            &start
+        );
+        assert_eq!(
+            session.shell_phases.get(&ScreenId::Primary),
+            Some(&ShellIntegrationPhase::Input(0))
+        );
     }
 
     #[test]

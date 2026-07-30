@@ -129,6 +129,10 @@ pub enum AdapterEvent {
         column: u32,
         marker: ShellIntegrationMarker,
     },
+    GridWrites {
+        screen: RemovalScreen,
+        rows: Vec<u32>,
+    },
 }
 
 /// Stable, vendor-free damage fact consumed by the live decoration lifecycle. Column bounds are
@@ -338,6 +342,7 @@ impl TerminalAdapter {
                 InlineImageStreamAction::Bytes(bytes) => {
                     self.advance_terminal_bytes(&bytes);
                     events.extend(self.drain_transcript_events());
+                    events.extend(self.drain_grid_write_events());
                 }
                 InlineImageStreamAction::Image(encoded) => {
                     let cursor = self.cursor();
@@ -348,6 +353,7 @@ impl TerminalAdapter {
                     };
                     self.write_inline_image_placeholder(b"[image]");
                     events.extend(self.drain_transcript_events());
+                    events.extend(self.drain_grid_write_events());
                     events.push(AdapterEvent::InlineImage {
                         screen,
                         row: cursor.row,
@@ -372,6 +378,7 @@ impl TerminalAdapter {
                 InlineImageStreamAction::TooLarge => {
                     self.write_inline_image_placeholder(b"[image:too-large]");
                     events.extend(self.drain_transcript_events());
+                    events.extend(self.drain_grid_write_events());
                 }
             }
         }
@@ -383,8 +390,44 @@ impl TerminalAdapter {
         if let Some(canonical) = self.resize_canonical.as_mut() {
             canonical.processor.advance(&mut canonical.term, bytes);
             discard_listener_output(&canonical.listener);
+            let _ = canonical.term.take_input_writes();
         }
         self.observe_parser_boundary(bytes);
+    }
+
+    fn drain_grid_write_events(&mut self) -> Vec<AdapterEvent> {
+        let mut primary = Vec::new();
+        let mut alternate = Vec::new();
+        for (screen, row) in self.term.take_input_writes() {
+            let Ok(row) = u32::try_from(row) else {
+                continue;
+            };
+            match screen {
+                TranscriptScreen::Primary => primary.push(row),
+                TranscriptScreen::Alternate => alternate.push(row),
+            }
+        }
+        primary.sort_unstable();
+        primary.dedup();
+        alternate.sort_unstable();
+        alternate.dedup();
+
+        let mut events = Vec::with_capacity(
+            usize::from(!primary.is_empty()) + usize::from(!alternate.is_empty()),
+        );
+        if !primary.is_empty() {
+            events.push(AdapterEvent::GridWrites {
+                screen: RemovalScreen::Primary,
+                rows: primary,
+            });
+        }
+        if !alternate.is_empty() {
+            events.push(AdapterEvent::GridWrites {
+                screen: RemovalScreen::Alternate,
+                rows: alternate,
+            });
+        }
+        events
     }
 
     fn write_inline_image_placeholder(&mut self, label: &[u8]) {
@@ -1544,29 +1587,64 @@ mod tests {
     #[test]
     fn osc_1337_inline_image_is_emitted_once_across_feed_boundaries() {
         let mut terminal = TerminalAdapter::new(nz(40), nz(4));
-        assert!(terminal.feed(b"pre\x1b]1337;Fi").is_empty());
+        assert_eq!(
+            terminal.feed(b"pre\x1b]1337;Fi"),
+            vec![AdapterEvent::GridWrites {
+                screen: RemovalScreen::Primary,
+                rows: vec![0],
+            }]
+        );
         assert!(terminal.feed(b"le=inline=1;name=eA==:YW").is_empty());
         let events = terminal.feed(b"JjZA==\x1b\\post");
         assert_eq!(
-            events,
-            vec![AdapterEvent::InlineImage {
+            events
+                .iter()
+                .filter(|event| matches!(event, AdapterEvent::InlineImage { .. }))
+                .collect::<Vec<_>>(),
+            vec![&AdapterEvent::InlineImage {
                 screen: RemovalScreen::Primary,
                 row: 0,
                 column: 3,
                 encoded: b"YWJjZA==".to_vec(),
             }]
         );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::GridWrites {
+                screen: RemovalScreen::Primary,
+                rows
+            } if rows == &[0]
+        )));
         assert_eq!(terminal.visible_text()[0], "pre[image]post");
     }
 
     #[test]
     fn osc_1337_inline_zero_is_ignored_without_a_placeholder() {
         let mut terminal = TerminalAdapter::new(nz(40), nz(4));
+        let events = terminal.feed(b"left\x1b]1337;File=inline=0:YWJj\x07right");
         assert!(
-            terminal
-                .feed(b"left\x1b]1337;File=inline=0:YWJj\x07right")
-                .is_empty()
+            events
+                .iter()
+                .all(|event| matches!(event, AdapterEvent::GridWrites { .. }))
         );
         assert_eq!(terminal.visible_text()[0], "leftright");
+    }
+
+    #[test]
+    fn grid_write_facts_exclude_cursor_only_crlf_and_cup_motion() {
+        let mut terminal = TerminalAdapter::new(nz(40), nz(4));
+        assert_eq!(
+            terminal.feed(b"written"),
+            vec![AdapterEvent::GridWrites {
+                screen: RemovalScreen::Primary,
+                rows: vec![0],
+            }]
+        );
+        assert!(
+            terminal
+                .feed(b"\r\n\x1b[3;12H\r")
+                .iter()
+                .all(|event| !matches!(event, AdapterEvent::GridWrites { .. }))
+        );
     }
 }
