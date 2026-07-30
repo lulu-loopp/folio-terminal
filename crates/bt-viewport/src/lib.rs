@@ -1991,14 +1991,24 @@ impl ViewportProjection {
                         .saturating_mul(self.cell_height_subpixels.get()),
                 });
             }
-            return layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize)
-                .get(local_row)?
-                .anchors
-                .first()
-                .map(|anchor| ScrollAnchor {
+            let source_rows =
+                layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize);
+            if let Some(row) = source_rows.get(local_row) {
+                return row.anchors.first().map(|anchor| ScrollAnchor {
                     source: anchor.start.clone(),
                     local_offset: 0,
                 });
+            }
+
+            let virtual_row = local_row.checked_sub(source_rows.len())?;
+            self.inline_path_artifacts.get(id)?;
+            let source_end = source_rows.last()?.anchors.last()?.end.clone();
+            return Some(ScrollAnchor {
+                source: source_end,
+                local_offset: i64::try_from(virtual_row.saturating_add(1))
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(self.cell_height_subpixels.get()),
+            });
         }
 
         let staging_row = absolute_row.saturating_sub(history_rows);
@@ -4523,6 +4533,113 @@ mod tests {
         assert_eq!(projection.unread_rows(), 1);
         assert_eq!(frame.status_text.as_deref(), Some("2 lines below"));
         assert!(!frame.cursor.visible);
+    }
+
+    fn assert_inline_path_virtual_rows_are_reviewable(
+        offsets: std::ops::RangeInclusive<i32>,
+        host_index: usize,
+    ) {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        let mut ids = Vec::new();
+        for index in 0..50 {
+            let finalized = store
+                .capture(CapturedRow::plain(&format!("line-{index:02}"), false))
+                .finalized
+                .remove(0);
+            ids.push(finalized.line.id);
+            document.finalize_transaction(finalized);
+        }
+
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.sync_inline_path_artifacts([13_usize, 21, 29].map(|index| {
+            (
+                ids[index],
+                ProjectedMathArtifact {
+                    key: format!("path-image-{index}"),
+                    end: ids[index],
+                    rgba: Arc::from(vec![255; 4]),
+                    width_px: 1,
+                    height_px: 1,
+                    height_subpixels: 4 * cell_height().get(),
+                    baseline_subpixels: 0,
+                    mode: MathMode::Inline,
+                    kind: RgbaArtifactKind::LocalImagePath { animated: false },
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: format!("image-{index}.png"),
+                },
+            )
+        }));
+        projection.project(&document);
+
+        let live = || vec![CapturedRow::plain("        ", false); 12];
+        let cursor = GridCursor {
+            row: 11,
+            column: 0,
+            visible: true,
+        };
+        projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+
+        let interval_end = *offsets.end();
+        for offset in offsets {
+            projection.scroll_to_bottom();
+            projection.scroll_by_rows(offset);
+            let frame = projection
+                .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                .unwrap();
+            assert_eq!(
+                frame.scroll_offset_rows, offset as usize,
+                "path-image virtual row at review offset {offset} must retain an anchored viewport"
+            );
+            let FrameViewportOrigin::Anchored(ScrollAnchor {
+                source:
+                    ContentAnchor::History {
+                        id,
+                        offset: source_offset,
+                        bias,
+                        ..
+                    },
+                local_offset,
+            }) = &frame.viewport_origin
+            else {
+                panic!(
+                    "path-image virtual row at review offset {offset} must use its host history line"
+                );
+            };
+            assert_eq!(*id, ids[host_index]);
+            assert_eq!(*source_offset, GraphemeOffset(7));
+            assert_eq!(*bias, Bias::After);
+            assert_eq!(
+                *local_offset,
+                i64::from(interval_end - offset + 1).saturating_mul(cell_height().get()),
+                "local_offset must encode the virtual row after the host line's end anchor"
+            );
+        }
+    }
+
+    #[test]
+    fn first_inline_path_virtual_row_interval_is_reviewable() {
+        assert_inline_path_virtual_rows_are_reviewable(21..=24, 29);
+    }
+
+    #[test]
+    fn second_inline_path_virtual_row_interval_is_reviewable() {
+        assert_inline_path_virtual_rows_are_reviewable(33..=36, 21);
+    }
+
+    #[test]
+    fn third_inline_path_virtual_row_interval_is_reviewable() {
+        assert_inline_path_virtual_rows_are_reviewable(45..=48, 13);
     }
 
     #[test]
