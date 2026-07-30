@@ -50,6 +50,8 @@ pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap()
 pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap();
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
+const TERM_PROGRAM: &str = "BetterTerminal";
+const TERM_PROGRAM_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Diagnostic-only byte sink for one ConPTY reader. The main file is byte-for-byte suitable for
 /// `BT_PROBE_INPUT`; the adjacent `.chunks` file preserves reader arrival boundaries and timing.
@@ -260,13 +262,28 @@ impl PtyCommand {
             .any(|(key, _)| environment_key_eq(key, OsStr::new("NO_COLOR")))
     }
 
-    /// Color-capable interactive shells receive `COLORTERM`/`TERM` declarations merged with the
-    /// caller's environment (explicit values win). A caller that explicitly sets `NO_COLOR` opts
-    /// out and gets no declarations. An *inherited* `NO_COLOR` does not suppress them — it is
-    /// stripped instead, see `strips_inherited_no_color`.
+    /// Every child receives terminal identity declarations. Color-capable interactive shells also
+    /// receive `COLORTERM`/`TERM`. All declarations are merged with the caller's environment, and
+    /// explicit values win. A caller that explicitly sets `NO_COLOR` opts out of the color
+    /// declarations. An *inherited* `NO_COLOR` does not suppress them — it is stripped instead,
+    /// see `strips_inherited_no_color`.
     fn resolved_environment(&self) -> Vec<(OsString, OsString)> {
         let command_has_no_color = self.command_has_no_color();
-        let mut environment = Vec::with_capacity(self.environment.len() + 2);
+        let mut environment = Vec::with_capacity(self.environment.len() + 4);
+        if !self
+            .environment
+            .iter()
+            .any(|(key, _)| environment_key_eq(key, OsStr::new("TERM_PROGRAM")))
+        {
+            environment.push(("TERM_PROGRAM".into(), TERM_PROGRAM.into()));
+        }
+        if !self
+            .environment
+            .iter()
+            .any(|(key, _)| environment_key_eq(key, OsStr::new("TERM_PROGRAM_VERSION")))
+        {
+            environment.push(("TERM_PROGRAM_VERSION".into(), TERM_PROGRAM_VERSION.into()));
+        }
         if self.declare_color_support && !command_has_no_color {
             if !self
                 .environment
@@ -987,6 +1004,14 @@ mod tests {
         assert!(command.strips_inherited_no_color());
         let environment = command.resolved_environment();
         assert_eq!(
+            environment_value(&environment, "TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new("BetterTerminal"))
+        );
+        assert_eq!(
+            environment_value(&environment, "TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new(env!("CARGO_PKG_VERSION")))
+        );
+        assert_eq!(
             environment_value(&environment, "COLORTERM"),
             Some(std::ffi::OsStr::new("truecolor"))
         );
@@ -997,25 +1022,48 @@ mod tests {
     }
 
     #[test]
-    fn plain_command_declares_no_color_capability() {
+    fn plain_command_declares_terminal_identity_but_no_color_capability() {
         let command = PtyCommand::new("some-tool.exe");
         assert!(!command.strips_inherited_no_color());
         let environment = command.resolved_environment();
+        assert_eq!(
+            environment_value(&environment, "TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new("BetterTerminal"))
+        );
+        assert_eq!(
+            environment_value(&environment, "TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new(env!("CARGO_PKG_VERSION")))
+        );
         assert_eq!(environment_value(&environment, "COLORTERM"), None);
         assert_eq!(environment_value(&environment, "TERM"), None);
     }
 
     #[test]
-    fn explicit_environment_overrides_default_color_declarations() {
+    fn explicit_environment_overrides_default_terminal_and_color_declarations() {
         let colorterm_key = if cfg!(windows) {
             "colorterm"
         } else {
             "COLORTERM"
         };
+        let term_program_key = if cfg!(windows) {
+            "term_program"
+        } else {
+            "TERM_PROGRAM"
+        };
         let environment = PtyCommand::powershell()
             .env(colorterm_key, "24bit")
             .env("TERM", "better-terminal")
+            .env(term_program_key, "UserTerminal")
+            .env("TERM_PROGRAM_VERSION", "user-version")
             .resolved_environment();
+        assert_eq!(
+            environment_value(&environment, "TERM_PROGRAM"),
+            Some(std::ffi::OsStr::new("UserTerminal"))
+        );
+        assert_eq!(
+            environment_value(&environment, "TERM_PROGRAM_VERSION"),
+            Some(std::ffi::OsStr::new("user-version"))
+        );
         assert_eq!(
             environment_value(&environment, "COLORTERM"),
             Some(std::ffi::OsStr::new("24bit"))
@@ -1104,7 +1152,7 @@ mod tests {
             .arg("-Command")
             .arg("cmd.exe /D /C set");
         let mut session = PtySession::spawn(command, size(80, 20), no_wake()).unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(15);
         let mut output = Vec::new();
         let mut child_exited = false;
         while Instant::now() < deadline {
@@ -1129,6 +1177,17 @@ mod tests {
                 .lines()
                 .any(|line| line.trim() == "TERM=xterm-256color"),
             "child environment did not contain TERM=xterm-256color: {output:?}"
+        );
+        assert!(
+            output
+                .lines()
+                .any(|line| line.trim() == "TERM_PROGRAM=BetterTerminal"),
+            "child environment did not contain TERM_PROGRAM=BetterTerminal: {output:?}"
+        );
+        let expected_version = format!("TERM_PROGRAM_VERSION={}", env!("CARGO_PKG_VERSION"));
+        assert!(
+            output.lines().any(|line| line.trim() == expected_version),
+            "child environment did not contain {expected_version}: {output:?}"
         );
         assert!(
             !output.lines().any(|line| line
