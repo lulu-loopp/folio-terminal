@@ -126,6 +126,12 @@ pub enum LifecycleDirective {
         column: u32,
         encoded: Vec<u8>,
     },
+    ShellIntegration {
+        screen: RemovalScreen,
+        row: u32,
+        column: u32,
+        marker: crate::inline_image::ShellIntegrationMarker,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -168,6 +174,17 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
             row,
             column,
             encoded,
+        },
+        AdapterEvent::ShellIntegration {
+            screen,
+            row,
+            column,
+            marker,
+        } => LifecycleDirective::ShellIntegration {
+            screen,
+            row,
+            column,
+            marker,
         },
     }
 }

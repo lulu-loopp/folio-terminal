@@ -17,12 +17,18 @@ use bt_viewport::{ViewportFrame, ViewportProjection};
 
 const FOREGROUND_RGB: [u8; 3] = [0xd8, 0xdc, 0xe8];
 
-struct ReplayChunk<'a> {
-    elapsed: Duration,
-    bytes: &'a [u8],
-    /// A `# RESIZE columns rows elapsed_us` marker recorded before this chunk: the new dimensions
-    /// take effect at this point of the replay, exactly as they did in the live session.
-    resize_before: Option<(NonZeroU32, NonZeroU32)>,
+enum ReplayEvent<'a> {
+    Bytes {
+        elapsed: Duration,
+        bytes: &'a [u8],
+    },
+    /// Resize is an event in its own right. It must not be attached to a later PTY chunk: recordings
+    /// can contain consecutive resizes and a final resize after the last byte.
+    Resize {
+        elapsed: Duration,
+        columns: NonZeroU32,
+        rows: NonZeroU32,
+    },
 }
 
 /// A math task taken from the session, awaiting its deferred completion. Models the off-thread
@@ -894,10 +900,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let chunks = if chunks_path.is_file() {
         parse_chunks(&input, &fs::read_to_string(&chunks_path)?)?
     } else {
-        vec![ReplayChunk {
+        vec![ReplayEvent::Bytes {
             elapsed: Duration::ZERO,
             bytes: &input,
-            resize_before: None,
         }]
     };
     let columns = env_dimension("BT_PROBE_COLUMNS", 120)?;
@@ -914,30 +919,37 @@ fn main() -> Result<(), Box<dyn Error>> {
     let delayed = oracle.math_latency.is_some();
     let mut final_elapsed = Duration::ZERO;
 
-    for chunk in chunks {
-        final_elapsed = chunk.elapsed;
-        let observed_at = started + chunk.elapsed;
+    for event in chunks {
+        let elapsed = match &event {
+            ReplayEvent::Bytes { elapsed, .. } | ReplayEvent::Resize { elapsed, .. } => *elapsed,
+        };
+        final_elapsed = elapsed;
+        let observed_at = started + elapsed;
         if delayed {
             // Fire every internal deadline that falls before this chunk arrives, so a queued
             // relayout can land and a resize can quiesce before the next PTY bytes.
             oracle.drive_until(observed_at)?;
         }
-        if let Some((columns, rows)) = chunk.resize_before {
-            oracle.session.resize_at(columns, rows, observed_at)?;
-            // The marker is written when the PTY itself is resized, so both the local resize and
-            // the ConPTY acknowledgement happen here, exactly like the app's coalesced flush.
-            oracle
-                .session
-                .mark_pty_resize_requested_at(columns, rows, observed_at);
-            oracle.publish("resize", chunk.elapsed)?;
-            if delayed {
-                // The resize demotes rasters to stale and queues relayouts; dispatch them so they
-                // land one latency later rather than instantly.
-                oracle.dispatch_delayed(observed_at);
+        match event {
+            ReplayEvent::Resize { columns, rows, .. } => {
+                oracle.session.resize_at(columns, rows, observed_at)?;
+                // The marker is written when the PTY itself is resized, so both the local resize and
+                // the ConPTY acknowledgement happen here, exactly like the app's coalesced flush.
+                oracle
+                    .session
+                    .mark_pty_resize_requested_at(columns, rows, observed_at);
+                oracle.publish("resize", elapsed)?;
+                if delayed {
+                    // The resize demotes rasters to stale and queues relayouts; dispatch them so they
+                    // land one latency later rather than instantly.
+                    oracle.dispatch_delayed(observed_at);
+                }
+            }
+            ReplayEvent::Bytes { bytes, .. } => {
+                oracle.advance_before(observed_at, elapsed)?;
+                oracle.feed(bytes, observed_at, elapsed)?;
             }
         }
-        oracle.advance_before(observed_at, chunk.elapsed)?;
-        oracle.feed(chunk.bytes, observed_at, chunk.elapsed)?;
     }
     if delayed {
         oracle.drain_to_quiescence()?;
@@ -1234,21 +1246,25 @@ fn load_source_integrity_annotations(
 fn parse_chunks<'a>(
     input: &'a [u8],
     manifest: &str,
-) -> Result<Vec<ReplayChunk<'a>>, Box<dyn Error>> {
-    let mut chunks = Vec::new();
+) -> Result<Vec<ReplayEvent<'a>>, Box<dyn Error>> {
+    let mut events = Vec::new();
     let mut offset = 0usize;
     let mut expected_sequence = 0u64;
     let mut previous_elapsed = Duration::ZERO;
-    let mut pending_resize = None;
     for (line_index, line) in manifest.lines().enumerate() {
         let line = line.trim();
         if let Some(resize) = line.strip_prefix("# RESIZE ") {
             let fields = resize.split_ascii_whitespace().collect::<Vec<_>>();
-            let (Some(columns), Some(rows)) = (
+            let (Some(columns), Some(rows), Some(elapsed_us)) = (
                 fields.first().and_then(|f| f.parse::<u32>().ok()),
                 fields.get(1).and_then(|f| f.parse::<u32>().ok()),
+                fields.get(2).and_then(|f| f.parse::<u64>().ok()),
             ) else {
-                return Err(invalid_manifest(line_index, "expected: # RESIZE cols rows").into());
+                return Err(invalid_manifest(
+                    line_index,
+                    "expected: # RESIZE cols rows elapsed_us",
+                )
+                .into());
             };
             let (Some(columns), Some(rows)) = (NonZeroU32::new(columns), NonZeroU32::new(rows))
             else {
@@ -1256,7 +1272,16 @@ fn parse_chunks<'a>(
                     invalid_manifest(line_index, "resize dimensions must be non-zero").into(),
                 );
             };
-            pending_resize = Some((columns, rows));
+            let elapsed = Duration::from_micros(elapsed_us);
+            if elapsed < previous_elapsed {
+                return Err(invalid_manifest(line_index, "arrival time moved backwards").into());
+            }
+            events.push(ReplayEvent::Resize {
+                elapsed,
+                columns,
+                rows,
+            });
+            previous_elapsed = elapsed;
             continue;
         }
         if line.is_empty() || line.starts_with('#') {
@@ -1281,11 +1306,7 @@ fn parse_chunks<'a>(
         let bytes = input
             .get(offset..end)
             .ok_or_else(|| invalid_manifest(line_index, "chunk lengths exceed BT_PROBE_INPUT"))?;
-        chunks.push(ReplayChunk {
-            elapsed,
-            bytes,
-            resize_before: pending_resize.take(),
-        });
+        events.push(ReplayEvent::Bytes { elapsed, bytes });
         offset = end;
         expected_sequence = expected_sequence.saturating_add(1);
         previous_elapsed = elapsed;
@@ -1300,7 +1321,7 @@ fn parse_chunks<'a>(
         )
         .into());
     }
-    Ok(chunks)
+    Ok(events)
 }
 
 fn invalid_manifest(line_index: usize, message: &str) -> io::Error {
@@ -1345,8 +1366,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(chunks.len(), 2);
-        assert_eq!(chunks[0].bytes, b"ab");
-        assert_eq!(chunks[1].bytes, b"cdef");
-        assert_eq!(chunks[1].elapsed, Duration::from_micros(20));
+        assert!(matches!(
+            &chunks[0],
+            ReplayEvent::Bytes { elapsed, bytes }
+                if *elapsed == Duration::from_micros(10) && *bytes == b"ab"
+        ));
+        assert!(matches!(
+            &chunks[1],
+            ReplayEvent::Bytes { elapsed, bytes }
+                if *elapsed == Duration::from_micros(20) && *bytes == b"cdef"
+        ));
+    }
+
+    #[test]
+    fn consecutive_and_trailing_resize_markers_remain_independent_events() {
+        let input = b"ab";
+        let events = parse_chunks(
+            input,
+            "0 10 2\n# RESIZE 120 30 20\n# RESIZE 80 20 30\n# RESIZE 100 25 40\n",
+        )
+        .unwrap();
+        assert_eq!(events.len(), 4);
+        assert!(matches!(
+            events[1],
+            ReplayEvent::Resize { elapsed, columns, rows }
+                if elapsed == Duration::from_micros(20)
+                    && columns.get() == 120
+                    && rows.get() == 30
+        ));
+        assert!(matches!(
+            events[2],
+            ReplayEvent::Resize { elapsed, columns, rows }
+                if elapsed == Duration::from_micros(30)
+                    && columns.get() == 80
+                    && rows.get() == 20
+        ));
+        assert!(matches!(
+            events[3],
+            ReplayEvent::Resize { elapsed, columns, rows }
+                if elapsed == Duration::from_micros(40)
+                    && columns.get() == 100
+                    && rows.get() == 25
+        ));
     }
 }

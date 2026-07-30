@@ -22,7 +22,7 @@ use bt_transcript::CapturedRow;
 use crate::cell_capture::{
     CapturedRowFingerprint, captured_row_fingerprint, snapshot, to_captured_row,
 };
-use crate::inline_image::{InlineImageStreamAction, Osc1337Scanner};
+use crate::inline_image::{InlineImageStreamAction, Osc1337Scanner, ShellIntegrationMarker};
 
 pub const SCROLLBACK_LINES: usize = 0;
 
@@ -122,6 +122,12 @@ pub enum AdapterEvent {
         row: u32,
         column: u32,
         encoded: Vec<u8>,
+    },
+    ShellIntegration {
+        screen: RemovalScreen,
+        row: u32,
+        column: u32,
+        marker: ShellIntegrationMarker,
     },
 }
 
@@ -347,6 +353,20 @@ impl TerminalAdapter {
                         row: cursor.row,
                         column: cursor.column,
                         encoded,
+                    });
+                }
+                InlineImageStreamAction::ShellIntegration(marker) => {
+                    let cursor = self.cursor();
+                    let screen = if self.modes().alternate_screen {
+                        RemovalScreen::Alternate
+                    } else {
+                        RemovalScreen::Primary
+                    };
+                    events.push(AdapterEvent::ShellIntegration {
+                        screen,
+                        row: cursor.row,
+                        column: cursor.column,
+                        marker,
                     });
                 }
                 InlineImageStreamAction::TooLarge => {

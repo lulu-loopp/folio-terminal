@@ -48,7 +48,7 @@ use crate::{
     cell_capture::{CapturedRowFingerprint, captured_row_is_blank},
     inline_image::{
         DecodedInlineImage, InlineImageDecodeError, InlineImageSource, InlineImageTask,
-        decode_inline_image, detect_local_image_path_candidates,
+        ShellIntegrationMarker, decode_inline_image, detect_local_image_path_candidates,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
@@ -566,6 +566,8 @@ pub struct DualPlaneSession {
     math_layout_options: MathLayoutOptions,
     live_screen: ScreenId,
     cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
+    shell_phases: BTreeMap<ScreenId, ShellIntegrationPhase>,
+    semantic_input_regions: Vec<SemanticInputRegion>,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
@@ -651,6 +653,25 @@ struct CursorLogicalLineMemory {
 struct CursorLineSuppression {
     cursor_line: (u32, u32),
     preceding_nonblank_line: Option<(u32, u32)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ShellIntegrationPhase {
+    Prompt,
+    Input(usize),
+    Output,
+    Finished,
+}
+
+#[derive(Clone, Debug)]
+struct SemanticInputRegion {
+    screen: ScreenId,
+    start: AnchorId,
+    end: AnchorId,
+    closed: bool,
+    /// Exact visible command text captured before a reflow. Coordinates are only a projection;
+    /// this content witness is what re-seats the region after the vendor changes physical rows.
+    witness: String,
 }
 
 impl CursorLineSuppression {
@@ -756,6 +777,8 @@ impl DualPlaneSession {
             math_layout_options: MathLayoutOptions::default(),
             live_screen: ScreenId::Primary,
             cursor_logical_line_memory: None,
+            shell_phases: BTreeMap::new(),
+            semantic_input_regions: Vec::new(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
@@ -1112,6 +1135,7 @@ impl DualPlaneSession {
         rows: NonZeroU32,
         observed_at: Instant,
     ) -> Result<(), SessionError> {
+        self.refresh_semantic_region_witnesses();
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
         if plan.begin_transaction {
             self.cursor_logical_line_memory = None;
@@ -1180,6 +1204,7 @@ impl DualPlaneSession {
         // A grow or width-only resize can change the generation without removing rows.
         self.document
             .capture_rows_transaction(&[], self.grid_generation);
+        self.reanchor_semantic_input_regions_after_resize();
         let next_layout = LayoutKey {
             width_cells: columns,
             ..self.layout_key
@@ -1517,7 +1542,9 @@ impl DualPlaneSession {
         let initial_context = self.live_initial_detection_context(&inputs);
         let candidates = live_candidate_rows(&inputs, initial_context.clone(), stable);
         let context_signature = live_detection_context_signature(&inputs);
-        let cursor_suppression = self.cursor_line_suppression();
+        let cursor_suppression = (!self.shell_integration_is_authoritative(self.live_screen))
+            .then(|| self.cursor_line_suppression())
+            .flatten();
         let mut new_tasks = Vec::new();
         for candidate_row in candidates {
             if cursor_suppression.is_some_and(|suppression| suppression.contains(candidate_row)) {
@@ -1569,9 +1596,10 @@ impl DualPlaneSession {
         resolve_live_detection_tasks(&mut new_tasks);
         new_tasks.retain(|task| {
             let suppressed = task.resolved
-                && cursor_suppression.is_some_and(|suppression| {
-                    suppression.intersects(task.start.row, task.end.row)
-                });
+                && (self.semantic_input_overlaps_live(task.screen, task.start, task.end)
+                    || cursor_suppression.is_some_and(|suppression| {
+                        suppression.intersects(task.start.row, task.end.row)
+                    }));
             if suppressed && let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
                 // Cursor movement does not damage the source row. Leave the signature open so the
                 // next published frame can schedule this already-settled candidate immediately.
@@ -1698,7 +1726,371 @@ impl DualPlaneSession {
         })
     }
 
+    fn shell_integration_is_authoritative(&self, screen: ScreenId) -> bool {
+        self.shell_phases.contains_key(&screen)
+    }
+
+    fn handle_shell_integration_marker(
+        &mut self,
+        screen: ScreenId,
+        point: GridPoint,
+        marker: ShellIntegrationMarker,
+    ) {
+        let phase = self.shell_phases.get(&screen).copied();
+        match marker {
+            ShellIntegrationMarker::PromptStart => {
+                if let Some(ShellIntegrationPhase::Input(region)) = phase {
+                    self.close_semantic_input_region(region, screen, point);
+                }
+                self.shell_phases
+                    .insert(screen, ShellIntegrationPhase::Prompt);
+            }
+            ShellIntegrationMarker::CommandStart => {
+                // Duplicate/nested B markers are tolerated without moving the authoritative start.
+                if matches!(phase, Some(ShellIntegrationPhase::Input(_))) {
+                    return;
+                }
+                let start = self.document.register_anchor(ContentAnchor::Live {
+                    screen,
+                    point,
+                    bias: Bias::Before,
+                    generation: self.grid_generation,
+                });
+                let end = self.document.register_anchor(ContentAnchor::Live {
+                    screen,
+                    point,
+                    bias: Bias::After,
+                    generation: self.grid_generation,
+                });
+                let region = self.semantic_input_regions.len();
+                self.semantic_input_regions.push(SemanticInputRegion {
+                    screen,
+                    start,
+                    end,
+                    closed: false,
+                    witness: String::new(),
+                });
+                self.shell_phases
+                    .insert(screen, ShellIntegrationPhase::Input(region));
+            }
+            ShellIntegrationMarker::CommandExecuted => {
+                if let Some(ShellIntegrationPhase::Input(region)) = phase {
+                    self.close_semantic_input_region(region, screen, point);
+                }
+                self.shell_phases
+                    .insert(screen, ShellIntegrationPhase::Output);
+            }
+            ShellIntegrationMarker::CommandFinished => {
+                if let Some(ShellIntegrationPhase::Input(region)) = phase {
+                    self.close_semantic_input_region(region, screen, point);
+                }
+                self.shell_phases
+                    .insert(screen, ShellIntegrationPhase::Finished);
+            }
+        }
+        self.reconcile_decorations_against_semantic_input();
+    }
+
+    fn close_semantic_input_region(
+        &mut self,
+        region_index: usize,
+        screen: ScreenId,
+        point: GridPoint,
+    ) {
+        let Some(region) = self.semantic_input_regions.get(region_index) else {
+            return;
+        };
+        let end = region.end;
+        let _ = self.document.replace_anchor(
+            end,
+            ContentAnchor::Live {
+                screen,
+                point,
+                bias: Bias::After,
+                generation: self.grid_generation,
+            },
+        );
+        if let Some(region) = self.semantic_input_regions.get_mut(region_index) {
+            region.closed = true;
+        }
+        self.refresh_semantic_region_witness(region_index);
+    }
+
+    fn semantic_input_overlaps_live(
+        &self,
+        screen: ScreenId,
+        start: GridPoint,
+        end: GridPoint,
+    ) -> bool {
+        if !self.shell_integration_is_authoritative(screen) {
+            return false;
+        }
+        let candidate_start = ContentAnchor::Live {
+            screen,
+            point: start,
+            bias: Bias::Before,
+            generation: self.grid_generation,
+        };
+        let candidate_end = ContentAnchor::Live {
+            screen,
+            point: end,
+            bias: Bias::After,
+            generation: self.grid_generation,
+        };
+        self.semantic_input_overlaps(&candidate_start, &candidate_end)
+    }
+
+    fn semantic_input_overlaps_history(&self, id: TranscriptId) -> bool {
+        let Some(line) = self.document.entries().get(&id).map(|entry| &entry.line) else {
+            return false;
+        };
+        let start = ContentAnchor::History {
+            id,
+            offset: GraphemeOffset(0),
+            bias: Bias::Before,
+            generation: line.source_generation,
+        };
+        let end = ContentAnchor::History {
+            id,
+            offset: GraphemeOffset(
+                u32::try_from(line.grapheme_boundaries.len().saturating_sub(1)).unwrap_or(u32::MAX),
+            ),
+            bias: Bias::After,
+            generation: line.source_generation,
+        };
+        self.semantic_input_overlaps(&start, &end)
+    }
+
+    fn semantic_input_overlaps(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
+        self.semantic_input_regions
+            .iter()
+            .enumerate()
+            .any(|(region_index, region)| {
+                let Ok(region_start) = self.document.anchor(region.start) else {
+                    return false;
+                };
+                let region_end = if !region.closed
+                    && region.screen == self.live_screen
+                    && self.shell_phases.get(&region.screen)
+                        == Some(&ShellIntegrationPhase::Input(region_index))
+                {
+                    ContentAnchor::Live {
+                        screen: region.screen,
+                        point: {
+                            let cursor = self.terminal.cursor();
+                            GridPoint {
+                                row: cursor.row,
+                                column: cursor.column,
+                            }
+                        },
+                        bias: Bias::After,
+                        generation: self.grid_generation,
+                    }
+                } else {
+                    let Ok(end) = self.document.anchor(region.end) else {
+                        return false;
+                    };
+                    end.clone()
+                };
+                selection_overlaps(start, end, region_start, &region_end)
+            })
+    }
+
+    fn refresh_semantic_region_witness(&mut self, region_index: usize) {
+        let Some(region) = self.semantic_input_regions.get(region_index) else {
+            return;
+        };
+        let Ok(ContentAnchor::Live {
+            screen: start_screen,
+            point: start,
+            ..
+        }) = self.document.anchor(region.start)
+        else {
+            return;
+        };
+        let end = if region.closed {
+            let Ok(ContentAnchor::Live {
+                screen: end_screen,
+                point,
+                ..
+            }) = self.document.anchor(region.end)
+            else {
+                return;
+            };
+            if start_screen != end_screen {
+                return;
+            }
+            *point
+        } else {
+            let cursor = self.terminal.cursor();
+            GridPoint {
+                row: cursor.row,
+                column: cursor.column,
+            }
+        };
+        let Some(witness) = self.visible_text_between(*start, end) else {
+            return;
+        };
+        if let Some(region) = self.semantic_input_regions.get_mut(region_index) {
+            region.witness = witness;
+        }
+    }
+
+    fn refresh_semantic_region_witnesses(&mut self) {
+        for index in 0..self.semantic_input_regions.len() {
+            self.refresh_semantic_region_witness(index);
+        }
+    }
+
+    fn visible_text_between(&self, start: GridPoint, end: GridPoint) -> Option<String> {
+        if (end.row, end.column) < (start.row, start.column) {
+            return None;
+        }
+        let mut witness = String::new();
+        for row in start.row..=end.row {
+            let captured = self.terminal.visible_row(row)?;
+            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let byte_start = if row == start.row {
+                byte_offset_at_column(&boundaries, start.column, text.len())
+            } else {
+                0
+            };
+            let byte_end = if row == end.row {
+                byte_offset_at_column(&boundaries, end.column, text.len())
+            } else {
+                text.len()
+            };
+            if byte_start <= byte_end
+                && let Some(fragment) = text.get(byte_start..byte_end)
+            {
+                witness.push_str(fragment);
+            }
+        }
+        Some(witness)
+    }
+
+    fn reanchor_semantic_input_regions_after_resize(&mut self) {
+        let mut logical_text = String::new();
+        let mut segments = Vec::new();
+        for row in 0..self.live_rows.len() as u32 {
+            let Some(captured) = self.terminal.visible_row(row) else {
+                continue;
+            };
+            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let byte_start = logical_text.len();
+            logical_text.push_str(&text);
+            segments.push(LiveImagePathSegment {
+                row,
+                byte_start,
+                byte_end: logical_text.len(),
+                boundaries,
+            });
+        }
+        for index in 0..self.semantic_input_regions.len() {
+            let region = &self.semantic_input_regions[index];
+            if region.screen != self.live_screen || region.witness.is_empty() {
+                continue;
+            }
+            let Ok(ContentAnchor::Live { point: old_end, .. }) = self.document.anchor(region.end)
+            else {
+                continue;
+            };
+            let preferred_end = if !region.closed {
+                let cursor = self.terminal.cursor();
+                GridPoint {
+                    row: cursor.row,
+                    column: cursor.column,
+                }
+            } else {
+                *old_end
+            };
+            let best = logical_text
+                .match_indices(&region.witness)
+                .filter_map(|(byte_start, _)| {
+                    let byte_end = byte_start.saturating_add(region.witness.len());
+                    let start = live_path_point(&segments, byte_start, false)?;
+                    let end = live_path_point(&segments, byte_end, true)?;
+                    let distance = end.row.abs_diff(preferred_end.row) as u64
+                        + end.column.abs_diff(preferred_end.column) as u64;
+                    Some((distance, start, end))
+                })
+                .min_by_key(|(distance, _, _)| *distance);
+            let Some((_, start, end)) = best else {
+                continue;
+            };
+            let start_anchor = region.start;
+            let end_anchor = region.end;
+            let _ = self.document.replace_anchor(
+                start_anchor,
+                ContentAnchor::Live {
+                    screen: region.screen,
+                    point: start,
+                    bias: Bias::Before,
+                    generation: self.grid_generation,
+                },
+            );
+            let _ = self.document.replace_anchor(
+                end_anchor,
+                ContentAnchor::Live {
+                    screen: region.screen,
+                    point: end,
+                    bias: Bias::After,
+                    generation: self.grid_generation,
+                },
+            );
+        }
+        self.reconcile_decorations_against_semantic_input();
+    }
+
+    fn reconcile_decorations_against_semantic_input(&mut self) {
+        let retired_images = self
+            .inline_images
+            .iter()
+            .filter_map(|(occurrence, record)| {
+                let InlineImageRecordKind::LocalPath { start_anchor, .. } = &record.kind else {
+                    return None;
+                };
+                let start = self.document.anchor(*start_anchor).ok()?;
+                let end = self.document.anchor(record.end_anchor).ok()?;
+                self.semantic_input_overlaps(start, end)
+                    .then_some(*occurrence)
+            })
+            .collect::<BTreeSet<_>>();
+        self.retire_inline_images(&retired_images);
+
+        let retired_live = self
+            .live_decorations
+            .iter()
+            .filter_map(|(row, record)| {
+                self.semantic_input_overlaps_live(record.screen, record.start, record.end)
+                    .then_some(*row)
+            })
+            .collect::<Vec<_>>();
+        for row in retired_live {
+            self.live_decorations.remove(&row);
+        }
+        let suppressed_frozen = self
+            .decorations
+            .keys()
+            .copied()
+            .filter(|id| self.semantic_input_overlaps_history(*id))
+            .collect::<Vec<_>>();
+        for id in suppressed_frozen {
+            if let Some(record) = self.decorations.get_mut(&id) {
+                record.decoration = DecorationLifecycle::None;
+                record.artifact = None;
+            }
+            self.document.set_decoration(id, DecorationIntent::Plain);
+        }
+    }
+
     fn new_live_decoration_is_cursor_suppressed(&self, task: &LiveDetectionTask) -> bool {
+        if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
+            return true;
+        }
+        if self.shell_integration_is_authoritative(task.screen) {
+            return false;
+        }
         let replaces_existing = self.live_decorations.values().any(|record| {
             record.screen == task.screen
                 && record.start == task.start
@@ -2806,6 +3198,25 @@ impl DualPlaneSession {
         task: InlineImageTask,
         result: Result<DecodedInlineImage, InlineImageDecodeError>,
     ) -> bool {
+        let semantically_suppressed =
+            self.inline_images
+                .get(&task.occurrence_id)
+                .is_some_and(|record| {
+                    let InlineImageRecordKind::LocalPath { start_anchor, .. } = &record.kind else {
+                        return false;
+                    };
+                    let Ok(start) = self.document.anchor(*start_anchor) else {
+                        return false;
+                    };
+                    let Ok(end) = self.document.anchor(record.end_anchor) else {
+                        return false;
+                    };
+                    self.semantic_input_overlaps(start, end)
+                });
+        if semantically_suppressed {
+            self.retire_inline_images(&BTreeSet::from([task.occurrence_id]));
+            return false;
+        }
         let Some(record) = self.inline_images.get_mut(&task.occurrence_id) else {
             return false;
         };
@@ -2970,6 +3381,10 @@ impl DualPlaneSession {
             });
             return true;
         }
+        if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
+            self.live_decorations.remove(&task.start.row);
+            return true;
+        }
         if artifact.is_none() && failure_reason.is_none() {
             self.live_decorations.remove(&task.start.row);
             return true;
@@ -3069,6 +3484,18 @@ impl DualPlaneSession {
                 .decorations
                 .get_mut(&task.candidate_id)
                 .is_some_and(|record| record.fail(&task, None));
+        }
+        if self
+            .document
+            .entries()
+            .range(task.transcript_id..=task.block_end)
+            .any(|(id, _)| self.semantic_input_overlaps_history(*id))
+        {
+            if let Some(record) = self.decorations.get_mut(&task.candidate_id) {
+                record.decoration = DecorationLifecycle::None;
+                record.artifact = None;
+            }
+            return true;
         }
         let block_is_current = task.inputs.iter().all(|input| {
             self.document
@@ -4659,6 +5086,18 @@ impl DualPlaneSession {
                     column,
                     encoded,
                 } => self.register_inline_image(screen, row, column, encoded),
+                LifecycleDirective::ShellIntegration {
+                    screen,
+                    row,
+                    column,
+                    marker,
+                } => {
+                    let screen = match screen {
+                        RemovalScreen::Primary => ScreenId::Primary,
+                        RemovalScreen::Alternate => ScreenId::Alternate,
+                    };
+                    self.handle_shell_integration_marker(screen, GridPoint { row, column }, marker);
+                }
             }
         }
         self.flush_top_scroll_batch(&mut pending_top_scroll);
@@ -4676,6 +5115,18 @@ impl DualPlaneSession {
             RemovalScreen::Primary => ScreenId::Primary,
             RemovalScreen::Alternate => ScreenId::Alternate,
         };
+        if matches!(
+            self.shell_phases.get(&screen),
+            Some(ShellIntegrationPhase::Input(_))
+        ) {
+            return;
+        }
+        if matches!(
+            self.shell_phases.get(&screen),
+            Some(ShellIntegrationPhase::Input(_))
+        ) {
+            return;
+        }
         let occurrence_id = self.next_inline_image_occurrence_id;
         self.next_inline_image_occurrence_id =
             self.next_inline_image_occurrence_id.saturating_add(1);
@@ -4744,6 +5195,11 @@ impl DualPlaneSession {
         let mut matched = BTreeSet::new();
 
         for candidate in candidates {
+            let candidate_is_input =
+                self.semantic_input_overlaps_live(screen, candidate.start, candidate.end);
+            if candidate_is_input {
+                continue;
+            }
             let matched_occurrence =
                 existing
                     .iter()
@@ -4783,9 +5239,11 @@ impl DualPlaneSession {
                 );
             } else if create_and_retire
                 && candidate.stable
-                && !self.cursor_line_suppression().is_some_and(|suppression| {
-                    suppression.intersects(candidate.start.row, candidate.end.row)
-                })
+                && !self.semantic_input_overlaps_live(screen, candidate.start, candidate.end)
+                && (self.shell_integration_is_authoritative(screen)
+                    || !self.cursor_line_suppression().is_some_and(|suppression| {
+                        suppression.intersects(candidate.start.row, candidate.end.row)
+                    }))
             {
                 let occurrence = self.register_local_image_path(
                     candidate.path,
@@ -4867,6 +5325,9 @@ impl DualPlaneSession {
 
     fn detect_frozen_image_paths(&mut self, id: TranscriptId) {
         if !self.math_layout_options.detect_image_paths {
+            return;
+        }
+        if self.semantic_input_overlaps_history(id) {
             return;
         }
         let Some(line) = self
@@ -5482,7 +5943,11 @@ impl DualPlaneSession {
             .insert(id, DecorationRecord::frozen(versions));
         // Ordinary frozen lines take only the allocation-free delimiter prefilter. A candidate
         // snapshots immutable source here; the worker owns fence/pairing/escape/size detection.
-        if may_contain_math && !self.primary_parked && self.resize_epoch.decorations_allowed() {
+        if may_contain_math
+            && !self.semantic_input_overlaps_history(id)
+            && !self.primary_parked
+            && self.resize_epoch.decorations_allowed()
+        {
             self.schedule_scan(id);
         }
     }
@@ -7526,6 +7991,15 @@ fn live_task_is_current(
 
 fn captured_row_text(row: &CapturedRow) -> String {
     captured_row_text_and_boundaries(row).0
+}
+
+fn byte_offset_at_column(boundaries: &[(u32, u32)], column: u32, text_len: usize) -> usize {
+    boundaries
+        .iter()
+        .rev()
+        .find(|(_, boundary_column)| *boundary_column <= column)
+        .map_or(0, |(byte, _)| *byte as usize)
+        .min(text_len)
 }
 
 fn live_candidate_rows(
@@ -13851,6 +14325,138 @@ mod tests {
                 .count(),
             2
         );
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn osc133_input_region_suppresses_path_and_math_while_identical_output_renders_once() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let image = format!("[Image: source: \"{}\"]", path.display());
+        let command = format!("{image} $$input$$");
+        let stream = format!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07{command}\x1b]133;C\x07\r\n{image}\r\n$$output$$\r\n\x1b]133;D;0\x07"
+        );
+        session.feed_at(stream.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+
+        let image_tasks = session
+            .local_image_path_tasks
+            .iter()
+            .map(|task| task.occurrence_id)
+            .collect::<Vec<_>>();
+        assert_eq!(image_tasks.len(), 1, "only the output path may enqueue");
+        assert_eq!(
+            session.inline_images.len(),
+            1,
+            "the command echo must never own an image occurrence"
+        );
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+            1,
+            "only output math may render"
+        );
+        assert_eq!(session.live_decorations.len(), 1);
+        assert!(
+            session
+                .live_decorations
+                .values()
+                .all(|record| record.span.original_source.contains("output"))
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn osc133_command_region_reanchors_by_content_across_narrow_reflow() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(120), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let image = format!("[Image: source: \"{}\"]", path.display());
+        session
+            .feed_at(
+                format!("\x1b]133;A\x07PS> \x1b]133;B\x07{image}").as_bytes(),
+                started,
+            )
+            .unwrap();
+        session
+            .resize_at(nz(24), nz(12), started + Duration::from_millis(10))
+            .unwrap();
+        session.mark_pty_resize_requested_at(nz(24), nz(12), started + Duration::from_millis(11));
+        session
+            .feed_at(
+                format!("\x1b]133;C\x07\r\n{image}\r\n\x1b]133;D;0\x07").as_bytes(),
+                started + Duration::from_millis(20),
+            )
+            .unwrap();
+        session
+            .finish_resize_if_quiescent(started + Duration::from_secs(2))
+            .unwrap();
+        session.advance_live_stability(started + Duration::from_secs(3));
+
+        assert_eq!(session.inline_images.len(), 1);
+        assert_eq!(session.local_image_path_tasks.len(), 1);
+        let record = session.inline_images.values().next().unwrap();
+        let InlineImageRecordKind::LocalPath { start_anchor, .. } = &record.kind else {
+            panic!("expected output path")
+        };
+        let ContentAnchor::Live { point, .. } = session.document.anchor(*start_anchor).unwrap()
+        else {
+            panic!("output remains live in this fixture")
+        };
+        assert!(point.row > 0, "the sole occurrence must belong to output");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn osc133_input_region_remains_plain_after_freezing_into_transcript() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(2));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let image = format!("[Image: source: \"{}\"]", path.display());
+        session
+            .feed_at(
+                format!(
+                    "\x1b]133;A\x07PS> \x1b]133;B\x07{image}\x1b]133;C\x07\r\n{image}\r\nextra\r\nmore\r\n\x1b]133;D;0\x07"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+
+        let input_history = session
+            .document
+            .entries()
+            .iter()
+            .filter(|(_, entry)| entry.line.text.contains(&image))
+            .filter(|(id, _)| session.semantic_input_overlaps_history(**id))
+            .count();
+        assert_eq!(
+            input_history, 1,
+            "the command echo must retain input identity"
+        );
+        assert_eq!(
+            session
+                .inline_images
+                .values()
+                .filter(|record| matches!(
+                    session.document.anchor(record.end_anchor).unwrap(),
+                    ContentAnchor::History { .. }
+                ))
+                .count(),
+            1,
+            "only the identical output line may own a frozen image"
+        );
+
+        std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 }

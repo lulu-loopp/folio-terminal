@@ -108,3 +108,15 @@
 - **hover peek 升级位**:路径文本在抑制期间仍是原生可选/可复制文本;未来可把“成功
   解码路径的 hover 临时看图”升级为 §4 的本地无网络 peek,但它是独立呈现政策位,
   不得绕过光标行的新建 gate、提前落 band,也不得改变单击进入共享预览池的晋升路径。
+
+## 7. OSC 133 输入区权威来源(2026-07-30)
+
+- PowerShell opt-in shell integration 发 FTCS `133;A/B/C/D`;安装与状态机详见
+  `docs/shell-integration.md`。某个 screen 一旦见过有效标记,B..C 内容锚区域就是图片与公式
+  的共同权威 gate,该 screen 的光标/WRAPLINE/CUP/粘滞记忆退出裁决。
+- B..C 包含 live 编辑与提交后的命令回显,永远不装饰;C..D 是输出,照常装饰。区域内容锚随
+  live→staging→history 迁移,resize/reflow 以命令文本见证重新落位,不得清空后猜测。
+- 从未见标记的 screen 完全保留本节 §6 的既有启发式。外层 PowerShell 标记不冒充 nested
+  alternate-screen TUI 的内部轮次;未标记的 Codex/Claude Code screen 继续走降级模式。
+- v1 接受 OSC 标记可由子进程伪造的风险:影响仅限装饰门控/命令元数据,不赋予资源权限;
+  nonce 留待后续加固。

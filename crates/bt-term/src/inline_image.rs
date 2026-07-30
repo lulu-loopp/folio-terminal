@@ -329,17 +329,30 @@ fn candidate_start_boundary(bytes: &[u8], start: usize) -> bool {
 pub(crate) enum InlineImageStreamAction {
     Bytes(Vec<u8>),
     Image(Vec<u8>),
+    ShellIntegration(ShellIntegrationMarker),
     TooLarge,
+}
+
+/// FinalTerm Command Status markers used by PowerShell shell integration. Parameters after the
+/// command letter (for example the exit status on `D`) do not affect region ownership in v1.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShellIntegrationMarker {
+    PromptStart,
+    CommandStart,
+    CommandExecuted,
+    CommandFinished,
 }
 
 #[derive(Debug)]
 enum StreamState {
     Ground,
     Escape,
-    OscPrefix { matched: usize, held: Vec<u8> },
+    OscPrefix { held: Vec<u8> },
     OscPass,
     InlineFile(InlineFileCapture),
     AfterInlineEscape,
+    ShellIntegration { payload: Vec<u8>, oversized: bool },
+    AfterShellIntegrationEscape { payload: Vec<u8>, oversized: bool },
 }
 
 #[derive(Debug, Default)]
@@ -418,7 +431,6 @@ impl Default for Osc1337Scanner {
 
 impl Osc1337Scanner {
     pub(crate) fn scan(&mut self, bytes: &[u8]) -> Vec<InlineImageStreamAction> {
-        const PREFIX: &[u8] = b"1337;";
         let mut actions = Vec::new();
         let mut ordinary = Vec::new();
 
@@ -436,7 +448,6 @@ impl Osc1337Scanner {
                 StreamState::Escape => {
                     if byte == b']' {
                         StreamState::OscPrefix {
-                            matched: 0,
                             held: vec![0x1b, b']'],
                         }
                     } else if byte == 0x1b {
@@ -447,24 +458,27 @@ impl Osc1337Scanner {
                         StreamState::Ground
                     }
                 }
-                StreamState::OscPrefix {
-                    mut matched,
-                    mut held,
-                } => {
-                    if PREFIX.get(matched) == Some(&byte) {
-                        held.push(byte);
-                        matched += 1;
-                        if matched == PREFIX.len() {
+                StreamState::OscPrefix { mut held } => {
+                    held.push(byte);
+                    let body = &held[2..];
+                    if b"1337;".starts_with(body) || b"133;".starts_with(body) {
+                        if body == b"1337;" {
                             flush_bytes(&mut actions, &mut ordinary);
                             StreamState::InlineFile(InlineFileCapture::default())
+                        } else if body == b"133;" {
+                            flush_bytes(&mut actions, &mut ordinary);
+                            StreamState::ShellIntegration {
+                                payload: Vec::new(),
+                                oversized: false,
+                            }
                         } else {
-                            StreamState::OscPrefix { matched, held }
+                            StreamState::OscPrefix { held }
                         }
                     } else if byte == 0x1b {
+                        held.pop();
                         ordinary.extend_from_slice(&held);
                         StreamState::Escape
                     } else {
-                        held.push(byte);
                         ordinary.extend_from_slice(&held);
                         if byte == 0x07 {
                             StreamState::Ground
@@ -512,7 +526,6 @@ impl Osc1337Scanner {
                         StreamState::Ground
                     } else if byte == b']' {
                         StreamState::OscPrefix {
-                            matched: 0,
                             held: vec![0x1b, b']'],
                         }
                     } else if byte == 0x1b {
@@ -523,11 +536,73 @@ impl Osc1337Scanner {
                         StreamState::Ground
                     }
                 }
+                StreamState::ShellIntegration {
+                    mut payload,
+                    mut oversized,
+                } => match byte {
+                    0x07 => {
+                        finish_shell_integration(&mut actions, &payload, oversized);
+                        StreamState::Ground
+                    }
+                    0x1b => StreamState::AfterShellIntegrationEscape { payload, oversized },
+                    0x18 | 0x1a => StreamState::Ground,
+                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {
+                        StreamState::ShellIntegration { payload, oversized }
+                    }
+                    _ => {
+                        if payload.len() < 128 {
+                            payload.push(byte);
+                        } else {
+                            oversized = true;
+                        }
+                        StreamState::ShellIntegration { payload, oversized }
+                    }
+                },
+                StreamState::AfterShellIntegrationEscape { payload, oversized } => {
+                    if byte == b'\\' {
+                        finish_shell_integration(&mut actions, &payload, oversized);
+                        StreamState::Ground
+                    } else if byte == b']' {
+                        // A nested OSC terminates the malformed outer marker and begins a fresh
+                        // sequence. This bounds recovery without manufacturing a semantic event.
+                        StreamState::OscPrefix {
+                            held: vec![0x1b, b']'],
+                        }
+                    } else if byte == 0x1b {
+                        StreamState::AfterShellIntegrationEscape { payload, oversized }
+                    } else {
+                        StreamState::Ground
+                    }
+                }
             };
         }
         flush_bytes(&mut actions, &mut ordinary);
         actions
     }
+}
+
+fn finish_shell_integration(
+    actions: &mut Vec<InlineImageStreamAction>,
+    payload: &[u8],
+    oversized: bool,
+) {
+    if oversized {
+        return;
+    }
+    let Some((&command, parameters)) = payload.split_first() else {
+        return;
+    };
+    if !parameters.is_empty() && parameters.first() != Some(&b';') {
+        return;
+    }
+    let marker = match command {
+        b'A' => ShellIntegrationMarker::PromptStart,
+        b'B' => ShellIntegrationMarker::CommandStart,
+        b'C' => ShellIntegrationMarker::CommandExecuted,
+        b'D' => ShellIntegrationMarker::CommandFinished,
+        _ => return,
+    };
+    actions.push(InlineImageStreamAction::ShellIntegration(marker));
 }
 
 fn finish_capture(
@@ -812,6 +887,78 @@ mod tests {
                 InlineImageStreamAction::Bytes(b"after".to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn osc_133_markers_reassemble_across_chunks_and_accept_standard_parameters() {
+        let mut scanner = Osc1337Scanner::default();
+        let mut actions = Vec::new();
+        for chunk in [
+            b"before\x1b]13".as_slice(),
+            b"3;A\x07\x1b]133;B\x1b".as_slice(),
+            b"\\command\x1b]133;C\x07output\x1b]133;D;17\x1b\\after".as_slice(),
+        ] {
+            actions.extend(scanner.scan(chunk));
+        }
+        assert_eq!(
+            actions,
+            vec![
+                InlineImageStreamAction::Bytes(b"before".to_vec()),
+                InlineImageStreamAction::ShellIntegration(ShellIntegrationMarker::PromptStart),
+                InlineImageStreamAction::ShellIntegration(ShellIntegrationMarker::CommandStart),
+                InlineImageStreamAction::Bytes(b"command".to_vec()),
+                InlineImageStreamAction::ShellIntegration(ShellIntegrationMarker::CommandExecuted),
+                InlineImageStreamAction::Bytes(b"output".to_vec()),
+                InlineImageStreamAction::ShellIntegration(ShellIntegrationMarker::CommandFinished),
+                InlineImageStreamAction::Bytes(b"after".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_and_nested_osc_133_recover_without_manufacturing_markers() {
+        let mut scanner = Osc1337Scanner::default();
+        assert_eq!(
+            scanner.scan(b"x\x1b]133;Bbogus\x07y\x1b]133;B\x1b]133;C\x07z"),
+            vec![
+                InlineImageStreamAction::Bytes(b"x".to_vec()),
+                InlineImageStreamAction::Bytes(b"y".to_vec()),
+                InlineImageStreamAction::ShellIntegration(ShellIntegrationMarker::CommandExecuted),
+                InlineImageStreamAction::Bytes(b"z".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn osc_133_decisions_are_invariant_at_every_chunk_boundary() {
+        let stream = b"pre\x1b]133;A\x07\x1b]133;B\x1b\\cmd\x1b]133;C\x07out\x1b]133;D;0\x1b\\post";
+        fn normalized(chunks: &[&[u8]]) -> (Vec<u8>, Vec<ShellIntegrationMarker>) {
+            let mut scanner = Osc1337Scanner::default();
+            let mut bytes = Vec::new();
+            let mut markers = Vec::new();
+            for chunk in chunks {
+                for action in scanner.scan(chunk) {
+                    match action {
+                        InlineImageStreamAction::Bytes(part) => bytes.extend(part),
+                        InlineImageStreamAction::ShellIntegration(marker) => markers.push(marker),
+                        InlineImageStreamAction::Image(_) | InlineImageStreamAction::TooLarge => {
+                            panic!("fixture contains no image")
+                        }
+                    }
+                }
+            }
+            (bytes, markers)
+        }
+        let whole = normalized(&[stream]);
+        for split in 0..=stream.len() {
+            assert_eq!(
+                normalized(&[&stream[..split], &stream[split..]]),
+                whole,
+                "split at byte {split}"
+            );
+        }
+        let bytewise = stream.iter().map(std::slice::from_ref).collect::<Vec<_>>();
+        assert_eq!(normalized(&bytewise), whole);
     }
 
     #[test]
