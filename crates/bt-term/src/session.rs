@@ -674,6 +674,108 @@ struct SemanticInputRegion {
     witness: String,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct OrderedSemanticMatchScore {
+    matches: usize,
+    distance: u64,
+}
+
+impl OrderedSemanticMatchScore {
+    fn with_match(self, preferred_end: GridPoint, candidate_end: GridPoint) -> Self {
+        Self {
+            matches: self.matches.saturating_add(1),
+            distance: self.distance.saturating_add(
+                u64::from(preferred_end.row.abs_diff(candidate_end.row)).saturating_add(u64::from(
+                    preferred_end.column.abs_diff(candidate_end.column),
+                )),
+            ),
+        }
+    }
+
+    fn is_better_than(self, other: Self) -> bool {
+        self.matches > other.matches
+            || (self.matches == other.matches && self.distance < other.distance)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OrderedSemanticMatchStep {
+    Start,
+    SkipRegion,
+    SkipCandidate,
+    Match,
+}
+
+/// Match repeated command witnesses as an ordered, one-to-one sequence. Each OSC 133 B..C region
+/// is an occurrence identity, not just a string: independently choosing the closest equal string
+/// lets several regions collapse onto one repeated command after reflow. Sequence alignment first
+/// maximizes the number of surviving identities, then minimizes movement from their prior ends.
+fn ordered_semantic_matches(
+    regions: &[(usize, GridPoint)],
+    candidates: &[(GridPoint, GridPoint)],
+) -> Vec<(usize, GridPoint, GridPoint)> {
+    let columns = candidates.len().saturating_add(1);
+    let mut scores = vec![
+        OrderedSemanticMatchScore::default();
+        regions.len().saturating_add(1).saturating_mul(columns)
+    ];
+    let mut steps = vec![
+        OrderedSemanticMatchStep::Start;
+        regions.len().saturating_add(1).saturating_mul(columns)
+    ];
+    for region in 1..=regions.len() {
+        steps[region * columns] = OrderedSemanticMatchStep::SkipRegion;
+    }
+    for step in steps
+        .iter_mut()
+        .take(candidates.len().saturating_add(1))
+        .skip(1)
+    {
+        *step = OrderedSemanticMatchStep::SkipCandidate;
+    }
+    for region in 1..=regions.len() {
+        for candidate in 1..=candidates.len() {
+            let index = region * columns + candidate;
+            let mut best = scores[(region - 1) * columns + candidate];
+            let mut step = OrderedSemanticMatchStep::SkipRegion;
+
+            let skip_candidate = scores[index - 1];
+            if skip_candidate.is_better_than(best) {
+                best = skip_candidate;
+                step = OrderedSemanticMatchStep::SkipCandidate;
+            }
+
+            let matched = scores[(region - 1) * columns + candidate - 1]
+                .with_match(regions[region - 1].1, candidates[candidate - 1].1);
+            if matched.is_better_than(best) || matched == best {
+                best = matched;
+                step = OrderedSemanticMatchStep::Match;
+            }
+            scores[index] = best;
+            steps[index] = step;
+        }
+    }
+
+    let mut matched = Vec::new();
+    let mut region = regions.len();
+    let mut candidate = candidates.len();
+    while region > 0 || candidate > 0 {
+        match steps[region * columns + candidate] {
+            OrderedSemanticMatchStep::Start => break,
+            OrderedSemanticMatchStep::SkipRegion => region -= 1,
+            OrderedSemanticMatchStep::SkipCandidate => candidate -= 1,
+            OrderedSemanticMatchStep::Match => {
+                let (start, end) = candidates[candidate - 1];
+                matched.push((regions[region - 1].0, start, end));
+                region -= 1;
+                candidate -= 1;
+            }
+        }
+    }
+    matched.reverse();
+    matched
+}
+
 impl CursorLineSuppression {
     fn contains(self, row: u32) -> bool {
         self.intersects(row, row)
@@ -1965,6 +2067,9 @@ impl DualPlaneSession {
             {
                 witness.push_str(fragment);
             }
+            if row < end.row && !captured.continues {
+                witness.push('\n');
+            }
         }
         Some(witness)
     }
@@ -1985,39 +2090,98 @@ impl DualPlaneSession {
                 byte_end: logical_text.len(),
                 boundaries,
             });
+            if !captured.continues {
+                logical_text.push('\n');
+            }
         }
+        let cursor = self.terminal.cursor();
+        let cursor_point = GridPoint {
+            row: cursor.row,
+            column: cursor.column,
+        };
+        let active_region = match self.shell_phases.get(&self.live_screen) {
+            Some(ShellIntegrationPhase::Input(index)) => Some(*index),
+            _ => None,
+        };
+        let mut regions_by_witness = BTreeMap::<String, Vec<(usize, GridPoint)>>::new();
         for index in 0..self.semantic_input_regions.len() {
             let region = &self.semantic_input_regions[index];
-            if region.screen != self.live_screen || region.witness.is_empty() {
+            if region.screen != self.live_screen {
                 continue;
             }
-            let Ok(ContentAnchor::Live { point: old_end, .. }) = self.document.anchor(region.end)
+            if region.witness.is_empty() {
+                if active_region == Some(index) && !region.closed {
+                    let start_anchor = region.start;
+                    let end_anchor = region.end;
+                    for (anchor, bias) in [(start_anchor, Bias::Before), (end_anchor, Bias::After)]
+                    {
+                        let _ = self.document.replace_anchor(
+                            anchor,
+                            ContentAnchor::Live {
+                                screen: region.screen,
+                                point: cursor_point,
+                                bias,
+                                generation: self.grid_generation,
+                            },
+                        );
+                    }
+                }
+                continue;
+            }
+            let (
+                Ok(ContentAnchor::Live {
+                    screen: start_screen,
+                    ..
+                }),
+                Ok(ContentAnchor::Live {
+                    screen: end_screen,
+                    point: old_end,
+                    ..
+                }),
+            ) = (
+                self.document.anchor(region.start),
+                self.document.anchor(region.end),
+            )
             else {
+                // Frozen and boundary-split regions already carry stable transcript/staging
+                // identity. Pulling either side back into the live grid would duplicate ownership.
                 continue;
             };
+            if start_screen != end_screen || *start_screen != region.screen {
+                continue;
+            }
             let preferred_end = if !region.closed {
-                let cursor = self.terminal.cursor();
-                GridPoint {
-                    row: cursor.row,
-                    column: cursor.column,
-                }
+                cursor_point
             } else {
                 *old_end
             };
-            let best = logical_text
-                .match_indices(&region.witness)
+            regions_by_witness
+                .entry(region.witness.clone())
+                .or_default()
+                .push((index, preferred_end));
+        }
+
+        let mut matches = Vec::new();
+        for (witness, regions) in regions_by_witness {
+            let candidates = logical_text
+                .match_indices(&witness)
                 .filter_map(|(byte_start, _)| {
-                    let byte_end = byte_start.saturating_add(region.witness.len());
+                    let byte_end = byte_start.saturating_add(witness.len());
                     let start = live_path_point(&segments, byte_start, false)?;
                     let end = live_path_point(&segments, byte_end, true)?;
-                    let distance = end.row.abs_diff(preferred_end.row) as u64
-                        + end.column.abs_diff(preferred_end.column) as u64;
-                    Some((distance, start, end))
+                    Some((start, end))
                 })
-                .min_by_key(|(distance, _, _)| *distance);
-            let Some((_, start, end)) = best else {
-                continue;
-            };
+                .collect::<Vec<_>>();
+            let ordered = ordered_semantic_matches(&regions, &candidates);
+            if std::env::var_os("BT_SEMANTIC_TRACE").is_some() {
+                eprintln!(
+                    "SEMANTIC_ORDERED witness={witness:?} regions={regions:?} candidates={candidates:?} matched={ordered:?}"
+                );
+            }
+            matches.extend(ordered);
+        }
+        for (index, start, end) in matches {
+            let region = &self.semantic_input_regions[index];
             let start_anchor = region.start;
             let end_anchor = region.end;
             let _ = self.document.replace_anchor(
@@ -14326,6 +14490,120 @@ mod tests {
             2
         );
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    const OSC133_ACCEPT2_PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal> ";
+    const OSC133_ACCEPT2_IMAGE: &str =
+        "[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]";
+    const OSC133_ACCEPT2_COMMAND: &str =
+        "echo \"[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]\"";
+
+    #[derive(Clone, Copy, Debug)]
+    enum Osc133ZoomStage {
+        WrappedCommand,
+    }
+
+    fn resize_osc133_fixture(session: &mut DualPlaneSession, at: Instant) {
+        session.resize_at(nz(80), nz(24), at).unwrap();
+        session.mark_pty_resize_requested_at(nz(80), nz(24), at + Duration::from_millis(1));
+    }
+
+    fn feed_osc133_accept2_round(
+        session: &mut DualPlaneSession,
+        started: Instant,
+        zoom_stage: Option<Osc133ZoomStage>,
+    ) -> Instant {
+        let mut at = started;
+        session.feed_at(b"\x1b]133;A\x07", at).unwrap();
+        session
+            .feed_at(OSC133_ACCEPT2_PROMPT.as_bytes(), at)
+            .unwrap();
+        at += Duration::from_millis(10);
+        session.feed_at(b"\x1b]133;B\x07", at).unwrap();
+
+        at += Duration::from_millis(10);
+        session
+            .feed_at(OSC133_ACCEPT2_COMMAND.as_bytes(), at)
+            .unwrap();
+        // PSReadLine's repaint leaves the cursor at the next physical row when the command fills
+        // the 104th cell. Force that real recorded shape while keeping the row empty.
+        session.feed_at(b" \r\x1b[K", at).unwrap();
+        if matches!(zoom_stage, Some(Osc133ZoomStage::WrappedCommand)) {
+            resize_osc133_fixture(session, at);
+        }
+
+        at += Duration::from_millis(10);
+        // `osc133-accept2.vt` carries Enter before OSC 133;C; keep that ordering instead of the
+        // compact synthetic shape used by the older shell-integration tests.
+        session.feed_at(b"\r\n\x1b]133;C\x07", at).unwrap();
+
+        at += Duration::from_millis(10);
+        session
+            .feed_at(OSC133_ACCEPT2_IMAGE.as_bytes(), at)
+            .unwrap();
+
+        at += Duration::from_millis(10);
+        session.feed_at(b"\r\n\x1b]133;D;0\x07", at).unwrap();
+        at + Duration::from_millis(10)
+    }
+
+    fn assert_osc133_accept2_rounds(session: &mut DualPlaneSession, rounds: usize, at: Instant) {
+        session
+            .finish_resize_if_quiescent(at + Duration::from_secs(2))
+            .unwrap();
+        session.advance_live_stability(at + Duration::from_secs(3));
+
+        assert_eq!(session.semantic_input_regions.len(), rounds);
+        assert!(
+            session
+                .semantic_input_regions
+                .iter()
+                .all(|region| region.witness.trim_end_matches('\n') == OSC133_ACCEPT2_COMMAND),
+            "every B..C region must retain the recorded logical command witness: {:?}",
+            session
+                .semantic_input_regions
+                .iter()
+                .map(|region| &region.witness)
+                .collect::<Vec<_>>()
+        );
+        let starts = session
+            .semantic_input_regions
+            .iter()
+            .map(|region| format!("{:?}", session.document.anchor(region.start).unwrap()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            starts.len(),
+            rounds,
+            "repeated identical commands must keep distinct ordered identities"
+        );
+        assert_eq!(
+            session.inline_images.len(),
+            rounds,
+            "command echoes must remain undecorated and every output must own one image"
+        );
+        assert_eq!(
+            session.local_image_path_tasks.len(),
+            rounds,
+            "only the output line from each round may enqueue"
+        );
+    }
+
+    #[test]
+    fn osc133_accept2_wrapped_command_regions_survive_zoom_without_decorating_input() {
+        assert_eq!(
+            OSC133_ACCEPT2_PROMPT.len() + OSC133_ACCEPT2_COMMAND.len(),
+            104,
+            "the recorded prompt plus command lands exactly on the 104-column wrap boundary"
+        );
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(104), nz(26));
+        enable_path_detection(&mut session);
+        let mut at = started;
+        for _ in 0..3 {
+            at = feed_osc133_accept2_round(&mut session, at, None);
+        }
+        at = feed_osc133_accept2_round(&mut session, at, Some(Osc133ZoomStage::WrappedCommand));
+        assert_osc133_accept2_rounds(&mut session, 4, at);
     }
 
     #[test]
