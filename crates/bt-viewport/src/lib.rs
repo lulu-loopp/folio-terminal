@@ -501,6 +501,7 @@ impl ViewportFrame {
             return false;
         }
         for cell in &mut self.cells[first..last] {
+            cell.style.flags.remove(CellFlags::DOTTED_UNDERLINE);
             cell.style.flags.insert(CellFlags::UNDERLINE);
         }
         true
@@ -2718,6 +2719,13 @@ fn captured_staged_visual_row(
 }
 
 fn apply_implicit_hyperlinks(cells: &mut [CapturedCell]) {
+    // At this point every existing hyperlink came from OSC 8 in the captured terminal row.
+    // Projection owns the affordance: the source grid/transcript remains byte-for-byte unchanged,
+    // while inferred URLs added below deliberately retain their unmarked resting presentation.
+    for cell in cells.iter_mut().filter(|cell| cell.hyperlink.is_some()) {
+        cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
+    }
+
     let mut text = String::new();
     let mut byte_ranges = Vec::with_capacity(cells.len());
     for cell in cells.iter() {
@@ -2837,6 +2845,9 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
         if let Some(span) = span {
             cell.style = span.style.clone();
             cell.hyperlink.clone_from(&span.hyperlink);
+            if cell.hyperlink.is_some() {
+                cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
+            }
         }
         if cell.hyperlink.is_none()
             && let Some(range) = implicit_link_at(&implicit_links, byte_start as usize)
@@ -3107,16 +3118,15 @@ mod tests {
         }
         apply_implicit_hyperlinks(&mut cells);
 
-        assert!(
-            cells[..21]
-                .iter()
-                .all(|cell| cell.hyperlink.as_deref() == Some("file:///real-target"))
-        );
+        assert!(cells[..21].iter().all(|cell| cell.hyperlink.as_deref()
+            == Some("file:///real-target")
+            && cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)));
         let implicit = "https://plain.example";
         assert!(
             cells[22..43]
                 .iter()
-                .all(|cell| cell.hyperlink.as_deref() == Some(implicit))
+                .all(|cell| cell.hyperlink.as_deref() == Some(implicit)
+                    && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE))
         );
         assert_eq!(cells[43].hyperlink, None, "trailing ')' is not linked");
         assert_eq!(cells[44].hyperlink, None, "trailing '.' is not linked");
@@ -3145,6 +3155,49 @@ mod tests {
 
         assert_eq!(linked_text, text);
         assert_eq!(line.text, text, "recognition is projection-only");
+    }
+
+    #[test]
+    fn frozen_osc_8_link_is_dotted_while_bare_url_has_no_resting_marker() {
+        let explicit = "trusted";
+        let implicit = "https://plain.example";
+        let text = format!("{explicit} {implicit}");
+        let line = FrozenLine {
+            id: TranscriptId(7),
+            source_generation: SourceGeneration(3),
+            grapheme_boundaries: (0..=text.len() as u32).collect(),
+            text: text.clone(),
+            styles: vec![bt_transcript::StyleSpan {
+                byte_start: 0,
+                byte_end: explicit.len() as u32,
+                style: bt_transcript::CellStyle::default(),
+                hyperlink: Some("file:///actual-target".to_owned()),
+            }],
+            fragments: Vec::new(),
+            shell_marks: Vec::new(),
+            wrap_split: false,
+        };
+
+        let cells = layout_frozen_line(&line, 80)
+            .into_iter()
+            .flat_map(|row| row.cells)
+            .collect::<Vec<_>>();
+        assert!(cells[..explicit.len()].iter().all(|cell| {
+            cell.hyperlink.as_deref() == Some("file:///actual-target")
+                && cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
+        }));
+        assert!(
+            cells[explicit.len() + 1..explicit.len() + 1 + implicit.len()]
+                .iter()
+                .all(|cell| {
+                    cell.hyperlink.as_deref() == Some(implicit)
+                        && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
+                })
+        );
+        assert!(
+            line.styles[0].style.flags.is_empty(),
+            "projection must not mutate frozen transcript style"
+        );
     }
 
     #[test]
@@ -3179,12 +3232,19 @@ mod tests {
 
         let hit = frame.hyperlink_at(0, 4).unwrap();
         assert_eq!(hit.uri, "https://actual.example/login");
+        assert!(
+            frame
+                .cells
+                .iter()
+                .all(|cell| cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE))
+        );
         assert!(frame.underline_hyperlink(&hit));
         assert!(
             frame
                 .cells
                 .iter()
-                .all(|cell| cell.style.flags.contains(CellFlags::UNDERLINE))
+                .all(|cell| cell.style.flags.contains(CellFlags::UNDERLINE)
+                    && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE))
         );
     }
 

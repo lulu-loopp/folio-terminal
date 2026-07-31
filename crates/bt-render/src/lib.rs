@@ -89,6 +89,7 @@ const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
 const SEGOE_COLOR_EMOJI_FONT_FAMILY: &str = "Segoe UI Emoji";
 const TEXT_SYMBOL_FONT_FAMILY: &str = "Segoe UI Symbol";
 const NARROW_FALLBACK_SIDE_BEARING_EM: f32 = 0.05;
+const DOTTED_UNDERLINE_SEGMENT_LOGICAL_PX: f32 = 2.0;
 const NOTO_COLOR_EMOJI_BYTES: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../assets/fonts/NotoColorEmoji_WindowsCompatible.ttf"
@@ -2609,7 +2610,9 @@ impl Renderer {
                 )
             }));
         }
-        for (index, cell) in frame.cells.iter().enumerate() {
+        let mut index = 0;
+        while index < frame.cells.len() {
+            let cell = &frame.cells[index];
             if cell.style.flags.contains(CellFlags::UNDERLINE) {
                 let row = index / columns;
                 let column = index % columns;
@@ -2623,7 +2626,46 @@ impl Renderer {
                     bottom,
                     foreground,
                 ));
+                index += 1;
+                continue;
             }
+            if !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE) {
+                index += 1;
+                continue;
+            }
+
+            let row = index / columns;
+            let start_column = index % columns;
+            let (foreground, _) = resolve_colors(&cell.style);
+            let mut end = index + 1;
+            while end < frame.cells.len() && end / columns == row {
+                let next = &frame.cells[end];
+                let (next_foreground, _) = resolve_colors(&next.style);
+                if next.style.flags.contains(CellFlags::UNDERLINE)
+                    || !next.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
+                    || next_foreground != foreground
+                {
+                    break;
+                }
+                end += 1;
+            }
+
+            let [left, _, _, bottom] = frame_cell_bounds_px(self.metrics, frame, row, start_column);
+            let right = left + (end - index) as f32 * self.metrics.cell_width_px;
+            rects.extend(
+                dotted_underline_segments(left, right, bottom, self.metrics.scale_factor)
+                    .into_iter()
+                    .map(|[segment_left, top, segment_right, segment_bottom]| {
+                        self.pixel_rect(
+                            segment_left,
+                            top,
+                            segment_right,
+                            segment_bottom,
+                            foreground,
+                        )
+                    }),
+            );
+            index = end;
         }
         rects
     }
@@ -3092,6 +3134,34 @@ fn frame_cell_bounds_px(
         left + metrics.cell_width_px,
         top + mapped.height_subpixels as f32 / SUBPIXELS_PER_PX as f32,
     ]
+}
+
+/// Split one contiguous dotted underline run into opaque, physical-pixel-aligned rectangles.
+///
+/// Cell metrics are already expressed in physical pixels. The nominal two-logical-pixel dash and
+/// gap therefore become 2/3/4 physical pixels at 1x/1.5x/2x. Horizontal edges and the baseline
+/// are rounded to device pixels; thickness stays identical to the existing solid underline.
+fn dotted_underline_segments(
+    left: f32,
+    right: f32,
+    bottom: f32,
+    scale_factor: f64,
+) -> Vec<[f32; 4]> {
+    let left = left.round();
+    let right = right.round();
+    let bottom = bottom.round();
+    let thickness = (scale_factor as f32).max(1.0);
+    let segment = (DOTTED_UNDERLINE_SEGMENT_LOGICAL_PX * scale_factor as f32)
+        .round()
+        .max(1.0);
+    let period = segment * 2.0;
+    let mut rectangles = Vec::new();
+    let mut x = left;
+    while x < right {
+        rectangles.push([x, bottom - thickness, (x + segment).min(right), bottom]);
+        x += period;
+    }
+    rectangles
 }
 
 fn selection_span_bounds_px(
@@ -5386,6 +5456,45 @@ mod tests {
             ANSI_16_RGB[15],
             "indexed ANSI bright white must resolve through palette slot 15"
         );
+    }
+
+    #[test]
+    fn dotted_underline_geometry_scales_and_aligns_dash_gaps_to_physical_pixels() {
+        for (scale_factor, expected) in [
+            (
+                1.0,
+                vec![
+                    [8.0, 21.0, 10.0, 22.0],
+                    [12.0, 21.0, 14.0, 22.0],
+                    [16.0, 21.0, 18.0, 22.0],
+                ],
+            ),
+            (1.5, vec![[8.0, 20.5, 11.0, 22.0], [14.0, 20.5, 17.0, 22.0]]),
+            (2.0, vec![[8.0, 20.0, 12.0, 22.0], [16.0, 20.0, 18.0, 22.0]]),
+        ] {
+            assert_eq!(
+                dotted_underline_segments(8.0, 18.0, 22.0, scale_factor),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn dotted_underline_geometry_clips_the_final_dash_without_fractional_x_edges() {
+        let segments = dotted_underline_segments(8.2, 17.6, 21.8, 1.5);
+        assert_eq!(
+            segments,
+            vec![[8.0, 20.5, 11.0, 22.0], [14.0, 20.5, 17.0, 22.0]]
+        );
+        assert!(
+            segments
+                .iter()
+                .flatten()
+                .all(|coordinate| coordinate.is_finite())
+        );
+        assert!(segments.iter().all(|segment| segment[0].fract() == 0.0
+            && segment[2].fract() == 0.0
+            && segment[3].fract() == 0.0));
     }
 
     #[test]
