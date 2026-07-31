@@ -226,6 +226,10 @@ struct Runtime {
     click_tracker: ClickTracker,
     line_wheel_remainder: f64,
     pixel_wheel_remainder: f64,
+    /// Fractional subpixels awaiting consumption by the LOCAL scroll routes only. Forwarding
+    /// routes keep their own line-quantized accumulators above; the two never pour into each
+    /// other, so switching routes cannot dump parked residue as a sudden jump.
+    local_wheel_subpixel_remainder: f64,
     pending_pty_resize: Option<PendingPtyResize>,
     pending_resize_present: Option<GridSize>,
     hyperlink_hover: HyperlinkHover,
@@ -706,6 +710,7 @@ impl Runtime {
             click_tracker: ClickTracker::default(),
             line_wheel_remainder: 0.0,
             pixel_wheel_remainder: 0.0,
+            local_wheel_subpixel_remainder: 0.0,
             pending_pty_resize: None,
             pending_resize_present: None,
             hyperlink_hover: HyperlinkHover::default(),
@@ -1586,39 +1591,50 @@ impl Runtime {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
-        let lines = match delta {
+        // One physical event, two currencies. Local routes scroll by exact subpixels (stage C of
+        // the pixel-scroll plan); forwarding routes speak whole wheel lines because that is the
+        // application protocol. Route is decided first, then only that route's accumulator moves.
+        let cell_subpixels = self.projection.cell_height_subpixels().get() as f64;
+        let event_subpixels = match delta {
             MouseScrollDelta::LineDelta(_, y) => {
                 let multiplier =
                     match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
                         bt_platform::WheelScrollAmount::Lines(lines) => lines as f64,
                         bt_platform::WheelScrollAmount::Page => self.grid.rows.get() as f64,
                     };
-                self.line_wheel_remainder += f64::from(y) * multiplier;
-                let lines = self.line_wheel_remainder.trunc() as i32;
-                self.line_wheel_remainder -= f64::from(lines);
-                lines
+                f64::from(y) * multiplier * cell_subpixels
             }
             MouseScrollDelta::PixelDelta(position) => {
-                self.pixel_wheel_remainder += position.y;
-                let lines = (self.pixel_wheel_remainder
-                    / self.renderer.metrics().cell_height_px as f64)
-                    .trunc() as i32;
-                self.pixel_wheel_remainder -=
-                    lines as f64 * self.renderer.metrics().cell_height_px as f64;
-                lines
+                position.y * bt_viewport::SUBPIXELS_PER_PX as f64
             }
         };
-        if lines == 0 {
-            return Ok(());
-        }
         if let Some(math_hit) = self.math_hit() {
-            let delta = -lines.saturating_mul(self.renderer.metrics().cell_height_px as i32);
-            let horizontal = if self.modifiers.shift_key() { delta } else { 0 };
-            let vertical = if self.modifiers.shift_key() { 0 } else { delta };
+            // A hovered math block pans by whole pixels derived from the same exact motion, so
+            // trackpads feel identical over blocks and text. The commit is tentative: nothing is
+            // taken from the local accumulator until the block actually scrolls, because a
+            // non-scrollable block falls through to the ordinary routes with the event intact.
+            let mut tentative = self.local_wheel_subpixel_remainder + event_subpixels;
+            let take_px = drain_whole_units(&mut tentative, bt_viewport::SUBPIXELS_PER_PX as f64);
+            let delta_px = i32::try_from(-take_px).unwrap_or(0);
+            if delta_px == 0 {
+                self.local_wheel_subpixel_remainder = tentative;
+                return Ok(());
+            }
+            let horizontal = if self.modifiers.shift_key() {
+                delta_px
+            } else {
+                0
+            };
+            let vertical = if self.modifiers.shift_key() {
+                0
+            } else {
+                delta_px
+            };
             if self
                 .session
                 .scroll_math_block(&math_hit.anchor, horizontal, vertical)
             {
+                self.local_wheel_subpixel_remainder = tentative;
                 return self.publish_interaction_frame();
             }
         }
@@ -1629,9 +1645,13 @@ impl Runtime {
         // surface the user cannot see. Plain wheel therefore stays local in both directions;
         // scrolling back to the resting bottom (offset 0) exits and restores forwarding.
         if modes.alternate_screen && self.projection.is_scrolled() {
-            return self.scroll_view(lines);
+            return self.scroll_view_exact(event_subpixels);
         }
         if !self.modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off {
+            let lines = self.take_forward_wheel_lines(delta);
+            if lines == 0 {
+                return Ok(());
+            }
             let Some(hit) = self.frame_hit() else {
                 return Ok(());
             };
@@ -1663,9 +1683,13 @@ impl Runtime {
             // Alternate-screen wheel emulation belongs to the application. Shift is the explicit
             // local override for reviewing projection-only rows displaced above this screen.
             if self.modifiers.shift_key() {
-                return self.scroll_view(lines);
+                return self.scroll_view_exact(event_subpixels);
             }
             if modes.alternate_scroll {
+                let lines = self.take_forward_wheel_lines(delta);
+                if lines == 0 {
+                    return Ok(());
+                }
                 let bytes =
                     input::alternate_scroll_bytes(lines, self.session.application_cursor_mode());
                 return self.send_user_input(
@@ -1676,7 +1700,42 @@ impl Runtime {
             }
             return Ok(());
         }
-        self.scroll_view(lines)
+        self.scroll_view_exact(event_subpixels)
+    }
+
+    /// Whole-line quantization for the forwarding routes (TUI mouse tracking, alternate-scroll
+    /// emulation): applications receive wheel lines, so fractional motion parks here — in the
+    /// forwarding accumulators, never the local subpixel one — until a full line accrues.
+    fn take_forward_wheel_lines(&mut self, delta: MouseScrollDelta) -> i32 {
+        match delta {
+            MouseScrollDelta::LineDelta(_, y) => {
+                let multiplier =
+                    match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
+                        bt_platform::WheelScrollAmount::Lines(lines) => lines as f64,
+                        bt_platform::WheelScrollAmount::Page => self.grid.rows.get() as f64,
+                    };
+                self.line_wheel_remainder += f64::from(y) * multiplier;
+                drain_whole_units(&mut self.line_wheel_remainder, 1.0) as i32
+            }
+            MouseScrollDelta::PixelDelta(position) => {
+                self.pixel_wheel_remainder += position.y;
+                let cell_px = self.renderer.metrics().cell_height_px as f64;
+                drain_whole_units(&mut self.pixel_wheel_remainder, cell_px) as i32
+            }
+        }
+    }
+
+    /// Local pixel-exact wheel consumption: accumulate the event's fractional subpixels and
+    /// scroll by the integral part. Positive subpixels move into history, matching the wheel's
+    /// upward direction, and residue below one subpixel simply waits for the next event.
+    fn scroll_view_exact(&mut self, event_subpixels: f64) -> Result<()> {
+        self.local_wheel_subpixel_remainder += event_subpixels;
+        let take = drain_whole_units(&mut self.local_wheel_subpixel_remainder, 1.0);
+        if take == 0 {
+            return Ok(());
+        }
+        self.projection.scroll_by_subpixels(take);
+        self.publish_interaction_frame()
     }
 
     fn keyboard_input(&mut self, event: &KeyEvent) -> Result<()> {
@@ -2374,6 +2433,15 @@ fn recoverable_wheel_scroll_amount(
             bt_platform::WheelScrollAmount::Lines(FALLBACK_WHEEL_LINES)
         }
     }
+}
+
+/// Takes as many whole `unit`s as the accumulated remainder holds and returns the signed count,
+/// leaving the sub-unit residue in place. Truncation is symmetric around zero, so reversing the
+/// wheel never manufactures motion from residue of the opposite sign.
+fn drain_whole_units(remainder: &mut f64, unit: f64) -> i64 {
+    let units = (*remainder / unit).trunc() as i64;
+    *remainder -= units as f64 * unit;
+    units
 }
 
 fn protocol_mouse_button(button: MouseButton) -> Option<input::MouseProtocolButton> {
@@ -3366,6 +3434,42 @@ mod tests {
             recoverable_wheel_scroll_amount(Err("injected SPI failure".to_owned())),
             bt_platform::WheelScrollAmount::Lines(3)
         );
+    }
+
+    #[test]
+    fn wheel_accumulator_preserves_fractional_residue_across_events() {
+        // Eight trackpad ticks of 0.375 units (binary-exact) must add up to exactly 3 whole
+        // units drained, never 0 (per-event truncation) and never 4 (double counting).
+        let mut remainder = 0.0;
+        let mut drained = 0;
+        for _ in 0..8 {
+            remainder += 0.375;
+            drained += drain_whole_units(&mut remainder, 1.0);
+        }
+        assert_eq!(drained, 3);
+        assert_eq!(remainder, 0.0);
+
+        // Whole-line wheel notches with a 17px cell drain exactly one line per 17px, residue 8.
+        let mut pixels = 25.0;
+        assert_eq!(drain_whole_units(&mut pixels, 17.0), 1);
+        assert!((pixels - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn wheel_accumulator_truncates_symmetrically_and_never_flips_sign_on_reversal() {
+        // +0.6 then -0.7: neither direction has accrued a whole unit, so nothing drains and the
+        // residue nets out — reversal must not manufacture a step from opposite-sign residue.
+        let mut remainder = 0.0;
+        remainder += 0.6;
+        assert_eq!(drain_whole_units(&mut remainder, 1.0), 0);
+        remainder += -0.7;
+        assert_eq!(drain_whole_units(&mut remainder, 1.0), 0);
+        assert!((remainder + 0.1).abs() < 1e-9);
+
+        // A full downward unit drains as -1 with the same magnitude rules as upward.
+        let mut down = -1.4;
+        assert_eq!(drain_whole_units(&mut down, 1.0), -1);
+        assert!((down + 0.4).abs() < 1e-9);
     }
 
     #[test]
