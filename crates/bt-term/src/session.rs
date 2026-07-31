@@ -1076,7 +1076,16 @@ impl DualPlaneSession {
     /// (docs/M2-preview-matrix-and-verbs.md §6 hover-peek upgrade slot). Cursor-line and semantic
     /// input-region suppression gate band *creation*; the peek is presentation policy on top of
     /// plain text, so this probe answers on suppressed lines too and never registers anything.
+    ///
+    /// Peek is the complement of inline admission (user ruling 2026-07-31): where a non-failed
+    /// record already renders (or is about to render) the image in the flow, the probe refuses —
+    /// one content point gets one presentation, never both. Suppressed lines have no record, so
+    /// they keep the peek; a future "inline rendering off" policy bit removes the records and the
+    /// peek takes over everywhere without further changes here.
     pub fn local_image_path_probe_at(&self, anchor: &ContentAnchor) -> Option<PathBuf> {
+        if self.inline_image_record_covers(anchor) {
+            return None;
+        }
         match anchor {
             ContentAnchor::History { id, offset, .. } => {
                 let entry = self.document.entries().get(id)?;
@@ -1106,6 +1115,27 @@ impl DualPlaneSession {
             }
             ContentAnchor::Staging { .. } => None,
         }
+    }
+
+    /// Whether a live (non-failed) local-path record covers `anchor`: its image is on screen as a
+    /// band, or its decode is in flight and the band is imminent. Failed records do not cover —
+    /// the peek may try, fail the same admission gates, and stay silent.
+    fn inline_image_record_covers(&self, anchor: &ContentAnchor) -> bool {
+        self.inline_images.values().any(|record| {
+            if record.failed {
+                return false;
+            }
+            let InlineImageRecordKind::LocalPath { start_anchor, .. } = &record.kind else {
+                return false;
+            };
+            let (Ok(start), Ok(end)) = (
+                self.document.anchor(*start_anchor),
+                self.document.anchor(record.end_anchor),
+            ) else {
+                return false;
+            };
+            content_anchor_between(anchor, start, end)
+        })
     }
 
     /// The WRAPLINE-merged logical line of the live grid that contains `target_row`, in the same
@@ -14547,6 +14577,48 @@ mod tests {
     }
 
     #[test]
+    fn hover_peek_is_the_complement_of_inline_admission() {
+        // User ruling 2026-07-31: one content point, one presentation. Where the image renders
+        // (or is about to render) in the flow, the peek refuses; where inline admission is
+        // denied — no record yet, suppressed line, failed decode — the peek answers.
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        session
+            .feed_at(format!("{line}\r\nprompt").as_bytes(), started)
+            .unwrap();
+        let probe_anchor = ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point: GridPoint { row: 0, column: 20 },
+            bias: Bias::Before,
+            generation: session.grid_generation,
+        };
+        // No record yet (line not stable): the peek answers.
+        assert_eq!(
+            session.local_image_path_probe_at(&probe_anchor),
+            Some(path.clone())
+        );
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("stable path must enqueue the worker");
+        };
+        // Registered with the decode in flight: the band is imminent, the peek yields.
+        assert_eq!(session.local_image_path_probe_at(&probe_anchor), None);
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(session.complete_inline_image_result(task, result));
+        // Rendered inline: still no peek over the same span.
+        assert_eq!(session.local_image_path_probe_at(&probe_anchor), None);
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
     fn nonexistent_path_fails_quietly_and_never_becomes_clickable() {
         let mut session = DualPlaneSession::new(nz(120), nz(6));
         enable_path_detection(&mut session);
@@ -14580,6 +14652,17 @@ mod tests {
                 .is_none()
         );
         assert!(record.failed);
+        // A failed record does not cover its span: the peek complement lets the probe answer,
+        // and the peek's own decode fails the same gates and stays silent.
+        assert_eq!(
+            session.local_image_path_probe_at(&ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point: GridPoint { row: 0, column: 20 },
+                bias: Bias::Before,
+                generation: session.grid_generation,
+            }),
+            Some(missing.clone())
+        );
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(session.terminal().visible_text()[0], line);
