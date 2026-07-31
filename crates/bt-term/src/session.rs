@@ -1071,6 +1071,77 @@ impl DualPlaneSession {
             .collect()
     }
 
+    /// Read-only lexical probe for the hover-peek layer: the admissible local image path whose
+    /// character span covers `anchor`, independent of decoration records and creation gates
+    /// (docs/M2-preview-matrix-and-verbs.md §6 hover-peek upgrade slot). Cursor-line and semantic
+    /// input-region suppression gate band *creation*; the peek is presentation policy on top of
+    /// plain text, so this probe answers on suppressed lines too and never registers anything.
+    pub fn local_image_path_probe_at(&self, anchor: &ContentAnchor) -> Option<PathBuf> {
+        match anchor {
+            ContentAnchor::History { id, offset, .. } => {
+                let entry = self.document.entries().get(id)?;
+                detect_local_image_path_candidates(&entry.line.text)
+                    .into_iter()
+                    .find_map(|candidate| {
+                        let start = grapheme_offset_at_byte(
+                            &entry.line.grapheme_boundaries,
+                            candidate.byte_start,
+                        )?;
+                        let end = grapheme_offset_at_byte(
+                            &entry.line.grapheme_boundaries,
+                            candidate.byte_end,
+                        )?;
+                        (start <= *offset && *offset < end).then(|| PathBuf::from(candidate.path))
+                    })
+            }
+            ContentAnchor::Live { point, .. } => {
+                let (logical_text, segments) = self.live_logical_line_containing(point.row)?;
+                detect_local_image_path_candidates(&logical_text)
+                    .into_iter()
+                    .find_map(|candidate| {
+                        let start = live_path_point(&segments, candidate.byte_start, false)?;
+                        let end = live_path_point(&segments, candidate.byte_end, true)?;
+                        (start <= *point && *point < end).then(|| PathBuf::from(candidate.path))
+                    })
+            }
+            ContentAnchor::Staging { .. } => None,
+        }
+    }
+
+    /// The WRAPLINE-merged logical line of the live grid that contains `target_row`, in the same
+    /// text/segment encoding `detected_live_image_paths` scans.
+    fn live_logical_line_containing(
+        &self,
+        target_row: u32,
+    ) -> Option<(String, Vec<LiveImagePathSegment>)> {
+        let mut logical_text = String::new();
+        let mut segments = Vec::<LiveImagePathSegment>::new();
+        for row in 0..self.live_rows.len() as u32 {
+            let captured = self.terminal.visible_row(row)?;
+            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let byte_start = logical_text.len();
+            logical_text.push_str(&text);
+            segments.push(LiveImagePathSegment {
+                row,
+                byte_start,
+                byte_end: logical_text.len(),
+                boundaries,
+            });
+            if captured.continues {
+                continue;
+            }
+            if segments.iter().any(|segment| segment.row == target_row) {
+                return Some((logical_text, segments));
+            }
+            if row > target_row {
+                return None;
+            }
+            logical_text.clear();
+            segments.clear();
+        }
+        None
+    }
+
     /// Resolve a click capability only from a local-path record whose worker validation and decode
     /// succeeded. Path-looking terminal text that is pending or failed is intentionally inert.
     pub fn decoded_local_image_path_at(&self, anchor: &ContentAnchor) -> Option<PathBuf> {
@@ -14516,6 +14587,80 @@ mod tests {
             placement.artifact.kind,
             bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
         )));
+    }
+
+    #[test]
+    fn hover_peek_probe_answers_on_the_live_cursor_line_without_any_record() {
+        // The cursor sits on this line, so band creation is suppressed and no record exists —
+        // exactly the input-line scenario the peek layer serves. The probe is lexical and
+        // read-only: it must answer inside the span, refuse outside it, and register nothing.
+        let mut session = DualPlaneSession::new(nz(60), nz(4));
+        let started = Instant::now();
+        session
+            .feed_at(br"type C:\pictures\wallpaper.png here", started)
+            .unwrap();
+        let anchor = |column: u32| ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point: GridPoint { row: 0, column },
+            bias: Bias::Before,
+            generation: session.grid_generation,
+        };
+        assert_eq!(
+            session.local_image_path_probe_at(&anchor(5)),
+            Some(PathBuf::from(r"C:\pictures\wallpaper.png"))
+        );
+        assert_eq!(
+            session.local_image_path_probe_at(&anchor(28)),
+            Some(PathBuf::from(r"C:\pictures\wallpaper.png"))
+        );
+        assert_eq!(session.local_image_path_probe_at(&anchor(2)), None);
+        assert_eq!(session.local_image_path_probe_at(&anchor(30)), None);
+        assert!(session.inline_images.is_empty(), "probe must not register");
+    }
+
+    #[test]
+    fn hover_peek_probe_follows_wrapline_continuation_rows() {
+        let mut session = DualPlaneSession::new(nz(20), nz(4));
+        let started = Instant::now();
+        session
+            .feed_at(br"C:\a\b\c\verylongname.png", started)
+            .unwrap();
+        let anchor = ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point: GridPoint { row: 1, column: 2 },
+            bias: Bias::Before,
+            generation: session.grid_generation,
+        };
+        assert_eq!(
+            session.local_image_path_probe_at(&anchor),
+            Some(PathBuf::from(r"C:\a\b\c\verylongname.png"))
+        );
+    }
+
+    #[test]
+    fn hover_peek_probe_reads_history_lines() {
+        let mut session = DualPlaneSession::new(nz(60), nz(3));
+        let started = Instant::now();
+        session
+            .feed_at(b"C:\\img\\shot.png done\r\nb\r\nc\r\nd\r\ne\r\nf", started)
+            .unwrap();
+        let (id, entry) = session
+            .document
+            .entries()
+            .iter()
+            .find(|(_, entry)| entry.line.text.contains("shot.png"))
+            .expect("scrolled-out path line must reach history");
+        let anchor = |offset: u32| ContentAnchor::History {
+            id: *id,
+            offset: GraphemeOffset(offset),
+            bias: Bias::Before,
+            generation: entry.line.source_generation,
+        };
+        assert_eq!(
+            session.local_image_path_probe_at(&anchor(3)),
+            Some(PathBuf::from(r"C:\img\shot.png"))
+        );
+        assert_eq!(session.local_image_path_probe_at(&anchor(17)), None);
     }
 
     #[test]

@@ -24,7 +24,7 @@ pub use diagnostics::{
 pub use inline_image::{
     DecodedInlineImage, InlineImageDecodeError, InlineImageDecoder, InlineImageSource,
     InlineImageTask, LocalImagePathCandidate, MAX_INLINE_IMAGE_BYTES, ShellIntegrationMarker,
-    decode_inline_image, detect_local_image_path_candidates,
+    decode_inline_image, detect_local_image_path_candidates, normalized_local_image_path_key,
 };
 pub use lifecycle::{
     LIFECYCLE_RULES, LifecycleDirective, LifecycleRule, MatchValue, ResizePlan, RowAction,

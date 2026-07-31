@@ -227,6 +227,12 @@ fn normalized_local_path_key(path: &Path) -> String {
         .to_ascii_lowercase()
 }
 
+/// The slash/case-normalized identity every local-image cache layer keys on. Exposed so callers
+/// (e.g. the hover-peek cache) share the decoder's notion of "same file" instead of re-deriving it.
+pub fn normalized_local_image_path_key(path: &Path) -> String {
+    normalized_local_path_key(path)
+}
+
 fn is_admissible_local_image_path(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
     is_windows_drive_absolute(&text)

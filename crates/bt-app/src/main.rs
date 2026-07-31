@@ -18,12 +18,13 @@ use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_pty::{OutputWake, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit, MathHitTarget,
-    Preedit, PresentOutcome, Renderer, background_rgb, compose_preedit, foreground_rgb,
-    frame_content_digest, frame_is_alternate_screen, theme_revision,
+    PeekImageOverlay, Preedit, PresentOutcome, Renderer, background_rgb, compose_preedit,
+    foreground_rgb, frame_content_digest, frame_is_alternate_screen, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, SessionDecorationTask,
-    SessionMathTask, TerminalModes, render_detection_task, render_live_detection_task,
+    SessionMathTask, TerminalModes, normalized_local_image_path_key, render_detection_task,
+    render_live_detection_task,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
@@ -72,6 +73,16 @@ struct MathWorkerTask {
     foreground_rgb: [u8; 3],
 }
 
+enum MathWorkerRequest {
+    Decoration(MathWorkerTask),
+    /// Hover-peek decode: read and decode a local image off-thread without touching any
+    /// decoration record. The completion routes only to the app-side peek cache, so the band
+    /// creation gates (cursor line, semantic input region) are never bypassed.
+    PeekImage {
+        path: PathBuf,
+    },
+}
+
 enum DecorationWorkerCompletion {
     Math {
         task: Box<SessionMathTask>,
@@ -81,16 +92,20 @@ enum DecorationWorkerCompletion {
         task: bt_term::InlineImageTask,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     },
+    PeekImage {
+        path: PathBuf,
+        result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
+    },
 }
 
 struct MathWorker {
-    tasks: mpsc::Sender<MathWorkerTask>,
+    tasks: mpsc::Sender<MathWorkerRequest>,
     results: mpsc::Receiver<MathWorkerResult>,
 }
 
 impl MathWorker {
     fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
-        let (task_tx, task_rx) = mpsc::channel::<MathWorkerTask>();
+        let (task_tx, task_rx) = mpsc::channel::<MathWorkerRequest>();
         let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
         thread::Builder::new()
             .name("bt-math-worker".to_owned())
@@ -98,32 +113,43 @@ impl MathWorker {
                 let engine = MathEngine::new();
                 let mut image_decoder = InlineImageDecoder::default();
                 while let Ok(work) = task_rx.recv() {
-                    let MathWorkerTask {
-                        task,
-                        foreground_rgb,
-                    } = work;
-                    let completion = match task {
-                        SessionDecorationTask::Math(task) => match *task {
-                            SessionMathTask::Frozen(mut task) => {
-                                let result =
-                                    render_detection_task(&engine, &mut task, foreground_rgb);
-                                DecorationWorkerCompletion::Math {
-                                    task: Box::new(SessionMathTask::Frozen(task)),
-                                    result,
+                    let completion = match work {
+                        MathWorkerRequest::Decoration(MathWorkerTask {
+                            task,
+                            foreground_rgb,
+                        }) => match task {
+                            SessionDecorationTask::Math(task) => match *task {
+                                SessionMathTask::Frozen(mut task) => {
+                                    let result =
+                                        render_detection_task(&engine, &mut task, foreground_rgb);
+                                    DecorationWorkerCompletion::Math {
+                                        task: Box::new(SessionMathTask::Frozen(task)),
+                                        result,
+                                    }
                                 }
-                            }
-                            SessionMathTask::Live(mut task) => {
-                                let result =
-                                    render_live_detection_task(&engine, &mut task, foreground_rgb);
-                                DecorationWorkerCompletion::Math {
-                                    task: Box::new(SessionMathTask::Live(task)),
-                                    result,
+                                SessionMathTask::Live(mut task) => {
+                                    let result = render_live_detection_task(
+                                        &engine,
+                                        &mut task,
+                                        foreground_rgb,
+                                    );
+                                    DecorationWorkerCompletion::Math {
+                                        task: Box::new(SessionMathTask::Live(task)),
+                                        result,
+                                    }
                                 }
+                            },
+                            SessionDecorationTask::InlineImage(task) => {
+                                let result = image_decoder.decode(task.clone());
+                                DecorationWorkerCompletion::InlineImage { task, result }
                             }
                         },
-                        SessionDecorationTask::InlineImage(task) => {
-                            let result = image_decoder.decode(task.clone());
-                            DecorationWorkerCompletion::InlineImage { task, result }
+                        MathWorkerRequest::PeekImage { path } => {
+                            let result = image_decoder.decode(bt_term::InlineImageTask {
+                                occurrence_id: 0,
+                                source: bt_term::InlineImageSource::LocalPath(path.clone()),
+                            });
+                            DecorationWorkerCompletion::PeekImage { path, result }
                         }
                     };
                     if result_tx.send(MathWorkerResult { completion }).is_err() {
@@ -162,7 +188,7 @@ fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
 /// a one-way feature downgrade, never a terminal/runtime error.
 fn dispatch_pending_math_tasks(
     session: &mut DualPlaneSession,
-    tasks: &mpsc::Sender<MathWorkerTask>,
+    tasks: &mpsc::Sender<MathWorkerRequest>,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
@@ -171,10 +197,10 @@ fn dispatch_pending_math_tasks(
     }
     while let Some(task) = session.take_decoration_worker_task() {
         if tasks
-            .send(MathWorkerTask {
+            .send(MathWorkerRequest::Decoration(MathWorkerTask {
                 task,
                 foreground_rgb: foreground_rgb(),
-            })
+            }))
             .is_err()
         {
             return disable_math_worker_state(running, notice_pending);
@@ -233,6 +259,8 @@ struct Runtime {
     pending_pty_resize: Option<PendingPtyResize>,
     pending_resize_present: Option<GridSize>,
     hyperlink_hover: HyperlinkHover,
+    peek_hover: PeekHover,
+    peek_cache: std::collections::HashMap<String, PeekCacheEntry>,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
     pending_math_context_anchor: Option<MathBlockAnchor>,
@@ -478,6 +506,93 @@ impl HyperlinkHover {
     }
 }
 
+#[derive(Clone, Debug)]
+struct PeekCandidate {
+    path: PathBuf,
+    /// Physical pointer position of the most recent observation; the flyout anchors where the
+    /// hover settles, not where it began.
+    pointer: PhysicalPosition<f64>,
+}
+
+/// Hover state for the local-image peek flyout (preview matrix §4): same 300ms settle clock as
+/// the hyperlink tooltip, keyed by path so sliding along one path span never restarts the timer.
+#[derive(Default)]
+struct PeekHover {
+    candidate: Option<PeekCandidate>,
+    show_at: Option<Instant>,
+    /// The settled hover whose flyout is showing (or whose decode is in flight). The settle
+    /// pointer is kept so a decode that finishes later still places the flyout where the hover
+    /// settled.
+    active: Option<PeekCandidate>,
+}
+
+impl PeekHover {
+    /// Track the path under the pointer. Returns true when a previously shown flyout must be
+    /// hidden because the pointer left its path span.
+    fn observe(
+        &mut self,
+        path: Option<PathBuf>,
+        pointer: PhysicalPosition<f64>,
+        now: Instant,
+    ) -> bool {
+        if self.active.is_some() && path.as_ref() == self.active.as_ref().map(|active| &active.path)
+        {
+            self.candidate = None;
+            self.show_at = None;
+            return false;
+        }
+        let active_hidden = self.active.take().is_some();
+        match path {
+            Some(path) => {
+                let same_span =
+                    self.candidate.as_ref().map(|candidate| &candidate.path) == Some(&path);
+                self.candidate = Some(PeekCandidate { path, pointer });
+                if !same_span {
+                    self.show_at = Some(now + HYPERLINK_HOVER_DELAY);
+                }
+            }
+            None => {
+                self.candidate = None;
+                self.show_at = None;
+            }
+        }
+        active_hidden
+    }
+
+    /// The candidate whose settle deadline has passed, promoted to active. The caller resolves
+    /// the thumbnail (cache or worker) and shows the flyout.
+    fn activate_if_due(&mut self, now: Instant) -> Option<PeekCandidate> {
+        if self.show_at.is_none_or(|deadline| now < deadline) {
+            return None;
+        }
+        self.show_at = None;
+        let candidate = self.candidate.take()?;
+        self.active = Some(candidate.clone());
+        Some(candidate)
+    }
+
+    /// Drop all peek state. Returns true when a visible flyout must be hidden.
+    fn clear(&mut self) -> bool {
+        self.candidate = None;
+        self.show_at = None;
+        self.active.take().is_some()
+    }
+}
+
+/// App-side memory of peek decode outcomes, keyed by the decoder's normalized path identity.
+/// `Failed` entries keep a missing or corrupt file from re-hitting the disk on every hover;
+/// the payload bytes are shared `Arc`s with the worker decoder's own cache.
+enum PeekCacheEntry {
+    Pending,
+    Failed,
+    Ready {
+        key: String,
+        rgba: Arc<[u8]>,
+        width_px: u32,
+        height_px: u32,
+    },
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HyperlinkActivation {
     None,
@@ -714,6 +829,8 @@ impl Runtime {
             pending_pty_resize: None,
             pending_resize_present: None,
             hyperlink_hover: HyperlinkHover::default(),
+            peek_hover: PeekHover::default(),
+            peek_cache: std::collections::HashMap::new(),
             math_hover_anchor: None,
             math_hover_clear_at: None,
             pending_math_context_anchor: None,
@@ -888,6 +1005,11 @@ impl Runtime {
                         },
                         DecorationWorkerCompletion::InlineImage { task, result } => {
                             self.session.complete_inline_image_result(task, result)
+                        }
+                        DecorationWorkerCompletion::PeekImage { path, result } => {
+                            self.complete_peek_image(path, result);
+                            // Peek state never enters frames, so no republish is needed.
+                            false
                         }
                     };
                 }
@@ -1115,6 +1237,106 @@ impl Runtime {
         self.session.decoded_local_image_path_at(&anchor)
     }
 
+    /// The path text under the pointer by lexical probe rather than decoration record, so the
+    /// peek answers uniformly — including on lines whose band creation is suppressed (the input
+    /// line, the cursor line) where no record exists.
+    fn local_image_peek_probe(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
+        let anchor = self
+            .last_presented_frame
+            .as_ref()?
+            .anchor_at(hit.row, hit.column, Bias::Before)
+            .ok()??;
+        self.session.local_image_path_probe_at(&anchor)
+    }
+
+    /// Drop peek hover state and hide the flyout. Idempotent; used by every dismiss gesture
+    /// (pointer off the span, pointer left, wheel, click, any key).
+    fn dismiss_peek(&mut self) {
+        self.peek_hover.clear();
+        if self.renderer.set_peek_overlay(None) {
+            self.window.request_redraw();
+        }
+    }
+
+    fn activate_peek_if_due(&mut self, now: Instant) {
+        if let Some(candidate) = self.peek_hover.activate_if_due(now) {
+            self.show_or_request_peek(&candidate);
+        }
+    }
+
+    fn show_or_request_peek(&mut self, candidate: &PeekCandidate) {
+        let cache_key = normalized_local_image_path_key(&candidate.path);
+        match self.peek_cache.get(&cache_key) {
+            Some(PeekCacheEntry::Ready {
+                key,
+                rgba,
+                width_px,
+                height_px,
+            }) => {
+                let overlay = PeekImageOverlay {
+                    key: key.clone(),
+                    rgba: rgba.clone(),
+                    width_px: *width_px,
+                    height_px: *height_px,
+                    pointer_x: candidate.pointer.x as f32,
+                    pointer_y: candidate.pointer.y as f32,
+                };
+                if self.renderer.set_peek_overlay(Some(overlay)) {
+                    self.window.request_redraw();
+                }
+            }
+            // A failed decode stays silent: the terminal text is the honest surface, and the
+            // negative entry keeps hovers from re-hitting the disk.
+            Some(PeekCacheEntry::Pending) | Some(PeekCacheEntry::Failed) => {}
+            None => {
+                if !self.math_worker_running {
+                    return;
+                }
+                if self
+                    .math_worker
+                    .tasks
+                    .send(MathWorkerRequest::PeekImage {
+                        path: candidate.path.clone(),
+                    })
+                    .is_ok()
+                {
+                    self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
+                }
+            }
+        }
+    }
+
+    /// Record a peek decode outcome and, when the hover is still settled on that path, show the
+    /// flyout at the settle pointer.
+    fn complete_peek_image(
+        &mut self,
+        path: PathBuf,
+        result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
+    ) {
+        let cache_key = normalized_local_image_path_key(&path);
+        match result {
+            Ok(decoded) => {
+                self.peek_cache.insert(
+                    cache_key,
+                    PeekCacheEntry::Ready {
+                        key: decoded.key,
+                        rgba: decoded.rgba,
+                        width_px: decoded.width_px,
+                        height_px: decoded.height_px,
+                    },
+                );
+                if let Some(active) = self.peek_hover.active.clone()
+                    && active.path == path
+                {
+                    self.show_or_request_peek(&active);
+                }
+            }
+            Err(_) => {
+                self.peek_cache.insert(cache_key, PeekCacheEntry::Failed);
+            }
+        }
+    }
+
     fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
         if self.hyperlink_hover.activate_if_due(now) {
             self.publish_interaction_frame()?;
@@ -1124,6 +1346,7 @@ impl Runtime {
 
     fn pointer_left(&mut self) -> Result<()> {
         self.pointer_position = None;
+        self.dismiss_peek();
         let hyperlink_changed = self.hyperlink_hover.clear();
         if self.math_hover_anchor.is_some() {
             self.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
@@ -1293,6 +1516,7 @@ impl Runtime {
     }
 
     fn begin_local_selection(&mut self, hit: bt_render::GridHit) -> Result<()> {
+        self.dismiss_peek();
         let count = self
             .click_tracker
             .register(hit.row, hit.column, Instant::now());
@@ -1421,6 +1645,15 @@ impl Runtime {
             .and_then(|hit| self.hyperlink_hit(hit));
         if self.hyperlink_hover.observe(hyperlink, now) {
             self.publish_interaction_frame()?;
+        }
+        let peek_path = hit
+            .filter(|_| {
+                math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
+            })
+            .and_then(|hit| self.local_image_peek_probe(hit));
+        if self.peek_hover.observe(peek_path, position, now) && self.renderer.set_peek_overlay(None)
+        {
+            self.window.request_redraw();
         }
         let Some(hit) = hit else {
             return Ok(());
@@ -1591,6 +1824,8 @@ impl Runtime {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // Scrolling moves the content the flyout was anchored to; the transient peek dissolves.
+        self.dismiss_peek();
         // One physical event, two currencies. Local routes scroll by exact subpixels (stage C of
         // the pixel-scroll plan); forwarding routes speak whole wheel lines because that is the
         // application protocol. Route is decided first, then only that route's accumulator moves.
@@ -1742,6 +1977,9 @@ impl Runtime {
         if event.state != ElementState::Pressed {
             return Ok(());
         }
+        // Any keystroke dismisses the transient peek flyout (Esc included, per the peek verb
+        // ruling) without consuming the key: typing means the user has moved on from hovering.
+        self.dismiss_peek();
 
         // A non-empty winit Preedit is the composition authority. Editing/navigation keys are
         // intentionally left to the IME here even if it also exposes a physical named key; no PTY
@@ -2290,6 +2528,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        runtime.activate_peek_if_due(now);
         if let Err(error) = runtime.clear_math_hover_if_due(now) {
             self.fail(event_loop, error);
             return;
@@ -2304,6 +2543,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             runtime.session.synchronized_update_deadline(),
             runtime.session.live_stability_deadline(),
             runtime.hyperlink_hover.show_at,
+            runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
         ]
         .into_iter()
@@ -2849,6 +3089,76 @@ mod tests {
             Some("file:///a… · blocked"),
             "narrow chrome keeps the real target prefix and the blocked verdict visible"
         );
+    }
+
+    #[test]
+    fn peek_hover_settles_after_the_delay_and_slides_along_one_span_without_restarting() {
+        let start = Instant::now();
+        let path = PathBuf::from(r"C:\img\a.png");
+        let mut hover = PeekHover::default();
+
+        assert!(!hover.observe(Some(path.clone()), PhysicalPosition::new(10.0, 10.0), start));
+        assert!(
+            hover
+                .activate_if_due(start + Duration::from_millis(299))
+                .is_none()
+        );
+        // Sliding along the same path span refreshes the anchor but keeps the original clock:
+        // the flyout settles where the pointer last was, without ever restarting the delay.
+        assert!(!hover.observe(
+            Some(path.clone()),
+            PhysicalPosition::new(30.0, 12.0),
+            start + Duration::from_millis(200)
+        ));
+        let settled = hover
+            .activate_if_due(start + Duration::from_millis(300))
+            .expect("original deadline must fire");
+        assert_eq!(settled.path, path);
+        assert_eq!(settled.pointer.x, 30.0);
+        // While active, staying on the span neither hides nor re-arms.
+        assert!(!hover.observe(
+            Some(path.clone()),
+            PhysicalPosition::new(31.0, 12.0),
+            start + Duration::from_millis(400)
+        ));
+        assert!(hover.show_at.is_none());
+        // Leaving the span hides the flyout and drops all state.
+        assert!(hover.observe(
+            None,
+            PhysicalPosition::new(31.0, 40.0),
+            start + Duration::from_millis(500)
+        ));
+        assert!(hover.active.is_none());
+    }
+
+    #[test]
+    fn peek_hover_switching_paths_hides_the_old_flyout_and_restarts_the_clock() {
+        let start = Instant::now();
+        let first = PathBuf::from(r"C:\img\a.png");
+        let second = PathBuf::from(r"C:\img\b.png");
+        let mut hover = PeekHover::default();
+        hover.observe(Some(first), PhysicalPosition::new(10.0, 10.0), start);
+        assert!(
+            hover
+                .activate_if_due(start + Duration::from_millis(300))
+                .is_some()
+        );
+        let hidden = hover.observe(
+            Some(second.clone()),
+            PhysicalPosition::new(50.0, 10.0),
+            start + Duration::from_millis(400),
+        );
+        assert!(hidden, "switching spans must hide the visible flyout");
+        assert!(
+            hover
+                .activate_if_due(start + Duration::from_millis(600))
+                .is_none(),
+            "the second span runs a fresh settle clock"
+        );
+        let settled = hover
+            .activate_if_due(start + Duration::from_millis(700))
+            .expect("second span settles on its own deadline");
+        assert_eq!(settled.path, second);
     }
 
     #[test]

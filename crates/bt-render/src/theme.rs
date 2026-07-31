@@ -14,6 +14,8 @@ pub(crate) const DEFAULT_DIM_FOREGROUND_RGB: [u8; 3] = [0x88, 0x88, 0x88];
 /// Background-only selection treatment; foreground colors remain terminal-authored.
 pub(crate) const DEFAULT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0x26, 0x4f, 0x78];
 pub(crate) const DEFAULT_STATUS_BACKGROUND_RGB: [u8; 3] = [0x33, 0x33, 0x33];
+/// Campbell bright-black: a quiet neutral frame for the hover-peek flyout on the dark default.
+pub(crate) const DEFAULT_PEEK_BORDER_RGB: [u8; 3] = [0x76, 0x76, 0x76];
 
 /// Process-wide background selected before the first window or renderer is created.
 ///

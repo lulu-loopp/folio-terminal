@@ -33,7 +33,9 @@ use wgpu::util::DeviceExt;
 
 use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB};
 pub use theme::{DEFAULT_BACKGROUND_RGB, background_rgb, foreground_rgb, theme_revision};
-use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
+use theme::{
+    DEFAULT_PEEK_BORDER_RGB, DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB,
+};
 
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
@@ -576,6 +578,95 @@ struct MathDraw {
     key: String,
     tile_index: usize,
     first_vertex: u32,
+}
+
+/// Hover-peek thumbnail flyout: transient presentation-layer state set by the app shell
+/// (docs/M2-preview-matrix-and-verbs.md §4 peek verb). It deliberately never travels through
+/// `ViewportFrame`, so replay/pin contracts and frame equality are untouched by a visible peek.
+#[derive(Clone)]
+pub struct PeekImageOverlay {
+    /// Content identity in the shared GPU texture LRU (the decoder's `image:<hash>` key).
+    pub key: String,
+    pub rgba: Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
+    /// Physical-pixel pointer position captured when the hover settled; the flyout anchors to
+    /// this point and stays put rather than chasing further pointer motion.
+    pub pointer_x: f32,
+    pub pointer_y: f32,
+}
+
+struct PeekBoxLayout {
+    /// Outer border rect; the interior and image rects nest inside it.
+    frame: [f32; 4],
+    interior: [f32; 4],
+    image: [f32; 4],
+}
+
+/// Pure flyout placement: thumbnail capped to 40% of the padded pane per axis without upscaling,
+/// anchored below-right of the pointer, flipped above when the bottom lacks room, and clamped
+/// horizontally into the pane. Returns `None` when the window is too small to host the box.
+#[allow(clippy::too_many_arguments)]
+fn peek_box_layout(
+    viewport_width: f32,
+    viewport_height: f32,
+    padding_px: f32,
+    scale_factor: f32,
+    image_width_px: f32,
+    image_height_px: f32,
+    pointer_x: f32,
+    pointer_y: f32,
+) -> Option<PeekBoxLayout> {
+    if image_width_px <= 0.0 || image_height_px <= 0.0 {
+        return None;
+    }
+    let avail_left = padding_px;
+    let avail_top = padding_px;
+    let avail_right = viewport_width - padding_px;
+    let avail_bottom = viewport_height - padding_px;
+    let avail_width = avail_right - avail_left;
+    let avail_height = avail_bottom - avail_top;
+    if avail_width <= 0.0 || avail_height <= 0.0 {
+        return None;
+    }
+    let fit = (avail_width * 0.4 / image_width_px)
+        .min(avail_height * 0.4 / image_height_px)
+        .min(1.0);
+    let thumb_width = (image_width_px * fit).max(1.0);
+    let thumb_height = (image_height_px * fit).max(1.0);
+    let border = scale_factor.round().max(1.0);
+    let inset = 6.0 * scale_factor;
+    let box_width = thumb_width + 2.0 * (border + inset);
+    let box_height = thumb_height + 2.0 * (border + inset);
+    if box_width > avail_width || box_height > avail_height {
+        return None;
+    }
+    let offset_x = 12.0 * scale_factor;
+    let offset_y = 18.0 * scale_factor;
+    let mut top = pointer_y + offset_y;
+    if top + box_height > avail_bottom {
+        top = pointer_y - offset_y - box_height;
+    }
+    let top = top.clamp(avail_top, avail_bottom - box_height);
+    let left = (pointer_x + offset_x).clamp(avail_left, avail_right - box_width);
+    let frame = [left, top, left + box_width, top + box_height];
+    let interior = [
+        frame[0] + border,
+        frame[1] + border,
+        frame[2] - border,
+        frame[3] - border,
+    ];
+    let image = [
+        interior[0] + inset,
+        interior[1] + inset,
+        interior[0] + inset + thumb_width,
+        interior[1] + inset + thumb_height,
+    ];
+    Some(PeekBoxLayout {
+        frame,
+        interior,
+        image,
+    })
 }
 
 struct ComposedRow {
@@ -1299,6 +1390,7 @@ pub struct Renderer {
     wide_shaping_cache: WideShapingCache,
     glyph_degraded_frames: u64,
     window_focused: bool,
+    peek_overlay: Option<PeekImageOverlay>,
     trace_perf: bool,
     perf_frame: u64,
 }
@@ -1817,6 +1909,7 @@ impl Renderer {
             wide_shaping_cache: WideShapingCache::with_perf_tracking(trace_perf),
             glyph_degraded_frames: 0,
             window_focused: true,
+            peek_overlay: None,
             trace_perf,
             perf_frame: 0,
         })
@@ -1877,6 +1970,22 @@ impl Renderer {
     pub fn set_window_focused(&mut self, focused: bool) -> bool {
         let changed = self.window_focused != focused;
         self.window_focused = focused;
+        changed
+    }
+
+    /// Replace the hover-peek flyout. Returns whether the visible overlay changed so the caller
+    /// can skip redundant redraw requests. Peek state is renderer-side only; frames stay pure.
+    pub fn set_peek_overlay(&mut self, overlay: Option<PeekImageOverlay>) -> bool {
+        let changed = match (&self.peek_overlay, &overlay) {
+            (None, None) => false,
+            (Some(current), Some(next)) => {
+                current.key != next.key
+                    || current.pointer_x != next.pointer_x
+                    || current.pointer_y != next.pointer_y
+            }
+            _ => true,
+        };
+        self.peek_overlay = overlay;
         changed
     }
 
@@ -2033,6 +2142,23 @@ impl Renderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws();
+        let peek_rect_buffer = (!peek_rects.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("peek flyout rectangles"),
+                    contents: bytemuck::cast_slice(&peek_rects),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let peek_vertex_buffer = (!peek_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("peek flyout image vertices"),
+                    contents: bytemuck::cast_slice(&peek_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let math_prepared_at = Instant::now();
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
@@ -2123,6 +2249,25 @@ impl Renderer {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_vertex_buffer(0, math_overlay_buffer.slice(..));
                 pass.draw(0..6, 0..math_overlays.len() as u32);
+            }
+            // The peek flyout is the topmost transient surface: above grid text, bands, the
+            // status bar, and math toolbars.
+            if let Some(rect_buffer) = peek_rect_buffer.as_ref() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, rect_buffer.slice(..));
+                pass.draw(0..6, 0..peek_rects.len() as u32);
+            }
+            if let Some(vertex_buffer) = peek_vertex_buffer.as_ref() {
+                pass.set_pipeline(&self.math_pipeline);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                for draw in &peek_draws {
+                    if let Some(texture) = self.math_textures.get(&draw.key)
+                        && let Some(tile) = texture.tiles.get(draw.tile_index)
+                    {
+                        pass.set_bind_group(0, &tile.bind_group, &[]);
+                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                    }
+                }
             }
         }
         let encoded_at = Instant::now();
@@ -2303,6 +2448,91 @@ impl Renderer {
         (draws, vertices)
     }
 
+    /// Build the hover-peek flyout draws: border and background rects for the flat pipeline plus
+    /// textured quads through the shared content-keyed texture LRU. Empty when no peek is up,
+    /// when the window cannot host the box, or when the texture upload fails.
+    fn prepare_peek_draws(&mut self) -> (Vec<RectInstance>, Vec<MathDraw>, Vec<MathVertex>) {
+        let Some(overlay) = self.peek_overlay.clone() else {
+            return (Vec::new(), Vec::new(), Vec::new());
+        };
+        let Some(layout) = peek_box_layout(
+            self.config.width as f32,
+            self.config.height as f32,
+            self.metrics.padding_px,
+            self.metrics.scale_factor as f32,
+            overlay.width_px as f32,
+            overlay.height_px as f32,
+            overlay.pointer_x,
+            overlay.pointer_y,
+        ) else {
+            return (Vec::new(), Vec::new(), Vec::new());
+        };
+        if self.math_textures.get(&overlay.key).is_none()
+            && let Some(texture) =
+                self.upload_rgba_tiles(&overlay.rgba, overlay.width_px, overlay.height_px)
+        {
+            let (_, evictions) =
+                self.math_textures
+                    .insert(overlay.key.clone(), texture, overlay.rgba.len());
+            self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+        }
+        let Some(tile_geometry) = self.math_textures.get(&overlay.key).map(|texture| {
+            texture
+                .tiles
+                .iter()
+                .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
+                .collect::<Vec<_>>()
+        }) else {
+            return (Vec::new(), Vec::new(), Vec::new());
+        };
+        let rects = vec![
+            self.pixel_rect(
+                layout.frame[0],
+                layout.frame[1],
+                layout.frame[2],
+                layout.frame[3],
+                DEFAULT_PEEK_BORDER_RGB,
+            ),
+            self.pixel_rect(
+                layout.interior[0],
+                layout.interior[1],
+                layout.interior[2],
+                layout.interior[3],
+                DEFAULT_STATUS_BACKGROUND_RGB,
+            ),
+        ];
+        let fit = (layout.image[2] - layout.image[0]) / overlay.width_px as f32;
+        let mut draws = Vec::new();
+        let mut vertices = Vec::new();
+        for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
+            tile_geometry.into_iter().enumerate()
+        {
+            let left = layout.image[0] + tile_x as f32 * fit;
+            let top = layout.image[1] + tile_y as f32 * fit;
+            let right = left + tile_width as f32 * fit;
+            let bottom = top + tile_height as f32 * fit;
+            let first_vertex = vertices.len() as u32;
+            vertices.extend(math_quad_vertices(
+                left,
+                top,
+                right,
+                bottom,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                self.config.width,
+                self.config.height,
+            ));
+            draws.push(MathDraw {
+                key: overlay.key.clone(),
+                tile_index,
+                first_vertex,
+            });
+        }
+        (rects, draws, vertices)
+    }
+
     fn math_block_geometry(
         &self,
         frame: &ViewportFrame,
@@ -2444,21 +2674,30 @@ impl Renderer {
         &self,
         artifact: &bt_viewport::ProjectedMathArtifact,
     ) -> Option<CachedMathTexture> {
-        let expected = artifact.width_px as usize * artifact.height_px as usize * 4;
-        if artifact.width_px == 0 || artifact.height_px == 0 || artifact.rgba.len() != expected {
+        self.upload_rgba_tiles(&artifact.rgba, artifact.width_px, artifact.height_px)
+    }
+
+    fn upload_rgba_tiles(
+        &self,
+        rgba: &[u8],
+        width_px: u32,
+        height_px: u32,
+    ) -> Option<CachedMathTexture> {
+        let expected = width_px as usize * height_px as usize * 4;
+        if width_px == 0 || height_px == 0 || rgba.len() != expected {
             return None;
         }
         let tile_limit = self.max_texture_dimension_2d.max(1);
         let mut tiles = Vec::new();
-        for y in (0..artifact.height_px).step_by(tile_limit as usize) {
-            let height = (artifact.height_px - y).min(tile_limit);
-            for x in (0..artifact.width_px).step_by(tile_limit as usize) {
-                let width = (artifact.width_px - x).min(tile_limit);
+        for y in (0..height_px).step_by(tile_limit as usize) {
+            let height = (height_px - y).min(tile_limit);
+            for x in (0..width_px).step_by(tile_limit as usize) {
+                let width = (width_px - x).min(tile_limit);
                 let mut bytes = Vec::with_capacity(width as usize * height as usize * 4);
                 for row in y..y + height {
-                    let start = (row as usize * artifact.width_px as usize + x as usize) * 4;
+                    let start = (row as usize * width_px as usize + x as usize) * 4;
                     let end = start + width as usize * 4;
-                    bytes.extend_from_slice(&artifact.rgba[start..end]);
+                    bytes.extend_from_slice(&rgba[start..end]);
                 }
                 let texture = self.device.create_texture_with_data(
                     &self.queue,
@@ -4248,6 +4487,41 @@ fn indexed_color(index: u8) -> [u8; 3] {
 mod tests {
     use super::*;
     use bt_transcript::CapturedCell;
+
+    #[test]
+    fn peek_box_layout_places_below_right_without_upscaling() {
+        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 100.0, 50.0, 100.0, 100.0).unwrap();
+        // 1x thumbnail (no upscale), border 1, inset 6: box is 114x64 at pointer + (12, 18).
+        assert_eq!(layout.frame, [112.0, 118.0, 226.0, 182.0]);
+        assert_eq!(layout.interior, [113.0, 119.0, 225.0, 181.0]);
+        assert_eq!(layout.image, [119.0, 125.0, 219.0, 175.0]);
+    }
+
+    #[test]
+    fn peek_box_layout_flips_above_a_bottom_pointer() {
+        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 100.0, 50.0, 100.0, 780.0).unwrap();
+        assert_eq!(layout.frame[1], 780.0 - 18.0 - 64.0);
+        assert!(layout.frame[3] <= 792.0);
+    }
+
+    #[test]
+    fn peek_box_layout_caps_large_images_preserving_aspect_and_clamps_horizontally() {
+        let layout =
+            peek_box_layout(1000.0, 800.0, 8.0, 1.0, 4000.0, 2000.0, 950.0, 100.0).unwrap();
+        let width = layout.image[2] - layout.image[0];
+        let height = layout.image[3] - layout.image[1];
+        assert!(width <= (1000.0 - 16.0) * 0.4 + 1e-3);
+        assert!((height / width - 0.5).abs() < 1e-4);
+        // Pointer near the right edge: the box clamps inside the padded pane.
+        assert!(layout.frame[2] <= 992.0 + 1e-3);
+        assert!(layout.frame[0] >= 8.0);
+    }
+
+    #[test]
+    fn peek_box_layout_refuses_a_window_too_small_for_the_box() {
+        assert!(peek_box_layout(30.0, 30.0, 8.0, 1.0, 10.0, 10.0, 10.0, 10.0).is_none());
+        assert!(peek_box_layout(1000.0, 800.0, 8.0, 1.0, 0.0, 10.0, 10.0, 10.0).is_none());
+    }
 
     fn test_cell_anchors(count: usize) -> Vec<bt_viewport::CellAnchor> {
         (0..count)
