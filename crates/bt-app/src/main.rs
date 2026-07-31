@@ -1007,7 +1007,7 @@ impl Runtime {
                             self.session.complete_inline_image_result(task, result)
                         }
                         DecorationWorkerCompletion::PeekImage { path, result } => {
-                            self.complete_peek_image(path, result);
+                            self.complete_peek_image(path, result)?;
                             // Peek state never enters frames, so no republish is needed.
                             false
                         }
@@ -1249,22 +1249,46 @@ impl Runtime {
         self.session.local_image_path_probe_at(&anchor)
     }
 
+    /// Present a pure peek-overlay change. The overlay lives beside the frame, not inside it, so
+    /// `redraw` would find nothing queued and skip: when nothing newer is pending, the frame that
+    /// is already on screen re-enters the slot; a queued newer frame carries the overlay along on
+    /// its own redraw.
+    fn present_peek_overlay(&mut self, overlay: Option<PeekImageOverlay>) -> Result<()> {
+        if !self.renderer.set_peek_overlay(overlay) {
+            return Ok(());
+        }
+        if self.pending_frames.pending_frame().is_none()
+            && let Some(frame) = self.last_presented_frame.clone()
+        {
+            self.pending_frames
+                .publish(
+                    frame,
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .context("re-present the on-screen frame for a peek overlay change")?;
+        }
+        self.window.request_redraw();
+        Ok(())
+    }
+
     /// Drop peek hover state and hide the flyout. Idempotent; used by every dismiss gesture
     /// (pointer off the span, pointer left, wheel, click, any key).
-    fn dismiss_peek(&mut self) {
+    fn dismiss_peek(&mut self) -> Result<()> {
         self.peek_hover.clear();
-        if self.renderer.set_peek_overlay(None) {
-            self.window.request_redraw();
-        }
+        self.present_peek_overlay(None)
     }
 
-    fn activate_peek_if_due(&mut self, now: Instant) {
+    fn activate_peek_if_due(&mut self, now: Instant) -> Result<()> {
         if let Some(candidate) = self.peek_hover.activate_if_due(now) {
-            self.show_or_request_peek(&candidate);
+            self.show_or_request_peek(&candidate)?;
         }
+        Ok(())
     }
 
-    fn show_or_request_peek(&mut self, candidate: &PeekCandidate) {
+    fn show_or_request_peek(&mut self, candidate: &PeekCandidate) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&candidate.path);
         match self.peek_cache.get(&cache_key) {
             Some(PeekCacheEntry::Ready {
@@ -1281,16 +1305,14 @@ impl Runtime {
                     pointer_x: candidate.pointer.x as f32,
                     pointer_y: candidate.pointer.y as f32,
                 };
-                if self.renderer.set_peek_overlay(Some(overlay)) {
-                    self.window.request_redraw();
-                }
+                self.present_peek_overlay(Some(overlay))?;
             }
             // A failed decode stays silent: the terminal text is the honest surface, and the
             // negative entry keeps hovers from re-hitting the disk.
             Some(PeekCacheEntry::Pending) | Some(PeekCacheEntry::Failed) => {}
             None => {
                 if !self.math_worker_running {
-                    return;
+                    return Ok(());
                 }
                 if self
                     .math_worker
@@ -1304,6 +1326,7 @@ impl Runtime {
                 }
             }
         }
+        Ok(())
     }
 
     /// Record a peek decode outcome and, when the hover is still settled on that path, show the
@@ -1312,7 +1335,7 @@ impl Runtime {
         &mut self,
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
-    ) {
+    ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
         match result {
             Ok(decoded) => {
@@ -1328,13 +1351,14 @@ impl Runtime {
                 if let Some(active) = self.peek_hover.active.clone()
                     && active.path == path
                 {
-                    self.show_or_request_peek(&active);
+                    self.show_or_request_peek(&active)?;
                 }
             }
             Err(_) => {
                 self.peek_cache.insert(cache_key, PeekCacheEntry::Failed);
             }
         }
+        Ok(())
     }
 
     fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
@@ -1346,7 +1370,7 @@ impl Runtime {
 
     fn pointer_left(&mut self) -> Result<()> {
         self.pointer_position = None;
-        self.dismiss_peek();
+        self.dismiss_peek()?;
         let hyperlink_changed = self.hyperlink_hover.clear();
         if self.math_hover_anchor.is_some() {
             self.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
@@ -1516,7 +1540,7 @@ impl Runtime {
     }
 
     fn begin_local_selection(&mut self, hit: bt_render::GridHit) -> Result<()> {
-        self.dismiss_peek();
+        self.dismiss_peek()?;
         let count = self
             .click_tracker
             .register(hit.row, hit.column, Instant::now());
@@ -1651,9 +1675,8 @@ impl Runtime {
                 math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
             })
             .and_then(|hit| self.local_image_peek_probe(hit));
-        if self.peek_hover.observe(peek_path, position, now) && self.renderer.set_peek_overlay(None)
-        {
-            self.window.request_redraw();
+        if self.peek_hover.observe(peek_path, position, now) {
+            self.present_peek_overlay(None)?;
         }
         let Some(hit) = hit else {
             return Ok(());
@@ -1825,7 +1848,7 @@ impl Runtime {
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
         // Scrolling moves the content the flyout was anchored to; the transient peek dissolves.
-        self.dismiss_peek();
+        self.dismiss_peek()?;
         // One physical event, two currencies. Local routes scroll by exact subpixels (stage C of
         // the pixel-scroll plan); forwarding routes speak whole wheel lines because that is the
         // application protocol. Route is decided first, then only that route's accumulator moves.
@@ -1979,7 +2002,7 @@ impl Runtime {
         }
         // Any keystroke dismisses the transient peek flyout (Esc included, per the peek verb
         // ruling) without consuming the key: typing means the user has moved on from hovering.
-        self.dismiss_peek();
+        self.dismiss_peek()?;
 
         // A non-empty winit Preedit is the composition authority. Editing/navigation keys are
         // intentionally left to the IME here even if it also exposes a physical named key; no PTY
@@ -2528,7 +2551,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
-        runtime.activate_peek_if_due(now);
+        if let Err(error) = runtime.activate_peek_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.clear_math_hover_if_due(now) {
             self.fail(event_loop, error);
             return;

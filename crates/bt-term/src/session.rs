@@ -14616,6 +14616,24 @@ mod tests {
         assert_eq!(session.local_image_path_probe_at(&anchor(2)), None);
         assert_eq!(session.local_image_path_probe_at(&anchor(30)), None);
         assert!(session.inline_images.is_empty(), "probe must not register");
+
+        // Round-trip through a projected frame: the anchors the app's hover hit-test hands the
+        // probe must resolve exactly like hand-built grid points.
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let hovered = frame
+            .anchor_at(0, 10, Bias::Before)
+            .unwrap()
+            .expect("path cell must carry an anchor");
+        assert_eq!(
+            session.local_image_path_probe_at(&hovered),
+            Some(PathBuf::from(r"C:\pictures\wallpaper.png"))
+        );
+        let outside = frame
+            .anchor_at(0, 2, Bias::Before)
+            .unwrap()
+            .expect("prefix cell must carry an anchor");
+        assert_eq!(session.local_image_path_probe_at(&outside), None);
     }
 
     #[test]
