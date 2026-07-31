@@ -1994,10 +1994,18 @@ impl Runtime {
                 expected.columns,
                 expected.rows,
                 frame.columns,
-                frame.rows
+                frame.grid_rows
             );
         }
-        let has_text = frame.cells.iter().any(|cell| !cell.text.trim().is_empty());
+        let has_text = frame
+            .cells
+            .iter()
+            .take(
+                frame
+                    .drawable_rows()
+                    .saturating_mul(frame.columns.get() as usize),
+            )
+            .any(|cell| !cell.text.trim().is_empty());
         match self
             .renderer
             .present(&frame, trigger)
@@ -2017,7 +2025,7 @@ impl Runtime {
                         "BT_RESIZE present={}us columns={} rows={}",
                         latency.event_to_present_call.as_micros(),
                         frame.columns,
-                        frame.rows
+                        frame.grid_rows
                     );
                 }
                 if has_text && !self.first_text_presented {
@@ -2545,12 +2553,14 @@ fn nonzero_u32(value: u16) -> NonZeroU32 {
 
 fn frame_matches_grid(frame: &ViewportFrame, grid: GridSize) -> bool {
     frame.columns.get() == u32::from(grid.columns.get())
-        && frame.rows.get() == u32::from(grid.rows.get())
+        && frame.grid_rows.get() == u32::from(grid.rows.get())
 }
 
 fn presentation_equivalent(previous: &ViewportFrame, next: &ViewportFrame) -> bool {
     previous.columns == next.columns
+        && previous.grid_rows == next.grid_rows
         && previous.rows == next.rows
+        && previous.presentation_offset_subpixels == next.presentation_offset_subpixels
         && previous.cells == next.cells
         && previous.cursor == next.cursor
         && previous.cell_anchors == next.cell_anchors
@@ -3917,7 +3927,10 @@ mod tests {
         let render_rows = bt_render::text_row_cells(&frame)
             .unwrap()
             .collect::<Vec<_>>();
-        assert_eq!(render_rows.len(), 2);
+        assert_eq!(frame.grid_rows.get(), 2);
+        assert_eq!(frame.rows.get(), 3);
+        assert_eq!(frame.drawable_rows(), 2);
+        assert_eq!(render_rows.len(), 3);
         assert!(render_rows.iter().all(|row| row.len() == 4));
     }
 

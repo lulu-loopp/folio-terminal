@@ -40,3 +40,18 @@
 - 24 录制 × 双模逐字节不变(滚动是 app 态,不进录制——任何字节漂移=阶段实现越界)。
 - 全 workspace 测试、clippy -D warnings、fmt;既有滚动/选区/保持/回看钉死全绿。
 - 每阶段一单,验收(红检+回放)后才进下一阶段。
+
+## 阶段 A 的 G1 契约裁决
+
+- `ViewportFrame.grid_rows` 是 PTY 网格高度；`ViewportFrame.rows` 是呈现高度，包含底部
+  overscan。`cells.len == cell_anchors.len == columns * rows`，`row_map.len == rows`；
+  “frame 恒矩形”按这组呈现维度判定。
+- `presentation_offset_subpixels` 是呈现列表的精确行内偏移；阶段 A 的生产投影恒为
+  `0`。此时 `drawable_rows == grid_rows`，overscan 仍在同一矩形中，但不参与像素、
+  命中、选区或可见内容摘要。
+- resize trace 的 `FramePublished.rows/cells/anchors` 记录呈现矩形，并另带
+  `grid_rows`；PTY resize/grid-match 断言只比较 `grid_rows`。生命周期矩阵中原
+  `columns * grid_rows` 的 frame 矩形断言相应改判为
+  `columns * (grid_rows + FRAME_OVERSCAN_ROWS)`。
+- IME/preedit 与 cursor 的越界钳制在阶段 A 继续受 `grid_rows` 约束；部分首行下的
+  cursor/IME 策略是后续像素偏移阶段的契约债，不在本阶段借 overscan 改行为。

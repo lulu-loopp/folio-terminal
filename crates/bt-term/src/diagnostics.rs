@@ -248,7 +248,9 @@ mod tests {
         cells.resize(columns.get() as usize, CapturedCell::default());
         ViewportFrame {
             columns,
+            grid_rows: rows,
             rows,
+            presentation_offset_subpixels: 0,
             cells,
             cursor: GridCursor {
                 row: 0,

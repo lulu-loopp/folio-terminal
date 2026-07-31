@@ -29,6 +29,8 @@ pub use height_tree::HeightTree;
 /// lines readable on conventional 24-row terminals without imposing a fixed formula count.
 pub const LIVE_MATH_READABLE_SCALE_MILLI: u32 = 1000;
 pub const LIVE_MIN_VISIBLE_TEXT_ROWS: u32 = 8;
+/// Phase-A frame contract: one complete bottom row is carried beyond the PTY grid.
+pub const FRAME_OVERSCAN_ROWS: u32 = 1;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct LiveMathOccurrenceId(pub u64);
@@ -262,10 +264,21 @@ pub enum FrameViewportOrigin {
 }
 
 /// Stable render input owned by the viewport layer. Renderers never inspect the upstream grid.
+///
+/// `grid_rows` is the PTY grid height. `rows` is the rectangular presentation height and includes
+/// any bottom overscan rows. Every row-indexed payload (`cells`, `cell_anchors`, `row_map`,
+/// `selection_spans`, and `cursor`) uses presentation-row indices. The projection constructs those
+/// payloads from one ordered presentation-row list; consumers must not rebuild a second row list
+/// from the PTY grid.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ViewportFrame {
     pub columns: NonZeroU32,
+    pub grid_rows: NonZeroU32,
+    /// Number of rectangular presentation rows, including bottom overscan.
     pub rows: NonZeroU32,
+    /// Exact intra-row presentation offset. Phase A publishes zero; the signed row-map tops carry
+    /// the resulting geometry so a later phase can expose a partially visible first row.
+    pub presentation_offset_subpixels: i64,
     pub cells: Vec<CapturedCell>,
     pub cursor: GridCursor,
     pub cell_anchors: Vec<CellAnchor>,
@@ -281,11 +294,38 @@ pub struct ViewportFrame {
 }
 
 impl ViewportFrame {
+    /// Presentation rows that may contribute pixels or input hits for this frame. Phase A keeps
+    /// the exact offset at zero, so the bottom overscan suffix is present in the rectangle but
+    /// deliberately not drawable. Later pixel-scroll stages can expose that suffix without
+    /// changing the rectangular payload contract.
+    pub fn drawable_rows(&self) -> usize {
+        if self.presentation_offset_subpixels == 0 {
+            self.grid_rows.get() as usize
+        } else {
+            self.rows.get() as usize
+        }
+    }
+
+    pub fn drawable_interval_overlaps(&self, top_subpixels: i64, height_subpixels: i64) -> bool {
+        let bottom_subpixels = top_subpixels.saturating_add(height_subpixels);
+        bottom_subpixels > top_subpixels
+            && self.row_map.iter().take(self.drawable_rows()).any(|row| {
+                let row_bottom = row.top_subpixels.saturating_add(row.height_subpixels);
+                top_subpixels < row_bottom && row.top_subpixels < bottom_subpixels
+            })
+    }
+
     pub fn validate_shape(&self) -> Result<(), FrameShapeError> {
         if self.layout_key.width_cells != self.columns {
             return Err(FrameShapeError::LayoutWidth {
                 frame: self.columns.get(),
                 layout: self.layout_key.width_cells.get(),
+            });
+        }
+        if self.rows < self.grid_rows {
+            return Err(FrameShapeError::GridRowsBeyondPresentation {
+                grid_rows: self.grid_rows.get(),
+                presentation_rows: self.rows.get(),
             });
         }
         let expected = (self.columns.get() as usize)
@@ -415,6 +455,10 @@ impl ViewportFrame {
     pub fn visual_row_at(&self, y_subpixels: i64) -> Option<u32> {
         self.row_map
             .iter()
+            // Phase A carries the bottom overscan contract but publishes no pixel offset, so the
+            // overscan suffix is not hit-testable. This remains the frame-owned row map; no grid
+            // geometry is reconstructed here.
+            .take(self.drawable_rows())
             .position(|row| {
                 row.top_subpixels <= y_subpixels
                     && y_subpixels < row.top_subpixels.saturating_add(row.height_subpixels)
@@ -561,16 +605,50 @@ impl ViewportFrame {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameShapeError {
-    LayoutWidth { frame: u32, layout: u32 },
-    CellCount { expected: usize, actual: usize },
-    AnchorCount { expected: usize, actual: usize },
-    RowMapCount { expected: usize, actual: usize },
-    SelectionSpanRowOutOfBounds { row: u32, rows: usize },
-    SelectionSpanInvalidInterval { row: u32, top: i64, height: i64 },
-    MathBlockBandOrder { start: u32, end: u32 },
-    MathBlockBandTop { expected: i64, actual: i64 },
-    MathBlockBeyondBand { band_bottom: i64, block_bottom: i64 },
-    MathBlockOverlapsOutsideRow { row: u32 },
+    LayoutWidth {
+        frame: u32,
+        layout: u32,
+    },
+    GridRowsBeyondPresentation {
+        grid_rows: u32,
+        presentation_rows: u32,
+    },
+    CellCount {
+        expected: usize,
+        actual: usize,
+    },
+    AnchorCount {
+        expected: usize,
+        actual: usize,
+    },
+    RowMapCount {
+        expected: usize,
+        actual: usize,
+    },
+    SelectionSpanRowOutOfBounds {
+        row: u32,
+        rows: usize,
+    },
+    SelectionSpanInvalidInterval {
+        row: u32,
+        top: i64,
+        height: i64,
+    },
+    MathBlockBandOrder {
+        start: u32,
+        end: u32,
+    },
+    MathBlockBandTop {
+        expected: i64,
+        actual: i64,
+    },
+    MathBlockBeyondBand {
+        band_bottom: i64,
+        block_bottom: i64,
+    },
+    MathBlockOverlapsOutsideRow {
+        row: u32,
+    },
 }
 
 impl fmt::Display for FrameShapeError {
@@ -582,6 +660,13 @@ impl fmt::Display for FrameShapeError {
                     "frame width is {frame} cells, layout width is {layout}"
                 )
             }
+            Self::GridRowsBeyondPresentation {
+                grid_rows,
+                presentation_rows,
+            } => write!(
+                formatter,
+                "PTY grid has {grid_rows} rows but the frame carries only {presentation_rows} presentation rows"
+            ),
             Self::CellCount { expected, actual } => {
                 write!(formatter, "frame requires {expected} cells, got {actual}")
             }
@@ -632,6 +717,63 @@ impl Error for FrameShapeError {}
 struct VisualRow {
     cells: Vec<CapturedCell>,
     anchors: Vec<CellAnchor>,
+}
+
+/// The single projection-time source of truth for one rectangular presentation row. Flattened
+/// cells/anchors and `FrameVisualRow` geometry are all derived from this same ordered list.
+#[derive(Clone, Debug)]
+struct PresentedRow {
+    visual: VisualRow,
+    height_subpixels: i64,
+    live_grid_row: Option<u32>,
+}
+
+struct FlattenedPresentedRows {
+    cells: Vec<CapturedCell>,
+    cell_anchors: Vec<CellAnchor>,
+    row_map: Vec<FrameVisualRow>,
+}
+
+fn presented_height(rows: &[PresentedRow]) -> i64 {
+    rows.iter()
+        .map(|row| row.height_subpixels)
+        .fold(0_i64, i64::saturating_add)
+}
+
+/// Consume the projection's ordered row list into the three frame payloads in one pass.
+///
+/// `VisualRow` already owns the final cells and anchors. Moving those elements into the frame
+/// avoids cloning every `CapturedCell` (including its strings) and every pair of content anchors
+/// merely to discard the per-row vectors immediately afterwards.
+fn flatten_presented_rows(
+    rows: Vec<PresentedRow>,
+    columns: usize,
+    first_top_subpixels: i64,
+) -> Result<FlattenedPresentedRows, FrameProjectionError> {
+    let row_count = rows.len();
+    let cell_count = row_count.saturating_mul(columns);
+    let mut cells = Vec::with_capacity(cell_count);
+    let mut cell_anchors = Vec::with_capacity(cell_count);
+    let mut row_map = Vec::with_capacity(row_count);
+    let mut next_top = first_top_subpixels;
+
+    for (row_index, row) in rows.into_iter().enumerate() {
+        validate_visual_row(&row.visual, columns, "presentation", row_index)?;
+        row_map.push(FrameVisualRow {
+            top_subpixels: next_top,
+            height_subpixels: row.height_subpixels,
+            live_grid_row: row.live_grid_row,
+        });
+        next_top = next_top.saturating_add(row.height_subpixels);
+        cells.extend(row.visual.cells);
+        cell_anchors.extend(row.visual.anchors);
+    }
+
+    Ok(FlattenedPresentedRows {
+        cells,
+        cell_anchors,
+        row_map,
+    })
 }
 
 fn validate_visual_row(
@@ -723,6 +865,10 @@ pub enum FrameProjectionError {
         actual_cells: usize,
         actual_anchors: usize,
     },
+    PresentationRowCountOverflow {
+        grid_rows: u32,
+        overscan_rows: u32,
+    },
     FrameShape(FrameShapeError),
 }
 
@@ -749,6 +895,13 @@ impl fmt::Display for FrameProjectionError {
             } => write!(
                 formatter,
                 "expected {expected} cells and anchors in {plane} row {row}, got {actual_cells} cells and {actual_anchors} anchors"
+            ),
+            Self::PresentationRowCountOverflow {
+                grid_rows,
+                overscan_rows,
+            } => write!(
+                formatter,
+                "grid height {grid_rows} plus {overscan_rows} overscan rows exceeds the frame row limit"
             ),
             Self::FrameShape(error) => error.fmt(formatter),
         }
@@ -1049,8 +1202,17 @@ impl ViewportProjection {
             });
         }
         let expected_columns = columns.get() as usize;
-        let mut cells = Vec::with_capacity(expected_rows.saturating_mul(expected_columns));
-        let mut cell_anchors = Vec::with_capacity(expected_rows.saturating_mul(expected_columns));
+        let presentation_row_count = self
+            .live_rows
+            .get()
+            .checked_add(FRAME_OVERSCAN_ROWS)
+            .and_then(NonZeroU32::new)
+            .ok_or(FrameProjectionError::PresentationRowCountOverflow {
+                grid_rows: self.live_rows.get(),
+                overscan_rows: FRAME_OVERSCAN_ROWS,
+            })?;
+        let presentation_rows = presentation_row_count.get() as usize;
+        let mut presented = Vec::with_capacity(presentation_rows);
         for (row_index, row) in rows.into_iter().enumerate() {
             if row.cells.len() != expected_columns {
                 return Err(FrameProjectionError::ColumnCount {
@@ -1060,7 +1222,7 @@ impl ViewportProjection {
                 });
             }
             let visual =
-                captured_visual_row(&row, expected_columns, |column, bias| ContentAnchor::Live {
+                captured_visual_row(row, expected_columns, |column, bias| ContentAnchor::Live {
                     screen: ScreenId::Primary,
                     point: GridPoint {
                         row: row_index as u32,
@@ -1069,22 +1231,40 @@ impl ViewportProjection {
                     bias,
                     generation: self.grid_generation,
                 });
-            cells.extend(visual.cells);
-            cell_anchors.extend(visual.anchors);
+            presented.push(PresentedRow {
+                visual,
+                height_subpixels: self.cell_height_subpixels.get(),
+                live_grid_row: Some(row_index as u32),
+            });
         }
+        let last_grid_row = self.live_rows.get().saturating_sub(1);
+        presented.push(PresentedRow {
+            visual: blank_visual_row(expected_columns, |column, bias| ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point: GridPoint {
+                    row: last_grid_row,
+                    column: column as u32,
+                },
+                bias,
+                generation: self.grid_generation,
+            }),
+            height_subpixels: self.cell_height_subpixels.get(),
+            live_grid_row: None,
+        });
+        let FlattenedPresentedRows {
+            cells,
+            cell_anchors,
+            row_map,
+        } = flatten_presented_rows(presented, expected_columns, 0)?;
         let frame = ViewportFrame {
             columns,
-            rows: self.live_rows,
+            grid_rows: self.live_rows,
+            rows: presentation_row_count,
+            presentation_offset_subpixels: 0,
             cells,
             cursor,
             cell_anchors,
-            row_map: (0..self.live_rows.get())
-                .map(|row| FrameVisualRow {
-                    top_subpixels: i64::from(row).saturating_mul(self.cell_height_subpixels.get()),
-                    height_subpixels: self.cell_height_subpixels.get(),
-                    live_grid_row: Some(row),
-                })
-                .collect(),
+            row_map,
             selection_spans: Vec::new(),
             math_blocks: Vec::new(),
             math_failures: Vec::new(),
@@ -1111,6 +1291,16 @@ impl ViewportProjection {
         screen: ScreenId,
     ) -> Result<ViewportFrame, FrameProjectionError> {
         let expected_rows = self.live_rows.get() as usize;
+        let presentation_row_count = self
+            .live_rows
+            .get()
+            .checked_add(FRAME_OVERSCAN_ROWS)
+            .and_then(NonZeroU32::new)
+            .ok_or(FrameProjectionError::PresentationRowCountOverflow {
+                grid_rows: self.live_rows.get(),
+                overscan_rows: FRAME_OVERSCAN_ROWS,
+            })?;
+        let presentation_rows = presentation_row_count.get() as usize;
         if live_rows.len() != expected_rows {
             return Err(FrameProjectionError::RowCount {
                 expected: expected_rows,
@@ -1276,12 +1466,15 @@ impl ViewportProjection {
         self.review_hold =
             primary && self.resize_reflow_active && self.displaced_review_rows.is_some();
         let live_base = history_rows + staging_rows;
-        let window_end = (window_start + expected_rows).min(total_rows);
+        let visible_window_end = (window_start + expected_rows).min(total_rows);
+        let window_end = (window_start + presentation_rows).min(total_rows);
         // The live plane is always rectangular, but blank rows at its tail are presentation
         // capacity rather than unread content. If an anchored frame displaces only those rows,
         // reporting `N lines below` would claim hidden content even though every meaningful row
         // already fits in the viewport.
-        let first_live_row_below = window_end.saturating_sub(live_base).min(live_rows.len());
+        let first_live_row_below = visible_window_end
+            .saturating_sub(live_base)
+            .min(live_rows.len());
         let blank_live_rows_below = live_rows[first_live_row_below..]
             .iter()
             .rev()
@@ -1321,8 +1514,7 @@ impl ViewportProjection {
             &self.live_row_prefix,
             self.cell_height_subpixels.get(),
         );
-        let mut visible = Vec::with_capacity(expected_rows);
-        let mut visible_heights = Vec::with_capacity(expected_rows);
+        let mut presented = Vec::with_capacity(presentation_rows);
         let mut math_blocks = Vec::new();
 
         // A boundary-split formula owns an exact transcript prefix above the live band that holds
@@ -1407,8 +1599,8 @@ impl ViewportProjection {
                         let local_start = window_start.saturating_sub(row_base);
                         let row_heights =
                             distributed_row_heights(artifact.height_subpixels, line_rows);
-                        let visible_top = frame_top_subpixels
-                            .saturating_add(visible_heights.iter().copied().sum::<i64>());
+                        let visible_top =
+                            frame_top_subpixels.saturating_add(presented_height(&presented));
                         math_blocks.push(MathBlockPlacement {
                             start: *id,
                             anchor: MathBlockAnchor::History {
@@ -1491,8 +1683,8 @@ impl ViewportProjection {
                             ));
                         }
                         let local_start = window_start.saturating_sub(row_base);
-                        let line_visible_top = frame_top_subpixels
-                            .saturating_add(visible_heights.iter().copied().sum::<i64>());
+                        let line_visible_top =
+                            frame_top_subpixels.saturating_add(presented_height(&presented));
                         let line_top = line_visible_top.saturating_sub(
                             heights
                                 .iter()
@@ -1539,8 +1731,19 @@ impl ViewportProjection {
                     }
                     let local_start = window_start.saturating_sub(row_base);
                     let local_end = window_end.saturating_sub(row_base).min(laid_out.len());
-                    visible.extend(laid_out[local_start..local_end].iter().cloned());
-                    visible_heights.extend_from_slice(&laid_out_heights[local_start..local_end]);
+                    let visible_rows = local_end.saturating_sub(local_start);
+                    presented.extend(
+                        laid_out
+                            .into_iter()
+                            .zip(laid_out_heights)
+                            .skip(local_start)
+                            .take(visible_rows)
+                            .map(|(visual, height_subpixels)| PresentedRow {
+                                visual,
+                                height_subpixels,
+                                live_grid_row: None,
+                            }),
+                    );
                 }
                 row_base = line_end;
                 if row_base >= window_end {
@@ -1558,35 +1761,44 @@ impl ViewportProjection {
             for (offset, staged) in staged_rows[first..last].iter().enumerate() {
                 let row = captured_staged_visual_row(staged, column_count, self.source_generation);
                 validate_visual_row(&row, column_count, "staging", first + offset)?;
-                visible.push(row);
-                visible_heights.push(self.cell_height_subpixels.get());
+                presented.push(PresentedRow {
+                    visual: row,
+                    height_subpixels: self.cell_height_subpixels.get(),
+                    live_grid_row: None,
+                });
             }
         }
 
         if window_end > live_base && window_start < live_base + expected_rows {
             let first = window_start.saturating_sub(live_base);
             let last = window_end.saturating_sub(live_base).min(live_rows.len());
-            let visible_live_start = visible.len();
-            visible.extend(
-                live_rows[first..last]
-                    .iter()
+            let visible_live_start = presented.len();
+            presented.extend(
+                live_rows
+                    .into_iter()
+                    .skip(first)
+                    .take(last.saturating_sub(first))
                     .enumerate()
                     .map(|(offset, row)| {
                         let live_row = first + offset;
-                        captured_visual_row(row, column_count, |column, bias| ContentAnchor::Live {
-                            screen,
-                            point: GridPoint {
-                                row: live_row as u32,
-                                column: column as u32,
-                            },
-                            bias,
-                            generation: self.grid_generation,
-                        })
+                        PresentedRow {
+                            visual: captured_visual_row(row, column_count, |column, bias| {
+                                ContentAnchor::Live {
+                                    screen,
+                                    point: GridPoint {
+                                        row: live_row as u32,
+                                        column: column as u32,
+                                    },
+                                    bias,
+                                    generation: self.grid_generation,
+                                }
+                            }),
+                            height_subpixels: self.live_row_prefix[live_row + 1]
+                                .saturating_sub(self.live_row_prefix[live_row]),
+                            live_grid_row: Some(live_row as u32),
+                        }
                     }),
             );
-            visible_heights.extend((first..last).map(|live_row| {
-                self.live_row_prefix[live_row + 1].saturating_sub(self.live_row_prefix[live_row])
-            }));
 
             let mut path_image_offsets = HashMap::<u32, i64>::new();
             for live_math in &self.live_math_artifacts {
@@ -1645,7 +1857,11 @@ impl ViewportProjection {
                             if absolute >= window_start {
                                 let index = absolute - window_start;
                                 frame_top_subpixels.saturating_add(
-                                    visible_heights.iter().take(index).copied().sum::<i64>(),
+                                    presented
+                                        .iter()
+                                        .take(index)
+                                        .map(|row| row.height_subpixels)
+                                        .sum::<i64>(),
                                 )
                             } else {
                                 let rows_above =
@@ -1749,8 +1965,8 @@ impl ViewportProjection {
                 let visible_first = block_first.max(first);
                 let visible_last = block_last.min(last.saturating_sub(1));
                 for live_row in visible_first..=visible_last {
-                    let row = &mut visible[visible_live_start + live_row - first];
-                    for cell in &mut row.cells {
+                    let row = &mut presented[visible_live_start + live_row - first];
+                    for cell in &mut row.visual.cells {
                         suppress_math_source_cell(cell);
                     }
                 }
@@ -1759,14 +1975,14 @@ impl ViewportProjection {
                     if live_row < first || live_row >= last {
                         continue;
                     }
-                    let row = &mut visible[visible_live_start + live_row - first];
+                    let row = &mut presented[visible_live_start + live_row - first];
                     // Only cells proven to show this occurrence's source are cleared; an
                     // application overlay sharing the row (Jump chip) keeps its text and
                     // highlight style untouched on both sides.
                     for (start, end) in clear_ranges {
-                        let start = (*start as usize).min(row.cells.len());
-                        let end = (*end as usize).min(row.cells.len());
-                        for cell in &mut row.cells[start..end] {
+                        let start = (*start as usize).min(row.visual.cells.len());
+                        let end = (*end as usize).min(row.visual.cells.len());
+                        for cell in &mut row.visual.cells[start..end] {
                             suppress_math_source_cell(cell);
                         }
                     }
@@ -1780,66 +1996,38 @@ impl ViewportProjection {
                     let Some(index) = absolute.checked_sub(window_start) else {
                         continue;
                     };
-                    let Some(row) = visible.get_mut(index) else {
+                    let Some(row) = presented.get_mut(index) else {
                         break;
                     };
-                    for cell in &mut row.cells {
+                    for cell in &mut row.visual.cells {
                         suppress_math_source_cell(cell);
                     }
                 }
             }
         }
 
-        while visible.len() < expected_rows {
-            let row = visible.len() as u32;
-            visible.push(blank_visual_row(column_count, |column, bias| {
-                ContentAnchor::Live {
+        let last_grid_row = self.live_rows.get().saturating_sub(1);
+        while presented.len() < presentation_rows {
+            presented.push(PresentedRow {
+                visual: blank_visual_row(column_count, |column, bias| ContentAnchor::Live {
                     screen,
                     point: GridPoint {
-                        row,
+                        row: last_grid_row,
                         column: column as u32,
                     },
                     bias,
                     generation: self.grid_generation,
-                }
-            }));
-            visible_heights.push(self.cell_height_subpixels.get());
+                }),
+                height_subpixels: self.cell_height_subpixels.get(),
+                live_grid_row: None,
+            });
         }
-        visible.truncate(expected_rows);
-        visible_heights.truncate(expected_rows);
-        for (row_index, row) in visible.iter().enumerate() {
-            validate_visual_row(row, column_count, "visible", row_index)?;
-        }
-
-        let cells = visible
-            .iter()
-            .flat_map(|row| row.cells.iter().cloned())
-            .collect();
-        let cell_anchors = visible
-            .into_iter()
-            .flat_map(|row| row.anchors)
-            .collect::<Vec<_>>();
-        let mut next_top = frame_top_subpixels;
-        let row_map = (0..expected_rows)
-            .map(|frame_row| {
-                let absolute_row = window_start.saturating_add(frame_row);
-                let live_grid_row = absolute_row
-                    .checked_sub(live_base)
-                    .filter(|row| *row < expected_rows)
-                    .and_then(|row| u32::try_from(row).ok());
-                let height_subpixels = visible_heights
-                    .get(frame_row)
-                    .copied()
-                    .unwrap_or(self.cell_height_subpixels.get());
-                let mapped = FrameVisualRow {
-                    top_subpixels: next_top,
-                    height_subpixels,
-                    live_grid_row,
-                };
-                next_top = next_top.saturating_add(height_subpixels);
-                mapped
-            })
-            .collect::<Vec<_>>();
+        presented.truncate(presentation_rows);
+        let FlattenedPresentedRows {
+            cells,
+            cell_anchors,
+            row_map,
+        } = flatten_presented_rows(presented, column_count, frame_top_subpixels)?;
         let mut local_path_offsets = HashMap::<u32, i64>::new();
         for placement in &mut math_blocks {
             if matches!(
@@ -1888,12 +2076,15 @@ impl ViewportProjection {
         let selection_spans = self
             .selection
             .as_ref()
+            // Phase A's exact presentation offset is zero, so selection geometry is materialized
+            // only for the drawable prefix. It still indexes the same presentation-row anchors
+            // and is rendered only through the matching frame row-map entry.
             .map(|selection| selection_spans(&cell_anchors, column_count, expected_rows, selection))
             .transpose()?
             .unwrap_or_default();
-        let projected_cursor_row = live_base
-            .saturating_add(cursor.row as usize)
-            .checked_sub(window_start)
+        let projected_cursor_row = row_map
+            .iter()
+            .position(|row| row.live_grid_row == Some(cursor.row))
             .filter(|row| *row < expected_rows)
             .and_then(|row| u32::try_from(row).ok());
         let cursor_hidden_by_math = math_blocks.iter().any(|placement| {
@@ -1911,9 +2102,16 @@ impl ViewportProjection {
                     && cursor.row <= end.row
             )
         });
+        debug_assert_eq!(
+            cells.len(),
+            cell_anchors.len(),
+            "one presentation-row list must flatten to equal cell and anchor rectangles"
+        );
         let frame = ViewportFrame {
             columns,
-            rows: self.live_rows,
+            grid_rows: self.live_rows,
+            rows: presentation_row_count,
+            presentation_offset_subpixels: 0,
             cells,
             cursor: GridCursor {
                 row: projected_cursor_row.unwrap_or(cursor.row),
@@ -2669,13 +2867,14 @@ fn captured_row_is_blank(row: &CapturedRow) -> bool {
 }
 
 fn captured_visual_row(
-    row: &CapturedRow,
+    row: CapturedRow,
     columns: usize,
     anchor: impl Fn(usize, Bias) -> ContentAnchor,
 ) -> VisualRow {
+    let mut cells = row.cells;
     let mut anchors = Vec::with_capacity(columns);
     let mut lead = 0usize;
-    for (column, cell) in row.cells.iter().enumerate() {
+    for (column, cell) in cells.iter().enumerate() {
         if !cell.wide_spacer {
             lead = column;
         }
@@ -2684,7 +2883,6 @@ fn captured_visual_row(
             end: anchor(lead, Bias::After),
         });
     }
-    let mut cells = row.cells.clone();
     apply_implicit_hyperlinks(&mut cells);
     VisualRow { cells, anchors }
 }
@@ -2925,7 +3123,7 @@ fn selection_spans(
     selection: &ViewSelection,
 ) -> Result<Vec<SelectionSpan>, FrameProjectionError> {
     let expected = columns.saturating_mul(rows);
-    if anchors.len() != expected {
+    if anchors.len() < expected {
         return Err(FrameProjectionError::FrameShape(
             FrameShapeError::AnchorCount {
                 expected,
@@ -2945,7 +3143,7 @@ fn selection_spans(
                 .is_ok_and(|order| order == std::cmp::Ordering::Greater)
     };
     let mut spans = Vec::new();
-    for (row, row_anchors) in anchors.chunks(columns).enumerate() {
+    for (row, row_anchors) in anchors[..expected].chunks(columns).enumerate() {
         let mut column = 0usize;
         while column < columns {
             if !selected(&row_anchors[column]) {
@@ -3086,9 +3284,17 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(frame.cells.len(), 4);
+        assert_eq!(frame.grid_rows.get(), 2);
+        assert_eq!(frame.rows.get(), 3);
+        assert_eq!(frame.cells.len(), 6);
         assert_eq!(frame.cells[0].text, "a");
         assert_eq!(frame.cells[3].text, "d");
+        assert!(
+            frame.cells[4..]
+                .iter()
+                .all(|cell| *cell == CapturedCell::default()),
+            "phase-A bottom overscan is a presentation-blank row at live bottom"
+        );
         assert_eq!(frame.layout_key, key(2));
         assert_eq!(frame.cursor.column, 1);
 
@@ -3107,6 +3313,128 @@ mod tests {
                 actual: 1,
             })
         );
+    }
+
+    #[test]
+    fn phase_a_presentation_rectangle_carries_one_hidden_overscan_row_and_zero_offset() {
+        let projection = ViewportProjection::new(
+            key(2),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let frame = projection
+            .live_frame(
+                nz32(2),
+                vec![
+                    CapturedRow::plain("ab", false),
+                    CapturedRow::plain("cd", false),
+                ],
+                GridCursor {
+                    row: 1,
+                    column: 1,
+                    visible: true,
+                },
+            )
+            .unwrap();
+        let cell = cell_height().get();
+
+        assert_eq!(frame.grid_rows.get(), 2);
+        assert_eq!(
+            frame.rows.get(),
+            frame.grid_rows.get() + FRAME_OVERSCAN_ROWS
+        );
+        assert_eq!(frame.presentation_offset_subpixels, 0);
+        assert_eq!(frame.cells.len(), frame.rows.get() as usize * 2);
+        assert_eq!(frame.cell_anchors.len(), frame.cells.len());
+        assert_eq!(frame.row_map.len(), frame.rows.get() as usize);
+        assert_eq!(frame.drawable_rows(), frame.grid_rows.get() as usize);
+        assert_eq!(frame.row_map[0].top_subpixels, 0);
+        assert_eq!(frame.row_map[2].top_subpixels, 2 * cell);
+        assert_eq!(frame.row_map[2].live_grid_row, None);
+        assert_eq!(frame.visual_row_at(2 * cell), None);
+        assert!(!frame.drawable_interval_overlaps(2 * cell, cell));
+        assert!(
+            frame.anchor_at(2, 0, Bias::Before).unwrap().is_some(),
+            "overscan cells and anchors are part of the same presentation rectangle"
+        );
+    }
+
+    #[test]
+    fn presentation_contract_can_construct_a_negative_top_partial_first_row() {
+        let projection = ViewportProjection::new(
+            key(2),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut frame = projection
+            .live_frame(
+                nz32(2),
+                vec![
+                    CapturedRow::plain("ab", false),
+                    CapturedRow::plain("cd", false),
+                ],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+            )
+            .unwrap();
+        let offset = cell_height().get() / 2;
+        frame.presentation_offset_subpixels = offset;
+        for row in &mut frame.row_map {
+            row.top_subpixels = row.top_subpixels.saturating_sub(offset);
+        }
+
+        frame.validate_shape().unwrap();
+        assert_eq!(frame.row_map[0].top_subpixels, -offset);
+        assert_eq!(frame.drawable_rows(), frame.rows.get() as usize);
+        assert_eq!(frame.visual_row_at(0), Some(0));
+        assert_eq!(
+            frame.visual_row_at(2 * cell_height().get() - offset),
+            Some(2),
+            "the bottom overscan row becomes addressable only once an exact offset exposes it"
+        );
+    }
+
+    #[test]
+    fn primary_and_alternate_publish_the_same_phase_a_row_contract() {
+        for screen in [ScreenId::Primary, ScreenId::Alternate] {
+            let mut projection = ViewportProjection::new(
+                key(2),
+                DetectionRevision(1),
+                nz32(2),
+                cell_height(),
+                SourceGeneration(1),
+                GridGeneration(1),
+            );
+            let frame = projection
+                .continuous_frame(
+                    &HistoryDocument::default(),
+                    &[],
+                    vec![
+                        CapturedRow::plain("ab", false),
+                        CapturedRow::plain("cd", false),
+                    ],
+                    GridCursor {
+                        row: 0,
+                        column: 0,
+                        visible: true,
+                    },
+                    screen,
+                )
+                .unwrap();
+            assert_eq!(frame.grid_rows.get(), 2);
+            assert_eq!(frame.rows.get(), 3);
+            assert_eq!(frame.presentation_offset_subpixels, 0);
+            assert_eq!(frame.row_map[2].live_grid_row, None);
+        }
     }
 
     #[test]
@@ -3236,6 +3564,7 @@ mod tests {
             frame
                 .cells
                 .iter()
+                .take(frame.drawable_rows() * frame.columns.get() as usize)
                 .all(|cell| cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE))
         );
         assert!(frame.underline_hyperlink(&hit));
@@ -3243,6 +3572,7 @@ mod tests {
             frame
                 .cells
                 .iter()
+                .take(frame.drawable_rows() * frame.columns.get() as usize)
                 .all(|cell| cell.style.flags.contains(CellFlags::UNDERLINE)
                     && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE))
         );
@@ -4064,7 +4394,7 @@ mod tests {
                 ScreenId::Alternate,
             )
             .unwrap();
-        let last = bottom.row_map.last().unwrap();
+        let last = &bottom.row_map[bottom.grid_rows.get() as usize - 1];
         assert_eq!(
             last.top_subpixels.saturating_add(last.height_subpixels),
             6 * cell,
@@ -4182,8 +4512,8 @@ mod tests {
         assert_eq!(
             frame.word_selection(0, 0),
             Err(FrameShapeError::CellCount {
-                expected: 4,
-                actual: 3,
+                expected: 6,
+                actual: 5,
             })
         );
 
@@ -4192,8 +4522,8 @@ mod tests {
         assert_eq!(
             frame.line_selection(0),
             Err(FrameShapeError::AnchorCount {
-                expected: 4,
-                actual: 3,
+                expected: 6,
+                actual: 5,
             })
         );
     }
@@ -4239,10 +4569,10 @@ mod tests {
         );
         frame.validate_shape().unwrap();
 
-        frame.selection_spans[0].row = 2;
+        frame.selection_spans[0].row = 3;
         assert_eq!(
             frame.validate_shape(),
-            Err(FrameShapeError::SelectionSpanRowOutOfBounds { row: 2, rows: 2 })
+            Err(FrameShapeError::SelectionSpanRowOutOfBounds { row: 3, rows: 3 })
         );
 
         frame.selection_spans[0].row = 1;
@@ -5321,7 +5651,7 @@ mod tests {
                 &document,
                 &[],
                 vec![CapturedRow {
-                    cells: frame.cells.clone(),
+                    cells: frame.cells[..frame.columns.get() as usize].to_vec(),
                     continues: false,
                     shell_mark: None,
                 }],

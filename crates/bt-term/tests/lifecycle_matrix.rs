@@ -132,7 +132,7 @@ fn captured_row_text(row: &bt_transcript::CapturedRow) -> String {
 
 fn assert_frame_rows_come_from_real_sources(session: &DualPlaneSession, frame: &ViewportFrame) {
     let columns = frame.columns.get() as usize;
-    for row in 0..frame.rows.get() as usize {
+    for row in 0..frame.drawable_rows() {
         let source = &frame.cell_anchors[row * columns].start;
         let expected = match source {
             ContentAnchor::History { id, offset, .. } => {
@@ -366,14 +366,30 @@ fn reused_projection_refreshes_layout_before_framing_a_width_resize() {
     let mut session = DualPlaneSession::new(nz32(8), nz32(2));
     let mut projection = session.new_projection(session.layout_key());
     let initial = session.viewport_frame(&mut projection).unwrap();
-    assert_eq!((initial.columns.get(), initial.cells.len()), (8, 16));
+    assert_eq!(
+        (
+            initial.columns.get(),
+            initial.grid_rows.get(),
+            initial.rows.get(),
+            initial.cells.len()
+        ),
+        (8, 2, 3, 24)
+    );
 
     session.resize(nz32(20), nz32(2)).unwrap();
     session.refresh_projection(&mut projection);
     let resized = session.viewport_frame(&mut projection).unwrap();
 
     assert_eq!(projection.layout_key(), session.layout_key());
-    assert_eq!((resized.columns.get(), resized.cells.len()), (20, 40));
+    assert_eq!(
+        (
+            resized.columns.get(),
+            resized.grid_rows.get(),
+            resized.rows.get(),
+            resized.cells.len()
+        ),
+        (20, 2, 3, 60)
+    );
 }
 
 #[test]
@@ -478,7 +494,10 @@ fn g1_no_output_shrink_grow_storm_harvests_no_history_and_keeps_bottom_following
             session.resize(nz32(columns), nz32(rows)).unwrap();
             session.refresh_projection(&mut projection);
             let frame = session.viewport_frame(&mut projection).unwrap();
-            assert_eq!(frame.cells.len(), columns as usize * rows as usize);
+            assert_eq!(
+                frame.cells.len(),
+                columns as usize * (rows as usize + bt_viewport::FRAME_OVERSCAN_ROWS as usize)
+            );
             assert_eq!(projection.scroll_offset_rows(), 0);
             assert_eq!(frame.status_text, None);
             assert!(history_text(&session).is_empty());
@@ -1012,8 +1031,10 @@ fn g1_resize_trace_replay_is_deterministic_through_post_drag_wheel_frame() {
     assert!(matches!(
         first.last().map(|event| &event.kind),
         Some(bt_term::ResizeTraceKind::FramePublished {
-            cells: 8,
-            anchors: 8,
+            grid_rows: 2,
+            rows: 3,
+            cells: 12,
+            anchors: 12,
             layout_columns: 4,
             scroll_offset_rows: 1,
             anchored: true,

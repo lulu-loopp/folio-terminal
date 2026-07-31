@@ -150,7 +150,7 @@ impl HeadlessOracle {
     /// occurrence's rows — which the user sees as a half-band / stray fragment. Boundary-split
     /// bridges (`frozen_prefix_rows > 0`) legitimately carry a combined height and are exempt.
     fn audit_clip_alignment(&mut self, frame: &ViewportFrame) {
-        let last_live_row = frame.rows.get().saturating_sub(1);
+        let last_live_row = frame.grid_rows.get().saturating_sub(1);
         let mut violations = 0usize;
         for block in &frame.math_blocks {
             if block.display != bt_viewport::MathBlockDisplay::Rendered
@@ -646,11 +646,16 @@ impl HeadlessOracle {
                 }
             }
             let offset = self.projection.scroll_offset_rows() as i64;
-            let rows = frame.rows.get() as i64;
+            let rows = frame.grid_rows.get() as i64;
             let columns = frame.columns.get() as usize;
             // Absolute document row of this frame's first visible row grows as offset shrinks.
             let frame_start = -offset;
-            for (row, cells) in frame.cells.chunks(columns).enumerate() {
+            for (row, cells) in frame
+                .cells
+                .chunks(columns)
+                .take(frame.drawable_rows())
+                .enumerate()
+            {
                 let absolute = frame_start + row as i64;
                 if absolute < emitted_offset {
                     continue;
@@ -746,11 +751,16 @@ impl HeadlessOracle {
                 })
                 .count();
             let offset = self.projection.scroll_offset_rows() as i64;
-            let rows = frame.rows.get() as i64;
+            let rows = frame.grid_rows.get() as i64;
             let columns = frame.columns.get() as usize;
             let frame_start = -offset;
             let mut page_source_rows = Vec::new();
-            for (row, cells) in frame.cells.chunks(columns).enumerate() {
+            for (row, cells) in frame
+                .cells
+                .chunks(columns)
+                .take(frame.drawable_rows())
+                .enumerate()
+            {
                 let absolute = frame_start + row as i64;
                 if absolute < emitted_offset {
                     continue;
@@ -876,7 +886,12 @@ impl HeadlessOracle {
             );
         }
         let columns = frame.columns.get() as usize;
-        for (row, cells) in frame.cells.chunks(columns).enumerate() {
+        for (row, cells) in frame
+            .cells
+            .chunks(columns)
+            .take(frame.drawable_rows())
+            .enumerate()
+        {
             let text = cells
                 .iter()
                 .map(|cell| cell.text.as_str())

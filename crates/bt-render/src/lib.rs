@@ -266,7 +266,7 @@ pub fn compose_preedit(
         frame.cursor,
         &preedit.text[..cursor_byte],
         frame.columns.get(),
-        frame.rows.get(),
+        frame.grid_rows.get(),
     );
     overlay_preedit_cells(&mut composed, preedit);
     composed.cursor = ime_caret;
@@ -321,7 +321,9 @@ fn advance_grid_position(
 
 fn overlay_preedit_cells(frame: &mut ViewportFrame, preedit: &Preedit) {
     let columns = frame.columns.get() as usize;
-    let rows = frame.rows.get() as usize;
+    // IME remains bounded to the PTY grid in phase A. Moving it into a partially visible
+    // presentation row belongs to the cursor/IME debt carried into the pixel-offset phase.
+    let rows = frame.grid_rows.get() as usize;
     let mut row = frame.cursor.row as usize;
     let mut column = frame.cursor.column as usize;
     let mut previous_lead: Option<usize> = None;
@@ -396,7 +398,12 @@ pub fn frame_content_digest(frame: &ViewportFrame) -> FrameContentDigest {
     let mut first_text_row = None;
     let mut last_text_row = None;
 
-    for (index, cell) in frame.cells.iter().enumerate() {
+    for (index, cell) in frame
+        .cells
+        .iter()
+        .take(frame.drawable_rows().saturating_mul(columns))
+        .enumerate()
+    {
         let row = index / columns;
         let column = index % columns;
         fnv_write(&mut content_fnv, &(row as u32).to_le_bytes());
@@ -1615,7 +1622,12 @@ impl HeadlessRenderProbe {
         let mut uploads = 0_u64;
         let mut upload_bytes = 0_usize;
         for placement in &frame.math_blocks {
-            if placement.display == MathBlockDisplay::Source {
+            if placement.display == MathBlockDisplay::Source
+                || !frame.drawable_interval_overlaps(
+                    placement.top_subpixels,
+                    placement.clip_height_subpixels,
+                )
+            {
                 continue;
             }
             let key = &placement.artifact.key;
@@ -2296,6 +2308,11 @@ impl Renderer {
         frame: &ViewportFrame,
         placement: &MathBlockPlacement,
     ) -> Option<MathBlockGeometry> {
+        if !frame
+            .drawable_interval_overlaps(placement.top_subpixels, placement.clip_height_subpixels)
+        {
+            return None;
+        }
         let pane_left = self.metrics.padding_px;
         let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
             .min(self.config.width as f32);
@@ -2394,6 +2411,9 @@ impl Renderer {
         frame: &ViewportFrame,
         placement: &bt_viewport::MathFailurePlacement,
     ) -> Option<([f32; 4], [f32; 4])> {
+        if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.height_subpixels) {
+            return None;
+        }
         let pane_left = self.metrics.padding_px;
         let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
             .min(self.config.width as f32);
@@ -2516,8 +2536,14 @@ impl Renderer {
 
     fn rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
         let columns = frame.columns.get() as usize;
+        let drawable_rows = frame.drawable_rows();
         let mut rects = Vec::new();
-        for (index, cell) in frame.cells.iter().enumerate() {
+        for (index, cell) in frame
+            .cells
+            .iter()
+            .take(drawable_rows.saturating_mul(columns))
+            .enumerate()
+        {
             let (_, background) = resolve_colors(&cell.style);
             if background != default_background() {
                 rects.push(self.cell_rect(frame, index / columns, index % columns, background));
@@ -2526,7 +2552,7 @@ impl Renderer {
         for span in &frame.selection_spans {
             let start = span.start_column.min(frame.columns.get()) as usize;
             let end = span.end_column.min(frame.columns.get()) as usize;
-            if end > start && span.row < frame.rows.get() {
+            if end > start && (span.row as usize) < drawable_rows {
                 rects.push(self.cell_rect_span(
                     frame,
                     span,
@@ -2563,7 +2589,7 @@ impl Renderer {
             }
         }
         if frame.cursor.visible
-            && frame.cursor.row < frame.rows.get()
+            && (frame.cursor.row as usize) < drawable_rows
             && frame.cursor.column < frame.columns.get()
         {
             rects.extend(
@@ -2574,7 +2600,12 @@ impl Renderer {
                     }),
             );
         }
-        for (index, cell) in frame.cells.iter().enumerate() {
+        for (index, cell) in frame
+            .cells
+            .iter()
+            .take(drawable_rows.saturating_mul(columns))
+            .enumerate()
+        {
             if cell.style.flags.contains(CellFlags::HIDDEN) {
                 continue;
             }
@@ -2610,8 +2641,9 @@ impl Renderer {
                 )
             }));
         }
+        let drawable_cells = drawable_rows.saturating_mul(columns);
         let mut index = 0;
-        while index < frame.cells.len() {
+        while index < drawable_cells {
             let cell = &frame.cells[index];
             if cell.style.flags.contains(CellFlags::UNDERLINE) {
                 let row = index / columns;
@@ -2638,7 +2670,7 @@ impl Renderer {
             let start_column = index % columns;
             let (foreground, _) = resolve_colors(&cell.style);
             let mut end = index + 1;
-            while end < frame.cells.len() && end / columns == row {
+            while end < drawable_cells && end / columns == row {
                 let next = &frame.cells[end];
                 let (next_foreground, _) = resolve_colors(&next.style);
                 if next.style.flags.contains(CellFlags::UNDERLINE)
@@ -2820,10 +2852,10 @@ fn prepare_text_rows(
     let row_before = composed_row_cache.counters;
     let mut rows_reshaped = 0_u64;
     let source_rows = text_row_cells(frame)?;
-    let rows = frame.rows.get() as usize;
+    let rows = frame.drawable_rows();
     let mut next_rows = Vec::with_capacity(rows);
 
-    for source_cells in source_rows {
+    for source_cells in source_rows.take(rows) {
         // Row placement is intentionally absent from this key. Cached rows own shaping only;
         // `prepare_text_atlas` remaps the same Arc through the presented frame's live prefix map.
         let key = ComposedRowKey {
@@ -3052,10 +3084,11 @@ fn prepare_status_text_atlas(
     )
 }
 
-/// Validate the complete render frame before exposing exact terminal rows to text shaping.
+/// Validate the complete render frame before exposing exact presentation rows to text shaping.
 ///
 /// This is the shared slice boundary used by `Renderer::prepare_text_rows` and deterministic
-/// resize replay tests. `chunks_exact` is only constructed after the rectangularity proof.
+/// resize replay tests. `chunks_exact` is only constructed after the presentation-rectangle proof;
+/// phase-A drawing consumes its frame-owned drawable prefix and leaves the overscan suffix intact.
 pub fn text_row_cells(
     frame: &ViewportFrame,
 ) -> Result<std::slice::ChunksExact<'_, CapturedCell>, FrameShapeError> {
@@ -3082,7 +3115,7 @@ fn status_overlay_geometry(
     frame: &ViewportFrame,
     status: &str,
 ) -> Option<StatusOverlayGeometry> {
-    if frame.rows.get() < 2 {
+    if frame.drawable_rows() < 2 {
         return None;
     }
     let columns = frame.columns.get() as usize;
@@ -4865,7 +4898,9 @@ mod tests {
         }
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(columns as u32).unwrap(),
+            grid_rows: NonZeroU32::new(rows as u32).unwrap(),
             rows: NonZeroU32::new(rows as u32).unwrap(),
+            presentation_offset_subpixels: 0,
             cells,
             cursor: bt_viewport::GridCursor {
                 row: 0,
@@ -4975,7 +5010,9 @@ mod tests {
             };
             let frame = ViewportFrame {
                 columns: NonZeroU32::new(4).unwrap(),
+                grid_rows: NonZeroU32::new(3).unwrap(),
                 rows: NonZeroU32::new(3).unwrap(),
+                presentation_offset_subpixels: 0,
                 cells: vec![CapturedCell::default(); 12],
                 cursor,
                 cell_anchors: test_cell_anchors(12),
@@ -5014,7 +5051,9 @@ mod tests {
         let unit = SUBPIXELS_PER_PX;
         let frame = ViewportFrame {
             columns: NonZeroU32::new(2).unwrap(),
+            grid_rows: NonZeroU32::new(4).unwrap(),
             rows: NonZeroU32::new(4).unwrap(),
+            presentation_offset_subpixels: 0,
             cells: vec![CapturedCell::plain("x"); 8],
             cursor: bt_viewport::GridCursor {
                 row: 2,
@@ -5212,7 +5251,9 @@ mod tests {
     fn latest_frame_slot_overwrites_instead_of_queueing() {
         let frame = ViewportFrame {
             columns: NonZeroU32::new(1).unwrap(),
+            grid_rows: NonZeroU32::new(1).unwrap(),
             rows: NonZeroU32::new(1).unwrap(),
+            presentation_offset_subpixels: 0,
             cells: vec![CapturedCell::plain("a")],
             cursor: bt_viewport::GridCursor {
                 row: 0,
@@ -5248,7 +5289,9 @@ mod tests {
     fn frame_content_digest_is_stable_for_known_and_blank_frames() {
         let make_frame = |columns: u32, rows: u32, cells: Vec<CapturedCell>| ViewportFrame {
             columns: NonZeroU32::new(columns).unwrap(),
+            grid_rows: NonZeroU32::new(rows).unwrap(),
             rows: NonZeroU32::new(rows).unwrap(),
+            presentation_offset_subpixels: 0,
             cell_anchors: test_cell_anchors(cells.len()),
             row_map: test_row_map(rows),
             cells,
@@ -5303,10 +5346,123 @@ mod tests {
     }
 
     #[test]
+    fn zero_offset_overscan_has_the_same_pixel_draw_inputs_as_the_legacy_rectangle() {
+        let columns = 2_usize;
+        let grid_rows = 2_usize;
+        let legacy = ViewportFrame {
+            columns: NonZeroU32::new(columns as u32).unwrap(),
+            grid_rows: NonZeroU32::new(grid_rows as u32).unwrap(),
+            rows: NonZeroU32::new(grid_rows as u32).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: ["a", "b", "c", "d"]
+                .into_iter()
+                .map(CapturedCell::plain)
+                .collect(),
+            cursor: bt_viewport::GridCursor {
+                row: 1,
+                column: 1,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(columns * grid_rows),
+            row_map: test_row_map(grid_rows as u32),
+            selection_spans: vec![SelectionSpan {
+                row: 1,
+                start_column: 0,
+                end_column: 2,
+            }],
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns as u32),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        let mut overscan = legacy.clone();
+        overscan.rows = NonZeroU32::new((grid_rows + 1) as u32).unwrap();
+        let mut dangerous = CapturedCell::plain("OVERSCAN");
+        dangerous.style.background = TerminalColor::Rgb(255, 0, 0);
+        overscan.cells.extend([dangerous.clone(), dangerous]);
+        overscan.cell_anchors.extend(test_cell_anchors(columns));
+        overscan.row_map.push(bt_viewport::FrameVisualRow {
+            top_subpixels: grid_rows as i64 * 22 * SUBPIXELS_PER_PX,
+            height_subpixels: 22 * SUBPIXELS_PER_PX,
+            live_grid_row: None,
+        });
+        overscan.cursor.row = grid_rows as u32;
+        overscan.selection_spans.push(SelectionSpan {
+            row: grid_rows as u32,
+            start_column: 0,
+            end_column: columns as u32,
+        });
+
+        legacy.validate_shape().unwrap();
+        overscan.validate_shape().unwrap();
+        assert_eq!(legacy.drawable_rows(), overscan.drawable_rows());
+        assert_eq!(
+            frame_content_digest(&legacy),
+            frame_content_digest(&overscan)
+        );
+        assert!(!overscan.drawable_interval_overlaps(
+            overscan.row_map[grid_rows].top_subpixels,
+            overscan.row_map[grid_rows].height_subpixels,
+        ));
+
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut swash_cache = SwashCache::new();
+        let mut narrow_cache = NarrowShapingCache::new();
+        let mut wide_cache = WideShapingCache::new();
+        let mut row_cache = ComposedRowCache::new();
+        let mut legacy_rows = Vec::new();
+        let mut legacy_status = None;
+        prepare_text_rows(
+            &legacy,
+            metrics,
+            &mut legacy_rows,
+            &mut legacy_status,
+            &mut row_cache,
+            1,
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        let mut overscan_rows = Vec::new();
+        let mut overscan_status = None;
+        prepare_text_rows(
+            &overscan,
+            metrics,
+            &mut overscan_rows,
+            &mut overscan_status,
+            &mut row_cache,
+            1,
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+
+        assert_eq!(legacy_rows.len(), grid_rows);
+        assert_eq!(overscan_rows.len(), grid_rows);
+        assert!(
+            legacy_rows
+                .iter()
+                .zip(&overscan_rows)
+                .all(|(legacy, overscan)| Arc::ptr_eq(legacy, overscan)),
+            "the renderer must reuse the exact shaped rows; hidden overscan contributes no pixels"
+        );
+    }
+
+    #[test]
     fn publish_composition_and_text_row_boundary_reject_non_rectangular_frames() {
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(2).unwrap(),
+            grid_rows: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(2).unwrap(),
+            presentation_offset_subpixels: 0,
             cells: vec![CapturedCell::plain(""); 4],
             cursor: bt_viewport::GridCursor {
                 row: 0,
@@ -5551,7 +5707,9 @@ mod tests {
         let mut status_overlay = None;
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(2).unwrap(),
+            grid_rows: NonZeroU32::new(3).unwrap(),
             rows: NonZeroU32::new(3).unwrap(),
+            presentation_offset_subpixels: 0,
             cells: ["a", "b", "c"]
                 .into_iter()
                 .flat_map(|text| vec![CapturedCell::plain(text); 2])
@@ -5750,7 +5908,9 @@ mod tests {
     fn preedit_is_transient_underlined_grid_content_with_a_collapsed_caret() {
         let frame = ViewportFrame {
             columns: NonZeroU32::new(8).unwrap(),
+            grid_rows: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(2).unwrap(),
+            presentation_offset_subpixels: 0,
             cells: vec![CapturedCell::plain(""); 16],
             cursor: bt_viewport::GridCursor {
                 row: 0,
@@ -5796,7 +5956,9 @@ mod tests {
     fn preedit_uses_the_same_cluster_oracle_as_committed_cells() {
         let frame = ViewportFrame {
             columns: NonZeroU32::new(8).unwrap(),
+            grid_rows: NonZeroU32::new(2).unwrap(),
             rows: NonZeroU32::new(2).unwrap(),
+            presentation_offset_subpixels: 0,
             cells: vec![CapturedCell::plain(""); 16],
             cursor: bt_viewport::GridCursor {
                 row: 0,
@@ -5932,7 +6094,9 @@ mod tests {
         spacer.wide_spacer = true;
         let mut frame = ViewportFrame {
             columns: NonZeroU32::new(3).unwrap(),
+            grid_rows: NonZeroU32::new(1).unwrap(),
             rows: NonZeroU32::new(1).unwrap(),
+            presentation_offset_subpixels: 0,
             cells: vec![lead, spacer, CapturedCell::plain("x")],
             cursor: bt_viewport::GridCursor {
                 row: 0,
@@ -5970,7 +6134,9 @@ mod tests {
         };
         let frame = ViewportFrame {
             columns: NonZeroU32::new(1).unwrap(),
+            grid_rows: NonZeroU32::new(1).unwrap(),
             rows: NonZeroU32::new(1).unwrap(),
+            presentation_offset_subpixels: 0,
             cells: vec![CapturedCell::plain("x")],
             cursor: bt_viewport::GridCursor {
                 row: 0,

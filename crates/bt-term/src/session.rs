@@ -480,6 +480,8 @@ pub enum ResizeTraceKind {
     },
     FramePublished {
         columns: u32,
+        grid_rows: u32,
+        /// Rectangular presentation rows, including the phase-A bottom overscan row.
         rows: u32,
         layout_columns: u32,
         cells: usize,
@@ -1496,6 +1498,7 @@ impl DualPlaneSession {
             observed_at,
             ResizeTraceKind::FramePublished {
                 columns: frame.columns.get(),
+                grid_rows: frame.grid_rows.get(),
                 rows: frame.rows.get(),
                 layout_columns: frame.layout_key.width_cells.get(),
                 cells: frame.cells.len(),
@@ -3996,7 +3999,17 @@ impl DualPlaneSession {
                 ScreenId::Primary
             },
         )?;
+        debug_assert_eq!(
+            frame.cells.len(),
+            frame.cell_anchors.len(),
+            "projection must publish one rectangular presentation payload"
+        );
         self.decorate_math_frame(&mut frame);
+        debug_assert_eq!(
+            frame.cells.len(),
+            frame.cell_anchors.len(),
+            "decoration must preserve the presentation rectangle"
+        );
         frame
             .validate_shape()
             .map_err(FrameProjectionError::FrameShape)?;
@@ -4004,7 +4017,7 @@ impl DualPlaneSession {
     }
 
     /// Schedule frozen math candidates intersecting the published viewport. The frame is the
-    /// visibility oracle: one history anchor is sampled per visual row, then scans are expanded
+    /// visibility oracle: one history anchor is sampled per drawable presentation row, then scans are expanded
     /// only to a delimiter opener and an 8 KiB look-ahead. Work is therefore bounded by visible
     /// rows plus the detector's maximum admissible source, independent of transcript length.
     pub fn schedule_visible_artifacts(&mut self, frame: &ViewportFrame) -> usize {
@@ -4031,6 +4044,7 @@ impl DualPlaneSession {
         let visible = frame
             .cell_anchors
             .chunks(columns)
+            .take(frame.drawable_rows())
             .filter_map(|row| match &row.first()?.start {
                 ContentAnchor::History { id, .. } => Some(*id),
                 _ => None,
@@ -4744,7 +4758,7 @@ impl DualPlaneSession {
                 continue;
             };
             let end = record.block_end.unwrap_or(*start);
-            let last_row = (first_row..frame.rows.get())
+            let last_row = (first_row..drawable_frame_row_count(frame))
                 .take_while(|row| frame_row_history_id(frame, *row).is_some_and(|id| id <= end))
                 .last()
                 .unwrap_or(first_row);
@@ -4995,7 +5009,7 @@ impl DualPlaneSession {
                 continue;
             };
             let end = record.block_end.unwrap_or(*start);
-            let last_row = (first_row..frame.rows.get())
+            let last_row = (first_row..drawable_frame_row_count(frame))
                 .take_while(|row| frame_row_history_id(frame, *row).is_some_and(|id| id <= end))
                 .last()
                 .unwrap_or(first_row);
@@ -5063,7 +5077,7 @@ impl DualPlaneSession {
         }) {
             match placement.anchor {
                 MathBlockAnchor::History { start, end } => {
-                    rendered_rows.extend((0..frame.rows.get()).filter(|row| {
+                    rendered_rows.extend((0..drawable_frame_row_count(frame)).filter(|row| {
                         frame_row_history_id(frame, *row).is_some_and(|id| start <= id && id <= end)
                     }));
                 }
@@ -8521,8 +8535,12 @@ fn frame_row_history_id(frame: &ViewportFrame, row: u32) -> Option<TranscriptId>
     }
 }
 
+fn drawable_frame_row_count(frame: &ViewportFrame) -> u32 {
+    u32::try_from(frame.drawable_rows()).unwrap_or(u32::MAX)
+}
+
 fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32> {
-    (0..frame.rows.get()).find(|row| frame_row_history_id(frame, *row) == Some(id))
+    (0..drawable_frame_row_count(frame)).find(|row| frame_row_history_id(frame, *row) == Some(id))
 }
 
 fn frozen_inline_cells(
@@ -8545,7 +8563,12 @@ fn frozen_inline_cells(
         let end =
             u32::try_from(line.grapheme_boundaries.binary_search(&run.byte_end).ok()?).ok()?;
         let mut found = false;
-        for (index, anchors) in frame.cell_anchors.iter().enumerate() {
+        for (index, anchors) in frame
+            .cell_anchors
+            .iter()
+            .take(frame.drawable_rows().saturating_mul(columns))
+            .enumerate()
+        {
             let ContentAnchor::History {
                 id: anchor_id,
                 offset,
@@ -8611,7 +8634,7 @@ fn frame_row_for_live_range(
     start: u32,
     end: u32,
 ) -> Option<(u32, u32)> {
-    (0..frame.rows.get()).find_map(|frame_row| {
+    (0..drawable_frame_row_count(frame)).find_map(|frame_row| {
         let index = frame_row as usize * frame.columns.get() as usize;
         match &frame.cell_anchors.get(index)?.start {
             ContentAnchor::Live {
@@ -9003,6 +9026,7 @@ mod tests {
         let visible_ids = stopped
             .cell_anchors
             .chunks(stopped.columns.get() as usize)
+            .take(stopped.drawable_rows())
             .filter_map(|row| match &row.first()?.start {
                 ContentAnchor::History { id, .. } => Some(*id),
                 _ => None,
@@ -12242,7 +12266,7 @@ mod tests {
             frame.status_text, None,
             "an expand-only short formula has neither top overflow nor synthetic top slack"
         );
-        let last = frame.row_map.last().unwrap();
+        let last = &frame.row_map[frame.grid_rows.get() as usize - 1];
         assert_eq!(
             last.top_subpixels.saturating_add(last.height_subpixels),
             13 * SPIKE_CELL_HEIGHT_SUBPIXELS.get(),
@@ -13038,8 +13062,11 @@ mod tests {
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
 
-        assert_eq!((frame.columns.get(), frame.rows.get()), (4, 2));
-        assert_eq!(frame.cells.len(), 8);
+        assert_eq!(
+            (frame.columns.get(), frame.grid_rows.get(), frame.rows.get()),
+            (4, 2, 3)
+        );
+        assert_eq!(frame.cells.len(), 12);
         assert_eq!(frame.cells[0].text, "A");
         assert_eq!(frame.cells[0].style.foreground, TerminalColor::Named(1));
         assert_eq!((frame.cursor.row, frame.cursor.column), (0, 1));
