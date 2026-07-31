@@ -7,6 +7,16 @@ if ($Global:__BetterTerminalShellIntegration -and
     return
 }
 
+# Hyperlink capability declaration, honest and scoped: BetterTerminal renders OSC 8, but
+# identity-allowlisted CLIs (Claude Code 2.1.220 keys on WT_SESSION / TERM_PROGRAM=iTerm.app)
+# downgrade links for unknown terminals. FORCE_HYPERLINK is their documented capability override,
+# so declare it — only inside BetterTerminal sessions, and never clobber a user's explicit choice.
+# Known trade-off: supports-hyperlinks-family CLIs honor this even with redirected output, so a
+# command piping to a file may carry OSC 8 bytes; revisit as a setting when the settings slice lands.
+if ($env:TERM_PROGRAM -eq 'BetterTerminal' -and -not (Test-Path env:FORCE_HYPERLINK)) {
+    $env:FORCE_HYPERLINK = '1'
+}
+
 # PSConsoleHostReadLine is the supported console-host extension point. Importing PSReadLine here
 # makes its original entry point available on both supported PowerShell generations.
 Import-Module PSReadLine -ErrorAction SilentlyContinue
