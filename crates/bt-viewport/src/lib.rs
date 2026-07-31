@@ -276,8 +276,8 @@ pub struct ViewportFrame {
     pub grid_rows: NonZeroU32,
     /// Number of rectangular presentation rows, including bottom overscan.
     pub rows: NonZeroU32,
-    /// Exact intra-row presentation offset. Phase A publishes zero; the signed row-map tops carry
-    /// the resulting geometry so a later phase can expose a partially visible first row.
+    /// Exact intra-row presentation offset. The first row's signed top is its negation; a nonzero
+    /// value exposes the bottom overscan suffix while preserving one rectangular row payload.
     pub presentation_offset_subpixels: i64,
     pub cells: Vec<CapturedCell>,
     pub cursor: GridCursor,
@@ -294,10 +294,9 @@ pub struct ViewportFrame {
 }
 
 impl ViewportFrame {
-    /// Presentation rows that may contribute pixels or input hits for this frame. Phase A keeps
-    /// the exact offset at zero, so the bottom overscan suffix is present in the rectangle but
-    /// deliberately not drawable. Later pixel-scroll stages can expose that suffix without
-    /// changing the rectangular payload contract.
+    /// Presentation rows that may contribute pixels or input hits for this frame. An aligned frame
+    /// keeps the bottom overscan suffix hidden; an exact offset makes the complete presentation
+    /// list drawable while the pane clip limits actual coverage.
     pub fn drawable_rows(&self) -> usize {
         if self.presentation_offset_subpixels == 0 {
             self.grid_rows.get() as usize
@@ -453,11 +452,13 @@ impl ViewportFrame {
     }
 
     pub fn visual_row_at(&self, y_subpixels: i64) -> Option<u32> {
+        if y_subpixels < 0 {
+            return None;
+        }
         self.row_map
             .iter()
-            // Phase A carries the bottom overscan contract but publishes no pixel offset, so the
-            // overscan suffix is not hit-testable. This remains the frame-owned row map; no grid
-            // geometry is reconstructed here.
+            // The aligned contract keeps overscan non-hit-testable. With an exact offset the same
+            // frame-owned row map exposes any overscan pixels that entered the pane.
             .take(self.drawable_rows())
             .position(|row| {
                 row.top_subpixels <= y_subpixels
@@ -822,31 +823,6 @@ fn distributed_row_heights(total_height_subpixels: i64, rows: usize) -> Vec<i64>
         .collect()
 }
 
-fn continuous_row_top_subpixels(
-    row: usize,
-    live_base: usize,
-    live_row_prefix: &[i64],
-    cell_height_subpixels: i64,
-) -> i64 {
-    let fixed_rows = row.min(live_base);
-    let fixed_height = i64::try_from(fixed_rows)
-        .unwrap_or(i64::MAX)
-        .saturating_mul(cell_height_subpixels);
-    if row <= live_base {
-        return fixed_height;
-    }
-    let live_row = row.saturating_sub(live_base);
-    let live_height = live_row_prefix.get(live_row).copied().unwrap_or_else(|| {
-        let known_rows = live_row_prefix.len().saturating_sub(1);
-        live_row_prefix.last().copied().unwrap_or(0).saturating_add(
-            i64::try_from(live_row.saturating_sub(known_rows))
-                .unwrap_or(i64::MAX)
-                .saturating_mul(cell_height_subpixels),
-        )
-    });
-    fixed_height.saturating_add(live_height)
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrameProjectionError {
     RowCount {
@@ -932,20 +908,20 @@ pub struct ViewportProjection {
     source_generation: SourceGeneration,
     grid_generation: GridGeneration,
     cache_misses: u64,
-    scroll_offset_rows: usize,
-    pending_scroll_offset_rows: Option<usize>,
+    scroll_offset_subpixels: i64,
+    pending_scroll_offset_subpixels: Option<i64>,
     /// A review offset preserved across an application transcript rewrite. Codex-style TUIs
     /// reflow by clearing scrollback (ED3) and reprinting equivalent content; the anchored row
     /// the user was reading dies with the clear, but their review displacement is still
     /// meaningful, so it is re-established by row count as history refills instead of snapping
     /// the view to the bottom. Any explicit scroll action supersedes it.
-    displaced_review_rows: Option<usize>,
+    displaced_review_subpixels: Option<i64>,
     /// Whether a resize transaction is currently open, pushed in by the session each frame. It is
     /// the deterministic signal that a vanished review anchor is a resize-driven reflow (Codex
     /// clears scrollback then reprints) rather than a user-initiated clear, which gates the
     /// presentation-layer frame hold below.
     resize_reflow_active: bool,
-    /// True while the preserved `displaced_review_rows` was created by a resize reflow and has not
+    /// True while the preserved `displaced_review_subpixels` was created by a resize reflow and has not
     /// yet been re-anchored: during this window history is transiently empty, so the projection can
     /// only fall to the live bottom. Presentation reads this to hold the last frame instead of
     /// flashing to the bottom. It clears deterministically — when the displacement re-anchors, or
@@ -956,10 +932,11 @@ pub struct ViewportProjection {
     /// position, so presentation holds its previous complete frame until the session re-anchors or
     /// deterministically retires that record.
     exact_source_reprint_hold: bool,
-    live_overflow_offset_rows: usize,
-    last_live_overflow_rows: usize,
+    live_overflow_offset_subpixels: i64,
+    last_live_overflow_subpixels: i64,
     unread_rows: usize,
     last_total_rows: usize,
+    last_total_height_subpixels: i64,
     /// Resize/reflow changes visual row counts without appending terminal content.
     suppress_next_growth_compensation: bool,
     projection_dirty: bool,
@@ -997,16 +974,17 @@ impl ViewportProjection {
             source_generation,
             grid_generation,
             cache_misses: 0,
-            scroll_offset_rows: 0,
-            pending_scroll_offset_rows: None,
-            displaced_review_rows: None,
+            scroll_offset_subpixels: 0,
+            pending_scroll_offset_subpixels: None,
+            displaced_review_subpixels: None,
             resize_reflow_active: false,
             review_hold: false,
             exact_source_reprint_hold: false,
-            live_overflow_offset_rows: 0,
-            last_live_overflow_rows: 0,
+            live_overflow_offset_subpixels: 0,
+            last_live_overflow_subpixels: 0,
             unread_rows: 0,
             last_total_rows: 0,
+            last_total_height_subpixels: 0,
             suppress_next_growth_compensation: false,
             projection_dirty: true,
         }
@@ -1044,9 +1022,18 @@ impl ViewportProjection {
     }
 
     pub fn scroll_offset_rows(&self) -> usize {
-        self.pending_scroll_offset_rows
-            .unwrap_or(self.scroll_offset_rows)
-            .saturating_add(self.live_overflow_offset_rows)
+        usize::try_from(
+            self.pending_scroll_offset_subpixels
+                .unwrap_or(self.scroll_offset_subpixels)
+                .max(0)
+                .div_euclid(self.cell_height_subpixels.get()),
+        )
+        .unwrap_or(usize::MAX)
+    }
+
+    pub fn scroll_offset_subpixels(&self) -> i64 {
+        self.pending_scroll_offset_subpixels
+            .unwrap_or(self.scroll_offset_subpixels)
     }
 
     pub fn unread_rows(&self) -> usize {
@@ -1058,16 +1045,25 @@ impl ViewportProjection {
     pub fn debug_scroll_extent(&self) -> (usize, usize, usize, usize, usize) {
         (
             self.last_total_rows,
-            self.pending_scroll_offset_rows
-                .unwrap_or(self.scroll_offset_rows),
-            self.last_live_overflow_rows,
-            self.live_overflow_offset_rows,
+            self.scroll_offset_rows(),
+            usize::try_from(
+                self.last_live_overflow_subpixels
+                    .max(0)
+                    .div_euclid(self.cell_height_subpixels.get()),
+            )
+            .unwrap_or(usize::MAX),
+            usize::try_from(
+                self.live_overflow_offset_subpixels
+                    .max(0)
+                    .div_euclid(self.cell_height_subpixels.get()),
+            )
+            .unwrap_or(usize::MAX),
             self.unread_rows,
         )
     }
 
     pub fn is_scrolled(&self) -> bool {
-        self.scroll_offset_rows() != 0
+        self.scroll_offset_subpixels() != 0
     }
 
     /// Tell the projection whether a resize transaction is currently open. The session pushes this
@@ -1123,49 +1119,46 @@ impl ViewportProjection {
 
     /// Positive rows move into history; negative rows move toward the live bottom.
     pub fn scroll_by_rows(&mut self, rows: i32) {
+        self.scroll_by_subpixels(i64::from(rows).saturating_mul(self.cell_height_subpixels.get()));
+    }
+
+    /// Positive subpixels move into history; negative subpixels move toward the live bottom.
+    pub fn scroll_by_subpixels(&mut self, subpixels: i64) {
         // An explicit scroll is the user taking over: any preserved review displacement from an
         // application transcript rewrite is superseded.
-        self.displaced_review_rows = None;
+        self.displaced_review_subpixels = None;
+        self.review_hold = false;
+        let pane_height =
+            i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get());
         let max = self
-            .last_total_rows
-            .saturating_sub(self.live_rows.get() as usize);
-        let mut history = self
-            .pending_scroll_offset_rows
-            .unwrap_or(self.scroll_offset_rows);
-        if rows >= 0 {
-            let requested = rows as usize;
-            let local_capacity = self
-                .last_live_overflow_rows
-                .saturating_sub(self.live_overflow_offset_rows);
-            let local = requested.min(local_capacity);
-            self.live_overflow_offset_rows = self.live_overflow_offset_rows.saturating_add(local);
-            history = history
-                .saturating_add(requested.saturating_sub(local))
-                .min(max);
-        } else {
-            let requested = rows.unsigned_abs() as usize;
-            let history_delta = requested.min(history);
-            history = history.saturating_sub(history_delta);
-            self.live_overflow_offset_rows = self
-                .live_overflow_offset_rows
-                .saturating_sub(requested.saturating_sub(history_delta));
-        }
-        self.pending_scroll_offset_rows = Some(history);
-        if history == 0 {
+            .last_total_height_subpixels
+            .saturating_sub(pane_height)
+            .max(0);
+        let offset = self
+            .pending_scroll_offset_subpixels
+            .unwrap_or(self.scroll_offset_subpixels)
+            .saturating_add(subpixels)
+            .clamp(0, max);
+        self.pending_scroll_offset_subpixels = Some(offset);
+        self.live_overflow_offset_subpixels = offset.min(self.last_live_overflow_subpixels);
+        if offset == 0 {
             self.scroll_state = ViewportScrollState::Bottom;
-            self.scroll_offset_rows = 0;
+            self.scroll_offset_subpixels = 0;
             self.unread_rows = 0;
         }
         self.view_generation.0 += 1;
     }
 
     pub fn scroll_to_top(&mut self) {
-        self.displaced_review_rows = None;
+        self.displaced_review_subpixels = None;
+        let pane_height =
+            i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get());
         let offset = self
-            .last_total_rows
-            .saturating_sub(self.live_rows.get() as usize);
-        self.live_overflow_offset_rows = self.last_live_overflow_rows;
-        self.pending_scroll_offset_rows = Some(offset);
+            .last_total_height_subpixels
+            .saturating_sub(pane_height)
+            .max(0);
+        self.live_overflow_offset_subpixels = self.last_live_overflow_subpixels;
+        self.pending_scroll_offset_subpixels = Some(offset);
         if offset == 0 {
             self.scroll_state = ViewportScrollState::Bottom;
         }
@@ -1173,15 +1166,15 @@ impl ViewportProjection {
     }
 
     pub fn scroll_to_bottom(&mut self) {
-        self.displaced_review_rows = None;
+        self.displaced_review_subpixels = None;
         if self.is_scrolled()
             || !matches!(self.scroll_state, ViewportScrollState::Bottom)
             || self.unread_rows != 0
         {
             self.scroll_state = ViewportScrollState::Bottom;
-            self.scroll_offset_rows = 0;
-            self.pending_scroll_offset_rows = None;
-            self.live_overflow_offset_rows = 0;
+            self.scroll_offset_subpixels = 0;
+            self.pending_scroll_offset_subpixels = None;
+            self.live_overflow_offset_subpixels = 0;
             self.unread_rows = 0;
             self.view_generation.0 += 1;
         }
@@ -1338,16 +1331,10 @@ impl ViewportProjection {
             i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get());
         let live_height_delta = live_height.saturating_sub(rectangular_live_height);
         let live_extra_height = live_height_delta.max(0);
-        let live_rows_above = usize::try_from(
-            live_extra_height
-                .saturating_add(self.cell_height_subpixels.get() - 1)
-                .div_euclid(self.cell_height_subpixels.get()),
-        )
-        .unwrap_or(usize::MAX);
-        self.last_live_overflow_rows = live_rows_above;
-        self.live_overflow_offset_rows = self
-            .live_overflow_offset_rows
-            .min(self.last_live_overflow_rows);
+        self.last_live_overflow_subpixels = live_extra_height;
+        self.live_overflow_offset_subpixels = self
+            .live_overflow_offset_subpixels
+            .min(self.last_live_overflow_subpixels);
         let history_rows = if primary {
             usize::try_from(self.visual_row_heights.total())
                 .expect("visual row height totals are non-negative")
@@ -1367,70 +1354,85 @@ impl ViewportProjection {
         }
         self.suppress_next_growth_compensation = false;
         self.last_total_rows = total_rows;
-        let max_offset = total_rows.saturating_sub(expected_rows);
-        let bottom_start = max_offset;
+        let history_height = if primary { self.heights.total() } else { 0 };
+        let staging_height = i64::try_from(staging_rows)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(self.cell_height_subpixels.get());
+        let total_height = history_height
+            .saturating_add(staging_height)
+            .saturating_add(live_height);
+        self.last_total_height_subpixels = total_height;
+        let pane_height = rectangular_live_height;
+        let bottom_top_subpixels = total_height.saturating_sub(pane_height).max(0);
         if !primary {
             self.scroll_state = ViewportScrollState::Bottom;
-            self.pending_scroll_offset_rows = None;
-            self.scroll_offset_rows = 0;
-            if self.live_overflow_offset_rows == 0 {
-                self.unread_rows = 0;
-            }
-        } else if let Some(requested_offset) = self.pending_scroll_offset_rows.take() {
-            let offset = requested_offset.min(max_offset);
-            if offset == 0 {
-                self.scroll_state = ViewportScrollState::Bottom;
-            } else {
-                let target_row = bottom_start.saturating_sub(offset);
-                self.scroll_state = self
-                    .scroll_anchor_at_absolute_row(
+            if let Some(requested) = self.pending_scroll_offset_subpixels.take() {
+                let offset = requested.clamp(0, bottom_top_subpixels);
+                if offset != 0
+                    && let Some(anchor) = self.scroll_anchor_at_absolute_subpixel(
                         document,
                         staged_rows,
                         history_rows,
-                        target_row,
+                        bottom_top_subpixels.saturating_sub(offset),
+                        screen,
+                    )
+                {
+                    self.scroll_state = ViewportScrollState::Anchored(anchor);
+                }
+            }
+            if self.live_overflow_offset_subpixels == 0 {
+                self.unread_rows = 0;
+            }
+        } else if let Some(requested_offset) = self.pending_scroll_offset_subpixels.take() {
+            let offset = requested_offset.clamp(0, bottom_top_subpixels);
+            if offset == 0 {
+                self.scroll_state = ViewportScrollState::Bottom;
+            } else {
+                self.scroll_state = self
+                    .scroll_anchor_at_absolute_subpixel(
+                        document,
+                        staged_rows,
+                        history_rows,
+                        bottom_top_subpixels.saturating_sub(offset),
                         screen,
                     )
                     .map_or(ViewportScrollState::Bottom, ViewportScrollState::Anchored);
             }
-        } else if let Some(displaced) = self.displaced_review_rows {
+        } else if let Some(displaced) = self.displaced_review_subpixels {
             // Re-establish a review displacement preserved across an application transcript
             // rewrite: as the reprint refills history the offset deepens frame by frame, and the
             // preservation completes once the full displacement (or the new maximum) is reachable.
-            let offset = displaced.min(max_offset);
-            if offset != 0 {
-                let target_row = bottom_start.saturating_sub(offset);
-                if let Some(anchor) = self.scroll_anchor_at_absolute_row(
+            let offset = displaced.min(bottom_top_subpixels);
+            if offset != 0
+                && let Some(anchor) = self.scroll_anchor_at_absolute_subpixel(
                     document,
                     staged_rows,
                     history_rows,
-                    target_row,
+                    bottom_top_subpixels.saturating_sub(offset),
                     screen,
-                ) {
-                    self.scroll_state = ViewportScrollState::Anchored(anchor);
-                    if offset == displaced {
-                        self.displaced_review_rows = None;
-                    }
+                )
+            {
+                self.scroll_state = ViewportScrollState::Anchored(anchor);
+                if offset == displaced {
+                    self.displaced_review_subpixels = None;
                 }
             }
         }
 
-        let mut window_start = bottom_start;
+        let mut window_top_subpixels = bottom_top_subpixels;
         if let ViewportScrollState::Anchored(mut anchor) = self.scroll_state.clone() {
             anchor.source = document.resolve_anchor(&anchor.source);
-            if let Some(anchor_row) = self.absolute_row_for_anchor(
+            if let Some(anchor_y) = self.absolute_subpixel_for_anchor(
                 document,
                 staged_rows,
-                history_rows,
+                history_height,
                 &anchor.source,
                 screen,
             ) {
-                let local_rows = anchor
-                    .local_offset
-                    .max(0)
-                    .div_euclid(self.cell_height_subpixels.get())
-                    as usize;
-                window_start = anchor_row.saturating_add(local_rows).min(bottom_start);
-                if window_start < bottom_start {
+                window_top_subpixels = anchor_y
+                    .saturating_add(anchor.local_offset)
+                    .clamp(0, bottom_top_subpixels);
+                if window_top_subpixels < bottom_top_subpixels {
                     self.scroll_state = ViewportScrollState::Anchored(anchor);
                 } else {
                     self.scroll_state = ViewportScrollState::Bottom;
@@ -1440,31 +1442,69 @@ impl ViewportProjection {
                 // scrollback before reprinting equivalent content. Preserve the displacement so
                 // the refilled history restores the reading position instead of jumping to the
                 // bottom; a review already being restored keeps its original target.
-                if self.scroll_offset_rows != 0 {
-                    self.displaced_review_rows = Some(
-                        self.displaced_review_rows
-                            .map_or(self.scroll_offset_rows, |kept| {
-                                kept.max(self.scroll_offset_rows)
+                if self.scroll_offset_subpixels != 0 {
+                    self.displaced_review_subpixels = Some(
+                        self.displaced_review_subpixels
+                            .map_or(self.scroll_offset_subpixels, |kept| {
+                                kept.max(self.scroll_offset_subpixels)
                             }),
                     );
                 }
                 self.scroll_state = ViewportScrollState::Bottom;
             }
         }
-        self.scroll_offset_rows = bottom_start.saturating_sub(window_start);
+        self.scroll_offset_subpixels = bottom_top_subpixels.saturating_sub(window_top_subpixels);
+        self.live_overflow_offset_subpixels = self
+            .scroll_offset_subpixels
+            .min(self.last_live_overflow_subpixels);
         if matches!(self.scroll_state, ViewportScrollState::Bottom) {
-            window_start = bottom_start;
-            self.scroll_offset_rows = 0;
+            window_top_subpixels = bottom_top_subpixels;
+            self.scroll_offset_subpixels = 0;
+            self.live_overflow_offset_subpixels = 0;
             self.unread_rows = 0;
         }
         // A resize reflow that cleared the history under an anchored reviewer leaves the view at the
         // live bottom while the reprint refills. Signal presentation to hold the last frame across
         // that transient window instead of flashing to the bottom. This is intrinsically bounded by
         // the displacement state: it turns off the frame the displacement re-anchors (`else if`
-        // branch above clears `displaced_review_rows`) or an explicit scroll/input supersedes it,
+        // branch above clears `displaced_review_subpixels`) or an explicit scroll/input supersedes it,
         // and it never engages for a user-initiated clear because no resize transaction is open.
         self.review_hold =
-            primary && self.resize_reflow_active && self.displaced_review_rows.is_some();
+            primary && self.resize_reflow_active && self.displaced_review_subpixels.is_some();
+        let bottom_identity = matches!(self.scroll_state, ViewportScrollState::Bottom);
+        let live_plane_top_subpixels = history_height.saturating_add(staging_height);
+        let (mut window_start, mut first_row_top_subpixels) = if bottom_identity {
+            // Replays never scroll. Preserve their Phase-A row-model identity exactly: fractional
+            // history artifact height must not make `total_height - pane_height` select the
+            // preceding history row and leak a partial-first-row offset into a Bottom frame.
+            (
+                total_rows.saturating_sub(expected_rows),
+                live_plane_top_subpixels,
+            )
+        } else {
+            self.absolute_row_at_subpixel(
+                document,
+                staged_rows,
+                history_rows,
+                history_height,
+                window_top_subpixels,
+                screen,
+            )
+            .unwrap_or((0, 0))
+        };
+        if !bottom_identity && window_top_subpixels >= live_plane_top_subpixels {
+            // A free-height live artifact can push more than one source row above the pane while
+            // its raster still intersects the visible region. Keep the complete live row list so
+            // band placement, cell suppression and the fixed last row share one geometry. Exact
+            // local review changes only this list's pixel offset until history/staging is reached.
+            window_start = history_rows.saturating_add(staging_rows);
+            first_row_top_subpixels = live_plane_top_subpixels;
+        }
+        let presentation_offset_subpixels = if bottom_identity {
+            0
+        } else {
+            window_top_subpixels.saturating_sub(first_row_top_subpixels)
+        };
         let live_base = history_rows + staging_rows;
         let visible_window_end = (window_start + expected_rows).min(total_rows);
         let window_end = (window_start + presentation_rows).min(total_rows);
@@ -1481,39 +1521,22 @@ impl ViewportProjection {
             .take_while(|row| captured_row_is_blank(row))
             .count();
         let content_rows_below = self
-            .scroll_offset_rows
+            .scroll_offset_rows()
             .saturating_sub(blank_live_rows_below);
-        // A primary history anchor is already reviewing the continuous document above live. If a
-        // live raster arrives while that anchor is installed, its new tail height must not move
-        // the anchored pixels. Bottom/alternate views instead consume the projection-local live
-        // overflow explicitly before entering primary history.
-        let reviewed_live_height = if matches!(self.scroll_state, ViewportScrollState::Anchored(_))
-        {
-            live_extra_height
-        } else {
-            i64::try_from(self.live_overflow_offset_rows)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(self.cell_height_subpixels.get())
-                .min(live_extra_height)
-        };
         debug_assert!(primary || live_height_delta >= 0);
-        let frame_top_subpixels = reviewed_live_height.saturating_sub(live_extra_height);
+        let frame_top_subpixels = if bottom_identity {
+            live_extra_height.saturating_neg()
+        } else {
+            presentation_offset_subpixels.saturating_neg()
+        };
         let rows_above = usize::try_from(
-            frame_top_subpixels
-                .saturating_neg()
-                // Bottom-anchoring leaves positive top slack (blank), not hidden rows: its negated
-                // value is below zero and must read as zero rows above, never wrap to usize::MAX.
-                .max(0)
+            self.last_live_overflow_subpixels
+                .saturating_sub(self.live_overflow_offset_subpixels)
                 .saturating_add(self.cell_height_subpixels.get() - 1)
                 .div_euclid(self.cell_height_subpixels.get()),
         )
         .unwrap_or(usize::MAX);
-        let window_top_subpixels = continuous_row_top_subpixels(
-            window_start,
-            live_base,
-            &self.live_row_prefix,
-            self.cell_height_subpixels.get(),
-        );
+        let window_row_top_subpixels = first_row_top_subpixels;
         let mut presented = Vec::with_capacity(presentation_rows);
         let mut math_blocks = Vec::new();
 
@@ -1827,15 +1850,11 @@ impl ViewportProjection {
                 debug_assert!(artifact.render_scale_milli >= 1);
                 let (top_subpixels, clip_height_subpixels, content_offset_subpixels, frozen_rows) =
                     if matches!(artifact.kind, RgbaArtifactKind::LocalImagePath { .. }) {
-                        let absolute_start = live_base.saturating_add(block_last);
                         let row_top = frame_top_subpixels.saturating_add(
-                            continuous_row_top_subpixels(
-                                absolute_start,
-                                live_base,
-                                &self.live_row_prefix,
-                                cell_height,
-                            )
-                            .saturating_sub(window_top_subpixels),
+                            history_height
+                                .saturating_add(staging_height)
+                                .saturating_add(self.live_row_prefix[block_last])
+                                .saturating_sub(window_row_top_subpixels),
                         );
                         let offset = path_image_offsets
                             .entry(live_math.band_end_row)
@@ -1912,15 +1931,11 @@ impl ViewportProjection {
                             artifact.height_subpixels,
                             artifact.vertical_padding_subpixels,
                         );
-                        let absolute_start = live_base.saturating_add(block_first);
                         let top = frame_top_subpixels.saturating_add(
-                            continuous_row_top_subpixels(
-                                absolute_start,
-                                live_base,
-                                &self.live_row_prefix,
-                                cell_height,
-                            )
-                            .saturating_sub(window_top_subpixels),
+                            history_height
+                                .saturating_add(staging_height)
+                                .saturating_add(self.live_row_prefix[block_first])
+                                .saturating_sub(window_row_top_subpixels),
                         );
                         (top, band_height, content_offset, 0)
                     };
@@ -2076,16 +2091,28 @@ impl ViewportProjection {
         let selection_spans = self
             .selection
             .as_ref()
-            // Phase A's exact presentation offset is zero, so selection geometry is materialized
-            // only for the drawable prefix. It still indexes the same presentation-row anchors
-            // and is rendered only through the matching frame row-map entry.
-            .map(|selection| selection_spans(&cell_anchors, column_count, expected_rows, selection))
+            .map(|selection| {
+                selection_spans(
+                    &cell_anchors,
+                    column_count,
+                    if presentation_offset_subpixels == 0 {
+                        expected_rows
+                    } else {
+                        presentation_rows
+                    },
+                    selection,
+                )
+            })
             .transpose()?
             .unwrap_or_default();
         let projected_cursor_row = row_map
             .iter()
             .position(|row| row.live_grid_row == Some(cursor.row))
-            .filter(|row| *row < expected_rows)
+            .filter(|row| {
+                let mapped = row_map[*row];
+                mapped.top_subpixels < pane_height
+                    && mapped.top_subpixels.saturating_add(mapped.height_subpixels) > 0
+            })
             .and_then(|row| u32::try_from(row).ok());
         let cursor_hidden_by_math = math_blocks.iter().any(|placement| {
             matches!(
@@ -2111,7 +2138,7 @@ impl ViewportProjection {
             columns,
             grid_rows: self.live_rows,
             rows: presentation_row_count,
-            presentation_offset_subpixels: 0,
+            presentation_offset_subpixels,
             cells,
             cursor: GridCursor {
                 row: projected_cursor_row.unwrap_or(cursor.row),
@@ -2132,27 +2159,28 @@ impl ViewportProjection {
                     // override, so the indicator itself must teach that affordance.
                     Some(format!("{rows_above} rows above · Shift+wheel"))
                 }
+            } else if !primary && self.scroll_offset_subpixels != 0 {
+                Some(format!("{} rows below", self.scroll_offset_rows()))
             } else if content_rows_below != 0 {
                 Some(format!("{content_rows_below} lines below"))
-            } else if self.live_overflow_offset_rows != 0 {
-                Some(format!("{} rows below", self.live_overflow_offset_rows))
+            } else if self.live_overflow_offset_subpixels != 0 {
+                Some(format!("{} rows below", self.scroll_offset_rows()))
             } else {
                 None
             },
-            viewport_origin: match &self.scroll_state {
-                ViewportScrollState::Bottom if self.live_overflow_offset_rows == 0 => {
+            viewport_origin: match (&self.scroll_state, primary) {
+                (ViewportScrollState::Bottom, _) if self.scroll_offset_subpixels == 0 => {
                     FrameViewportOrigin::Bottom
                 }
-                ViewportScrollState::Bottom => FrameViewportOrigin::LiveOverflow {
-                    rows_below: self.live_overflow_offset_rows,
+                (_, false) => FrameViewportOrigin::LiveOverflow {
+                    rows_below: self.scroll_offset_rows(),
                 },
-                ViewportScrollState::Anchored(anchor) => {
+                (ViewportScrollState::Bottom, true) => FrameViewportOrigin::Bottom,
+                (ViewportScrollState::Anchored(anchor), true) => {
                     FrameViewportOrigin::Anchored(anchor.clone())
                 }
             },
-            scroll_offset_rows: self
-                .scroll_offset_rows
-                .saturating_add(self.live_overflow_offset_rows),
+            scroll_offset_rows: self.scroll_offset_rows(),
             layout_key: self.layout_key,
             view_generation: self.view_generation,
         };
@@ -2162,56 +2190,214 @@ impl ViewportProjection {
         Ok(frame)
     }
 
-    fn scroll_anchor_at_absolute_row(
+    fn history_row_heights(&self, document: &HistoryDocument, index: usize) -> Option<Vec<i64>> {
+        let id = *self.ordered_ids.get(index)?;
+        if let Some(artifact) = self.math_artifacts.get(&id) {
+            return Some(distributed_row_heights(
+                artifact.height_subpixels,
+                self.visual_rows[index],
+            ));
+        }
+        let entry = document.entries().get(&id)?;
+        let source_rows =
+            layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize).len();
+        let mut heights = vec![self.cell_height_subpixels.get(); source_rows];
+        for artifact in self.inline_path_artifacts.get(&id).into_iter().flatten() {
+            let rows = usize::try_from(
+                artifact
+                    .height_subpixels
+                    .max(1)
+                    .saturating_add(self.cell_height_subpixels.get() - 1)
+                    .div_euclid(self.cell_height_subpixels.get()),
+            )
+            .unwrap_or(usize::MAX);
+            heights.extend(distributed_row_heights(artifact.height_subpixels, rows));
+        }
+        Some(heights)
+    }
+
+    fn absolute_row_at_subpixel(
         &self,
         document: &HistoryDocument,
         staged_rows: &[StagedRow],
         history_rows: usize,
-        absolute_row: usize,
+        history_height: i64,
+        absolute_y: i64,
+        screen: ScreenId,
+    ) -> Option<(usize, i64)> {
+        if screen == ScreenId::Primary && absolute_y < history_height {
+            let index = self.heights.index_at_offset(absolute_y)?;
+            let line_top = self.heights.prefix_sum(index);
+            let local_y = absolute_y.saturating_sub(line_top);
+            let heights = self.history_row_heights(document, index)?;
+            let mut local_top = 0_i64;
+            let local_row = heights.iter().position(|height| {
+                let contains = local_y < local_top.saturating_add(*height);
+                if !contains {
+                    local_top = local_top.saturating_add(*height);
+                }
+                contains
+            })?;
+            let absolute_row = usize::try_from(self.visual_row_heights.prefix_sum(index))
+                .ok()?
+                .saturating_add(local_row);
+            return Some((absolute_row, line_top.saturating_add(local_top)));
+        }
+
+        let staging_height = if screen == ScreenId::Primary {
+            i64::try_from(staged_rows.len())
+                .unwrap_or(i64::MAX)
+                .saturating_mul(self.cell_height_subpixels.get())
+        } else {
+            0
+        };
+        let staging_top = history_height;
+        if screen == ScreenId::Primary && absolute_y < staging_top.saturating_add(staging_height) {
+            let local = absolute_y.saturating_sub(staging_top);
+            let row = usize::try_from(local.div_euclid(self.cell_height_subpixels.get())).ok()?;
+            let row_top = staging_top.saturating_add(
+                i64::try_from(row)
+                    .unwrap_or(i64::MAX)
+                    .saturating_mul(self.cell_height_subpixels.get()),
+            );
+            return Some((history_rows.saturating_add(row), row_top));
+        }
+
+        let live_top = staging_top.saturating_add(staging_height);
+        let local = absolute_y.saturating_sub(live_top);
+        if local < 0 || local >= self.live_row_prefix.last().copied().unwrap_or(0) {
+            return None;
+        }
+        let live_row = self
+            .live_row_prefix
+            .partition_point(|prefix| *prefix <= local)
+            .saturating_sub(1)
+            .min(self.live_rows.get().saturating_sub(1) as usize);
+        let row = if screen == ScreenId::Primary {
+            history_rows
+                .saturating_add(staged_rows.len())
+                .saturating_add(live_row)
+        } else {
+            live_row
+        };
+        Some((row, live_top.saturating_add(self.live_row_prefix[live_row])))
+    }
+
+    fn absolute_subpixel_for_anchor(
+        &self,
+        document: &HistoryDocument,
+        staged_rows: &[StagedRow],
+        history_height: i64,
+        anchor: &ContentAnchor,
+        screen: ScreenId,
+    ) -> Option<i64> {
+        match anchor {
+            ContentAnchor::History { .. } if screen == ScreenId::Primary => {
+                self.anchor_y(document, anchor).ok()
+            }
+            ContentAnchor::Staging { id, generation, .. }
+                if screen == ScreenId::Primary && *generation == self.source_generation =>
+            {
+                let row = staged_rows.iter().position(|staged| staged.id == *id)?;
+                Some(
+                    history_height.saturating_add(
+                        i64::try_from(row)
+                            .unwrap_or(i64::MAX)
+                            .saturating_mul(self.cell_height_subpixels.get()),
+                    ),
+                )
+            }
+            ContentAnchor::Live {
+                screen: anchor_screen,
+                point,
+                generation,
+                ..
+            } if *anchor_screen == screen
+                && *generation == self.grid_generation
+                && point.row < self.live_rows.get() =>
+            {
+                let staging_height = if screen == ScreenId::Primary {
+                    i64::try_from(staged_rows.len())
+                        .unwrap_or(i64::MAX)
+                        .saturating_mul(self.cell_height_subpixels.get())
+                } else {
+                    0
+                };
+                Some(
+                    history_height
+                        .saturating_add(staging_height)
+                        .saturating_add(self.live_row_prefix[point.row as usize]),
+                )
+            }
+            _ => None,
+        }
+    }
+
+    fn scroll_anchor_at_absolute_subpixel(
+        &self,
+        document: &HistoryDocument,
+        staged_rows: &[StagedRow],
+        history_rows: usize,
+        absolute_y: i64,
         screen: ScreenId,
     ) -> Option<ScrollAnchor> {
-        if absolute_row < history_rows {
-            let index = self
-                .visual_row_heights
-                .index_at_offset(absolute_row as i64)?;
-            let row_base = self.visual_row_heights.prefix_sum(index) as usize;
-            let id = self.ordered_ids.get(index)?;
-            let entry = document.entries().get(id)?;
-            let local_row = absolute_row.saturating_sub(row_base);
-            if self.math_artifacts.contains_key(id) {
+        let history_height = if screen == ScreenId::Primary {
+            self.heights.total()
+        } else {
+            0
+        };
+        let (absolute_row, row_top) = self.absolute_row_at_subpixel(
+            document,
+            staged_rows,
+            history_rows,
+            history_height,
+            absolute_y,
+            screen,
+        )?;
+        let intra_row = absolute_y.saturating_sub(row_top);
+        if screen == ScreenId::Primary && absolute_y < history_height {
+            let index = self.heights.index_at_offset(absolute_y)?;
+            let id = *self.ordered_ids.get(index)?;
+            let entry = document.entries().get(&id)?;
+            let line_top = self.heights.prefix_sum(index);
+            if self.math_artifacts.contains_key(&id) {
                 return Some(ScrollAnchor {
                     source: ContentAnchor::History {
-                        id: *id,
+                        id,
                         offset: GraphemeOffset(0),
                         bias: Bias::Before,
                         generation: entry.line.source_generation,
                     },
-                    local_offset: (local_row as i64)
-                        .saturating_mul(self.cell_height_subpixels.get()),
+                    local_offset: absolute_y.saturating_sub(line_top),
                 });
             }
             let source_rows =
                 layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize);
+            let local_row =
+                absolute_row.saturating_sub(self.visual_row_heights.prefix_sum(index) as usize);
             if let Some(row) = source_rows.get(local_row) {
                 return row.anchors.first().map(|anchor| ScrollAnchor {
                     source: anchor.start.clone(),
-                    local_offset: 0,
+                    local_offset: intra_row,
                 });
             }
-
-            let virtual_row = local_row.checked_sub(source_rows.len())?;
-            self.inline_path_artifacts.get(id)?;
             let source_end = source_rows.last()?.anchors.last()?.end.clone();
+            let source_y = self.anchor_y(document, &source_end).ok()?;
             return Some(ScrollAnchor {
                 source: source_end,
-                local_offset: i64::try_from(virtual_row.saturating_add(1))
-                    .unwrap_or(i64::MAX)
-                    .saturating_mul(self.cell_height_subpixels.get()),
+                local_offset: absolute_y.saturating_sub(source_y),
             });
         }
 
-        let staging_row = absolute_row.saturating_sub(history_rows);
-        if let Some(staged) = staged_rows.get(staging_row) {
+        let staging_base = if screen == ScreenId::Primary {
+            history_rows
+        } else {
+            0
+        };
+        let staging_row = absolute_row.saturating_sub(staging_base);
+        if screen == ScreenId::Primary
+            && let Some(staged) = staged_rows.get(staging_row)
+        {
             return Some(ScrollAnchor {
                 source: ContentAnchor::Staging {
                     id: staged.id,
@@ -2219,11 +2405,14 @@ impl ViewportProjection {
                     bias: Bias::Before,
                     generation: self.source_generation,
                 },
-                local_offset: 0,
+                local_offset: intra_row,
             });
         }
-
-        let live_row = staging_row.saturating_sub(staged_rows.len());
+        let live_row = if screen == ScreenId::Primary {
+            staging_row.saturating_sub(staged_rows.len())
+        } else {
+            absolute_row
+        };
         (live_row < self.live_rows.get() as usize).then_some(ScrollAnchor {
             source: ContentAnchor::Live {
                 screen,
@@ -2234,81 +2423,15 @@ impl ViewportProjection {
                 bias: Bias::Before,
                 generation: self.grid_generation,
             },
-            local_offset: 0,
+            local_offset: intra_row,
         })
-    }
-
-    fn absolute_row_for_anchor(
-        &self,
-        document: &HistoryDocument,
-        staged_rows: &[StagedRow],
-        history_rows: usize,
-        anchor: &ContentAnchor,
-        screen: ScreenId,
-    ) -> Option<usize> {
-        match anchor {
-            ContentAnchor::History {
-                id,
-                offset,
-                generation,
-                ..
-            } => {
-                let (index, projected_id) = self.projected_history_index(*id)?;
-                let entry = document.entries().get(id)?;
-                if *generation != entry.line.source_generation {
-                    return None;
-                }
-                if self.math_artifacts.contains_key(&projected_id) {
-                    return Some(self.visual_row_heights.prefix_sum(index) as usize);
-                }
-                let rows =
-                    layout_frozen_line(&entry.line, self.layout_key.width_cells.get() as usize);
-                let local_row = rows
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(row, visual)| {
-                        let ContentAnchor::History {
-                            offset: row_offset, ..
-                        } = &visual.anchors.first()?.start
-                        else {
-                            return None;
-                        };
-                        (row_offset.0 <= offset.0).then_some(row)
-                    })
-                    .next_back()?;
-                Some(self.visual_row_heights.prefix_sum(index) as usize + local_row)
-            }
-            ContentAnchor::Staging { id, generation, .. } => {
-                if *generation != self.source_generation {
-                    return None;
-                }
-                staged_rows
-                    .iter()
-                    .position(|staged| staged.id == *id)
-                    .map(|row| history_rows + row)
-            }
-            ContentAnchor::Live {
-                screen: anchor_screen,
-                point,
-                generation,
-                ..
-            } => {
-                if *anchor_screen != screen
-                    || *generation != self.grid_generation
-                    || point.row >= self.live_rows.get()
-                {
-                    return None;
-                }
-                Some(history_rows + staged_rows.len() + point.row as usize)
-            }
-        }
     }
 
     pub fn set_selection(&mut self, selection: Option<ViewSelection>) {
         self.selection = selection;
     }
     pub fn set_scroll_anchor(&mut self, anchor: Option<ScrollAnchor>) {
-        self.pending_scroll_offset_rows = None;
+        self.pending_scroll_offset_subpixels = None;
         self.scroll_state =
             anchor.map_or(ViewportScrollState::Bottom, ViewportScrollState::Anchored);
     }
@@ -2593,8 +2716,8 @@ impl ViewportProjection {
             self.suppress_next_growth_compensation = true;
         }
         if self.grid_generation != grid_generation {
-            self.live_overflow_offset_rows = 0;
-            self.last_live_overflow_rows = 0;
+            self.live_overflow_offset_subpixels = 0;
+            self.last_live_overflow_subpixels = 0;
         }
         self.live_rows = live_rows;
         self.source_generation = source_generation;
@@ -3240,19 +3363,74 @@ mod tests {
     #[test]
     fn offscreen_live_band_fallback_uses_the_free_height_prefix() {
         let cell = cell_height().get();
-        let prefix = [
-            0,
-            cell,
-            2 * cell + 32 * SUBPIXELS_PER_PX,
-            3 * cell + 32 * SUBPIXELS_PER_PX,
-        ];
-        let live_base = 5;
-        let live_row_two = continuous_row_top_subpixels(live_base + 2, live_base, &prefix, cell);
-        let live_origin = continuous_row_top_subpixels(live_base, live_base, &prefix, cell);
-        assert_eq!(
-            live_row_two.saturating_sub(live_origin),
-            2 * cell + 32 * SUBPIXELS_PER_PX
+        let extra = 32 * SUBPIXELS_PER_PX;
+        let mut projection = ViewportProjection::new(
+            key(4),
+            DetectionRevision(1),
+            nz32(3),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
         );
+        projection.sync_live_math_artifacts(
+            ScreenId::Alternate,
+            [ProjectedLiveMathArtifact {
+                occurrence_id: LiveMathOccurrenceId(1),
+                screen: ScreenId::Alternate,
+                start: GridPoint { row: 1, column: 0 },
+                end: GridPoint { row: 1, column: 3 },
+                band_start_row: 1,
+                band_end_row: 1,
+                clipped_top_rows: 0,
+                clipped_bottom_rows: 0,
+                occluded_source_rows: 0,
+                occluded_visible_rows: Vec::new(),
+                transition_stale: false,
+                frozen_prefix: Vec::new(),
+                staging_prefix: Vec::new(),
+                generation: GridGeneration(1),
+                artifact: ProjectedMathArtifact {
+                    key: "offscreen-prefix".to_owned(),
+                    end: TranscriptId(0),
+                    rgba: Arc::from(vec![255; 4]),
+                    width_px: 1,
+                    height_px: 1,
+                    height_subpixels: cell + extra,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: "x".to_owned(),
+                },
+            }],
+        );
+        let frame = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                vec![CapturedRow::plain("    ", false); 3],
+                GridCursor {
+                    row: 2,
+                    column: 0,
+                    visible: true,
+                },
+                ScreenId::Alternate,
+            )
+            .unwrap();
+        let live_origin = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(0))
+            .unwrap()
+            .top_subpixels;
+        let live_row_two = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(2))
+            .unwrap()
+            .top_subpixels;
+        assert_eq!(live_row_two.saturating_sub(live_origin), 2 * cell + extra);
         assert_ne!(
             live_row_two.saturating_sub(live_origin),
             2 * cell,
@@ -4394,7 +4572,11 @@ mod tests {
                 ScreenId::Alternate,
             )
             .unwrap();
-        let last = &bottom.row_map[bottom.grid_rows.get() as usize - 1];
+        let last = bottom
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(bottom.grid_rows.get() - 1))
+            .expect("the fixed bottom live row remains presented");
         assert_eq!(
             last.top_subpixels.saturating_add(last.height_subpixels),
             6 * cell,
@@ -4456,7 +4638,7 @@ mod tests {
             id: bt_transcript::StagingId(1),
             row: CapturedRow::plain("xx", false),
         }];
-        projection.scroll_offset_rows = 1;
+        projection.scroll_offset_subpixels = cell_height().get();
         let error = projection
             .continuous_frame(
                 &HistoryDocument::default(),
@@ -5601,6 +5783,553 @@ mod tests {
             &frame.viewport_origin,
             FrameViewportOrigin::Anchored(_)
         ));
+    }
+
+    fn history_row_top(frame: &ViewportFrame, id: TranscriptId) -> i64 {
+        let columns = frame.columns.get() as usize;
+        frame
+            .cell_anchors
+            .chunks(columns)
+            .zip(&frame.row_map)
+            .find_map(|(anchors, mapped)| {
+                anchors
+                    .iter()
+                    .any(|anchor| {
+                        matches!(
+                            anchor.start,
+                            ContentAnchor::History {
+                                id: anchor_id,
+                                ..
+                            } if anchor_id == id
+                        )
+                    })
+                    .then_some(mapped.top_subpixels)
+            })
+            .expect("north-star content anchor remains in the presentation rows")
+    }
+
+    fn assert_constant_subpixel_steps_move_content_exactly(mixed_artifact: bool) {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(32).unwrap());
+        let mut document = HistoryDocument::default();
+        let mut ids = Vec::new();
+        for index in 0..12 {
+            let finalized = store
+                .capture(CapturedRow::plain(&format!("line-{index:02}"), false))
+                .finalized
+                .remove(0);
+            ids.push(finalized.line.id);
+            document.finalize_transaction(finalized);
+        }
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(4),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        let target = if mixed_artifact {
+            let artifact_height = cell_height().get() * 5 / 2;
+            projection.sync_math_artifacts([(
+                ids[3],
+                ProjectedMathArtifact {
+                    key: "north-star-math".to_owned(),
+                    end: ids[3],
+                    rgba: Arc::from(vec![255; 4]),
+                    width_px: 1,
+                    height_px: 1,
+                    height_subpixels: artifact_height,
+                    baseline_subpixels: 0,
+                    mode: MathMode::Display,
+                    kind: RgbaArtifactKind::Math,
+                    vertical_padding_subpixels: 0,
+                    render_scale_milli: 1000,
+                    source: "x^2".to_owned(),
+                },
+            )]);
+            ids[5]
+        } else {
+            ids[7]
+        };
+        projection.project(&document);
+        let live = || vec![CapturedRow::plain("        ", false); 4];
+        let cursor = GridCursor {
+            row: 3,
+            column: 0,
+            visible: true,
+        };
+        projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        projection.scroll_by_rows(if mixed_artifact { 8 } else { 6 });
+        let mut frame = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        let step = cell_height().get() / 4;
+        let mut previous = history_row_top(&frame, target);
+        for sample in 1..=3 {
+            projection.scroll_by_subpixels(step);
+            frame = projection
+                .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                .unwrap();
+            let actual = history_row_top(&frame, target);
+            assert_eq!(
+                actual - previous,
+                step,
+                "north-star sample {sample}: every content anchor must move by the exact input step"
+            );
+            previous = actual;
+        }
+    }
+
+    #[test]
+    fn north_star_plain_text_content_moves_by_every_exact_subpixel_step() {
+        assert_constant_subpixel_steps_move_content_exactly(false);
+    }
+
+    #[test]
+    fn north_star_mixed_artifact_content_moves_by_every_exact_subpixel_step() {
+        assert_constant_subpixel_steps_move_content_exactly(true);
+    }
+
+    fn last_live_bottom(frame: &ViewportFrame) -> i64 {
+        let last = frame.grid_rows.get() - 1;
+        let row = frame
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(last))
+            .expect("the last live row remains in the presentation list");
+        row.top_subpixels.saturating_add(row.height_subpixels)
+    }
+
+    fn live_math_for_bottom_follow(occurrence_id: u64, cell: i64) -> ProjectedLiveMathArtifact {
+        ProjectedLiveMathArtifact {
+            occurrence_id: LiveMathOccurrenceId(occurrence_id),
+            screen: ScreenId::Primary,
+            start: GridPoint { row: 3, column: 0 },
+            end: GridPoint { row: 4, column: 7 },
+            band_start_row: 3,
+            band_end_row: 4,
+            clipped_top_rows: 0,
+            clipped_bottom_rows: 0,
+            occluded_source_rows: 0,
+            occluded_visible_rows: Vec::new(),
+            transition_stale: false,
+            frozen_prefix: Vec::new(),
+            staging_prefix: Vec::new(),
+            generation: GridGeneration(1),
+            artifact: ProjectedMathArtifact {
+                key: format!("bottom-follow-{occurrence_id}"),
+                end: TranscriptId(0),
+                rgba: Arc::from(vec![255; 4]),
+                width_px: 1,
+                height_px: 1,
+                height_subpixels: cell.saturating_mul(3),
+                baseline_subpixels: 0,
+                mode: MathMode::Display,
+                kind: RgbaArtifactKind::Math,
+                vertical_padding_subpixels: 0,
+                render_scale_milli: 1000,
+                source: "bottom-follow".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn bottom_follow_keeps_the_last_pixel_flush_through_async_artifact_and_zoom() {
+        let document = HistoryDocument::default();
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(12),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let live = || vec![CapturedRow::plain("        ", false); 12];
+        let cursor = GridCursor {
+            row: 11,
+            column: 0,
+            visible: true,
+        };
+        let plain = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(last_live_bottom(&plain), 12 * cell_height().get());
+
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [live_math_for_bottom_follow(1, cell_height().get())],
+        );
+        let decorated = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(last_live_bottom(&decorated), 12 * cell_height().get());
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+
+        let zoomed_cell = NonZeroI64::new(cell_height().get() * 2).unwrap();
+        projection.set_cell_height_subpixels(zoomed_cell);
+        projection.sync_live_math_artifacts(
+            ScreenId::Primary,
+            [live_math_for_bottom_follow(2, zoomed_cell.get())],
+        );
+        let zoomed = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(last_live_bottom(&zoomed), 12 * zoomed_cell.get());
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+    }
+
+    #[test]
+    fn bottom_replay_geometry_ignores_fractional_history_artifact_height() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(32).unwrap());
+        let mut document = HistoryDocument::default();
+        let mut ids = Vec::new();
+        for index in 0..8 {
+            let finalized = store
+                .capture(CapturedRow::plain(&format!("line-{index:02}"), false))
+                .finalized
+                .remove(0);
+            ids.push(finalized.line.id);
+            document.finalize_transaction(finalized);
+        }
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(4),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        let live = || vec![CapturedRow::plain("        ", false); 4];
+        let cursor = GridCursor {
+            row: 3,
+            column: 0,
+            visible: true,
+        };
+        let artifact = |height_subpixels| ProjectedMathArtifact {
+            key: format!("bottom-history-{height_subpixels}"),
+            end: ids[2],
+            rgba: Arc::from(vec![255; 4]),
+            width_px: 1,
+            height_px: 1,
+            height_subpixels,
+            baseline_subpixels: 0,
+            mode: MathMode::Display,
+            kind: RgbaArtifactKind::Math,
+            vertical_padding_subpixels: 0,
+            render_scale_milli: 1000,
+            source: "fractional-history-height".to_owned(),
+        };
+        let assert_row_identity = |frame: &ViewportFrame| {
+            assert_eq!(frame.viewport_origin, FrameViewportOrigin::Bottom);
+            assert_eq!(frame.presentation_offset_subpixels, 0);
+            assert_eq!(frame.drawable_rows(), frame.grid_rows.get() as usize);
+            assert_eq!(frame.row_map[0].top_subpixels, 0);
+            assert_eq!(frame.row_map[0].live_grid_row, Some(0));
+        };
+
+        projection.project(&document);
+        let plain = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_row_identity(&plain);
+
+        for height in [cell_height().get() * 5 / 2, cell_height().get() * 7 / 3] {
+            projection.sync_math_artifacts([(ids[2], artifact(height))]);
+            projection.project(&document);
+            let ready = projection
+                .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+                .unwrap();
+            assert_row_identity(&ready);
+            assert_eq!(projection.scroll_offset_subpixels(), 0);
+        }
+    }
+
+    #[test]
+    fn review_anchor_keeps_exact_y_through_append_and_artifact_height_change() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(64).unwrap());
+        let mut document = HistoryDocument::default();
+        let mut ids = Vec::new();
+        for index in 0..16 {
+            let finalized = store
+                .capture(CapturedRow::plain(&format!("line-{index:02}"), false))
+                .finalized
+                .remove(0);
+            ids.push(finalized.line.id);
+            document.finalize_transaction(finalized);
+        }
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(4),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let live = || vec![CapturedRow::plain("        ", false); 4];
+        let cursor = GridCursor {
+            row: 3,
+            column: 0,
+            visible: true,
+        };
+        projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        projection.scroll_by_subpixels(5 * cell_height().get() + cell_height().get() / 3);
+        let anchored = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        let target = ids[12];
+        let target_y = history_row_top(&anchored, target);
+        let exact_local = projection.scroll_anchor().unwrap().local_offset;
+        assert_ne!(exact_local, 0);
+
+        document.finalize_transaction(
+            store
+                .capture(CapturedRow::plain("appended", false))
+                .finalized
+                .remove(0),
+        );
+        projection.project(&document);
+        let appended = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(history_row_top(&appended, target), target_y);
+        assert_eq!(
+            projection.scroll_anchor().unwrap().local_offset,
+            exact_local
+        );
+
+        projection.sync_math_artifacts([(
+            ids[2],
+            ProjectedMathArtifact {
+                key: "async-history-height".to_owned(),
+                end: ids[2],
+                rgba: Arc::from(vec![255; 4]),
+                width_px: 1,
+                height_px: 1,
+                height_subpixels: cell_height().get() * 5 / 2,
+                baseline_subpixels: 0,
+                mode: MathMode::Display,
+                kind: RgbaArtifactKind::Math,
+                vertical_padding_subpixels: 0,
+                render_scale_milli: 1000,
+                source: "height-change".to_owned(),
+            },
+        )]);
+        projection.project(&document);
+        let resized_artifact = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert_eq!(history_row_top(&resized_artifact, target), target_y);
+        assert_eq!(
+            projection.scroll_anchor().unwrap().local_offset,
+            exact_local
+        );
+    }
+
+    #[test]
+    fn resize_reflow_hold_restores_the_exact_subpixel_displacement() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(256).unwrap());
+        let document = history_of(&mut store, 40);
+        let mut projection = ViewportProjection::new(
+            key(9),
+            DetectionRevision(1),
+            nz32(6),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        let cursor = GridCursor {
+            row: 0,
+            column: 0,
+            visible: true,
+        };
+        projection.project(&document);
+        projection
+            .continuous_frame(&document, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        let exact = 20 * cell_height().get() + cell_height().get() / 3;
+        projection.scroll_by_subpixels(exact);
+        let before = projection
+            .continuous_frame(&document, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        let local_before = projection.scroll_anchor().unwrap().local_offset;
+        assert_ne!(before.presentation_offset_subpixels, 0);
+
+        projection.set_resize_reflow_active(true);
+        let cleared = HistoryDocument::default();
+        projection.project(&cleared);
+        projection
+            .continuous_frame(&cleared, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert!(projection.review_hold());
+
+        let reprinted = history_of(&mut store, 40);
+        projection.project(&reprinted);
+        let restored = projection
+            .continuous_frame(&reprinted, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        assert!(!projection.review_hold());
+        assert_eq!(projection.scroll_offset_subpixels(), exact);
+        assert_eq!(
+            projection.scroll_anchor().unwrap().local_offset,
+            local_before
+        );
+        assert_eq!(
+            restored.presentation_offset_subpixels,
+            before.presentation_offset_subpixels
+        );
+    }
+
+    #[test]
+    fn alternate_sticky_review_uses_exact_pixel_capacity_and_exits_only_at_zero() {
+        let cell = cell_height().get();
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(6),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut artifact = live_math_for_bottom_follow(9, cell);
+        artifact.screen = ScreenId::Alternate;
+        artifact.start.row = 2;
+        artifact.end.row = 2;
+        artifact.band_start_row = 2;
+        artifact.band_end_row = 2;
+        artifact.artifact.height_subpixels = cell + cell / 3;
+        projection.sync_live_math_artifacts(ScreenId::Alternate, [artifact]);
+        let live = || vec![CapturedRow::plain("        ", false); 6];
+        let cursor = GridCursor {
+            row: 5,
+            column: 0,
+            visible: true,
+        };
+        projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                live(),
+                cursor,
+                ScreenId::Alternate,
+            )
+            .unwrap();
+
+        projection.scroll_by_subpixels(i64::MAX);
+        assert_eq!(projection.scroll_offset_subpixels(), cell / 3);
+        projection.scroll_by_subpixels(-(cell / 3 - 1));
+        assert_eq!(projection.scroll_offset_subpixels(), 1);
+        assert!(projection.is_scrolled());
+        projection.scroll_by_subpixels(-1);
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        assert!(!projection.is_scrolled());
+    }
+
+    #[test]
+    fn partial_first_and_overscan_rows_share_exact_selection_hit_and_cursor_geometry() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(16).unwrap());
+        let mut document = HistoryDocument::default();
+        let mut ids = Vec::new();
+        for text in ["h0", "h1", "h2", "h3"] {
+            let finalized = store
+                .capture(CapturedRow::plain(text, false))
+                .finalized
+                .remove(0);
+            ids.push(finalized.line.id);
+            document.finalize_transaction(finalized);
+        }
+        let mut projection = ViewportProjection::new(
+            key(2),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let live = || {
+            vec![
+                CapturedRow::plain("l0", false),
+                CapturedRow::plain("l1", false),
+            ]
+        };
+        let cursor = GridCursor {
+            row: 0,
+            column: 1,
+            visible: true,
+        };
+        projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        projection.scroll_by_subpixels(cell_height().get() + cell_height().get() / 2);
+        projection.set_selection(Some(ViewSelection {
+            start: ContentAnchor::History {
+                id: ids[2],
+                offset: GraphemeOffset(0),
+                bias: Bias::Before,
+                generation: store.source_generation(),
+            },
+            end: ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point: GridPoint { row: 1, column: 1 },
+                bias: Bias::After,
+                generation: GridGeneration(1),
+            },
+        }));
+        let frame = projection
+            .continuous_frame(&document, &[], live(), cursor, ScreenId::Primary)
+            .unwrap();
+        let cell = cell_height().get();
+        assert_eq!(frame.presentation_offset_subpixels, cell / 2);
+        assert_eq!(frame.row_map[0].top_subpixels, -(cell / 2));
+        assert_eq!(frame.visual_row_at(-1), None);
+        assert_eq!(frame.visual_row_at(0), Some(0));
+        assert_eq!(frame.visual_row_at(cell / 2 - 1), Some(0));
+        assert_eq!(frame.visual_row_at(cell / 2), Some(1));
+        assert_eq!(frame.visual_row_at(2 * cell - 1), Some(2));
+        assert!(
+            frame.selection_spans.iter().any(|span| span.row == 0)
+                && frame.selection_spans.iter().any(|span| span.row == 2)
+        );
+        assert_eq!(frame.cursor.row, 2);
+        assert!(frame.cursor.visible);
+    }
+
+    #[test]
+    fn subpixel_motion_does_not_invalidate_layout_or_row_materialization_cache() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(32).unwrap());
+        let document = history_of(&mut store, 20);
+        let mut projection = ViewportProjection::new(
+            key(9),
+            DetectionRevision(1),
+            nz32(6),
+            cell_height(),
+            store.source_generation(),
+            GridGeneration(1),
+        );
+        projection.project(&document);
+        let misses = projection.cache_misses();
+        let cached = projection.cache_len();
+        let cursor = GridCursor {
+            row: 0,
+            column: 0,
+            visible: true,
+        };
+        projection
+            .continuous_frame(&document, &[], six_blank_live(), cursor, ScreenId::Primary)
+            .unwrap();
+        for _ in 0..32 {
+            projection.scroll_by_subpixels(cell_height().get() / 7);
+            projection
+                .continuous_frame(&document, &[], six_blank_live(), cursor, ScreenId::Primary)
+                .unwrap();
+        }
+        assert_eq!(projection.cache_misses(), misses);
+        assert_eq!(projection.cache_len(), cached);
     }
 
     #[test]

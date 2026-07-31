@@ -29,6 +29,36 @@
   (把 .tmp-scroll-diagnosis 的几何探针固化为永久测试;纯文本与混合带场景双覆盖)。
 - 派生 `scroll_offset_rows` 保留供状态条/诊断。
 
+### 阶段 B 契约裁决与落地记录
+
+- 权威位置量是距 Bottom 的精确 `scroll_offset_subpixels`。非 Bottom 帧把窗口顶端编码为
+  `ContentAnchor + ScrollAnchor.local_offset`；history 由像素 `HeightTree` 定位逻辑块后
+  在块内按真实 row-height 前缀定位，staging 按 cell height，live 按
+  `live_row_prefix`。`scroll_offset_rows` 只由权威像素量派生，不参与恢复位置。
+- `scroll_by_rows` 仅是兼容入口，严格换算为 `rows * cell_height_subpixels` 后调用内部
+  `scroll_by_subpixels`。阶段 B 不接 PixelDelta：`bt-app` 仍先沿既有路径量化成整行，
+  再作上述换算，因此输入可见行为与 PTY 字节保持不变；原始像素输入累计留到阶段 C。
+- 投影从窗口顶端所在的真实像素行开始，首行 `top_subpixels =
+  -presentation_offset_subpixels`；offset 非零时底部 overscan 可进入 pane。Bottom 始终
+  以内容最后像素对齐 pane 最后像素，异步 artifact 换装和 zoom 重新测高也不得留缝。
+- 六不变量的永久钉死分别为：
+  `bottom_follow_keeps_the_last_pixel_flush_through_async_artifact_and_zoom`；
+  `review_anchor_keeps_exact_y_through_append_and_artifact_height_change`；
+  `resize_reflow_hold_restores_the_exact_subpixel_displacement`；
+  `alternate_sticky_review_uses_exact_pixel_capacity_and_exits_only_at_zero`；
+  `partial_first_and_overscan_rows_share_exact_selection_hit_and_cursor_geometry`；
+  `subpixel_motion_does_not_invalidate_layout_or_row_materialization_cache`，并由 bt-render 的
+  content-addressed row-cache 几何重映射测试钉死 shaping/row cache 不因 offset 失效。
+- North-star 永久红门为纯文本与混合图片/公式两场景：
+  `north_star_*_content_moves_by_every_exact_subpixel_step`。每个样本都比较同一内容锚的
+  相邻 frame y 差与输入 step，禁止用最终总位移掩盖中间量化。
+- cursor/IME 契约债裁决：cursor 只要其 `row_map` 像素区间与 pane 有严格正面积交集就
+  可见，允许位于部分可见首行或已进入 pane 的 overscan；完全在 pane 外才隐藏。
+  renderer 仍按原始呈现几何绘制并由 pane clip 裁切。IME 候选框使用同一 cursor 行，
+  但把 top/bottom 钳到 pane 的 `[0, grid_rows * cell_height]` 可见区间，故系统候选框
+  锚到裁剪后的可见 caret，不会落到 pane 外。对应永久测试为
+  `ime_candidate_anchor_clips_with_partial_first_and_overscan_cursors`。
+
 ## 阶段 C:输入接线与手感
 
 - 滚轮 PixelDelta 原样累计;LineDelta 换算固定名义像素(不再先按内容行取整);

@@ -3218,12 +3218,19 @@ fn selection_span_bounds_px(
 }
 
 fn ime_cursor_area_for_metrics(metrics: CellMetrics, frame: &ViewportFrame) -> ImeCursorArea {
-    let [left, top, right, bottom] = frame_cell_bounds_px(
+    let [left, raw_top, right, raw_bottom] = frame_cell_bounds_px(
         metrics,
         frame,
         frame.cursor.row as usize,
         frame.cursor.column as usize,
     );
+    // A partially visible first or overscan row may carry the live cursor. The GPU clips the cursor
+    // itself to the pane; native IME geometry must use that same clipped interval or Windows can
+    // place the candidate window above/below the terminal even though the visible caret is inside.
+    let pane_top = metrics.padding_px;
+    let pane_bottom = pane_top + frame.grid_rows.get() as f32 * metrics.cell_height_px;
+    let top = raw_top.clamp(pane_top, pane_bottom);
+    let bottom = raw_bottom.clamp(top, pane_bottom);
     ImeCursorArea {
         x: left.floor() as i32,
         y: top.floor() as i32,
@@ -5122,6 +5129,74 @@ mod tests {
     }
 
     #[test]
+    fn ime_candidate_anchor_clips_with_partial_first_and_overscan_cursors() {
+        let metrics = CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 18.0,
+            font_size_px: 14.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 12.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        };
+        let unit = SUBPIXELS_PER_PX;
+        let mut frame = ViewportFrame {
+            columns: NonZeroU32::new(2).unwrap(),
+            grid_rows: NonZeroU32::new(2).unwrap(),
+            rows: NonZeroU32::new(3).unwrap(),
+            presentation_offset_subpixels: 7 * unit,
+            cells: vec![CapturedCell::plain("x"); 6],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 1,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(6),
+            row_map: vec![
+                bt_viewport::FrameVisualRow {
+                    top_subpixels: -7 * unit,
+                    height_subpixels: 18 * unit,
+                    live_grid_row: Some(0),
+                },
+                bt_viewport::FrameVisualRow {
+                    top_subpixels: 11 * unit,
+                    height_subpixels: 18 * unit,
+                    live_grid_row: Some(1),
+                },
+                bt_viewport::FrameVisualRow {
+                    top_subpixels: 29 * unit,
+                    height_subpixels: 18 * unit,
+                    live_grid_row: None,
+                },
+            ],
+            selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(2),
+            view_generation: bt_doc::ViewGeneration(3),
+        };
+        frame.validate_shape().unwrap();
+
+        let first = ime_cursor_area_for_metrics(metrics, &frame);
+        assert_eq!(
+            (first.x, first.y, first.width, first.height),
+            (12, 4, 8, 11)
+        );
+
+        frame.cursor.row = 2;
+        let overscan = ime_cursor_area_for_metrics(metrics, &frame);
+        assert_eq!(
+            (overscan.x, overscan.y, overscan.width, overscan.height),
+            (12, 33, 8, 7)
+        );
+    }
+
+    #[test]
     fn real_math_decoration_keeps_inter_block_selection_in_its_own_row_map_band() {
         let started = std::time::Instant::now();
         let mut session = bt_term::DualPlaneSession::new(
@@ -5769,6 +5844,7 @@ mod tests {
         assert!(shifted.row_cache.resident_bytes > 0);
 
         let shifted_rows = text_rows.clone();
+        frame.presentation_offset_subpixels = 4 * SUBPIXELS_PER_PX;
         frame.row_map[0].top_subpixels = -4 * SUBPIXELS_PER_PX;
         frame.row_map[0].height_subpixels += 4 * SUBPIXELS_PER_PX;
         frame.row_map[1].top_subpixels += 4 * SUBPIXELS_PER_PX;

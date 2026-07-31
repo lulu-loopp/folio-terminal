@@ -10153,21 +10153,25 @@ mod tests {
             projection.scroll_by_rows(20);
             let frame = present(&mut session, &mut projection);
             assert_eq!(frame.scroll_offset_rows, 20, "reviewing 20 rows up");
+            let anchor_before_zoom = projection.scroll_anchor().unwrap().clone();
 
             // Zoom remeasures the cell height and resizes the grid; the anchored content is still
-            // present, so the review holds its offset and the projection adopts the new height.
+            // present, so the same semantic point stays pinned while the derived row diagnostic may
+            // change with the pane height and new cell metric.
             let t = start + Duration::from_millis(210);
             apply_zoom(&mut session, nz(40), end_rows, end_px, end_dpi, t);
-            let frame = present(&mut session, &mut projection);
+            let _frame = present(&mut session, &mut projection);
             assert_eq!(
                 projection.cell_height_subpixels().get(),
                 end_px * SUBPIXELS_PER_PX,
                 "the projection tracks the new cell height",
             );
             assert_eq!(
-                frame.scroll_offset_rows, 20,
-                "the review offset survives the zoom-driven metric change",
+                projection.scroll_anchor().unwrap(),
+                &anchor_before_zoom,
+                "zoom preserves the semantic source and exact intra-row offset",
             );
+            let zoomed_offset_subpixels = projection.scroll_offset_subpixels();
             assert!(!projection.review_hold());
 
             // Codex clears scrollback and reprints: the anchor vanishes, presentation must hold.
@@ -10197,8 +10201,14 @@ mod tests {
             let frame = present(&mut session, &mut projection);
             assert!(!projection.review_hold(), "the hold releases at re-anchor");
             assert_eq!(
-                frame.scroll_offset_rows, 20,
-                "the review returns to its original position after the zoom reprint",
+                projection.scroll_offset_subpixels(),
+                zoomed_offset_subpixels,
+                "the reprint restores the exact post-zoom pixel displacement",
+            );
+            assert_eq!(
+                frame.scroll_offset_rows,
+                usize::try_from(zoomed_offset_subpixels.div_euclid(end_px * SUBPIXELS_PER_PX))
+                    .unwrap(),
             );
             assert_eq!(
                 projection.cell_height_subpixels().get(),
@@ -11204,7 +11214,15 @@ mod tests {
         projection.scroll_by_rows(1);
         let full_review = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(full_review.row_map[0].top_subpixels, 0);
-        assert_eq!(full_review.status_text.as_deref(), Some("2 rows below"));
+        assert_eq!(
+            projection.scroll_offset_subpixels(),
+            bottom.row_map[0].top_subpixels.saturating_neg(),
+            "local review clamps to the exact free-height pixel capacity"
+        );
+        assert_eq!(
+            full_review.status_text,
+            Some(format!("{} rows below", projection.scroll_offset_rows()))
+        );
 
         let mut no_overflow = DualPlaneSession::new(nz(40), nz(12));
         no_overflow.feed(b"bottom-only").unwrap();

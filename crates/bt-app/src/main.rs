@@ -1281,7 +1281,9 @@ impl Runtime {
     }
 
     fn scroll_view(&mut self, rows: i32) -> Result<()> {
-        self.projection.scroll_by_rows(rows);
+        let subpixels =
+            i64::from(rows).saturating_mul(self.projection.cell_height_subpixels().get());
+        self.projection.scroll_by_subpixels(subpixels);
         self.publish_interaction_frame()
     }
 
