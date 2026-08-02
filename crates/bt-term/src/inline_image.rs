@@ -8,7 +8,10 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use image::{ImageFormat, ImageReader, Limits, codecs::png::PngDecoder};
+use image::{
+    ImageBuffer, ImageFormat, ImageReader, Limits, Rgba, codecs::png::PngDecoder,
+    imageops::FilterType,
+};
 
 /// Maximum decoded file payload accepted from OSC 1337. The streaming adapter applies the
 /// corresponding encoded bound before a worker task is allocated.
@@ -41,6 +44,84 @@ pub struct DecodedInlineImage {
     pub height_px: u32,
     /// GIF and APNG are deliberately decoded as one static frame.
     pub animated: bool,
+}
+
+/// Resample a native decode into the exact pixel box the current layout will show it in.
+///
+/// A band hands the renderer display-resolution pixels, never the native decode: a 3840x2400
+/// wallpaper shown 1280px wide is 35 MiB of texture for 4 MiB of visible detail, and two of those
+/// evict each other out of the GPU texture budget on every frame. Resampling is worker-only work —
+/// see `scale_inline_image`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InlineImageScaleTask {
+    pub occurrence_id: u64,
+    /// Identity of the native decode this request resamples. A completion whose content key no
+    /// longer matches the record's decode is a stale answer to a superseded question.
+    pub content_key: String,
+    pub rgba: Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
+    pub display_width_px: u32,
+    pub display_height_px: u32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScaledInlineImage {
+    pub occurrence_id: u64,
+    pub content_key: String,
+    /// `<content key>@<width>x<height>`. The display size is part of the texture identity, so a
+    /// zoom or DPI change asks the shared GPU LRU a different question and gets a re-raster
+    /// instead of a stale raster stretched by the sampler.
+    pub key: String,
+    pub rgba: Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+/// The texture identity of one content at one display size.
+pub fn display_texture_key(content_key: &str, width_px: u32, height_px: u32) -> String {
+    format!("{content_key}@{width_px}x{height_px}")
+}
+
+/// Resample a decoded image into its display box with a Lanczos3 kernel.
+///
+/// Worker-only: a wallpaper-sized downscale costs tens of milliseconds, which is exactly why the
+/// event thread hands this out instead of doing it inline. The native decode stays in the
+/// decoder's cache, so a later display size is one resample and never a second disk read.
+pub fn scale_inline_image(task: &InlineImageScaleTask) -> ScaledInlineImage {
+    let key = display_texture_key(
+        &task.content_key,
+        task.display_width_px,
+        task.display_height_px,
+    );
+    let native = (task.width_px, task.height_px);
+    let display = (task.display_width_px, task.display_height_px);
+    let rgba = if native == display {
+        Arc::clone(&task.rgba)
+    } else {
+        // `Arc<[u8]>` derefs to the sample slice, so the source buffer is borrowed rather than
+        // copied; only the resampled result is allocated.
+        let source: ImageBuffer<Rgba<u8>, Arc<[u8]>> =
+            ImageBuffer::from_raw(task.width_px, task.height_px, Arc::clone(&task.rgba))
+                .expect("scale task carries a decoded RGBA buffer of its stated dimensions");
+        Arc::from(
+            image::imageops::resize(
+                &source,
+                task.display_width_px,
+                task.display_height_px,
+                FilterType::Lanczos3,
+            )
+            .into_raw(),
+        )
+    };
+    ScaledInlineImage {
+        occurrence_id: task.occurrence_id,
+        content_key: task.content_key.clone(),
+        key,
+        rgba,
+        width_px: task.display_width_px,
+        height_px: task.display_height_px,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -763,6 +844,55 @@ mod tests {
             }
         }
         !crc
+    }
+
+    #[test]
+    fn resampling_produces_display_sized_pixels_under_a_size_bearing_identity() {
+        // A 4x4 image split left-black / right-white, downscaled to 2x2: separable resampling of a
+        // vertically uniform image keeps each column band's colour, so the result is provably a
+        // resample and not a crop.
+        let mut rgba = Vec::new();
+        for _ in 0..4 {
+            for x in 0..4 {
+                let value = if x < 2 { 0 } else { 255 };
+                rgba.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        let task = InlineImageScaleTask {
+            occurrence_id: 5,
+            content_key: "image:abc".to_owned(),
+            rgba: Arc::from(rgba),
+            width_px: 4,
+            height_px: 4,
+            display_width_px: 2,
+            display_height_px: 2,
+        };
+        let scaled = scale_inline_image(&task);
+        assert_eq!(scaled.occurrence_id, 5);
+        assert_eq!(scaled.content_key, "image:abc");
+        assert_eq!(scaled.key, "image:abc@2x2");
+        assert_eq!((scaled.width_px, scaled.height_px), (2, 2));
+        assert_eq!(scaled.rgba.len(), 2 * 2 * 4);
+        assert!(scaled.rgba[0] < 64, "the left half stays dark");
+        assert!(scaled.rgba[4] > 192, "the right half stays light");
+
+        // The same content at a second display size is a second texture identity, never a reuse.
+        let larger = scale_inline_image(&InlineImageScaleTask {
+            display_width_px: 8,
+            display_height_px: 8,
+            ..task.clone()
+        });
+        assert_ne!(larger.key, scaled.key);
+        assert_eq!(larger.rgba.len(), 8 * 8 * 4);
+
+        // A request already at the native size shares the decode's buffer rather than copying it.
+        let identity = scale_inline_image(&InlineImageScaleTask {
+            display_width_px: 4,
+            display_height_px: 4,
+            ..task.clone()
+        });
+        assert_eq!(identity.key, "image:abc@4x4");
+        assert!(Arc::ptr_eq(&identity.rgba, &task.rgba));
     }
 
     #[test]

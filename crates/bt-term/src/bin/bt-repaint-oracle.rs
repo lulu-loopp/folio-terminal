@@ -13,6 +13,7 @@ use bt_term::{
     LIVE_MATH_STABLE_INTERVAL, MathLayoutOptions, SessionDecorationTask, SessionMathTask,
     band_owns_its_rows, is_banded_artifact, render_detection_task, render_live_detection_task,
 };
+use bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES;
 use bt_viewport::{ViewportFrame, ViewportProjection};
 
 const FOREGROUND_RGB: [u8; 3] = [0xd8, 0xdc, 0xe8];
@@ -98,6 +99,13 @@ struct HeadlessOracle {
     final_visible_source_rows: usize,
     /// A human-readable exemplar for either layout-ownership violation.
     layout_worst: Option<String>,
+    /// Peak count of Rendered bands placed with an artifact the GPU cannot turn into a texture:
+    /// dimensions that disagree with the pixel buffer, or a single artifact no byte budget can
+    /// admit. Such a band draws its placement and its hover chrome while its own pixels never
+    /// appear — the bare grey rectangle. Zero in a healthy frame.
+    max_textureless_bands: usize,
+    /// A human-readable exemplar of the worst textureless band seen.
+    textureless_band_worst: Option<String>,
 }
 
 impl HeadlessOracle {
@@ -140,6 +148,8 @@ impl HeadlessOracle {
             max_overlapping_live_bands: 0,
             final_visible_source_rows: 0,
             layout_worst: None,
+            max_textureless_bands: 0,
+            textureless_band_worst: None,
         }
     }
 
@@ -300,6 +310,47 @@ impl HeadlessOracle {
     /// bands that stand in for their rows — math and OSC 1337 inline images; local image path bands
     /// are excluded because stacking several of them under one source row is their layout, not a
     /// collision (`band_owns_its_rows`).
+    /// A band is only honest if its artifact can become the texture the band shows. The renderer
+    /// rejects an artifact whose buffer disagrees with its stated dimensions, and the byte budget
+    /// refuses one larger than the whole cache; in both cases the raster silently never draws while
+    /// the band's placement and hover chrome still do. Screen-free but exact: this is the same
+    /// predicate `upload_math_texture` applies, read off the published frame.
+    fn audit_band_texture_backing(&mut self, frame: &ViewportFrame) {
+        let mut textureless = 0usize;
+        for block in &frame.math_blocks {
+            if block.display != bt_viewport::MathBlockDisplay::Rendered {
+                continue;
+            }
+            let artifact = &block.artifact;
+            let expected = artifact.width_px as usize * artifact.height_px as usize * 4;
+            let uploadable = artifact.width_px != 0
+                && artifact.height_px != 0
+                && artifact.rgba.len() == expected;
+            let admissible = artifact.rgba.len() <= MATH_TEXTURE_CACHE_BUDGET_BYTES;
+            if uploadable && admissible {
+                continue;
+            }
+            textureless += 1;
+            if self.textureless_band_worst.is_none() {
+                self.textureless_band_worst = Some(format!(
+                    "frame={} key={} {}x{} bytes={} uploadable={uploadable} admissible={admissible} src={:?}",
+                    self.frame_sequence,
+                    artifact.key,
+                    artifact.width_px,
+                    artifact.height_px,
+                    artifact.rgba.len(),
+                    block
+                        .source
+                        .replace('\n', " ")
+                        .chars()
+                        .take(28)
+                        .collect::<String>(),
+                ));
+            }
+        }
+        self.max_textureless_bands = self.max_textureless_bands.max(textureless);
+    }
+
     fn audit_live_band_ownership(&mut self, frame: &ViewportFrame) {
         let mut bands = Vec::new();
         let mut borrowed = 0usize;
@@ -535,6 +586,10 @@ impl HeadlessOracle {
                     let result = self.image_decoder.decode(task.clone());
                     changed |= self.session.complete_inline_image_result(task, result);
                 }
+                SessionDecorationTask::ScaleInlineImage(task) => {
+                    let scaled = bt_term::scale_inline_image(&task);
+                    changed |= self.session.complete_inline_image_scale(scaled);
+                }
                 SessionDecorationTask::Math(_) => {
                     unreachable!("math queues were drained before image completion")
                 }
@@ -614,6 +669,7 @@ impl HeadlessOracle {
         self.audit_clip_alignment(&frame);
         self.audit_occlusion_residue(&frame, elapsed);
         self.audit_live_band_ownership(&frame);
+        self.audit_band_texture_backing(&frame);
         self.frame_sequence = self.frame_sequence.saturating_add(1);
         Ok(())
     }
@@ -1148,6 +1204,24 @@ fn main() -> Result<(), Box<dyn Error>> {
         oracle.final_visible_source_rows,
         oracle.layout_worst.as_deref().unwrap_or("none"),
     );
+    // Reported only when it has something to report, so a clean replay stays byte-identical to the
+    // recorded baselines. The gate below is unconditional: a placed band with no possible texture
+    // is a bare rectangle on screen, never an opt-in concern.
+    if oracle.max_textureless_bands > 0 || env::var_os("BT_PROBE_TEXTURE_AUDIT").is_some() {
+        eprintln!(
+            "TEXTURE_AUDIT max_textureless_bands={} worst={}",
+            oracle.max_textureless_bands,
+            oracle.textureless_band_worst.as_deref().unwrap_or("none"),
+        );
+    }
+    if oracle.max_textureless_bands > 0 {
+        return Err(io::Error::other(format!(
+            "band placed with an artifact no texture can be made from: {} block(s) (worst: {})",
+            oracle.max_textureless_bands,
+            oracle.textureless_band_worst.as_deref().unwrap_or("none"),
+        ))
+        .into());
+    }
     if env::var_os("BT_PROBE_OCCLUSION_AUDIT").is_some() && oracle.max_occlusion_residue_cells > 0 {
         return Err(io::Error::other(format!(
             "terminal presentation residue under rendered math: {} cell(s) (worst: {})",

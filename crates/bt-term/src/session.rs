@@ -47,8 +47,9 @@ use crate::{
     },
     cell_capture::{CapturedRowFingerprint, captured_row_is_blank},
     inline_image::{
-        DecodedInlineImage, InlineImageDecodeError, InlineImageSource, InlineImageTask,
-        ShellIntegrationMarker, decode_inline_image, detect_local_image_path_candidates,
+        DecodedInlineImage, InlineImageDecodeError, InlineImageScaleTask, InlineImageSource,
+        InlineImageTask, ScaledInlineImage, ShellIntegrationMarker, decode_inline_image,
+        detect_local_image_path_candidates, scale_inline_image,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
@@ -130,6 +131,8 @@ pub enum SessionMathTask {
 pub enum SessionDecorationTask {
     Math(Box<SessionMathTask>),
     InlineImage(InlineImageTask),
+    /// Resample an already-decoded image into the display box the current layout shows it in.
+    ScaleInlineImage(InlineImageScaleTask),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -139,6 +142,10 @@ pub struct InlineImageRecordView {
     pub animated: bool,
     pub native_width_px: Option<u32>,
     pub native_height_px: Option<u32>,
+    /// Size of the resident display raster — the pixels the renderer uploads. `None` until the
+    /// first resample lands.
+    pub display_width_px: Option<u32>,
+    pub display_height_px: Option<u32>,
     pub display_rows: Option<u32>,
     pub failed: bool,
     pub local_path: Option<PathBuf>,
@@ -159,13 +166,21 @@ struct InlineImageRecord {
     occurrence_id: u64,
     end_anchor: AnchorId,
     kind: InlineImageRecordKind,
+    /// The native decode. It is never handed to the renderer; it is the source the display raster
+    /// is resampled from when the layout asks for a new display size.
     artifact: Option<DecodedInlineImage>,
+    /// The display-resolution raster the renderer actually uploads, if one has arrived.
+    display: Option<ScaledInlineImage>,
+    /// Display size of an outstanding resample request, so a layout that has not moved does not
+    /// re-ask the worker the same question every frame.
+    display_pending: Option<(u32, u32)>,
     failed: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct InlineImageGeometry {
-    display_scale_milli: u32,
+    display_width_px: u32,
+    display_height_px: u32,
     display_height_subpixels: i64,
     display_rows: u32,
 }
@@ -601,6 +616,9 @@ pub struct DualPlaneSession {
     live_tasks: VecDeque<LiveDetectionTask>,
     inline_image_tasks: VecDeque<InlineImageTask>,
     local_image_path_tasks: VecDeque<InlineImageTask>,
+    /// At most one outstanding resample per image occurrence, so the queue is bounded by the
+    /// record set rather than by how often the layout moves.
+    inline_image_scale_tasks: VecDeque<InlineImageScaleTask>,
     inline_images: BTreeMap<u64, InlineImageRecord>,
     next_inline_image_occurrence_id: u64,
     live_decorations: BTreeMap<u32, LiveDecorationRecord>,
@@ -917,6 +935,7 @@ impl DualPlaneSession {
             live_tasks: VecDeque::new(),
             inline_image_tasks: VecDeque::new(),
             local_image_path_tasks: VecDeque::new(),
+            inline_image_scale_tasks: VecDeque::new(),
             inline_images: BTreeMap::new(),
             next_inline_image_occurrence_id: 1,
             live_decorations: BTreeMap::new(),
@@ -1086,6 +1105,8 @@ impl DualPlaneSession {
                         .is_some_and(|artifact| artifact.animated),
                     native_width_px: record.artifact.as_ref().map(|artifact| artifact.width_px),
                     native_height_px: record.artifact.as_ref().map(|artifact| artifact.height_px),
+                    display_width_px: record.display.as_ref().map(|display| display.width_px),
+                    display_height_px: record.display.as_ref().map(|display| display.height_px),
                     display_rows,
                     failed: record.failed,
                     local_path: match &record.kind {
@@ -3524,6 +3545,10 @@ impl DualPlaneSession {
                         let result = decode_inline_image(task.clone());
                         self.complete_inline_image_result(task, result);
                     }
+                    SessionDecorationTask::ScaleInlineImage(task) => {
+                        let scaled = scale_inline_image(&task);
+                        self.complete_inline_image_scale(scaled);
+                    }
                 }
             }
             if !self.scheduler.has_retry() {
@@ -3551,8 +3576,19 @@ impl DualPlaneSession {
     }
 
     pub fn take_decoration_worker_task(&mut self) -> Option<SessionDecorationTask> {
+        // The display size a record needs is a pure function of the layout and its native
+        // dimensions, and anything can move either — a zoom, a reflow, an anchor migrating into
+        // history. Deriving it here, where work is handed out, means no state change has to
+        // remember to ask; a driver that can run a resample always requests the ones that are due.
+        self.request_inline_image_displays();
         self.take_math_worker_task()
             .map(|task| SessionDecorationTask::Math(Box::new(task)))
+            // Finishing a band the user is already waiting on outranks starting another decode.
+            .or_else(|| {
+                self.inline_image_scale_tasks
+                    .pop_front()
+                    .map(SessionDecorationTask::ScaleInlineImage)
+            })
             .or_else(|| {
                 self.inline_image_tasks
                     .pop_front()
@@ -3594,15 +3630,46 @@ impl DualPlaneSession {
         };
         match result {
             Ok(artifact) if artifact.occurrence_id == task.occurrence_id => {
+                let content_changed = record
+                    .artifact
+                    .as_ref()
+                    .is_none_or(|previous| previous.key != artifact.key);
                 record.artifact = Some(artifact);
                 record.failed = false;
+                if content_changed {
+                    record.display = None;
+                    record.display_pending = None;
+                }
             }
             Ok(_) => return false,
             Err(_) => {
                 record.artifact = None;
+                record.display = None;
+                record.display_pending = None;
                 record.failed = true;
             }
         }
+        self.bump_view_generation();
+        true
+    }
+
+    /// Accept a display raster. A resample of content the record no longer holds is a stale answer
+    /// to a superseded question and is dropped.
+    pub fn complete_inline_image_scale(&mut self, scaled: ScaledInlineImage) -> bool {
+        let Some(record) = self.inline_images.get_mut(&scaled.occurrence_id) else {
+            return false;
+        };
+        if record
+            .artifact
+            .as_ref()
+            .is_none_or(|decoded| decoded.key != scaled.content_key)
+        {
+            return false;
+        }
+        if record.display_pending == Some((scaled.width_px, scaled.height_px)) {
+            record.display_pending = None;
+        }
+        record.display = Some(scaled);
         self.bump_view_generation();
         true
     }
@@ -4661,12 +4728,22 @@ impl DualPlaneSession {
         end: TranscriptId,
     ) -> Option<ProjectedMathArtifact> {
         let geometry = self.inline_image_geometry(record, decoded)?;
+        // No display raster, no band. The renderer must never be handed the native decode: that is
+        // the 35 MiB texture that thrashed the GPU budget and left a placed band with nothing in it.
+        let display = record.display.as_ref()?;
+        // Normally 1000 — the raster is already the size the band shows. While a newer display size
+        // is still being resampled, the resident raster bridges the gap at the ratio the current
+        // layout demands, so a zoom softens for one worker round trip instead of blinking out.
+        let render_scale_milli = u64::from(geometry.display_width_px)
+            .saturating_mul(1000)
+            .div_euclid(u64::from(display.width_px).max(1))
+            .clamp(1, u64::from(u32::MAX)) as u32;
         Some(ProjectedMathArtifact {
-            key: decoded.key.clone(),
+            key: display.key.clone(),
             end,
-            rgba: Arc::clone(&decoded.rgba),
-            width_px: decoded.width_px,
-            height_px: decoded.height_px,
+            rgba: Arc::clone(&display.rgba),
+            width_px: display.width_px,
+            height_px: display.height_px,
             height_subpixels: geometry.display_height_subpixels,
             baseline_subpixels: 0,
             mode: MathMode::Display,
@@ -4681,7 +4758,7 @@ impl DualPlaneSession {
                 }
             },
             vertical_padding_subpixels: 0,
-            render_scale_milli: geometry.display_scale_milli,
+            render_scale_milli,
             source: match &record.kind {
                 InlineImageRecordKind::Osc1337 => "[image]".to_owned(),
                 InlineImageRecordKind::LocalPath { path, .. } => {
@@ -4718,8 +4795,10 @@ impl DualPlaneSession {
             .max(1) as u64;
         let viewport_height_subpixels = i64::from(self.terminal.dimensions().1.get())
             .saturating_mul(self.cell_height_subpixels.get());
-        let two_thirds_height_px = viewport_height_subpixels
-            .saturating_mul(2)
+        // One third of the viewport, not two (user ruling 2026-08-02). Inline is a glance; the M2
+        // preview pane is where an image is actually looked at. A third of the screen also keeps
+        // the display-sized texture a band uploads correspondingly smaller.
+        let one_third_height_px = viewport_height_subpixels
             .div_euclid(3)
             .div_euclid(SUBPIXELS_PER_PX)
             .max(1) as u64;
@@ -4734,7 +4813,7 @@ impl DualPlaneSession {
             .saturating_mul(self.cell_height_subpixels.get())
             .div_euclid(SUBPIXELS_PER_PX)
             .max(1) as u64;
-        let max_height_px = two_thirds_height_px.min(text_floor_height_px);
+        let max_height_px = one_third_height_px.min(text_floor_height_px);
         let width_scale = available_width_px
             .saturating_mul(1000)
             .checked_div(u64::from(decoded.width_px))?;
@@ -4745,12 +4824,13 @@ impl DualPlaneSession {
             .min(width_scale)
             .min(height_scale)
             .clamp(1, u64::from(u32::MAX)) as u32;
-        let display_height_subpixels = i64::from(decoded.height_px)
-            .saturating_mul(i64::from(display_scale_milli))
-            .saturating_mul(SUBPIXELS_PER_PX)
-            .saturating_add(999)
-            .div_euclid(1000)
-            .max(1);
+        let display_width_px = scaled_display_extent(decoded.width_px, display_scale_milli);
+        let display_height_px = scaled_display_extent(decoded.height_px, display_scale_milli);
+        // The band is exactly as tall as the raster it shows. Bands hand the renderer
+        // display-resolution pixels at scale 1000, so any other height here would be a band whose
+        // geometry disagrees with its own texture.
+        let display_height_subpixels =
+            i64::from(display_height_px).saturating_mul(SUBPIXELS_PER_PX);
         let display_rows = u32::try_from(
             display_height_subpixels
                 .saturating_add(self.cell_height_subpixels.get() - 1)
@@ -4759,10 +4839,53 @@ impl DualPlaneSession {
         .unwrap_or(u32::MAX)
         .max(1);
         Some(InlineImageGeometry {
-            display_scale_milli,
+            display_width_px,
+            display_height_px,
             display_height_subpixels,
             display_rows,
         })
+    }
+
+    /// Every image record whose resident display raster does not match the size the current layout
+    /// asks for gets one resample request. Driven from `take_decoration_worker_task`, so the set of
+    /// outstanding requests is re-derived from live state rather than accumulated by event.
+    fn request_inline_image_displays(&mut self) {
+        let mut requests = Vec::new();
+        for record in self.inline_images.values() {
+            let Some(decoded) = record.artifact.as_ref() else {
+                continue;
+            };
+            let Some(geometry) = self.inline_image_geometry(record, decoded) else {
+                continue;
+            };
+            let target = (geometry.display_width_px, geometry.display_height_px);
+            let resident = record
+                .display
+                .as_ref()
+                .map(|display| (display.width_px, display.height_px));
+            if resident == Some(target) || record.display_pending == Some(target) {
+                continue;
+            }
+            requests.push(InlineImageScaleTask {
+                occurrence_id: record.occurrence_id,
+                content_key: decoded.key.clone(),
+                rgba: Arc::clone(&decoded.rgba),
+                width_px: decoded.width_px,
+                height_px: decoded.height_px,
+                display_width_px: target.0,
+                display_height_px: target.1,
+            });
+        }
+        for request in requests {
+            if let Some(record) = self.inline_images.get_mut(&request.occurrence_id) {
+                record.display_pending =
+                    Some((request.display_width_px, request.display_height_px));
+            }
+            // One outstanding question per occurrence: a superseded size never reaches the worker.
+            self.inline_image_scale_tasks
+                .retain(|queued| queued.occurrence_id != request.occurrence_id);
+            self.inline_image_scale_tasks.push_back(request);
+        }
     }
 
     fn decorate_math_frame(&self, frame: &mut ViewportFrame) {
@@ -5533,6 +5656,8 @@ impl DualPlaneSession {
                 end_anchor: anchor,
                 kind: InlineImageRecordKind::Osc1337,
                 artifact: None,
+                display: None,
+                display_pending: None,
                 failed: false,
             },
         );
@@ -5831,6 +5956,8 @@ impl DualPlaneSession {
                     start_anchor,
                 },
                 artifact: None,
+                display: None,
+                display_pending: None,
                 failed: false,
             },
         );
@@ -6436,6 +6563,8 @@ impl DualPlaneSession {
         self.inline_image_tasks
             .retain(|task| !occurrences.contains(&task.occurrence_id));
         self.local_image_path_tasks
+            .retain(|task| !occurrences.contains(&task.occurrence_id));
+        self.inline_image_scale_tasks
             .retain(|task| !occurrences.contains(&task.occurrence_id));
     }
 
@@ -8853,6 +8982,19 @@ fn math_block_available_width_px(
         .div_euclid(SUBPIXELS_PER_PX)
         .max(0) as u32;
     pane_width_px.saturating_sub(inset_px).max(1)
+}
+
+/// One axis of the display box: the native extent taken at the display scale, rounded up so a
+/// band never shows fewer pixels than the layout allotted it, and never zero.
+fn scaled_display_extent(native_px: u32, scale_milli: u32) -> u32 {
+    u32::try_from(
+        u64::from(native_px)
+            .saturating_mul(u64::from(scale_milli))
+            .saturating_add(999)
+            .div_euclid(1000),
+    )
+    .unwrap_or(u32::MAX)
+    .max(1)
 }
 
 fn ordered_selection(selection: &ViewSelection) -> Option<(&ContentAnchor, &ContentAnchor)> {
@@ -13860,6 +14002,32 @@ mod tests {
         );
     }
 
+    use crate::inline_image::display_texture_key;
+
+    /// The texture identity a record's band currently projects: content plus display size.
+    fn resident_display_key(session: &DualPlaneSession, index: usize) -> String {
+        let record = &session.inline_image_records()[index];
+        display_texture_key(
+            record.content_key.as_deref().expect("decoded content"),
+            record.display_width_px.expect("resampled display raster"),
+            record.display_height_px.expect("resampled display raster"),
+        )
+    }
+
+    /// Run the resample leg of the image pipeline the way a worker would. A decode only produces
+    /// native pixels; the band shows the display-sized raster this drains into the record.
+    fn settle_inline_image_displays(session: &mut DualPlaneSession) -> usize {
+        let mut settled = 0;
+        session.request_inline_image_displays();
+        while let Some(task) = session.inline_image_scale_tasks.pop_front() {
+            let scaled = scale_inline_image(&task);
+            if session.complete_inline_image_scale(scaled) {
+                settled += 1;
+            }
+        }
+        settled
+    }
+
     fn decoded_test_image(
         occurrence_id: u64,
         width_px: u32,
@@ -13876,8 +14044,15 @@ mod tests {
         }
     }
 
+    /// The band's texture is display-resolution, so `render_scale_milli` is 1000 and the band is
+    /// exactly as tall as its own raster. 20x12 grid, 10px square cells, dpi 1000, image 200x300:
+    ///   - `one_third_height_px` = floor(12*10240/3/1024) = 40
+    ///   - `text_floor_height_px` = (12 - LIVE_MIN_VISIBLE_TEXT_ROWS(8)) * 10 = 40
+    ///   - `max_height_px` = 40, so `height_scale` = 40*1000/300 = 133 (width and dpi are looser)
+    ///   - display box = ceil(200*133/1000) x ceil(300*133/1000) = 27x40
+    ///   - `display_height_subpixels` = 40 * 1024 = 40960; `display_rows` = 4
     #[test]
-    fn inline_image_geometry_uses_dpi_width_fit_and_two_thirds_height_cap() {
+    fn inline_image_geometry_uses_dpi_width_fit_and_text_floor_height_cap() {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
         session.set_cell_width_subpixels(cell);
@@ -13891,6 +14066,7 @@ mod tests {
             task.clone(),
             Ok(decoded_test_image(task.occurrence_id, 200, 300, false)),
         ));
+        settle_inline_image_displays(&mut session);
 
         let record = &session.inline_image_records()[0];
         assert_eq!(record.display_rows, Some(4));
@@ -13906,13 +14082,184 @@ mod tests {
                 )
             })
             .expect("decoded image projects through the shared RGBA placement");
-        assert_eq!(placement.artifact.render_scale_milli, 133);
-        assert_eq!(placement.artifact.height_subpixels, 40_858);
-        assert_eq!(placement.clip_height_subpixels, 40_858);
+        assert_eq!(
+            (placement.artifact.width_px, placement.artifact.height_px),
+            (27, 40),
+            "the renderer is handed the display box, not the 200x300 native decode",
+        );
+        assert_eq!(
+            placement.artifact.rgba.len(),
+            27 * 40 * 4,
+            "resident bytes are the display box's, not the native decode's",
+        );
+        assert_eq!(placement.artifact.render_scale_milli, 1000);
+        assert_eq!(placement.artifact.height_subpixels, 40_960);
+        assert_eq!(placement.clip_height_subpixels, 40_960);
     }
 
+    /// PIN (grey-band root fix, 2026-08-02): an image artifact's resident bytes are its DISPLAY
+    /// box's, never its native decode's.
+    ///
+    /// A 3840x2400 wallpaper is 35 MiB of RGBA. Handed to the renderer at native resolution it is
+    /// most of the 64 MiB GPU texture budget for one band, so two visible bands evict each other
+    /// every frame and the loser draws its placement and its hover dim over nothing — a bare grey
+    /// rectangle. The band shows perhaps a megapixel; the texture must be that, and no more.
     #[test]
-    fn inline_image_width_fit_and_zoom_scale_reuse_the_content_texture() {
+    fn image_artifact_resident_bytes_are_display_sized_not_native() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(80), nz(24), cell);
+        session.set_cell_width_subpixels(cell);
+        session.feed(b"]1337;File=inline=1:AAAA").unwrap();
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        let native = decoded_test_image(task.occurrence_id, 3840, 2400, false);
+        let native_bytes = native.rgba.len();
+        assert!(session.complete_inline_image_result(task, Ok(native)));
+        settle_inline_image_displays(&mut session);
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let artifact = &frame
+            .math_blocks
+            .iter()
+            .find(|placement| placement.artifact.key.starts_with("image:"))
+            .expect("the decoded image projects a band")
+            .artifact;
+
+        // The band is 80 columns wide and capped at a third of a 24-row viewport, so the display
+        // box cannot exceed 800x80 physical pixels whatever the decode measured.
+        let display_bytes = artifact.width_px as usize * artifact.height_px as usize * 4;
+        assert_eq!(artifact.rgba.len(), display_bytes);
+        assert!(
+            artifact.width_px <= 800 && artifact.height_px <= 80,
+            "display box {}x{} must fit the pane the band occupies",
+            artifact.width_px,
+            artifact.height_px,
+        );
+        assert_eq!(artifact.render_scale_milli, 1000);
+        assert_eq!(native_bytes, 3840 * 2400 * 4);
+        assert!(
+            artifact.rgba.len() * 100 < native_bytes,
+            "resident bytes {} are not display-sized against a {native_bytes}-byte native decode",
+            artifact.rgba.len(),
+        );
+        assert!(
+            artifact.rgba.len() <= bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES / 16,
+            "one band must not be able to crowd the shared texture budget: {} bytes",
+            artifact.rgba.len(),
+        );
+    }
+
+    /// PIN (grey-band root fix, 2026-08-02): two wallpaper-sized images that could never both be
+    /// resident at native resolution both fit, and stay fit, once bands carry display-sized
+    /// rasters.
+    ///
+    /// This is the eviction thrash reproduced at the seam that produces the bytes. At native size
+    /// the pair is 70 MiB against a 64 MiB budget, so admitting either evicts the other on every
+    /// frame; at display size the pair is a rounding error against the same budget and neither ever
+    /// evicts anything.
+    #[test]
+    fn two_display_sized_bands_fit_a_budget_their_native_decodes_would_blow() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(80), nz(24), cell);
+        session.set_cell_width_subpixels(cell);
+        session
+            .feed(
+                b"]1337;File=inline=1:AAAA
+",
+            )
+            .unwrap();
+        session
+            .feed(
+                b"]1337;File=inline=1:BBBB
+",
+            )
+            .unwrap();
+
+        let mut native_total = 0usize;
+        while let Some(task) = session.take_decoration_worker_task() {
+            match task {
+                SessionDecorationTask::InlineImage(task) => {
+                    let native = decoded_test_image(task.occurrence_id, 3840, 2400, false);
+                    native_total += native.rgba.len();
+                    assert!(session.complete_inline_image_result(task, Ok(native)));
+                }
+                SessionDecorationTask::ScaleInlineImage(task) => {
+                    assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
+                }
+                SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
+            }
+        }
+        assert!(
+            native_total > bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES,
+            "the fixture must be a pair no budget could hold at native resolution",
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let bands = frame
+            .math_blocks
+            .iter()
+            .filter(|placement| placement.artifact.key.starts_with("image:"))
+            .collect::<Vec<_>>();
+        assert_eq!(bands.len(), 2, "both images must project a band");
+        assert_ne!(
+            bands[0].artifact.key, bands[1].artifact.key,
+            "distinct content keeps distinct texture identity",
+        );
+        let resident = bands
+            .iter()
+            .map(|placement| placement.artifact.rgba.len())
+            .sum::<usize>();
+        assert!(
+            resident <= bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES,
+            "two visible bands must coexist in the texture budget: {resident} bytes",
+        );
+    }
+
+    /// The inline height cap is one third of the viewport, not two (user ruling 2026-08-02):
+    /// inline is a glance, the preview pane is where an image is looked at. 20x30 grid, 10px
+    /// square cells, image 200x300:
+    ///   - `one_third_height_px` = floor(30*10240/3/1024) = 100
+    ///   - `text_floor_height_px` = (30 - 8) * 10 = 220, so the third is what binds
+    ///   - `height_scale` = 100*1000/300 = 333; under the retired two-thirds rule it was 666
+    #[test]
+    fn inline_image_height_is_capped_at_one_third_of_the_viewport() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(20), nz(30), cell);
+        session.set_cell_width_subpixels(cell);
+        session.feed(b"]1337;File=inline=1:AAAA").unwrap();
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(task.occurrence_id, 200, 300, false)),
+        ));
+        settle_inline_image_displays(&mut session);
+
+        let record = &session.inline_image_records()[0];
+        assert_eq!(
+            (record.display_width_px, record.display_height_px),
+            (Some(67), Some(100)),
+            "one third of a 300px viewport, not the 200px two thirds allowed before",
+        );
+        assert_eq!(record.display_rows, Some(10));
+    }
+
+    /// Width fit resamples down to the pane, and a zoom asks the shared GPU LRU a *different*
+    /// question rather than stretching a stale raster: the display size is part of the texture
+    /// identity, so the key changes and the pixels are re-rastered from the decode already in
+    /// hand. Between the zoom and the resample landing, the resident raster bridges the gap at the
+    /// ratio the new layout demands, so the band softens for one worker round trip instead of
+    /// blinking out.
+    #[test]
+    fn inline_image_width_fit_downscales_and_zoom_rekeys_at_the_new_display_size() {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(20), nz(20), cell);
         session.set_cell_width_subpixels(cell);
@@ -13926,6 +14273,7 @@ mod tests {
             task.clone(),
             Ok(decoded_test_image(task.occurrence_id, 400, 10, false)),
         ));
+        settle_inline_image_displays(&mut session);
         let mut projection = session.new_projection(session.layout_key());
         let first = session.viewport_frame(&mut projection).unwrap();
         let first = first
@@ -13933,14 +14281,26 @@ mod tests {
             .iter()
             .find(|placement| placement.artifact.key.starts_with("image:"))
             .unwrap();
-        assert_eq!(first.artifact.render_scale_milli, 500);
+        // 400x10 native into 20 columns of 10px: the width fit is 500 milli, so the display box is
+        // 200x5 and the renderer never sees the 400px-wide decode.
+        assert_eq!(first.artifact.render_scale_milli, 1000);
+        assert_eq!(
+            (first.artifact.width_px, first.artifact.height_px),
+            (200, 5)
+        );
+        assert_eq!(first.artifact.rgba.len(), 200 * 5 * 4);
         let key = first.artifact.key.clone();
         let decoded = session
             .inline_images
             .get(&task.occurrence_id)
             .and_then(|record| record.artifact.as_ref())
             .unwrap();
-        assert_eq!(decoded.key, key);
+        assert_eq!(
+            (decoded.width_px, decoded.height_px),
+            (400, 10),
+            "the native decode stays resident as the source future display sizes resample from",
+        );
+        assert_eq!(key, display_texture_key(&decoded.key, 200, 5));
 
         let mut zoom = DualPlaneSession::with_cell_height(nz(20), nz(20), cell);
         zoom.set_cell_width_subpixels(cell);
@@ -13954,6 +14314,7 @@ mod tests {
             zoom_task.clone(),
             Ok(decoded_test_image(zoom_task.occurrence_id, 10, 10, false,)),
         ));
+        settle_inline_image_displays(&mut zoom);
         let mut zoom_projection = zoom.new_projection(zoom.layout_key());
         let before_zoom = zoom.viewport_frame(&mut zoom_projection).unwrap();
         let before_zoom = before_zoom
@@ -13967,17 +14328,46 @@ mod tests {
             dpi_milli: nz(2000),
             ..zoom.layout_key()
         });
+        // The zoom is seen but the resample has not landed: the 10x10 raster bridges the 20x20
+        // band the new layout asks for, keeping the picture on screen at the old sharpness.
+        let bridging = zoom.viewport_frame(&mut zoom_projection).unwrap();
+        let bridging = bridging
+            .math_blocks
+            .iter()
+            .find(|placement| placement.artifact.key == zoom_key)
+            .expect("the resident raster keeps the band alive across the zoom");
+        assert_eq!(bridging.artifact.render_scale_milli, 2000);
+
+        // A zoom re-rasters; it never re-decodes.
+        let SessionDecorationTask::ScaleInlineImage(scale_task) = zoom
+            .take_decoration_worker_task()
+            .expect("the zoom must ask for the new display size")
+        else {
+            panic!("a zoom re-rasters an image it already decoded");
+        };
+        assert_eq!(
+            (scale_task.display_width_px, scale_task.display_height_px),
+            (20, 20)
+        );
+        assert!(zoom.complete_inline_image_scale(scale_inline_image(&scale_task)));
+        assert!(zoom.take_decoration_worker_task().is_none());
+
         let zoomed = zoom.viewport_frame(&mut zoom_projection).unwrap();
         let zoomed = zoomed
             .math_blocks
             .iter()
-            .find(|placement| placement.artifact.key == zoom_key)
+            .find(|placement| placement.artifact.key.starts_with("image:"))
             .unwrap();
-        assert_eq!(zoomed.artifact.render_scale_milli, 2000);
-        assert_eq!(
+        assert_ne!(
             zoomed.artifact.key, zoom_key,
-            "zoom scales the held texture without re-decoding or rekeying pixels"
+            "the display size is part of the texture identity, so a zoom is a different texture"
         );
+        assert_eq!(zoomed.artifact.render_scale_milli, 1000);
+        assert_eq!(
+            (zoomed.artifact.width_px, zoomed.artifact.height_px),
+            (20, 20)
+        );
+        assert_eq!(zoomed.artifact.rgba.len(), 20 * 20 * 4);
     }
 
     #[test]
@@ -13994,6 +14384,7 @@ mod tests {
         let result = decode_inline_image(task.clone());
         assert_eq!(result, Err(InlineImageDecodeError::InvalidBase64));
         assert!(session.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut session);
         assert!(session.inline_image_records()[0].failed);
         assert!(
             session
@@ -14061,6 +14452,7 @@ mod tests {
             task,
             Ok(decoded_test_image(occurrence_id, 40, 40, false)),
         ));
+        settle_inline_image_displays(&mut session);
         assert_eq!(
             session.inline_image_records()[0].display_rows,
             Some(4),
@@ -14252,11 +14644,13 @@ mod tests {
         else {
             panic!("OSC 1337 must enqueue an image worker task");
         };
-        let key = format!("image:test-{}", task.occurrence_id);
+        let content_key = format!("image:test-{}", task.occurrence_id);
         assert!(session.complete_inline_image_result(
             task.clone(),
             Ok(decoded_test_image(task.occurrence_id, 10, 10, true)),
         ));
+        settle_inline_image_displays(&mut session);
+        let key = resident_display_key(&session, 0);
         session.feed(b"one\r\ntwo\r\nthree\r\nfour\r\n").unwrap();
 
         let record = session.inline_images.get(&task.occurrence_id).unwrap();
@@ -14272,7 +14666,7 @@ mod tests {
                 .artifact
                 .as_ref()
                 .map(|artifact| artifact.key.as_str()),
-            Some(key.as_str())
+            Some(content_key.as_str())
         );
         assert!(session.take_decoration_worker_task().is_none());
 
@@ -14788,6 +15182,7 @@ mod tests {
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let result = decoder.decode(task.clone());
         assert!(session.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut session);
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
         assert!(frame.math_blocks.iter().any(|placement| matches!(
@@ -14925,6 +15320,7 @@ mod tests {
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let result = decoder.decode(task.clone());
         assert!(session.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut session);
         assert_eq!(
             session.decoded_local_image_path_at(&start),
             Some(path.clone())
@@ -15025,10 +15421,12 @@ mod tests {
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let result = decoder.decode(task.clone());
         assert!(session.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut session);
         let content_key = session.inline_image_records()[0]
             .content_key
             .clone()
             .expect("the decoded artifact must be resident before the chip arrives");
+        let display_key = resident_display_key(&session, 0);
         let mut projection = session.new_projection(session.layout_key());
 
         let overlaid = jump_chip_overlaid_line(&line);
@@ -15056,7 +15454,7 @@ mod tests {
             let frame = session.viewport_frame(&mut projection).unwrap();
             assert!(
                 frame.math_blocks.iter().any(|placement| {
-                    placement.artifact.key == content_key
+                    placement.artifact.key == display_key
                         && placement.live_occurrence_id == Some(LiveMathOccurrenceId(occurrence))
                         && matches!(
                             placement.artifact.kind,
@@ -15113,6 +15511,7 @@ mod tests {
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let result = decoder.decode(task.clone());
         assert!(session.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut session);
 
         now += LIVE_MATH_STABLE_INTERVAL;
         repaint_first_live_row(&mut session, "the run finished with no artifacts", now);
@@ -15166,6 +15565,7 @@ mod tests {
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let result = decoder.decode(task.clone());
         assert!(session.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut session);
         // Rendered inline: still no peek over the same span.
         assert_eq!(session.local_image_path_probe_at(&probe_anchor), None);
 
@@ -15197,6 +15597,7 @@ mod tests {
         let result = decoder.decode(task.clone());
         assert!(result.is_err());
         assert!(session.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut session);
         let record = session.inline_images.values().next().unwrap();
         let InlineImageRecordKind::LocalPath { start_anchor, .. } = record.kind else {
             panic!("expected local path record");
@@ -15353,10 +15754,8 @@ mod tests {
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let result = decoder.decode(task.clone());
         assert!(session.complete_inline_image_result(task, result));
-        let key = session.inline_image_records()[0]
-            .content_key
-            .clone()
-            .unwrap();
+        settle_inline_image_displays(&mut session);
+        let key = resident_display_key(&session, 0);
 
         let repaint = format!("\u{1b}[?2026h\u{1b}[2J\u{1b}[H{line}\u{1b}[?2026l");
         session
@@ -15407,6 +15806,7 @@ mod tests {
         assert_ne!(first.occurrence_id, second.occurrence_id);
         assert!(session.complete_inline_image_result(tasks[0].clone(), Ok(first)));
         assert!(session.complete_inline_image_result(tasks[1].clone(), Ok(second)));
+        settle_inline_image_displays(&mut session);
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(

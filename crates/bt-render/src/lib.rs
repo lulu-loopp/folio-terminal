@@ -4,7 +4,7 @@ mod procedural;
 mod theme;
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
     mem::size_of,
     num::{NonZeroI64, NonZeroU16, NonZeroU32},
@@ -17,6 +17,7 @@ use bt_transcript::{CapturedCell, CellFlags, CellStyle, TerminalColor};
 use bt_unicode::{cluster_width, graphemes};
 #[cfg(test)]
 use bt_viewport::FrameViewportOrigin;
+use bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES;
 use bt_viewport::{
     FrameShapeError, MathBlockAnchor, MathBlockDisplay, MathBlockPlacement, SUBPIXELS_PER_PX,
     SelectionSpan, ViewportFrame,
@@ -85,7 +86,6 @@ struct StatusOverlayGeometry {
     rect: [f32; 4],
     first_column: usize,
 }
-const MATH_TEXTURE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const PRIMARY_FONT_FAMILY: &str = "Consolas";
 const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
 const SEGOE_COLOR_EMOJI_FONT_FAMILY: &str = "Segoe UI Emoji";
@@ -578,6 +578,15 @@ struct MathDraw {
     key: String,
     tile_index: usize,
     first_vertex: u32,
+}
+
+/// One frame's math block draws plus the indices of the `frame.math_blocks` entries that actually
+/// put pixels on screen. Overlays that decorate a block (the hover dim) read `drawn` so they can
+/// never outlive the raster they decorate.
+struct MathDrawBatch {
+    draws: Vec<MathDraw>,
+    vertices: Vec<MathVertex>,
+    drawn: HashSet<usize>,
 }
 
 /// Hover-peek thumbnail flyout: transient presentation-layer state set by the app shell
@@ -1381,6 +1390,11 @@ pub struct Renderer {
     math_sampler: wgpu::Sampler,
     math_textures: ByteLru<String, CachedMathTexture>,
     math_texture_evictions: u64,
+    /// Artifacts the byte budget refused outright, and visible blocks left without a texture. Both
+    /// used to be silent `continue`s; a band that draws its placement but not its pixels is a bare
+    /// rectangle on screen, so it is counted where the frame trace can see it.
+    math_texture_refusals: u64,
+    textureless_math_blocks: u64,
     metrics: CellMetrics,
     init_timings: RendererInitTimings,
     text_rows: Vec<Arc<ComposedRow>>,
@@ -1715,12 +1729,7 @@ impl HeadlessRenderProbe {
         let mut uploads = 0_u64;
         let mut upload_bytes = 0_usize;
         for placement in &frame.math_blocks {
-            if placement.display == MathBlockDisplay::Source
-                || !frame.drawable_interval_overlaps(
-                    placement.top_subpixels,
-                    placement.clip_height_subpixels,
-                )
-            {
+            if !math_block_admits_texture(frame, placement) {
                 continue;
             }
             let key = &placement.artifact.key;
@@ -1893,6 +1902,8 @@ impl Renderer {
             math_sampler,
             math_textures: ByteLru::new(MATH_TEXTURE_CACHE_BUDGET_BYTES),
             math_texture_evictions: 0,
+            math_texture_refusals: 0,
+            textureless_math_blocks: 0,
             metrics,
             init_timings: RendererInitTimings {
                 adapter: adapter_time,
@@ -2079,7 +2090,38 @@ impl Renderer {
         };
         let atlas_prepared_at = Instant::now();
 
-        let rects = self.rectangles(frame);
+        // Math draws first: the hover dim rect decorates a block's raster, so it must know which
+        // rasters this frame actually put on screen before it decides to darken anything.
+        let math_batch = self.prepare_math_draws(frame);
+        let math_prepared_at = Instant::now();
+        let math_vertex_buffer = (!math_batch.vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("visible math block vertices"),
+                    contents: bytemuck::cast_slice(&math_batch.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws();
+        let peek_rect_buffer = (!peek_rects.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("peek flyout rectangles"),
+                    contents: bytemuck::cast_slice(&peek_rects),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let peek_vertex_buffer = (!peek_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("peek flyout image vertices"),
+                    contents: bytemuck::cast_slice(&peek_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let math_draws = math_batch.draws;
+
+        let rects = self.rectangles(frame, &math_batch.drawn);
         let empty_rect = [RectInstance::zeroed()];
         let rect_data = if rects.is_empty() {
             empty_rect.as_slice()
@@ -2134,33 +2176,6 @@ impl Renderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 });
         let rectangles_prepared_at = Instant::now();
-        let (math_draws, math_vertices) = self.prepare_math_draws(frame);
-        let math_vertex_buffer = (!math_vertices.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("visible math block vertices"),
-                    contents: bytemuck::cast_slice(&math_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
-        let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws();
-        let peek_rect_buffer = (!peek_rects.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("peek flyout rectangles"),
-                    contents: bytemuck::cast_slice(&peek_rects),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
-        let peek_vertex_buffer = (!peek_vertices.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("peek flyout image vertices"),
-                    contents: bytemuck::cast_slice(&peek_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
-        let math_prepared_at = Instant::now();
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
         // both the default-black interval and DXGI's stretch of the old frame.
@@ -2290,7 +2305,7 @@ impl Renderer {
             let digest_elapsed = digest_started.elapsed();
             self.perf_frame = self.perf_frame.saturating_add(1);
             eprintln!(
-                "BT_PERF_TRACE frame={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
+                "BT_PERF_TRACE frame={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
                 self.perf_frame,
                 trigger.source,
                 frame.cells.len(),
@@ -2318,12 +2333,14 @@ impl Renderer {
                 text_stats.wide.evictions,
                 text_stats.wide.resident_bytes,
                 (atlas_prepared_at - rows_prepared_at).as_micros(),
-                (rectangles_prepared_at - atlas_prepared_at).as_micros(),
-                (math_prepared_at - rectangles_prepared_at).as_micros(),
+                (rectangles_prepared_at - math_prepared_at).as_micros(),
+                (math_prepared_at - atlas_prepared_at).as_micros(),
                 frame.math_blocks.len(),
                 self.math_texture_evictions,
+                self.math_texture_refusals,
+                self.textureless_math_blocks,
                 self.math_textures.resident_bytes(),
-                (surface_acquired_at - math_prepared_at).as_micros(),
+                (surface_acquired_at - rectangles_prepared_at).as_micros(),
                 (encoded_at - surface_acquired_at).as_micros(),
                 (present_called_at - encoded_at).as_micros(),
                 total_elapsed.as_micros(),
@@ -2350,7 +2367,7 @@ impl Renderer {
         )
     }
 
-    fn prepare_math_draws(&mut self, frame: &ViewportFrame) -> (Vec<MathDraw>, Vec<MathVertex>) {
+    fn prepare_math_draws(&mut self, frame: &ViewportFrame) -> MathDrawBatch {
         // UI-UX §7.5c, M1.9a ruling: do not invent automatic math line breaking. With terminal
         // wrapping on (the current native default), the pane clips a left-aligned, max-content
         // raster and therefore acts as the block's horizontal viewport. Scrolling controls are
@@ -2358,24 +2375,28 @@ impl Renderer {
         // is applied here.
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
+        let mut drawn = HashSet::new();
         let pane_left = self.metrics.padding_px;
         let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
             .min(self.config.width as f32);
         let pane_top = self.metrics.padding_px;
         let pane_bottom = self.config.height as f32;
 
-        for placement in &frame.math_blocks {
-            if placement.display == MathBlockDisplay::Source {
+        for (index, placement) in frame.math_blocks.iter().enumerate() {
+            if !math_block_admits_texture(frame, placement) {
                 continue;
             }
             let key = &placement.artifact.key;
             if self.math_textures.get(key).is_none()
                 && let Some(texture) = self.upload_math_texture(&placement.artifact)
             {
-                let (_, evictions) =
+                let (admitted, evictions) =
                     self.math_textures
                         .insert(key.clone(), texture, placement.artifact.rgba.len());
                 self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+                if !admitted {
+                    self.note_math_texture_refusal(key, placement.artifact.rgba.len());
+                }
             }
             let Some(tile_geometry) = self.math_textures.get(key).map(|texture| {
                 texture
@@ -2384,11 +2405,15 @@ impl Renderer {
                     .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
                     .collect::<Vec<_>>()
             }) else {
+                // A placed band with no texture. Silence here is what painted a bare grey
+                // rectangle: the band's own pixels never drew while everything around them did.
+                self.note_textureless_block(key, placement.artifact.rgba.len());
                 continue;
             };
             let Some(geometry) = self.math_block_geometry(frame, placement) else {
                 continue;
             };
+            drawn.insert(index);
             let scale = placement.artifact.render_scale_milli as f32 / 1000.0;
             let block_top = if placement.artifact.mode == MathMode::Inline {
                 pane_top
@@ -2446,7 +2471,34 @@ impl Renderer {
                 });
             }
         }
-        (draws, vertices)
+        MathDrawBatch {
+            draws,
+            vertices,
+            drawn,
+        }
+    }
+
+    /// The LRU refused the texture outright: one artifact larger than the whole budget. Nothing
+    /// evicts it into fitting, so the band will stay textureless until its size changes.
+    fn note_math_texture_refusal(&mut self, key: &str, resident_bytes: usize) {
+        self.math_texture_refusals = self.math_texture_refusals.saturating_add(1);
+        if self.trace_perf {
+            eprintln!(
+                "BT_PERF_TRACE math_texture_refused key={key} bytes={resident_bytes} budget={MATH_TEXTURE_CACHE_BUDGET_BYTES}"
+            );
+        }
+    }
+
+    /// A visible block whose texture is not resident after this frame's upload attempt. Counted
+    /// always so `BT_PERF_TRACE` can carry it; printed per occurrence only under the trace.
+    fn note_textureless_block(&mut self, key: &str, resident_bytes: usize) {
+        self.textureless_math_blocks = self.textureless_math_blocks.saturating_add(1);
+        if self.trace_perf {
+            eprintln!(
+                "BT_PERF_TRACE math_block_without_texture key={key} bytes={resident_bytes} resident={}",
+                self.math_textures.resident_bytes(),
+            );
+        }
     }
 
     /// Build the hover-peek flyout draws: border and background rects for the flat pipeline plus
@@ -2472,10 +2524,13 @@ impl Renderer {
             && let Some(texture) =
                 self.upload_rgba_tiles(&overlay.rgba, overlay.width_px, overlay.height_px)
         {
-            let (_, evictions) =
+            let (admitted, evictions) =
                 self.math_textures
                     .insert(overlay.key.clone(), texture, overlay.rgba.len());
             self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+            if !admitted {
+                self.note_math_texture_refusal(&overlay.key, overlay.rgba.len());
+            }
         }
         let Some(tile_geometry) = self.math_textures.get(&overlay.key).map(|texture| {
             texture
@@ -2774,7 +2829,11 @@ impl Renderer {
         Ok(())
     }
 
-    fn rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
+    fn rectangles(
+        &self,
+        frame: &ViewportFrame,
+        drawn_math_blocks: &HashSet<usize>,
+    ) -> Vec<RectInstance> {
         let columns = frame.columns.get() as usize;
         let drawable_rows = frame.drawable_rows();
         let mut rects = Vec::new();
@@ -2802,8 +2861,8 @@ impl Renderer {
                 ));
             }
         }
-        for placement in &frame.math_blocks {
-            if placement.toolbar_visible
+        for (index, placement) in frame.math_blocks.iter().enumerate() {
+            if math_block_dim_is_drawn(placement, drawn_math_blocks.contains(&index))
                 && let Some(geometry) = self.math_block_geometry(frame, placement)
             {
                 rects.push(self.pixel_rect_with_coverage(
@@ -4434,6 +4493,29 @@ fn default_background() -> [u8; 3] {
     background_rgb()
 }
 
+/// Whether a block's hover dim scrim is drawn.
+///
+/// The dim darkens a block so its toolbar reads against it. A Rendered block's substance is its
+/// texture: if that texture did not draw, the scrim would be the only thing on screen where the
+/// picture belongs — the bare grey rectangle. A Source block draws as terminal text and owns no
+/// texture, so its hover dim is unconditional (projection deliberately allows a Source block to
+/// carry `toolbar_visible`; see `crates/bt-term/src/session.rs`).
+fn math_block_dim_is_drawn(placement: &MathBlockPlacement, textured: bool) -> bool {
+    placement.toolbar_visible && (placement.display == MathBlockDisplay::Source || textured)
+}
+
+/// Whether a placement may upload its texture into the shared byte budget this frame.
+///
+/// Visibility is part of the question, not an afterthought. Uploading first and asking later let a
+/// band scrolled off screen admit its texture and evict the texture of a band the user is looking
+/// at; the visible band then found nothing resident, skipped its quad, and left its placement and
+/// hover chrome drawing over bare background. Both preparation paths ask this one question.
+fn math_block_admits_texture(frame: &ViewportFrame, placement: &MathBlockPlacement) -> bool {
+    placement.display != MathBlockDisplay::Source
+        && frame
+            .drawable_interval_overlaps(placement.top_subpixels, placement.clip_height_subpixels)
+}
+
 fn surface_config_size(width: u32, height: u32, max_texture_dimension_2d: u32) -> (u32, u32) {
     let limit = max_texture_dimension_2d.max(1);
     (width.max(1).min(limit), height.max(1).min(limit))
@@ -4522,6 +4604,56 @@ mod tests {
     fn peek_box_layout_refuses_a_window_too_small_for_the_box() {
         assert!(peek_box_layout(30.0, 30.0, 8.0, 1.0, 10.0, 10.0, 10.0, 10.0).is_none());
         assert!(peek_box_layout(1000.0, 800.0, 8.0, 1.0, 0.0, 10.0, 10.0, 10.0).is_none());
+    }
+
+    /// A rendered live math placement carrying `resident_bytes` of RGBA, for texture-budget tests.
+    fn test_math_placement(
+        key: &str,
+        top_subpixels: i64,
+        clip_height_subpixels: i64,
+        resident_bytes: usize,
+    ) -> MathBlockPlacement {
+        let width_px = 1_u32;
+        let height_px = (resident_bytes / 4) as u32;
+        MathBlockPlacement {
+            start: bt_transcript::TranscriptId(1),
+            // History-anchored: a scrolled-away block is exactly a history block off the top of
+            // the pane, and it keeps the fixture free of the live band-top frame invariant.
+            anchor: bt_viewport::MathBlockAnchor::History {
+                start: bt_transcript::TranscriptId(1),
+                end: bt_transcript::TranscriptId(1),
+            },
+            source: key.to_owned(),
+            artifact: bt_viewport::ProjectedMathArtifact {
+                key: key.to_owned(),
+                end: bt_transcript::TranscriptId(1),
+                rgba: Arc::from(vec![0_u8; resident_bytes]),
+                width_px,
+                height_px,
+                height_subpixels: clip_height_subpixels,
+                baseline_subpixels: 0,
+                mode: MathMode::Display,
+                kind: bt_viewport::RgbaArtifactKind::InlineImage { animated: false },
+                vertical_padding_subpixels: 0,
+                render_scale_milli: 1000,
+                source: key.to_owned(),
+            },
+            top_subpixels,
+            left_subpixels: 0,
+            content_offset_subpixels: 0,
+            clip_height_subpixels,
+            display: MathBlockDisplay::Rendered,
+            horizontal_overflow: bt_viewport::HorizontalOverflowOwner::Block,
+            horizontal_scroll_px: 0,
+            vertical_scroll_px: 0,
+            toolbar_visible: false,
+            occluded_source_rows: 0,
+            occluded_visible_rows: Vec::new(),
+            live_occurrence_id: None,
+            frozen_prefix_rows: 0,
+            clipped_top_rows: 0,
+            clipped_bottom_rows: 0,
+        }
     }
 
     fn test_cell_anchors(count: usize) -> Vec<bt_viewport::CellAnchor> {
@@ -5697,6 +5829,141 @@ mod tests {
         assert_eq!(blank_digest.nonblank_cells, 0);
         assert_eq!(blank_digest.first_text_row, -1);
         assert_eq!(blank_digest.last_text_row, -1);
+    }
+
+    /// PIN (grey-band root fix, 2026-08-02): the hover dim never outlives the raster it dims.
+    ///
+    /// A rendered block whose texture did not draw must not draw its scrim either: the scrim alone
+    /// over background IS the bare grey rectangle the user reported. Source blocks are unaffected
+    /// — they draw as terminal text, own no texture, and projection deliberately lets them carry
+    /// `toolbar_visible`.
+    #[test]
+    fn the_hover_dim_is_drawn_only_over_a_block_that_put_pixels_on_screen() {
+        let mut rendered = test_math_placement("k", 0, 20 * SUBPIXELS_PER_PX, 16);
+        let mut source = rendered.clone();
+        source.display = MathBlockDisplay::Source;
+
+        assert!(
+            !math_block_dim_is_drawn(&rendered, true),
+            "no hover, no dim"
+        );
+        assert!(
+            !math_block_dim_is_drawn(&source, true),
+            "no hover, no dim for a source block either",
+        );
+
+        rendered.toolbar_visible = true;
+        source.toolbar_visible = true;
+        assert!(
+            math_block_dim_is_drawn(&rendered, true),
+            "a hovered block that drew its raster dims it",
+        );
+        assert!(
+            !math_block_dim_is_drawn(&rendered, false),
+            "a hovered block whose texture never drew must not paint a bare scrim",
+        );
+        assert!(
+            math_block_dim_is_drawn(&source, false),
+            "a source block owns no texture; its hover dim is over its own text",
+        );
+    }
+
+    /// PIN (grey-band root fix, 2026-08-02): an off-screen band never evicts an on-screen band's
+    /// texture.
+    ///
+    /// `prepare_math_draws` used to upload and admit a block's texture BEFORE asking whether the
+    /// block was on screen. With the shared byte budget near full, the scrolled-away band's upload
+    /// evicted the visible band's texture; the visible band then found nothing resident, skipped
+    /// its quad, and drew only its placement and hover dim — a bare grey rectangle. Visibility is
+    /// now the first question both preparation paths ask, so this reproduces the eviction against
+    /// the real LRU and proves the decision that prevents it.
+    #[test]
+    fn an_offscreen_band_does_not_evict_an_onscreen_bands_texture() {
+        let rows = 4_u32;
+        let cell = 20 * SUBPIXELS_PER_PX;
+        let block_bytes = 6 * 1024 * 1024;
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(4).unwrap(),
+            grid_rows: NonZeroU32::new(rows).unwrap(),
+            rows: NonZeroU32::new(rows).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::plain("x"); 4 * rows as usize],
+            cell_anchors: test_cell_anchors(4 * rows as usize),
+            row_map: (0..rows)
+                .map(|row| bt_viewport::FrameVisualRow {
+                    top_subpixels: i64::from(row) * cell,
+                    height_subpixels: cell,
+                    live_grid_row: Some(row),
+                })
+                .collect(),
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: true,
+            },
+            selection_spans: Vec::new(),
+            math_blocks: vec![
+                test_math_placement("onscreen", 0, cell, block_bytes),
+                // Two full grid heights above the pane: scrolled away, nothing of it is drawable.
+                test_math_placement("offscreen", -2 * i64::from(rows) * cell, cell, block_bytes),
+            ],
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(4),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        frame.validate_shape().unwrap();
+
+        assert!(
+            math_block_admits_texture(&frame, &frame.math_blocks[0]),
+            "the on-screen band is the one that needs a texture",
+        );
+        assert!(
+            !math_block_admits_texture(&frame, &frame.math_blocks[1]),
+            "a band with no drawable pixels must not compete for the texture budget",
+        );
+
+        // The real LRU, sized so the pair cannot coexist: admitting the off-screen block is exactly
+        // one eviction of the on-screen block, and its quad then has nothing to sample.
+        let mut cache = ByteLru::<String, ()>::new(block_bytes + block_bytes / 2);
+        let mut evictions = 0_u64;
+        for placement in &frame.math_blocks {
+            if !math_block_admits_texture(&frame, placement) {
+                continue;
+            }
+            let (admitted, evicted) = cache.insert(
+                placement.artifact.key.clone(),
+                (),
+                placement.artifact.rgba.len(),
+            );
+            assert!(admitted);
+            evictions += evicted;
+        }
+        assert_eq!(evictions, 0, "no visible band may be evicted by this frame");
+        assert!(
+            cache.get(&"onscreen".to_owned()).is_some(),
+            "the on-screen band's texture stayed resident",
+        );
+
+        // Same LRU, same frame, with visibility ignored the way the defect did: the on-screen
+        // band's texture is gone before it is ever drawn.
+        let mut unordered = ByteLru::<String, ()>::new(block_bytes + block_bytes / 2);
+        let mut unordered_evictions = 0_u64;
+        for placement in &frame.math_blocks {
+            let (_, evicted) = unordered.insert(
+                placement.artifact.key.clone(),
+                (),
+                placement.artifact.rgba.len(),
+            );
+            unordered_evictions += evicted;
+        }
+        assert_eq!(unordered_evictions, 1);
+        assert!(
+            unordered.get(&"onscreen".to_owned()).is_none(),
+            "this is the defect: the off-screen band evicted the band on screen",
+        );
     }
 
     #[test]

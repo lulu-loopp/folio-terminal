@@ -92,6 +92,10 @@ enum DecorationWorkerCompletion {
         task: bt_term::InlineImageTask,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     },
+    /// A decoded image resampled into the display box a band shows it in. Resampling a
+    /// wallpaper-sized decode is tens of milliseconds, so it belongs here and never on the event
+    /// thread.
+    ScaleInlineImage { scaled: bt_term::ScaledInlineImage },
     PeekImage {
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
@@ -142,6 +146,11 @@ impl MathWorker {
                             SessionDecorationTask::InlineImage(task) => {
                                 let result = image_decoder.decode(task.clone());
                                 DecorationWorkerCompletion::InlineImage { task, result }
+                            }
+                            SessionDecorationTask::ScaleInlineImage(task) => {
+                                DecorationWorkerCompletion::ScaleInlineImage {
+                                    scaled: bt_term::scale_inline_image(&task),
+                                }
                             }
                         },
                         MathWorkerRequest::PeekImage { path } => {
@@ -1008,6 +1017,9 @@ impl Runtime {
                         },
                         DecorationWorkerCompletion::InlineImage { task, result } => {
                             self.session.complete_inline_image_result(task, result)
+                        }
+                        DecorationWorkerCompletion::ScaleInlineImage { scaled } => {
+                            self.session.complete_inline_image_scale(scaled)
                         }
                         DecorationWorkerCompletion::PeekImage { path, result } => {
                             self.complete_peek_image(path, result)?;

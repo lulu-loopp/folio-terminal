@@ -115,6 +115,13 @@ pub struct FrameVisualRow {
     pub live_grid_row: Option<u32>,
 }
 
+/// Byte budget of the GPU texture cache every projected artifact competes in.
+///
+/// It lives with the artifact type rather than inside one renderer because it is a property of the
+/// artifacts: a raster larger than this can never become a texture no matter who is asked to upload
+/// it, so producers and auditors need the same number the uploader uses.
+pub const MATH_TEXTURE_CACHE_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
 /// Immutable CPU raster produced off the presentation thread. The renderer owns the independent
 /// GPU texture cache; carrying pixels here keeps viewport projection deterministic and device-free.
 #[derive(Clone, Debug, Eq, PartialEq)]
