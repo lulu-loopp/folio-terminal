@@ -993,7 +993,12 @@ pub struct ViewportProjection {
     /// position, so presentation holds its previous complete frame until the session re-anchors or
     /// deterministically retires that record.
     exact_source_reprint_hold: bool,
+    /// How much of `last_live_overflow_subpixels` the reader has currently spent.
     live_overflow_offset_subpixels: i64,
+    /// Live-plane height that the resting Bottom frame still cuts off above the pane, i.e. the band
+    /// inflation minus the bottom relief a blank live tail already yielded (see `continuous_frame`).
+    /// It is simultaneously the resting top cut, the local-review capacity, and the count behind the
+    /// "N rows above" indicator — one number, so a review always ends exactly where rest begins.
     last_live_overflow_subpixels: i64,
     unread_rows: usize,
     last_total_rows: usize,
@@ -1392,7 +1397,51 @@ impl ViewportProjection {
             i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get());
         let live_height_delta = live_height.saturating_sub(rectangular_live_height);
         let live_extra_height = live_height_delta.max(0);
-        self.last_live_overflow_subpixels = live_extra_height;
+        // Bottom relief (user ruling 2026-08-02): a band-inflated live plane pushes content above
+        // the pane while the rows under the cursor may hold nothing. At Bottom that blank tail
+        // yields — up to the band overflow — so the resting window ends at the last meaningful grid
+        // row instead of wasting pane on emptiness while a decoration is cut at the top.
+        //
+        // A row is meaningful when it carries ink, when the cursor sits on it, or when a live
+        // decoration owns it (`live_row_prefix` grew that row, so a blank source row inside a band
+        // still shows pixels). Because every row below the last meaningful one is exactly one cell
+        // tall, capping the relief at `blank_tail_rows * cell_height` keeps the last meaningful row
+        // — and therefore the cursor and every decoration — completely inside the pane.
+        //
+        // Content-derived and deterministic: zero relief without band overflow (byte-identical
+        // classic behavior), zero on full panes (a TUI writes its lower rows), uniform across
+        // Primary and Alternate.
+        let last_decorated_live_row = self
+            .live_math_artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact.screen == screen && artifact.generation == self.grid_generation
+            })
+            .map(|artifact| artifact.band_end_row as usize)
+            .max()
+            .unwrap_or(0)
+            .min(expected_rows.saturating_sub(1));
+        let last_meaningful_row = live_rows
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, row)| !live_row_is_blank(row))
+            .map_or(0, |(index, _)| index)
+            .max(cursor.row as usize)
+            .max(last_decorated_live_row);
+        let blank_tail_rows = expected_rows.saturating_sub(last_meaningful_row + 1);
+        let bottom_relief_subpixels = i64::try_from(blank_tail_rows)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(self.cell_height_subpixels.get())
+            .min(live_extra_height)
+            .max(0);
+        // The relieved pixels are spent at rest, so they are no longer overflow: what remains is
+        // both the height still cut off above the pane and the exact local-review capacity. One
+        // number now drives the resting cut (`frame_top_subpixels`), the review indicator, and —
+        // via `bottom_top_subpixels` below — the scroll ceiling, so a review that returns to offset
+        // zero lands back on the identical resting geometry.
+        self.last_live_overflow_subpixels =
+            live_extra_height.saturating_sub(bottom_relief_subpixels);
         self.live_overflow_offset_subpixels = self
             .live_overflow_offset_subpixels
             .min(self.last_live_overflow_subpixels);
@@ -1424,7 +1473,10 @@ impl ViewportProjection {
             .saturating_add(live_height);
         self.last_total_height_subpixels = total_height;
         let pane_height = rectangular_live_height;
-        let bottom_top_subpixels = total_height.saturating_sub(pane_height).max(0);
+        let bottom_top_subpixels = total_height
+            .saturating_sub(pane_height)
+            .saturating_sub(bottom_relief_subpixels)
+            .max(0);
         if !primary {
             self.scroll_state = ViewportScrollState::Bottom;
             if let Some(requested) = self.pending_scroll_offset_subpixels.take() {
@@ -1586,7 +1638,13 @@ impl ViewportProjection {
             .saturating_sub(blank_live_rows_below);
         debug_assert!(primary || live_height_delta >= 0);
         let frame_top_subpixels = if bottom_identity {
-            live_extra_height.saturating_neg()
+            // The resting live plane is cut at the top by the overflow the blank tail did NOT
+            // relieve. The relieved pixels move the whole plane down instead, spending blank tail
+            // rows off the pane bottom. With zero relief this is `-live_extra_height` exactly, the
+            // classic flush-bottom identity. It also agrees to the subpixel with the scrolled path:
+            // at offset zero that path computes `window_top - live_plane_top`, which is precisely
+            // `live_extra_height - relief`, so leaving and returning to rest never jumps.
+            self.last_live_overflow_subpixels.saturating_neg()
         } else {
             presentation_offset_subpixels.saturating_neg()
         };
@@ -3139,6 +3197,14 @@ fn apply_implicit_hyperlinks(cells: &mut [CapturedCell]) {
             }
         }
     }
+}
+
+/// A live row with no visible ink: every cell's text is empty or whitespace. Wide-char spacers
+/// carry empty text and never appear without their inked lead cell, so they need no special case.
+fn live_row_is_blank(row: &CapturedRow) -> bool {
+    row.cells
+        .iter()
+        .all(|cell| cell.text.chars().all(char::is_whitespace))
 }
 
 /// True when `cell` belongs to the same OSC 8 link group: exact (id, uri) match, read explicitly

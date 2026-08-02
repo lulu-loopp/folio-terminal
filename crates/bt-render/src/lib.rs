@@ -5480,7 +5480,11 @@ mod tests {
         );
         session
             .feed_at(
-                b"\x1b[?1049h$$x0$$\r\nafter-0\r\n$$x1$$\r\nafter-1\r\n$$x2$$\r\nafter-2\r\n$$x3$$\r\nafter-3",
+                // The application writes its own last row, as a full-screen TUI does: with no blank
+                // live tail the bottom relief is zero, so the four inflated bands keep the classic
+                // cut-at-top frame this fixture needs (a blank tail would instead yield pane at the
+                // bottom and reveal them completely — see bt-viewport `continuous_frame`).
+                b"\x1b[?1049h$$x0$$\r\nafter-0\r\n$$x1$$\r\nafter-1\r\n$$x2$$\r\nafter-2\r\n$$x3$$\r\nafter-3\x1b[24;1Hstatus-row",
                 started,
             )
             .unwrap();

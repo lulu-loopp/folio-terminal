@@ -10777,7 +10777,20 @@ mod tests {
                 default_math_padding_subpixels(),
             )
         );
-        assert_eq!(rendered.status_text.as_deref(), Some("1 rows above"));
+        // Bottom relief: the block inflates grid row 0 by `29696 - 18432 = 11264` subpixels while
+        // rows 2..11 are a blank tail, so the whole inflation is relieved at rest. Nothing is cut
+        // off above the pane any more, so there is no "rows above" affordance to advertise — the
+        // resting frame proves it by placing row 0 flush at the pane top at its full band height.
+        assert_eq!(rendered.status_text, None);
+        assert_eq!(rendered.row_map[0].live_grid_row, Some(0));
+        assert_eq!(rendered.row_map[0].top_subpixels, 0);
+        assert_eq!(
+            rendered.row_map[0].height_subpixels,
+            math_presentation_height_subpixels(
+                20 * SUBPIXELS_PER_PX,
+                default_math_padding_subpixels(),
+            )
+        );
         assert!(!rendered.cells.iter().any(|cell| cell.text == "$"));
 
         session
@@ -11154,7 +11167,24 @@ mod tests {
             )
         );
         assert_eq!(expanded.math_blocks[0].artifact.render_scale_milli, 1000);
-        assert_eq!(expanded.status_text.as_deref(), Some("2 rows above"));
+        // Bottom relief: grid row 0 grows to 50176 subpixels (inflation 31744) while rows 2..11 are
+        // a blank tail, so the resting frame yields that tail instead of cutting the block. The
+        // band lands flush at the pane top and there is nothing above to advertise.
+        assert_eq!(expanded.status_text, None);
+        assert_eq!(expanded.row_map[0].live_grid_row, Some(0));
+        assert_eq!(expanded.row_map[0].top_subpixels, 0);
+        let expanded_last = expanded
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(11))
+            .expect("the fixed last live row stays presented");
+        assert_eq!(
+            expanded_last
+                .top_subpixels
+                .saturating_add(expanded_last.height_subpixels),
+            12 * SPIKE_CELL_HEIGHT_SUBPIXELS.get() + 31744,
+            "the blank tail yields exactly the relieved pixels below the pane bottom"
+        );
 
         let mut capped = DualPlaneSession::new(nz(40), nz(12));
         capped
@@ -11241,13 +11271,19 @@ mod tests {
         );
     }
 
+    /// Local review of a band-inflated alternate grid. The application writes its own last row
+    /// (`\x1b[12;1H`), which is what a full-screen TUI does and what makes this the bottom-relief
+    /// no-op case: `blank_tail_rows == 0`, so the relief is zero and the resting frame is the
+    /// classic flush-bottom / cut-at-top geometry whose overflow is reviewable pixel by pixel. The
+    /// complementary case — an alternate grid that does leave a blank tail — is
+    /// `alternate_blank_tail_yields_to_the_band_at_rest_instead_of_local_review`.
     #[test]
     fn bottom_frame_keeps_the_last_live_row_visible_and_alt_overflow_is_locally_reviewable() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
         session
             .feed_at(
-                b"\x1b[?1049h$$x$$\r\nbarrier-1\r\nbarrier-2\r\nbottom",
+                b"\x1b[?1049h$$x$$\r\nbarrier-1\r\nbarrier-2\r\nbottom\x1b[12;1Hstatus-line",
                 start,
             )
             .unwrap();
@@ -11343,6 +11379,78 @@ mod tests {
             session.viewport_frame(&mut projection).unwrap().row_map[0].top_subpixels,
             bottom.row_map[0].top_subpixels
         );
+    }
+
+    /// Complement of `bottom_frame_keeps_the_last_live_row_visible_and_alt_overflow_is_locally_reviewable`
+    /// on the same alternate grid: this application stops writing at row 3, so rows 4..11 are a
+    /// blank tail and the bottom-relief ruling applies exactly as it does on the primary screen.
+    /// The band inflates grid row 0 from 18432 to 50176 subpixels (overflow 31744), the blank tail
+    /// is worth 8 * 18432 = 147456, so the whole overflow is relieved: the equation is complete at
+    /// rest, the eight blank rows absorb the shift, and there is no local review left to offer.
+    #[test]
+    fn alternate_blank_tail_yields_to_the_band_at_rest_instead_of_local_review() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session
+            .feed_at(
+                b"\x1b[?1049h$$x$$\r\nbarrier-1\r\nbarrier-2\r\nbottom",
+                start,
+            )
+            .unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let bottom = session.viewport_frame(&mut projection).unwrap();
+        let cell = SPIKE_CELL_HEIGHT_SUBPIXELS.get();
+        assert_eq!(bottom.row_map[0].live_grid_row, Some(0));
+        assert_eq!(
+            bottom.row_map[0].height_subpixels,
+            math_presentation_height_subpixels(
+                40 * SUBPIXELS_PER_PX,
+                default_math_padding_subpixels(),
+            )
+        );
+        assert_eq!(
+            bottom.row_map[0].top_subpixels, 0,
+            "the blank tail yields the whole overflow, so the band is complete at rest"
+        );
+        assert_eq!(bottom.status_text, None);
+        assert!(matches!(
+            bottom.viewport_origin,
+            FrameViewportOrigin::Bottom
+        ));
+        let last = bottom
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(11))
+            .expect("the fixed last live row stays presented");
+        assert_eq!(
+            last.top_subpixels.saturating_add(last.height_subpixels),
+            12 * cell + 31744,
+            "the yielded pixels come out of the blank tail below the pane bottom"
+        );
+        let cursor_row = bottom
+            .row_map
+            .iter()
+            .find(|row| row.live_grid_row == Some(3))
+            .unwrap();
+        assert!(
+            cursor_row
+                .top_subpixels
+                .saturating_add(cursor_row.height_subpixels)
+                <= 12 * cell,
+            "the last meaningful row (the application's cursor row) stays inside the pane"
+        );
+
+        // Nothing is above the pane any more, so local review has nothing left to spend.
+        projection.scroll_by_rows(1);
+        let unmoved = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        assert_eq!(unmoved.row_map, bottom.row_map);
+        assert_eq!(unmoved.status_text, None);
     }
 
     #[test]
@@ -12306,10 +12414,12 @@ mod tests {
             clip_bottom.saturating_sub(raster_bottom),
             default_math_padding_subpixels()
         );
-        assert_eq!(
-            frame.status_text.as_deref(),
-            Some("3 rows above · Shift+wheel")
-        );
+        // Bottom relief: the align block expands 37888 subpixels past its four source rows while
+        // rows 5..15 of this 16-row alternate grid are a blank tail, so the resting frame yields
+        // the tail and shows the complete equation. Its clip therefore starts at the pane top and
+        // no local-review affordance is advertised, because there is nothing left above to review.
+        assert_eq!(clip_top, 0);
+        assert_eq!(frame.status_text, None);
         assert!(
             frame
                 .cells
@@ -12546,13 +12656,16 @@ mod tests {
         );
     }
 
+    /// The last grid row is written (`\x1b[12;1H`) so this stays a zero-relief scenario: with no
+    /// blank live tail the resting frame keeps the classic cut-at-top geometry and the inflated
+    /// live plane is reviewable, which is the state this placement rule is about.
     #[test]
     fn live_show_source_placement_uses_row_map_after_an_expanded_block_above() {
         let start = Instant::now();
         let mut session = DualPlaneSession::new(nz(40), nz(12));
         session
             .feed_at(
-                b"$$upper$$\r\nbarrier-upper\r\n\r\n$$lower$$\r\nbarrier-lower",
+                b"$$upper$$\r\nbarrier-upper\r\n\r\n$$lower$$\r\nbarrier-lower\x1b[12;1Hfooter",
                 start,
             )
             .unwrap();
@@ -13847,6 +13960,227 @@ mod tests {
                     bt_viewport::RgbaArtifactKind::InlineImage { .. }
                 ))
         );
+    }
+
+    /// Build a 20x12 session (10px cells, `SUBPIXELS_PER_PX` = 1024, so cell height/width =
+    /// 10 * 1024 = 10240 subpixels) with a live OSC 1337 image band on grid row 0, then park the
+    /// cursor `crlf_count` rows below via bare CR/LF (no glyphs, so those rows stay
+    /// `live_row_is_blank`). Returns the completed session plus the occurrence id.
+    ///
+    /// The 40x40px decoded image is chosen so its display geometry lands exactly on the
+    /// `inline_image_geometry` two-thirds/text-floor cap for this 12-row grid:
+    ///   - `two_thirds_height_px`  = floor(12*10240 * 2/3 / 1024) = 80
+    ///   - `text_floor_height_px`  = (12 - LIVE_MIN_VISIBLE_TEXT_ROWS(8)) * 10px = 40
+    ///   - `max_height_px`         = min(80, 40) = 40
+    ///   - `height_scale`          = 40*1000/40 = 1000; `width_scale` and `dpi` are both looser
+    ///     (available width is 20 cols = 200px, so width_scale = 5000; dpi_milli = 1000), so the
+    ///     binding scale is 1000 (1:1).
+    ///   - `display_height_subpixels` = 40 * 1000 * 1024 / 1000 = 40960 (exact, no rounding).
+    ///   - `display_rows` = ceil(40960 / 10240) = 4.
+    ///
+    /// A live OSC 1337 band is always exactly one grid row (`band_start_row == band_end_row ==
+    /// point.row`, crates/bt-term/src/session.rs `sync_live_projection_artifacts`), so
+    /// `distributed_row_heights` spreads the whole artifact height over that single row: it
+    /// cannot "borrow" neighboring blank rows the way a multi-row Math band can. Grid row 0
+    /// therefore grows from cell height (10240) straight to 40960 subpixels, an inflation
+    /// (`live_extra_height`) of 40960 - 10240 = 30720 subpixels, independent of `crlf_count`.
+    /// This is also exactly the per-block acceptance cap `(12 - 8) * 10240 = 40960`, so the
+    /// artifact is accepted (the filter is `<=`).
+    fn bottom_relief_image_session(
+        crlf_count: usize,
+    ) -> (DualPlaneSession, u64, ViewportProjection) {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
+        session.set_cell_width_subpixels(cell);
+        session.feed(b"hi").unwrap();
+        session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
+        for _ in 0..crlf_count {
+            session.feed(b"\r\n").unwrap();
+        }
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        let occurrence_id = task.occurrence_id;
+        assert!(session.complete_inline_image_result(
+            task,
+            Ok(decoded_test_image(occurrence_id, 40, 40, false)),
+        ));
+        assert_eq!(
+            session.inline_image_records()[0].display_rows,
+            Some(4),
+            "display geometry must land on the two-thirds/text-floor cap this test derives from"
+        );
+        let projection = session.new_projection(session.layout_key());
+        (session, occurrence_id, projection)
+    }
+
+    /// Regression for the bottom-relief ruling (user ruling 2026-08-02,
+    /// `ViewportProjection::continuous_frame` in crates/bt-viewport/src/lib.rs): a live band that
+    /// genuinely inflates a grid row (not merely borrows a neighbour's blank rows, see
+    /// `bottom_relief_image_session`) must let a blank live tail below it yield scroll range, up
+    /// to the band overflow, instead of making the viewer scroll through pure emptiness to reveal
+    /// the rest of the decoration.
+    ///
+    /// Cursor parks at row 9 (9 CR/LF after the image), so the last meaningful row is
+    /// `max(last non-blank row = 0, cursor.row = 9, last decorated row = 0) = 9` and
+    /// `blank_tail_rows = 12 - (9+1) = 2`. `live_extra_height` is 30720 (see
+    /// `bottom_relief_image_session`), so:
+    ///   `relief = min(2 * 10240, 30720) = min(20480, 30720) = 20480`.
+    /// The relief is partial here (the two blank rows cannot cover all three overflowing rows),
+    /// which makes this the interesting case: exactly 20480 subpixels of blank tail are spent, and
+    /// exactly `30720 - 20480 = 10240` of overflow remain. That one remainder drives all three
+    /// faces of the rule at once:
+    ///   - the resting cut: `row_map[0].top == -10240` instead of the unrelieved `-30720`;
+    ///   - the resting bottom: the last grid row ends 20480 past the pane bottom (122880 + 20480 =
+    ///     143360) — pure blank tail, while row 9 (the last meaningful row) still ends exactly flush
+    ///     at 122880;
+    ///   - the scroll ceiling: 10240, so review spends the same remainder and nothing more.
+    #[test]
+    fn inline_image_band_inflation_relieves_a_blank_live_tail_at_bottom() {
+        let (session, _occurrence_id, mut projection) = bottom_relief_image_session(9);
+
+        // At rest: authority is Bottom/0, and the resting frame is shifted down by the relief.
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        assert_eq!(
+            *projection.scroll_state(),
+            bt_viewport::ViewportScrollState::Bottom
+        );
+        let pane_height = 12 * 10240;
+        assert_eq!(frame.row_map[0].live_grid_row, Some(0));
+        assert_eq!(
+            frame.row_map[0].top_subpixels, -10240,
+            "cut at top only by the overflow the blank tail could not relieve"
+        );
+        assert_eq!(
+            frame.row_map[0].height_subpixels, 40960,
+            "one-row band carries the full artifact height"
+        );
+        assert_eq!(
+            frame.status_text.as_deref(),
+            Some("1 rows above"),
+            "the indicator counts the relieved remainder, not the raw inflation"
+        );
+        let row_bottom = |frame: &bt_viewport::ViewportFrame, row: u32| {
+            let mapped = frame
+                .row_map
+                .iter()
+                .rev()
+                .find(|mapped| mapped.live_grid_row == Some(row))
+                .unwrap();
+            mapped.top_subpixels + mapped.height_subpixels
+        };
+        assert_eq!(
+            row_bottom(&frame, 9),
+            pane_height,
+            "the last meaningful row (the cursor row) still ends exactly at the pane bottom"
+        );
+        assert_eq!(
+            row_bottom(&frame, 11),
+            pane_height + 20480,
+            "only the two blank tail rows yielded, by exactly the relief"
+        );
+
+        // Request a scroll far beyond any possible ceiling. The projection clamps it to the
+        // relieved ceiling (10240), not the unrelieved one (30720): the window's reachable
+        // upward shift is exactly `relief` pixels smaller, because the rest was already spent.
+        projection.scroll_by_subpixels(1_000_000);
+        let scrolled = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            projection.scroll_offset_subpixels(),
+            10240,
+            "relieved ceiling: 30720 (unrelieved) - 20480 (relief) = 10240"
+        );
+        assert!(matches!(
+            projection.scroll_state(),
+            bt_viewport::ViewportScrollState::Anchored(_)
+        ));
+        // Reaching the (now closer) ceiling still fully reveals the band: its top lands at 0
+        // (no longer cut off) and the live plane's total span (153600 = live_height) still
+        // extends `live_extra_height` (30720) past the pane, since revealing the whole band
+        // necessarily shows its whole inflated height once you are all the way scrolled up.
+        assert_eq!(scrolled.row_map[0].live_grid_row, Some(0));
+        assert_eq!(scrolled.row_map[0].top_subpixels, 0);
+        assert_eq!(scrolled.row_map[0].height_subpixels, 40960);
+        assert!(
+            !scrolled
+                .status_text
+                .as_deref()
+                .unwrap_or_default()
+                .contains("rows above"),
+            "at the ceiling the band is complete, so no overflow remains above the pane"
+        );
+        assert_eq!(row_bottom(&scrolled, 11), 153600);
+
+        // One subpixel of review is one subpixel of motion from the relieved rest: the resting
+        // placement and the scrolled placement are the same function of the window top, so
+        // leaving and returning to the bottom never jumps by the relief.
+        projection.scroll_by_subpixels(-1_000_000);
+        projection.scroll_by_subpixels(1);
+        let nudged = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(projection.scroll_offset_subpixels(), 1);
+        assert_eq!(nudged.row_map[0].top_subpixels, -10240 + 1);
+
+        // Back to rest: the identical relieved geometry and the identical scrolling authority.
+        projection.scroll_by_subpixels(-1);
+        let returned = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        assert_eq!(
+            *projection.scroll_state(),
+            bt_viewport::ViewportScrollState::Bottom
+        );
+        assert_eq!(returned.row_map, frame.row_map);
+        assert_eq!(returned.viewport_origin, frame.viewport_origin);
+        assert_eq!(returned.status_text, frame.status_text);
+    }
+
+    /// Control for `inline_image_band_inflation_relieves_a_blank_live_tail_at_bottom`: the cursor
+    /// parks on the very last grid row (11 CR/LF after the image), so
+    /// `blank_tail_rows = 12 - (11+1) = 0` and `relief = min(0, live_extra_height) = 0`
+    /// regardless of how large the inflation is. Both the resting geometry and the scroll ceiling
+    /// must be byte-identical to the classic behavior computed without the relief term at all:
+    /// the plane is flush at the pane bottom, cut at the top by the full 30720, and the ceiling is
+    /// exactly that same 30720.
+    #[test]
+    fn inline_image_band_inflation_keeps_flush_bottom_when_no_blank_tail() {
+        let (session, _occurrence_id, mut projection) = bottom_relief_image_session(11);
+
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(projection.scroll_offset_subpixels(), 0);
+        assert_eq!(
+            *projection.scroll_state(),
+            bt_viewport::ViewportScrollState::Bottom
+        );
+        let pane_height = 12 * 10240;
+        assert_eq!(frame.row_map[0].live_grid_row, Some(0));
+        assert_eq!(
+            frame.row_map[0].top_subpixels, -30720,
+            "zero blank tail means zero relief: the classic full cut at the top"
+        );
+        let last_live = frame
+            .row_map
+            .iter()
+            .rev()
+            .find(|row| row.live_grid_row == Some(11))
+            .unwrap();
+        assert_eq!(
+            last_live.top_subpixels + last_live.height_subpixels,
+            pane_height
+        );
+
+        projection.scroll_by_subpixels(1_000_000);
+        let _ = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            projection.scroll_offset_subpixels(),
+            30720,
+            "zero blank tail means zero relief: the ceiling is exactly the unrelieved live_extra_height"
+        );
+        assert!(matches!(
+            projection.scroll_state(),
+            bt_viewport::ViewportScrollState::Anchored(_)
+        ));
     }
 
     #[test]
