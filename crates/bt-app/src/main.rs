@@ -81,6 +81,10 @@ enum MathWorkerRequest {
     PeekImage {
         path: PathBuf,
     },
+    /// Resample a peeked decode into the flyout's display box. Same worker as every other
+    /// resample, and for the same reason: a wallpaper-sized Lanczos3 pass is tens of milliseconds
+    /// and the event thread must not spend them. The completion routes only to the peek slot.
+    PeekScale(bt_term::InlineImageScaleTask),
 }
 
 enum DecorationWorkerCompletion {
@@ -95,10 +99,15 @@ enum DecorationWorkerCompletion {
     /// A decoded image resampled into the display box a band shows it in. Resampling a
     /// wallpaper-sized decode is tens of milliseconds, so it belongs here and never on the event
     /// thread.
-    ScaleInlineImage { scaled: bt_term::ScaledInlineImage },
+    ScaleInlineImage {
+        scaled: bt_term::ScaledInlineImage,
+    },
     PeekImage {
         path: PathBuf,
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
+    },
+    PeekScaledImage {
+        scaled: bt_term::ScaledInlineImage,
     },
 }
 
@@ -159,6 +168,11 @@ impl MathWorker {
                                 source: bt_term::InlineImageSource::LocalPath(path.clone()),
                             });
                             DecorationWorkerCompletion::PeekImage { path, result }
+                        }
+                        MathWorkerRequest::PeekScale(task) => {
+                            DecorationWorkerCompletion::PeekScaledImage {
+                                scaled: bt_term::scale_inline_image(&task),
+                            }
                         }
                     };
                     if result_tx.send(MathWorkerResult { completion }).is_err() {
@@ -272,6 +286,10 @@ struct Runtime {
     hyperlink_hover: HyperlinkHover,
     peek_hover: PeekHover,
     peek_cache: std::collections::HashMap<String, PeekCacheEntry>,
+    /// The one display-sized thumbnail the flyout can draw, and the one resample in flight. See
+    /// `PeekThumbnail` for why a single entry is the whole policy.
+    peek_thumbnail: Option<PeekThumbnail>,
+    peek_thumbnail_pending: Option<PeekThumbnailTarget>,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
     pending_math_context_anchor: Option<MathBlockAnchor>,
@@ -593,6 +611,9 @@ impl PeekHover {
 /// App-side memory of peek decode outcomes, keyed by the decoder's normalized path identity.
 /// `Failed` entries keep a missing or corrupt file from re-hitting the disk on every hover;
 /// the payload bytes are shared `Arc`s with the worker decoder's own cache.
+///
+/// `Ready` holds the *native* decode. It is CPU memory the worker's decoder already retains, and
+/// it is what a resample at any later display size is computed from — it never reaches the GPU.
 enum PeekCacheEntry {
     Pending,
     Failed,
@@ -602,6 +623,75 @@ enum PeekCacheEntry {
         width_px: u32,
         height_px: u32,
     },
+}
+
+/// One content at one display size: `(content key, display width, display height)`.
+type PeekThumbnailTarget = (String, u32, u32);
+
+/// The display-sized raster the flyout hands the renderer — the only peek pixels that ever reach
+/// the GPU.
+///
+/// Cache policy: exactly one entry. A peek is transient and singular (one flyout at a time), the
+/// display box depends on the viewport at hover time, and the native decodes stay path-keyed in
+/// `peek_cache`, so re-showing at a size this entry does not hold costs one worker resample and
+/// never a disk read. `key` carries the display size (`display_texture_key`), so the shared GPU
+/// LRU can never serve a raster rastered for a different box.
+struct PeekThumbnail {
+    /// Identity of the native decode this was resampled from, matched against `PeekCacheEntry`.
+    content_key: String,
+    key: String,
+    rgba: Arc<[u8]>,
+    width_px: u32,
+    height_px: u32,
+}
+
+impl PeekThumbnail {
+    fn from_scaled(scaled: bt_term::ScaledInlineImage) -> Self {
+        Self {
+            content_key: scaled.content_key,
+            key: scaled.key,
+            rgba: scaled.rgba,
+            width_px: scaled.width_px,
+            height_px: scaled.height_px,
+        }
+    }
+
+    fn matches(&self, target: &PeekThumbnailTarget) -> bool {
+        self.content_key == target.0 && (self.width_px, self.height_px) == (target.1, target.2)
+    }
+
+    /// The overlay the renderer draws: display-sized pixels under a display-sized identity, and a
+    /// pointer anchor. This is the only path by which peek pixels reach the GPU.
+    fn overlay(&self, pointer: PhysicalPosition<f64>) -> PeekImageOverlay {
+        PeekImageOverlay {
+            key: self.key.clone(),
+            rgba: Arc::clone(&self.rgba),
+            width_px: self.width_px,
+            height_px: self.height_px,
+            pointer_x: pointer.x as f32,
+            pointer_y: pointer.y as f32,
+        }
+    }
+}
+
+/// The one resample that stands between a native decode and the flyout, addressed to the worker.
+fn peek_scale_task(
+    target: &PeekThumbnailTarget,
+    rgba: Arc<[u8]>,
+    native_width_px: u32,
+    native_height_px: u32,
+) -> bt_term::InlineImageScaleTask {
+    let (content_key, display_width_px, display_height_px) = target;
+    bt_term::InlineImageScaleTask {
+        // The peek is not an occurrence in the document; its identity is the content key.
+        occurrence_id: 0,
+        content_key: content_key.clone(),
+        rgba,
+        width_px: native_width_px,
+        height_px: native_height_px,
+        display_width_px: *display_width_px,
+        display_height_px: *display_height_px,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -843,6 +933,8 @@ impl Runtime {
             hyperlink_hover: HyperlinkHover::default(),
             peek_hover: PeekHover::default(),
             peek_cache: std::collections::HashMap::new(),
+            peek_thumbnail: None,
+            peek_thumbnail_pending: None,
             math_hover_anchor: None,
             math_hover_clear_at: None,
             pending_math_context_anchor: None,
@@ -1024,6 +1116,10 @@ impl Runtime {
                         DecorationWorkerCompletion::PeekImage { path, result } => {
                             self.complete_peek_image(path, result)?;
                             // Peek state never enters frames, so no republish is needed.
+                            false
+                        }
+                        DecorationWorkerCompletion::PeekScaledImage { scaled } => {
+                            self.complete_peek_scale(scaled)?;
                             false
                         }
                     };
@@ -1272,7 +1368,11 @@ impl Runtime {
         if !self.renderer.set_peek_overlay(overlay) {
             return Ok(());
         }
-        if self.pending_frames.pending_frame().is_none()
+        // Not while a resize present is outstanding: that gate admits only the newly projected
+        // grid, and the frame on screen is the previous one. A repaint is already owed to the
+        // resize, and it carries the renderer-side overlay state with it.
+        if self.pending_resize_present.is_none()
+            && self.pending_frames.pending_frame().is_none()
             && let Some(frame) = self.last_presented_frame.clone()
         {
             self.pending_frames
@@ -1303,43 +1403,70 @@ impl Runtime {
         Ok(())
     }
 
+    /// Resolve the flyout for a settled hover: decode the path if it is new, resample the decode
+    /// into the box this viewport will draw it in if that raster is not the one already held, and
+    /// present when display-sized pixels are in hand. Each miss is one worker round trip and the
+    /// completion re-enters here, so the event thread neither decodes nor resamples.
     fn show_or_request_peek(&mut self, candidate: &PeekCandidate) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&candidate.path);
-        match self.peek_cache.get(&cache_key) {
-            Some(PeekCacheEntry::Ready {
-                key,
-                rgba,
-                width_px,
-                height_px,
-            }) => {
-                let overlay = PeekImageOverlay {
-                    key: key.clone(),
-                    rgba: rgba.clone(),
-                    width_px: *width_px,
-                    height_px: *height_px,
-                    pointer_x: candidate.pointer.x as f32,
-                    pointer_y: candidate.pointer.y as f32,
-                };
-                self.present_peek_overlay(Some(overlay))?;
-            }
-            // A failed decode stays silent: the terminal text is the honest surface, and the
-            // negative entry keeps hovers from re-hitting the disk.
-            Some(PeekCacheEntry::Pending) | Some(PeekCacheEntry::Failed) => {}
-            None => {
-                if !self.math_worker_running {
+        let (content_key, native_rgba, native_width_px, native_height_px) =
+            match self.peek_cache.get(&cache_key) {
+                Some(PeekCacheEntry::Ready {
+                    key,
+                    rgba,
+                    width_px,
+                    height_px,
+                }) => (key.clone(), Arc::clone(rgba), *width_px, *height_px),
+                // A failed decode stays silent: the terminal text is the honest surface, and the
+                // negative entry keeps hovers from re-hitting the disk.
+                Some(PeekCacheEntry::Pending) | Some(PeekCacheEntry::Failed) => return Ok(()),
+                None => {
+                    if !self.math_worker_running {
+                        return Ok(());
+                    }
+                    if self
+                        .math_worker
+                        .tasks
+                        .send(MathWorkerRequest::PeekImage {
+                            path: candidate.path.clone(),
+                        })
+                        .is_ok()
+                    {
+                        self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
+                    }
                     return Ok(());
                 }
-                if self
-                    .math_worker
-                    .tasks
-                    .send(MathWorkerRequest::PeekImage {
-                        path: candidate.path.clone(),
-                    })
-                    .is_ok()
-                {
-                    self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
-                }
-            }
+            };
+        // The renderer owns the box; a pane too small to host the flyout shows none, and nothing
+        // is resampled for it.
+        let Some((display_width_px, display_height_px)) = self
+            .renderer
+            .peek_thumbnail_extent(native_width_px, native_height_px)
+        else {
+            return Ok(());
+        };
+        let target: PeekThumbnailTarget = (content_key, display_width_px, display_height_px);
+        if let Some(thumbnail) = self.peek_thumbnail.as_ref()
+            && thumbnail.matches(&target)
+        {
+            let overlay = thumbnail.overlay(candidate.pointer);
+            return self.present_peek_overlay(Some(overlay));
+        }
+        if self.peek_thumbnail_pending.as_ref() == Some(&target) || !self.math_worker_running {
+            return Ok(());
+        }
+        if self
+            .math_worker
+            .tasks
+            .send(MathWorkerRequest::PeekScale(peek_scale_task(
+                &target,
+                native_rgba,
+                native_width_px,
+                native_height_px,
+            )))
+            .is_ok()
+        {
+            self.peek_thumbnail_pending = Some(target);
         }
         Ok(())
     }
@@ -1372,6 +1499,25 @@ impl Runtime {
             Err(_) => {
                 self.peek_cache.insert(cache_key, PeekCacheEntry::Failed);
             }
+        }
+        Ok(())
+    }
+
+    /// Take delivery of the flyout's display-sized raster. Only the question still outstanding is
+    /// answered here: an earlier size arriving after the viewport moved on leaves the newer request
+    /// in flight rather than asking for it twice.
+    fn complete_peek_scale(&mut self, scaled: bt_term::ScaledInlineImage) -> Result<()> {
+        let delivered: PeekThumbnailTarget = (
+            scaled.content_key.clone(),
+            scaled.width_px,
+            scaled.height_px,
+        );
+        if self.peek_thumbnail_pending.as_ref() == Some(&delivered) {
+            self.peek_thumbnail_pending = None;
+        }
+        self.peek_thumbnail = Some(PeekThumbnail::from_scaled(scaled));
+        if let Some(active) = self.peek_hover.active.clone() {
+            self.show_or_request_peek(&active)?;
         }
         Ok(())
     }
@@ -2189,6 +2335,14 @@ impl Runtime {
         if physical.width == 0 || physical.height == 0 {
             return Ok(());
         }
+        // Both halves of a visible flyout belong to the viewport that produced them: the anchor is
+        // a physical point on the old surface, and the raster was sized to the old pane. A resize
+        // dissolves it exactly as a wheel notch does; the retained thumbnail is re-derived, and
+        // resampled if the new pane asks for another box, on the next settled hover. The frame
+        // this handler publishes below is the repaint that drops it, so nothing is queued here:
+        // the frame on screen belongs to the old grid and the resize gate would refuse it.
+        self.peek_hover.clear();
+        self.renderer.set_peek_overlay(None);
         // The Resized payload is already in physical pixels. Synchronize presentation before any
         // DPI reconciliation can publish a frame, then reconcile once more against inner_size().
         self.renderer
@@ -3222,6 +3376,73 @@ mod tests {
             .activate_if_due(start + Duration::from_millis(700))
             .expect("second span settles on its own deadline");
         assert_eq!(settled.path, second);
+    }
+
+    /// Pin (a) of the peek raster defect: every peek pixel that reaches the renderer is one the
+    /// flyout draws. The chain the app runs — the renderer's box, the worker's resample, the
+    /// thumbnail slot, the overlay — is walked end to end here, so a future edit that hands the
+    /// renderer a native decode again fails on the resident byte count and on the texture key.
+    #[test]
+    fn the_peek_overlay_carries_display_sized_pixels_under_a_display_sized_key() {
+        // A decode far larger than any flyout: 1024x768 in a 640x480 pane.
+        let (native_width_px, native_height_px) = (1024_u32, 768_u32);
+        let native_rgba: Arc<[u8]> =
+            Arc::from(vec![
+                0x40_u8;
+                native_width_px as usize * native_height_px as usize * 4
+            ]);
+        let content_key = "image:0123456789abcdef0123456789abcdef".to_owned();
+
+        let (display_width_px, display_height_px) = bt_render::peek_thumbnail_extent(
+            640.0,
+            480.0,
+            8.0,
+            1.0,
+            native_width_px,
+            native_height_px,
+        )
+        .expect("the pane can host the flyout");
+        assert!(
+            display_width_px < native_width_px && display_height_px < native_height_px,
+            "the 40% cap is what makes the flyout smaller than its decode",
+        );
+
+        let target: PeekThumbnailTarget =
+            (content_key.clone(), display_width_px, display_height_px);
+        let task = peek_scale_task(
+            &target,
+            Arc::clone(&native_rgba),
+            native_width_px,
+            native_height_px,
+        );
+        let thumbnail = PeekThumbnail::from_scaled(bt_term::scale_inline_image(&task));
+        let overlay = thumbnail.overlay(PhysicalPosition::new(120.0, 90.0));
+        assert_eq!(
+            (overlay.width_px, overlay.height_px),
+            (display_width_px, display_height_px),
+        );
+        assert_eq!(
+            overlay.rgba.len(),
+            display_width_px as usize * display_height_px as usize * 4,
+            "the resident bytes the renderer uploads are the display box, not the decode",
+        );
+        assert!(
+            overlay.rgba.len() * 16 < native_rgba.len(),
+            "the defect uploaded {} bytes where {} suffice",
+            native_rgba.len(),
+            overlay.rgba.len(),
+        );
+        assert_eq!(
+            overlay.key,
+            bt_term::display_texture_key(&content_key, display_width_px, display_height_px),
+            "the display size is part of the texture identity, so the shared LRU can never \
+             serve a raster sized for another box",
+        );
+        assert!(
+            thumbnail.matches(&target),
+            "the slot answers the question the hover asked, so a raster for another box is \
+             never presented as this one",
+        );
     }
 
     #[test]

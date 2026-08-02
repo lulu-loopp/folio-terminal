@@ -594,8 +594,13 @@ struct MathDrawBatch {
 /// `ViewportFrame`, so replay/pin contracts and frame equality are untouched by a visible peek.
 #[derive(Clone)]
 pub struct PeekImageOverlay {
-    /// Content identity in the shared GPU texture LRU (the decoder's `image:<hash>` key).
+    /// Texture identity in the shared GPU LRU: the decode's content key at this display size
+    /// (`bt_term::display_texture_key`). The size is part of the identity, so a differently sized
+    /// flyout asks the LRU a different question instead of stretching a stale raster.
     pub key: String,
+    /// Display-resolution pixels, already resampled to `peek_thumbnail_extent`. Never the native
+    /// decode: a flyout is at most 40% of a pane, and uploading a wallpaper for it would spend
+    /// tens of MiB of the shared texture budget on a thumbnail and evict the bands on screen.
     pub rgba: Arc<[u8]>,
     pub width_px: u32,
     pub height_px: u32,
@@ -612,44 +617,88 @@ struct PeekBoxLayout {
     image: [f32; 4],
 }
 
-/// Pure flyout placement: thumbnail capped to 40% of the padded pane per axis without upscaling,
-/// anchored below-right of the pointer, flipped above when the bottom lacks room, and clamped
-/// horizontally into the pane. Returns `None` when the window is too small to host the box.
+/// Border thickness and interior inset of the flyout box in physical pixels. The thumbnail extent
+/// and the box that frames it are derived from these same two numbers, so the size the app
+/// resamples to and the size the box reserves can never disagree.
+fn peek_border_px(scale_factor: f32) -> f32 {
+    scale_factor.round().max(1.0)
+}
+
+fn peek_inset_px(scale_factor: f32) -> f32 {
+    6.0 * scale_factor
+}
+
+/// The exact pixel box the flyout shows an image in: capped to 40% of the padded pane per axis,
+/// never upscaled, `None` when the padded pane cannot host the box that frames it.
+///
+/// This is the size the app must resample to *before* the pixels reach the renderer. Applying it
+/// twice is the identity — an image already at its display extent is within the cap, so `fit`
+/// saturates at 1.0 and the extent is returned unchanged — which is what lets `peek_box_layout`
+/// agree with the display-sized dimensions the app hands it.
+pub fn peek_thumbnail_extent(
+    viewport_width: f32,
+    viewport_height: f32,
+    padding_px: f32,
+    scale_factor: f32,
+    image_width_px: u32,
+    image_height_px: u32,
+) -> Option<(u32, u32)> {
+    if image_width_px == 0 || image_height_px == 0 {
+        return None;
+    }
+    let avail_width = viewport_width - 2.0 * padding_px;
+    let avail_height = viewport_height - 2.0 * padding_px;
+    if avail_width <= 0.0 || avail_height <= 0.0 {
+        return None;
+    }
+    let native_width = image_width_px as f32;
+    let native_height = image_height_px as f32;
+    let fit = (avail_width * 0.4 / native_width)
+        .min(avail_height * 0.4 / native_height)
+        .min(1.0);
+    // Truncate, never round: a rounded extent could exceed the 40% cap it was derived from, and
+    // that cap is what bounds the resident texture.
+    let thumb_width = ((native_width * fit) as u32).max(1);
+    let thumb_height = ((native_height * fit) as u32).max(1);
+    let chrome = 2.0 * (peek_border_px(scale_factor) + peek_inset_px(scale_factor));
+    if thumb_width as f32 + chrome > avail_width || thumb_height as f32 + chrome > avail_height {
+        return None;
+    }
+    Some((thumb_width, thumb_height))
+}
+
+/// Pure flyout placement around the extent above: anchored below-right of the pointer, flipped
+/// above when the bottom lacks room, and clamped horizontally into the pane. Returns `None` when
+/// the window is too small to host the box.
 #[allow(clippy::too_many_arguments)]
 fn peek_box_layout(
     viewport_width: f32,
     viewport_height: f32,
     padding_px: f32,
     scale_factor: f32,
-    image_width_px: f32,
-    image_height_px: f32,
+    image_width_px: u32,
+    image_height_px: u32,
     pointer_x: f32,
     pointer_y: f32,
 ) -> Option<PeekBoxLayout> {
-    if image_width_px <= 0.0 || image_height_px <= 0.0 {
-        return None;
-    }
+    let (thumb_width_px, thumb_height_px) = peek_thumbnail_extent(
+        viewport_width,
+        viewport_height,
+        padding_px,
+        scale_factor,
+        image_width_px,
+        image_height_px,
+    )?;
     let avail_left = padding_px;
     let avail_top = padding_px;
     let avail_right = viewport_width - padding_px;
     let avail_bottom = viewport_height - padding_px;
-    let avail_width = avail_right - avail_left;
-    let avail_height = avail_bottom - avail_top;
-    if avail_width <= 0.0 || avail_height <= 0.0 {
-        return None;
-    }
-    let fit = (avail_width * 0.4 / image_width_px)
-        .min(avail_height * 0.4 / image_height_px)
-        .min(1.0);
-    let thumb_width = (image_width_px * fit).max(1.0);
-    let thumb_height = (image_height_px * fit).max(1.0);
-    let border = scale_factor.round().max(1.0);
-    let inset = 6.0 * scale_factor;
+    let thumb_width = thumb_width_px as f32;
+    let thumb_height = thumb_height_px as f32;
+    let border = peek_border_px(scale_factor);
+    let inset = peek_inset_px(scale_factor);
     let box_width = thumb_width + 2.0 * (border + inset);
     let box_height = thumb_height + 2.0 * (border + inset);
-    if box_width > avail_width || box_height > avail_height {
-        return None;
-    }
     let offset_x = 12.0 * scale_factor;
     let offset_y = 18.0 * scale_factor;
     let mut top = pointer_y + offset_y;
@@ -1985,6 +2034,24 @@ impl Renderer {
         changed
     }
 
+    /// The display box this viewport would show a native decode of `image_width_px` x
+    /// `image_height_px` in, or `None` when the pane cannot host the flyout at all. The app asks
+    /// this before a peek so it resamples once, off-thread, to exactly the pixels the flyout draws.
+    pub fn peek_thumbnail_extent(
+        &self,
+        image_width_px: u32,
+        image_height_px: u32,
+    ) -> Option<(u32, u32)> {
+        peek_thumbnail_extent(
+            self.config.width as f32,
+            self.config.height as f32,
+            self.metrics.padding_px,
+            self.metrics.scale_factor as f32,
+            image_width_px,
+            image_height_px,
+        )
+    }
+
     /// Replace the hover-peek flyout. Returns whether the visible overlay changed so the caller
     /// can skip redundant redraw requests. Peek state is renderer-side only; frames stay pure.
     pub fn set_peek_overlay(&mut self, overlay: Option<PeekImageOverlay>) -> bool {
@@ -2513,8 +2580,8 @@ impl Renderer {
             self.config.height as f32,
             self.metrics.padding_px,
             self.metrics.scale_factor as f32,
-            overlay.width_px as f32,
-            overlay.height_px as f32,
+            overlay.width_px,
+            overlay.height_px,
             overlay.pointer_x,
             overlay.pointer_y,
         ) else {
@@ -4573,7 +4640,7 @@ mod tests {
 
     #[test]
     fn peek_box_layout_places_below_right_without_upscaling() {
-        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 100.0, 50.0, 100.0, 100.0).unwrap();
+        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 100, 50, 100.0, 100.0).unwrap();
         // 1x thumbnail (no upscale), border 1, inset 6: box is 114x64 at pointer + (12, 18).
         assert_eq!(layout.frame, [112.0, 118.0, 226.0, 182.0]);
         assert_eq!(layout.interior, [113.0, 119.0, 225.0, 181.0]);
@@ -4582,19 +4649,19 @@ mod tests {
 
     #[test]
     fn peek_box_layout_flips_above_a_bottom_pointer() {
-        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 100.0, 50.0, 100.0, 780.0).unwrap();
+        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 100, 50, 100.0, 780.0).unwrap();
         assert_eq!(layout.frame[1], 780.0 - 18.0 - 64.0);
         assert!(layout.frame[3] <= 792.0);
     }
 
     #[test]
     fn peek_box_layout_caps_large_images_preserving_aspect_and_clamps_horizontally() {
-        let layout =
-            peek_box_layout(1000.0, 800.0, 8.0, 1.0, 4000.0, 2000.0, 950.0, 100.0).unwrap();
+        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 4000, 2000, 950.0, 100.0).unwrap();
         let width = layout.image[2] - layout.image[0];
         let height = layout.image[3] - layout.image[1];
         assert!(width <= (1000.0 - 16.0) * 0.4 + 1e-3);
-        assert!((height / width - 0.5).abs() < 1e-4);
+        // The extent is whole pixels, so the aspect is preserved to within that quantization.
+        assert!((height - width * 0.5).abs() <= 1.0);
         // Pointer near the right edge: the box clamps inside the padded pane.
         assert!(layout.frame[2] <= 992.0 + 1e-3);
         assert!(layout.frame[0] >= 8.0);
@@ -4602,8 +4669,116 @@ mod tests {
 
     #[test]
     fn peek_box_layout_refuses_a_window_too_small_for_the_box() {
-        assert!(peek_box_layout(30.0, 30.0, 8.0, 1.0, 10.0, 10.0, 10.0, 10.0).is_none());
-        assert!(peek_box_layout(1000.0, 800.0, 8.0, 1.0, 0.0, 10.0, 10.0, 10.0).is_none());
+        assert!(peek_box_layout(30.0, 30.0, 8.0, 1.0, 10, 10, 10.0, 10.0).is_none());
+        assert!(peek_box_layout(1000.0, 800.0, 8.0, 1.0, 0, 10, 10.0, 10.0).is_none());
+    }
+
+    /// The flyout must be able to consume the extent it published: resampling to
+    /// `peek_thumbnail_extent` and laying that out again must reproduce the same thumbnail, or the
+    /// renderer would silently rescale the pixels the app resampled for it.
+    #[test]
+    fn peek_thumbnail_extent_is_idempotent_so_the_layout_agrees_with_display_sized_pixels() {
+        for (native_width, native_height) in
+            [(4000_u32, 2000_u32), (3840, 2400), (100, 50), (17, 4099)]
+        {
+            let (display_width, display_height) =
+                peek_thumbnail_extent(1000.0, 800.0, 8.0, 1.5, native_width, native_height)
+                    .unwrap();
+            assert!(display_width <= native_width && display_height <= native_height);
+            assert_eq!(
+                peek_thumbnail_extent(1000.0, 800.0, 8.0, 1.5, display_width, display_height),
+                Some((display_width, display_height)),
+                "a display-sized image is already within the cap, so the extent is the identity",
+            );
+            let layout = peek_box_layout(
+                1000.0,
+                800.0,
+                8.0,
+                1.5,
+                display_width,
+                display_height,
+                40.0,
+                40.0,
+            )
+            .unwrap();
+            assert_eq!(layout.image[2] - layout.image[0], display_width as f32);
+            assert_eq!(layout.image[3] - layout.image[1], display_height as f32);
+        }
+    }
+
+    /// Pin (b) of the peek raster defect, on the real `ByteLru` at the real budget: hovering a
+    /// wallpaper path while bands that fit the budget are on screen must evict none of them. The
+    /// native-resolution upload the defect performed does evict one — the grey band symptom.
+    #[test]
+    fn a_display_sized_peek_thumbnail_does_not_evict_an_onscreen_bands_texture() {
+        // A 4K pane showing three image bands, each already display-sized (14bab58): full padded
+        // pane width by the one-third-viewport height cap. That is the resident set a hover meets.
+        let (viewport_width, viewport_height) = (3840.0_f32, 2160.0_f32);
+        let padding = 8.0_f32;
+        let band_width = (viewport_width - 2.0 * padding) as usize;
+        let band_height = ((viewport_height - 2.0 * padding) / 3.0) as usize;
+        let band_bytes = band_width * band_height * 4;
+        let band_keys: Vec<String> = (0..3)
+            .map(|index| {
+                bt_term::display_texture_key(
+                    &format!("image:band{index}"),
+                    band_width as u32,
+                    band_height as u32,
+                )
+            })
+            .collect();
+
+        // The hovered path is a 3840x2400 wallpaper: 35 MiB decoded, against a 64 MiB budget the
+        // bands already hold half of.
+        let (native_width, native_height) = (3840_u32, 2400_u32);
+        let native_bytes = native_width as usize * native_height as usize * 4;
+        assert!(
+            3 * band_bytes + native_bytes > MATH_TEXTURE_CACHE_BUDGET_BYTES,
+            "the premise: the native decode does not fit beside the bands on screen",
+        );
+        let (thumb_width, thumb_height) = peek_thumbnail_extent(
+            viewport_width,
+            viewport_height,
+            padding,
+            1.0,
+            native_width,
+            native_height,
+        )
+        .unwrap();
+        let thumb_bytes = thumb_width as usize * thumb_height as usize * 4;
+
+        let mut cache = ByteLru::<String, ()>::new(MATH_TEXTURE_CACHE_BUDGET_BYTES);
+        for key in &band_keys {
+            let (admitted, evictions) = cache.insert(key.clone(), (), band_bytes);
+            assert!(admitted && evictions == 0);
+        }
+        let peek_key = bt_term::display_texture_key("image:wallpaper", thumb_width, thumb_height);
+        let (admitted, evictions) = cache.insert(peek_key, (), thumb_bytes);
+        assert!(admitted, "the flyout's own texture is admissible");
+        assert_eq!(
+            evictions, 0,
+            "hovering a path evicted a band that fits: {thumb_bytes} peek bytes beside \
+             {band_bytes} per band",
+        );
+        for key in &band_keys {
+            assert!(
+                cache.get(key).is_some(),
+                "the bands on screen kept their textures across the hover",
+            );
+        }
+
+        // Same LRU, same bands, with the peek uploading the native decode the way the defect did:
+        // a band's texture is gone and its quad has nothing to sample.
+        let mut native = ByteLru::<String, ()>::new(MATH_TEXTURE_CACHE_BUDGET_BYTES);
+        for key in &band_keys {
+            assert!(native.insert(key.clone(), (), band_bytes).0);
+        }
+        let (_, native_evictions) = native.insert("image:wallpaper".to_owned(), (), native_bytes);
+        assert_eq!(native_evictions, 1);
+        assert!(
+            native.get(&band_keys[0]).is_none(),
+            "this is the defect: a native-resolution peek evicted the oldest band on screen",
+        );
     }
 
     /// A rendered live math placement carrying `resident_bytes` of RGBA, for texture-budget tests.
