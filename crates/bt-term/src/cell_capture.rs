@@ -5,7 +5,9 @@ use alacritty_terminal::{
     term::cell::{Cell, Flags},
     vte::ansi::{Color, NamedColor},
 };
-use bt_transcript::{CapturedCell, CapturedRow, CellFlags, CellStyle, TerminalColor};
+use bt_transcript::{
+    CapturedCell, CapturedRow, CellFlags, CellHyperlink, CellStyle, TerminalColor,
+};
 use std::hash::{Hash, Hasher};
 
 #[cfg(test)]
@@ -148,7 +150,13 @@ pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
                     foreground: capture_color(cell.fg),
                     background: capture_color(cell.bg),
                 },
-                hyperlink: cell.hyperlink().map(|link| link.uri().to_string()),
+                // The vendor synthesizes a per-emission id when OSC 8 sends none, so one wrapped
+                // link's segments share an id. The fingerprint above deliberately hashes the uri
+                // only — synthesized ids change per repaint and must not perturb row stability.
+                hyperlink: cell.hyperlink().map(|link| CellHyperlink {
+                    id: Some(link.id().to_string()),
+                    uri: link.uri().to_string(),
+                }),
                 wide_spacer: cell
                     .flags
                     .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER),

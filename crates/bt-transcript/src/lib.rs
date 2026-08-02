@@ -214,11 +214,49 @@ impl Default for CellStyle {
     }
 }
 
+/// A cell's hyperlink: the target `uri` plus the OSC 8 `id` grouping key. The id is what makes a
+/// soft-wrapped multi-segment link one link (the vendor terminal synthesizes a per-emission id
+/// when the application sends none), but it is presentation grouping metadata only: it changes on
+/// every application repaint, so it MUST NOT participate in content identity. Equality and
+/// hashing therefore cover the uri alone — content fingerprints, preservation's proven-source
+/// exact equality, and shaped-row caches all stay byte-stable across repaints, exactly as when
+/// only the uri was stored. Link grouping reads `.id` explicitly.
+#[derive(Clone, Debug)]
+pub struct CellHyperlink {
+    pub id: Option<String>,
+    pub uri: String,
+}
+
+impl CellHyperlink {
+    /// An implicitly detected link (bare URL in transcript text): no OSC 8 id exists, so the
+    /// link's extent is defined by cell contiguity.
+    pub fn implicit(uri: impl Into<String>) -> Self {
+        Self {
+            id: None,
+            uri: uri.into(),
+        }
+    }
+}
+
+impl PartialEq for CellHyperlink {
+    fn eq(&self, other: &Self) -> bool {
+        self.uri == other.uri
+    }
+}
+
+impl Eq for CellHyperlink {}
+
+impl std::hash::Hash for CellHyperlink {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.uri.hash(state);
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct CapturedCell {
     pub text: String,
     pub style: CellStyle,
-    pub hyperlink: Option<String>,
+    pub hyperlink: Option<CellHyperlink>,
     /// A terminal wide-character spacer has no source text of its own.
     pub wide_spacer: bool,
 }
@@ -258,7 +296,7 @@ pub struct StyleSpan {
     pub byte_start: u32,
     pub byte_end: u32,
     pub style: CellStyle,
-    pub hyperlink: Option<String>,
+    pub hyperlink: Option<CellHyperlink>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -708,7 +746,7 @@ mod tests {
         let mut store = TranscriptStore::new(nz(8));
         let linked = CapturedCell {
             text: "e\u{301}".into(),
-            hyperlink: Some("https://example.test".into()),
+            hyperlink: Some(CellHyperlink::implicit("https://example.test")),
             ..CapturedCell::default()
         };
         let spacer = CapturedCell {
@@ -724,7 +762,10 @@ mod tests {
         assert_eq!(line.text, "e\u{301}");
         assert_eq!(line.grapheme_boundaries, vec![0, 3]);
         assert_eq!(
-            line.styles[0].hyperlink.as_deref(),
+            line.styles[0]
+                .hyperlink
+                .as_ref()
+                .map(|link| link.uri.as_str()),
             Some("https://example.test")
         );
         assert_eq!(line.shell_marks[0].1, "prompt");

@@ -1431,5 +1431,8 @@ fn g1_style_color_and_osc8_metadata_survive_the_real_capture_pipeline() {
     let span = &line.line.styles[0];
     assert!(span.style.flags.contains(CellFlags::BOLD));
     assert_eq!(span.style.foreground, TerminalColor::Named(1));
-    assert_eq!(span.hyperlink.as_deref(), Some("https://example.test"));
+    assert_eq!(
+        span.hyperlink.as_ref().map(|link| link.uri.as_str()),
+        Some("https://example.test")
+    );
 }

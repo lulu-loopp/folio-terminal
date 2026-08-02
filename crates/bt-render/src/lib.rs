@@ -986,11 +986,12 @@ fn shape_entry_resident_bytes(key: &ShapeKey, buffer: &Buffer, value_bytes: usiz
 fn captured_cell_resident_bytes(cell: &CapturedCell) -> usize {
     size_of::<CapturedCell>()
         .saturating_add(cell.text.capacity())
-        .saturating_add(
-            cell.hyperlink
-                .as_ref()
-                .map_or(0, |hyperlink| hyperlink.capacity()),
-        )
+        .saturating_add(cell.hyperlink.as_ref().map_or(0, |hyperlink| {
+            hyperlink
+                .uri
+                .capacity()
+                .saturating_add(hyperlink.id.as_ref().map_or(0, String::capacity))
+        }))
 }
 
 fn composed_row_resident_bytes(key: &ComposedRowKey, row: &ComposedRow) -> usize {
@@ -6201,7 +6202,9 @@ mod tests {
         let mut background = base.clone();
         background.style.background = TerminalColor::Indexed(42);
         assert_ne!(key, changed_cell_key(background));
-        base.hyperlink = Some("https://example.invalid".to_owned());
+        base.hyperlink = Some(bt_transcript::CellHyperlink::implicit(
+            "https://example.invalid",
+        ));
         assert_ne!(key, changed_cell_key(base));
 
         let scaled = ComposedRowKey {

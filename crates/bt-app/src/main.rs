@@ -252,6 +252,8 @@ struct Runtime {
     click_tracker: ClickTracker,
     line_wheel_remainder: f64,
     pixel_wheel_remainder: f64,
+    /// Wheel detents awaiting a mouse-protocol report; per-notch, no system-lines multiplier.
+    notch_wheel_remainder: f64,
     /// Fractional subpixels awaiting consumption by the LOCAL scroll routes only. Forwarding
     /// routes keep their own line-quantized accumulators above; the two never pour into each
     /// other, so switching routes cannot dump parked residue as a sudden jump.
@@ -825,6 +827,7 @@ impl Runtime {
             click_tracker: ClickTracker::default(),
             line_wheel_remainder: 0.0,
             pixel_wheel_remainder: 0.0,
+            notch_wheel_remainder: 0.0,
             local_wheel_subpixel_remainder: 0.0,
             pending_pty_resize: None,
             pending_resize_present: None,
@@ -1906,8 +1909,12 @@ impl Runtime {
             return self.scroll_view_exact(event_subpixels);
         }
         if !self.modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off {
-            let lines = self.take_forward_wheel_lines(delta);
-            if lines == 0 {
+            // Mouse-protocol wheel reports are per-notch, never per-system-scroll-line: the
+            // application applies its own lines-per-event step, so multiplying by the Windows
+            // wheel setting had TUIs (user report 2026-08-01: Claude Code transcript) scrolling
+            // three times too far per notch.
+            let notches = self.take_forward_wheel_notches(delta);
+            if notches == 0 {
                 return Ok(());
             }
             let Some(hit) = self.frame_hit() else {
@@ -1918,7 +1925,7 @@ impl Runtime {
                 .as_ref()
                 .context("missing frame for forwarded wheel hit")?;
             let hit = live_viewport_mouse_hit(frame, hit);
-            let button = if lines > 0 {
+            let button = if notches > 0 {
                 input::MouseProtocolButton::WheelUp
             } else {
                 input::MouseProtocolButton::WheelDown
@@ -1932,7 +1939,7 @@ impl Runtime {
                 self.modifiers,
             );
             return self.send_user_input(
-                &one.repeat(lines.unsigned_abs() as usize),
+                &one.repeat(notches.unsigned_abs() as usize),
                 "forward SGR mouse wheel to PTY",
                 UserInputKind::Mouse,
             );
@@ -1961,9 +1968,9 @@ impl Runtime {
         self.scroll_view_exact(event_subpixels)
     }
 
-    /// Whole-line quantization for the forwarding routes (TUI mouse tracking, alternate-scroll
-    /// emulation): applications receive wheel lines, so fractional motion parks here — in the
-    /// forwarding accumulators, never the local subpixel one — until a full line accrues.
+    /// Whole-line quantization for the alternate-scroll emulation route: arrow-key emulation
+    /// mirrors the local scroll distance, so the system lines-per-notch setting applies here.
+    /// Fractional motion parks in the forwarding accumulators, never the local subpixel one.
     fn take_forward_wheel_lines(&mut self, delta: MouseScrollDelta) -> i32 {
         match delta {
             MouseScrollDelta::LineDelta(_, y) => {
@@ -1974,6 +1981,23 @@ impl Runtime {
                     };
                 self.line_wheel_remainder += f64::from(y) * multiplier;
                 drain_whole_units(&mut self.line_wheel_remainder, 1.0) as i32
+            }
+            MouseScrollDelta::PixelDelta(position) => {
+                self.pixel_wheel_remainder += position.y;
+                let cell_px = self.renderer.metrics().cell_height_px as f64;
+                drain_whole_units(&mut self.pixel_wheel_remainder, cell_px) as i32
+            }
+        }
+    }
+
+    /// Per-notch quantization for the mouse-protocol route: one wheel report per detent, the
+    /// xterm convention every TUI calibrates its own scroll step against. Trackpad pixel deltas
+    /// emit one report per accrued cell height of travel.
+    fn take_forward_wheel_notches(&mut self, delta: MouseScrollDelta) -> i32 {
+        match delta {
+            MouseScrollDelta::LineDelta(_, y) => {
+                self.notch_wheel_remainder += f64::from(y);
+                drain_whole_units(&mut self.notch_wheel_remainder, 1.0) as i32
             }
             MouseScrollDelta::PixelDelta(position) => {
                 self.pixel_wheel_remainder += position.y;
@@ -2987,6 +3011,7 @@ mod tests {
 
     fn hyperlink_hit(uri: &str) -> HyperlinkHit {
         HyperlinkHit {
+            id: None,
             uri: uri.to_owned(),
             start: bt_doc::ContentAnchor::Live {
                 screen: bt_doc::ScreenId::Primary,

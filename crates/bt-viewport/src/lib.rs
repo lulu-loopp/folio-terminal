@@ -15,8 +15,8 @@ use bt_doc::{
     HistoryDocument, LayoutKey, MathMode, ScreenId, ViewGeneration, compare_anchors,
 };
 use bt_transcript::{
-    CapturedCell, CapturedRow, CellFlags, FrozenLine, GraphemeOffset, HyperlinkRange,
-    SourceGeneration, StagedRow, StagingId, TranscriptId, detect_http_urls,
+    CapturedCell, CapturedRow, CellFlags, CellHyperlink, FrozenLine, GraphemeOffset,
+    HyperlinkRange, SourceGeneration, StagedRow, StagingId, TranscriptId, detect_http_urls,
 };
 use bt_unicode::{cluster_width, graphemes};
 
@@ -91,6 +91,10 @@ pub struct CellAnchor {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct HyperlinkHit {
     pub uri: String,
+    /// OSC 8 grouping id. Present: the link is every frame cell carrying the same (id, uri) —
+    /// soft-wrapped segments separated by layout indent stay one link. Absent (implicitly
+    /// detected bare URL): the link is the contiguous same-uri cell run.
+    pub id: Option<String>,
     pub start: ContentAnchor,
     pub end: ContentAnchor,
 }
@@ -503,18 +507,42 @@ impl ViewportFrame {
             return None;
         }
         let index = row as usize * self.columns.get() as usize + column as usize;
-        let uri = self.cells.get(index)?.hyperlink.as_ref()?;
+        let link = self.cells.get(index)?.hyperlink.as_ref()?;
+        if link.id.is_some() {
+            // OSC 8 with a grouping id (the vendor synthesizes one per emission when the
+            // application omits it): the link is every cell carrying the same (id, uri), even
+            // across layout-indent gaps between soft-wrapped segments.
+            let first = self
+                .cells
+                .iter()
+                .position(|cell| cell_in_link_group(cell, link))?;
+            let last = self
+                .cells
+                .iter()
+                .rposition(|cell| cell_in_link_group(cell, link))?;
+            return Some(HyperlinkHit {
+                uri: link.uri.clone(),
+                id: link.id.clone(),
+                start: self.cell_anchors.get(first)?.start.clone(),
+                end: self.cell_anchors.get(last)?.end.clone(),
+            });
+        }
+        let same_uri = |cell: &bt_transcript::CapturedCell| {
+            cell.hyperlink
+                .as_ref()
+                .is_some_and(|other| other.uri == link.uri)
+        };
         let mut first = index;
-        while first > 0 && self.cells[first - 1].hyperlink.as_deref() == Some(uri.as_str()) {
+        while first > 0 && same_uri(&self.cells[first - 1]) {
             first -= 1;
         }
         let mut last = index + 1;
-        while last < self.cells.len() && self.cells[last].hyperlink.as_deref() == Some(uri.as_str())
-        {
+        while last < self.cells.len() && same_uri(&self.cells[last]) {
             last += 1;
         }
         Some(HyperlinkHit {
-            uri: uri.clone(),
+            uri: link.uri.clone(),
+            id: None,
             start: self.cell_anchors.get(first)?.start.clone(),
             end: self.cell_anchors.get(last - 1)?.end.clone(),
         })
@@ -523,23 +551,56 @@ impl ViewportFrame {
     /// Add the ordinary terminal underline flag to the active link in this frame only. Source
     /// cells and transcript styles remain unchanged.
     pub fn underline_hyperlink(&mut self, hyperlink: &HyperlinkHit) -> bool {
+        if hyperlink.id.is_some() {
+            let group = bt_transcript::CellHyperlink {
+                id: hyperlink.id.clone(),
+                uri: hyperlink.uri.clone(),
+            };
+            let Some(first) = self
+                .cells
+                .iter()
+                .position(|cell| cell_in_link_group(cell, &group))
+            else {
+                return false;
+            };
+            let Some(last) = self
+                .cells
+                .iter()
+                .rposition(|cell| cell_in_link_group(cell, &group))
+            else {
+                return false;
+            };
+            // The hit must describe this frame's group, not a stale frame's.
+            if self.cell_anchors[first].start != hyperlink.start
+                || self.cell_anchors[last].end != hyperlink.end
+            {
+                return false;
+            }
+            for index in first..=last {
+                if cell_in_link_group(&self.cells[index], &group) {
+                    let flags = &mut self.cells[index].style.flags;
+                    flags.remove(CellFlags::DOTTED_UNDERLINE);
+                    flags.insert(CellFlags::UNDERLINE);
+                }
+            }
+            return true;
+        }
+        let same_uri = |cell: &bt_transcript::CapturedCell| {
+            cell.hyperlink
+                .as_ref()
+                .is_some_and(|other| other.uri == hyperlink.uri)
+        };
         let Some(index) = self.cells.iter().enumerate().find_map(|(index, cell)| {
-            (cell.hyperlink.as_deref() == Some(hyperlink.uri.as_str())
-                && self.cell_anchors[index].start == hyperlink.start)
-                .then_some(index)
+            (same_uri(cell) && self.cell_anchors[index].start == hyperlink.start).then_some(index)
         }) else {
             return false;
         };
         let mut first = index;
-        while first > 0
-            && self.cells[first - 1].hyperlink.as_deref() == Some(hyperlink.uri.as_str())
-        {
+        while first > 0 && same_uri(&self.cells[first - 1]) {
             first -= 1;
         }
         let mut last = index + 1;
-        while last < self.cells.len()
-            && self.cells[last].hyperlink.as_deref() == Some(hyperlink.uri.as_str())
-        {
+        while last < self.cells.len() && same_uri(&self.cells[last]) {
             last += 1;
         }
         if self.cell_anchors[last - 1].end != hyperlink.end {
@@ -3070,14 +3131,22 @@ fn apply_implicit_hyperlinks(cells: &mut [CapturedCell]) {
         {
             continue;
         }
-        let uri = text[range.byte_start..range.byte_end].to_owned();
+        let link = CellHyperlink::implicit(text[range.byte_start..range.byte_end].to_owned());
         for index in affected {
-            cells[index].hyperlink = Some(uri.clone());
+            cells[index].hyperlink = Some(link.clone());
             if index + 1 < cells.len() && cells[index + 1].wide_spacer {
-                cells[index + 1].hyperlink = Some(uri.clone());
+                cells[index + 1].hyperlink = Some(link.clone());
             }
         }
     }
+}
+
+/// True when `cell` belongs to the same OSC 8 link group: exact (id, uri) match, read explicitly
+/// because `CellHyperlink`'s own equality deliberately covers the uri alone.
+fn cell_in_link_group(cell: &CapturedCell, link: &CellHyperlink) -> bool {
+    cell.hyperlink
+        .as_ref()
+        .is_some_and(|other| other.id == link.id && other.uri == link.uri)
 }
 
 fn frozen_visual_line_count(text: &str, columns: usize) -> usize {
@@ -3173,7 +3242,9 @@ fn layout_frozen_line(line: &FrozenLine, columns: usize) -> Vec<VisualRow> {
         if cell.hyperlink.is_none()
             && let Some(range) = implicit_link_at(&implicit_links, byte_start as usize)
         {
-            cell.hyperlink = Some(line.text[range.byte_start..range.byte_end].to_owned());
+            cell.hyperlink = Some(CellHyperlink::implicit(
+                line.text[range.byte_start..range.byte_end].to_owned(),
+            ));
         }
         if width == 2 {
             cell.style.flags.insert(CellFlags::WIDE_CHAR);
@@ -3620,20 +3691,20 @@ mod tests {
         let mut cells =
             CapturedRow::plain("https://shown.example https://plain.example).", false).cells;
         for cell in &mut cells[..21] {
-            cell.hyperlink = Some("file:///real-target".to_owned());
+            cell.hyperlink = Some(CellHyperlink::implicit("file:///real-target"));
         }
         apply_implicit_hyperlinks(&mut cells);
 
-        assert!(cells[..21].iter().all(|cell| cell.hyperlink.as_deref()
-            == Some("file:///real-target")
-            && cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)));
+        assert!(cells[..21].iter().all(
+            |cell| cell.hyperlink.as_ref().map(|link| link.uri.as_str())
+                == Some("file:///real-target")
+                && cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
+        ));
         let implicit = "https://plain.example";
-        assert!(
-            cells[22..43]
-                .iter()
-                .all(|cell| cell.hyperlink.as_deref() == Some(implicit)
-                    && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE))
-        );
+        assert!(cells[22..43].iter().all(|cell| {
+            cell.hyperlink.as_ref().map(|link| link.uri.as_str()) == Some(implicit)
+                && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
+        }));
         assert_eq!(cells[43].hyperlink, None, "trailing ')' is not linked");
         assert_eq!(cells[44].hyperlink, None, "trailing '.' is not linked");
     }
@@ -3655,7 +3726,9 @@ mod tests {
         let linked_text = rows
             .iter()
             .flat_map(|row| row.cells.iter())
-            .filter(|cell| cell.hyperlink.as_deref() == Some(text.as_str()))
+            .filter(|cell| {
+                cell.hyperlink.as_ref().map(|link| link.uri.as_str()) == Some(text.as_str())
+            })
             .map(|cell| cell.text.as_str())
             .collect::<String>();
 
@@ -3677,7 +3750,7 @@ mod tests {
                 byte_start: 0,
                 byte_end: explicit.len() as u32,
                 style: bt_transcript::CellStyle::default(),
-                hyperlink: Some("file:///actual-target".to_owned()),
+                hyperlink: Some(CellHyperlink::implicit("file:///actual-target")),
             }],
             fragments: Vec::new(),
             shell_marks: Vec::new(),
@@ -3689,14 +3762,14 @@ mod tests {
             .flat_map(|row| row.cells)
             .collect::<Vec<_>>();
         assert!(cells[..explicit.len()].iter().all(|cell| {
-            cell.hyperlink.as_deref() == Some("file:///actual-target")
+            cell.hyperlink.as_ref().map(|link| link.uri.as_str()) == Some("file:///actual-target")
                 && cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
         }));
         assert!(
             cells[explicit.len() + 1..explicit.len() + 1 + implicit.len()]
                 .iter()
                 .all(|cell| {
-                    cell.hyperlink.as_deref() == Some(implicit)
+                    cell.hyperlink.as_ref().map(|link| link.uri.as_str()) == Some(implicit)
                         && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
                 })
         );
@@ -3710,7 +3783,7 @@ mod tests {
     fn hyperlink_hit_exposes_real_target_and_underlines_the_complete_span() {
         let mut cells = CapturedRow::plain("trusted label", false).cells;
         for cell in &mut cells {
-            cell.hyperlink = Some("https://actual.example/login".to_owned());
+            cell.hyperlink = Some(CellHyperlink::implicit("https://actual.example/login"));
         }
         let projection = ViewportProjection::new(
             key(13),
@@ -3754,6 +3827,84 @@ mod tests {
                 .all(|cell| cell.style.flags.contains(CellFlags::UNDERLINE)
                     && !cell.style.flags.contains(CellFlags::DOTTED_UNDERLINE))
         );
+    }
+
+    #[test]
+    fn id_grouped_wrapped_link_underlines_both_segments_across_the_indent_gap() {
+        // The Claude Code layout: an OSC 8 link wraps, and the continuation row is indented, so
+        // the two segments are separated by non-link cells. The shared emission id (vendor
+        // synthesizes one when the app omits it) makes them one link: hovering either segment
+        // must upgrade both to solid, and the gap cells must stay untouched.
+        let link = CellHyperlink {
+            id: Some("42_alacritty".to_owned()),
+            uri: "file:///C:/pictures/a.png".to_owned(),
+        };
+        let mut first_row = CapturedRow::plain("path-head", true).cells;
+        for cell in &mut first_row[2..] {
+            cell.hyperlink = Some(link.clone());
+        }
+        let mut second_row = CapturedRow::plain("  tail   ", false).cells;
+        for cell in &mut second_row[2..6] {
+            cell.hyperlink = Some(link.clone());
+        }
+        let projection = ViewportProjection::new(
+            key(9),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let mut frame = projection
+            .live_frame(
+                nz32(9),
+                vec![
+                    CapturedRow {
+                        cells: first_row,
+                        continues: true,
+                        shell_mark: None,
+                    },
+                    CapturedRow {
+                        cells: second_row,
+                        continues: false,
+                        shell_mark: None,
+                    },
+                ],
+                GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: false,
+                },
+            )
+            .unwrap();
+
+        // Hitting the second segment reports the whole link, first segment start to last end.
+        let hit = frame.hyperlink_at(1, 3).unwrap();
+        assert_eq!(hit.uri, "file:///C:/pictures/a.png");
+        assert_eq!(hit.id.as_deref(), Some("42_alacritty"));
+        assert_eq!(hit, frame.hyperlink_at(0, 5).unwrap());
+        assert!(frame.underline_hyperlink(&hit));
+        let columns = frame.columns.get() as usize;
+        let solid = |frame: &ViewportFrame, row: usize, column: usize| {
+            let flags = frame.cells[row * columns + column].style.flags;
+            flags.contains(CellFlags::UNDERLINE) && !flags.contains(CellFlags::DOTTED_UNDERLINE)
+        };
+        for column in 2..9 {
+            assert!(solid(&frame, 0, column), "first segment column {column}");
+        }
+        for column in 2..6 {
+            assert!(solid(&frame, 1, column), "second segment column {column}");
+        }
+        // The indent gap and the untouched tail carry no underline at all.
+        for column in [0, 1] {
+            assert!(
+                !frame.cells[columns + column]
+                    .style
+                    .flags
+                    .intersects(CellFlags::UNDERLINE | CellFlags::DOTTED_UNDERLINE),
+                "gap column {column}"
+            );
+        }
     }
 
     #[test]
@@ -4090,7 +4241,7 @@ mod tests {
             for cell in &mut row.cells {
                 cell.style.flags.insert(CellFlags::UNDERLINE);
                 cell.style.background = bt_transcript::TerminalColor::Rgb(30, 31, 32);
-                cell.hyperlink = Some("https://source.invalid".to_owned());
+                cell.hyperlink = Some(CellHyperlink::implicit("https://source.invalid"));
             }
         }
         let overlay_cells = &mut live[4].cells[4..7];
