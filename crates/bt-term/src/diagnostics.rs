@@ -28,15 +28,45 @@ pub struct FormulaFrameObservation {
     pub occluded_occurrences: BTreeSet<LiveMathOccurrenceId>,
 }
 
+/// Every artifact kind that occupies a presentation band: the math raster and both image bands.
+/// Band geometry, ownership, clipping and source occlusion are one mechanism for all three, so
+/// every diagnostic that audits a band audits all of them. Spelled out variant by variant rather
+/// than defaulted to `true`, so a future artifact kind has to opt in deliberately.
+pub fn is_banded_artifact(kind: &RgbaArtifactKind) -> bool {
+    matches!(
+        kind,
+        RgbaArtifactKind::Math
+            | RgbaArtifactKind::InlineImage { .. }
+            | RgbaArtifactKind::LocalImagePath { .. }
+    )
+}
+
+/// The banded kinds whose artifact stands in for the terminal rows underneath it. A math raster and
+/// an OSC 1337 inline image are drawn over their own band rows, so those rows must be blanked and
+/// must belong to that block alone. A local image path band is not one of them: its height is added
+/// to its source row's height, so it paints in space nothing else occupies, below a path line that
+/// deliberately stays readable, and several of them stack under one row. Auditing row suppression or
+/// row exclusivity against a local-path band would assert the opposite of its layout.
+pub fn band_owns_its_rows(kind: &RgbaArtifactKind) -> bool {
+    match kind {
+        RgbaArtifactKind::Math | RgbaArtifactKind::InlineImage { .. } => true,
+        RgbaArtifactKind::LocalImagePath { .. } => false,
+    }
+}
+
 /// Classify the exact `ViewportFrame` handed to the renderer. A rendered block carries its source
 /// in frame metadata; an exposed source block remains visible in the terminal cell plane.
+///
+/// Image bands are observed alongside formulas. Their `source` is a file path (or `[image]`),
+/// which carries none of the display-math delimiters `source_rows_expose` matches on, so an image
+/// band contributes presence and occurrence identity here without ever being reported as an
+/// exposed-source flash — the path line under an image band is deliberately still visible.
 pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
     let rendered_sources = frame
         .math_blocks
         .iter()
         .filter(|block| {
-            block.display == MathBlockDisplay::Rendered
-                && block.artifact.kind == RgbaArtifactKind::Math
+            block.display == MathBlockDisplay::Rendered && is_banded_artifact(&block.artifact.kind)
         })
         .map(|block| block.source.clone())
         .collect::<Vec<_>>();
@@ -45,7 +75,7 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
         .iter()
         .filter(|block| {
             block.display == MathBlockDisplay::Rendered
-                && block.artifact.kind == RgbaArtifactKind::Math
+                && is_banded_artifact(&block.artifact.kind)
                 && block.occluded_source_rows != 0
         })
         .map(|block| block.source.clone())
@@ -55,10 +85,10 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
         .iter()
         .filter_map(|block| {
             (block.display == MathBlockDisplay::Rendered
-                && block.artifact.kind == RgbaArtifactKind::Math)
-                .then_some(block.live_occurrence_id)
-                .flatten()
-                .map(|id| (id, block.source.clone()))
+                && is_banded_artifact(&block.artifact.kind))
+            .then_some(block.live_occurrence_id)
+            .flatten()
+            .map(|id| (id, block.source.clone()))
         })
         .collect::<BTreeMap<_, _>>();
     let occluded_occurrences = frame
@@ -66,7 +96,7 @@ pub fn observe_formula_frame(frame: &ViewportFrame) -> FormulaFrameObservation {
         .iter()
         .filter_map(|block| {
             (block.display == MathBlockDisplay::Rendered
-                && block.artifact.kind == RgbaArtifactKind::Math
+                && is_banded_artifact(&block.artifact.kind)
                 && block.occluded_source_rows != 0)
                 .then_some(block.live_occurrence_id)
                 .flatten()
@@ -149,7 +179,7 @@ impl FormulaFlashOracle {
                 .iter()
                 .filter(|block| {
                     block.display == MathBlockDisplay::Rendered
-                        && block.artifact.kind == RgbaArtifactKind::Math
+                        && is_banded_artifact(&block.artifact.kind)
                         && block.live_occurrence_id.is_none()
                 })
                 .map(|block| block.source.clone()),

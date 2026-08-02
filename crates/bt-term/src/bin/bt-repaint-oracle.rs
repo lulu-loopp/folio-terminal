@@ -11,7 +11,7 @@ use bt_math::MathEngine;
 use bt_term::{
     DualPlaneSession, FormulaFlashOracle, FormulaFrameState, InlineImageDecoder,
     LIVE_MATH_STABLE_INTERVAL, MathLayoutOptions, SessionDecorationTask, SessionMathTask,
-    render_detection_task, render_live_detection_task,
+    band_owns_its_rows, is_banded_artifact, render_detection_task, render_live_detection_task,
 };
 use bt_viewport::{ViewportFrame, ViewportProjection};
 
@@ -148,13 +148,15 @@ impl HeadlessOracle {
     /// context is present: a bottom-edge run-off (the band ends on the last live row) or occlusion.
     /// Every other short clip is a phantom top clip — the stale identity out-counting the reflowed
     /// occurrence's rows — which the user sees as a half-band / stray fragment. Boundary-split
-    /// bridges (`frozen_prefix_rows > 0`) legitimately carry a combined height and are exempt.
+    /// bridges (`frozen_prefix_rows > 0`) legitimately carry a combined height and are exempt. Every
+    /// banded artifact answers to this: a half-drawn image band is the same defect as a half-drawn
+    /// formula, and image bands are exactly what the replay was previously blind to.
     fn audit_clip_alignment(&mut self, frame: &ViewportFrame) {
         let last_live_row = frame.grid_rows.get().saturating_sub(1);
         let mut violations = 0usize;
         for block in &frame.math_blocks {
             if block.display != bt_viewport::MathBlockDisplay::Rendered
-                || block.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+                || !is_banded_artifact(&block.artifact.kind)
             {
                 continue;
             }
@@ -201,10 +203,12 @@ impl HeadlessOracle {
         self.max_clip_misalign = self.max_clip_misalign.max(violations);
     }
 
-    /// Frame-level red gate for terminal ink surviving underneath a rendered formula. Formula
-    /// source suppression must clear the complete `CapturedCell` presentation in the owned band,
+    /// Frame-level red gate for terminal ink surviving underneath a rendered band. Source
+    /// suppression must clear the complete `CapturedCell` presentation in the owned band,
     /// and the exact proven cells in an occluded row. Otherwise textless SGR state (most visibly
-    /// UNDERLINE) is still rendered as a long horizontal line through the transparent math raster.
+    /// UNDERLINE) is still rendered as a long horizontal line through the transparent raster. This
+    /// covers every band that stands in for its rows — math and OSC 1337 inline images alike; a
+    /// local image path band owns no terminal rows to clear (`band_owns_its_rows`).
     fn audit_occlusion_residue(&mut self, frame: &ViewportFrame, elapsed: Duration) {
         let columns = frame.columns.get() as usize;
         let blank = bt_transcript::CapturedCell::default();
@@ -212,7 +216,7 @@ impl HeadlessOracle {
         let mut sources = Vec::new();
         for block in &frame.math_blocks {
             if block.display != bt_viewport::MathBlockDisplay::Rendered
-                || block.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+                || !band_owns_its_rows(&block.artifact.kind)
             {
                 continue;
             }
@@ -292,13 +296,16 @@ impl HeadlessOracle {
     /// height of its exact source rows, but it must not claim neighbouring blank separators or
     /// textless input chrome, and two blocks must never share one terminal row. Both violations
     /// were directly visible in the historical frame geometry even though formula-state stdout was
-    /// otherwise byte-identical across the suspect commits.
+    /// otherwise byte-identical across the suspect commits. Row exclusivity is the invariant of
+    /// bands that stand in for their rows — math and OSC 1337 inline images; local image path bands
+    /// are excluded because stacking several of them under one source row is their layout, not a
+    /// collision (`band_owns_its_rows`).
     fn audit_live_band_ownership(&mut self, frame: &ViewportFrame) {
         let mut bands = Vec::new();
         let mut borrowed = 0usize;
         for block in &frame.math_blocks {
             if block.display != bt_viewport::MathBlockDisplay::Rendered
-                || block.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+                || !band_owns_its_rows(&block.artifact.kind)
             {
                 continue;
             }
@@ -596,7 +603,7 @@ impl HeadlessOracle {
         let geometry = env::var_os("BT_PROBE_GEOMETRY").is_some()
             && frame.math_blocks.iter().any(|block| {
                 block.display == bt_viewport::MathBlockDisplay::Rendered
-                    && block.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                    && is_banded_artifact(&block.artifact.kind)
             });
         if dump {
             self.dump_frame(&frame);
@@ -631,7 +638,7 @@ impl HeadlessOracle {
                 .iter()
                 .filter(|block| {
                     block.display == bt_viewport::MathBlockDisplay::Rendered
-                        && block.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                        && is_banded_artifact(&block.artifact.kind)
                         && matches!(block.anchor, bt_viewport::MathBlockAnchor::History { .. })
                 })
                 .count();
@@ -691,7 +698,7 @@ impl HeadlessOracle {
                 .iter()
                 .filter(|block| {
                     block.display == bt_viewport::MathBlockDisplay::Rendered
-                        && block.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                        && is_banded_artifact(&block.artifact.kind)
                 })
                 .map(|block| {
                     block
@@ -710,7 +717,7 @@ impl HeadlessOracle {
                     .iter()
                     .filter(|b| {
                         b.display == bt_viewport::MathBlockDisplay::Rendered
-                            && b.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                            && is_banded_artifact(&b.artifact.kind)
                     })
                     .count(),
             );
@@ -746,7 +753,7 @@ impl HeadlessOracle {
                 .iter()
                 .filter(|block| {
                     block.display == bt_viewport::MathBlockDisplay::Rendered
-                        && block.artifact.kind == bt_viewport::RgbaArtifactKind::Math
+                        && is_banded_artifact(&block.artifact.kind)
                         && matches!(block.anchor, bt_viewport::MathBlockAnchor::History { .. })
                 })
                 .count();
@@ -811,7 +818,7 @@ impl HeadlessOracle {
     fn dump_geometry(&self, frame: &ViewportFrame) {
         for block in &frame.math_blocks {
             if block.display != bt_viewport::MathBlockDisplay::Rendered
-                || block.artifact.kind != bt_viewport::RgbaArtifactKind::Math
+                || !is_banded_artifact(&block.artifact.kind)
             {
                 continue;
             }

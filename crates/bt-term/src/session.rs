@@ -255,13 +255,9 @@ impl ProvenLiveRow {
     /// The Jump chip overwrote this row mid-source: everything visible before the exact chip
     /// signature must be this row's proven source prefix, byte- and boundary-identical.
     fn chip_split_matches(&self, input: &LiveDetectionInput) -> bool {
-        let Some((before_chip, _)) = input.text.split_once("Jump to bottom (ctrl+End)") else {
+        let Some(visible_source) = chip_split_visible_prefix(&self.text, &input.text) else {
             return false;
         };
-        let visible_source = before_chip.trim_end();
-        if visible_source.is_empty() || !self.text.starts_with(visible_source) {
-            return false;
-        }
         let prefix_end = u32::try_from(visible_source.len()).unwrap_or(u32::MAX);
         let proven_boundaries = self
             .cell_boundaries
@@ -273,6 +269,36 @@ impl ProvenLiveRow {
             .take_while(|(byte, _)| *byte <= prefix_end);
         proven_boundaries.eq(visible_boundaries)
     }
+}
+
+/// Claude Code's "jump to bottom" status chip. It is not content: the application paints it over
+/// whichever live row it lands on, so a row still carrying detector-proven source can come back
+/// with this exact signature stamped across its middle while the source underneath is untouched.
+const JUMP_CHIP_SIGNATURE: &str = "Jump to bottom (ctrl+End)";
+
+/// The prefix of `proven` which `overlaid` still displays in front of the Jump chip, when
+/// `overlaid` is the same line with that chip painted over it mid-way. `None` means `overlaid` is
+/// not `proven` under a chip: it carries no chip at all, the chip starts the row so nothing of the
+/// source survives in front of it, or what does survive is not `proven`'s own prefix — that is a
+/// genuinely different line, not an occluded one.
+///
+/// This is the single decision both occlusion-tolerant readers make: live math clears the leaked
+/// source cells around the chip on top of it (adding a cell-boundary check over the returned
+/// prefix), and live image paths keep matching their record to the row instead of retiring it.
+fn chip_split_visible_prefix<'a>(proven: &'a str, overlaid: &str) -> Option<&'a str> {
+    let (before_chip, _) = overlaid.split_once(JUMP_CHIP_SIGNATURE)?;
+    let visible = before_chip.trim_end();
+    if visible.is_empty() || !proven.starts_with(visible) {
+        return None;
+    }
+    Some(&proven[..visible.len()])
+}
+
+/// `overlaid` is the line `proven` was proven from, with the Jump chip painted across it. An
+/// overlay is a repaint of a row, never a new content point, so whatever the row proved keeps its
+/// identity for as long as the chip sits there.
+fn jump_chip_overlays_source(proven: &str, overlaid: &str) -> bool {
+    chip_split_visible_prefix(proven, overlaid).is_some()
 }
 
 #[derive(Eq, PartialEq)]
@@ -5570,8 +5596,9 @@ impl DualPlaneSession {
                     .find_map(|(occurrence, path, source_text, _)| {
                         (!matched.contains(occurrence)
                             && *path == candidate.path
-                            && *source_text == candidate.source_text)
-                            .then_some(*occurrence)
+                            && (*source_text == candidate.source_text
+                                || jump_chip_overlays_source(source_text, &candidate.source_text)))
+                        .then_some(*occurrence)
                     });
             if let Some(occurrence) = matched_occurrence {
                 matched.insert(occurrence);
@@ -5632,19 +5659,28 @@ impl DualPlaneSession {
         if !create_and_retire {
             return;
         }
+        // A record whose line is currently under the Jump chip yields no candidate to match (the
+        // chip broke the path apart) yet has lost nothing: retiring it here would re-register the
+        // very same path as a fresh occurrence the moment the chip moves away, re-decoding the
+        // artifact and re-placing the band somewhere independently computed.
         let retired = existing
             .into_iter()
-            .filter_map(|(occurrence, _, _, start)| {
+            .filter_map(|(occurrence, _, source_text, start)| {
                 (!matched.contains(&occurrence)
-                    && stable.get(start.row as usize).copied().unwrap_or(false))
+                    && stable.get(start.row as usize).copied().unwrap_or(false)
+                    && !self
+                        .live_logical_line_text(start.row)
+                        .is_some_and(|line| jump_chip_overlays_source(&source_text, &line)))
                 .then_some(occurrence)
             })
             .collect::<BTreeSet<_>>();
         self.retire_inline_images(&retired);
     }
 
-    fn detected_live_image_paths(&self, stable: &[bool]) -> Vec<DetectedLiveImagePath> {
-        let mut detected = Vec::new();
+    /// Walk the live grid one WRAPLINE-joined logical line at a time, handing each visitor exactly
+    /// the text the path detector reads together with the per-row segments mapping its bytes back
+    /// to grid points.
+    fn for_each_live_logical_line(&self, mut visit: impl FnMut(&str, &[LiveImagePathSegment])) {
         let mut logical_text = String::new();
         let mut segments = Vec::<LiveImagePathSegment>::new();
         for row in 0..self.live_rows.len() as u32 {
@@ -5663,27 +5699,45 @@ impl DualPlaneSession {
             if captured.continues {
                 continue;
             }
+            visit(&logical_text, &segments);
+            logical_text.clear();
+            segments.clear();
+        }
+    }
+
+    /// The complete logical line `row` currently belongs to, exactly as the path detector reads it.
+    fn live_logical_line_text(&self, row: u32) -> Option<String> {
+        let mut found = None;
+        self.for_each_live_logical_line(|text, segments| {
+            if found.is_none() && segments.iter().any(|segment| segment.row == row) {
+                found = Some(text.to_owned());
+            }
+        });
+        found
+    }
+
+    fn detected_live_image_paths(&self, stable: &[bool]) -> Vec<DetectedLiveImagePath> {
+        let mut detected = Vec::new();
+        self.for_each_live_logical_line(|logical_text, segments| {
             let line_stable = segments
                 .iter()
                 .all(|segment| stable.get(segment.row as usize).copied().unwrap_or(false));
-            for candidate in detect_local_image_path_candidates(&logical_text) {
-                let Some(start) = live_path_point(&segments, candidate.byte_start, false) else {
+            for candidate in detect_local_image_path_candidates(logical_text) {
+                let Some(start) = live_path_point(segments, candidate.byte_start, false) else {
                     continue;
                 };
-                let Some(end) = live_path_point(&segments, candidate.byte_end, true) else {
+                let Some(end) = live_path_point(segments, candidate.byte_end, true) else {
                     continue;
                 };
                 detected.push(DetectedLiveImagePath {
                     path: PathBuf::from(candidate.path),
-                    source_text: logical_text.clone(),
+                    source_text: logical_text.to_owned(),
                     start,
                     end,
                     stable: line_stable,
                 });
             }
-            logical_text.clear();
-            segments.clear();
-        }
+        });
         detected
     }
 
@@ -14904,6 +14958,173 @@ mod tests {
             source_row.top_subpixels,
             session.cell_height_subpixels.get(),
             placement.anchor,
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// Paint Claude Code's Jump chip over a live path line the way the application does: straight
+    /// onto the row, overwriting cells in place so the row keeps its width. Starting the chip on
+    /// the path's root separator destroys the drive prefix, which is exactly what makes the
+    /// detector blind to a path it had already proven.
+    fn jump_chip_overlaid_line(line: &str) -> String {
+        let chip_start = line.find('"').expect("path line is quoted") + 3;
+        let chip_end = chip_start + JUMP_CHIP_SIGNATURE.len();
+        assert!(
+            chip_end < line.len(),
+            "the chip must land inside the line, not extend it"
+        );
+        let overlaid = format!(
+            "{}{JUMP_CHIP_SIGNATURE}{}",
+            &line[..chip_start],
+            &line[chip_end..]
+        );
+        assert_eq!(overlaid.len(), line.len(), "an overlay never reflows a row");
+        assert!(
+            detect_local_image_path_candidates(&overlaid).is_empty(),
+            "the occluded row must offer the detector no candidate at all: {overlaid}"
+        );
+        overlaid
+    }
+
+    /// Repaint live row zero in place and park the cursor back on the input row below it, exactly
+    /// as an application redrawing its status chrome does.
+    fn repaint_first_live_row(session: &mut DualPlaneSession, text: &str, at: Instant) {
+        session
+            .feed_at(
+                format!("\u{1b}[1;1H\u{1b}[2K{text}\u{1b}[2;7H").as_bytes(),
+                at,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_jump_chip_over_a_live_path_line_keeps_one_occurrence_without_re_decoding() {
+        // Claude Code's "Jump to bottom (ctrl+End)" chip lands on whatever row it covers, including
+        // one already proven to carry an image path. Whole-line equality read that repaint as the
+        // source having vanished: the record retired, and the moment the chip moved away the same
+        // path registered as a brand new occurrence, re-decoded and re-placed — the band the user
+        // sees blink out and float back. The chip is an overlay, so the occurrence is preserved.
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        session
+            .feed_at(format!("{line}\r\nprompt").as_bytes(), started)
+            .unwrap();
+        let mut now = started + LIVE_MATH_STABLE_INTERVAL;
+        session.advance_live_stability(now);
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("stable absolute image path must enqueue the decoration worker");
+        };
+        let occurrence = task.occurrence_id;
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(session.complete_inline_image_result(task, result));
+        let content_key = session.inline_image_records()[0]
+            .content_key
+            .clone()
+            .expect("the decoded artifact must be resident before the chip arrives");
+        let mut projection = session.new_projection(session.layout_key());
+
+        let overlaid = jump_chip_overlaid_line(&line);
+        let mut assert_same_band = |session: &mut DualPlaneSession, phase: &str| {
+            let records = session.inline_image_records();
+            assert_eq!(
+                records.len(),
+                1,
+                "{phase}: the chip must not add a second occurrence: {records:?}"
+            );
+            assert_eq!(
+                records[0].occurrence_id, occurrence,
+                "{phase}: the occurrence must survive the overlay"
+            );
+            assert_eq!(
+                records[0].content_key.as_deref(),
+                Some(content_key.as_str()),
+                "{phase}: the decoded artifact must survive the overlay"
+            );
+            assert!(
+                session.take_decoration_worker_task().is_none(),
+                "{phase}: a surviving occurrence never re-enters the decode queue"
+            );
+            session.refresh_projection(&mut projection);
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert!(
+                frame.math_blocks.iter().any(|placement| {
+                    placement.artifact.key == content_key
+                        && placement.live_occurrence_id == Some(LiveMathOccurrenceId(occurrence))
+                        && matches!(
+                            placement.artifact.kind,
+                            bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+                        )
+                }),
+                "{phase}: the band must stay on screen"
+            );
+        };
+
+        // Several redraw/settle cycles with the chip resident: each one damages the row, each one
+        // reads back stable, and none of them may retire the occurrence.
+        for cycle in 0..3 {
+            now += LIVE_MATH_STABLE_INTERVAL;
+            repaint_first_live_row(&mut session, &overlaid, now);
+            assert_eq!(session.terminal().visible_text()[0], overlaid);
+            now += LIVE_MATH_STABLE_INTERVAL;
+            session.advance_live_stability(now);
+            assert_same_band(&mut session, &format!("chip cycle {cycle}"));
+        }
+
+        // The chip moves away: the very same occurrence keeps the band, no re-registration.
+        now += LIVE_MATH_STABLE_INTERVAL;
+        repaint_first_live_row(&mut session, &line, now);
+        now += LIVE_MATH_STABLE_INTERVAL;
+        session.advance_live_stability(now);
+        assert_eq!(session.terminal().visible_text()[0], line);
+        assert_same_band(&mut session, "chip cleared");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn a_live_path_line_rewritten_to_other_content_still_retires_its_occurrence() {
+        // Control for the chip tolerance above: tolerance is scoped to the exact overlay shape, so
+        // a row whose source genuinely changed retires exactly as it always did.
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        session
+            .feed_at(format!("{line}\r\nprompt").as_bytes(), started)
+            .unwrap();
+        let mut now = started + LIVE_MATH_STABLE_INTERVAL;
+        session.advance_live_stability(now);
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("stable absolute image path must enqueue the decoration worker");
+        };
+        let occurrence = task.occurrence_id;
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(session.complete_inline_image_result(task, result));
+
+        now += LIVE_MATH_STABLE_INTERVAL;
+        repaint_first_live_row(&mut session, "the run finished with no artifacts", now);
+        now += LIVE_MATH_STABLE_INTERVAL;
+        session.advance_live_stability(now);
+        assert!(
+            !session
+                .inline_image_records()
+                .iter()
+                .any(|record| record.occurrence_id == occurrence),
+            "a source line that genuinely changed must retire its occurrence: {:?}",
+            session.inline_image_records()
         );
 
         std::fs::remove_file(&path).unwrap();

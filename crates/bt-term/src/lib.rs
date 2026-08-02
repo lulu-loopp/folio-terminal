@@ -19,7 +19,8 @@ pub use bt_doc::LayoutKey;
 #[doc(hidden)]
 pub use bt_math::MathEngine;
 pub use diagnostics::{
-    FormulaFlashOracle, FormulaFrameObservation, FormulaFrameState, observe_formula_frame,
+    FormulaFlashOracle, FormulaFrameObservation, FormulaFrameState, band_owns_its_rows,
+    is_banded_artifact, observe_formula_frame,
 };
 pub use inline_image::{
     DecodedInlineImage, InlineImageDecodeError, InlineImageDecoder, InlineImageSource,
