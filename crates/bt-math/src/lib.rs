@@ -358,6 +358,60 @@ fn vertical_alpha_bounds(rgba: &[u8], width_px: u32) -> Option<(u32, u32)> {
     Some((first as u32, last as u32))
 }
 
+/// A standalone SVG document rasterized at its intrinsic size, in straight (unpremultiplied)
+/// sRGB RGBA — the same byte contract the math rasters and decoded images share.
+pub struct SvgRaster {
+    pub rgba: Vec<u8>,
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+/// The two ways an SVG payload fails, kept apart so callers can classify honestly: bytes that do
+/// not parse are simply not an SVG (an unsupported payload), while a valid document with an
+/// absurd intrinsic size is a dimensions problem.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SvgRasterError {
+    Parse(String),
+    Dimensions(String),
+}
+
+/// Rasterize a standalone SVG document at its intrinsic size (one user unit per pixel). Serves
+/// the inline-image pipeline's SVG admission (M2 preview matrix §2: SVG displays as a static
+/// raster); this crate owns the resvg dependency, so image decoding borrows the rasterizer
+/// instead of growing its own.
+pub fn rasterize_svg_document(bytes: &[u8]) -> Result<SvgRaster, SvgRasterError> {
+    static OPTIONS: OnceLock<resvg::usvg::Options<'static>> = OnceLock::new();
+    let options = OPTIONS.get_or_init(resvg::usvg::Options::default);
+    let tree = resvg::usvg::Tree::from_data(bytes, options)
+        .map_err(|error| SvgRasterError::Parse(error.to_string()))?;
+    let size = tree.size();
+    let width_px = size.width().ceil().max(1.0) as u32;
+    let height_px = size.height().ceil().max(1.0) as u32;
+    let resident_bytes = (width_px as usize)
+        .checked_mul(height_px as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| SvgRasterError::Dimensions("svg raster dimensions overflow".to_owned()))?;
+    if width_px > 16_384 || height_px > 16_384 || resident_bytes > MAX_RASTER_BYTES {
+        return Err(SvgRasterError::Dimensions(format!(
+            "svg intrinsic size {width_px}x{height_px} exceeds the raster budget"
+        )));
+    }
+    let mut pixmap = resvg::tiny_skia::Pixmap::new(width_px, height_px)
+        .ok_or_else(|| SvgRasterError::Dimensions("svg raster allocation failed".to_owned()))?;
+    resvg::render(
+        &tree,
+        resvg::tiny_skia::Transform::identity(),
+        &mut pixmap.as_mut(),
+    );
+    let mut rgba = pixmap.take();
+    unpremultiply_srgb_rgba(&mut rgba);
+    Ok(SvgRaster {
+        rgba,
+        width_px,
+        height_px,
+    })
+}
+
 fn crop_vertical_alpha(rgba: &[u8], width_px: u32) -> Option<(Vec<u8>, u32, u32)> {
     let (first, last) = vertical_alpha_bounds(rgba, width_px)?;
     let row_bytes = width_px as usize * 4;
@@ -654,6 +708,24 @@ mod tests {
         let mut rgba = [64, 32, 16, 128, 9, 8, 7, 0, 4, 5, 6, 255];
         unpremultiply_srgb_rgba(&mut rgba);
         assert_eq!(rgba, [128, 64, 32, 128, 0, 0, 0, 0, 4, 5, 6, 255]);
+    }
+
+    #[test]
+    fn svg_document_rasterizes_at_intrinsic_size_with_straight_alpha() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="6">
+            <rect x="0" y="0" width="8" height="6" fill="#ff0000"/>
+        </svg>"##;
+        let raster = rasterize_svg_document(svg).unwrap();
+        assert_eq!((raster.width_px, raster.height_px), (8, 6));
+        assert_eq!(raster.rgba.len(), 8 * 6 * 4);
+        assert_eq!(&raster.rgba[..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn svg_raster_rejects_invalid_documents_and_absurd_intrinsic_sizes() {
+        assert!(rasterize_svg_document(b"not an svg at all").is_err());
+        let huge = br##"<svg xmlns="http://www.w3.org/2000/svg" width="99999" height="99999"/>"##;
+        assert!(rasterize_svg_document(huge).is_err());
     }
 
     #[derive(Deserialize)]

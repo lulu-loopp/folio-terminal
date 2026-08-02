@@ -174,9 +174,12 @@ fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDe
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|error| InlineImageDecodeError::Decode(error.to_string()))?;
-    let format = reader
-        .format()
-        .ok_or(InlineImageDecodeError::UnsupportedFormat)?;
+    let Some(format) = reader.format() else {
+        // Not a recognized raster container. SVG is admitted as a static raster (preview matrix
+        // §2); the parse itself is the validity check — XML that usvg rejects is simply an
+        // unsupported payload, with no sniffing heuristics in front of it.
+        return decode_svg_bytes(bytes);
+    };
     if !matches!(
         format,
         ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::WebP | ImageFormat::Gif
@@ -220,6 +223,22 @@ fn decode_image_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDe
     })
 }
 
+fn decode_svg_bytes(bytes: &[u8]) -> Result<DecodedImagePayload, InlineImageDecodeError> {
+    let raster = bt_math::rasterize_svg_document(bytes).map_err(|error| match error {
+        // Bytes that fail the SVG parse are simply not any admitted format — the same quiet
+        // verdict a text file with a .png extension has always received.
+        bt_math::SvgRasterError::Parse(_) => InlineImageDecodeError::UnsupportedFormat,
+        bt_math::SvgRasterError::Dimensions(_) => InlineImageDecodeError::InvalidDimensions,
+    })?;
+    Ok(DecodedImagePayload {
+        key: format!("image:{:032x}", content_hash_128(bytes)),
+        rgba: Arc::from(raster.rgba),
+        width_px: raster.width_px,
+        height_px: raster.height_px,
+        animated: false,
+    })
+}
+
 fn normalized_local_path_key(path: &Path) -> String {
     path.as_os_str()
         .to_string_lossy()
@@ -243,7 +262,7 @@ fn is_admissible_local_image_path(path: &Path) -> bool {
             .is_some_and(|extension| {
                 matches!(
                     extension.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "webp" | "gif"
+                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
                 )
             })
 }
@@ -786,10 +805,15 @@ mod tests {
             detect_local_image_path_candidates(r"source=C:/tmp/picture.jpeg]ignored.png")[0].path,
             "C:/tmp/picture.jpeg"
         );
+        assert_eq!(
+            detect_local_image_path_candidates(r"[Image: source: C:\tmp\image.svg]")[0].path,
+            r"C:\tmp\image.svg",
+            "svg joined the admissible extensions with the 2026-08-02 static-raster slice"
+        );
         for rejected in [
             r"[Image: source: relative\image.png]",
             r"[Image: source: \\server\share\image.png]",
-            r"[Image: source: C:\tmp\image.svg]",
+            r"[Image: source: C:\tmp\image.bmp]",
             r#"[Image: source: "C:\tmp\unterminated image.png]"#,
             r"prefixXC:\tmp\image.png",
         ] {
@@ -798,6 +822,42 @@ mod tests {
                 "unexpected candidate in {rejected:?}"
             );
         }
+    }
+
+    #[test]
+    fn svg_local_path_decodes_through_the_rasterizer_at_intrinsic_size() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-inline-svg-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("probe.svg");
+        std::fs::write(
+            &path,
+            br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="6">
+                <rect x="0" y="0" width="8" height="6" fill="#00ff00"/>
+            </svg>"##,
+        )
+        .unwrap();
+
+        let mut decoder = InlineImageDecoder::default();
+        let decoded = decoder
+            .decode(InlineImageTask {
+                occurrence_id: 71,
+                source: InlineImageSource::LocalPath(path.clone()),
+            })
+            .unwrap();
+        assert_eq!((decoded.width_px, decoded.height_px), (8, 6));
+        assert!(!decoded.animated);
+        assert_eq!(&decoded.rgba[..4], &[0, 255, 0, 255]);
+        assert!(decoded.key.starts_with("image:"));
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
     }
 
     #[test]

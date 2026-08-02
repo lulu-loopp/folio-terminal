@@ -153,7 +153,7 @@ mod windows_impl {
             .is_some_and(|extension| {
                 matches!(
                     extension.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "webp" | "gif"
+                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
                 )
             });
         if !allowed_extension {
@@ -699,7 +699,8 @@ mod windows_impl {
             assert!(validate_local_image_path(Path::new("C:/tmp/IMAGE.JPEG")).is_ok());
             assert!(validate_local_image_path(Path::new(r"relative\image.png")).is_err());
             assert!(validate_local_image_path(Path::new(r"\\server\share\image.png")).is_err());
-            assert!(validate_local_image_path(Path::new(r"C:\tmp\image.svg")).is_err());
+            assert!(validate_local_image_path(Path::new(r"C:\tmp\image.svg")).is_ok());
+            assert!(validate_local_image_path(Path::new(r"C:\tmp\image.bmp")).is_err());
             assert!(validate_local_image_path(Path::new("C:\\tmp\\bad\0.png")).is_err());
         }
     }
