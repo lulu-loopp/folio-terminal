@@ -112,6 +112,41 @@
   解码路径的 hover 临时看图”升级为 §4 的本地无网络 peek,但它是独立呈现政策位,
   不得绕过光标行的新建 gate、提前落 band,也不得改变单击进入共享预览池的晋升路径。
 
+### 6.1 alternate 屏不落图片 band(用户裁决 2026-08-02,修订本节)
+
+- **裁决**:alternate(副屏)**完全不渲染内联图片 band**;该屏的图片只走 hover peek。
+  理由:全屏 TUI 自己拥有并按自己的节奏重绘那块画布,把 band 锚在它的行上必然产生
+  「浮动/遮挡/滚动别扭」一族问题。primary(我们自己拥有的转录流)的内联图片**一切照旧**。
+  **公式/数学 band 不在本裁决范围内**:alternate 的公式行为原样不变。
+- **与本节旧文的关系**:上文「光标行抑制…primary 与 alternate 一致」「已渲染 band 即使在
+  alternate 应用重绘时被可见光标扫过也保持」等句仍原样有效,但对图片而言在 alternate 已
+  不可达(那里根本不建 band),故只对公式生效;primary 的图片仍逐字照旧。
+- **实现即政策**:唯一判据 `inline_image_bands_admitted(screen)`(`crates/bt-term/src/session.rs`),
+  两个**新建**接缝各调用一次——OSC 1337 的 `register_inline_image` 与路径检测的
+  `reconcile_live_image_paths`。**只 gate 新建**:切屏本身不追认作废 primary 的既有记录,
+  history/staging 记录分毫不动(live 平面另按下文切屏政策处理)。
+- **OSC 1337 在 alternate**:协议照常解析(payload 被消费、流不失步、不报协议错),
+  但不产生记录、不入 worker 队列、不落 band。adapter 仍在网格里写 `[image]` 文本占位
+  (那是文本基底,与本节的 band 政策不同层),故副屏上一次 OSC 1337 只留该占位文本。
+- **切屏时的 live 记录**:进/出 alternate 都作废**live 平面**上的图片记录,与公式侧
+  `invalidate_all_live_decorations` 同策(见 `retire_live_inline_images`)。理由是结构性的:
+  live 记录锚在被换走的那块网格上,`RestorePrimary` 还会 bump `grid_generation`,留着的
+  记录既不可能再匹配、也不可能再投影或作废——只会是一条永久不可见却占着解码位图的
+  occurrence。回到 primary 后,路径经既有稳定窗口重新登记、band 照常回来(与 live 公式
+  重新检测同形)。history/staging 记录不是 live,分毫不动:TUI 上方的转录该有的 band 都在。
+- **peek 是内联准入的补集(2026-07-31 裁决)因此零成本承接**:`local_image_path_probe_at`
+  只在「有未失败记录覆盖该锚」时拒答,副屏既然一条记录都不建,探针就必然作答,
+  hover peek 层**一行都不用改**。钉死于 `alternate_screen_path_text_creates_no_record_and_the_peek_answers_instead`。
+- **回放/录制影响(2026-08-02 实测)**:默认回放(未设 `BT_PROBE_IMAGE_PATHS`)不检测路径,
+  且唯一带 OSC 1337 的录制(`image-accept`)全程在 primary,故**逐字节不变**——54 份
+  `.tmp-repaint-capture/*.vt` release 前后对拍 stdout+stderr 全同。设 `BT_PROBE_IMAGE_PATHS=1`
+  时,纯 primary 的图片录制(`path-accept` / `image-accept` / `hover-peek-feel` /
+  `osc133-accept2` / `pixel-scroll-feel`)仍逐字节全同;在副屏打印过图片路径的五份按裁决
+  **预期少掉副屏那些 band**(带 band 的帧数 before→after:`cc-image-repro` 115→36、
+  `hover-peek-complement` 329→80、`relief-chip-feel` 253→148、`svg-slice-feel` 79→2、
+  `texture-residency-feel` 379→91;残余即同一录制里 primary 段的 band,证明只副屏被裁),
+  这是裁决本身,不是回归。
+
 ## 7. OSC 133 输入区权威来源(2026-07-30)
 
 - PowerShell opt-in shell integration 发 FTCS `133;A/B/C/D`;安装与状态机详见

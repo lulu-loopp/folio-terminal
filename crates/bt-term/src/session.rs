@@ -316,6 +316,24 @@ fn jump_chip_overlays_source(proven: &str, overlaid: &str) -> bool {
     chip_split_visible_prefix(proven, overlaid).is_some()
 }
 
+/// Whether a screen admits inline image bands at all (user ruling 2026-08-02,
+/// docs/M2-preview-matrix-and-verbs.md §6).
+///
+/// The transcript flow is ours: on the primary screen a printed path or an OSC 1337 payload grows
+/// its picture underneath the text, unchanged. The alternate screen belongs to the application —
+/// it owns its surface and repaints it on its own schedule — so anchoring bands to its lines
+/// produced the float/occlusion/awkward-scroll family. Images there are hover-peek only.
+///
+/// This costs the peek layer nothing, which is why the ruling is cheap: `local_image_path_probe_at`
+/// refuses exactly where a non-failed record covers the anchor (peek is the complement of inline
+/// admission), so a screen that creates no records is a screen where the probe always answers.
+///
+/// The gate is on *creation* only. Formula/math bands are outside the ruling and keep their
+/// alternate-screen behaviour exactly.
+const fn inline_image_bands_admitted(screen: ScreenId) -> bool {
+    matches!(screen, ScreenId::Primary)
+}
+
 #[derive(Eq, PartialEq)]
 struct BoundaryCell<'a> {
     columns: (u32, u32),
@@ -5546,6 +5564,7 @@ impl DualPlaneSession {
                 LifecycleDirective::ParkPrimary => {
                     self.cursor_logical_line_memory = None;
                     self.invalidate_all_live_decorations();
+                    self.retire_live_inline_images();
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
                     self.live_screen = ScreenId::Alternate;
@@ -5559,6 +5578,7 @@ impl DualPlaneSession {
                 LifecycleDirective::RestorePrimary => {
                     self.cursor_logical_line_memory = None;
                     self.invalidate_all_live_decorations();
+                    self.retire_live_inline_images();
                     self.pending_live_handoffs.clear();
                     self.live_tasks.clear();
                     self.live_screen = ScreenId::Primary;
@@ -5569,21 +5589,6 @@ impl DualPlaneSession {
                     self.grid_generation.0 += 1;
                     self.document
                         .capture_rows_transaction(&[], self.grid_generation);
-                    let retired = self
-                        .inline_images
-                        .values()
-                        .filter_map(|record| {
-                            matches!(
-                                self.document.anchor(record.end_anchor).ok(),
-                                Some(ContentAnchor::Live {
-                                    screen: ScreenId::Alternate,
-                                    ..
-                                })
-                            )
-                            .then_some(record.occurrence_id)
-                        })
-                        .collect::<BTreeSet<_>>();
-                    self.retire_inline_images(&retired);
                     self.bump_view_generation();
                 }
                 LifecycleDirective::InlineImage {
@@ -5628,10 +5633,9 @@ impl DualPlaneSession {
             RemovalScreen::Primary => ScreenId::Primary,
             RemovalScreen::Alternate => ScreenId::Alternate,
         };
-        if matches!(
-            self.shell_phases.get(&screen),
-            Some(ShellIntegrationPhase::Input(_))
-        ) {
+        // The protocol still parses on the alternate screen — the adapter consumed the payload and
+        // reported no error — it simply yields no record and therefore no band.
+        if !inline_image_bands_admitted(screen) {
             return;
         }
         if matches!(
@@ -5672,6 +5676,14 @@ impl DualPlaneSession {
 
     fn reconcile_live_image_paths(&mut self, create_and_retire: bool, stable: &[bool]) {
         if !self.math_layout_options.detect_image_paths {
+            return;
+        }
+        // No band is admitted on the alternate screen, so there is nothing there to create, match,
+        // re-anchor or retire: every arm below is scoped to records anchored on the *live* screen,
+        // and the live screen holds none. Returning here also spares a full grid path scan on every
+        // stability tick of a repainting TUI. Primary records are untouched — they are anchored to
+        // the other screen and simply are not visible while the application owns the grid.
+        if !inline_image_bands_admitted(self.live_screen) {
             return;
         }
         let candidates = self.detected_live_image_paths(stable);
@@ -6552,6 +6564,29 @@ impl DualPlaneSession {
         {
             self.frozen_certified_through = None;
         }
+    }
+
+    /// A screen switch invalidates the live plane, and image records follow the same policy the
+    /// math side has always applied there (`invalidate_all_live_decorations` on both the park and
+    /// the restore arm). The grid a live record is anchored to is replaced by the other screen's,
+    /// and `RestorePrimary` bumps the grid generation on top of that, so a kept record could never
+    /// again be matched, projected or retired — it would be a permanently invisible occurrence
+    /// holding its decoded raster. The primary transcript loses nothing: history and staging
+    /// records are not live and are untouched, and a primary live path re-registers from the
+    /// restored grid through the ordinary stability window, exactly as a live formula re-detects.
+    fn retire_live_inline_images(&mut self) {
+        let retired = self
+            .inline_images
+            .values()
+            .filter_map(|record| {
+                matches!(
+                    self.document.anchor(record.end_anchor).ok(),
+                    Some(ContentAnchor::Live { .. })
+                )
+                .then_some(record.occurrence_id)
+            })
+            .collect::<BTreeSet<_>>();
+        self.retire_inline_images(&retired);
     }
 
     fn retire_inline_images(&mut self, occurrences: &BTreeSet<u64>) {
@@ -15144,18 +15179,23 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// RE-ADJUDICATED for the alternate-screen image ruling (2026-08-02): this fixture used to
+    /// enter the alternate screen (`\x1b[?1049h`) because a full-screen TUI is where a bottom input
+    /// path and an upper output path sit together. Images no longer band there at all, so the
+    /// subject — the cursor-line gate suppressing the input path while the output path above it
+    /// renders — is exercised on the primary screen, where inline images live. The gate itself is
+    /// unchanged and still screen-agnostic (§6 "primary 与 alternate 一致"); it is simply no longer
+    /// reachable for images on the alternate screen, where the ruling refuses band creation
+    /// outright.
     #[test]
-    fn alternate_bottom_input_path_is_suppressed_while_output_path_renders() {
+    fn bottom_input_path_is_suppressed_while_output_path_renders() {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         session
-            .feed_at(
-                format!("\x1b[?1049h{line}\x1b[8;1H{line}").as_bytes(),
-                started,
-            )
+            .feed_at(format!("{line}\x1b[8;1H{line}").as_bytes(), started)
             .unwrap();
         assert_eq!(session.visible_cursor_logical_line(), Some((7, 7)));
         assert_eq!(
@@ -15736,8 +15776,20 @@ mod tests {
         assert!(session.take_decoration_worker_task().is_none());
     }
 
+    /// PIN (alternate-screen image ruling, 2026-08-02): path text on the alternate screen creates
+    /// no record and no worker task, at first stability and across a full-screen repaint, while
+    /// `local_image_path_probe_at` keeps answering on that very anchor.
+    ///
+    /// RE-ADJUDICATED from `alternate_repaint_reuses_the_ready_path_occurrence_without_flash_or_decode`
+    /// (which asserted that an alternate path *did* enqueue and that its band survived a
+    /// synchronized repaint). The user ruling voids that scenario at its root: a TUI owns and
+    /// repaints its own surface, so no image band is anchored to its lines at all — there is no
+    /// occurrence left for a repaint to preserve. The repaint sequence is kept here so the
+    /// post-repaint reconcile seam is still covered, now proving the record-free state instead.
+    /// Primary-screen "one occurrence across a repaint" coverage is unaffected and lives in
+    /// `a_jump_chip_over_a_live_path_line_keeps_one_occurrence_without_re_decoding`.
     #[test]
-    fn alternate_repaint_reuses_the_ready_path_occurrence_without_flash_or_decode() {
+    fn alternate_screen_path_text_creates_no_record_and_the_peek_answers_instead() {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
@@ -15746,16 +15798,50 @@ mod tests {
         let enter = format!("\u{1b}[?1049h{line}\r\nprompt");
         session.feed_at(enter.as_bytes(), started).unwrap();
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
-        let SessionDecorationTask::InlineImage(task) =
-            session.take_decoration_worker_task().unwrap()
-        else {
-            panic!("alternate path must enqueue");
+
+        let peek_anchor = ContentAnchor::Live {
+            screen: ScreenId::Alternate,
+            point: GridPoint { row: 0, column: 20 },
+            bias: Bias::Before,
+            generation: session.grid_generation,
         };
-        let mut decoder = crate::inline_image::InlineImageDecoder::default();
-        let result = decoder.decode(task.clone());
-        assert!(session.complete_inline_image_result(task, result));
-        settle_inline_image_displays(&mut session);
-        let key = resident_display_key(&session, 0);
+        let assert_no_band_but_a_peek = |session: &mut DualPlaneSession, phase: &str| {
+            assert!(
+                session.inline_images.is_empty(),
+                "{phase}: the alternate screen admits no image record: {:?}",
+                session.inline_image_records()
+            );
+            assert!(
+                session.local_image_path_tasks.is_empty(),
+                "{phase}: no record means no worker task"
+            );
+            assert!(
+                session.take_decoration_worker_task().is_none(),
+                "{phase}: nothing was scheduled to decode"
+            );
+            // The complement: with no record covering the anchor, the probe answers, so hover peek
+            // serves the image with zero changes to the peek layer.
+            assert_eq!(
+                session.local_image_path_probe_at(&peek_anchor),
+                Some(path.clone()),
+                "{phase}: the peek must answer where inline admission is refused"
+            );
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert!(
+                frame.math_blocks.iter().all(|placement| !matches!(
+                    placement.artifact.kind,
+                    bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+                )),
+                "{phase}: no band may reach the frame"
+            );
+            assert_eq!(
+                session.terminal().visible_text()[0],
+                line,
+                "{phase}: the path text itself is untouched"
+            );
+        };
+        assert_no_band_but_a_peek(&mut session, "first stability");
 
         let repaint = format!("\u{1b}[?2026h\u{1b}[2J\u{1b}[H{line}\u{1b}[?2026l");
         session
@@ -15764,17 +15850,119 @@ mod tests {
                 started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1),
             )
             .unwrap();
-        assert_eq!(session.inline_image_records().len(), 1);
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL * 3);
+        assert_no_band_but_a_peek(&mut session, "after a synchronized full-screen repaint");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (alternate-screen image ruling, 2026-08-02): OSC 1337 still parses on the alternate
+    /// screen — the payload is consumed, the stream stays in sync, no protocol error is reported —
+    /// but it yields no record, no worker task and therefore no band. The identical bytes on the
+    /// primary screen register exactly as before.
+    #[test]
+    fn osc1337_on_the_alternate_screen_parses_but_creates_no_record() {
+        let mut session = DualPlaneSession::new(nz(40), nz(8));
+        session.feed(b"\x1b[?1049h").unwrap();
+        session
+            .feed(b"\x1b]1337;File=inline=1:AAAA\x07after")
+            .unwrap();
+        assert!(
+            session.inline_images.is_empty(),
+            "the alternate screen admits no OSC 1337 record: {:?}",
+            session.inline_image_records()
+        );
+        assert!(session.inline_image_tasks.is_empty());
         assert!(session.take_decoration_worker_task().is_none());
-        let mut projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&mut projection).unwrap();
-        assert!(frame.math_blocks.iter().any(|placement| {
-            placement.artifact.key == key
-                && matches!(
+        assert_eq!(
+            session.terminal().visible_text()[0],
+            "[image]after",
+            "the escape sequence is still consumed as protocol (never echoed as its own bytes); \
+             the adapter's text substrate placeholder is unchanged by the ruling, which is a \
+             session-level band policy"
+        );
+
+        session.feed(b"\x1b[?1049l").unwrap();
+        session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
+        assert_eq!(
+            session.inline_images.len(),
+            1,
+            "the same bytes on the primary screen register unchanged"
+        );
+        assert!(matches!(
+            session.take_decoration_worker_task(),
+            Some(SessionDecorationTask::InlineImage(_))
+        ));
+    }
+
+    /// PIN (alternate-screen image ruling, 2026-08-02): a primary-screen band survives an
+    /// alternate round trip the way a live formula does — the live plane is invalidated on the
+    /// switch (one occurrence in, one occurrence out, never two), the TUI's own output creates
+    /// nothing, and the restored primary grid re-registers the path and shows the band again.
+    #[test]
+    fn a_primary_image_band_survives_an_alternate_round_trip() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let mut now = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let mut settle_band = |session: &mut DualPlaneSession, at: Instant, phase: &str| {
+            session.advance_live_stability(at);
+            let SessionDecorationTask::InlineImage(task) = session
+                .take_decoration_worker_task()
+                .unwrap_or_else(|| panic!("{phase}: the primary path must enqueue"))
+            else {
+                panic!("{phase}: the primary path must enqueue an image task");
+            };
+            let result = decoder.decode(task.clone());
+            assert!(session.complete_inline_image_result(task, result));
+            settle_inline_image_displays(session);
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            assert!(
+                frame.math_blocks.iter().any(|placement| matches!(
                     placement.artifact.kind,
                     bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
-                )
-        }));
+                )),
+                "{phase}: the primary band must be on screen"
+            );
+            assert_eq!(
+                session.inline_image_records().len(),
+                1,
+                "{phase}: exactly one occurrence: {:?}",
+                session.inline_image_records()
+            );
+        };
+
+        session
+            .feed_at(format!("{line}\r\nprompt").as_bytes(), now)
+            .unwrap();
+        now += LIVE_MATH_STABLE_INTERVAL;
+        settle_band(&mut session, now, "primary before the round trip");
+
+        // Enter the alternate screen and let the application print the same path text there.
+        now += Duration::from_millis(1);
+        session
+            .feed_at(format!("\u{1b}[?1049h{line}\r\nTUI").as_bytes(), now)
+            .unwrap();
+        now += LIVE_MATH_STABLE_INTERVAL;
+        session.advance_live_stability(now);
+        assert!(
+            session.inline_images.is_empty(),
+            "the switch invalidates the live plane and the alternate screen creates nothing: {:?}",
+            session.inline_image_records()
+        );
+        assert!(session.take_decoration_worker_task().is_none());
+
+        // Leave it: the primary grid comes back and the path re-registers through the ordinary
+        // stability window, exactly as a live formula re-detects after a screen switch.
+        now += Duration::from_millis(1);
+        session.feed_at(b"\x1b[?1049l", now).unwrap();
+        now += LIVE_MATH_STABLE_INTERVAL;
+        settle_band(&mut session, now, "primary after the round trip");
+        assert_eq!(session.terminal().visible_text()[0], line);
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
