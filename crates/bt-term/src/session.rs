@@ -14461,6 +14461,240 @@ mod tests {
         assert_eq!(zoomed.artifact.rgba.len(), 20 * 20 * 4);
     }
 
+    /// PIN (regrow, user report 2026-08-03): the display size a band asks for is a pure function of
+    /// the native decode and the current layout, so a narrow/widen round trip returns to the exact
+    /// pixel box it started in — geometry subpixels, requested resample dims, and resident raster
+    /// alike. Deriving the next size from the *resident* raster instead ratchets: each narrowing
+    /// shrinks the source the next derivation measures, and widening finds nothing left to grow.
+    #[test]
+    fn a_narrowed_band_regrows_to_the_display_size_the_wide_pane_asks_for() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(40), nz(24), cell);
+        session.set_cell_width_subpixels(cell);
+        session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(task.occurrence_id, 400, 100, false)),
+        ));
+        settle_inline_image_displays(&mut session);
+
+        // 40 columns of 10px = 400px available, so width fit is 1:1; the height cap is a third of a
+        // 240px viewport = 80px, so the binding scale is 80*1000/100 = 800 and the box is 320x80.
+        let record = &session.inline_image_records()[0];
+        let wide = (
+            record.display_width_px.unwrap(),
+            record.display_height_px.unwrap(),
+        );
+        assert_eq!(wide, (320, 80));
+        let wide_geometry = sole_band_geometry(&session);
+
+        // Narrow to 20 columns: 200px available makes width the binding fit at 500 milli.
+        session.resize(nz(20), nz(24)).unwrap();
+        let narrow_task = loop {
+            match session.take_decoration_worker_task() {
+                Some(SessionDecorationTask::ScaleInlineImage(task)) => break task,
+                Some(_) => continue,
+                None => panic!("narrowing must ask for a smaller display size"),
+            }
+        };
+        assert_eq!(
+            (
+                narrow_task.display_width_px,
+                narrow_task.display_height_px,
+                narrow_task.width_px,
+                narrow_task.height_px,
+            ),
+            (200, 50, 400, 100),
+            "a resample always reads the native decode, whatever raster is resident",
+        );
+        assert!(session.complete_inline_image_scale(scale_inline_image(&narrow_task)));
+        let record = &session.inline_image_records()[0];
+        assert_eq!(
+            (
+                record.display_width_px.unwrap(),
+                record.display_height_px.unwrap()
+            ),
+            (200, 50),
+        );
+
+        // Widen back: the wide pane must ask for the box it asked for the first time.
+        session.resize(nz(40), nz(24)).unwrap();
+        let widen_task = loop {
+            match session.take_decoration_worker_task() {
+                Some(SessionDecorationTask::ScaleInlineImage(task)) => break task,
+                Some(_) => continue,
+                None => panic!("widening must ask for the larger display size again"),
+            }
+        };
+        assert_eq!(
+            (widen_task.display_width_px, widen_task.display_height_px),
+            wide,
+            "the display size is a function of the native decode and the layout, not of the \
+             already-shrunk raster the record happens to hold",
+        );
+        assert_eq!(
+            (widen_task.width_px, widen_task.height_px),
+            (400, 100),
+            "the resample source stays the native decode across the round trip",
+        );
+        assert!(session.complete_inline_image_scale(scale_inline_image(&widen_task)));
+        let record = &session.inline_image_records()[0];
+        assert_eq!(
+            (
+                record.display_width_px.unwrap(),
+                record.display_height_px.unwrap()
+            ),
+            wide,
+        );
+        assert_eq!(
+            sole_band_geometry(&session),
+            wide_geometry,
+            "band geometry returns to the exact subpixel height it had before the narrowing",
+        );
+
+        // What the renderer is handed is the same box it was handed the first time, at scale 1000:
+        // a band that regrew only in geometry while still uploading the shrunken raster would be a
+        // blurred picture, not a restored one.
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let artifact = &frame
+            .math_blocks
+            .iter()
+            .find(|placement| placement.artifact.key.starts_with("image:"))
+            .expect("the widened band projects")
+            .artifact;
+        assert_eq!((artifact.width_px, artifact.height_px), wide);
+        assert_eq!(artifact.render_scale_milli, 1000);
+        assert_eq!(
+            artifact.height_subpixels,
+            wide_geometry.display_height_subpixels
+        );
+    }
+
+    /// PIN (resample flood, 2026-08-03): a drag re-derives the display size on every frame, so the
+    /// worker is routinely answering questions the layout has already superseded. Two properties
+    /// hold whatever order those answers arrive in: at most one question per occurrence is
+    /// outstanding at a time, and a superseded raster landing last never strands the band — the
+    /// next hand-out re-asks the current question exactly once and the record converges.
+    ///
+    /// The strand this rules out is the reported symptom: a completion is only "the target was
+    /// achieved" when its dimensions are the ones still wanted; otherwise it is just "the worker is
+    /// free again", and the re-derivation must be free to ask afresh.
+    #[test]
+    fn a_flood_of_superseded_resamples_converges_on_the_size_the_layout_still_wants() {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(40), nz(24), cell);
+        session.set_cell_width_subpixels(cell);
+        session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("OSC 1337 must enqueue an image worker task");
+        };
+        assert!(session.complete_inline_image_result(
+            task.clone(),
+            Ok(decoded_test_image(task.occurrence_id, 400, 100, false)),
+        ));
+        settle_inline_image_displays(&mut session);
+
+        // Three layout moves, none of them answered: the drag outruns the worker.
+        let first = next_scale_task(&mut session, nz(20)).expect("the first narrowing asks");
+        assert_eq!((first.display_width_px, first.display_height_px), (200, 50));
+        assert!(
+            next_scale_task_without_resize(&mut session).is_none(),
+            "one outstanding question per occurrence: an unchanged target never re-asks",
+        );
+        let second = next_scale_task(&mut session, nz(30)).expect("the second move asks");
+        assert_eq!(
+            (second.display_width_px, second.display_height_px),
+            (300, 75)
+        );
+        let third = next_scale_task(&mut session, nz(24)).expect("the third move asks");
+        assert_eq!((third.display_width_px, third.display_height_px), (240, 60));
+
+        // The answers come back out of order, and the last one to land is superseded — the raster
+        // the band ends up holding is one no layout wants any more.
+        assert!(session.complete_inline_image_scale(scale_inline_image(&third)));
+        assert!(session.complete_inline_image_scale(scale_inline_image(&first)));
+        assert!(session.complete_inline_image_scale(scale_inline_image(&second)));
+        let stale = &session.inline_image_records()[0];
+        assert_eq!(
+            (
+                stale.display_width_px.unwrap(),
+                stale.display_height_px.unwrap()
+            ),
+            (300, 75),
+            "the last answer wins the raster, superseded or not",
+        );
+
+        // Exactly one further question, and it is the one the layout is still asking.
+        let recovery =
+            next_scale_task_without_resize(&mut session).expect("a superseded raster must re-ask");
+        assert_eq!(
+            (recovery.display_width_px, recovery.display_height_px),
+            (240, 60),
+            "the re-ask is the current target, not the resident raster's size",
+        );
+        assert_eq!(
+            (recovery.width_px, recovery.height_px),
+            (400, 100),
+            "and it still resamples from the native decode",
+        );
+        assert!(session.complete_inline_image_scale(scale_inline_image(&recovery)));
+        let settled = &session.inline_image_records()[0];
+        assert_eq!(
+            (
+                settled.display_width_px.unwrap(),
+                settled.display_height_px.unwrap()
+            ),
+            (240, 60),
+        );
+        assert!(
+            next_scale_task_without_resize(&mut session).is_none(),
+            "a converged record asks nothing further",
+        );
+    }
+
+    /// Resize to `columns` and hand out the resample request that fall-out produces, if any.
+    fn next_scale_task(
+        session: &mut DualPlaneSession,
+        columns: NonZeroU32,
+    ) -> Option<InlineImageScaleTask> {
+        session.resize(columns, nz(24)).unwrap();
+        next_scale_task_without_resize(session)
+    }
+
+    /// Drain the decoration queue for the next resample request without touching the layout.
+    fn next_scale_task_without_resize(
+        session: &mut DualPlaneSession,
+    ) -> Option<InlineImageScaleTask> {
+        loop {
+            match session.take_decoration_worker_task() {
+                Some(SessionDecorationTask::ScaleInlineImage(task)) => break Some(task),
+                Some(_) => continue,
+                None => break None,
+            }
+        }
+    }
+
+    /// The geometry the session derives for the one image band in a single-image fixture.
+    fn sole_band_geometry(session: &DualPlaneSession) -> InlineImageGeometry {
+        let record = session
+            .inline_images
+            .values()
+            .next()
+            .expect("the fixture holds one image record");
+        let decoded = record.artifact.as_ref().expect("the decode has landed");
+        session
+            .inline_image_geometry(record, decoded)
+            .expect("a decoded band has geometry")
+    }
+
     #[test]
     fn malformed_inline_image_completion_leaves_a_text_placeholder() {
         let mut session = DualPlaneSession::new(nz(30), nz(4));

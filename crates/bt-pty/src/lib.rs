@@ -666,14 +666,27 @@ mod tests {
     impl InteractiveOracle {
         fn spawn() -> Self {
             let startup = r#"Set-PSReadLineOption -HistorySaveStyle SaveNothing; function global:prompt { Write-Host ('Q' * 110); (('P' * 81) + ' ') }"#;
-            let command = PtyCommand::new("powershell.exe")
+            Self::spawn_with(startup, 100, 18)
+        }
+
+        /// Same live child, but with a caller-chosen startup script and geometry. Probes that care
+        /// about absolute row addressing need a short prompt and a wide start width.
+        fn spawn_with(startup: &str, columns: u16, rows: u16) -> Self {
+            Self::spawn_shell_with("powershell.exe", startup, columns, rows)
+        }
+
+        /// The line editor is the component that caches absolute rows, so which shell hosts it is
+        /// part of the probe's subject: `bt-app` seats spawn `pwsh.exe`, whose PSReadLine is not
+        /// the 2.0.0 that ships inside Windows PowerShell.
+        fn spawn_shell_with(shell: &str, startup: &str, columns: u16, rows: u16) -> Self {
+            let command = PtyCommand::new(shell)
                 .arg("-NoLogo")
                 .arg("-NoProfile")
                 .arg("-NoExit")
                 .arg("-Command")
                 .arg(startup);
-            let session = PtySession::spawn(command, size(100, 18), no_wake()).unwrap();
-            let terminal = TerminalAdapter::new(nz32(100), nz32(18));
+            let session = PtySession::spawn(command, size(columns, rows), no_wake()).unwrap();
+            let terminal = TerminalAdapter::new(nz32(columns), nz32(rows));
             Self {
                 session,
                 terminal,
@@ -790,6 +803,40 @@ mod tests {
 
         fn resize_conpty(&mut self, columns: u16, rows: u16) {
             self.session.resize(size(columns, rows)).unwrap();
+        }
+
+        /// The naive staging: resize the local grid and the pseudoconsole and nothing else.
+        ///
+        /// This is deliberately *not* what the application does, and the difference is the whole
+        /// point of stages (F)–(H). Without a resize transaction there is no vendor reconcile, so
+        /// the bottom-anchored grid keeps every row the reflow added out of the viewport while
+        /// conhost keeps them in it — and the two disagree about which absolute row the prompt is
+        /// on. Use `begin_resize_transaction` + `reconcile_resize_transaction_to_viewport` to
+        /// reproduce the product; use this only to show what that reconcile is buying.
+        fn resize_both(&mut self, columns: u16, rows: u16) {
+            self.resize_terminal(columns, rows);
+            self.resize_conpty(columns, rows);
+        }
+
+        /// Ask the child to read conhost's own text buffer, viewport origin and cursor back to us
+        /// (`BTDUMP` is installed by the probe's startup script). On the pinned sidecar this is the
+        /// only way to see what a resize did to rows already on screen, because it repaints
+        /// nothing; on the inbox implementation it is the independent check that its repaint told
+        /// us the truth.
+        fn probe_buffer_dump(&mut self, stage: &str, rows: u16) {
+            let start = self.raw_output.len();
+            self.write_line(&format!("BTDUMP {rows}"));
+            self.wait_for_output_since(start, b"BTDUMPEND");
+            self.pump_until_quiet(Duration::from_secs(10));
+            self.wait_for_current_line("BTP>");
+            let emitted = String::from_utf8_lossy(&self.raw_output[start..]).into_owned();
+            let dump = emitted
+                .rsplit("BTDUMPBEGIN")
+                .next()
+                .and_then(|tail| tail.split("BTDUMPEND").next())
+                .map(|body| body.replace(['\r', '\n'], ""))
+                .unwrap_or_default();
+            eprintln!("BT_CONPTY_NARROW_PROBE stage={stage}-dump{dump}");
         }
     }
 
@@ -1291,6 +1338,15 @@ mod tests {
             evidence.synchronization_replies.contains('R'),
             "terminal did not answer ConPTY's DSR with a CPR: {evidence:?}"
         );
+        assert_resize_cursor_outcome_contract(&evidence);
+    }
+
+    /// The outcome every ConPTY implementation owes after a resize storm, independent of *how* it
+    /// resynchronizes the cursor. Kept separate from the mechanism assertions because the two
+    /// implementations reach this contract by different means: the pinned sidecar asks the terminal
+    /// `CSI 6 n` and adopts the reply (`microsoft/terminal#19535`), while the Windows inbox
+    /// implementation repaints the whole viewport and places the cursor itself.
+    fn assert_resize_cursor_outcome_contract(evidence: &CursorOracleEvidence) {
         assert_eq!(
             evidence.typed_line,
             format!("{ORACLE_PROMPT}{ORACLE_EDITING_PREFIX}{ORACLE_POST_RESIZE_INPUT}"),
@@ -1329,9 +1385,23 @@ mod tests {
         );
     }
 
+    /// What the Windows inbox implementation does with the same oracle, measured rather than
+    /// assumed. This test used to assert the `#18725` failure shape as a known-bad record; on
+    /// Windows 11 build 26200 that shape no longer occurs, so asserting it would have pinned a
+    /// falsehood. What survives of `#18725` here is a *mechanism* divergence, not an outcome one:
+    /// the inbox implementation never asks for a cursor position report, and instead emits an
+    /// unsolicited full-viewport repaint terminated by an absolute CUP on every resize (see the
+    /// `stage=on-narrow` evidence of `narrow_resize_conpty_reflow_probe` under
+    /// `BT_CONPTY_FORCE_SYSTEM=1`).
+    ///
+    /// The pin therefore no longer rests on this oracle's outcome. It rests on the repaint traffic
+    /// that mechanism implies: one full viewport per committed resize, arriving mid-transaction,
+    /// which is exactly the traffic `docs/M1.8-resize-visual-stability.md` records the sidecar as
+    /// not producing. Anyone proposing to flip the default to the inbox implementation must re-run
+    /// the M1.8 resize-stability corpus, not just this oracle.
     #[test]
-    #[ignore = "known system ConPTY cursor desync: https://github.com/microsoft/terminal/issues/18725"]
-    fn system_conpty_known_resize_cursor_desync_oracle() {
+    #[ignore = "upstream A/B record: drives a real interactive PowerShell through the inbox ConPTY"]
+    fn system_conpty_resize_cursor_outcome_matches_the_sidecar_contract() {
         assert!(
             std::env::var_os("BT_CONPTY_FORCE_SYSTEM").is_some(),
             "run in a fresh process with BT_CONPTY_FORCE_SYSTEM=1"
@@ -1339,18 +1409,352 @@ mod tests {
         assert_eq!(conpty_source(), ConPtySource::System);
         let evidence = run_resize_cursor_oracle();
         eprintln!("BT_CONPTY_ORACLE {} evidence={evidence:?}", conpty_source());
+        assert_eq!(
+            evidence.synchronization_dsr_requests, 0,
+            "the inbox implementation is expected to resynchronize by repaint, not by DSR; a nonzero \
+             count means it adopted the `#19535` handshake and this record needs revisiting: {evidence:?}"
+        );
+        assert_resize_cursor_outcome_contract(&evidence);
+    }
+
+    /// The 49-column hard-terminated row the narrow-reflow probe writes. Deliberately longer than
+    /// the narrow width it is then squeezed into, and self-indexing so a wrap point is readable.
+    const NARROW_PROBE_LINE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw";
+    const NARROW_PROBE_WIDE: u16 = 104;
+    const NARROW_PROBE_NARROW: u16 = 45;
+
+    fn escaped(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes)
+            .chars()
+            .map(|c| match c {
+                '\x1b' => "<ESC>".to_owned(),
+                '\r' => "<CR>".to_owned(),
+                '\n' => "<LF>".to_owned(),
+                '\x07' => "<BEL>".to_owned(),
+                c if (c as u32) < 0x20 => format!("<{:02X}>", c as u32),
+                c => c.to_string(),
+            })
+            .collect()
+    }
+
+    fn occupied_rows(rows: &[String]) -> Vec<(usize, String)> {
+        rows.iter()
+            .enumerate()
+            .filter(|(_, row)| !row.trim_end().is_empty())
+            .map(|(index, row)| (index, row.trim_end().to_owned()))
+            .collect()
+    }
+
+    /// Ground-truth probe for narrow-resize reflow (dev-gated; run with `--ignored --nocapture`).
+    ///
+    /// Question: when a real ConPTY narrows below the length of a *hard-terminated* row that is
+    /// already on screen, does conhost re-wrap that row (pushing everything below it down), does it
+    /// repaint at all, and where does it then address the prompt with absolute CUP?
+    ///
+    /// What it answered, on the pinned sidecar ConPTY (`CONPTY_SIDECAR_VERSION`):
+    ///
+    /// * conhost **does** re-wrap a hard-terminated row that is longer than the new width. A
+    ///   49-column row narrowed to 45 becomes two buffer rows (45 + 4) and every row below it moves
+    ///   down. The `WRAPLINE`-agnostic split bt-term inherits from the vendored grid is therefore
+    ///   the faithful rule, not a divergence. Widening straight back restores the original rows
+    ///   exactly, so the reflow is lossless in both directions.
+    /// * conhost's viewport origin stays at buffer row 0 across the narrowing: the rows the reflow
+    ///   added are absorbed by the blank region at the bottom, nothing scrolls into scrollback.
+    /// * the sidecar emits **nothing at all** on resize. It resynchronizes only later, by asking the
+    ///   terminal `CSI 6 n` and adopting the answer, which makes this terminal's post-reflow cursor
+    ///   row the coordinate the child then renders against.
+    /// * the inbox/system ConPTY (`BT_CONPTY_FORCE_SYSTEM=1`) instead repaints the whole viewport
+    ///   on resize and places the cursor itself: `CSI ?25l`, `CSI 8;rows;cols t`, `CSI H`, every row
+    ///   followed by `EL` and CRLF, then an absolute CUP and `CSI ?25h`. Repaint-on-resize is thus
+    ///   ConPTY-implementation dependent; do not build terminal-side rules on the assumption that
+    ///   either happens.
+    ///
+    /// Stages (F)–(H) then ask the question that decides ownership: *is the divergence ours?*
+    ///
+    /// * Resizing the local grid and the pseudoconsole directly (stages A–E, `resize_both`) does
+    ///   diverge. The vendored grid is bottom-anchored — `shrink_columns` pushes every row the
+    ///   reflow adds out through the top of the viewport into scrollback — while conhost grows
+    ///   downward into the blank tail. After a 104→46 narrowing our viewport was one row short of
+    ///   conhost's, and because the sidecar adopts our CPR, conhost's own buffer then took the
+    ///   child's next write on the wrong row.
+    /// * The application never resizes that way. `resize_at` opens a transaction, the coalesced
+    ///   pseudoconsole size is committed by `mark_pty_resize_requested_at`, and the vendor
+    ///   reconcile in between (`reconcile_resize_transaction_to_viewport`) re-evaluates height
+    ///   after the final-width reflow. Through that path (stages F–H) our viewport is row-for-row
+    ///   identical to conhost's buffer, our CPR is the row conhost itself would have chosen, and
+    ///   the child's redraw lands on the prompt row — under both implementations, for a single
+    ///   resize, for the recording's nine-step drag, pumped or unpumped, for a plain keystroke and
+    ///   for a wrapping history recall. The reconcile is the seam that keeps ConPTY's absolute
+    ///   addressing meaningful; nothing else in the resize path may be allowed to skip it.
+    ///
+    /// This is an observation harness, not a behaviour assertion on conhost: the assertions below
+    /// only check that the probe actually produced the evidence it claims to produce. Read the
+    /// `BT_CONPTY_NARROW_PROBE` lines on stderr for the raw byte and buffer evidence.
+    #[test]
+    #[ignore = "dev probe: drives a real interactive PowerShell through ConPTY; host-timing sensitive"]
+    fn narrow_resize_conpty_reflow_probe() {
+        // Each question gets a fresh child: ConPTY re-emits already-visible text when a later write
+        // reflows it, so reusing one child would let a stale repaint answer a newer question.
+
+        // (A) Narrow only. What did conhost do to the two over-long hard-terminated rows?
+        let mut narrowed = narrow_probe_child();
+        let mark = narrowed.raw_output.len();
+        narrowed.resize_both(NARROW_PROBE_NARROW, 26);
+        narrowed.pump_for(Duration::from_millis(750));
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=on-narrow width={NARROW_PROBE_NARROW} emitted={:?}",
+            escaped(&narrowed.raw_output[mark..])
+        );
+        narrowed.probe_buffer_dump("narrow", 6);
+
+        // (B) Narrow, then widen straight back with nothing written in between. Is the clipped tail
+        //     restored, and does the buffer return to its original row assignment?
+        let mut round_trip = narrow_probe_child();
+        round_trip.resize_both(NARROW_PROBE_NARROW, 26);
+        round_trip.pump_for(Duration::from_millis(400));
+        let mark = round_trip.raw_output.len();
+        round_trip.resize_both(NARROW_PROBE_WIDE, 26);
+        round_trip.pump_for(Duration::from_millis(750));
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=on-widen width={NARROW_PROBE_WIDE} emitted={:?}",
+            escaped(&round_trip.raw_output[mark..])
+        );
+        round_trip.probe_buffer_dump("widened", 6);
+
+        // (C) Narrow, then make the line editor redraw. The absolute CUP row it picks is what our
+        //     grid must agree with, because that redraw lands on whatever row we put there.
+        let mut edited = narrow_probe_child();
+        let wide_rows = edited.terminal.visible_text();
+        let wide_cursor = edited.terminal.cursor();
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=wide width={NARROW_PROBE_WIDE} cursor={wide_cursor:?} rows={:?}",
+            occupied_rows(&wide_rows)
+        );
+        edited.resize_both(NARROW_PROBE_NARROW, 26);
+        edited.pump_for(Duration::from_millis(400));
+        let mark = edited.raw_output.len();
+        edited.session.write(b"Z").unwrap();
+        edited.pump_for(Duration::from_millis(750));
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=narrow-keystroke emitted={:?} local_cursor={:?} local_rows={:?}",
+            escaped(&edited.raw_output[mark..]),
+            edited.terminal.cursor(),
+            occupied_rows(&edited.terminal.visible_text())
+        );
+        edited.session.write(b"").unwrap();
+        edited.pump_until_quiet(Duration::from_secs(10));
+        edited.probe_buffer_dump("after-keystroke", 6);
+
+        // (D) The recording's exact shape: one hard-terminated 49-column line with the prompt
+        //     directly beneath it and nothing above, narrowed to 46 the way the seat gesture did.
+        let mut recording = narrow_probe_clean_child();
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=recording-wide cursor={:?} rows={:?}",
+            recording.terminal.cursor(),
+            occupied_rows(&recording.terminal.visible_text())
+        );
+        recording.resize_both(46, 26);
+        recording.pump_for(Duration::from_millis(750));
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=recording-narrow local_cursor={:?} local_rows={:?}",
+            recording.terminal.cursor(),
+            occupied_rows(&recording.terminal.visible_text())
+        );
+        recording.probe_buffer_dump("recording", 4);
+
+        // (E) The recording's shape *and* the gesture that follows it: one keystroke into
+        //     PSReadLine after the narrowing. The line editor redraws its input at an absolute
+        //     row it derived from the console it can see; whether that row is the prompt row
+        //     this terminal actually has is the whole question.
+        let mut recording_edit = narrow_probe_clean_child();
+        recording_edit.resize_both(46, 26);
+        recording_edit.pump_for(Duration::from_millis(400));
+        let mark = recording_edit.raw_output.len();
+        recording_edit.session.write(b"Z").unwrap();
+        recording_edit.pump_for(Duration::from_millis(750));
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=recording-keystroke source={} emitted={:?} local_cursor={:?} local_rows={:?}",
+            conpty_source(),
+            escaped(&recording_edit.raw_output[mark..]),
+            recording_edit.terminal.cursor(),
+            occupied_rows(&recording_edit.terminal.visible_text())
+        );
+        recording_edit.session.write(b"\x03").unwrap();
+        recording_edit.pump_until_quiet(Duration::from_secs(10));
+        recording_edit.probe_buffer_dump("recording-keystroke", 5);
+
+        // (F) The same shape driven the way the application actually drives it: a resize
+        //     transaction around many projected local widths, one committed pseudoconsole size,
+        //     and the vendor reconcile in between. This is the only staging whose disagreement
+        //     with the `*-dump` line is a real product bug.
+        for (label, storm) in [
+            ("single", &[46u16][..]),
+            (
+                "storm",
+                &[51, 47, 45, 27, 46, 50, 49, 27, 46, 64, 54, 52, 46][..],
+            ),
+        ] {
+            let mut app = narrow_probe_clean_child();
+            app.terminal.begin_resize_transaction();
+            for width in storm {
+                app.resize_terminal(*width, 26);
+                app.pump_for(Duration::from_millis(4));
+            }
+            app.resize_conpty(46, 26);
+            app.terminal.reconcile_resize_transaction_to_viewport();
+            app.pump_for(Duration::from_millis(400));
+            eprintln!(
+                "BT_CONPTY_NARROW_PROBE stage=app-{label}-narrow local_cursor={:?} local_rows={:?}",
+                app.terminal.cursor(),
+                occupied_rows(&app.terminal.visible_text())
+            );
+            let mark = app.raw_output.len();
+            app.session.write(b"Z").unwrap();
+            app.pump_for(Duration::from_millis(750));
+            eprintln!(
+                "BT_CONPTY_NARROW_PROBE stage=app-{label}-keystroke emitted={:?} local_cursor={:?} local_rows={:?}",
+                escaped(&app.raw_output[mark..]),
+                app.terminal.cursor(),
+                occupied_rows(&app.terminal.visible_text())
+            );
+            app.session.write(b"\x03").unwrap();
+            app.pump_until_quiet(Duration::from_secs(10));
+            app.terminal.finish_resize_transaction();
+            app.probe_buffer_dump(&format!("app-{label}"), 5);
+        }
+
+        // (G) The seat recording replayed as a live child: its 39-column prompt, its drag (each
+        //     step resizes the pseudoconsole, exactly as the `# RESIZE` markers record), and then
+        //     one keystroke. The line editor's redraw carries an absolute row; whether that row is
+        //     the prompt row is the whole user-visible difference between the two ConPTYs.
+        let mut seat = narrow_probe_seat_child();
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=seat-wide source={} cursor={:?} rows={:?}",
+            conpty_source(),
+            seat.terminal.cursor(),
+            occupied_rows(&seat.terminal.visible_text())
+        );
+        seat.terminal.begin_resize_transaction();
+        for width in [51u16, 47, 45, 27, 46, 50, 49, 27, 46] {
+            seat.resize_terminal(width, 26);
+            seat.resize_conpty(width, 26);
+            seat.terminal.reconcile_resize_transaction_to_viewport();
+            seat.pump_for(Duration::from_millis(60));
+        }
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=seat-narrow local_cursor={:?} local_rows={:?}",
+            seat.terminal.cursor(),
+            occupied_rows(&seat.terminal.visible_text())
+        );
+        let mark = seat.raw_output.len();
+        seat.session.write(b"Z").unwrap();
+        seat.pump_for(Duration::from_millis(750));
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=seat-keystroke emitted={:?} local_cursor={:?} local_rows={:?}",
+            escaped(&seat.raw_output[mark..]),
+            seat.terminal.cursor(),
+            occupied_rows(&seat.terminal.visible_text())
+        );
+
+        // (H) The same seat drag with the terminal never servicing the pipe in between, so the
+        //     keystroke reaches the child in the same wake-up as the resize. On the sidecar the
+        //     child's own cursor read then races a cursor-position round trip that has not even
+        //     been asked yet; on the inbox implementation there is no round trip to race.
+        let mut race = narrow_probe_seat_child();
+        race.session.write(SEAT_TYPED.as_bytes()).unwrap();
+        race.pump_for(Duration::from_millis(400));
+        race.terminal.begin_resize_transaction();
+        for width in [51u16, 47, 45, 27, 46, 50, 49, 27, 46] {
+            race.resize_terminal(width, 26);
+            race.resize_conpty(width, 26);
+        }
+        race.terminal.reconcile_resize_transaction_to_viewport();
+        let mark = race.raw_output.len();
+        race.session.write(b"Z").unwrap();
+        race.pump_for(Duration::from_millis(1500));
+        eprintln!(
+            "BT_CONPTY_NARROW_PROBE stage=race-keystroke source={} emitted={:?} local_cursor={:?} local_rows={:?}",
+            conpty_source(),
+            escaped(&race.raw_output[mark..]),
+            race.terminal.cursor(),
+            occupied_rows(&race.terminal.visible_text())
+        );
+
         assert!(
-            evidence.synchronization_dsr_requests > 0,
-            "known upstream system-ConPTY failure: no post-resize DSR/CPR synchronization; https://github.com/microsoft/terminal/issues/18725; {evidence:?}"
+            wide_rows
+                .iter()
+                .any(|row| row.trim_end() == NARROW_PROBE_LINE),
+            "probe never got its hard-terminated row on screen: {:?}",
+            occupied_rows(&wide_rows)
         );
-        assert_eq!(
-            evidence.recalled_line,
-            format!("{ORACLE_PROMPT}{ORACLE_HISTORY_COMMAND}"),
-            "known upstream system-ConPTY failure: https://github.com/microsoft/terminal/issues/18725; {evidence:?}"
+    }
+
+    /// Startup script shared by the probe children: a short prompt whose absolute row is easy to
+    /// read out of a CUP, plus `BTDUMP`, which reads conhost's own buffer and viewport back to us.
+    const PROBE_STARTUP_COMMON: &str = concat!(
+        "Set-PSReadLineOption -HistorySaveStyle SaveNothing; ",
+        "function global:prompt { 'BTP> ' }; ",
+        "function global:BTDUMP { param($n) $ui=$Host.UI.RawUI; ",
+        "$w=$ui.BufferSize.Width; $bh=$ui.BufferSize.Height; ",
+        "$wp=$ui.WindowPosition; $ws=$ui.WindowSize; $cp=$ui.CursorPosition; ",
+        "$r=New-Object System.Management.Automation.Host.Rectangle 0,0,($w-1),($n-1); ",
+        "$c=$ui.GetBufferContents($r); ",
+        "$t=(0..($n-1) | ForEach-Object { $y=$_; ",
+        "'R'+$y+'<'+(-join (0..($w-1) | ForEach-Object { $c[$y,$_].Character })).TrimEnd()+'>' ",
+        "}) -join ' '; ",
+        "Write-Output ('BTDUMPBEGIN w='+$w+' bh='+$bh+' wp='+$wp.X+','+$wp.Y",
+        "+' ws='+$ws.Width+'x'+$ws.Height+' cp='+$cp.X+','+$cp.Y+' '+$t+'BTDUMPEND') };",
+    );
+
+    /// The seat recording's shape: the over-long hard-terminated row is printed by the startup
+    /// script, so the prompt sits directly beneath it with nothing above and no command echo.
+    fn narrow_probe_clean_child() -> InteractiveOracle {
+        let startup = format!("{PROBE_STARTUP_COMMON} Write-Host '{NARROW_PROBE_LINE}'");
+        let mut oracle = InteractiveOracle::spawn_with(&startup, NARROW_PROBE_WIDE, 26);
+        oracle.wait_for_current_line("BTP>");
+        oracle.pump_until_quiet(Duration::from_secs(10));
+        oracle
+    }
+
+    /// The seat recording's own geometry: a 39-column prompt (the width of
+    /// `(base) PS D:\Developer\BetterTerminal> `) directly beneath one 49-column hard-terminated
+    /// row. Prompt width is the variable that decides whether a stale absolute row anchor is
+    /// visible: the line editor re-addresses column 39 on whatever row it still believes in.
+    const SEAT_PROMPT: &str = "BTSEAT D:\\Developer\\BetterTerminal> ";
+
+    /// Typed at the wide width before the drag, so the line editor enters the resize holding a
+    /// non-empty buffer and a previous render — and long enough that re-rendering it past the
+    /// 43-column prompt wraps onto a second physical row at the narrow width, which is what the
+    /// recording's redraw had to do.
+    const SEAT_TYPED: &str = "BT_SEAT_TYPED_INPUT_LONG_ENOUGH_TO_WRAP";
+
+    /// The recording's prompt is not one string: a conda hook writes `(base) ` with `Write-Host`
+    /// and the prompt function returns the rest, so the line editor's own idea of the prompt is
+    /// shorter than the column its cursor actually starts in. Reproduce that split exactly.
+    fn narrow_probe_seat_child() -> InteractiveOracle {
+        let startup = format!(
+            "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+             function global:prompt {{ Write-Host -NoNewline '(base) '; '{SEAT_PROMPT}' }}; \
+             Write-Host '{NARROW_PROBE_LINE}'"
         );
-        assert_eq!(
-            evidence.cleared_line, ORACLE_EMPTY_PROMPT_LINE,
-            "known upstream system-ConPTY failure: https://github.com/microsoft/terminal/issues/18725; {evidence:?}"
-        );
+        let mut oracle =
+            InteractiveOracle::spawn_shell_with("pwsh.exe", &startup, NARROW_PROBE_WIDE, 26);
+        oracle.wait_for_current_line(&format!("(base) {}", SEAT_PROMPT.trim_end()));
+        oracle.pump_until_quiet(Duration::from_secs(10));
+        oracle
+    }
+
+    /// A live child parked at a prompt with one hard-terminated row on screen that is longer than
+    /// the width the probe is about to narrow to.
+    fn narrow_probe_child() -> InteractiveOracle {
+        let mut oracle = InteractiveOracle::spawn_with(PROBE_STARTUP_COMMON, NARROW_PROBE_WIDE, 26);
+        oracle.wait_for_current_line("BTP>");
+        oracle.pump_until_quiet(Duration::from_secs(10));
+        let start = oracle.raw_output.len();
+        oracle.write_line(&format!("Write-Output '{NARROW_PROBE_LINE}'"));
+        oracle.wait_for_output_since(start, NARROW_PROBE_LINE.as_bytes());
+        oracle.pump_until_quiet(Duration::from_secs(10));
+        oracle.wait_for_current_line("BTP>");
+        oracle
     }
 }
