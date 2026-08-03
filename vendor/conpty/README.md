@@ -52,7 +52,7 @@ DSR through the real terminal adapter, then checks the prompt after CSI A and CS
 | --- | ---: | ---: | --- |
 | sidecar `1.24.260512001` | 0 | 0 | **FAIL**; no post-resize cursor synchronization, history navigation did not preserve a clean prompt row |
 | sidecar `1.25.260710002-preview` | 1 | 1 | **PASS**; `BT_PROMPT> echo BTHT`, then `BT_PROMPT>` |
-| Windows inbox ConPTY | 0 on the acceptance host | 0 | **known FAIL** at the synchronization gate; retained as the ignored `system_conpty_known_resize_cursor_desync_oracle` regression record |
+| Windows inbox ConPTY | 0 | 0 | **PASS** on Windows 11 build 26200 — see below |
 
 Reproduce the accepted sidecar result with:
 
@@ -60,12 +60,39 @@ Reproduce the accepted sidecar result with:
 cargo test -p bt-pty sidecar_resize_keeps_history_navigation_on_a_clean_prompt_line -- --nocapture
 ```
 
-Reproduce the current inbox failure in a fresh process with:
+Reproduce the inbox A/B in a fresh process with:
 
 ```powershell
 $env:BT_CONPTY_FORCE_SYSTEM = '1'
-cargo test -p bt-pty system_conpty_known_resize_cursor_desync_oracle -- --ignored --nocapture
+cargo test -p bt-pty system_conpty_resize_cursor_outcome_matches_the_sidecar_contract -- --ignored --nocapture
 ```
+
+### What is left of `#18725` on the inbox implementation
+
+Re-measured on Windows 11 Pro build 26200 (2026-08): the inbox implementation **passes** the
+outcome contract this oracle exists to protect — post-resize input echoes on the current prompt,
+`CSI A` recalls onto the prompt row without disturbing the rows above it, and `CSI B` restores the
+typed line. The row of this table that previously read "known FAIL" asserted a shape that no longer
+occurs; the ignored record was rewritten to assert the contract instead of the historical failure,
+because pinning a falsehood is worse than having no record.
+
+What survives is a **mechanism** divergence, and it is the reason the pin stays. The inbox
+implementation resynchronizes by repainting: every committed resize emits `CSI ?25l`,
+`CSI 8;rows;cols t`, `CSI H`, the full viewport row-by-row with `EL` + CRLF, an absolute CUP, and
+`CSI ?25h`. The pinned sidecar emits **nothing**, and asks `CSI 6 n` once, later. A window drag that
+commits nine pseudoconsole resizes therefore costs nine full viewport repaints on the inbox path and
+zero bytes on the sidecar path — arriving mid-transaction, which is exactly the traffic
+`docs/M1.8-resize-visual-stability.md` records the sidecar as not producing and whose absence the
+resize-stability design depends on. Flipping the default to the inbox implementation is a
+resize-visual-stability change first and a cursor-synchronization change second; it requires
+re-running the M1.8 corpus, not just this oracle. The pin also keeps the behaviour attached to a
+hash-verified artifact rather than to whatever ConPTY the host OS happens to ship.
+
+`crates/bt-pty`'s `narrow_resize_conpty_reflow_probe` records the byte-level evidence for both
+implementations, including the fact that BetterTerminal's own resize path
+(`resize_at` → `mark_pty_resize_requested_at` → `reconcile_resize_transaction_to_viewport`) leaves
+our viewport row-for-row identical to conhost's buffer on both, so the absolute rows a child
+addresses after a reflow mean the same thing on either implementation.
 
 `bt-app` startup/resize trace lines and BTCRP002 record/replay metadata use the selected loader's
 display value. It is explicit and parseable: `source=sidecar version=1.25.260710002-preview dll=...`
