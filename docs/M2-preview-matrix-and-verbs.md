@@ -12,11 +12,16 @@
 
 ## 2. 内联准入表
 
+> **2026-08-03 修订(用户裁决,见 §6.1 补遗):图片全族退出内联,两屏皆然。**
+> 下表「直接显示 / 静态光栅显示 / 首帧静态」三行**当前一律读作「不进内联,hover peek」**;
+> 单击进预览 pane 随 M2 图像族落地。表原文保留,因为它就是政策位翻案后要回到的那张表。
+> **公式/数学 band 不在本次裁决范围内,逐字不变。**
+
 | 格式 | 内联给什么 | 备注 |
 |---|---|---|
-| PNG/JPEG/WebP/BMP | 直接显示 | 图片片 v1(协议先行,路径检测跟上) |
-| SVG | 静态光栅显示 | resvg 基建现成(bt-math 管线) |
-| GIF/APNG/动图 WebP | **首帧静态 + 可播放角标** | 动画只在预览播;「hover 播放」= 政策位,默认关 |
+| PNG/JPEG/WebP/BMP | ~~直接显示~~ → **不进内联,hover peek** | 图片片 v1(协议先行,路径检测跟上);2026-08-03 退出内联 |
+| SVG | ~~静态光栅显示~~ → **不进内联,hover peek** | resvg 基建现成(bt-math 管线);同上 |
+| GIF/APNG/动图 WebP | ~~**首帧静态 + 可播放角标**~~ → **不进内联,hover peek** | 动画只在预览播;「hover 播放」= 政策位,默认关 |
 | 视频/PDF/HTML/音频/其它 | 不进内联,显示为链接/图标 | 视频=只读媒体缓冲已裁(§7 压测补遗) |
 
 ## 3. 预览 pane 四族(v1 优先级按 agent CLI 工作流排)
@@ -116,6 +121,12 @@
 
 ### 6.1 alternate 屏不落图片 band(用户裁决 2026-08-02,修订本节)
 
+> **【已被 §6.1.1 取代,2026-08-03】** 本小节整段仍为有效记录,但其「primary 一切照旧」
+> 的结论已被下一小节翻案:图片 band 在**两屏**都退役。本小节留档的理由不是历史癖好——
+> 它是那条结构性论证的第一次成立,而 §6.1.1 就是同一条论证走完剩下半步。
+> 本小节里凡说「alternate 不落 band / primary 照旧」处,今日一律读作「两屏都不落 band」;
+> 其余(切屏 live 记录作废、peek 是内联准入的补集、OSC 1337 占位文本属文本基底)逐字仍然有效。
+
 - **裁决**:alternate(副屏)**完全不渲染内联图片 band**;该屏的图片只走 hover peek。
   理由:全屏 TUI 自己拥有并按自己的节奏重绘那块画布,把 band 锚在它的行上必然产生
   「浮动/遮挡/滚动别扭」一族问题。primary(我们自己拥有的转录流)的内联图片**一切照旧**。
@@ -148,6 +159,95 @@
   `hover-peek-complement` 329→80、`relief-chip-feel` 253→148、`svg-slice-feel` 79→2、
   `texture-residency-feel` 379→91;残余即同一录制里 primary 段的 band,证明只副屏被裁),
   这是裁决本身,不是回归。
+
+### 6.1.1 图片 band 两屏全退役,只留 hover peek(用户裁决 2026-08-03,取代 §6.1 的结论)
+
+- **裁决**:内联图片 band 在 **primary 与 alternate 两屏都不再存在**。图片**处处只走 hover peek**;
+  单击晋升进预览 pane 随 **M2 图像族**一并落地。**公式/数学 band 明确不在本裁决范围内,分毫未动。**
+- **理由(结构性,不是手感)**:band 是往一块**shell 按绝对坐标寻址**的画布里**注入行**。这与
+  PSReadLine 以及一切用绝对 CUP 重绘的应用**结构性交战**——不是某个 bug,是两套坐标系同时对同
+  一块网格声明所有权。§6.1 的副屏裁决(b3769b7)已经证明:band 一死,那一整族「浮动/遮挡/滚动
+  别扭」的毛病跟着一起死。primary 只是同一条病灶显形得慢:它同样是 shell 在按绝对坐标写字。
+  于是本次把剩下半步走完。
+- **实现即政策(法则③,可翻案)**:
+  - 唯一政策位 `INLINE_IMAGE_BANDS: bool = false`(`crates/bt-term/src/session.rs`)。每个 session
+    构造时把它抄进 `DualPlaneSession::inline_image_bands`;生产代码从不写这个字段。
+  - `inline_image_bands_admitted(bands, screen)` **保留 screen 参数**:翻案时 band 只回到 primary,
+    §6.1 给出的理由原样成立。
+  - **创建侧**三个接缝:`reconcile_live_image_paths`(live 路径)、`detect_frozen_image_paths`
+    (冻结转录行——本次新加的门,§6.1 时代它不存在,因为那时 primary 还建记录)、
+    `register_inline_image`(OSC 1337,见下)。路径/`file://`/相对引用文本因此**任何平面都不建记录**。
+  - **投影侧**一个接缝:`projected_inline_image` 开头一行。frozen / live / history-path 三条投影
+    全部经它,所以这是「图片记录不再是 band」的**唯一**那一行。
+  - **调度侧**一个接缝:`take_decoration_worker_task` 不再调用 `request_inline_image_displays`。
+    display 光栅的存在意义就是被 band 上传;peek 自己按 `bt_render::peek_thumbnail_extent` 定框、
+    自己 `PeekScale`,与记录无关。几何/重采样/纹理身份**机器一行未删**,只是没人再问它。
+- **peek 是内联准入的补集,所以这次同样零成本**:`local_image_path_probe_at` 只在「有未失败记录
+  覆盖该锚」时拒答。**一条记录都不建 ⇒ 覆盖恒假 ⇒ 探针在一切可准入跨度上必然作答**。这条组合性
+  钉死于 `path_text_creates_no_record_anywhere_and_the_peek_answers_everywhere`(live 与 history
+  两个平面各一遍)。peek 层**一行都没改**。
+- **OSC 1337:记录活下来,但它不再是 band,而是「解码载体」**。这是本次唯一需要新机器的地方,
+  理由是**不对称的**:打印出来的路径,peek 层随时可以从行文本里重新读出来;OSC 1337 的图**只在
+  流里出现过一次**,退役 band 之后如果不锚在占位符上,它就**一点呈现都没有**了。所以:
+  - 协议照常解析、payload 照常进 worker、解码照常按内容 key 缓存;`projected_inline_image` 拒绝投影。
+  - §6.1 的两道门(副屏、shell 输入区)是**对 band 创建**的门,对一个永不投影的载体无话可说,
+    故政策位关时不跑;翻案即原样恢复。
+  - **占位符即锚点**:adapter 写 `[image]` 时把**实际写了几列**(右边缘会截断)一路报到 session
+    (`AdapterEvent::InlineImage::placeholder_columns`),记录存下这个跨度。
+    `DualPlaneSession::inline_image_payload_peek_at(anchor)` 在该跨度上返回解码的**内容 key**;
+    bt-app 在 `DecorationWorkerCompletion::InlineImage` 经过时把解码顺手记进 `peek_cache`
+    (`remember_stream_payload_for_peek`)。解码未落地/失败则沉默,与打不开的文件同一条诚实降级。
+  - app 侧唯一的结构改动是把 peek 的主语从 `PathBuf` 抬成 `PeekSubject { key, path: Option<PathBuf> }`
+    ——两种形状只差一件事:**缓存未命中时有没有东西可读**。命名文件有(worker 读盘),流内 payload
+    没有(它的字节早已过去)。`show_or_request_peek` 因此仍是一个函数。
+  - 切屏作废 live 记录的老规矩对载体同样成立且**正是对的**:副屏被换走时,它承载的那个 `[image]`
+    占位符也跟着消失,没有任何东西还能被 hover。
+  - 钉死于 `osc_1337_decodes_on_both_screens_and_bands_on_neither`、
+    `an_osc_1337_payload_peeks_on_its_placeholder_and_nowhere_else`、
+    `a_stream_payload_is_a_peek_subject_with_nothing_to_read`(bt-app)。
+- **退役代码一行未删(法则③ 可逆性)**:几何、display 重采样调度、band 投影、创建门全部**门控**
+  而非删除。为了让门后面的机器不在政策位关着的这段时间里**腐烂**,`DualPlaneSession` 上有一个
+  仅测试可见的 `restore_retired_image_bands()`:**一次裁决用一个字符做的翻案,pin 在运行期做**。
+  所有 band 机制 pin(几何/重采样收敛/纹理预算/锚迁移/视口底部让位/输入区抑制门)都经它跑,
+  因此翻案回来时它们是**被验证过**的,不是被一句注释承诺过的。
+  组合钉死于 `flipping_the_policy_bit_back_on_restores_the_whole_band_pipeline`:同样的字节,
+  同一份 fixture,只差这一位——关着是 `(0 记录, 0 band)`,开着是 `(1 记录, 1 band)`。
+- **对照组**:`formulas_still_band_while_images_do_not`——同一帧里公式照常成 band,图片不成。
+- **补集不变量两侧都钉住**:`inline_image_record_covers` 的第一问就是政策位——「覆盖」的含义是
+  **在流里呈现**,一条投影不出去的记录什么也没呈现,所以补集恒真、探针必答。翻案回来时旧的拒答
+  全部回来,**包括本文件此前不可能有的那一条**:OSC 1337 的 band 在屏上时,同一个占位符不得再浮
+  一次。钉死于 `an_osc_1337_band_and_its_placeholder_peek_are_never_both_admitted`(政策位两侧各一句)。
+- **Ctrl+单击的连带后果(诚实记账,非裁决内容)**:「Ctrl+单击 → 系统默认看图器」(§4 第三档、
+  §6 末条)一向要求 **worker 真的打开并解码过那个文件**,把它挂在装饰记录上。主屏不再建记录之后,
+  这份验证改由 **peek 自己那份**承担——同一个 worker、同一个解码器、同一道准入门,记在
+  `peek_cache` 里(`local_image_path_hit`)。**代价说清楚:必须先 hover 过一次,Ctrl+单击才开得动。**
+  pending / 失败条目照旧完全惰性;政策位翻案后记录重新第一个作答,老行为原样回来。
+  单击进预览 pane 仍按裁决随 M2 图像族落地。
+- **回放足迹(2026-08-03 实测,62 份 `.tmp-repaint-capture/*.vt` × 2 模式,release oracle 前后对拍
+  stdout+stderr)**:
+  - **默认模式(未设 `BT_PROBE_IMAGE_PATHS`):0/62 有差异,逐字节全同。** 默认回放不检测路径;
+    唯一带 OSC 1337 的录制(`image-accept`)的 band 只在 `BT_PROBE_IMAGE_PATHS` 下成形,
+    因为该开关同时是这条管线在 oracle 里的总闸。
+  - **`BT_PROBE_IMAGE_PATHS=1`:23/62 有差异,另 39 份逐字节全同。** 全部差异都是
+    per-frame `rendered=[…]` 里图片 band 的消失,**没有一条差异出现在 audit/summary 行**:
+    23 份的 `ISOLATION_GAP` / `OWNERSHIP_LEDGER` / `HELD_UNBACKED` / `OCCLUSION_AUDIT` /
+    `CLIP_AUDIT` / `LAYOUT_AUDIT` 前后**逐字节相同**。这是裁决本身的足迹,不是回归。
+  - **总量**:带图片 band 的帧 **2802 → 0**;带公式 band 的帧 **1541 → 1541**(语料里只有
+    `pixel-scroll-feel` 同时载有公式 band,它一帧未失——这就是「公式不在本裁决范围内」的实测对照)。
+  - 逐份(帧数 before→after,`带 band 帧 / 其中图片 band 帧`):
+    `alt-peek-only-feel` 191→0 / 191→0、`band-stuck-trace` 38→0 / 38→0、`cc-image-repro` 36→0 / 36→0、
+    `cursor-accept` 13→0 / 13→0、`daily-b35ce24` 965→0 / 965→0、`final-input-accept` 18→0 / 18→0、
+    `hover-peek-complement` 80→0 / 80→0、`hover-peek-feel-2` 22→0 / 22→0、`hover-peek-feel` 2→0 / 2→0、
+    `image-accept` 259→0 / 259→0(全部是 OSC 1337 的 `[image]` band)、`osc133-accept` 34→0 / 34→0、
+    `osc133-accept2` 211→0 / 211→0、`osc133-accept3` 285→0 / 285→0、`osc7-relative-feel` 47→0 / 47→0、
+    `paste-accept` 13→0 / 13→0、`paste-round3` 12→0 / 12→0、`path-accept` 13→0 / 13→0、
+    **`pixel-scroll-feel` 1622→1541 / 81→0**(余下 1541 全是公式 band)、`relief-chip-feel` 148→0 / 148→0、
+    `seat-fix2-feel` 7→0 / 7→0、`svg-slice-feel` 226→0 / 226→0、`texture-residency-feel` 91→0 / 91→0、
+    `zero-resize-restore` 10→0 / 10→0。
+  - 对照 §6.1 当日(2026-08-02)只裁副屏时的表:那次 `cc-image-repro` 是 115→36、
+    `hover-peek-complement` 329→80、`relief-chip-feel` 253→148、`texture-residency-feel` 379→91,
+    **残余即同一录制里 primary 段的 band**。今天正是把那些残余一并裁掉,所以它们各自的旧「after」
+    就是今天的「before」——两次裁决在同一批数字上首尾相接。
 
 ### 6.2 图片引用的三种形状都要能 peek(用户报告 2026-08-02)
 

@@ -124,6 +124,9 @@ pub enum LifecycleDirective {
         screen: RemovalScreen,
         row: u32,
         column: u32,
+        /// Columns of the `[image]` placeholder the adapter wrote — the peek span, reported rather
+        /// than recomputed.
+        placeholder_columns: u32,
         encoded: Vec<u8>,
     },
     ShellIntegration {
@@ -175,11 +178,13 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
             screen,
             row,
             column,
+            placeholder_columns,
             encoded,
         } => LifecycleDirective::InlineImage {
             screen,
             row,
             column,
+            placeholder_columns,
             encoded,
         },
         AdapterEvent::ShellIntegration {

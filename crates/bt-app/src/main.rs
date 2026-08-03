@@ -587,9 +587,51 @@ impl HyperlinkHover {
     }
 }
 
+/// What a settled hover is a hover *of*. Two shapes reach the flyout, and they differ in exactly
+/// one thing: whether a cache miss can be filled by reading a file.
+///
+/// A printed path, a `file://` URI and an OSC 8 link target all name a file on disk — the worker
+/// reads it. An OSC 1337 payload names nothing: its bytes arrived once in the stream and were
+/// decoded then, so the flyout can only show what was already remembered under the decoder's
+/// content key. Both shapes are one identity string in `peek_cache`, which is why the rest of the
+/// pipeline never has to ask which is which.
+#[derive(Clone, Debug)]
+struct PeekSubject {
+    /// Identity in `peek_cache`: a normalized path for a named file, the decoder's content key for
+    /// a stream payload. Two observations are the same hover exactly when these agree.
+    key: String,
+    /// The file to read on a cache miss, when there is one.
+    path: Option<PathBuf>,
+}
+
+/// Identity is the key alone — the path beside it is only how a miss is filled. A file the terminal
+/// printed twice under two spellings is one picture, and sliding between them must not restart the
+/// settle clock or re-decode anything.
+impl PartialEq for PeekSubject {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+    }
+}
+
+impl Eq for PeekSubject {}
+
+impl PeekSubject {
+    fn from_path(path: PathBuf) -> Self {
+        Self {
+            key: normalized_local_image_path_key(&path),
+            path: Some(path),
+        }
+    }
+
+    /// A payload the session already decoded, addressed by the key it was cached under.
+    fn from_content_key(key: String) -> Self {
+        Self { key, path: None }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PeekCandidate {
-    path: PathBuf,
+    subject: PeekSubject,
     /// Physical pointer position of the most recent observation; the flyout anchors where the
     /// hover settles, not where it began.
     pointer: PhysicalPosition<f64>,
@@ -612,22 +654,23 @@ impl PeekHover {
     /// hidden because the pointer left its path span.
     fn observe(
         &mut self,
-        path: Option<PathBuf>,
+        subject: Option<PeekSubject>,
         pointer: PhysicalPosition<f64>,
         now: Instant,
     ) -> bool {
-        if self.active.is_some() && path.as_ref() == self.active.as_ref().map(|active| &active.path)
+        if self.active.is_some()
+            && subject.as_ref() == self.active.as_ref().map(|active| &active.subject)
         {
             self.candidate = None;
             self.show_at = None;
             return false;
         }
         let active_hidden = self.active.take().is_some();
-        match path {
-            Some(path) => {
+        match subject {
+            Some(subject) => {
                 let same_span =
-                    self.candidate.as_ref().map(|candidate| &candidate.path) == Some(&path);
-                self.candidate = Some(PeekCandidate { path, pointer });
+                    self.candidate.as_ref().map(|candidate| &candidate.subject) == Some(&subject);
+                self.candidate = Some(PeekCandidate { subject, pointer });
                 if !same_span {
                     self.show_at = Some(now + HYPERLINK_HOVER_DELAY);
                 }
@@ -660,7 +703,8 @@ impl PeekHover {
     }
 }
 
-/// App-side memory of peek decode outcomes, keyed by the decoder's normalized path identity.
+/// App-side memory of peek decode outcomes, keyed by `PeekSubject::key` — the decoder's normalized
+/// path identity for a named file, its content key for a stream payload.
 /// `Failed` entries keep a missing or corrupt file from re-hitting the disk on every hover;
 /// the payload bytes are shared `Arc`s with the worker decoder's own cache.
 ///
@@ -1409,6 +1453,7 @@ impl Runtime {
                             }
                         },
                         DecorationWorkerCompletion::InlineImage { task, result } => {
+                            self.remember_stream_payload_for_peek(&task, result.as_ref().ok());
                             self.session.complete_inline_image_result(task, result)
                         }
                         DecorationWorkerCompletion::ScaleInlineImage { scaled } => {
@@ -1652,28 +1697,55 @@ impl Runtime {
             .hyperlink_at(hit.row, hit.column)
     }
 
+    /// The file a Ctrl+click at `hit` may hand to the system viewer (preview matrix §4, "leave this
+    /// product"). Never path-*looking* text: the verb has always required that a worker actually
+    /// opened and decoded the file, so that a misdetected word cannot launch anything.
+    ///
+    /// With inline image bands retired (docs §6.1.1) there is no decoration record left to carry
+    /// that verification on the primary screen, so the verification the verb requires is now the
+    /// peek's own — the same worker, the same decoder, the same admission gates, recorded in
+    /// `peek_cache`. Consequence, stated plainly: the file must have been peeked at least once
+    /// before Ctrl+click opens it. Pending and failed entries stay inert exactly as before, and
+    /// when the band policy is restored the record answers first again.
     fn local_image_path_hit(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
         let anchor = self
             .last_presented_frame
             .as_ref()?
             .anchor_at(hit.row, hit.column, Bias::Before)
             .ok()??;
-        self.session.decoded_local_image_path_at(&anchor)
+        if let Some(path) = self.session.decoded_local_image_path_at(&anchor) {
+            return Some(path);
+        }
+        let path = peek_target_from_sources(
+            self.session.local_image_path_probe_at(&anchor),
+            self.hyperlink_hit(hit).map(|hyperlink| hyperlink.uri),
+        )?;
+        matches!(
+            self.peek_cache.get(&normalized_local_image_path_key(&path)),
+            Some(PeekCacheEntry::Ready { .. })
+        )
+        .then_some(path)
     }
 
-    /// The image a hover at `hit` may preview, from either shape the screen can offer it in.
+    /// The image a hover at `hit` may preview, from any shape the screen can offer it in.
     ///
     /// The line's own text comes first, by lexical probe rather than decoration record, so the
     /// peek answers uniformly — including on lines whose band creation is suppressed (the input
-    /// line, the cursor line, every line of the alternate screen) where no record exists. Failing
-    /// that, the cell may belong to an OSC 8 hyperlink, whose target is a URI the text never
-    /// spells: `[layout](file:///D:/layout-preview.png)` renders as the word alone, and the file
-    /// it points at is knowable only from the link. Both sources pass the same admission gates.
+    /// line, the cursor line, and since the 2026-08-03 ruling every line of both screens) where no
+    /// record exists. Failing that, the cell may belong to an OSC 8 hyperlink, whose target is a
+    /// URI the text never spells: `[layout](file:///D:/layout-preview.png)` renders as the word
+    /// alone, and the file it points at is knowable only from the link. Both sources pass the same
+    /// admission gates.
     ///
-    /// The complement of inline admission is checked once, here, before either source is
-    /// consulted — a link that happens to lie across a banded content point does not smuggle a
-    /// second presentation of it.
-    fn peek_target(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
+    /// Last comes the one shape that names no file: an OSC 1337 payload, hovered over the
+    /// `[image]` placeholder the adapter wrote for it. It is asked last because it is the only
+    /// source that cannot be re-read — where a path and a placeholder somehow shared a cell, the
+    /// text the pointer was actually put on is still what wins.
+    ///
+    /// The complement of inline admission is checked once, here, before any source is consulted —
+    /// a link that happens to lie across a banded content point does not smuggle a second
+    /// presentation of it.
+    fn peek_target(&self, hit: bt_render::GridHit) -> Option<PeekSubject> {
         let anchor = self
             .last_presented_frame
             .as_ref()?
@@ -1686,6 +1758,12 @@ impl Runtime {
             self.session.local_image_path_probe_at(&anchor),
             self.hyperlink_hit(hit).map(|hyperlink| hyperlink.uri),
         )
+        .map(PeekSubject::from_path)
+        .or_else(|| {
+            self.session
+                .inline_image_payload_peek_at(&anchor)
+                .map(PeekSubject::from_content_key)
+        })
     }
 
     /// Present a pure peek-overlay change. The overlay lives beside the frame, not inside it, so
@@ -1731,12 +1809,12 @@ impl Runtime {
         Ok(())
     }
 
-    /// Resolve the flyout for a settled hover: decode the path if it is new, resample the decode
+    /// Resolve the flyout for a settled hover: decode the subject if it is new, resample the decode
     /// into the box this viewport will draw it in if that raster is not the one already held, and
     /// present when display-sized pixels are in hand. Each miss is one worker round trip and the
     /// completion re-enters here, so the event thread neither decodes nor resamples.
     fn show_or_request_peek(&mut self, candidate: &PeekCandidate) -> Result<()> {
-        let cache_key = normalized_local_image_path_key(&candidate.path);
+        let cache_key = candidate.subject.key.clone();
         let (content_key, native_rgba, native_width_px, native_height_px) =
             match self.peek_cache.get(&cache_key) {
                 Some(PeekCacheEntry::Ready {
@@ -1749,15 +1827,19 @@ impl Runtime {
                 // negative entry keeps hovers from re-hitting the disk.
                 Some(PeekCacheEntry::Pending) | Some(PeekCacheEntry::Failed) => return Ok(()),
                 None => {
+                    // Nothing to read: a stream payload is cached when its decode lands or never,
+                    // and the session only names one whose decode already succeeded, so a miss
+                    // here is a hover that arrived first. The next one finds it.
+                    let Some(path) = candidate.subject.path.clone() else {
+                        return Ok(());
+                    };
                     if !self.math_worker_running {
                         return Ok(());
                     }
                     if self
                         .math_worker
                         .tasks
-                        .send(MathWorkerRequest::PeekImage {
-                            path: candidate.path.clone(),
-                        })
+                        .send(MathWorkerRequest::PeekImage { path })
                         .is_ok()
                     {
                         self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
@@ -1799,6 +1881,40 @@ impl Runtime {
         Ok(())
     }
 
+    /// Remember an OSC 1337 decode under its content key so a hover over the `[image]` placeholder
+    /// can show it.
+    ///
+    /// A stream payload is the one image the peek cannot go and fetch: the bytes were in the
+    /// stream, the session decoded them once, and with inline image bands retired
+    /// (`INLINE_IMAGE_BANDS`, docs §6.1) nothing else will ever ask for them again. Catching the
+    /// decode here — where it passes through on its way into the session — is the whole of the
+    /// cost, and it is why the placeholder can peek at all.
+    ///
+    /// A named file is deliberately not remembered here: its identity in the cache is its path,
+    /// the peek's own decoder produces it on demand, and duplicating it under a second key would
+    /// give one file two entries that can disagree.
+    fn remember_stream_payload_for_peek(
+        &mut self,
+        task: &bt_term::InlineImageTask,
+        decoded: Option<&bt_term::DecodedInlineImage>,
+    ) {
+        if !matches!(task.source, bt_term::InlineImageSource::Osc1337(_)) {
+            return;
+        }
+        let Some(decoded) = decoded else {
+            return;
+        };
+        self.peek_cache.insert(
+            decoded.key.clone(),
+            PeekCacheEntry::Ready {
+                key: decoded.key.clone(),
+                rgba: Arc::clone(&decoded.rgba),
+                width_px: decoded.width_px,
+                height_px: decoded.height_px,
+            },
+        );
+    }
+
     /// Record a peek decode outcome and, when the hover is still settled on that path, show the
     /// flyout at the settle pointer.
     fn complete_peek_image(
@@ -1810,7 +1926,7 @@ impl Runtime {
         match result {
             Ok(decoded) => {
                 self.peek_cache.insert(
-                    cache_key,
+                    cache_key.clone(),
                     PeekCacheEntry::Ready {
                         key: decoded.key,
                         rgba: decoded.rgba,
@@ -1819,7 +1935,7 @@ impl Runtime {
                     },
                 );
                 if let Some(active) = self.peek_hover.active.clone()
-                    && active.path == path
+                    && active.subject.key == cache_key
                 {
                     self.show_or_request_peek(&active)?;
                 }
@@ -3989,7 +4105,12 @@ mod tests {
         let path = PathBuf::from(r"C:\img\a.png");
         let mut hover = PeekHover::default();
 
-        assert!(!hover.observe(Some(path.clone()), PhysicalPosition::new(10.0, 10.0), start));
+        let subject = PeekSubject::from_path(path.clone());
+        assert!(!hover.observe(
+            Some(subject.clone()),
+            PhysicalPosition::new(10.0, 10.0),
+            start
+        ));
         assert!(
             hover
                 .activate_if_due(start + Duration::from_millis(299))
@@ -3998,18 +4119,18 @@ mod tests {
         // Sliding along the same path span refreshes the anchor but keeps the original clock:
         // the flyout settles where the pointer last was, without ever restarting the delay.
         assert!(!hover.observe(
-            Some(path.clone()),
+            Some(subject.clone()),
             PhysicalPosition::new(30.0, 12.0),
             start + Duration::from_millis(200)
         ));
         let settled = hover
             .activate_if_due(start + Duration::from_millis(300))
             .expect("original deadline must fire");
-        assert_eq!(settled.path, path);
+        assert_eq!(settled.subject, subject);
         assert_eq!(settled.pointer.x, 30.0);
         // While active, staying on the span neither hides nor re-arms.
         assert!(!hover.observe(
-            Some(path.clone()),
+            Some(subject.clone()),
             PhysicalPosition::new(31.0, 12.0),
             start + Duration::from_millis(400)
         ));
@@ -4026,8 +4147,8 @@ mod tests {
     #[test]
     fn peek_hover_switching_paths_hides_the_old_flyout_and_restarts_the_clock() {
         let start = Instant::now();
-        let first = PathBuf::from(r"C:\img\a.png");
-        let second = PathBuf::from(r"C:\img\b.png");
+        let first = PeekSubject::from_path(PathBuf::from(r"C:\img\a.png"));
+        let second = PeekSubject::from_path(PathBuf::from(r"C:\img\b.png"));
         let mut hover = PeekHover::default();
         hover.observe(Some(first), PhysicalPosition::new(10.0, 10.0), start);
         assert!(
@@ -4050,7 +4171,7 @@ mod tests {
         let settled = hover
             .activate_if_due(start + Duration::from_millis(700))
             .expect("second span settles on its own deadline");
-        assert_eq!(settled.path, second);
+        assert_eq!(settled.subject, second);
     }
 
     /// PIN (user repro, 2026-08-02): a hovered cell's link is the peek's second source, so an
@@ -4089,6 +4210,39 @@ mod tests {
             );
         }
         assert_eq!(peek_target_from_sources(None, None), None);
+    }
+
+    /// PIN (band retirement ruling, 2026-08-03, docs §6.1): the peek's third source is an OSC 1337
+    /// payload, which names no file, and the pipeline tells the two apart by exactly one property —
+    /// whether a cache miss has anything to read.
+    ///
+    /// A named file's identity is its normalized path, so the same file spelled two ways is one
+    /// hover and one cache entry. A payload's identity is the decoder's content key, and it carries
+    /// no path at all: the bytes came through the stream and were remembered when the decode landed,
+    /// so a miss is a hover that arrived early, never a disk read to schedule. That `path: None` is
+    /// the whole of the difference is what keeps `show_or_request_peek` one function.
+    #[test]
+    fn a_stream_payload_is_a_peek_subject_with_nothing_to_read() {
+        let by_path = PeekSubject::from_path(PathBuf::from(r"C:\img\a.png"));
+        assert_eq!(
+            by_path.key,
+            normalized_local_image_path_key(std::path::Path::new(r"C:\img\a.png")),
+            "a named file is identified the way the decoder identifies it",
+        );
+        assert!(by_path.path.is_some(), "a named file is readable on a miss");
+        assert_eq!(
+            PeekSubject::from_path(PathBuf::from(r"C:\IMG\A.PNG")),
+            by_path,
+            "one file spelled two ways is one hover and one cache entry",
+        );
+
+        let payload = PeekSubject::from_content_key("image:sha-abc".to_owned());
+        assert_eq!(payload.key, "image:sha-abc");
+        assert!(
+            payload.path.is_none(),
+            "a stream payload has no file behind it, so a cache miss reads nothing",
+        );
+        assert_ne!(payload, by_path);
     }
 
     /// Pin (a) of the peek raster defect: every peek pixel that reaches the renderer is one the

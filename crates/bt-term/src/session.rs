@@ -154,7 +154,13 @@ pub struct InlineImageRecordView {
 
 #[derive(Clone, Debug)]
 enum InlineImageRecordKind {
-    Osc1337,
+    Osc1337 {
+        /// Columns the adapter's `[image]` placeholder occupies, starting at `end_anchor` (which
+        /// for this kind is the placeholder's *first* cell). This is the span the hover peek
+        /// answers over: with bands retired the payload has no other presentation, and the
+        /// placeholder text is the only thing on screen that stands for it.
+        placeholder_columns: u32,
+    },
     LocalPath {
         path: PathBuf,
         source_text: String,
@@ -317,22 +323,39 @@ fn jump_chip_overlays_source(proven: &str, overlaid: &str) -> bool {
     chip_split_visible_prefix(proven, overlaid).is_some()
 }
 
-/// Whether a screen admits inline image bands at all (user ruling 2026-08-02,
-/// docs/M2-preview-matrix-and-verbs.md §6).
+/// Whether inline image bands exist at all (user ruling 2026-08-03,
+/// docs/M2-preview-matrix-and-verbs.md §6.1). **A policy bit under 法则③, not a structure.**
 ///
-/// The transcript flow is ours: on the primary screen a printed path or an OSC 1337 payload grows
-/// its picture underneath the text, unchanged. The alternate screen belongs to the application —
-/// it owns its surface and repaints it on its own schedule — so anchoring bands to its lines
-/// produced the float/occlusion/awkward-scroll family. Images there are hover-peek only.
+/// `false` retires image bands on *both* screens: images are hover-peek only everywhere, and click
+/// promotion to the preview pane arrives with M2's image family. The rationale is the one the
+/// alternate screen already proved (ruling 2026-08-02, b3769b7): a band injects rows into a surface
+/// the shell addresses absolutely, which is structurally at war with PSReadLine and every
+/// absolute-CUP application. What died on the alternate screen dies on the primary for the same
+/// reason — the primary just took longer to show it.
 ///
-/// This costs the peek layer nothing, which is why the ruling is cheap: `local_image_path_probe_at`
+/// Flipping this back to `true` restores the previous policy verbatim: every gate reads it as
+/// `bands && <old predicate>` and nothing else changes, so the reversal is one character. Each
+/// session copies it into `DualPlaneSession::inline_image_bands` at construction, which is what
+/// lets the pins flip it at runtime instead of only asserting that they could — see
+/// `flipping_the_policy_bit_back_on_restores_the_whole_band_pipeline`.
+///
+/// Formula/math bands are explicitly outside this ruling and are not gated by it anywhere.
+const INLINE_IMAGE_BANDS: bool = false;
+
+/// Whether `screen` admits inline image bands (user ruling 2026-08-02, superseded 2026-08-03 by
+/// `INLINE_IMAGE_BANDS`).
+///
+/// The screen parameter is kept for the future policy flip: when bands come back they come back to
+/// the primary screen only, for the reason the 2026-08-02 ruling gave — the transcript flow is ours,
+/// while the alternate screen belongs to the application, which owns its surface and repaints it on
+/// its own schedule, so anchoring bands to its lines produced the float/occlusion/awkward-scroll
+/// family.
+///
+/// This costs the peek layer nothing, which is why both rulings are cheap: `local_image_path_probe_at`
 /// refuses exactly where a non-failed record covers the anchor (peek is the complement of inline
-/// admission), so a screen that creates no records is a screen where the probe always answers.
-///
-/// The gate is on *creation* only. Formula/math bands are outside the ruling and keep their
-/// alternate-screen behaviour exactly.
-const fn inline_image_bands_admitted(screen: ScreenId) -> bool {
-    matches!(screen, ScreenId::Primary)
+/// admission), so a session that creates no records is a session where the probe always answers.
+const fn inline_image_bands_admitted(bands: bool, screen: ScreenId) -> bool {
+    bands && matches!(screen, ScreenId::Primary)
 }
 
 #[derive(Eq, PartialEq)]
@@ -642,6 +665,13 @@ pub struct DualPlaneSession {
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
+    /// This session's copy of the `INLINE_IMAGE_BANDS` policy bit. A field rather than a bare
+    /// `const` read for one reason: a policy that switches a whole code path off must stay
+    /// *exercisable*, or the path rots between the ruling and its reversal. Every band mechanism
+    /// this terminal owns — geometry, resample derivation, texture identity, the viewport's
+    /// blank-tail relief, the input-region creation gates — is still pinned, by tests that turn the
+    /// bit back on and say so. Production never writes it.
+    inline_image_bands: bool,
     inline_image_tasks: VecDeque<InlineImageTask>,
     local_image_path_tasks: VecDeque<InlineImageTask>,
     /// At most one outstanding resample per image occurrence, so the queue is bounded by the
@@ -962,6 +992,7 @@ impl DualPlaneSession {
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
+            inline_image_bands: INLINE_IMAGE_BANDS,
             inline_image_tasks: VecDeque::new(),
             local_image_path_tasks: VecDeque::new(),
             inline_image_scale_tasks: VecDeque::new(),
@@ -1105,6 +1136,18 @@ impl DualPlaneSession {
             .div_euclid(1000)
     }
 
+    /// Restore the retired inline-image-band policy for this session (`INLINE_IMAGE_BANDS`).
+    ///
+    /// The reversal a future ruling makes by editing one character, a pin makes at runtime. This is
+    /// the only writer, and it exists so the whole band pipeline — creation gates, geometry,
+    /// resample derivation, texture identity, projection, the viewport's blank-tail relief — stays
+    /// pinned by tests that run it rather than by a comment promising it still works. A test that
+    /// calls this is testing the *machinery*; a test of the *policy* leaves it alone.
+    #[cfg(test)]
+    fn restore_retired_image_bands(&mut self) {
+        self.inline_image_bands = true;
+    }
+
     pub fn live_detection_count(&self) -> u64 {
         self.live_detection_count
     }
@@ -1139,7 +1182,7 @@ impl DualPlaneSession {
                     display_rows,
                     failed: record.failed,
                     local_path: match &record.kind {
-                        InlineImageRecordKind::Osc1337 => None,
+                        InlineImageRecordKind::Osc1337 { .. } => None,
                         InlineImageRecordKind::LocalPath { path, .. } => Some(path.clone()),
                     },
                 }
@@ -1200,6 +1243,54 @@ impl DualPlaneSession {
         }
     }
 
+    /// The decoder's content key for an OSC 1337 payload whose `[image]` placeholder covers
+    /// `anchor` — the peek's third source, and the only one that does not name a file.
+    ///
+    /// A printed path can always be re-read off the line, so the peek layer serves it lexically and
+    /// the worker reads the disk on demand. An OSC 1337 picture has no such second chance: it
+    /// arrived once, in the stream. With bands retired the placeholder text the adapter wrote is
+    /// the whole of its presence on screen, so that text is what the hover answers over, and the
+    /// decode the record already holds is what it shows. The key is the decoder's own content
+    /// identity, which is exactly the key the app cached that decode under.
+    ///
+    /// `None` until the decode lands, and forever for one that failed: the same honest silence a
+    /// path whose file will not open gets. The span is the placeholder's own cells, reported by the
+    /// adapter that wrote them, so a label truncated at the right edge answers over what is
+    /// actually there and not one column more.
+    pub fn inline_image_payload_peek_at(&self, anchor: &ContentAnchor) -> Option<String> {
+        let record = self.inline_image_payload_at(anchor)?;
+        record
+            .artifact
+            .as_ref()
+            .map(|artifact| artifact.key.clone())
+    }
+
+    /// Whether a non-failed OSC 1337 placeholder covers `anchor` at all, decoded or not — the
+    /// positional half of `inline_image_payload_peek_at`, split out because the complement asks the
+    /// same question about presentation while the peek asks it about content.
+    fn inline_image_payload_covers(&self, anchor: &ContentAnchor) -> bool {
+        self.inline_image_payload_at(anchor).is_some()
+    }
+
+    fn inline_image_payload_at(&self, anchor: &ContentAnchor) -> Option<&InlineImageRecord> {
+        self.inline_images.values().find(|record| {
+            if record.failed {
+                return false;
+            }
+            let InlineImageRecordKind::Osc1337 {
+                placeholder_columns,
+            } = &record.kind
+            else {
+                return false;
+            };
+            let Ok(start) = self.document.anchor(record.end_anchor) else {
+                return false;
+            };
+            anchor_shifted_right(start, *placeholder_columns)
+                .is_some_and(|end| content_anchor_between(anchor, start, &end))
+        })
+    }
+
     /// Whether a peek may be presented at `anchor` at all — the complement of inline admission,
     /// stated once so every source of a peek target obeys it. The line's own text goes through
     /// `local_image_path_probe_at`, which asks this first; an OSC 8 link target is resolved by the
@@ -1209,10 +1300,23 @@ impl DualPlaneSession {
         !self.inline_image_record_covers(anchor)
     }
 
-    /// Whether a live (non-failed) local-path record covers `anchor`: its image is on screen as a
-    /// band, or its decode is in flight and the band is imminent. Failed records do not cover —
-    /// the peek may try, fail the same admission gates, and stay silent.
+    /// Whether a live (non-failed) record covers `anchor`: its image is on screen as a band, or its
+    /// decode is in flight and the band is imminent. Failed records do not cover — the peek may
+    /// try, fail the same admission gates, and stay silent.
+    ///
+    /// "Covers" means *presents in the flow*, which is why the policy bit is the first question. A
+    /// session that projects no band presents nothing anywhere, so the complement is vacuous and
+    /// every admissible span keeps its peek — the whole content of the 2026-08-03 ruling, and the
+    /// reason the peek layer needed no changes to carry it. Restore the policy and the refusals
+    /// return, including the one this file could not have had before: an OSC 1337 placeholder whose
+    /// band is on screen must not also float a flyout over itself.
     fn inline_image_record_covers(&self, anchor: &ContentAnchor) -> bool {
+        if !self.inline_image_bands {
+            return false;
+        }
+        if self.inline_image_payload_covers(anchor) {
+            return true;
+        }
         self.inline_images.values().any(|record| {
             if record.failed {
                 return false;
@@ -3625,7 +3729,14 @@ impl DualPlaneSession {
         // dimensions, and anything can move either — a zoom, a reflow, an anchor migrating into
         // history. Deriving it here, where work is handed out, means no state change has to
         // remember to ask; a driver that can run a resample always requests the ones that are due.
-        self.request_inline_image_displays();
+        //
+        // A display raster exists to be uploaded by a band, so with bands retired nothing schedules
+        // one: the hover peek sizes and resamples its own flyout raster app-side against
+        // `peek_thumbnail_extent`, off the record entirely. The scheduler itself is untouched below
+        // — this is the policy bit refusing to *ask*, not the machinery being removed.
+        if self.inline_image_bands {
+            self.request_inline_image_displays();
+        }
         self.take_math_worker_task()
             .map(|task| SessionDecorationTask::Math(Box::new(task)))
             // Finishing a band the user is already waiting on outranks starting another decode.
@@ -4653,7 +4764,7 @@ impl DualPlaneSession {
             })
             .collect::<Vec<_>>();
         frozen_artifacts.extend(self.inline_images.values().filter_map(|record| {
-            if !matches!(record.kind, InlineImageRecordKind::Osc1337) {
+            if !matches!(record.kind, InlineImageRecordKind::Osc1337 { .. }) {
                 return None;
             }
             let ContentAnchor::History { id, .. } = self.document.anchor(record.end_anchor).ok()?
@@ -4743,7 +4854,7 @@ impl DualPlaneSession {
                         _ => return None,
                     }
                 }
-                InlineImageRecordKind::Osc1337 => *point,
+                InlineImageRecordKind::Osc1337 { .. } => *point,
             };
             Some(ProjectedLiveMathArtifact {
                 occurrence_id: LiveMathOccurrenceId(record.occurrence_id),
@@ -4772,6 +4883,13 @@ impl DualPlaneSession {
         decoded: &DecodedInlineImage,
         end: TranscriptId,
     ) -> Option<ProjectedMathArtifact> {
+        // 法则③ policy gate, stated once for every plane: frozen, live and history-path projection
+        // all funnel through here, so this is the single line at which an image record stops being
+        // a band. Records may still exist above it (an OSC 1337 payload is a decode carrier for the
+        // hover peek) — they simply reach no viewport.
+        if !self.inline_image_bands {
+            return None;
+        }
         let geometry = self.inline_image_geometry(record, decoded)?;
         // No display raster, no band. The renderer must never be handed the native decode: that is
         // the 35 MiB texture that thrashed the GPU budget and left a placed band with nothing in it.
@@ -4793,9 +4911,11 @@ impl DualPlaneSession {
             baseline_subpixels: 0,
             mode: MathMode::Display,
             kind: match record.kind {
-                InlineImageRecordKind::Osc1337 => bt_viewport::RgbaArtifactKind::InlineImage {
-                    animated: decoded.animated,
-                },
+                InlineImageRecordKind::Osc1337 { .. } => {
+                    bt_viewport::RgbaArtifactKind::InlineImage {
+                        animated: decoded.animated,
+                    }
+                }
                 InlineImageRecordKind::LocalPath { .. } => {
                     bt_viewport::RgbaArtifactKind::LocalImagePath {
                         animated: decoded.animated,
@@ -4805,7 +4925,7 @@ impl DualPlaneSession {
             vertical_padding_subpixels: 0,
             render_scale_milli,
             source: match &record.kind {
-                InlineImageRecordKind::Osc1337 => "[image]".to_owned(),
+                InlineImageRecordKind::Osc1337 { .. } => "[image]".to_owned(),
                 InlineImageRecordKind::LocalPath { path, .. } => {
                     path.as_os_str().to_string_lossy().into_owned()
                 }
@@ -4819,7 +4939,7 @@ impl DualPlaneSession {
         decoded: &DecodedInlineImage,
     ) -> Option<InlineImageGeometry> {
         let display_anchor = match record.kind {
-            InlineImageRecordKind::Osc1337 => record.end_anchor,
+            InlineImageRecordKind::Osc1337 { .. } => record.end_anchor,
             InlineImageRecordKind::LocalPath { start_anchor, .. } => start_anchor,
         };
         let column = match self.document.anchor(display_anchor).ok()? {
@@ -4957,7 +5077,7 @@ impl DualPlaneSession {
                     MathBlockAnchor::History { start, .. } => {
                         self.inline_images.values().find_map(|record| {
                             let display_anchor = match &record.kind {
-                                InlineImageRecordKind::Osc1337 => record.end_anchor,
+                                InlineImageRecordKind::Osc1337 { .. } => record.end_anchor,
                                 InlineImageRecordKind::LocalPath {
                                     path, start_anchor, ..
                                 } if path.as_os_str().to_string_lossy()
@@ -5622,8 +5742,9 @@ impl DualPlaneSession {
                     screen,
                     row,
                     column,
+                    placeholder_columns,
                     encoded,
-                } => self.register_inline_image(screen, row, column, encoded),
+                } => self.register_inline_image(screen, row, column, placeholder_columns, encoded),
                 LifecycleDirective::ShellIntegration {
                     screen,
                     row,
@@ -5674,27 +5795,47 @@ impl DualPlaneSession {
         self.working_directory.as_deref()
     }
 
+    /// Take delivery of an OSC 1337 payload the adapter already consumed.
+    ///
+    /// With image bands retired (`INLINE_IMAGE_BANDS`) this record is no longer a band: it is a
+    /// *decode carrier*. The payload exists nowhere else — unlike a printed path, which the peek
+    /// layer can re-read off the line at any time, an OSC 1337 picture arrives once, in the stream,
+    /// and is gone. So the record survives to hold the decode, the worker task still runs, the
+    /// content is still cached by key, and `inline_image_payload_peek_at` hands it to the hover
+    /// flyout over the `[image]` placeholder the adapter wrote. What no longer happens is
+    /// projection: `projected_inline_image` refuses, so nothing reaches the flow.
+    ///
+    /// The two gates below are gates on *band creation* — the alternate screen's, and the shell's
+    /// input region. A carrier that never projects is not something they have anything to say
+    /// about, so under the current policy they do not run; flipping the bit back on restores them
+    /// verbatim.
     fn register_inline_image(
         &mut self,
         screen: RemovalScreen,
         row: u32,
         column: u32,
+        placeholder_columns: u32,
         encoded: Vec<u8>,
     ) {
         let screen = match screen {
             RemovalScreen::Primary => ScreenId::Primary,
             RemovalScreen::Alternate => ScreenId::Alternate,
         };
-        // The protocol still parses on the alternate screen — the adapter consumed the payload and
-        // reported no error — it simply yields no record and therefore no band.
-        if !inline_image_bands_admitted(screen) {
-            return;
-        }
-        if matches!(
-            self.shell_phases.get(&screen),
-            Some(ShellIntegrationPhase::Input(_))
-        ) {
-            return;
+        if self.inline_image_bands {
+            // Both gates below refuse *band creation*, and neither has anything to say about a
+            // record that never projects, so with bands retired neither runs.
+            //
+            // The protocol still parses on the alternate screen — the adapter consumed the payload
+            // and reported no error — it simply yields no record and therefore no band.
+            if !inline_image_bands_admitted(self.inline_image_bands, screen) {
+                return;
+            }
+            if matches!(
+                self.shell_phases.get(&screen),
+                Some(ShellIntegrationPhase::Input(_))
+            ) {
+                return;
+            }
         }
         let occurrence_id = self.next_inline_image_occurrence_id;
         self.next_inline_image_occurrence_id =
@@ -5710,7 +5851,9 @@ impl DualPlaneSession {
             InlineImageRecord {
                 occurrence_id,
                 end_anchor: anchor,
-                kind: InlineImageRecordKind::Osc1337,
+                kind: InlineImageRecordKind::Osc1337 {
+                    placeholder_columns,
+                },
                 artifact: None,
                 display: None,
                 display_pending: None,
@@ -5735,7 +5878,7 @@ impl DualPlaneSession {
         // and the live screen holds none. Returning here also spares a full grid path scan on every
         // stability tick of a repainting TUI. Primary records are untouched — they are anchored to
         // the other screen and simply are not visible while the application owns the grid.
-        if !inline_image_bands_admitted(self.live_screen) {
+        if !inline_image_bands_admitted(self.inline_image_bands, self.live_screen) {
             return;
         }
         let candidates = self.detected_live_image_paths(stable);
@@ -5934,6 +6077,13 @@ impl DualPlaneSession {
 
     fn detect_frozen_image_paths(&mut self, id: TranscriptId) {
         if !self.math_layout_options.detect_image_paths {
+            return;
+        }
+        // A frozen transcript line has no screen of its own, so the ruling reaches it through the
+        // policy bit directly: with image bands retired there is nothing for a history record to
+        // project, and the peek reads the line's own text (`local_image_path_probe_at` takes the
+        // `History` arm) without any record at all.
+        if !self.inline_image_bands {
             return;
         }
         if self.semantic_input_overlaps_history(id) {
@@ -8776,6 +8926,51 @@ fn grapheme_offset_at_byte(boundaries: &[u32], byte: usize) -> Option<GraphemeOf
         .ok()
         .and_then(|index| u32::try_from(index).ok())
         .map(GraphemeOffset)
+}
+
+/// The exclusive end of a run of `columns` cells starting at `start`, as an anchor in `start`'s own
+/// plane, so a span given as "here, this wide" can be tested by `content_anchor_between` like any
+/// other. Only used for the `[image]` placeholder, which is ASCII and never wraps (the adapter
+/// truncates it at the right edge), so one column is one grapheme on one row.
+fn anchor_shifted_right(start: &ContentAnchor, columns: u32) -> Option<ContentAnchor> {
+    Some(match start {
+        ContentAnchor::History {
+            id,
+            offset,
+            generation,
+            ..
+        } => ContentAnchor::History {
+            id: *id,
+            offset: GraphemeOffset(offset.0.checked_add(columns)?),
+            bias: Bias::After,
+            generation: *generation,
+        },
+        ContentAnchor::Staging {
+            id,
+            offset,
+            generation,
+            ..
+        } => ContentAnchor::Staging {
+            id: *id,
+            offset: GraphemeOffset(offset.0.checked_add(columns)?),
+            bias: Bias::After,
+            generation: *generation,
+        },
+        ContentAnchor::Live {
+            screen,
+            point,
+            generation,
+            ..
+        } => ContentAnchor::Live {
+            screen: *screen,
+            point: GridPoint {
+                row: point.row,
+                column: point.column.checked_add(columns)?,
+            },
+            bias: Bias::After,
+            generation: *generation,
+        },
+    })
 }
 
 fn content_anchor_between(
@@ -14105,6 +14300,23 @@ mod tests {
         )
     }
 
+    /// Every image band a frame carries. Zero on both screens since the 2026-08-03 ruling, which is
+    /// what the policy pins assert; the machinery pins that restore the retired policy assert the
+    /// bands are back.
+    fn image_placements(frame: &ViewportFrame) -> Vec<&bt_viewport::MathBlockPlacement> {
+        frame
+            .math_blocks
+            .iter()
+            .filter(|placement| {
+                matches!(
+                    placement.artifact.kind,
+                    bt_viewport::RgbaArtifactKind::InlineImage { .. }
+                        | bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+                )
+            })
+            .collect()
+    }
+
     /// Run the resample leg of the image pipeline the way a worker would. A decode only produces
     /// native pixels; the band shows the display-sized raster this drains into the record.
     fn settle_inline_image_displays(session: &mut DualPlaneSession) -> usize {
@@ -14147,6 +14359,7 @@ mod tests {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
         session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
         session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -14200,6 +14413,7 @@ mod tests {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(80), nz(24), cell);
         session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
         session.feed(b"]1337;File=inline=1:AAAA").unwrap();
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -14257,6 +14471,7 @@ mod tests {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(80), nz(24), cell);
         session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
         session
             .feed(
                 b"]1337;File=inline=1:AAAA
@@ -14322,6 +14537,7 @@ mod tests {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(20), nz(30), cell);
         session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
         session.feed(b"]1337;File=inline=1:AAAA").unwrap();
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -14354,6 +14570,7 @@ mod tests {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(20), nz(20), cell);
         session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
         session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -14395,6 +14612,7 @@ mod tests {
 
         let mut zoom = DualPlaneSession::with_cell_height(nz(20), nz(20), cell);
         zoom.set_cell_width_subpixels(cell);
+        zoom.restore_retired_image_bands();
         zoom.feed(b"\x1b]1337;File=inline=1:BBBB\x07").unwrap();
         let SessionDecorationTask::InlineImage(zoom_task) =
             zoom.take_decoration_worker_task().unwrap()
@@ -14471,6 +14689,7 @@ mod tests {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(40), nz(24), cell);
         session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
         session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -14590,6 +14809,7 @@ mod tests {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(40), nz(24), cell);
         session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
         session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -14673,6 +14893,7 @@ mod tests {
     fn next_scale_task_without_resize(
         session: &mut DualPlaneSession,
     ) -> Option<InlineImageScaleTask> {
+        session.request_inline_image_displays();
         loop {
             match session.take_decoration_worker_task() {
                 Some(SessionDecorationTask::ScaleInlineImage(task)) => break Some(task),
@@ -14762,6 +14983,7 @@ mod tests {
         let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
         let mut session = DualPlaneSession::with_cell_height(nz(20), nz(12), cell);
         session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
         session.feed(b"hi").unwrap();
         session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
         for _ in 0..crlf_count {
@@ -14961,6 +15183,7 @@ mod tests {
             nz(4),
             NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap(),
         );
+        session.restore_retired_image_bands();
         session
             .feed(b"\x1b]1337;File=inline=1:AAAA\x07\r\n")
             .unwrap();
@@ -15231,6 +15454,7 @@ mod tests {
         let started = Instant::now();
         let mut session = DualPlaneSession::new(nz(240), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let command = format!("echo \"[Image: source: {}]\"", path.display());
         let mut typed = String::new();
         let mut observed_at = started;
@@ -15398,6 +15622,7 @@ mod tests {
 
         let mut image = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut image);
+        image.restore_retired_image_bands();
         let image_line = format!("[Image: source: \"{}\"]", path.display());
         let image_typed_at = feed_ascii_one_byte_at_a_time(&mut image, &image_line, started);
         assert_eq!(image.visible_cursor_logical_line(), Some((0, 0)));
@@ -15486,6 +15711,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         session
@@ -15625,11 +15851,17 @@ mod tests {
         );
     }
 
+    /// MACHINERY (band retirement ruling, 2026-08-03): the band this pins is retired
+    /// (`INLINE_IMAGE_BANDS`), so the pin restores the policy and keeps guarding the pipeline the
+    /// reversal returns to — detection, registration, worker decode, the click capability gate, and
+    /// the placement rule that a band opens *below* its still-visible source row. The policy itself
+    /// is pinned by `path_text_creates_no_record_anywhere_and_the_peek_answers_everywhere`.
     #[test]
     fn local_path_image_keeps_source_text_and_appends_a_worker_decoded_band() {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         session
@@ -15739,6 +15971,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         session
@@ -15829,6 +16062,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         session
@@ -15872,6 +16106,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         session
@@ -15911,6 +16146,7 @@ mod tests {
     fn nonexistent_path_fails_quietly_and_never_becomes_clickable() {
         let mut session = DualPlaneSession::new(nz(120), nz(6));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let missing = std::env::temp_dir().join(format!(
             "betterterminal-missing-{}-{}.png",
@@ -16151,6 +16387,319 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// PIN (band retirement ruling, 2026-08-03, docs §6.1): the primary screen now answers path
+    /// text the way the alternate one already did, in every plane — no record, no worker task, no
+    /// band, live or frozen — and the peek probe answers on the very anchors that used to carry a
+    /// band.
+    ///
+    /// The second half is the *complement composition*, and it is the whole reason the ruling costs
+    /// the peek layer nothing. `local_image_path_probe_at` refuses exactly where a non-failed record
+    /// covers the anchor; a session that creates no records anywhere is a session where "covers" is
+    /// vacuously false, so the probe answers on every admissible span there is. Nothing in the peek
+    /// layer had to learn about this ruling.
+    ///
+    /// RED CHECK: restoring the retired policy here (`restore_retired_image_bands`) turns the record
+    /// assertions red immediately, and the probe then refuses on the live anchor — which is the
+    /// complement doing its job, not a second defect.
+    #[test]
+    fn path_text_creates_no_record_anywhere_and_the_peek_answers_everywhere() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(240), nz(4));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        session
+            .feed_at(format!("{line}\r\nprompt").as_bytes(), started)
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+
+        assert!(
+            session.inline_images.is_empty(),
+            "the primary screen admits no image record either: {:?}",
+            session.inline_image_records(),
+        );
+        assert!(session.local_image_path_tasks.is_empty());
+        assert!(session.take_decoration_worker_task().is_none());
+        assert_eq!(
+            session.terminal().visible_text()[0],
+            line,
+            "the path text is the whole of what the flow shows",
+        );
+        let live_anchor = ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point: GridPoint { row: 0, column: 20 },
+            bias: Bias::Before,
+            generation: session.grid_generation,
+        };
+        assert!(session.peek_admits_at(&live_anchor));
+        assert_eq!(
+            session.local_image_path_probe_at(&live_anchor),
+            Some(path.clone()),
+            "no record covers the anchor, so the probe answers",
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(image_placements(&frame).is_empty());
+
+        // Scroll the line into history: the frozen plane creates nothing either, and the probe
+        // reads the transcript entry's own text on the very same content point.
+        session
+            .feed_at(
+                b"a\r\nb\r\nc\r\nd\r\ne",
+                started + LIVE_MATH_STABLE_INTERVAL * 2,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL * 4);
+        let (id, entry) = session
+            .document
+            .entries()
+            .iter()
+            .find(|(_, entry)| entry.line.text.contains("[Image: source:"))
+            .expect("the path line must reach history");
+        let history_anchor = ContentAnchor::History {
+            id: *id,
+            offset: GraphemeOffset(20),
+            bias: Bias::Before,
+            generation: entry.line.source_generation,
+        };
+        assert!(
+            session.inline_images.is_empty(),
+            "freezing a line into the transcript registers nothing either: {:?}",
+            session.inline_image_records(),
+        );
+        assert!(session.peek_admits_at(&history_anchor));
+        assert_eq!(
+            session.local_image_path_probe_at(&history_anchor),
+            Some(path.clone()),
+            "the frozen line keeps its peek too",
+        );
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(image_placements(&frame).is_empty());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (band retirement ruling, 2026-08-03, docs §6.1): an OSC 1337 payload keeps its decode
+    /// and loses its band, and the `[image]` placeholder the adapter wrote is where the hover finds
+    /// it.
+    ///
+    /// This is the one image shape that cannot be re-read: the bytes were in the stream. Without an
+    /// anchor on the placeholder, retiring the band would leave an OSC 1337 picture with no
+    /// presentation at all — which is why the record survives as a decode carrier and the probe
+    /// answers over exactly the cells the label occupies, and not one column more.
+    ///
+    /// RED CHECK: widening the span past `placeholder_columns` makes the column-7 assertion red;
+    /// answering before the decode lands makes the first assertion red.
+    #[test]
+    fn an_osc_1337_payload_peeks_on_its_placeholder_and_nowhere_else() {
+        let mut session = DualPlaneSession::new(nz(40), nz(4));
+        session
+            .feed(b"pre\x1b]1337;File=inline=1:AAAA\x07tail")
+            .unwrap();
+        assert_eq!(session.terminal().visible_text()[0], "pre[image]tail");
+        let generation = session.grid_generation;
+        let anchor = move |column: u32| ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point: GridPoint { row: 0, column },
+            bias: Bias::Before,
+            generation,
+        };
+
+        // Before the decode lands there is nothing to show, and the hover says so by staying quiet.
+        assert_eq!(session.inline_image_payload_peek_at(&anchor(3)), None);
+        let SessionDecorationTask::InlineImage(task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("the payload must reach the decoder");
+        };
+        let decoded = decoded_test_image(task.occurrence_id, 8, 8, false);
+        let content_key = decoded.key.clone();
+        assert!(session.complete_inline_image_result(task, Ok(decoded)));
+
+        for column in 3..10 {
+            assert_eq!(
+                session.inline_image_payload_peek_at(&anchor(column)),
+                Some(content_key.clone()),
+                "column {column} is inside the `[image]` placeholder",
+            );
+        }
+        assert_eq!(
+            session.inline_image_payload_peek_at(&anchor(2)),
+            None,
+            "the text before the placeholder is not the placeholder"
+        );
+        assert_eq!(
+            session.inline_image_payload_peek_at(&anchor(10)),
+            None,
+            "neither is the text after it"
+        );
+
+        // And no band, at any point of that.
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(image_placements(&frame).is_empty());
+    }
+
+    /// PIN (the complement, both sides of the policy bit): one content point gets one presentation.
+    /// The `[image]` placeholder peek exists *because* the payload has no band; restore the band and
+    /// the same placeholder must fall silent, or the reversal would show one picture twice over one
+    /// content point.
+    ///
+    /// This is the case the file could not have had before today: while the record was a band it
+    /// had no peek to refuse, and while it has a peek it is not a band. Pinning both sides here is
+    /// what keeps the invariant true of the policy rather than of the current setting of it.
+    #[test]
+    fn an_osc_1337_band_and_its_placeholder_peek_are_never_both_admitted() {
+        let peek_at_placeholder = |restore: bool| {
+            let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+            let mut session = DualPlaneSession::with_cell_height(nz(40), nz(24), cell);
+            session.set_cell_width_subpixels(cell);
+            if restore {
+                session.restore_retired_image_bands();
+            }
+            session
+                .feed(b"pre\x1b]1337;File=inline=1:AAAA\x07tail")
+                .unwrap();
+            let generation = session.grid_generation;
+            let anchor = ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point: GridPoint { row: 0, column: 5 },
+                bias: Bias::Before,
+                generation,
+            };
+            while let Some(task) = session.take_decoration_worker_task() {
+                match task {
+                    SessionDecorationTask::InlineImage(task) => {
+                        let decoded = decoded_test_image(task.occurrence_id, 32, 32, false);
+                        assert!(session.complete_inline_image_result(task, Ok(decoded)));
+                    }
+                    SessionDecorationTask::ScaleInlineImage(task) => {
+                        assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
+                    }
+                    SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
+                }
+            }
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            let banded = !image_placements(&frame).is_empty();
+            let admitted = session.peek_admits_at(&anchor)
+                && session.inline_image_payload_peek_at(&anchor).is_some();
+            (banded, admitted)
+        };
+
+        assert_eq!(
+            peek_at_placeholder(false),
+            (false, true),
+            "as shipped: no band, so the placeholder is where the picture is found",
+        );
+        assert_eq!(
+            peek_at_placeholder(true),
+            (true, false),
+            "policy restored: the band presents it, so the placeholder must not present it again",
+        );
+    }
+
+    /// CONTROL for the band retirement ruling (2026-08-03): the ruling is about images. A display
+    /// formula on the very same screen still grows its band, from the same projection seam, in the
+    /// same frame.
+    #[test]
+    fn formulas_still_band_while_images_do_not() {
+        let mut session = DualPlaneSession::new(nz(40), nz(24));
+        let started = Instant::now();
+        session
+            .feed_at(
+                b"intro\r\n$$x$$\r\n\x1b]1337;File=inline=1:AAAA\x07\r\nbarrier",
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1,
+            "the formula is detected and rendered as it always was",
+        );
+        while let Some(SessionDecorationTask::InlineImage(task)) =
+            session.take_decoration_worker_task()
+        {
+            let decoded = decoded_test_image(task.occurrence_id, 32, 32, false);
+            assert!(session.complete_inline_image_result(task, Ok(decoded)));
+        }
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            image_placements(&frame).is_empty(),
+            "images do not band: {:?}",
+            image_placements(&frame),
+        );
+        assert!(
+            frame.math_blocks.iter().any(|placement| matches!(
+                placement.artifact.kind,
+                bt_viewport::RgbaArtifactKind::Math
+            )),
+            "the formula band is untouched by the image ruling",
+        );
+    }
+
+    /// PIN (法则③ reversibility, 2026-08-03): the ruling is a policy bit, and this is what proves
+    /// it. Two sessions, the same bytes; the only difference is `INLINE_IMAGE_BANDS`, and the whole
+    /// creation-through-projection pipeline comes back with it — record, worker task, decode,
+    /// display raster, band in the frame.
+    ///
+    /// This is also why `restore_retired_image_bands` exists: every machinery pin in this module
+    /// runs through it, so nothing on the far side of the bit rots while the bit is off.
+    #[test]
+    fn flipping_the_policy_bit_back_on_restores_the_whole_band_pipeline() {
+        let (directory, path) = temporary_path_image();
+        let line = format!("[Image: source: \"{}\"]", path.display());
+        let started = Instant::now();
+
+        let run = |restore: bool| {
+            let mut session = DualPlaneSession::new(nz(160), nz(8));
+            enable_path_detection(&mut session);
+            if restore {
+                session.restore_retired_image_bands();
+            }
+            session
+                .feed_at(format!("{line}\r\nprompt").as_bytes(), started)
+                .unwrap();
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+            let mut decoder = crate::inline_image::InlineImageDecoder::default();
+            while let Some(task) = session.take_decoration_worker_task() {
+                match task {
+                    SessionDecorationTask::InlineImage(task) => {
+                        let result = decoder.decode(task.clone());
+                        assert!(session.complete_inline_image_result(task, result));
+                    }
+                    SessionDecorationTask::ScaleInlineImage(task) => {
+                        assert!(session.complete_inline_image_scale(scale_inline_image(&task)));
+                    }
+                    SessionDecorationTask::Math(_) => panic!("the fixture contains no math"),
+                }
+            }
+            let records = session.inline_images.len();
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            (records, image_placements(&frame).len())
+        };
+
+        assert_eq!(
+            run(false),
+            (0, 0),
+            "as shipped: the path text stands alone, in both the record set and the frame",
+        );
+        assert_eq!(
+            run(true),
+            (1, 1),
+            "policy restored: the same bytes register, decode, resample and project again",
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     /// PIN (user repro, 2026-08-02): on the alternate screen — where the band ruling leaves hover
     /// as the only image affordance — every shape an assistant puts an image reference in reaches
     /// the peek. The report that produced this pin had three of them on one screen and none
@@ -16268,6 +16817,7 @@ mod tests {
         let (root, image, work) = temporary_relative_image_tree();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
 
         session.feed_at(&osc7_report(&work), started).unwrap();
@@ -16375,6 +16925,7 @@ mod tests {
 
         let mut primary = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut primary);
+        primary.restore_retired_image_bands();
         let started = Instant::now();
         primary.feed_at(&osc7_report(&work), started).unwrap();
         primary.feed_at(PRINTED, started).unwrap();
@@ -16404,6 +16955,7 @@ mod tests {
 
         let mut alternate = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut alternate);
+        alternate.restore_retired_image_bands();
         alternate.feed_at(&osc7_report(&work), started).unwrap();
         alternate.feed_at(b"\x1b[?1049h", started).unwrap();
         alternate.feed_at(PRINTED, started).unwrap();
@@ -16426,6 +16978,7 @@ mod tests {
 
         let mut unreported = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut unreported);
+        unreported.restore_retired_image_bands();
         unreported.feed_at(PRINTED, started).unwrap();
         unreported.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         assert!(unreported.inline_images.is_empty());
@@ -16520,6 +17073,7 @@ mod tests {
 
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let mut now = Instant::now();
         session.feed_at(&osc7_report(&work), now).unwrap();
         session.feed_at(b"see ./shot.png\r\nprompt", now).unwrap();
@@ -16553,24 +17107,28 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// PIN (alternate-screen image ruling, 2026-08-02): OSC 1337 still parses on the alternate
-    /// screen — the payload is consumed, the stream stays in sync, no protocol error is reported —
-    /// but it yields no record, no worker task and therefore no band. The identical bytes on the
-    /// primary screen register exactly as before.
+    /// PIN (band retirement ruling, 2026-08-03 — supersedes the 2026-08-02 alternate-screen half of
+    /// this pin): OSC 1337 parses on **both** screens exactly as it always did — the payload is
+    /// consumed, the stream stays in sync, no protocol error is reported — and it still decodes,
+    /// because with bands retired the record's whole job is to *hold* that decode for the hover
+    /// peek. What it no longer does, on either screen, is project a band.
+    ///
+    /// The 2026-08-02 ruling refused the record on the alternate screen because a record was a
+    /// band. It no longer is. Refusing it now would mean an OSC 1337 picture with no presentation
+    /// at all on the screen where hover is the only presentation there is.
     #[test]
-    fn osc1337_on_the_alternate_screen_parses_but_creates_no_record() {
+    fn osc_1337_decodes_on_both_screens_and_bands_on_neither() {
         let mut session = DualPlaneSession::new(nz(40), nz(8));
         session.feed(b"\x1b[?1049h").unwrap();
         session
             .feed(b"\x1b]1337;File=inline=1:AAAA\x07after")
             .unwrap();
-        assert!(
-            session.inline_images.is_empty(),
-            "the alternate screen admits no OSC 1337 record: {:?}",
+        assert_eq!(
+            session.inline_images.len(),
+            1,
+            "the payload is carried so the peek has something to show: {:?}",
             session.inline_image_records()
         );
-        assert!(session.inline_image_tasks.is_empty());
-        assert!(session.take_decoration_worker_task().is_none());
         assert_eq!(
             session.terminal().visible_text()[0],
             "[image]after",
@@ -16578,18 +17136,55 @@ mod tests {
              the adapter's text substrate placeholder is unchanged by the ruling, which is a \
              session-level band policy"
         );
+        let SessionDecorationTask::InlineImage(alternate_task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("the payload must still reach the decoder");
+        };
+        assert!(session.complete_inline_image_result(
+            alternate_task.clone(),
+            Ok(decoded_test_image(
+                alternate_task.occurrence_id,
+                8,
+                8,
+                false
+            )),
+        ));
+        assert!(
+            session.take_decoration_worker_task().is_none(),
+            "no display raster is scheduled for a record that will never be uploaded",
+        );
 
         session.feed(b"\x1b[?1049l").unwrap();
-        session.feed(b"\x1b]1337;File=inline=1:AAAA\x07").unwrap();
+        // The carrier goes with the grid it was anchored to: the alternate screen (and the
+        // `[image]` placeholder printed on it) is discarded by the switch, so the payload it stood
+        // for has nothing left to be hovered over. Same rule as a live formula, unchanged by this
+        // ruling — see `retire_live_inline_images`.
+        assert!(session.inline_images.is_empty());
+        session.feed(b"\x1b]1337;File=inline=1:BBBB\x07").unwrap();
         assert_eq!(
             session.inline_images.len(),
             1,
-            "the same bytes on the primary screen register unchanged"
+            "the same bytes on the primary screen are carried the same way"
         );
-        assert!(matches!(
-            session.take_decoration_worker_task(),
-            Some(SessionDecorationTask::InlineImage(_))
+        let SessionDecorationTask::InlineImage(primary_task) =
+            session.take_decoration_worker_task().unwrap()
+        else {
+            panic!("the primary payload must reach the decoder too");
+        };
+        assert!(session.complete_inline_image_result(
+            primary_task.clone(),
+            Ok(decoded_test_image(primary_task.occurrence_id, 8, 8, false)),
         ));
+
+        // Neither decode reaches a viewport, on either plane.
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            image_placements(&frame).is_empty(),
+            "no image band projects on either screen: {:?}",
+            image_placements(&frame),
+        );
     }
 
     /// PIN (alternate-screen image ruling, 2026-08-02): a primary-screen band survives an
@@ -16601,6 +17196,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let mut now = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
@@ -16669,6 +17265,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let line = format!("[Image: source: \"{}\"]", path.display());
         session
@@ -16813,6 +17410,7 @@ mod tests {
         let started = Instant::now();
         let mut session = DualPlaneSession::new(nz(104), nz(26));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let mut at = started;
         for _ in 0..3 {
             at = feed_osc133_accept2_round(&mut session, at, None);
@@ -16826,6 +17424,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let image = format!("[Image: source: \"{}\"]", path.display());
         let command = format!("{image} $$input$$");
@@ -16868,6 +17467,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(200), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let image = format!("[Image: source: \"{}\"]", path.display());
         let command = format!("echo '{image} $$output$$'");
@@ -17007,6 +17607,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(120), nz(8));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let image = format!("[Image: source: \"{}\"]", path.display());
         session
@@ -17051,6 +17652,7 @@ mod tests {
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(2));
         enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
         let started = Instant::now();
         let image = format!("[Image: source: \"{}\"]", path.display());
         session

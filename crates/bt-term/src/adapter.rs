@@ -121,6 +121,11 @@ pub enum AdapterEvent {
         screen: RemovalScreen,
         row: u32,
         column: u32,
+        /// How many columns of the `[image]` placeholder the adapter actually wrote at
+        /// `(row, column)`. Near the right edge the label is truncated, so the span the hover-peek
+        /// layer must answer over is reported by the only party that knows it rather than
+        /// recomputed — one formula, one owner.
+        placeholder_columns: u32,
         encoded: Vec<u8>,
     },
     ShellIntegration {
@@ -358,13 +363,14 @@ impl TerminalAdapter {
                     } else {
                         RemovalScreen::Primary
                     };
-                    self.write_inline_image_placeholder(b"[image]");
+                    let placeholder_columns = self.write_inline_image_placeholder(b"[image]");
                     events.extend(self.drain_transcript_events());
                     events.extend(self.drain_grid_write_events());
                     events.push(AdapterEvent::InlineImage {
                         screen,
                         row: cursor.row,
                         column: cursor.column,
+                        placeholder_columns,
                         encoded,
                     });
                 }
@@ -445,7 +451,9 @@ impl TerminalAdapter {
         events
     }
 
-    fn write_inline_image_placeholder(&mut self, label: &[u8]) {
+    /// Write the `[image]` text placeholder at the cursor and report how many columns of it landed.
+    /// The label is ASCII, so one byte is one column.
+    fn write_inline_image_placeholder(&mut self, label: &[u8]) -> u32 {
         let remaining = self
             .columns
             .get()
@@ -453,6 +461,7 @@ impl TerminalAdapter {
             .max(1) as usize;
         let visible = &label[..label.len().min(remaining)];
         self.advance_terminal_bytes(visible);
+        visible.len() as u32
     }
 
     /// Consume damage exactly once after a parser/resize action. `Term::damage` also accounts for
@@ -1620,6 +1629,8 @@ mod tests {
                 screen: RemovalScreen::Primary,
                 row: 0,
                 column: 3,
+                // `[image]` fits whole at column 3 of a 40-column grid.
+                placeholder_columns: 7,
                 encoded: b"YWJjZA==".to_vec(),
             }]
         );
