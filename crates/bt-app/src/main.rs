@@ -11,15 +11,20 @@ use std::{
 };
 
 mod input;
+mod persist;
+mod seats;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
+use bt_layout::{Axis, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
+use bt_persist::{SESSION_SCHEMA_VERSION, SessionV1, TabV1, WindowBoundsV1, WindowStateV1};
 use bt_pty::{OutputWake, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit, MathHitTarget,
-    PeekImageOverlay, Preedit, PresentOutcome, Renderer, background_rgb, compose_preedit,
-    foreground_rgb, frame_content_digest, frame_is_alternate_screen, theme_revision,
+    PeekImageOverlay, Preedit, PresentOutcome, Renderer, SeatViewport, background_rgb,
+    compose_preedit, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
+    theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, SessionDecorationTask,
@@ -32,7 +37,7 @@ use bt_viewport::{
 };
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
+    dpi::{LogicalPosition, LogicalSize, PhysicalPosition, PhysicalSize},
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
@@ -293,6 +298,27 @@ struct Runtime {
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
     pending_math_context_anchor: Option<MathBlockAnchor>,
+    /// The layout tree this window hosts. A lone terminal leaf by default, which
+    /// is today's window written down.
+    seats: seats::Seats,
+    /// The most recent answer from `solve`. Every rectangle the renderer and the
+    /// input router use comes from here, so the picture and the hit test can
+    /// never be two geometries (D4).
+    seat_layout: SeatLayout,
+    seat_pointer: seats::ChromePointer,
+    divider_drag: Option<DividerDrag>,
+    /// The last work area that was successfully observed (tiny-window §4.4).
+    work_area: WorkAreaHint,
+    session_store: persist::SessionStore,
+}
+
+/// A divider drag in flight. Holds only the split's identity: the geometry is
+/// re-read from the current solve on every pointer move, because the answer to
+/// "where is this divider" must not be a second copy of the layout.
+#[derive(Clone, Copy, Debug)]
+struct DividerDrag {
+    split: SplitId,
+    dir: Axis,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -804,11 +830,24 @@ impl Runtime {
         let trace_resize = std::env::var_os("BT_RESIZE_TRACE").is_some();
         let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
         let phase_started = Instant::now();
+        // Read the previous session before the window exists, so its bounds can
+        // be the window's opening bounds rather than a correction applied after
+        // the user has already seen it somewhere else.
+        let session_store = persist::SessionStore::open();
+        let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
             .with_title(WINDOW_TITLE)
-            .with_inner_size(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT))
+            .with_inner_size(
+                restored
+                    .map(|(_, size)| size)
+                    .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
+            )
             // Do not expose the system class brush while the first swapchain image is pending.
             .with_visible(false);
+        let attributes = match restored {
+            Some((position, _)) => attributes.with_position(position),
+            None => attributes,
+        };
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -826,7 +865,7 @@ impl Runtime {
         let startup_dpi = dpi_snapshot(&window)?;
         let startup_scale_factor = startup_dpi.authoritative_scale;
         let phase_started = Instant::now();
-        let renderer = pollster::block_on(Renderer::new(
+        let mut renderer = pollster::block_on(Renderer::new(
             Arc::clone(&window),
             physical.width,
             physical.height,
@@ -853,9 +892,21 @@ impl Runtime {
         );
         let renderer_time = phase_started.elapsed();
         let render_physical = presentation_physical_size(renderer.presentation_geometry());
+        // The seam of §4.2, in the one order it is allowed to run: window
+        // geometry -> viewport -> solve -> seat rects -> the terminal seat's
+        // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
+        // it produces here is computed fresh against this machine's DPI.
+        let seats = session_store
+            .loaded()
+            .tabs
+            .first()
+            .and_then(|tab| seats::Seats::from_persisted(&tab.root))
+            .unwrap_or_else(seats::Seats::lone_terminal);
+        let (seat_layout, terminal_seat) = solve_seats(&seats, &renderer, render_physical);
+        renderer.set_seat_viewport(terminal_seat);
         let grid = renderer
             .metrics()
-            .grid_for_pixels(render_physical.width, render_physical.height);
+            .grid_for_pixels(terminal_seat.width, terminal_seat.height);
         let probe_input = load_probe_input()?;
         let pty_proxy = proxy.clone();
         let wake: OutputWake = Arc::new(move || {
@@ -864,8 +915,11 @@ impl Runtime {
         let phase_started = Instant::now();
         let pty = if probe_input.is_none() {
             Some(
-                PtySession::spawn_default(pty_size(grid, render_physical), wake)
-                    .context("spawn default PowerShell in ConPTY")?,
+                PtySession::spawn_default(
+                    pty_size(grid, terminal_pty_physical(&renderer, render_physical)),
+                    wake,
+                )
+                .context("spawn default PowerShell in ConPTY")?,
             )
         } else {
             None
@@ -953,7 +1007,16 @@ impl Runtime {
             math_hover_anchor: None,
             math_hover_clear_at: None,
             pending_math_context_anchor: None,
+            seats,
+            seat_layout,
+            seat_pointer: seats::ChromePointer::default(),
+            divider_drag: None,
+            work_area: WorkAreaHint::NeverKnown,
+            session_store,
         };
+        runtime.refresh_work_area();
+        runtime.apply_window_min_inner_size();
+        runtime.refresh_chrome();
         if trace_startup {
             let renderer_phases = runtime.renderer.init_timings();
             eprintln!(
@@ -999,6 +1062,203 @@ impl Runtime {
             );
         }
         Ok(runtime)
+    }
+
+    /// Re-solve the tree against the current surface and place the terminal
+    /// seat. Returns the grid the terminal seat's rectangle asks for.
+    ///
+    /// This is the only place cols/rows are derived from pixels once seats
+    /// exist, and it derives them from the *seat's* rectangle rather than the
+    /// window's. The direction is one-way (red line L10): what comes back out
+    /// of the terminal never re-enters here.
+    fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) -> GridSize {
+        let (layout, terminal_seat) = solve_seats(&self.seats, &self.renderer, render_physical);
+        self.seat_layout = layout;
+        self.renderer.set_seat_viewport(terminal_seat);
+        self.refresh_chrome();
+        self.renderer
+            .metrics()
+            .grid_for_pixels(terminal_seat.width, terminal_seat.height)
+    }
+
+    fn seat_metrics(&self) -> SeatMetrics {
+        seats::seat_metrics(self.renderer.metrics().dpi_milli().get())
+    }
+
+    /// Rebuild the chrome quads and labels from the current solve. Returns
+    /// whether anything visible changed.
+    fn refresh_chrome(&mut self) -> bool {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (quads, labels) =
+            seats::build_chrome(&self.seats, &self.seat_layout, scale, self.seat_pointer);
+        self.renderer.set_chrome(quads, labels)
+    }
+
+    /// Ask the OS for the work area of the display this window is on.
+    ///
+    /// tiny-window §4.4: a query that fails leaves the last successful answer in
+    /// place, because the work area rarely changes between two queries and
+    /// reusing the old number is more honest than inventing one. Having never
+    /// succeeded is a different state with a different answer — no minimum at
+    /// all, rather than a guess that could lock the user's window.
+    fn refresh_work_area(&mut self) {
+        let Ok(hwnd) = window_hwnd(&self.window) else {
+            return;
+        };
+        let Ok(rect) = bt_platform::get_work_area(hwnd) else {
+            return;
+        };
+        let scale = self.renderer.metrics().scale_factor.max(f64::MIN_POSITIVE);
+        let width = ((rect.right - rect.left).max(0) as f64 / scale).round() as i64;
+        let height = ((rect.bottom - rect.top).max(0) as f64 / scale).round() as i64;
+        self.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
+    }
+
+    /// Hand the OS the minimum inner size the tree needs (§2.6.5, L12).
+    fn apply_window_min_inner_size(&mut self) {
+        let metrics = self.seat_metrics();
+        let minimum = self.seats.min_inner_size(&metrics, self.work_area);
+        self.window.set_min_inner_size(minimum.map(|size| {
+            LogicalSize::new(
+                size.width.floor_px().max(1) as f64,
+                size.height.floor_px().max(1) as f64,
+            )
+        }));
+    }
+
+    /// The durable form of everything this window would want back after a
+    /// restart. Layout *intent* only (L11): no rectangle, no cols/rows, no DPI
+    /// of a seat — those are all recomputed by the next `solve`.
+    fn session_snapshot(&self) -> SessionV1 {
+        let mut session = self.session_store.loaded().clone();
+        let scale = self.renderer.metrics().scale_factor.max(f64::MIN_POSITIVE);
+        let inner = self.window.inner_size();
+        let position = self
+            .window
+            .outer_position()
+            .map(|p| (p.x, p.y))
+            .unwrap_or((session.window.bounds.x, session.window.bounds.y));
+        session.schema_version = SESSION_SCHEMA_VERSION;
+        session.window = WindowStateV1 {
+            bounds: WindowBoundsV1 {
+                x: (f64::from(position.0) / scale).round() as i32,
+                y: (f64::from(position.1) / scale).round() as i32,
+                width: (f64::from(inner.width) / scale).round().max(1.0) as u32,
+                height: (f64::from(inner.height) / scale).round().max(1.0) as u32,
+            },
+            dpi: self.renderer.metrics().dpi_milli().get(),
+            maximized: self.window.is_maximized(),
+            monitor_id: session.window.monitor_id.clone(),
+        };
+        session.tabs = vec![TabV1 {
+            root: self.seats.to_persisted(),
+            pinned: false,
+            // Positional rather than a stable id: this slice has no leaf-id
+            // registry to draw from, and the in-order index is a function of
+            // the same tree shape the file already carries, so it cannot point
+            // at a leaf the document does not have.
+            focused_leaf: format!("leaf-{}", self.focus_leaf_index()),
+        }];
+        session.active_tab = 0;
+        session
+    }
+
+    fn focus_leaf_index(&self) -> usize {
+        self.seats
+            .tree()
+            .seats_in_order()
+            .iter()
+            .position(|seat| seat.id == self.seats.focus())
+            .unwrap_or(0)
+    }
+
+    /// Record a meaningful change and start the debounce window (§5.1).
+    fn mark_session_dirty(&mut self, now: Instant) {
+        let snapshot = self.session_snapshot();
+        self.session_store.record(snapshot, now);
+    }
+
+    /// The dev-only preview toggle, and everything one costs: the tree changes,
+    /// so the window minimum, the terminal's columns, the ConPTY coalescer and
+    /// the session file all follow it, in that order.
+    fn toggle_preview_seat(&mut self) -> Result<()> {
+        let metrics = self.seat_metrics();
+        if !self.seats.toggle_preview(&metrics) {
+            return Ok(());
+        }
+        self.seat_pointer = seats::ChromePointer::default();
+        self.divider_drag = None;
+        self.apply_window_min_inner_size();
+        self.commit_seat_geometry()
+    }
+
+    /// Re-solve after a tree edit and carry the consequences to the terminal.
+    ///
+    /// Deliberately routed through the same coalescer a window resize uses: a
+    /// divider drag and an OS resize are the same event as far as ConPTY is
+    /// concerned, and §4.2 says the solver does not participate in that
+    /// debounce — it answers every frame, and someone else decides when the
+    /// child hears about it.
+    fn commit_seat_geometry(&mut self) -> Result<()> {
+        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        if render_physical.width == 0 || render_physical.height == 0 {
+            return Ok(());
+        }
+        // A seat rectangle changing is a resize as far as a transient flyout is
+        // concerned: its anchor was a physical point on the old pane and its
+        // raster was sized to it. tiny-window §3.5 generalises the existing
+        // dissolve rule to exactly this case, so the same two lines `resize`
+        // already runs run here.
+        self.peek_hover.clear();
+        self.renderer.set_peek_overlay(None);
+        let next_grid = self.resolve_seat_layout(render_physical);
+        let now = Instant::now();
+        coalesce_pty_resize(
+            &mut self.pending_pty_resize,
+            next_grid,
+            terminal_pty_physical(&self.renderer, render_physical),
+            now,
+        );
+        if next_grid != self.grid {
+            self.session
+                .resize(
+                    nonzero_u32(next_grid.columns.get()),
+                    nonzero_u32(next_grid.rows.get()),
+                )
+                .context("resize terminal actor for a seat layout change")?;
+            self.grid = next_grid;
+        }
+        self.sync_math_layout_key();
+        self.pending_resize_present = Some(next_grid);
+        self.mark_session_dirty(now);
+        self.publish_frame(FrameTrigger {
+            occurred_at: now,
+            source: FrameSource::Resize,
+        })?;
+        self.redraw()
+    }
+
+    /// The pointer, expressed in the terminal seat's own coordinates, or `None`
+    /// when it is not over the terminal seat at all.
+    ///
+    /// Every existing hit test — the grid, math blocks, hyperlinks, the peek
+    /// flyout's anchor — reads through here, so all of them keep working with
+    /// exactly one correction applied in exactly one place.
+    fn terminal_pointer(&self) -> Option<PhysicalPosition<f64>> {
+        let position = self.pointer_position?;
+        let seat = self.renderer.seat_viewport();
+        if !seats::terminal_contains(
+            &self.seat_layout,
+            self.seats.terminal(),
+            position.x,
+            position.y,
+        ) {
+            return None;
+        }
+        Some(PhysicalPosition::new(
+            position.x - f64::from(seat.x),
+            position.y - f64::from(seat.y),
+        ))
     }
 
     fn publish_frame(&mut self, trigger: FrameTrigger) -> Result<()> {
@@ -1320,6 +1580,11 @@ impl Runtime {
             pty.resize(pty_size(pending.grid, pending.physical))
                 .context("commit coalesced final ConPTY resize")?;
         }
+        // The quiet boundary is also where a resize *ends*, so it is the
+        // meaningful change §5.1 asks the session write to be debounced behind.
+        // Marking it on every intermediate `Resized` would turn one drag of a
+        // window corner into a hundred disk writes.
+        self.mark_session_dirty(now);
         let reconciled = self.session.mark_pty_resize_requested_at(
             nonzero_u32(pending.grid.columns.get()),
             nonzero_u32(pending.grid.rows.get()),
@@ -1335,7 +1600,7 @@ impl Runtime {
     }
 
     fn frame_hit(&self) -> Option<bt_render::GridHit> {
-        let position = self.pointer_position?;
+        let position = self.terminal_pointer()?;
         let frame = self.last_presented_frame.as_ref()?;
         self.renderer
             .metrics()
@@ -1343,7 +1608,7 @@ impl Runtime {
     }
 
     fn math_hit(&self) -> Option<MathHit> {
-        let position = self.pointer_position?;
+        let position = self.terminal_pointer()?;
         let frame = self.last_presented_frame.as_ref()?;
         self.renderer.math_hit_test(frame, position.x, position.y)
     }
@@ -1561,6 +1826,9 @@ impl Runtime {
 
     fn pointer_left(&mut self) -> Result<()> {
         self.pointer_position = None;
+        if self.seat_pointer.hover.take().is_some() && self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
         self.dismiss_peek()?;
         let hyperlink_changed = self.hyperlink_hover.clear();
         if self.math_hover_anchor.is_some() {
@@ -1850,6 +2118,20 @@ impl Runtime {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.pointer_position = Some(position);
+        // A divider drag owns the pointer outright: while one is in flight the
+        // terminal hears nothing, which is the same rule an in-progress
+        // selection drag already lives by.
+        if self.drive_divider_drag(position)? {
+            return Ok(());
+        }
+        self.update_chrome_hover(position)?;
+        // Everything below reads the pointer through `terminal_pointer` — one
+        // correction, in one place, applied to hover, peek, selection and
+        // protocol forwarding alike. Outside the seat it answers `None`, which
+        // is exactly what a pointer outside the grid already answered, so the
+        // clearing paths below run unchanged.
+        let local = self.terminal_pointer();
+        let position = local.unwrap_or(position);
         let now = Instant::now();
         let math_hit = self.update_math_hover(now)?;
         let hit = self.frame_hit();
@@ -1911,7 +2193,183 @@ impl Runtime {
         )
     }
 
+    /// Advance a divider drag. Returns whether the pointer was consumed.
+    ///
+    /// Every frame re-reads the split's slot from the current solve and asks
+    /// `bt-layout::apply` for the ratio: the clamp, and the refusal when the
+    /// clamp is unsatisfiable, are §2.4's and are not re-derived here. Red line
+    /// L9 is upheld by the edit itself — `DragDivider`'s focus set is exactly
+    /// that one split, so nothing rebalances mid-gesture.
+    fn drive_divider_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.divider_drag else {
+            return Ok(false);
+        };
+        let Some(slot) = self
+            .seats
+            .split_slots(&self.seat_layout)
+            .into_iter()
+            .find(|slot| slot.id == drag.split)
+        else {
+            self.divider_drag = None;
+            return Ok(false);
+        };
+        let along = match drag.dir {
+            Axis::Row => position.x,
+            Axis::Col => position.y,
+        };
+        let scale_ppm = seats::scale_ppm(self.renderer.metrics().dpi_milli().get());
+        let Some((requested, usable)) = seats::requested_ratio(slot, scale_ppm, along) else {
+            return Ok(true);
+        };
+        let metrics = self.seat_metrics();
+        // A refusal, and a clamp that changed nothing, both mean "do not
+        // re-solve": §2.4 rules that an infeasible drag has zero side effects
+        // rather than writing a value the next solve will "correct", which
+        // would dress a refusal up as a jitter.
+        if self
+            .seats
+            .drag_divider(&metrics, drag.split, requested, usable)
+            == Ok(true)
+        {
+            self.commit_seat_geometry()?;
+        }
+        Ok(true)
+    }
+
+    /// Repaint the chrome when the pointer moves onto or off a divider, a close
+    /// affordance or a collapsed bar.
+    fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let hover = seats::hit_chrome(
+            &self.seats,
+            &self.seat_layout,
+            scale,
+            position.x,
+            position.y,
+        );
+        if self.seat_pointer.hover == hover {
+            return Ok(());
+        }
+        self.seat_pointer.hover = hover;
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Put the frame already on screen back in the slot so a pure chrome change
+    /// reaches the glass. Chrome lives beside the frame, exactly as the peek
+    /// flyout does, so `redraw` would otherwise find nothing queued and skip.
+    fn present_chrome_change(&mut self) -> Result<()> {
+        if self.pending_resize_present.is_none()
+            && self.pending_frames.pending_frame().is_none()
+            && let Some(frame) = self.last_presented_frame.clone()
+        {
+            self.pending_frames
+                .publish(
+                    frame,
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+                .context("re-present the on-screen frame for a seat chrome change")?;
+        }
+        self.window.request_redraw();
+        Ok(())
+    }
+
+    /// Route a press onto seat chrome. Returns whether the button was consumed.
+    fn chrome_mouse_input(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
+        if button != MouseButton::Left {
+            return Ok(false);
+        }
+        if state == ElementState::Released {
+            let Some(drag) = self.divider_drag.take() else {
+                return Ok(false);
+            };
+            let _ = drag;
+            self.seat_pointer.dragging = None;
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            // The end of a drag is a meaningful change (§5.1): the ratio that
+            // was being explored is now the ratio the user chose.
+            self.mark_session_dirty(Instant::now());
+            return Ok(true);
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(target) = seats::hit_chrome(
+            &self.seats,
+            &self.seat_layout,
+            scale,
+            position.x,
+            position.y,
+        ) else {
+            // Not on chrome, but possibly not on the terminal either — a press
+            // in a preview's body belongs to that seat and must not reach the
+            // grid underneath it. With a lone leaf there is no other seat for a
+            // press to belong to, so nothing is claimed and every existing path
+            // sees the button exactly as before.
+            return Ok(!self.seats.is_lone_terminal()
+                && !seats::terminal_contains(
+                    &self.seat_layout,
+                    self.seats.terminal(),
+                    position.x,
+                    position.y,
+                ));
+        };
+        match target {
+            seats::ChromeTarget::Divider(split) => {
+                let Some(slot) = self
+                    .seats
+                    .split_slots(&self.seat_layout)
+                    .into_iter()
+                    .find(|slot| slot.id == split)
+                else {
+                    return Ok(true);
+                };
+                self.divider_drag = Some(DividerDrag {
+                    split,
+                    dir: slot.dir,
+                });
+                self.seat_pointer.dragging = Some(split);
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+            }
+            seats::ChromeTarget::Close(seat) => {
+                if self.seats.close_seat(seat) {
+                    self.seat_pointer = seats::ChromePointer::default();
+                    self.apply_window_min_inner_size();
+                    self.commit_seat_geometry()?;
+                }
+            }
+            seats::ChromeTarget::CollapseBar(seat) => {
+                // §2.6.3: clicking a collapsed bar expands it, by promoting it
+                // to the focus — W2 then makes it the last seat to fall, and
+                // the concession chain gives it the room by itself. Keyboard
+                // focus does not move; v1 keeps that on the terminal.
+                if self.seats.set_focus(seat) {
+                    self.apply_window_min_inner_size();
+                    self.commit_seat_geometry()?;
+                }
+            }
+        }
+        Ok(true)
+    }
+
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
+        if let Some(position) = self.pointer_position
+            && self.chrome_mouse_input(state, button, position)?
+        {
+            return Ok(());
+        }
         if state == ElementState::Released
             && matches!(self.mouse_route, Some(MouseRoute::MathBlock))
         {
@@ -2038,6 +2496,20 @@ impl Runtime {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // A notch over another seat is that seat's, not the terminal's. Guarded
+        // on there being another seat at all, so a lone leaf scrolls exactly as
+        // it always has — including before the pointer has ever moved.
+        if !self.seats.is_lone_terminal()
+            && let Some(position) = self.pointer_position
+            && !seats::terminal_contains(
+                &self.seat_layout,
+                self.seats.terminal(),
+                position.x,
+                position.y,
+            )
+        {
+            return Ok(());
+        }
         // Scrolling moves the content the flyout was anchored to; the transient peek dissolves.
         self.dismiss_peek()?;
         // One physical event, two currencies. Local routes scroll by exact subpixels (stage C of
@@ -2238,6 +2710,17 @@ impl Runtime {
             }
             return Ok(());
         }
+        // Dev-only: open or close the preview seat at its ruled fixed-right
+        // address, so the layout can be felt before the verbs that will really
+        // open it exist. Ctrl+Shift+P is a placeholder binding and is documented
+        // as such; it is checked here, above the PTY encoder, so the chord never
+        // reaches the child.
+        if is_preview_toggle_shortcut(&event.logical_key, self.modifiers) {
+            if !event.repeat {
+                self.toggle_preview_seat()?;
+            }
+            return Ok(());
+        }
 
         if !self.session.terminal_modes().alternate_screen {
             let page = self.grid.rows.get() as i32;
@@ -2395,15 +2878,15 @@ impl Runtime {
             occurred_at: Instant::now(),
             source: FrameSource::Resize,
         };
-        let next_grid = self
-            .renderer
-            .metrics()
-            .grid_for_pixels(render_physical.width, render_physical.height);
+        // solve -> seat rects -> cols/rows -> the existing 200ms ConPTY quiet
+        // coalescing -> LayoutKey. §4.2 fixes this order and forbids the reverse
+        // (red line L10); the solver itself takes no part in the debounce.
+        let next_grid = self.resolve_seat_layout(render_physical);
         let observed_at = Instant::now();
         coalesce_pty_resize(
             &mut self.pending_pty_resize,
             next_grid,
-            render_physical,
+            terminal_pty_physical(&self.renderer, render_physical),
             observed_at,
         );
         if next_grid != self.grid {
@@ -2458,10 +2941,13 @@ impl Runtime {
 
         self.apply_scale_factor(snapshot.authoritative_scale)?;
         if physical.width > 0 && physical.height > 0 {
-            let next_grid = self
-                .renderer
-                .metrics()
-                .grid_for_pixels(render_physical.width, render_physical.height);
+            // A DPI change is a similarity transform: the same tree solved again
+            // on a new rectangle. Red line L5 — not one ratio, not one fixed
+            // extent is rewritten on this path, and `resolve_seat_layout` writes
+            // none because `solve` is pure.
+            self.refresh_work_area();
+            self.apply_window_min_inner_size();
+            let next_grid = self.resolve_seat_layout(render_physical);
             if next_grid != self.grid {
                 self.session
                     .resize(
@@ -2473,7 +2959,7 @@ impl Runtime {
                 coalesce_pty_resize(
                     &mut self.pending_pty_resize,
                     next_grid,
-                    render_physical,
+                    terminal_pty_physical(&self.renderer, render_physical),
                     Instant::now(),
                 );
             }
@@ -2598,6 +3084,12 @@ impl Runtime {
     }
 
     fn shutdown(&mut self) -> Result<()> {
+        // The clean-exit path (§5.5): flush whatever the debounce still owes,
+        // then drop this run's sentinel. Its absence next time is the whole
+        // signal that this run reached here at all, so it must be removed
+        // before anything below is allowed to fail.
+        self.mark_session_dirty(Instant::now());
+        self.session_store.close();
         self.ime_system_caret.destroy();
         if let Some(pty) = self.pty.as_mut() {
             pty.shutdown().context("shut down child process")?;
@@ -2758,6 +3250,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        runtime.session_store.flush_if_due(now);
         runtime.flush_ime_cursor_area(now);
         if let Err(error) = runtime.finish_resize_if_quiescent(now) {
             self.fail(event_loop, error);
@@ -2791,6 +3284,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
+            runtime.session_store.deadline(),
         ]
         .into_iter()
         .flatten()
@@ -3137,6 +3631,95 @@ fn pty_frame_is_unchanged(
     pending
         .or(last_presented)
         .is_some_and(|previous| presentation_equivalent(previous, next))
+}
+
+/// The dev-only preview toggle: `Ctrl+Shift+P`.
+///
+/// Matched on the *character* the layout produced rather than on a physical key
+/// so it behaves the same on every keyboard layout, and required to carry both
+/// Ctrl and Shift and nothing else — a bare `Ctrl+P` is a real terminal control
+/// byte (DLE) and must keep reaching the child.
+fn is_preview_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
+    modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("p"))
+}
+
+/// Solve the tree against the current surface, and pick out the terminal seat.
+///
+/// The whole §4.1 conversion lives here and nowhere else: physical pixels in,
+/// logical viewport, one `solve`, seat rectangles out. The solver is pure and
+/// `O(seats)`, so calling it on every resize and every frame of a divider drag
+/// is the preferred implementation rather than something to optimise away
+/// (§4.4) — one geometry beats a cached one.
+fn solve_seats(
+    seats: &seats::Seats,
+    renderer: &Renderer,
+    render_physical: PhysicalSize<u32>,
+) -> (SeatLayout, SeatViewport) {
+    let dpi_milli = renderer.metrics().dpi_milli().get();
+    let metrics = seats::seat_metrics(dpi_milli);
+    let viewport = seats::logical_viewport(
+        render_physical.width,
+        render_physical.height,
+        seats::scale_ppm(dpi_milli),
+    );
+    let layout = seats
+        .solve(viewport, &metrics)
+        .unwrap_or_else(|_| seats::fit_what_fits(seats, viewport, &metrics));
+    let terminal = seats::seat_viewport(&layout, seats.terminal()).unwrap_or(SeatViewport::whole(
+        render_physical.width.max(1),
+        render_physical.height.max(1),
+    ));
+    (layout, terminal)
+}
+
+/// The pixel size ConPTY is told about: the terminal *seat's*, not the window's.
+/// They are the same number for a lone leaf.
+fn terminal_pty_physical(renderer: &Renderer, window: PhysicalSize<u32>) -> PhysicalSize<u32> {
+    let seat = renderer.seat_viewport();
+    if seat.width == 0 || seat.height == 0 {
+        return window;
+    }
+    PhysicalSize::new(seat.width, seat.height)
+}
+
+/// Where a restored window should open, or `None` to let the OS decide.
+///
+/// docs/M2-persistence-schema-v1.md §3.1: hitting the recorded monitor and the
+/// recorded logical coordinates is best effort, but "does not crash, does not
+/// land off-screen" is the hard floor. So a rectangle that no monitor can see
+/// forfeits its position — the size is still honoured, because a size is never
+/// off-screen.
+fn restore_window_placement(
+    event_loop: &ActiveEventLoop,
+    session: &SessionV1,
+) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
+    // An empty tab list is the first run: there is nothing to restore, and the
+    // product's opening size stands.
+    if session.tabs.is_empty() {
+        return None;
+    }
+    let bounds = session.window.bounds;
+    let size = LogicalSize::new(f64::from(bounds.width), f64::from(bounds.height));
+    let position = LogicalPosition::new(f64::from(bounds.x), f64::from(bounds.y));
+    let visible = event_loop.available_monitors().any(|monitor| {
+        let scale = monitor.scale_factor().max(f64::MIN_POSITIVE);
+        let origin = monitor.position();
+        let extent = monitor.size();
+        let left = f64::from(origin.x) / scale;
+        let top = f64::from(origin.y) / scale;
+        let right = left + f64::from(extent.width) / scale;
+        let bottom = top + f64::from(extent.height) / scale;
+        // "Some of the window is reachable" rather than "all of it fits": a
+        // window whose title bar is on screen can always be dragged the rest of
+        // the way, and demanding containment would move windows the user
+        // deliberately parked half off a monitor.
+        position.x < right
+            && position.y < bottom
+            && position.x + size.width > left
+            && position.y + size.height > top
+    });
+    Some((position, size)).filter(|_| visible)
 }
 
 fn pty_size(grid: GridSize, physical: PhysicalSize<u32>) -> PtySize {

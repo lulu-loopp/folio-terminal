@@ -31,7 +31,10 @@ mod windows_impl {
             COLORREF, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT,
             RECT, SetLastError, WIN32_ERROR, WPARAM,
         },
-        Graphics::Gdi::{CreateSolidBrush, DeleteObject, HGDIOBJ},
+        Graphics::Gdi::{
+            CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
+            MONITORINFO, MonitorFromWindow,
+        },
         System::{
             DataExchange::{
                 CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
@@ -587,6 +590,40 @@ mod windows_impl {
         })
     }
 
+    /// The work area — the monitor minus the taskbar and other appbars — of the
+    /// display this window sits on, in physical pixels.
+    ///
+    /// `docs/M2-layout-solver-spec.md` §2.6.5 clamps the window's minimum inner
+    /// size to 60% of *this* rectangle, not of the monitor: a minimum computed
+    /// against the full monitor would quietly include the taskbar's strip and let
+    /// the window refuse to shrink past something the user can never see all of.
+    /// Failure is reported rather than guessed at, because tiny-window §4.4 rules
+    /// that a never-observed work area means "set no minimum at all".
+    pub fn get_work_area(hwnd: NonZeroIsize) -> Result<WindowRect, String> {
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle.
+        // MonitorFromWindow with MONITOR_DEFAULTTONEAREST always returns a valid
+        // monitor handle, and `info` stays valid and exclusively borrowed across
+        // this read-only query with its `cbSize` set as the API requires.
+        let ok = unsafe {
+            let monitor =
+                MonitorFromWindow(HWND(hwnd.get() as *mut c_void), MONITOR_DEFAULTTONEAREST);
+            GetMonitorInfoW(monitor, &mut info)
+        };
+        if !ok.as_bool() {
+            return Err("GetMonitorInfoW failed".to_owned());
+        }
+        Ok(WindowRect {
+            left: info.rcWork.left,
+            top: info.rcWork.top,
+            right: info.rcWork.right,
+            bottom: info.rcWork.bottom,
+        })
+    }
+
     pub fn install_window_class_background(hwnd: NonZeroIsize, rgb: [u8; 3]) -> Result<(), String> {
         WINDOW_CLASS_BACKGROUND
             .get_or_init(|| install_window_class_background_once(hwnd, rgb))
@@ -709,6 +746,6 @@ mod windows_impl {
 #[cfg(windows)]
 pub use windows_impl::{
     ImeSystemCaret, MathContextMenu, clipboard_text, get_dpi_for_window, get_window_rect,
-    install_window_class_background, open_local_file, set_clipboard_text, shell_execute,
-    wheel_scroll_amount,
+    get_work_area, install_window_class_background, open_local_file, set_clipboard_text,
+    shell_execute, wheel_scroll_amount,
 };

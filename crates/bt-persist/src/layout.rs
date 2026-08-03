@@ -70,6 +70,23 @@ pub struct SplitNodeV1 {
 pub enum LeafNodeV1 {
     Term(TermLeafV1),
     Files(FilesLeafV1),
+    /// `preview { "kind": "preview", "pinned": bool }`.
+    ///
+    /// docs/M2-persistence-schema-v1.md §3.2 lists only `term` and `files`,
+    /// because it was written before the layout solver's seat family was
+    /// ruled. `docs/M2-layout-solver-spec.md` §5 then put "the preview seat's
+    /// `pinned` flag" in the durable column outright — a field that cannot be
+    /// written is a ruling that cannot be kept, and the tree that
+    /// `session.json` exists to carry is by §3.2's own words "the solver's
+    /// input", whose leaf kinds are the solver's. This variant closes that gap
+    /// in the direction the later, more specific document requires; it is
+    /// additive, so every v1 document written before it still reads.
+    ///
+    /// No content field: red line L1 keeps content identity out of the layout
+    /// tree, and *which file* the preview was showing is content. `pinned` is
+    /// geometry — it decides whether a new preview reuses this seat (§1.3 tier
+    /// ①) or opens a column beside it.
+    Preview(PreviewLeafV1),
     /// A leaf kind this build does not recognize (written by a newer
     /// BetterTerminal). Read-time placeholder only — this crate never
     /// constructs it on purpose, and the consumer is expected to render it
@@ -92,6 +109,13 @@ pub struct TermLeafV1 {
     pub profile_id: String,
     pub cwd: String,
     pub manual_name: Option<String>,
+}
+
+/// `preview { "kind": "preview", "pinned": bool }` — see [`LeafNodeV1::Preview`]
+/// for why this leaf exists and why it carries nothing but the flag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviewLeafV1 {
+    pub pinned: bool,
 }
 
 /// `files { "kind": "files", "root": ..., "open": [...], "sel": ..., "width": number }`

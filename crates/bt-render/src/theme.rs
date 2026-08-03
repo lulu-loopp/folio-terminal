@@ -17,6 +17,52 @@ pub(crate) const DEFAULT_STATUS_BACKGROUND_RGB: [u8; 3] = [0x33, 0x33, 0x33];
 /// Campbell bright-black: a quiet neutral frame for the hover-peek flyout on the dark default.
 pub(crate) const DEFAULT_PEEK_BORDER_RGB: [u8; 3] = [0x76, 0x76, 0x76];
 
+// ---------------------------------------------------------------------------
+// Seat chrome — 临时基调 (provisional key), pending the user's styling pass.
+//
+// Every constant below is a *policy* position in the sense of
+// `docs/M2-layout-solver-spec.md` §1.4: overturning one edits this block and
+// nothing else. They are named rather than inlined precisely so that the
+// styling pass has one place to land. Nothing here is a structural ruling — the
+// structural rulings (a divider occupies real space in the allocation, a
+// collapsed seat is a real rectangle with real area) live in `bt-layout` and are
+// not colours.
+// ---------------------------------------------------------------------------
+
+/// A non-terminal seat's body fill. Shares the terminal's background so an empty
+/// preview reads as "nothing here yet" rather than as a second product.
+pub const SEAT_BODY_BACKGROUND_RGB: [u8; 3] = [0x0c, 0x0c, 0x0c];
+/// A seat title bar's fill: one step above the body, no border.
+pub const SEAT_TITLE_BAR_BACKGROUND_RGB: [u8; 3] = [0x1a, 0x1a, 0x1a];
+/// A seat title bar's ink, and the `x` glyph's.
+pub const SEAT_TITLE_TEXT_RGB: [u8; 3] = [0xcc, 0xcc, 0xcc];
+/// A divider at rest: one logical pixel of quiet separation.
+pub const SEAT_DIVIDER_RGB: [u8; 3] = [0x33, 0x33, 0x33];
+/// A divider under the pointer — the same Campbell bright-black the peek frame
+/// uses, because both say the same thing: "this edge is a thing you can touch".
+pub const SEAT_DIVIDER_HOVER_RGB: [u8; 3] = [0x76, 0x76, 0x76];
+/// A divider being dragged.
+pub const SEAT_DIVIDER_ACTIVE_RGB: [u8; 3] = [0x3b, 0x78, 0xff];
+/// A collapsed seat's clickable bar (`M2-layout-solver-spec.md` §2.6.3).
+pub const SEAT_COLLAPSE_BAR_RGB: [u8; 3] = [0x26, 0x26, 0x26];
+/// The same bar under the pointer.
+pub const SEAT_COLLAPSE_BAR_HOVER_RGB: [u8; 3] = [0x33, 0x33, 0x33];
+
+/// A seat title bar's height, in logical pixels.
+pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 28.0;
+/// A seat title's font size, in logical pixels.
+pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 13.0;
+/// The inset between a title bar's edge and its text, in logical pixels.
+pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 8.0;
+/// A divider's drawn width, in logical pixels. `DIVIDER` in `bt-layout` is the
+/// space it *occupies*; this is what it *looks like*, and the two are allowed to
+/// differ only because the visual one may snap to the physical grid for
+/// sharpness (§2.5).
+pub const SEAT_DIVIDER_VISUAL_LOGICAL_PX: f32 = 1.0;
+/// A divider's hit zone, in logical pixels — wider than its line, because a
+/// one-pixel target is not a target.
+pub const SEAT_DIVIDER_HIT_LOGICAL_PX: f32 = 6.0;
+
 /// Process-wide background selected before the first window or renderer is created.
 ///
 /// `BT_BG` is a diagnostic reveal switch, not a second theme system. It stays in sRGB byte form

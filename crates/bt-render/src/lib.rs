@@ -33,7 +33,14 @@ use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
 use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB};
-pub use theme::{DEFAULT_BACKGROUND_RGB, background_rgb, foreground_rgb, theme_revision};
+pub use theme::{
+    DEFAULT_BACKGROUND_RGB, SEAT_BODY_BACKGROUND_RGB, SEAT_COLLAPSE_BAR_HOVER_RGB,
+    SEAT_COLLAPSE_BAR_RGB, SEAT_DIVIDER_ACTIVE_RGB, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_DIVIDER_HOVER_RGB, SEAT_DIVIDER_RGB, SEAT_DIVIDER_VISUAL_LOGICAL_PX,
+    SEAT_TITLE_BAR_BACKGROUND_RGB, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
+    SEAT_TITLE_PADDING_LOGICAL_PX, SEAT_TITLE_TEXT_RGB, background_rgb, foreground_rgb,
+    theme_revision,
+};
 use theme::{
     DEFAULT_PEEK_BORDER_RGB, DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB,
 };
@@ -1427,12 +1434,22 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     max_texture_dimension_2d: u32,
     configured_size: (u32, u32),
+    /// The terminal seat's rectangle inside the swapchain (§4.1). Equal to the
+    /// whole surface whenever the tree is a lone terminal leaf.
+    seat: SeatViewport,
+    chrome_quads: Vec<ChromeQuad>,
+    chrome_labels: Vec<ChromeLabel>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
+    /// A second glyphon viewport whose resolution names the whole surface rather
+    /// than the seat, so chrome text can be positioned in window coordinates
+    /// while grid text stays in seat-local ones.
+    chrome_viewport: Viewport,
     atlas: TextAtlas,
     text_renderer: TextRenderer,
     status_text_renderer: TextRenderer,
+    chrome_text_renderer: TextRenderer,
     rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
@@ -1465,6 +1482,81 @@ pub struct PresentationGeometry {
     pub swapchain_size: (u32, u32),
     /// Per-axis device limit applied to the swapchain size.
     pub max_texture_dimension_2d: u32,
+}
+
+/// The rectangle of the swapchain the terminal draws itself into, in physical
+/// pixels.
+///
+/// This is the seam `docs/M2-layout-solver-spec.md` §4.1 names: the solver hands
+/// out seat rectangles, and the terminal seat's rectangle arrives here. The
+/// terminal's own frame machinery never learns that it moved — every pixel it
+/// computes is still relative to its own top-left, and the whole translation is
+/// one `set_viewport`/`set_scissor_rect` pair plus a glyphon `Resolution` that
+/// names the seat instead of the window.
+///
+/// A lone terminal leaf solves to the whole viewport, so the seat is
+/// `(0, 0, config.width, config.height)` and every expression below is
+/// numerically the one that was there before this type existed. That is the
+/// byte-identity argument, and it is an argument about *values*, not about a
+/// branch that skips the new code.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SeatViewport {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl SeatViewport {
+    /// The whole surface: what a lone leaf solves to.
+    #[must_use]
+    pub const fn whole(width: u32, height: u32) -> Self {
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        }
+    }
+
+    /// Clamped so the rectangle is inside `width` x `height` and never empty.
+    #[must_use]
+    fn clamped_to(self, width: u32, height: u32) -> Self {
+        let x = self.x.min(width.saturating_sub(1));
+        let y = self.y.min(height.saturating_sub(1));
+        Self {
+            x,
+            y,
+            width: self.width.clamp(1, width.saturating_sub(x).max(1)),
+            height: self.height.clamp(1, height.saturating_sub(y).max(1)),
+        }
+    }
+}
+
+/// One flat rectangle of seat chrome, in physical pixels of the whole surface.
+///
+/// Chrome is everything the solver produced that is not a seat's interior:
+/// dividers, a preview's title bar and body, a collapsed seat's bar. It is drawn
+/// after the terminal seat with the pass restored to the whole surface, so it is
+/// the one class of draw that legitimately knows where the window's edges are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChromeQuad {
+    /// `[left, top, right, bottom]`.
+    pub rect: [f32; 4],
+    pub color: [u8; 3],
+}
+
+/// One line of seat chrome text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChromeLabel {
+    pub text: String,
+    /// The box the text is laid out in and clipped to, `[left, top, right, bottom]`.
+    pub rect: [f32; 4],
+    pub font_size_px: f32,
+    pub color: [u8; 3],
+    /// Right-align inside `rect` rather than left-align. The `x` affordance of a
+    /// title bar is the only user of this today.
+    pub align_right: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1922,10 +2014,13 @@ impl Renderer {
         let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
+        let chrome_viewport = Viewport::new(&device, &cache);
         let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
         let text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let status_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let chrome_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rect_pipeline = create_rect_pipeline(&device, config.format);
         let (math_pipeline, math_bind_group_layout, math_sampler) =
@@ -1939,12 +2034,17 @@ impl Renderer {
             config,
             max_texture_dimension_2d,
             configured_size: swapchain_size,
+            seat: SeatViewport::whole(swapchain_size.0, swapchain_size.1),
+            chrome_quads: Vec::new(),
+            chrome_labels: Vec::new(),
             font_system,
             swash_cache,
             viewport,
+            chrome_viewport,
             atlas,
             text_renderer,
             status_text_renderer,
+            chrome_text_renderer,
             rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
@@ -2043,8 +2143,8 @@ impl Renderer {
         image_height_px: u32,
     ) -> Option<(u32, u32)> {
         peek_thumbnail_extent(
-            self.config.width as f32,
-            self.config.height as f32,
+            self.seat.width as f32,
+            self.seat.height as f32,
             self.metrics.padding_px,
             self.metrics.scale_factor as f32,
             image_width_px,
@@ -2075,7 +2175,40 @@ impl Renderer {
         let swapchain_size = surface_config_size(width, height, self.max_texture_dimension_2d);
         self.config.width = swapchain_size.0;
         self.config.height = swapchain_size.1;
+        // A new surface invalidates the seat rectangle that was solved against the
+        // old one. The whole surface is the honest interim answer — it is what a
+        // lone leaf solves to — and the caller re-solves and sets the real one
+        // before this frame is drawn. Keeping a stale rectangle here would let a
+        // shrunk window draw the terminal outside its own swapchain.
+        self.seat = SeatViewport::whole(swapchain_size.0, swapchain_size.1);
         Ok(())
+    }
+
+    /// The rectangle of the swapchain the terminal seat occupies.
+    #[must_use]
+    pub fn seat_viewport(&self) -> SeatViewport {
+        self.seat
+    }
+
+    /// Place the terminal seat. Returns whether the rectangle changed.
+    ///
+    /// Red line L10 runs the other way and is worth restating here: nothing
+    /// inside the terminal may call this. The rectangle arrives from `solve`,
+    /// never from the content that will be drawn in it.
+    pub fn set_seat_viewport(&mut self, seat: SeatViewport) -> bool {
+        let seat = seat.clamped_to(self.config.width, self.config.height);
+        let changed = self.seat != seat;
+        self.seat = seat;
+        changed
+    }
+
+    /// Replace the seat chrome drawn around the terminal. Returns whether the
+    /// visible chrome changed, so the caller can skip a redundant redraw.
+    pub fn set_chrome(&mut self, quads: Vec<ChromeQuad>, labels: Vec<ChromeLabel>) -> bool {
+        let changed = self.chrome_quads != quads || self.chrome_labels != labels;
+        self.chrome_quads = quads;
+        self.chrome_labels = labels;
+        changed
     }
 
     pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
@@ -2098,7 +2231,17 @@ impl Renderer {
         let frame_started = Instant::now();
         frame.validate_shape()?;
         let validated_at = Instant::now();
+        // Grid text is laid out in seat-local pixels, so glyphon's resolution is
+        // the seat's; the pass viewport below lands those pixels at the seat's
+        // corner. Chrome text is laid out in window pixels and gets its own.
         self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.seat.width,
+                height: self.seat.height,
+            },
+        );
+        self.chrome_viewport.update(
             &self.queue,
             Resolution {
                 width: self.config.width,
@@ -2242,6 +2385,37 @@ impl Renderer {
                     contents: bytemuck::cast_slice(overlay_data),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
+        // Seat chrome. Empty whenever the tree is a lone terminal leaf, and every
+        // branch below is guarded on emptiness, so a lone leaf issues exactly the
+        // command stream it issued before seats existed.
+        let chrome_rects: Vec<RectInstance> = self
+            .chrome_quads
+            .iter()
+            .map(|quad| {
+                surface_pixel_rect(quad.rect, quad.color, self.config.width, self.config.height)
+            })
+            .collect();
+        let chrome_rect_buffer = (!chrome_rects.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("seat chrome rectangles"),
+                    contents: bytemuck::cast_slice(chrome_rects.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let chrome_layouts = shape_chrome_labels(&mut self.font_system, &self.chrome_labels);
+        let chrome_prepared = !chrome_layouts.is_empty()
+            && prepare_chrome_text_atlas(
+                &mut self.chrome_text_renderer,
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.chrome_viewport,
+                &mut self.swash_cache,
+                &chrome_layouts,
+            )
+            .is_ok();
         let rectangles_prepared_at = Instant::now();
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
@@ -2289,15 +2463,18 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
+            // Everything the terminal draws is in seat-local pixels; this pair is
+            // the entire translation, and for a lone leaf the seat *is* the
+            // surface, so these are the two calls that were always here.
             pass.set_viewport(
-                0.0,
-                0.0,
-                self.config.width as f32,
-                self.config.height as f32,
+                self.seat.x as f32,
+                self.seat.y as f32,
+                self.seat.width as f32,
+                self.seat.height as f32,
                 0.0,
                 1.0,
             );
-            pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+            pass.set_scissor_rect(self.seat.x, self.seat.y, self.seat.width, self.seat.height);
             if !rects.is_empty() {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_vertex_buffer(0, rect_buffer.slice(..));
@@ -2350,6 +2527,30 @@ impl Renderer {
                         pass.set_bind_group(0, &tile.bind_group, &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
+                }
+            }
+            // Seat chrome last, with the pass restored to the whole window: it is
+            // the one class of draw that legitimately owns the space between
+            // seats. Skipped entirely when there is no chrome.
+            if chrome_rect_buffer.is_some() || chrome_prepared {
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                if let Some(buffer) = chrome_rect_buffer.as_ref() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..6, 0..chrome_rects.len() as u32);
+                }
+                if chrome_prepared {
+                    self.chrome_text_renderer
+                        .render(&self.atlas, &self.chrome_viewport, &mut pass)
+                        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
             }
         }
@@ -2445,9 +2646,9 @@ impl Renderer {
         let mut drawn = HashSet::new();
         let pane_left = self.metrics.padding_px;
         let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
-            .min(self.config.width as f32);
+            .min(self.seat.width as f32);
         let pane_top = self.metrics.padding_px;
-        let pane_bottom = self.config.height as f32;
+        let pane_bottom = self.seat.height as f32;
 
         for (index, placement) in frame.math_blocks.iter().enumerate() {
             if !math_block_admits_texture(frame, placement) {
@@ -2528,8 +2729,8 @@ impl Renderer {
                     uv_top,
                     uv_right,
                     uv_bottom,
-                    self.config.width,
-                    self.config.height,
+                    self.seat.width,
+                    self.seat.height,
                 ));
                 draws.push(MathDraw {
                     key: key.clone(),
@@ -2576,8 +2777,8 @@ impl Renderer {
             return (Vec::new(), Vec::new(), Vec::new());
         };
         let Some(layout) = peek_box_layout(
-            self.config.width as f32,
-            self.config.height as f32,
+            self.seat.width as f32,
+            self.seat.height as f32,
             self.metrics.padding_px,
             self.metrics.scale_factor as f32,
             overlay.width_px,
@@ -2644,8 +2845,8 @@ impl Renderer {
                 0.0,
                 1.0,
                 1.0,
-                self.config.width,
-                self.config.height,
+                self.seat.width,
+                self.seat.height,
             ));
             draws.push(MathDraw {
                 key: overlay.key.clone(),
@@ -2668,9 +2869,9 @@ impl Renderer {
         }
         let pane_left = self.metrics.padding_px;
         let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
-            .min(self.config.width as f32);
+            .min(self.seat.width as f32);
         let pane_top = self.metrics.padding_px;
-        let pane_bottom = self.config.height as f32;
+        let pane_bottom = self.seat.height as f32;
         let band_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let top = if placement.artifact.mode == MathMode::Inline {
             band_top + self.metrics.ascii_baseline_px
@@ -2708,7 +2909,7 @@ impl Renderer {
         );
         let (visible_left, visible_right) = math_horizontal_bounds(
             self.metrics,
-            self.config.width,
+            self.seat.width,
             frame.columns,
             placement.left_subpixels,
             scaled_width,
@@ -2769,9 +2970,9 @@ impl Renderer {
         }
         let pane_left = self.metrics.padding_px;
         let pane_right = (pane_left + frame.columns.get() as f32 * self.metrics.cell_width_px)
-            .min(self.config.width as f32);
+            .min(self.seat.width as f32);
         let pane_top = self.metrics.padding_px;
-        let pane_bottom = self.config.height as f32;
+        let pane_bottom = self.seat.height as f32;
         let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let raw_bottom = raw_top + placement.height_subpixels as f32 / SUBPIXELS_PER_PX as f32;
         let top = raw_top.max(pane_top);
@@ -3185,8 +3386,8 @@ impl Renderer {
         color: [u8; 3],
         coverage: f32,
     ) -> RectInstance {
-        let width = self.config.width.max(1) as f32;
-        let height = self.config.height.max(1) as f32;
+        let width = self.seat.width.max(1) as f32;
+        let height = self.seat.height.max(1) as f32;
         RectInstance {
             rect: [
                 left / width * 2.0 - 1.0,
@@ -3313,6 +3514,119 @@ fn prepare_text_rows(
         narrow: narrow_shaping_cache.counters.delta_since(narrow_before),
         wide: wide_shaping_cache.counters.delta_since(wide_before),
     })
+}
+
+/// A chrome rectangle in whole-surface pixels.
+///
+/// Deliberately a free function rather than a `Renderer` method: the seat-local
+/// [`Renderer::pixel_rect`] and this one differ in exactly which rectangle they
+/// call "the world", and having them side by side as one method with a flag is
+/// how the two would eventually be confused for each other.
+fn surface_pixel_rect(rect: [f32; 4], color: [u8; 3], width: u32, height: u32) -> RectInstance {
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+    RectInstance {
+        rect: [
+            rect[0] / w * 2.0 - 1.0,
+            1.0 - rect[1] / h * 2.0,
+            rect[2] / w * 2.0 - 1.0,
+            1.0 - rect[3] / h * 2.0,
+        ],
+        color: rect_gpu_color_with_coverage(color, 1.0),
+    }
+}
+
+/// A shaped chrome label and where it goes, in whole-surface pixels.
+struct ChromeTextLayout {
+    buffer: Buffer,
+    left: f32,
+    top: f32,
+    bounds: TextBounds,
+    color: Color,
+}
+
+/// Shape every chrome label. The buffers are owned by the returned vector so
+/// they outlive the `prepare` that borrows them.
+fn shape_chrome_labels(
+    font_system: &mut FontSystem,
+    labels: &[ChromeLabel],
+) -> Vec<ChromeTextLayout> {
+    labels
+        .iter()
+        .filter(|label| !label.text.is_empty() && label.rect[2] > label.rect[0])
+        .map(|label| {
+            let width = label.rect[2] - label.rect[0];
+            let height = label.rect[3] - label.rect[1];
+            let line_height = label.font_size_px * 1.4;
+            let mut buffer =
+                Buffer::new(font_system, Metrics::new(label.font_size_px, line_height));
+            buffer.set_wrap(Wrap::None);
+            buffer.set_size(Some(width), Some(line_height));
+            buffer.set_text(
+                &label.text,
+                &Attrs::new().family(Family::SansSerif),
+                Shaping::Advanced,
+                None,
+            );
+            buffer.shape_until_scroll(font_system, false);
+            let text_width = buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max);
+            let left = if label.align_right {
+                (label.rect[2] - text_width).max(label.rect[0])
+            } else {
+                label.rect[0]
+            };
+            let [r, g, b] = label.color;
+            ChromeTextLayout {
+                buffer,
+                left,
+                // Centre the line box in the bar rather than the ink: the ink's
+                // height depends on which characters were typed, and a title that
+                // shifts when its text changes is worse than one sitting a hair
+                // off centre.
+                top: label.rect[1] + (height - line_height) / 2.0,
+                bounds: TextBounds {
+                    left: label.rect[0].floor() as i32,
+                    top: label.rect[1].floor() as i32,
+                    right: label.rect[2].ceil() as i32,
+                    bottom: label.rect[3].ceil() as i32,
+                },
+                color: Color::rgb(r, g, b),
+            }
+        })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_chrome_text_atlas(
+    text_renderer: &mut TextRenderer,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    font_system: &mut FontSystem,
+    atlas: &mut TextAtlas,
+    viewport: &Viewport,
+    swash_cache: &mut SwashCache,
+    layouts: &[ChromeTextLayout],
+) -> Result<(), PrepareError> {
+    text_renderer.prepare(
+        device,
+        queue,
+        font_system,
+        atlas,
+        viewport,
+        layouts.iter().map(|layout| TextArea {
+            buffer: &layout.buffer,
+            left: layout.left,
+            top: layout.top,
+            scale: 1.0,
+            bounds: layout.bounds,
+            default_color: layout.color,
+            custom_glyphs: &[],
+        }),
+        swash_cache,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -254,7 +254,9 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "bt-doc",
+ "bt-layout",
  "bt-math",
+ "bt-persist",
  "bt-platform",
  "bt-pty",
  "bt-render",
