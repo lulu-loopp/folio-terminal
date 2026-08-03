@@ -1521,7 +1521,7 @@ impl SeatViewport {
 
     /// Clamped so the rectangle is inside `width` x `height` and never empty.
     #[must_use]
-    fn clamped_to(self, width: u32, height: u32) -> Self {
+    pub(crate) fn clamped_to(self, width: u32, height: u32) -> Self {
         let x = self.x.min(width.saturating_sub(1));
         let y = self.y.min(height.saturating_sub(1));
         Self {
@@ -2175,12 +2175,19 @@ impl Renderer {
         let swapchain_size = surface_config_size(width, height, self.max_texture_dimension_2d);
         self.config.width = swapchain_size.0;
         self.config.height = swapchain_size.1;
-        // A new surface invalidates the seat rectangle that was solved against the
-        // old one. The whole surface is the honest interim answer — it is what a
-        // lone leaf solves to — and the caller re-solves and sets the real one
-        // before this frame is drawn. Keeping a stale rectangle here would let a
-        // shrunk window draw the terminal outside its own swapchain.
-        self.seat = SeatViewport::whole(swapchain_size.0, swapchain_size.1);
+        // A new surface makes the seat rectangle that was solved against the old
+        // one provisional, and the caller re-solves before the next frame. Until
+        // it does, the rectangle is *clamped* rather than replaced: the only
+        // legitimate author of a seat rectangle is `solve` (red line L10), and
+        // substituting the whole surface here would have this crate invent one —
+        // a lone leaf's answer, handed to a tree that is not a lone leaf. That
+        // hands every content extent below (`pane_right`, `pane_bottom`, the
+        // peek box, the math band and its toolbar) the window instead of the
+        // seat, and removes the pass scissor that keeps the terminal off its
+        // neighbours. Clamping keeps the one safety property the substitution
+        // was buying — a shrunk surface can never be drawn outside — without
+        // discarding a split.
+        self.seat = self.seat.clamped_to(swapchain_size.0, swapchain_size.1);
         Ok(())
     }
 
@@ -5227,6 +5234,63 @@ mod tests {
         assert!(point_in_rect([visible_left + 1.0, 20.0], hit));
     }
 
+    /// Content extents read the *seat*, and the seat is what stops them.
+    ///
+    /// A band wider than the pane, and the toolbar pinned to its right edge,
+    /// must both end inside the seat. The only number that can end them is the
+    /// one passed here, so this is the pin for "no draw site substitutes the
+    /// window extent": hand it the window (1920) instead of the seat (975) and
+    /// the assertions fail, which is exactly the picture the user saw — the
+    /// band and its toolbar past the divider, in the next seat.
+    #[test]
+    fn a_band_and_its_toolbar_end_inside_the_seat_not_inside_the_window() {
+        let metrics = CellMetrics {
+            cell_width_px: 18.0,
+            cell_height_px: 44.0,
+            font_size_px: 32.0,
+            padding_px: 16.0,
+            scale_factor: 2.0,
+            ascii_baseline_px: 34.0,
+            primary_advance_px: 18.0,
+            primary_cap_height_px: 24.0,
+            primary_cap_center_y_px: 20.0,
+        };
+        const SEAT_WIDTH: u32 = 975;
+        const WINDOW_WIDTH: u32 = 1920;
+        // 60 columns is wider than this seat holds: padding + 60 * 18 = 1096.
+        let columns = NonZeroU32::new(60).unwrap();
+        let (left, right) = math_horizontal_bounds(
+            metrics, SEAT_WIDTH, columns, 0, 4000.0, // an image far wider than either extent
+            true,
+        )
+        .expect("a visible band");
+        assert!(left >= metrics.padding_px);
+        assert!(
+            right <= SEAT_WIDTH as f32,
+            "the band ran to {right}, past the {SEAT_WIDTH}px seat"
+        );
+        // The toolbar is placed at the band's right edge, clamped to the same
+        // pane edge; it must not reach past the seat either.
+        let (toolbar_top, toolbar_bottom) = math_toolbar_vertical_bounds(40.0, 120.0, 2.0);
+        let button = toolbar_bottom - toolbar_top;
+        let total = button * 2.0 + MATH_TOOL_GAP_LOGICAL_PX * 2.0;
+        let pane_right = (metrics.padding_px + columns.get() as f32 * metrics.cell_width_px)
+            .min(SEAT_WIDTH as f32);
+        let toolbar_left = right.min(pane_right - total).max(metrics.padding_px);
+        assert!(
+            toolbar_left + total <= SEAT_WIDTH as f32,
+            "the toolbar ran to {}, past the {SEAT_WIDTH}px seat",
+            toolbar_left + total
+        );
+        // Red gate: the same call against the window extent does escape.
+        let (_, window_right) =
+            math_horizontal_bounds(metrics, WINDOW_WIDTH, columns, 0, 4000.0, true).unwrap();
+        assert!(
+            window_right > SEAT_WIDTH as f32,
+            "the pin would pass even if a draw site read the window"
+        );
+    }
+
     #[test]
     fn math_toolbar_shrinks_to_the_visible_source_row_band() {
         for (scale, top, bottom) in [(1.0, 8.0, 26.0), (1.25, 10.0, 32.5)] {
@@ -6791,6 +6855,53 @@ mod tests {
         );
         assert_eq!(rect_gpu_color_with_coverage([0, 0, 0], -1.0)[3], 0.0);
         assert_eq!(rect_gpu_color_with_coverage([0, 0, 0], 2.0)[3], 1.0);
+    }
+
+    /// The seat rectangle a surface change leaves behind, pinned as the exact
+    /// expression `Renderer::resize` applies to `self.seat`.
+    ///
+    /// A solved split must survive: substituting the whole surface here is a
+    /// lone leaf's answer given to a tree that is not one, and it silently
+    /// widens every content extent (`pane_right`, `pane_bottom`, the peek box,
+    /// the math band and its toolbar) and the pass scissor to the window — which
+    /// is how terminal content came to be drawn over a neighbouring seat. What
+    /// must still hold is that the rectangle never leaves the new surface.
+    ///
+    /// Red gate: replace the clamp with `SeatViewport::whole(width, height)` and
+    /// the first case fails.
+    #[test]
+    fn a_surface_change_clamps_the_solved_seat_and_never_reinvents_it() {
+        let split = SeatViewport {
+            x: 0,
+            y: 0,
+            width: 975,
+            height: 1200,
+        };
+        assert_eq!(
+            split.clamped_to(1920, 1200),
+            split,
+            "a no-op surface change must leave a solved split exactly as solved"
+        );
+        let right_seat = SeatViewport {
+            x: 976,
+            y: 0,
+            width: 944,
+            height: 1200,
+        };
+        assert_eq!(
+            right_seat.clamped_to(1920, 1200),
+            right_seat,
+            "a seat with a non-zero origin survives untouched too"
+        );
+        for (width, height) in [(1280u32, 800u32), (1, 1), (600, 1200)] {
+            let clamped = right_seat.clamped_to(width, height);
+            assert!(
+                clamped.x + clamped.width <= width.max(1)
+                    && clamped.y + clamped.height <= height.max(1),
+                "{clamped:?} escapes a {width}x{height} surface"
+            );
+            assert!(clamped.width >= 1 && clamped.height >= 1);
+        }
     }
 
     #[test]

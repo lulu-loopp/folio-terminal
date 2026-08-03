@@ -109,7 +109,7 @@ impl Seats {
     /// that is open. Returns whether the tree changed.
     pub fn toggle_preview(&mut self, metrics: &SeatMetrics) -> bool {
         match self.preview() {
-            Some(existing) => self.close_seat(existing),
+            Some(existing) => self.close_seat(metrics, existing),
             None => {
                 let seat = Seat::new(SeatId(self.next_seat), SeatKind::Preview);
                 let split_id = SplitId(self.next_split);
@@ -129,9 +129,12 @@ impl Seats {
     /// Close one seat, promoting its sibling. Refused for the last seat: an
     /// empty tree is not a state the solver can represent, and the last pane
     /// closing is the *tab* closing (§7.1.4), which this slice does not host.
-    pub fn close_seat(&mut self, seat: SeatId) -> bool {
-        let metrics = SeatMetrics::ruled_at_unit_scale();
-        match apply(&self.tree, &metrics, &Edit::CloseSeat { target: seat }) {
+    ///
+    /// Takes the same `SeatMetrics` every other edit takes: one device scale is
+    /// in force at a time, and an edit that reads a different one than the solve
+    /// that follows it is two tables where §2.1 rules there is one.
+    pub fn close_seat(&mut self, metrics: &SeatMetrics, seat: SeatId) -> bool {
+        match apply(&self.tree, metrics, &Edit::CloseSeat { target: seat }) {
             Ok(outcome) => {
                 self.tree = outcome.tree;
                 if self.focus == seat {
@@ -1053,6 +1056,80 @@ mod tests {
     /// clickable bar that keeps its place in the tree (§2.6.3) — and the bar is
     /// real chrome with a real hit target, not an absence.
     ///
+    /// Opening the preview must be indistinguishable, downstream, from a window
+    /// narrowing that leaves the terminal the same rectangle.
+    ///
+    /// Everything the resize machinery is handed — the grid, and the pixel size
+    /// ConPTY is told — is a function of the terminal seat's rectangle and
+    /// nothing else (`grid_for_pixels(seat)`, `terminal_pty_physical(seat)`), so
+    /// the pin is that the rectangle a preview leaves the terminal is *exactly*
+    /// the rectangle a lone leaf gets from a window of that size. If that holds
+    /// at every DPI, the two paths cannot hand the coalescer different numbers,
+    /// and there is no seat-shaped resize for anything downstream to notice.
+    ///
+    /// Red gate: derive the second rectangle from the *window* rather than from
+    /// the seat — the discrepancy the bug report described — and the equality
+    /// fails at every DPI.
+    #[test]
+    fn opening_the_preview_hands_the_resize_machinery_a_window_narrowings_rectangle() {
+        for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000, 2_500] {
+            let metrics = seat_metrics(dpi_milli);
+            let (width, height) = (1920u32, 1200u32);
+
+            let mut seats = Seats::lone_terminal();
+            assert!(seats.toggle_preview(&metrics), "the preview must open");
+            let opened = seat_viewport(
+                &solved(&seats, viewport_of(width, height, dpi_milli), &metrics),
+                seats.terminal(),
+            )
+            .expect("the terminal keeps a rectangle");
+            assert!(
+                opened.width < width,
+                "the preview must actually cost the terminal width at {dpi_milli} milli-DPI"
+            );
+
+            // The same rectangle, reached by narrowing the window instead.
+            let narrowed = seat_viewport(
+                &solved(
+                    &Seats::lone_terminal(),
+                    viewport_of(opened.width, opened.height, dpi_milli),
+                    &metrics,
+                ),
+                SeatId(1),
+            )
+            .expect("a lone leaf keeps a rectangle");
+            assert_eq!(
+                narrowed,
+                SeatViewport::whole(opened.width, opened.height),
+                "a lone leaf in a {}x{} window is that window at {dpi_milli} milli-DPI",
+                opened.width,
+                opened.height
+            );
+            assert_eq!(
+                (narrowed.width, narrowed.height),
+                (opened.width, opened.height),
+                "the two paths must present the same extent to `grid_for_pixels` \
+                 and to the ConPTY pixel size at {dpi_milli} milli-DPI"
+            );
+            // Red gate: the window's extent is not that extent, so an
+            // implementation that read it would be caught here.
+            assert_ne!(
+                (width, height),
+                (opened.width, opened.height),
+                "the pin would pass even if the grid were derived from the window"
+            );
+
+            // Closing hands every pixel back, so the sequence is symmetric.
+            assert!(seats.toggle_preview(&metrics), "the preview must close");
+            let closed = seat_viewport(
+                &solved(&seats, viewport_of(width, height, dpi_milli), &metrics),
+                seats.terminal(),
+            )
+            .expect("the terminal keeps a rectangle");
+            assert_eq!(closed, SeatViewport::whole(width, height));
+        }
+    }
+
     /// This state is deliberately hard to reach by dragging the window, because
     /// §2.6.5's minimum inner size stops the OS well above it; that is the
     /// concession chain being a degradation path rather than an everyday one.

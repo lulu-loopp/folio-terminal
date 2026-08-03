@@ -1490,6 +1490,13 @@ impl Runtime {
     fn apply_ime_cursor_area(&mut self, area: ImeCursorArea) {
         // Renderer pixels, winit PhysicalPosition, and a per-monitor-aware Win32 client area all
         // share the client-origin device-pixel axis. No screen-origin translation belongs here.
+        //
+        // A seat-origin one does. The caret rectangle is computed by the same
+        // frame machinery as every other content pixel, so it is expressed in
+        // the terminal seat's own coordinates; winit and IMM32 both want the
+        // window's. This is the inverse of `terminal_pointer`'s correction and
+        // the only place it runs in this direction (§4.1, one translation).
+        let area = window_ime_cursor_area(self.renderer.seat_viewport(), area);
         self.window.set_ime_cursor_area(
             PhysicalPosition::new(area.x, area.y),
             PhysicalSize::new(area.width, area.height),
@@ -2344,7 +2351,8 @@ impl Runtime {
                 }
             }
             seats::ChromeTarget::Close(seat) => {
-                if self.seats.close_seat(seat) {
+                let metrics = self.seat_metrics();
+                if self.seats.close_seat(&metrics, seat) {
                     self.seat_pointer = seats::ChromePointer::default();
                     self.apply_window_min_inner_size();
                     self.commit_seat_geometry()?;
@@ -2923,6 +2931,18 @@ impl Runtime {
             ensure_swapchain_matches_inner(&self.renderer, physical)?;
         }
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        // Touching the surface is what obliges a solve, not changing the DPI:
+        // every seat rectangle is a function of the surface, so the answer that
+        // was true of the old one is not yet true of this one. The equal-scale
+        // path below returns early and this method publishes a frame, so the
+        // solve has to happen here rather than after that branch — otherwise the
+        // frame is drawn against a rectangle nobody re-derived, which is how the
+        // terminal came to be drawn over its neighbour's seat. `solve` is pure
+        // and the tree has not changed, so on the common no-op path this is the
+        // same answer arrived at again.
+        if physical.width > 0 && physical.height > 0 {
+            self.resolve_seat_layout(render_physical);
+        }
         let snapshot = dpi_snapshot(&self.window)?;
         log_dpi_snapshot(
             stage,
@@ -3671,6 +3691,19 @@ fn solve_seats(
         render_physical.height.max(1),
     ));
     (layout, terminal)
+}
+
+/// A caret rectangle the frame produced, moved from the terminal seat's
+/// coordinates into the window's — what winit and IMM32 are asking for.
+///
+/// The identity for a lone leaf is the point: its seat origin is `(0, 0)`, so
+/// this is the number that was passed before seats existed.
+fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorArea {
+    ImeCursorArea {
+        x: area.x.saturating_add_unsigned(seat.x),
+        y: area.y.saturating_add_unsigned(seat.y),
+        ..area
+    }
 }
 
 /// The pixel size ConPTY is told about: the terminal *seat's*, not the window's.
@@ -4764,6 +4797,48 @@ mod tests {
         assert!(
             !notice_pending,
             "the user-visible downgrade notice is one-shot"
+        );
+    }
+
+    /// The caret rectangle leaves the frame in the terminal seat's coordinates
+    /// and reaches winit and IMM32 in the window's. This is the one place the
+    /// seat correction runs in that direction, so it is pinned in both: a lone
+    /// leaf's origin is `(0, 0)` and the number is unchanged, and a seat that
+    /// has been moved carries the caret with it.
+    ///
+    /// Red gate: return `area` unchanged and the second case fails — the
+    /// candidate window would open a seat's width away from the caret.
+    #[test]
+    fn the_ime_caret_leaves_the_seat_in_the_windows_coordinates() {
+        let area = ImeCursorArea {
+            x: 250,
+            y: 100,
+            width: 18,
+            height: 44,
+        };
+        assert_eq!(
+            window_ime_cursor_area(SeatViewport::whole(1920, 1200), area),
+            area,
+            "a lone leaf's seat is the window, so nothing moves"
+        );
+        let moved = window_ime_cursor_area(
+            SeatViewport {
+                x: 976,
+                y: 0,
+                width: 944,
+                height: 1200,
+            },
+            area,
+        );
+        assert_eq!(
+            moved,
+            ImeCursorArea {
+                x: 250 + 976,
+                y: 100,
+                width: 18,
+                height: 44,
+            },
+            "a seat with an origin carries the caret to the window's axis"
         );
     }
 
