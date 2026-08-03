@@ -354,6 +354,32 @@ fn take_due_pty_resize(
         })
 }
 
+/// The single gate between a solved grid and ConPTY.
+///
+/// A solve that answers what `current_grid` already holds must schedule nothing: the ConPTY
+/// sidecar review pinned at 83dbcd3 found that any live resize call is unsafe while a shell is
+/// still initializing (PSReadLine caches its own cursor anchor, and a reflow invalidates it — a
+/// defect in conhost itself, not the sidecar), and a call whose columns and rows do not move is
+/// never the resize that opens that window; it is only ever a spurious repeat of one already
+/// applied. Startup's post-`ShowWindow` DPI reconciliation, a live OS `Resized`, and a divider drag
+/// (`commit_seat_geometry`) all solve through this one point, so a clean, same-DPI session restore
+/// — whose spawn-time grid already *is* the seat's resolved grid — reaches zero ConPTY resize
+/// requests after spawn. Returns whether the grid actually changed, so a call site can gate its own
+/// terminal-actor resize on the identical decision.
+fn coalesce_pty_resize_on_grid_change(
+    pending: &mut Option<PendingPtyResize>,
+    next_grid: GridSize,
+    current_grid: GridSize,
+    physical: PhysicalSize<u32>,
+    observed_at: Instant,
+) -> bool {
+    let changed = next_grid != current_grid;
+    if changed {
+        coalesce_pty_resize(pending, next_grid, physical, observed_at);
+    }
+    changed
+}
+
 #[derive(Clone)]
 enum MouseRoute {
     Local(SelectionDrag),
@@ -1213,13 +1239,13 @@ impl Runtime {
         self.renderer.set_peek_overlay(None);
         let next_grid = self.resolve_seat_layout(render_physical);
         let now = Instant::now();
-        coalesce_pty_resize(
+        if coalesce_pty_resize_on_grid_change(
             &mut self.pending_pty_resize,
             next_grid,
+            self.grid,
             terminal_pty_physical(&self.renderer, render_physical),
             now,
-        );
-        if next_grid != self.grid {
+        ) {
             self.session
                 .resize(
                     nonzero_u32(next_grid.columns.get()),
@@ -2891,13 +2917,16 @@ impl Runtime {
         // (red line L10); the solver itself takes no part in the debounce.
         let next_grid = self.resolve_seat_layout(render_physical);
         let observed_at = Instant::now();
-        coalesce_pty_resize(
+        // A `Resized` that settles back onto the grid ConPTY already has — the common shape of
+        // the very first delivery after a clean, same-DPI session restore — must not schedule a
+        // real ConPTY resize at all; see `coalesce_pty_resize_on_grid_change`.
+        if coalesce_pty_resize_on_grid_change(
             &mut self.pending_pty_resize,
             next_grid,
+            self.grid,
             terminal_pty_physical(&self.renderer, render_physical),
             observed_at,
-        );
-        if next_grid != self.grid {
+        ) {
             self.session
                 .resize(
                     nonzero_u32(next_grid.columns.get()),
@@ -2968,7 +2997,13 @@ impl Runtime {
             self.refresh_work_area();
             self.apply_window_min_inner_size();
             let next_grid = self.resolve_seat_layout(render_physical);
-            if next_grid != self.grid {
+            if coalesce_pty_resize_on_grid_change(
+                &mut self.pending_pty_resize,
+                next_grid,
+                self.grid,
+                terminal_pty_physical(&self.renderer, render_physical),
+                Instant::now(),
+            ) {
                 self.session
                     .resize(
                         nonzero_u32(next_grid.columns.get()),
@@ -2976,12 +3011,6 @@ impl Runtime {
                     )
                     .context("rebuild terminal grid after authoritative DPI correction")?;
                 self.grid = next_grid;
-                coalesce_pty_resize(
-                    &mut self.pending_pty_resize,
-                    next_grid,
-                    terminal_pty_physical(&self.renderer, render_physical),
-                    Instant::now(),
-                );
             }
         }
         self.sync_math_layout_key();
@@ -4957,6 +4986,132 @@ mod tests {
         assert_eq!(committed.grid, final_grid);
         assert_eq!(committed.physical, PhysicalSize::new(1440, 900));
         assert!(pending.is_none());
+    }
+
+    /// The pure half of `solve_seats` (main.rs's own free function), parameterized on a
+    /// `dpi_milli` instead of `&Renderer` so a startup scenario can be solved without a live GPU
+    /// device. Numerically identical to what `Runtime::create` and `resolve_seat_layout` do with
+    /// an actual renderer in hand — see `solve_seats`'s own body.
+    fn solved_terminal_seat(
+        seats: &seats::Seats,
+        dpi_milli: u32,
+        render_physical: PhysicalSize<u32>,
+    ) -> bt_render::SeatViewport {
+        let metrics = seats::seat_metrics(dpi_milli);
+        let viewport = seats::logical_viewport(
+            render_physical.width,
+            render_physical.height,
+            seats::scale_ppm(dpi_milli),
+        );
+        let layout = seats
+            .solve(viewport, &metrics)
+            .unwrap_or_else(|_| seats::fit_what_fits(seats, viewport, &metrics));
+        seats::seat_viewport(&layout, seats.terminal()).unwrap_or(bt_render::SeatViewport::whole(
+            render_physical.width.max(1),
+            render_physical.height.max(1),
+        ))
+    }
+
+    /// PIN (startup order): a session restore with a preview seat open must spawn ConPTY at the
+    /// seat's own grid and ask it for nothing more.
+    ///
+    /// `Runtime::create` resolves the seat layout (`seats::Seats::from_persisted` -> `solve_seats`)
+    /// *before* `PtySession::spawn_default`, and seeds `self.grid` to that same solve's grid. §4.2
+    /// says solve is pure, so the very first re-solve after `ShowWindow`
+    /// (`reconcile_authoritative_dpi`) — run against the identical tree and an identical,
+    /// same-DPI viewport — reproduces the identical seat rectangle, and therefore the identical
+    /// `GridSize`. `coalesce_pty_resize_on_grid_change` is the single point every later solve
+    /// (a live OS `Resized`, a divider drag, a DPI reconciliation) funnels through; fed the exact
+    /// pair a clean restore produces, it must schedule nothing.
+    #[test]
+    fn a_restored_split_tree_reaches_zero_pty_resize_requests_after_a_matching_dpi_spawn() {
+        // The shape a preview-narrowed terminal round-trips to `session.json` as: a row split,
+        // the terminal first, a pinned preview second (`seats.rs`'s `LeafNodeV1::Preview` docs).
+        let node = bt_persist::LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+            dir: bt_persist::SplitDirV1::Row,
+            ratio: 700_000,
+            children: [
+                Box::new(bt_persist::LayoutNodeV1::Leaf(
+                    bt_persist::LeafNodeV1::Term(bt_persist::TermLeafV1 {
+                        profile_id: "pwsh.exe".to_owned(),
+                        cwd: String::new(),
+                        manual_name: None,
+                    }),
+                )),
+                Box::new(bt_persist::LayoutNodeV1::Leaf(
+                    bt_persist::LeafNodeV1::Preview(bt_persist::PreviewLeafV1 { pinned: true }),
+                )),
+            ],
+        });
+        let seats = seats::Seats::from_persisted(&node).expect("the tree carries a terminal leaf");
+        let dpi_milli = 1_000_u32; // the restored session's recorded DPI equals the monitor's at show
+        let render_physical = PhysicalSize::new(1600, 900);
+
+        // The spawn-time solve (before `PtySession::spawn_default`) and the post-`ShowWindow`
+        // re-solve, run back to back exactly as startup does.
+        let spawn_rect = solved_terminal_seat(&seats, dpi_milli, render_physical);
+        let resolved_rect = solved_terminal_seat(&seats, dpi_milli, render_physical);
+        assert_eq!(
+            spawn_rect, resolved_rect,
+            "an unchanged tree against an unchanged viewport must solve to the same seat twice"
+        );
+        assert!(
+            spawn_rect.width < render_physical.width,
+            "the preview seat must actually narrow the terminal, or this pin proves nothing"
+        );
+
+        // `CellMetrics::grid_for_pixels` is a pure function of the seat rectangle and the
+        // (unchanged) font metrics, so an identical rectangle answers an identical `GridSize` on
+        // both solves — that arithmetic is already pinned in `bt-render`. What this test pins is
+        // the gate downstream of it, fed the one pair of grids a clean restore ever produces.
+        let seat_grid = GridSize {
+            columns: std::num::NonZeroU16::new(100).unwrap(),
+            rows: std::num::NonZeroU16::new(30).unwrap(),
+        };
+        let physical = PhysicalSize::new(spawn_rect.width, spawn_rect.height);
+
+        // `Runtime::create` seeds `self.grid` to exactly the spawn-time grid; the first
+        // post-show solve compares against that same value.
+        let current_grid = seat_grid;
+        let mut pending = None;
+        let now = Instant::now();
+        let scheduled = coalesce_pty_resize_on_grid_change(
+            &mut pending,
+            seat_grid,
+            current_grid,
+            physical,
+            now,
+        );
+        assert!(
+            !scheduled,
+            "the first post-spawn solve answers the exact grid the PTY was spawned with"
+        );
+        assert!(
+            take_due_pty_resize(&mut pending, now + WINDOW_RESIZE_QUIET).is_none(),
+            "spawn size already equals the seat grid; a matching-DPI restore must schedule zero \
+             ConPTY resizes"
+        );
+    }
+
+    /// RED-CHECK for the pin above: proves it is not vacuous. The pre-fix `resize()` and
+    /// `commit_seat_geometry()` called `coalesce_pty_resize` unconditionally — the old
+    /// spawn-then-resize shape this pin exists to forbid — which schedules a real ConPTY resize
+    /// even when the grid the PTY was spawned with never moved. Restoring that unconditional call
+    /// at the two real call sites is exactly what turns the pin above red.
+    #[test]
+    fn the_old_unconditional_coalesce_would_have_scheduled_a_resize_for_an_unchanged_grid() {
+        let grid = GridSize {
+            columns: std::num::NonZeroU16::new(100).unwrap(),
+            rows: std::num::NonZeroU16::new(30).unwrap(),
+        };
+        let mut pending = None;
+        let now = Instant::now();
+        // The old shape: no `next_grid != current_grid` gate at all.
+        coalesce_pty_resize(&mut pending, grid, PhysicalSize::new(1000, 700), now);
+        assert!(
+            take_due_pty_resize(&mut pending, now + WINDOW_RESIZE_QUIET).is_some(),
+            "an unconditional coalesce call schedules a resize even for an unchanged grid"
+        );
     }
 
     #[test]
