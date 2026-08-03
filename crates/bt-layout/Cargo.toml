@@ -1,0 +1,15 @@
+[package]
+name = "bt-layout"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# No dependencies, by ruling. Red line L7 (M2-layout-solver-spec §4.1) forbids
+# bt-viewport / bt-doc / bt-term / bt-render; nothing else is needed either,
+# because every number here is integer subpixel arithmetic (D3) and the subpixel
+# constant is self-held (§2.5).
+[dependencies]
+
+[lints]
+workspace = true

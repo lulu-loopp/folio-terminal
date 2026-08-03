@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "window": {
+    "bounds": {
+      "x": -100,
+      "y": 50,
+      "width": 1920,
+      "height": 1040
+    },
+    "dpi": 144,
+    "maximized": true,
+    "monitor_id": "\\\\.\\DISPLAY2"
+  },
+  "tabs": [
+    {
+      "root": {
+        "dir": "row",
+        "ratio": 350000,
+        "children": [
+          {
+            "kind": "files",
+            "root": "C:\\Users\\dev\\project",
+            "open": [
+              "node-12",
+              "node-45"
+            ],
+            "sel": "node-45",
+            "width": 240
+          },
+          {
+            "dir": "col",
+            "ratio": 600000,
+            "children": [
+              {
+                "kind": "term",
+                "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                "cwd": "C:\\Users\\dev\\project",
+                "manual_name": "build"
+              },
+              {
+                "kind": "term",
+                "profile_id": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "cwd": "C:\\Users\\dev",
+                "manual_name": null
+              }
+            ]
+          }
+        ]
+      },
+      "pinned": true,
+      "focused_leaf": "leaf-term-build"
+    },
+    {
+      "root": {
+        "kind": "term",
+        "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        "cwd": "C:\\Users\\dev\\scratch",
+        "manual_name": null
+      },
+      "pinned": false,
+      "focused_leaf": "leaf-term-scratch"
+    }
+  ],
+  "active_tab": 1,
+  "recent": [
+    {
+      "key": "C:\\Program Files\\PowerShell\\7\\pwsh.exe|C:\\Users\\dev\\notes|",
+      "seed": {
+        "kind": "term",
+        "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        "cwd": "C:\\Users\\dev\\notes",
+        "manual_name": null
+      },
+      "timestamp": "2026-08-02T21:14:00Z"
+    },
+    {
+      "key": "|C:\\Users\\dev\\docs|reference",
+      "seed": {
+        "kind": "files",
+        "root": "C:\\Users\\dev\\docs"
+      },
+      "timestamp": "2026-08-01T09:30:00Z"
+    }
+  ]
+}

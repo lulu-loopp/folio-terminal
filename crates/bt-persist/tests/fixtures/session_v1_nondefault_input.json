@@ -1,0 +1,88 @@
+{
+  "unrecognized_top_level_field": "a third-party tool or a future BetterTerminal wrote this",
+  "active_tab": 1,
+  "schema_version": 1,
+  "recent": [
+    {
+      "timestamp": "2026-08-02T21:14:00Z",
+      "seed": {
+        "manual_name": null,
+        "cwd": "C:\\Users\\dev\\notes",
+        "kind": "term",
+        "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        "unrecognized_seed_field": true
+      },
+      "key": "C:\\Program Files\\PowerShell\\7\\pwsh.exe|C:\\Users\\dev\\notes|"
+    },
+    {
+      "seed": {
+        "kind": "files",
+        "root": "C:\\Users\\dev\\docs"
+      },
+      "unrecognized_recent_entry_field": [1, 2, 3],
+      "key": "|C:\\Users\\dev\\docs|reference",
+      "timestamp": "2026-08-01T09:30:00Z"
+    }
+  ],
+  "tabs": [
+    {
+      "focused_leaf": "leaf-term-build",
+      "root": {
+        "children": [
+          {
+            "width": 240,
+            "sel": "node-45",
+            "unrecognized_leaf_field": "should vanish on round trip",
+            "kind": "files",
+            "open": ["node-12", "node-45"],
+            "root": "C:\\Users\\dev\\project"
+          },
+          {
+            "children": [
+              {
+                "manual_name": "build",
+                "cwd": "C:\\Users\\dev\\project",
+                "kind": "term",
+                "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+              },
+              {
+                "kind": "term",
+                "profile_id": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "manual_name": null,
+                "cwd": "C:\\Users\\dev"
+              }
+            ],
+            "ratio": 600000,
+            "dir": "col"
+          }
+        ],
+        "ratio": 350000,
+        "unrecognized_split_field": "vendor extension nobody asked for",
+        "dir": "row"
+      },
+      "pinned": true
+    },
+    {
+      "pinned": false,
+      "root": {
+        "kind": "term",
+        "cwd": "C:\\Users\\dev\\scratch",
+        "manual_name": null,
+        "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe"
+      },
+      "focused_leaf": "leaf-term-scratch"
+    }
+  ],
+  "window": {
+    "maximized": true,
+    "unrecognized_window_field": {"nested": "junk"},
+    "dpi": 144,
+    "bounds": {
+      "height": 1040,
+      "width": 1920,
+      "y": 50,
+      "x": -100
+    },
+    "monitor_id": "\\\\.\\DISPLAY2"
+  }
+}

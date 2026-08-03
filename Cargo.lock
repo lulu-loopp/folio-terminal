@@ -298,6 +298,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-layout"
+version = "0.0.0"
+
+[[package]]
 name = "bt-math"
 version = "0.0.0"
 dependencies = [
@@ -312,6 +316,15 @@ dependencies = [
  "typst-layout",
  "typst-library",
  "typst-svg",
+]
+
+[[package]]
+name = "bt-persist"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
