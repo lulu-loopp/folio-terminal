@@ -1,4 +1,4 @@
-# OSC 133 shell integration
+# OSC 133 + OSC 7 shell integration
 
 BetterTerminal treats FinalTerm Command Status (FTCS) `OSC 133` markers as the authoritative
 prompt/input/output boundary for each terminal screen that emits them:
@@ -18,6 +18,32 @@ Region endpoints use BetterTerminal content anchors. Normal scrolling migrates t
 live grid to staging to transcript. Before a resize, a live region also captures its exact displayed
 command text; after vendor reflow, that content witness re-seats its endpoints on the new physical
 rows. Resize therefore changes only projection, not input/output ownership.
+
+## OSC 7: the authoritative working directory
+
+The same script also emits `OSC 7` once per prompt, immediately before `133;A`:
+
+```
+ESC ] 7 ; file:///<percent-encoded $PWD> BEL
+```
+
+This is the standard Windows Terminal / iTerm convention and it is the **only** way BetterTerminal
+learns where a session's output is being printed from. It exists to resolve relative image path
+text (`./shot.png`, `../a/b.svg`) — see `docs/M2-preview-matrix-and-verbs.md` §6.3. A session that
+never receives OSC 7 leaves relative paths undetected rather than guessing a directory, exactly as
+a screen that never emits OSC 133 keeps the cursor/WRAPLINE heuristics.
+
+The authority is empty (the file-URI spelling of "this host"); BetterTerminal also accepts
+`localhost` and this machine's own name, and rejects every other authority as a remote share. The
+path is percent-encoded minimally: UTF-8 byte by byte, keeping RFC 3986 unreserved characters,
+sub-delims, `:`, `@` and `/`. The directory is stored per session and survives primary/alternate
+screen switches, because a working directory belongs to the shell process and the full-screen TUI
+it launched inherits it.
+
+A location on a non-filesystem provider (`HKLM:`, `Cert:`, …) emits an **empty** report, which
+retracts the previous directory. An unresolvable report — a remote share, a malformed URI, a
+truncated one — clears the stored directory for the same reason: leaving a stale directory to
+answer for a place the shell has left is the guess the ruling forbids.
 
 ## PowerShell 7 and Windows PowerShell 5.1
 

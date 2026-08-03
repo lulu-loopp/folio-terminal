@@ -4,7 +4,7 @@ use std::{
     fs::File,
     io::{Cursor, Read},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -20,6 +20,11 @@ pub(crate) const MAX_INLINE_IMAGE_BASE64_BYTES: usize = MAX_INLINE_IMAGE_BYTES.d
 /// Keep a compressed image from expanding into an unbounded CPU/GPU artifact.
 pub const MAX_INLINE_IMAGE_RGBA_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_OSC_1337_FILE_HEADER_BYTES: usize = 4 * 1024;
+/// Bound on the `file://` URI an OSC 7 report may carry. A Windows extended-length path tops out
+/// at 32767 UTF-16 units, but a working directory that percent-encodes past this is not a
+/// directory this terminal will resolve relative text against; the report is dropped whole rather
+/// than truncated into a different directory.
+const MAX_OSC_7_URI_BYTES: usize = 4 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InlineImageTask {
@@ -334,18 +339,29 @@ pub fn normalized_local_image_path_key(path: &Path) -> String {
 }
 
 fn is_admissible_local_image_path(path: &Path) -> bool {
+    is_local_absolute_path(path) && has_admissible_image_extension(path)
+}
+
+/// The shape gate every local reference shares: drive-rooted and nameable by this filesystem.
+///
+/// It says nothing about *what* the path names, which is the point — a working directory reported
+/// over OSC 7 is a directory and has no extension to allow, while an image must additionally clear
+/// `has_admissible_image_extension`. Keeping the two halves apart is what lets one URI decoder
+/// serve both without either shape inheriting the other's privileges.
+fn is_local_absolute_path(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
-    is_windows_drive_absolute(&text)
-        && !text.contains('\0')
-        && path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| {
-                matches!(
-                    extension.to_ascii_lowercase().as_str(),
-                    "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
-                )
-            })
+    is_windows_drive_absolute(&text) && !text.contains('\0')
+}
+
+fn has_admissible_image_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"
+            )
+        })
 }
 
 fn is_windows_drive_absolute(text: &str) -> bool {
@@ -411,6 +427,161 @@ pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandi
         };
     }
     candidates
+}
+
+/// Allocation-light lexical scan for `./`- and `../`-prefixed relative image references.
+///
+/// The returned `path` is the candidate text **exactly as printed** and is deliberately *not* a
+/// path yet: a relative reference names nothing until it is joined to a directory, and this
+/// terminal only ever learns a directory by being told one (OSC 7). `resolve_relative_image_path`
+/// is the join; `detect_inline_image_candidates` is where the two meet.
+///
+/// Scope is `./` and `../` only (user ruling 2026-08-03). A bare `dir/x.png` is not a candidate:
+/// it is indistinguishable from ordinary prose and from every other word with a dot in it, and the
+/// false-positive surface is the whole reason the absolute scan requires a drive letter. Both
+/// separators open a candidate, because `.\x.png` is simply how Windows spells `./x.png` and is
+/// what PowerShell completion prints.
+///
+/// Boundaries are the absolute scan's boundaries, unchanged: an unquoted candidate opens at a
+/// token boundary (`candidate_start_boundary`) and closes at whitespace or a closing delimiter
+/// (`is_path_terminator_char`); a quoted one may contain both and must close its quote. The
+/// extension allowlist is applied here, before any join, so a `./notes.txt` never becomes a
+/// resolution question at all.
+pub fn detect_relative_image_path_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
+    let bytes = text.as_bytes();
+    let mut candidates = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        let quoted = bytes[cursor] == b'"';
+        let start = if quoted {
+            cursor.saturating_add(1)
+        } else {
+            cursor
+        };
+        if !is_relative_prefix_at(bytes, start)
+            || (!quoted && !candidate_start_boundary(text, start))
+        {
+            cursor += 1;
+            continue;
+        }
+        let end = if quoted {
+            bytes[start..]
+                .iter()
+                .position(|byte| *byte == b'"')
+                .map(|offset| start + offset)
+        } else {
+            Some(token_end(text, start))
+        };
+        let Some(end) = end.filter(|end| *end > start) else {
+            cursor += 1;
+            continue;
+        };
+        let candidate = &text[start..end];
+        if has_admissible_image_extension(Path::new(candidate)) {
+            candidates.push(LocalImagePathCandidate {
+                path: candidate.to_owned(),
+                byte_start: start,
+                byte_end: end,
+            });
+        }
+        cursor = if quoted {
+            end.saturating_add(1)
+        } else {
+            end.max(cursor.saturating_add(1))
+        };
+    }
+    candidates
+}
+
+/// A `.` or `..` component followed by a separator, and nothing else.
+fn is_relative_prefix_at(bytes: &[u8], start: usize) -> bool {
+    if bytes.get(start) != Some(&b'.') {
+        return false;
+    }
+    let after_dots = if bytes.get(start + 1) == Some(&b'.') {
+        start + 2
+    } else {
+        start + 1
+    };
+    bytes
+        .get(after_dots)
+        .is_some_and(|byte| matches!(*byte, b'/' | b'\\'))
+}
+
+/// Join a relative candidate onto an authoritative working directory and normalize it lexically.
+///
+/// Lexical by construction: `..` pops the component to its left instead of asking the filesystem
+/// what a symlink underneath it resolves to. That is exactly what keeps this on the event thread —
+/// existence, file kind, size and decode stay worker-only, precisely as they are for a printed
+/// absolute path. The result meets the same `is_admissible_local_image_path` gate every other
+/// shape meets, so resolution widens how a file may be *named* and never what may be previewed.
+///
+/// `..` that would climb past the drive root names nothing a filesystem can hold, and a join that
+/// lands on the bare drive root names a directory rather than a file; both are simply not
+/// candidates.
+pub fn resolve_relative_image_path(working_directory: &Path, relative: &str) -> Option<PathBuf> {
+    if !is_local_absolute_path(working_directory) {
+        return None;
+    }
+    let base = working_directory.as_os_str().to_str()?;
+    let (drive, rest) = base.split_at(2);
+    let mut components = Vec::new();
+    for component in rest.split(['/', '\\']).chain(relative.split(['/', '\\'])) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            named => components.push(named),
+        }
+    }
+    if components.is_empty() {
+        return None;
+    }
+    let mut native = String::from(drive);
+    for component in components {
+        native.push('\\');
+        native.push_str(component);
+    }
+    let path = PathBuf::from(native);
+    is_admissible_local_image_path(&path).then_some(path)
+}
+
+/// Every image reference one line of text offers **inline admission**: native drive-rooted paths,
+/// plus `./`/`../` relative paths resolved against `working_directory`.
+///
+/// `working_directory` is `None` for any session whose shell has never reported one over OSC 7,
+/// and then relative text yields no candidates at all. That is the ruling, not a limitation to be
+/// worked around: a relative path without an authoritative directory is a guess, and this terminal
+/// does not guess where a line of text was printed from.
+pub fn detect_inline_image_candidates(
+    text: &str,
+    working_directory: Option<&Path>,
+) -> Vec<LocalImagePathCandidate> {
+    let mut candidates = detect_local_image_path_candidates(text);
+    if let Some(working_directory) = working_directory {
+        candidates.extend(resolved_relative_image_candidates(text, working_directory));
+    }
+    candidates
+}
+
+/// The relative candidates of one line, each carrying its **resolved** absolute path under the
+/// span of the relative text that must be hovered — the convention `detect_local_image_uri_candidates`
+/// already established for a reference whose printed form is not its path.
+fn resolved_relative_image_candidates(
+    text: &str,
+    working_directory: &Path,
+) -> Vec<LocalImagePathCandidate> {
+    detect_relative_image_path_candidates(text)
+        .into_iter()
+        .filter_map(|candidate| {
+            let path = resolve_relative_image_path(working_directory, &candidate.path)?;
+            Some(LocalImagePathCandidate {
+                path: path.to_string_lossy().into_owned(),
+                ..candidate
+            })
+        })
+        .collect()
 }
 
 fn is_drive_prefix_at(bytes: &[u8], start: usize) -> bool {
@@ -533,12 +704,18 @@ pub fn detect_local_image_uri_candidates(text: &str) -> Vec<LocalImagePathCandid
     candidates
 }
 
-/// Every image one line of text offers the hover peek: native drive-rooted paths and `file://`
-/// URIs. Inline admission scans only the former, so this is the peek's own reading of the line.
-/// The two shapes cannot overlap — a URI's embedded `D:/…` is preceded by `/`, which
-/// `is_path_tail_char` rejects as a path opening.
-pub fn detect_peek_image_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
-    let mut candidates = detect_local_image_path_candidates(text);
+/// Every image one line of text offers the hover peek: everything inline admission reads
+/// (`detect_inline_image_candidates` — native drive-rooted paths and resolved relative paths) plus
+/// `file://` URIs, which only ever peek.
+///
+/// No two shapes can claim the same text. A URI's embedded `D:/…` and its `./…`-looking interior
+/// are both preceded by `/`, which `is_path_tail_char` rejects as an opening; a native path's own
+/// `\.\` is preceded by `\` for the same reason.
+pub fn detect_peek_image_candidates(
+    text: &str,
+    working_directory: Option<&Path>,
+) -> Vec<LocalImagePathCandidate> {
+    let mut candidates = detect_inline_image_candidates(text, working_directory);
     candidates.extend(detect_local_image_uri_candidates(text));
     candidates
 }
@@ -602,26 +779,70 @@ fn is_uri_byte(byte: u8) -> bool {
 /// (`is_admissible_local_image_path`: drive-rooted and an allowlisted image extension), so no
 /// shape buys a privilege another lacks. Existence, size, and decode stay worker-side as always.
 ///
+/// A peeked image URI is text some process printed into the flow, so its authority must be empty
+/// or `localhost` and nothing else — this machine's hostname is deliberately not consulted here.
+/// A trailing slash names a directory, which is never an image.
+pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
+    decode_file_uri(uri, None, TrailingSlash::Reject)
+        .filter(|path| has_admissible_image_extension(path))
+}
+
+/// Decode a `file://` URI to the local path it names, applying only the shape gate every local
+/// reference shares (`is_local_absolute_path`) and no extension allowlist.
+///
+/// This is the URI machinery itself, shared by the image peek above and by the OSC 7 working
+/// directory — a directory has no extension, so the image gate must not be wired into the decoder.
+///
 /// Resolution is per URI segment: each is percent-decoded on its own and the results are joined
 /// with `\`. That is what RFC 3986 means — a `%2F` inside a segment decodes to a literal `/` in a
 /// filename, never to a separator — and it costs nothing, since such a name simply fails to exist.
+/// A single **trailing** empty segment is a directory's trailing slash rather than an empty name
+/// (`file:///D:/src/` and `file:///D:/` both name directories); an interior one (`file:///D://a`)
+/// stays rejected.
 ///
-/// A non-empty authority other than `localhost` is a remote share (`file://host/share/a.png`) and
-/// is rejected: this is the *local* image peek, and a UNC fetch is not a hover's business.
-pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
+/// A non-empty authority is accepted only when it is `localhost` or `local_host`, this machine's
+/// own name — the two spellings of "this host" that a file URI has. Anything else is a remote
+/// share (`file://server/share/a.png`), which no local read may follow. Callers that must not
+/// honour a hostname at all pass `None`.
+pub fn file_uri_to_local_path(uri: &str, local_host: Option<&str>) -> Option<PathBuf> {
+    decode_file_uri(uri, local_host, TrailingSlash::Directory)
+}
+
+/// Whether a trailing `/` is a directory's own slash or an empty final name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TrailingSlash {
+    Directory,
+    Reject,
+}
+
+fn decode_file_uri(
+    uri: &str,
+    local_host: Option<&str>,
+    trailing_slash: TrailingSlash,
+) -> Option<PathBuf> {
     let rest = uri
         .get(..7)
         .filter(|scheme| scheme.eq_ignore_ascii_case("file://"))
         .map(|scheme| &uri[scheme.len()..])?;
     let (authority, path) = rest.split_at(rest.find('/')?);
-    if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
+    let authority_is_this_host = authority.is_empty()
+        || authority.eq_ignore_ascii_case("localhost")
+        || local_host.is_some_and(|host| authority.eq_ignore_ascii_case(host));
+    if !authority_is_this_host {
         return None;
     }
     // Query and fragment are not part of the path; a filename containing `?` or `#` must have
     // percent-encoded them.
     let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+    let mut segments = path.split('/').skip(1).collect::<Vec<_>>();
+    if trailing_slash == TrailingSlash::Directory
+        && segments.len() > 1
+        && segments.last() == Some(&"")
+    {
+        segments.pop();
+    }
     let mut native = String::new();
-    for segment in path.split('/').skip(1) {
+    for segment in segments {
         let decoded = percent_decode(segment)?;
         if decoded.is_empty() {
             return None;
@@ -631,8 +852,27 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
         }
         native.push_str(&decoded);
     }
+    // `file:///D:/` names the drive root: the separator that makes it a root belongs to the path.
+    if native.len() == 2 && native.ends_with(':') {
+        native.push('\\');
+    }
     let path = PathBuf::from(native);
-    is_admissible_local_image_path(&path).then_some(path)
+    is_local_absolute_path(&path).then_some(path)
+}
+
+/// This machine's name — the one authority a `file://` URI may carry besides none and `localhost`.
+///
+/// Read once: a machine does not rename itself inside one terminal session, and the OSC 7 path
+/// runs on the event thread.
+pub fn local_host_name() -> Option<&'static str> {
+    static LOCAL_HOST: OnceLock<Option<String>> = OnceLock::new();
+    LOCAL_HOST
+        .get_or_init(|| {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|name| !name.is_empty())
+        })
+        .as_deref()
 }
 
 /// Percent-decode one URI segment. `None` when an escape is malformed, the result is not UTF-8,
@@ -662,6 +902,10 @@ pub(crate) enum InlineImageStreamAction {
     Bytes(Vec<u8>),
     Image(Vec<u8>),
     ShellIntegration(ShellIntegrationMarker),
+    /// One OSC 7 report: the `file://` URI bytes the shell named its working directory with. An
+    /// empty payload is the report "I no longer have one to give", which is a fact of its own and
+    /// therefore still an action.
+    WorkingDirectory(Vec<u8>),
     TooLarge,
 }
 
@@ -685,6 +929,8 @@ enum StreamState {
     AfterInlineEscape,
     ShellIntegration { payload: Vec<u8>, oversized: bool },
     AfterShellIntegrationEscape { payload: Vec<u8>, oversized: bool },
+    WorkingDirectory { payload: Vec<u8>, oversized: bool },
+    AfterWorkingDirectoryEscape { payload: Vec<u8>, oversized: bool },
 }
 
 #[derive(Debug, Default)]
@@ -742,10 +988,15 @@ fn parse_inline_file_header(header: &[u8]) -> Option<bool> {
 
 /// Streaming OSC prefilter at the existing adapter parser seam.
 ///
-/// Unknown OSC 1337 commands are swallowed by `vte::ansi::Performer` before they reach
-/// `alacritty_terminal::Term`. Intercepting only the exact `OSC 1337;File=...` prefix here keeps all
-/// other terminal bytes on their unchanged path and, unlike a second unbounded `vte::Parser`, can
-/// stop retaining an oversized base64 payload before its terminator arrives.
+/// The OSC sequences BetterTerminal gives meaning to — `1337;File=` (inline image), `133;` (shell
+/// integration) and `7;` (working directory) — are swallowed by `vte::ansi::Performer` before they
+/// reach `alacritty_terminal::Term`, so they are recognized here instead. This is the whole of the
+/// vendor face for all three: nothing upstream is patched.
+///
+/// Recognition is by exact prefix, and every byte of every other sequence stays on its unchanged
+/// path — a prefix that turns out not to match (`OSC 777`) is emitted whole the moment it is ruled
+/// out. Unlike a second unbounded `vte::Parser`, this can also stop retaining an oversized payload
+/// before its terminator arrives.
 #[derive(Debug)]
 pub(crate) struct Osc1337Scanner {
     state: StreamState,
@@ -793,13 +1044,22 @@ impl Osc1337Scanner {
                 StreamState::OscPrefix { mut held } => {
                     held.push(byte);
                     let body = &held[2..];
-                    if b"1337;".starts_with(body) || b"133;".starts_with(body) {
+                    if b"1337;".starts_with(body)
+                        || b"133;".starts_with(body)
+                        || b"7;".starts_with(body)
+                    {
                         if body == b"1337;" {
                             flush_bytes(&mut actions, &mut ordinary);
                             StreamState::InlineFile(InlineFileCapture::default())
                         } else if body == b"133;" {
                             flush_bytes(&mut actions, &mut ordinary);
                             StreamState::ShellIntegration {
+                                payload: Vec::new(),
+                                oversized: false,
+                            }
+                        } else if body == b"7;" {
+                            flush_bytes(&mut actions, &mut ordinary);
+                            StreamState::WorkingDirectory {
                                 payload: Vec::new(),
                                 oversized: false,
                             }
@@ -906,11 +1166,65 @@ impl Osc1337Scanner {
                         StreamState::Ground
                     }
                 }
+                StreamState::WorkingDirectory {
+                    mut payload,
+                    mut oversized,
+                } => match byte {
+                    0x07 => {
+                        finish_working_directory(&mut actions, payload, oversized);
+                        StreamState::Ground
+                    }
+                    0x1b => StreamState::AfterWorkingDirectoryEscape { payload, oversized },
+                    0x18 | 0x1a => StreamState::Ground,
+                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {
+                        StreamState::WorkingDirectory { payload, oversized }
+                    }
+                    _ => {
+                        if payload.len() < MAX_OSC_7_URI_BYTES {
+                            payload.push(byte);
+                        } else {
+                            oversized = true;
+                        }
+                        StreamState::WorkingDirectory { payload, oversized }
+                    }
+                },
+                StreamState::AfterWorkingDirectoryEscape { payload, oversized } => {
+                    if byte == b'\\' {
+                        finish_working_directory(&mut actions, payload, oversized);
+                        StreamState::Ground
+                    } else if byte == b']' {
+                        StreamState::OscPrefix {
+                            held: vec![0x1b, b']'],
+                        }
+                    } else if byte == 0x1b {
+                        StreamState::AfterWorkingDirectoryEscape { payload, oversized }
+                    } else {
+                        StreamState::Ground
+                    }
+                }
             };
         }
         flush_bytes(&mut actions, &mut ordinary);
         actions
     }
+}
+
+/// Report one terminated OSC 7.
+///
+/// A payload we had to truncate is reported as *no* directory rather than as the prefix we
+/// happened to keep: the shell said it moved, and half a URI is a different directory, not a
+/// smaller one. The session's response to an unresolvable report is to forget — see
+/// `DualPlaneSession::set_reported_working_directory`.
+fn finish_working_directory(
+    actions: &mut Vec<InlineImageStreamAction>,
+    payload: Vec<u8>,
+    oversized: bool,
+) {
+    actions.push(InlineImageStreamAction::WorkingDirectory(if oversized {
+        Vec::new()
+    } else {
+        payload
+    }));
 }
 
 fn finish_shell_integration(
@@ -1313,9 +1627,250 @@ mod tests {
         // The two shapes never claim the same text: the `D:/…` inside a URI is not a native path.
         assert!(detect_local_image_path_candidates(text).is_empty());
         assert_eq!(
-            detect_peek_image_candidates(text).len(),
+            detect_peek_image_candidates(text, None).len(),
             2,
             "the peek reads one line once, through both shapes"
+        );
+    }
+
+    /// PIN (relative path ruling, 2026-08-03 (a)): OSC 7 is read off the byte stream at the same
+    /// prefilter seam OSC 133 and OSC 1337 are read at — reassembled across arbitrary chunk
+    /// boundaries, under either terminator, with the surrounding bytes untouched.
+    #[test]
+    fn osc_7_reports_its_working_directory_uri_across_chunks_and_both_terminators() {
+        let mut scanner = Osc1337Scanner::default();
+        let mut actions = Vec::new();
+        for chunk in [
+            b"before\x1b]".as_slice(),
+            b"7;file:///D:/a".as_slice(),
+            b"/b\x07mid\x1b]7;file:///D:/c\x1b".as_slice(),
+            b"\\after".as_slice(),
+        ] {
+            actions.extend(scanner.scan(chunk));
+        }
+        assert_eq!(
+            actions,
+            vec![
+                InlineImageStreamAction::Bytes(b"before".to_vec()),
+                InlineImageStreamAction::WorkingDirectory(b"file:///D:/a/b".to_vec()),
+                InlineImageStreamAction::Bytes(b"mid".to_vec()),
+                InlineImageStreamAction::WorkingDirectory(b"file:///D:/c".to_vec()),
+                InlineImageStreamAction::Bytes(b"after".to_vec()),
+            ]
+        );
+
+        // An empty report is the fact "no directory", and an oversized one is reported as the same
+        // fact rather than as the prefix that happened to fit.
+        let mut scanner = Osc1337Scanner::default();
+        let oversized = format!("\x1b]7;file:///D:/{}\x07", "a".repeat(MAX_OSC_7_URI_BYTES));
+        assert_eq!(
+            scanner.scan(b"\x1b]7;\x07"),
+            vec![InlineImageStreamAction::WorkingDirectory(Vec::new())]
+        );
+        assert_eq!(
+            scanner.scan(oversized.as_bytes()),
+            vec![InlineImageStreamAction::WorkingDirectory(Vec::new())]
+        );
+
+        // OSC 777 shares OSC 7's first byte and must still pass through untouched.
+        let mut scanner = Osc1337Scanner::default();
+        assert_eq!(
+            scanner.scan(b"\x1b]777;notify;hi\x07x"),
+            vec![InlineImageStreamAction::Bytes(
+                b"\x1b]777;notify;hi\x07x".to_vec()
+            )]
+        );
+    }
+
+    /// PIN (relative path ruling, 2026-08-03 (a)): the working directory rides the very same URI
+    /// decoder the image peek uses — percent decoding, authority rules, per-segment joining — with
+    /// the image extension allowlist deliberately not wired into it, because a directory has no
+    /// extension to allow.
+    #[test]
+    fn working_directory_uris_decode_without_the_image_extension_gate() {
+        for (uri, expected) in [
+            (
+                "file:///D:/Developer/BetterTerminal",
+                r"D:\Developer\BetterTerminal",
+            ),
+            // A trailing slash is how a URI names a directory, not an empty final segment.
+            ("file:///D:/Developer/", r"D:\Developer"),
+            ("file:///D:/", r"D:\"),
+            ("file:///D:/My%20Pictures", r"D:\My Pictures"),
+            ("file:///D:/%E5%9B%BE%20%E7%89%87", r"D:\图 片"),
+            ("file://localhost/D:/src", r"D:\src"),
+            ("FILE:///D:/src", r"D:\src"),
+        ] {
+            assert_eq!(
+                file_uri_to_local_path(uri, None),
+                Some(PathBuf::from(expected)),
+                "{uri:?}"
+            );
+        }
+        // This machine's own name is the third spelling of "this host"; any other authority is a
+        // remote share and names no directory this terminal may resolve against.
+        assert_eq!(
+            file_uri_to_local_path("file://MACHINE/D:/src", Some("machine")),
+            Some(PathBuf::from(r"D:\src"))
+        );
+        for rejected in [
+            "file://server/share/src",
+            "file://MACHINE/D:/src",
+            "file:///notadrive/src",
+            "file:///D://src",
+            "file:///D:/a%zz",
+            "file:///",
+            "",
+            "not a uri",
+        ] {
+            assert_eq!(file_uri_to_local_path(rejected, None), None, "{rejected:?}");
+        }
+        // The image peek keeps its own stricter reading: no hostname authority, and a trailing
+        // slash names a directory, which is never an image.
+        assert_eq!(
+            file_uri_to_local_image_path("file://MACHINE/D:/a.png"),
+            None
+        );
+        assert_eq!(file_uri_to_local_image_path("file:///D:/a.png/"), None);
+    }
+
+    /// PIN (relative path ruling, 2026-08-03): the relative scan is `./` and `../` only, keeps the
+    /// absolute scan's boundary rules exactly, and reports the text as printed — resolution is a
+    /// separate act that needs a directory this scan does not have.
+    #[test]
+    fn relative_image_candidates_are_dot_prefixed_only_and_report_their_printed_text() {
+        let text = r#"see ./a.png and ..\b\c.svg and "./my pic.webp" but not dir/d.png"#;
+        let candidates = detect_relative_image_path_candidates(text);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["./a.png", r"..\b\c.svg", "./my pic.webp"]
+        );
+        for candidate in &candidates[..2] {
+            assert_eq!(
+                &text[candidate.byte_start..candidate.byte_end],
+                candidate.path,
+                "an unquoted span addresses its own text exactly"
+            );
+        }
+        for rejected in [
+            // Bare relative paths are out of scope: they are indistinguishable from prose.
+            "dir/x.png",
+            "x.png",
+            // The extension allowlist is the same one every shape meets.
+            "./notes.txt",
+            "../a.bmp",
+            // A dot that continues a token opens nothing, which is what keeps the `./` inside a
+            // URI and the `\.\` inside a native path out of this scan.
+            "file:///D:/./a.png",
+            r"D:\a\.\b.png",
+            "v1../a.png",
+            ".../a.png",
+            // A quoted candidate must close its quote (the unquoted re-read that follows stops at
+            // the space, exactly as it does for an unterminated quoted absolute path).
+            r#""./unterminated image.png"#,
+        ] {
+            assert!(
+                detect_relative_image_path_candidates(rejected).is_empty(),
+                "unexpected relative candidate in {rejected:?}"
+            );
+        }
+        // The boundary generalization of 2026-08-02 applies unchanged: CJK prose and full-width
+        // brackets open and close a relative candidate just as they do an absolute one.
+        assert_eq!(
+            detect_relative_image_path_candidates("见图（./图片.png）")[0].path,
+            "./图片.png"
+        );
+    }
+
+    /// PIN (relative path ruling, 2026-08-03): resolution is a lexical join — no filesystem call,
+    /// `..` popping the component to its left — followed by the same admission gate every other
+    /// shape meets. A climb past the drive root names nothing.
+    #[test]
+    fn relative_candidates_resolve_lexically_against_a_working_directory() {
+        let cwd = PathBuf::from(r"D:\a\b");
+        for (relative, expected) in [
+            ("./x.png", r"D:\a\b\x.png"),
+            (r".\x.png", r"D:\a\b\x.png"),
+            ("./sub/x.png", r"D:\a\b\sub\x.png"),
+            ("../y.svg", r"D:\a\y.svg"),
+            ("../../z.PNG", r"D:\z.PNG"),
+            ("../b/./x.png", r"D:\a\b\x.png"),
+        ] {
+            assert_eq!(
+                resolve_relative_image_path(&cwd, relative),
+                Some(PathBuf::from(expected)),
+                "{relative:?}"
+            );
+        }
+        assert_eq!(
+            resolve_relative_image_path(Path::new(r"D:\"), "./x.png"),
+            Some(PathBuf::from(r"D:\x.png"))
+        );
+        for rejected in [
+            // Above the drive root there is no path to name.
+            "../../../x.png",
+            // The extension allowlist, applied to the result exactly as to printed text.
+            "./notes.txt",
+        ] {
+            assert_eq!(
+                resolve_relative_image_path(&cwd, rejected),
+                None,
+                "{rejected:?}"
+            );
+        }
+        // A directory that is not itself a drive-rooted local path is no authority at all.
+        assert_eq!(
+            resolve_relative_image_path(Path::new(r"\\server\share"), "./x.png"),
+            None
+        );
+    }
+
+    /// PIN (relative path ruling, 2026-08-03 (d), the honest-degradation pin): with no working
+    /// directory, relative text yields no candidate through any union layer. The same text with a
+    /// directory yields the resolved absolute path under the span of the relative text.
+    #[test]
+    fn relative_text_is_no_candidate_at_all_without_a_working_directory() {
+        let text = "see ./a.png and D:\\abs.png and file:///D:/uri.png";
+        let without = detect_peek_image_candidates(text, None);
+        assert_eq!(
+            without
+                .iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![r"D:\abs.png", r"D:\uri.png"],
+            "no directory, no relative candidate — and every other shape is untouched"
+        );
+        assert!(
+            detect_inline_image_candidates(text, None)
+                .iter()
+                .all(|candidate| candidate.path != "./a.png")
+        );
+
+        let cwd = PathBuf::from(r"D:\work");
+        let with = detect_inline_image_candidates(text, Some(&cwd));
+        assert_eq!(
+            with.iter()
+                .map(|candidate| candidate.path.as_str())
+                .collect::<Vec<_>>(),
+            vec![r"D:\abs.png", r"D:\work\a.png"],
+            "inline admission reads the native path and the resolved relative one"
+        );
+        let relative = with
+            .iter()
+            .find(|candidate| candidate.path == r"D:\work\a.png")
+            .unwrap();
+        assert_eq!(
+            &text[relative.byte_start..relative.byte_end],
+            "./a.png",
+            "the span covers the printed reference, the path is where it resolves"
+        );
+        assert_eq!(
+            detect_peek_image_candidates(text, Some(&cwd)).len(),
+            3,
+            "the peek reads the line once through all three shapes"
         );
     }
 
@@ -1492,23 +2047,26 @@ mod tests {
 
     #[test]
     fn osc_133_decisions_are_invariant_at_every_chunk_boundary() {
-        let stream = b"pre\x1b]133;A\x07\x1b]133;B\x1b\\cmd\x1b]133;C\x07out\x1b]133;D;0\x1b\\post";
-        fn normalized(chunks: &[&[u8]]) -> (Vec<u8>, Vec<ShellIntegrationMarker>) {
+        let stream = b"pre\x1b]7;file:///D:/w\x07\x1b]133;A\x07\x1b]133;B\x1b\\cmd\x1b]133;C\x07out\x1b]133;D;0\x1b\\post";
+        type Normalized = (Vec<u8>, Vec<ShellIntegrationMarker>, Vec<Vec<u8>>);
+        fn normalized(chunks: &[&[u8]]) -> Normalized {
             let mut scanner = Osc1337Scanner::default();
             let mut bytes = Vec::new();
             let mut markers = Vec::new();
+            let mut directories = Vec::new();
             for chunk in chunks {
                 for action in scanner.scan(chunk) {
                     match action {
                         InlineImageStreamAction::Bytes(part) => bytes.extend(part),
                         InlineImageStreamAction::ShellIntegration(marker) => markers.push(marker),
+                        InlineImageStreamAction::WorkingDirectory(uri) => directories.push(uri),
                         InlineImageStreamAction::Image(_) | InlineImageStreamAction::TooLarge => {
                             panic!("fixture contains no image")
                         }
                     }
                 }
             }
-            (bytes, markers)
+            (bytes, markers, directories)
         }
         let whole = normalized(&[stream]);
         for split in 0..=stream.len() {

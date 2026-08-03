@@ -73,7 +73,8 @@
 
 ## 6. 终端文本图片路径 v1 边界(2026-07-28)
 
-- 只检测盘符根绝对路径(`C:\...`及`C:/...`);UNC 与相对路径拒绝。未引号路径止于
+- 只检测盘符根绝对路径(`C:\...`及`C:/...`);UNC 与相对路径拒绝(相对路径部分见
+  §6.3 的 2026-08-03 修订:有 OSC 7 权威工作目录时 `./`、`../` 进检测,没有则仍全拒)。未引号路径止于
   空白或`]`,双引号路径允许空格且必须闭合。扩展名只准 png/jpg/jpeg/webp/gif/svg
   (svg 落地 2026-08-02:按 §2 静态光栅,decode worker 经 bt-math/resvg 以固有尺寸
   一用户单位=一像素光栅化;usvg 解析本身即有效性门,不加嗅探)。
@@ -193,6 +194,65 @@
   **`BT_PROBE_IMAGE_PATHS=1`** 两种模式下,release oracle 前后对拍 stdout+stderr **全部逐字节相同**
   (0/55 差异)。即录制语料里没有一条 CJK 邻接或括号包裹的路径,边界推广对既有录制无观测效应;
   peek 本就不在回放里跑。
+
+### 6.3 相对路径:只在 shell 报了工作目录时才认(用户裁决 2026-08-03,修订本节)
+
+§6 首句「相对路径拒绝」在此**部分翻案**:`./x.png`、`../a/b.svg` 这类相对引用**进检测**
+——peek 与内联**两条通路都进**——但**只在该会话有一个由 shell 经 OSC 7 报出的权威工作
+目录时**。没见过 OSC 7 的会话里,相对路径**仍然完全不被检测**。
+
+- **权威规则(裁决核心)**:工作目录的**唯一**来源是 OSC 7(`ESC ] 7 ; file://<authority>/<path> BEL`,
+  WT/iTerm 同款约定)。**绝不猜**:不拿进程启动目录兜底,不从提示符文本里刮路径,不做任何
+  启发式。这与 OSC 133 那一片是同一条诚实降级路线——没有权威来源就退回"什么都不做",
+  而不是退回"猜一个"。钉死于 `relative_path_text_is_inert_without_a_reported_working_directory`
+  与 `relative_text_is_no_candidate_at_all_without_a_working_directory`(红门:给检测层加一条
+  `std::env::current_dir()` 兜底,两条 pin 立刻转红)。
+- **范围**:只认 `.` 或 `..` 开头**后接分隔符**的候选(`./`、`.\`、`../`、`..\`;`.\` 只是
+  `./` 的 Windows 写法,PowerShell 补全就打这个)。裸 `dir/x.png` **故意不收**——它与散文
+  无法区分,误报面正是绝对路径扫描要求盘符的全部理由。扩展名白名单与开闭边界规则
+  (`is_path_tail_char` / `is_closing_delimiter` / 引号分支)与 §6.2 **逐字相同**,不新开一套。
+- **接缝**:
+  - **摄入**:OSC 7 在**既有的** `Osc1337Scanner` 流式前置过滤器里解析(与 OSC 133/1337 同一
+    个接缝,vendor 面零改动,守 R11')。`AdapterEvent::WorkingDirectory { uri }` →
+    `LifecycleDirective::WorkingDirectory` → session。URI 解码复用 `file_uri_to_local_image_path`
+    的机器:抽出 `decode_file_uri`(scheme/authority/percent/逐 segment 拼接),**图片扩展名门
+    不套在目录上**——目录没有扩展名可准入。目录多两条:结尾 `/` 是目录自己的斜杠(不是空
+    segment),authority 除空与 `localhost` 外还接受本机名(`local_host_name()`,file URI 里
+    "本机"的第三种拼法);打印出来的图片 URI **不**享受这两条(仍是 `TrailingSlash::Reject` +
+    不认主机名)。
+  - **状态**:`DualPlaneSession::working_directory`,**每会话一份、跨主/副屏**——工作目录属于
+    shell 进程,副屏的全屏 TUI 是 shell 的孩子,自然继承它最后一次报告。切屏不带走也不清空。
+  - **解析**:候选与会话相遇处(`detect_inline_image_candidates` / `detect_peek_image_candidates`
+    的 `working_directory` 参数)才把相对文本拼成绝对路径,**词法归一化**(`..` 弹掉左边一段,
+    越过盘符根即非候选),**事件线程零文件系统调用**;存在性/普通文件/8 MiB/真实格式/解码
+    照旧全在 worker。
+  - 解析出的绝对路径此后**走完全既有的管线**:记录、worker 解码、peek 探针、补集不变量、
+    §6.1 副屏不落 band——全部一字未改。组合性钉死于
+    `a_reported_working_directory_resolves_a_relative_path_into_a_primary_band`(主屏成 band)与
+    `a_relative_path_on_the_alternate_screen_peeks_and_creates_no_record`(副屏只 peek、零记录)。
+  - 候选跨度(`byte_start..byte_end`)覆盖**打印出来的相对文本**,`path` 是**解析后的绝对路径**
+    ——与 §6.2 给 `file://` URI 定下的约定同形。三种形状互不抢文本:URI 里的 `./` 和原生路径
+    里的 `\.\` 前面都是 `/` 或 `\`,`is_path_tail_char` 一律判为"续接 token",开不了口。
+- **陈旧语义(接受的语义,非缺陷)**:相对引用在**被检测的那一刻**解析,不是在被打印的那一刻。
+  shell 换了目录之后,屏幕上一字未改的旧文本**按当前工作目录**重新解析(旧 occurrence 退休、
+  新的登记)。理由是结构性的:live 网格本来就在被持续重扫,要"按打印时的目录钉死"就得给每
+  一行转录挂一个目录,而 live 平面上这仍然做不到。一个权威、永远是最新的那个,才是这个终端
+  对自己所知的诚实交代。钉死于 `re_detection_resolves_old_text_against_the_current_working_directory`。
+- **集成脚本**:`scripts/shell-integration/betterterminal.ps1` 的 prompt 钩子每次提示符发一条
+  `ESC ] 7 ; file:///<百分号编码的 $PWD> BEL`,在 `133;A` **之前**。authority 留空(file URI 里
+  "本机"的写法,不用每次查主机名,也不会过期)。编码是最小且正确的:UTF-8 逐字节,保留
+  RFC 3986 的 unreserved + sub-delims + `:` `@` `/`,其余全部 `%XX`——空格成 `%20`,CJK 成它的
+  UTF-8 转义。PS 5.1 安全(`[char]27` 一路,`String.IndexOf(char)`,不用 `String.Contains(char)`)。
+  当前位置不在 FileSystem provider(`HKLM:` 一类)时发**空**的 `ESC ] 7 ; BEL`:那是**撤回**,
+  不是沉默——留着旧目录去回答一个 shell 已经离开的地方,正是裁决禁止的猜测。同理,解不出的
+  报告(远程共享、畸形 URI、超长被截断)一律把已存目录**清空**而不是保留。端到端钉死于
+  `crates/bt-term/tests/shell_integration_script.rs`(真起一个 Windows PowerShell 5.1 跑脚本,
+  把它吐的字节喂回 session)。
+- **回放影响(2026-08-03 实测)**:56 份 `.tmp-repaint-capture/*.vt` 在**默认**与
+  **`BT_PROBE_IMAGE_PATHS=1`** 两种模式下,release oracle 前后对拍 stdout+stderr **全部逐字节
+  相同**(0/56)。语料里一条 OSC 7 都没有(全量扫过),故按构造即恒等;OSC 前缀树多一个 `7;`
+  分支对 `OSC 777` 一类只是把同样的字节晚一拍吐出,输出等价,单独钉死于
+  `osc_7_reports_its_working_directory_uri_across_chunks_and_both_terminators`。
 
 ## 7. OSC 133 输入区权威来源(2026-07-30)
 

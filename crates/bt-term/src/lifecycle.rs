@@ -132,6 +132,9 @@ pub enum LifecycleDirective {
         column: u32,
         marker: crate::inline_image::ShellIntegrationMarker,
     },
+    WorkingDirectory {
+        uri: String,
+    },
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -190,6 +193,7 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
             column,
             marker,
         },
+        AdapterEvent::WorkingDirectory { uri } => LifecycleDirective::WorkingDirectory { uri },
         AdapterEvent::GridWrites { screen, rows } => {
             LifecycleDirective::GridWrites { screen, rows }
         }

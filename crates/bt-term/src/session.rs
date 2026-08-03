@@ -7,7 +7,7 @@ use std::{
     io::Write as _,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
     ops::Bound,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -49,7 +49,8 @@ use crate::{
     inline_image::{
         DecodedInlineImage, InlineImageDecodeError, InlineImageScaleTask, InlineImageSource,
         InlineImageTask, ScaledInlineImage, ShellIntegrationMarker, decode_inline_image,
-        detect_local_image_path_candidates, detect_peek_image_candidates, scale_inline_image,
+        detect_inline_image_candidates, detect_peek_image_candidates, file_uri_to_local_path,
+        local_host_name, scale_inline_image,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
@@ -628,6 +629,15 @@ pub struct DualPlaneSession {
     live_screen: ScreenId,
     cursor_logical_line_memory: Option<CursorLogicalLineMemory>,
     shell_phases: BTreeMap<ScreenId, ShellIntegrationPhase>,
+    /// The last working directory the shell reported over OSC 7, and the *only* authority relative
+    /// image path text is ever resolved against (user ruling 2026-08-03). `None` — never reported,
+    /// or reported as something unresolvable — means relative text yields no candidates at all;
+    /// this terminal never guesses where a line was printed from.
+    ///
+    /// Session-wide and screen-independent by construction: a working directory belongs to the
+    /// shell process, so the alternate-screen TUI the shell launched inherits the shell's last
+    /// report, and a screen switch neither carries nor clears it.
+    working_directory: Option<PathBuf>,
     semantic_input_regions: Vec<SemanticInputRegion>,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
@@ -947,6 +957,7 @@ impl DualPlaneSession {
             live_screen: ScreenId::Primary,
             cursor_logical_line_memory: None,
             shell_phases: BTreeMap::new(),
+            working_directory: None,
             semantic_input_regions: Vec::new(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
@@ -1161,7 +1172,7 @@ impl DualPlaneSession {
         match anchor {
             ContentAnchor::History { id, offset, .. } => {
                 let entry = self.document.entries().get(id)?;
-                detect_peek_image_candidates(&entry.line.text)
+                detect_peek_image_candidates(&entry.line.text, self.working_directory.as_deref())
                     .into_iter()
                     .find_map(|candidate| {
                         let start = grapheme_offset_at_byte(
@@ -1177,7 +1188,7 @@ impl DualPlaneSession {
             }
             ContentAnchor::Live { point, .. } => {
                 let (logical_text, segments) = self.live_logical_line_containing(point.row)?;
-                detect_peek_image_candidates(&logical_text)
+                detect_peek_image_candidates(&logical_text, self.working_directory.as_deref())
                     .into_iter()
                     .find_map(|candidate| {
                         let start = live_path_point(&segments, candidate.byte_start, false)?;
@@ -5625,6 +5636,9 @@ impl DualPlaneSession {
                     };
                     self.handle_shell_integration_marker(screen, GridPoint { row, column }, marker);
                 }
+                LifecycleDirective::WorkingDirectory { uri } => {
+                    self.set_reported_working_directory(&uri);
+                }
                 LifecycleDirective::GridWrites { screen, rows } => {
                     let screen = match screen {
                         RemovalScreen::Primary => ScreenId::Primary,
@@ -5636,6 +5650,28 @@ impl DualPlaneSession {
         }
         self.flush_top_scroll_batch(&mut pending_top_scroll);
         Ok(())
+    }
+
+    /// Adopt — or forget — the working directory the shell just reported over OSC 7.
+    ///
+    /// A report this terminal cannot resolve to a drive-rooted local directory (a remote share, a
+    /// malformed or truncated URI, an empty payload) does not leave the previous directory
+    /// standing. The shell has told us it moved; keeping the old answer would resolve relative
+    /// text against a directory the session has demonstrably left, which is exactly the guess the
+    /// ruling forbids. Forgetting returns the session to the state it has before any shell speaks
+    /// OSC 7 at all: no directory, and therefore no relative candidates.
+    ///
+    /// No filesystem call: the directory's existence is not asked here (nor anywhere on the event
+    /// thread), the same way a printed absolute path's existence is only ever the worker's
+    /// question.
+    fn set_reported_working_directory(&mut self, uri: &str) {
+        self.working_directory = file_uri_to_local_path(uri, local_host_name());
+    }
+
+    /// The shell's last reported working directory, or `None` when this session was never told
+    /// one. The sole resolution authority for relative image path text.
+    pub fn working_directory(&self) -> Option<&Path> {
+        self.working_directory.as_deref()
     }
 
     fn register_inline_image(
@@ -5875,7 +5911,9 @@ impl DualPlaneSession {
             let line_stable = segments
                 .iter()
                 .all(|segment| stable.get(segment.row as usize).copied().unwrap_or(false));
-            for candidate in detect_local_image_path_candidates(logical_text) {
+            for candidate in
+                detect_inline_image_candidates(logical_text, self.working_directory.as_deref())
+            {
                 let Some(start) = live_path_point(segments, candidate.byte_start, false) else {
                     continue;
                 };
@@ -5909,7 +5947,9 @@ impl DualPlaneSession {
         else {
             return;
         };
-        for candidate in detect_local_image_path_candidates(&line.text) {
+        for candidate in
+            detect_inline_image_candidates(&line.text, self.working_directory.as_deref())
+        {
             let path = PathBuf::from(candidate.path);
             let already_registered = self.inline_images.values().any(|record| {
                 let InlineImageRecordKind::LocalPath {
@@ -15438,7 +15478,7 @@ mod tests {
         );
         assert_eq!(overlaid.len(), line.len(), "an overlay never reflows a row");
         assert!(
-            detect_local_image_path_candidates(&overlaid).is_empty(),
+            detect_inline_image_candidates(&overlaid, None).is_empty(),
             "the occluded row must offer the detector no candidate at all: {overlaid}"
         );
         overlaid
@@ -15940,6 +15980,259 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// A temporary tree whose root name carries both a space and CJK — the OSC 7 report must
+    /// percent-encode them and this terminal must decode them back — holding one 1x1 PNG beside a
+    /// working directory that reaches it through `../`.
+    fn temporary_relative_image_tree() -> (PathBuf, PathBuf, PathBuf) {
+        use base64::Engine as _;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "betterterminal 图 片-{}-{unique}",
+            std::process::id()
+        ));
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let image = root.join("shot.png");
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        std::fs::write(&image, png).unwrap();
+        (root, image, work)
+    }
+
+    /// The exact bytes `scripts/shell-integration/betterterminal.ps1` puts on the wire for one
+    /// directory: an empty authority and a minimally percent-encoded path. The script's own
+    /// emission is pinned end to end in `tests/shell_integration_script.rs`; this is the same
+    /// shape, written where a unit test can reach it.
+    fn osc7_report(directory: &Path) -> Vec<u8> {
+        const SAFE: &str = "-._~!$&'()*+,;=:@/";
+        let mut uri = String::from("file:///");
+        for byte in directory.to_string_lossy().replace('\\', "/").bytes() {
+            if byte.is_ascii_alphanumeric() || SAFE.contains(char::from(byte)) {
+                uri.push(char::from(byte));
+            } else {
+                uri.push_str(&format!("%{byte:02X}"));
+            }
+        }
+        format!("\u{1b}]7;{uri}\u{7}").into_bytes()
+    }
+
+    /// PIN (relative path ruling, 2026-08-03 (a) and (b)): a shell that reports its working
+    /// directory over OSC 7 — through a directory name carrying a space and CJK, so the report is
+    /// percent-encoded and must be decoded back — makes `../shot.png` printed in its output a
+    /// first-class inline image on the primary screen. The record, the worker task and the band
+    /// are the *existing* ones: resolution happens at detection, and everything downstream of a
+    /// candidate sees an absolute path it cannot distinguish from printed absolute text.
+    #[test]
+    fn a_reported_working_directory_resolves_a_relative_path_into_a_primary_band() {
+        let (root, image, work) = temporary_relative_image_tree();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+
+        session.feed_at(&osc7_report(&work), started).unwrap();
+        assert_eq!(
+            session.working_directory(),
+            Some(work.as_path()),
+            "the percent-encoded report decodes back to the directory the shell named"
+        );
+
+        session
+            .feed_at(b"see ../shot.png\r\nprompt", started)
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let Some(SessionDecorationTask::InlineImage(task)) = session.take_decoration_worker_task()
+        else {
+            panic!("a resolved relative path enqueues like any other local path");
+        };
+        assert_eq!(
+            task.source,
+            InlineImageSource::LocalPath(image.clone()),
+            "the worker is handed the resolved absolute path, not the printed reference"
+        );
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(session.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut session);
+
+        assert_eq!(
+            session
+                .inline_image_records()
+                .into_iter()
+                .filter_map(|record| record.local_path)
+                .collect::<Vec<_>>(),
+            vec![image.clone()]
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            frame.math_blocks.iter().any(|placement| matches!(
+                placement.artifact.kind,
+                bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+            )),
+            "the band reaches the frame through the unchanged pipeline"
+        );
+        assert_eq!(
+            session.terminal().visible_text()[0],
+            "see ../shot.png",
+            "the printed reference itself is untouched"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// PIN (relative path ruling, 2026-08-03 (c)): the alternate-screen ruling composes with
+    /// relative resolution without either knowing about the other. A relative reference on the
+    /// alternate screen creates no record and no worker task — no band is admitted there — and the
+    /// peek answers on that very anchor with the resolved absolute path, which is exactly the
+    /// complement invariant already in force for absolute paths and URIs.
+    #[test]
+    fn a_relative_path_on_the_alternate_screen_peeks_and_creates_no_record() {
+        let (root, image, work) = temporary_relative_image_tree();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        session.feed_at(&osc7_report(&work), started).unwrap();
+        session
+            .feed_at(b"\x1b[?1049hsee ../shot.png\r\nTUI", started)
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+
+        assert!(
+            session.inline_images.is_empty(),
+            "the alternate screen admits no band, resolved or printed: {:?}",
+            session.inline_image_records()
+        );
+        assert!(session.local_image_path_tasks.is_empty());
+        assert!(session.take_decoration_worker_task().is_none());
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.anchor_at(0, 6, Bias::Before).unwrap().unwrap();
+        assert!(session.peek_admits_at(&anchor));
+        assert_eq!(
+            session.local_image_path_probe_at(&anchor),
+            Some(image),
+            "the peek serves the image where inline admission is refused"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// PIN (relative path ruling, 2026-08-03 (d), the honest-degradation pin): the identical bytes,
+    /// with the identical file on disk, in a session that was never told a working directory
+    /// produce nothing at all — no record, no worker task, no peek. This terminal does not infer a
+    /// directory from where it was spawned or from anything else; a relative reference without an
+    /// authority is simply text, exactly as the OSC 133 slice leaves an unmarked screen on its
+    /// heuristics.
+    #[test]
+    fn relative_path_text_is_inert_without_a_reported_working_directory() {
+        let (root, _image, _work) = temporary_relative_image_tree();
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        assert_eq!(session.working_directory(), None);
+        session
+            .feed_at(b"see ../shot.png\r\nprompt", started)
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+
+        assert!(session.inline_images.is_empty());
+        assert!(session.local_image_path_tasks.is_empty());
+        assert!(session.take_decoration_worker_task().is_none());
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.anchor_at(0, 6, Bias::Before).unwrap().unwrap();
+        assert_eq!(session.local_image_path_probe_at(&anchor), None);
+
+        // A report this terminal cannot resolve leaves it in the same state, and retracts a
+        // directory it had already been given rather than letting a stale one answer.
+        session
+            .feed_at(b"\x1b]7;file:///D:/somewhere\x07", started)
+            .unwrap();
+        assert_eq!(
+            session.working_directory(),
+            Some(Path::new(r"D:\somewhere"))
+        );
+        for retraction in [
+            "\u{1b}]7;\u{7}",
+            "\u{1b}]7;file://server/share\u{7}",
+            "\u{1b}]7;not a uri\u{7}",
+        ] {
+            session
+                .feed_at(b"\x1b]7;file:///D:/somewhere\x07", started)
+                .unwrap();
+            session.feed_at(retraction.as_bytes(), started).unwrap();
+            assert_eq!(
+                session.working_directory(),
+                None,
+                "{retraction:?} must retract, never leave the previous directory answering"
+            );
+        }
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// PIN (relative path ruling, 2026-08-03 (e), accepted semantics): a relative reference is
+    /// resolved at the moment it is *detected*, not at the moment it was printed. Text that is
+    /// re-detected after the shell moved therefore resolves against the CURRENT working directory.
+    ///
+    /// This is deliberate and documented (docs/M2-preview-matrix-and-verbs.md §6.3). A terminal
+    /// that pinned each line to the directory in force when it scrolled by would have to carry a
+    /// directory on every transcript line, and would still be wrong for the live grid, which is
+    /// re-scanned continuously by construction. One authority, always the latest, is the honest
+    /// account of what this terminal actually knows.
+    #[test]
+    fn re_detection_resolves_old_text_against_the_current_working_directory() {
+        use base64::Engine as _;
+
+        let (root, _image, work) = temporary_relative_image_tree();
+        let second = root.join("second");
+        std::fs::create_dir(&second).unwrap();
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .unwrap();
+        std::fs::write(second.join("shot.png"), png).unwrap();
+
+        let mut session = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut session);
+        let mut now = Instant::now();
+        session.feed_at(&osc7_report(&work), now).unwrap();
+        session.feed_at(b"see ./shot.png\r\nprompt", now).unwrap();
+        now += LIVE_MATH_STABLE_INTERVAL;
+        session.advance_live_stability(now);
+        assert_eq!(
+            session
+                .inline_image_records()
+                .into_iter()
+                .filter_map(|record| record.local_path)
+                .collect::<Vec<_>>(),
+            vec![work.join("shot.png")]
+        );
+
+        // The shell moves. The line on screen has not changed one byte, and the next detection
+        // pass reads it against the directory the session is in now.
+        now += Duration::from_millis(1);
+        session.feed_at(&osc7_report(&second), now).unwrap();
+        now += LIVE_MATH_STABLE_INTERVAL;
+        session.advance_live_stability(now);
+        assert_eq!(
+            session
+                .inline_image_records()
+                .into_iter()
+                .filter_map(|record| record.local_path)
+                .collect::<Vec<_>>(),
+            vec![second.join("shot.png")],
+            "one occurrence, resolved against the current directory — never two answers at once"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// PIN (alternate-screen image ruling, 2026-08-02): OSC 1337 still parses on the alternate

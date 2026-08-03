@@ -25,10 +25,11 @@ pub use diagnostics::{
 pub use inline_image::{
     DecodedInlineImage, InlineImageDecodeError, InlineImageDecoder, InlineImageScaleTask,
     InlineImageSource, InlineImageTask, LocalImagePathCandidate, MAX_INLINE_IMAGE_BYTES,
-    ScaledInlineImage, ShellIntegrationMarker, decode_inline_image,
+    ScaledInlineImage, ShellIntegrationMarker, decode_inline_image, detect_inline_image_candidates,
     detect_local_image_path_candidates, detect_local_image_uri_candidates,
-    detect_peek_image_candidates, display_texture_key, file_uri_to_local_image_path,
-    normalized_local_image_path_key, scale_inline_image,
+    detect_peek_image_candidates, detect_relative_image_path_candidates, display_texture_key,
+    file_uri_to_local_image_path, file_uri_to_local_path, local_host_name,
+    normalized_local_image_path_key, resolve_relative_image_path, scale_inline_image,
 };
 pub use lifecycle::{
     LIFECYCLE_RULES, LifecycleDirective, LifecycleRule, MatchValue, ResizePlan, RowAction,

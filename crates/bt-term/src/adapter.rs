@@ -129,6 +129,13 @@ pub enum AdapterEvent {
         column: u32,
         marker: ShellIntegrationMarker,
     },
+    /// The shell reported its working directory over OSC 7. The fact carried is the `file://` URI
+    /// exactly as received; what it names — a usable directory, or nothing this terminal can
+    /// resolve — is a session decision, not a vendor-seam one. No screen is attached: a working
+    /// directory belongs to the shell, and the alternate-screen TUI it launched inherits it.
+    WorkingDirectory {
+        uri: String,
+    },
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -373,6 +380,14 @@ impl TerminalAdapter {
                         row: cursor.row,
                         column: cursor.column,
                         marker,
+                    });
+                }
+                InlineImageStreamAction::WorkingDirectory(uri) => {
+                    // A URI is ASCII by construction (RFC 3986); bytes that are not UTF-8 are not
+                    // a URI, and the empty report they become is the same "no directory" fact an
+                    // empty OSC 7 payload carries.
+                    events.push(AdapterEvent::WorkingDirectory {
+                        uri: String::from_utf8(uri).unwrap_or_default(),
                     });
                 }
                 InlineImageStreamAction::TooLarge => {
