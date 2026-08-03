@@ -16125,6 +16125,90 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// PIN (relative path widening, 2026-08-03): the shape the user reproduced — a bare reference
+    /// carrying a separator and no `./` in front of it — reaches every answer the anchored form
+    /// reaches, through the same seam and with nothing added downstream: an inline band on the
+    /// primary screen, a peek and no record on the alternate one, and nothing at all in a session
+    /// that was never told a directory.
+    #[test]
+    fn a_bare_relative_reference_with_a_separator_answers_like_an_anchored_one() {
+        let (root, image, work) = temporary_relative_image_tree();
+        let nested = work.join("local-images");
+        std::fs::create_dir_all(&nested).unwrap();
+        let sunset = nested.join("sunset.png");
+        std::fs::copy(&image, &sunset).unwrap();
+        const PRINTED: &[u8] = b"see local-images/sunset.png\r\nprompt";
+
+        let mut primary = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut primary);
+        let started = Instant::now();
+        primary.feed_at(&osc7_report(&work), started).unwrap();
+        primary.feed_at(PRINTED, started).unwrap();
+        primary.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let Some(SessionDecorationTask::InlineImage(task)) = primary.take_decoration_worker_task()
+        else {
+            panic!("a bare relative reference enqueues like any other local path");
+        };
+        assert_eq!(
+            task.source,
+            InlineImageSource::LocalPath(sunset.clone()),
+            "the join is the same lexical join the anchored form gets"
+        );
+        let mut decoder = crate::inline_image::InlineImageDecoder::default();
+        let result = decoder.decode(task.clone());
+        assert!(primary.complete_inline_image_result(task, result));
+        settle_inline_image_displays(&mut primary);
+        let mut projection = primary.new_projection(primary.layout_key());
+        let frame = primary.viewport_frame(&mut projection).unwrap();
+        assert!(
+            frame.math_blocks.iter().any(|placement| matches!(
+                placement.artifact.kind,
+                bt_viewport::RgbaArtifactKind::LocalImagePath { .. }
+            )),
+            "the band reaches the frame through the unchanged pipeline"
+        );
+
+        let mut alternate = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut alternate);
+        alternate.feed_at(&osc7_report(&work), started).unwrap();
+        alternate.feed_at(b"\x1b[?1049h", started).unwrap();
+        alternate.feed_at(PRINTED, started).unwrap();
+        alternate.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert!(
+            alternate.inline_images.is_empty(),
+            "the alternate screen admits no band, bare or anchored: {:?}",
+            alternate.inline_image_records()
+        );
+        assert!(alternate.take_decoration_worker_task().is_none());
+        let mut projection = alternate.new_projection(alternate.layout_key());
+        let frame = alternate.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.anchor_at(0, 6, Bias::Before).unwrap().unwrap();
+        assert!(alternate.peek_admits_at(&anchor));
+        assert_eq!(
+            alternate.local_image_path_probe_at(&anchor),
+            Some(sunset),
+            "the peek serves the image where inline admission is refused"
+        );
+
+        let mut unreported = DualPlaneSession::new(nz(160), nz(8));
+        enable_path_detection(&mut unreported);
+        unreported.feed_at(PRINTED, started).unwrap();
+        unreported.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert!(unreported.inline_images.is_empty());
+        assert!(unreported.local_image_path_tasks.is_empty());
+        assert!(unreported.take_decoration_worker_task().is_none());
+        let mut projection = unreported.new_projection(unreported.layout_key());
+        let frame = unreported.viewport_frame(&mut projection).unwrap();
+        let anchor = frame.anchor_at(0, 6, Bias::Before).unwrap().unwrap();
+        assert_eq!(
+            unreported.local_image_path_probe_at(&anchor),
+            None,
+            "a bare reference without an authority is text, exactly as an anchored one is"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// PIN (relative path ruling, 2026-08-03 (d), the honest-degradation pin): the identical bytes,
     /// with the identical file on disk, in a session that was never told a working directory
     /// produce nothing at all — no record, no worker task, no peek. This terminal does not infer a

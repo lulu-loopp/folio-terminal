@@ -429,38 +429,54 @@ pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandi
     candidates
 }
 
-/// Allocation-light lexical scan for `./`- and `../`-prefixed relative image references.
+/// Allocation-light lexical scan for relative image references.
 ///
 /// The returned `path` is the candidate text **exactly as printed** and is deliberately *not* a
 /// path yet: a relative reference names nothing until it is joined to a directory, and this
 /// terminal only ever learns a directory by being told one (OSC 7). `resolve_relative_image_path`
 /// is the join; `detect_inline_image_candidates` is where the two meet.
 ///
-/// Scope is `./` and `../` only (user ruling 2026-08-03). A bare `dir/x.png` is not a candidate:
-/// it is indistinguishable from ordinary prose and from every other word with a dot in it, and the
-/// false-positive surface is the whole reason the absolute scan requires a drive letter. Both
-/// separators open a candidate, because `.\x.png` is simply how Windows spells `./x.png` and is
-/// what PowerShell completion prints.
+/// Scope (user ruling 2026-08-03, widened the same day): `./`- and `../`-**anchored** references,
+/// and **bare** ones that carry at least one separator — `local-images/sunset.svg`,
+/// `.tmp-a85-parent/docs/spikes/artifacts/03-visual/c-fraction.svg`. A single-segment bare name
+/// (`readme.png`) stays out: one word with a dot in it is prose until something says otherwise,
+/// and nothing in the text ever says so. The separator *is* that boundary — it is the only mark a
+/// bare reference carries that ordinary prose does not — and it is why the widening is affordable
+/// at all: the worker's existence gate makes every prose false positive silent (no file, no band),
+/// so what the boundary buys is a bounded number of `stat` calls, not a wrong picture.
 ///
 /// Boundaries are the absolute scan's boundaries, unchanged: an unquoted candidate opens at a
 /// token boundary (`candidate_start_boundary`) and closes at whitespace or a closing delimiter
 /// (`is_path_terminator_char`); a quoted one may contain both and must close its quote. The
 /// extension allowlist is applied here, before any join, so a `./notes.txt` never becomes a
-/// resolution question at all.
+/// resolution question at all. What a bare reference adds on top is `bare_candidate_opens_at`:
+/// having no anchor to pin its start, it must be a run of path characters and nothing else.
 pub fn detect_relative_image_path_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
     let bytes = text.as_bytes();
     let mut candidates = Vec::new();
     let mut cursor = 0usize;
+    // The first terminator at or after some earlier opening — which is therefore the first
+    // terminator at or after *every* opening before it, since no terminator lies in between. The
+    // absolute scan can afford to find a token's end once per drive prefix because drive prefixes
+    // are rare; a bare reference has no prefix, so every character in `{"a":1,"b":2,…}` opens a
+    // candidate, and finding the same token's end once per opening would read the line once per
+    // character. Reusing it reads each token once, whatever opens inside it.
+    let mut token_end_seen = 0usize;
     while cursor < bytes.len() {
+        // A candidate opens on a character, so a cursor resting mid-character opens nothing. The
+        // absolute scan is spared this test by its drive prefix, which is ASCII and proves the
+        // boundary; a bare relative reference has no such prefix to be proved by.
+        if !text.is_char_boundary(cursor) {
+            cursor += 1;
+            continue;
+        }
         let quoted = bytes[cursor] == b'"';
         let start = if quoted {
             cursor.saturating_add(1)
         } else {
             cursor
         };
-        if !is_relative_prefix_at(bytes, start)
-            || (!quoted && !candidate_start_boundary(text, start))
-        {
+        if !quoted && !candidate_start_boundary(text, start) {
             cursor += 1;
             continue;
         }
@@ -470,27 +486,87 @@ pub fn detect_relative_image_path_candidates(text: &str) -> Vec<LocalImagePathCa
                 .position(|byte| *byte == b'"')
                 .map(|offset| start + offset)
         } else {
-            Some(token_end(text, start))
+            if start >= token_end_seen {
+                token_end_seen = token_end(text, start);
+            }
+            Some(token_end_seen)
         };
         let Some(end) = end.filter(|end| *end > start) else {
             cursor += 1;
             continue;
         };
         let candidate = &text[start..end];
-        if has_admissible_image_extension(Path::new(candidate)) {
+        // What opened the candidate is asked before what it says, because the bare opening is the
+        // one test whose cost this loop can bound: it stops at the first character that is not a
+        // path character, and every opening has such a character in front of it, so no two
+        // openings can read the same stretch twice. Asking the whole candidate first — extension,
+        // separators, colon — would read one long line without terminators once per character.
+        //
+        // Quoting is a declaration of extent: it says where the reference begins and ends, so it
+        // needs neither an anchor nor a pure run to be read as one.
+        let admitted = (quoted
+            || is_relative_prefix_at(bytes, start)
+            || bare_candidate_opens_at(text, start, candidate))
+            && is_relative_image_reference(candidate);
+        if admitted {
             candidates.push(LocalImagePathCandidate {
                 path: candidate.to_owned(),
                 byte_start: start,
                 byte_end: end,
             });
         }
-        cursor = if quoted {
-            end.saturating_add(1)
+        // An admitted candidate consumes its text, so nothing is read out of the middle of one. A
+        // refused one consumes a single character: whatever it was, the reference may still begin
+        // one character later — behind the `：` in `路径：dir/a.png`, or at the quote in
+        // `path="./a.png"` — and a refusal is never evidence about the text that follows it.
+        cursor = if admitted {
+            if quoted {
+                end.saturating_add(1)
+            } else {
+                end.max(cursor.saturating_add(1))
+            }
         } else {
-            end.max(cursor.saturating_add(1))
+            cursor.saturating_add(1)
         };
     }
     candidates
+}
+
+/// The shape a relative image reference must have, whatever opened it.
+///
+/// Three refusals and one allowlist. A candidate with no separator is a single bare name, which is
+/// out of scope. One that *opens* with a separator names a place from the drive root rather than
+/// from here — `/usr/share/x.png` in a log line, or the `//host/x.png` a scheme leaves behind —
+/// and joining it to a working directory would invent a location nobody named. One containing `:`
+/// is not relative at all: the colon is exactly the character that makes text absolute (`D:\…`) or
+/// schemed (`file:…`, `https:…`), both of which are other scans' business and must never be
+/// claimed twice.
+fn is_relative_image_reference(candidate: &str) -> bool {
+    !candidate.starts_with(['/', '\\'])
+        && candidate.contains(['/', '\\'])
+        && !candidate.contains(':')
+        && has_admissible_image_extension(Path::new(candidate))
+}
+
+/// Whether a bare (unanchored, unquoted) candidate may open where it does.
+///
+/// An anchored reference declares where it begins — `./` and `../` are marks, not prose. A bare
+/// one declares nothing, so the character class must speak for it: the candidate is a run of path
+/// characters and nothing else, and the character before it is not `:`.
+///
+/// Both halves are what keep a bare reference out of a URL without anyone sniffing for URLs. The
+/// run rule is why `路径：local-images/sunset.svg` is read as the reference after the colon rather
+/// than as one long candidate starting at `路` — and why `x(dir/a.png` is not read from `x`. The
+/// preceding-`:` rule is why `https://host:8080/img/x.png` offers nothing: `//host` opens with a
+/// separator, and the `8080/img/x.png` behind the port colon would otherwise be a perfectly
+/// well-formed relative name. A colon binds leftward; what follows it belongs to whatever the
+/// colon already made absolute or schemed.
+fn bare_candidate_opens_at(text: &str, start: usize, candidate: &str) -> bool {
+    candidate.chars().all(is_path_tail_char)
+        && text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|character| character != ':')
 }
 
 /// A `.` or `..` component followed by a separator, and nothing else.
@@ -548,7 +624,8 @@ pub fn resolve_relative_image_path(working_directory: &Path, relative: &str) -> 
 }
 
 /// Every image reference one line of text offers **inline admission**: native drive-rooted paths,
-/// plus `./`/`../` relative paths resolved against `working_directory`.
+/// plus relative references — anchored (`./`, `../`) or bare with a separator — resolved against
+/// `working_directory`.
 ///
 /// `working_directory` is `None` for any session whose shell has never reported one over OSC 7,
 /// and then relative text yields no candidates at all. That is the ruling, not a limitation to be
@@ -565,9 +642,10 @@ pub fn detect_inline_image_candidates(
     candidates
 }
 
-/// The relative candidates of one line, each carrying its **resolved** absolute path under the
-/// span of the relative text that must be hovered — the convention `detect_local_image_uri_candidates`
-/// already established for a reference whose printed form is not its path.
+/// The relative candidates of one line — anchored and bare alike — each carrying its **resolved**
+/// absolute path under the span of the relative text that must be hovered, the convention
+/// `detect_local_image_uri_candidates` already established for a reference whose printed form is
+/// not its path.
 fn resolved_relative_image_candidates(
     text: &str,
     working_directory: &Path,
@@ -600,7 +678,9 @@ fn is_drive_prefix_at(bytes: &[u8], start: usize) -> bool {
 /// `/` and `\` are on this list for one load-bearing reason: it is what keeps the `D:/…` embedded
 /// in a `file:///D:/…` URI from being read as a native path. URIs reach the peek through
 /// `detect_local_image_uri_candidates`, which decodes them properly; they must never be half-read
-/// here.
+/// here. The same clause serves the bare relative scan, where it does double duty: it refuses
+/// every mid-URL opening (`a.b/x.png` inside `https://a.b/x.png` is preceded by `/`), and, read as
+/// a class rather than a boundary, it is the run a bare candidate must consist of.
 ///
 /// Everything else opens a path — whitespace of any width, opening brackets and quotes of any
 /// script (`(`、`（`、`「`、`“`), separators (`:`、`：`、`=`、`,`), and the rest of punctuation.
@@ -710,7 +790,10 @@ pub fn detect_local_image_uri_candidates(text: &str) -> Vec<LocalImagePathCandid
 ///
 /// No two shapes can claim the same text. A URI's embedded `D:/…` and its `./…`-looking interior
 /// are both preceded by `/`, which `is_path_tail_char` rejects as an opening; a native path's own
-/// `\.\` is preceded by `\` for the same reason.
+/// `\.\` is preceded by `\` for the same reason. The bare relative shape, which has no prefix of
+/// its own to be recognized by, is held off the other two by `is_relative_image_reference`: a
+/// candidate carrying a `:` is somebody else's (a drive's, a scheme's), and one opening with a
+/// separator is the remainder of somebody else's.
 pub fn detect_peek_image_candidates(
     text: &str,
     working_directory: Option<&Path>,
@@ -1734,40 +1817,58 @@ mod tests {
         assert_eq!(file_uri_to_local_image_path("file:///D:/a.png/"), None);
     }
 
-    /// PIN (relative path ruling, 2026-08-03): the relative scan is `./` and `../` only, keeps the
-    /// absolute scan's boundary rules exactly, and reports the text as printed — resolution is a
-    /// separate act that needs a directory this scan does not have.
+    /// PIN (relative path ruling, 2026-08-03, as widened the same day): the relative scan reads
+    /// anchored (`./`, `../`) **and** bare references that carry a separator, keeps the absolute
+    /// scan's boundary rules exactly, and reports the text as printed — resolution is a separate
+    /// act that needs a directory this scan does not have.
     #[test]
-    fn relative_image_candidates_are_dot_prefixed_only_and_report_their_printed_text() {
-        let text = r#"see ./a.png and ..\b\c.svg and "./my pic.webp" but not dir/d.png"#;
+    fn relative_candidates_are_anchored_or_bare_with_a_separator_and_report_their_printed_text() {
+        let text = r#"see ./a.png and ..\b\c.svg and "./my pic.webp" and dir/d.png"#;
         let candidates = detect_relative_image_path_candidates(text);
         assert_eq!(
             candidates
                 .iter()
                 .map(|candidate| candidate.path.as_str())
                 .collect::<Vec<_>>(),
-            vec!["./a.png", r"..\b\c.svg", "./my pic.webp"]
+            vec!["./a.png", r"..\b\c.svg", "./my pic.webp", "dir/d.png"]
         );
-        for candidate in &candidates[..2] {
+        for candidate in candidates
+            .iter()
+            .filter(|candidate| candidate.path != "./my pic.webp")
+        {
             assert_eq!(
                 &text[candidate.byte_start..candidate.byte_end],
                 candidate.path,
                 "an unquoted span addresses its own text exactly"
             );
         }
+        // The two shapes the user reproduced, verbatim — plus the shapes the widening admits as a
+        // consequence, which the anchored-only scan used to refuse for want of an anchor. A
+        // directory really can be named `v1..`, and a name no filesystem holds costs one `stat`.
+        for repro in [
+            "local-images/sunset.svg",
+            ".tmp-a85-parent/docs/spikes/artifacts/03-visual/c-fraction.svg",
+            "v1../a.png",
+            ".../a.png",
+        ] {
+            assert_eq!(
+                detect_relative_image_path_candidates(&format!("生成了 {repro} 见图"))
+                    .into_iter()
+                    .map(|candidate| candidate.path)
+                    .collect::<Vec<_>>(),
+                vec![repro.to_owned()],
+                "{repro:?} is a reference like any other"
+            );
+        }
         for rejected in [
-            // Bare relative paths are out of scope: they are indistinguishable from prose.
-            "dir/x.png",
-            "x.png",
             // The extension allowlist is the same one every shape meets.
             "./notes.txt",
             "../a.bmp",
+            "dir/notes.txt",
             // A dot that continues a token opens nothing, which is what keeps the `./` inside a
             // URI and the `\.\` inside a native path out of this scan.
             "file:///D:/./a.png",
             r"D:\a\.\b.png",
-            "v1../a.png",
-            ".../a.png",
             // A quoted candidate must close its quote (the unquoted re-read that follows stops at
             // the space, exactly as it does for an unterminated quoted absolute path).
             r#""./unterminated image.png"#,
@@ -1778,10 +1879,169 @@ mod tests {
             );
         }
         // The boundary generalization of 2026-08-02 applies unchanged: CJK prose and full-width
-        // brackets open and close a relative candidate just as they do an absolute one.
+        // brackets open and close a relative candidate just as they do an absolute one — and a
+        // bare reference in CJK prose is read from the colon that introduces it, never from the
+        // prose in front of it.
         assert_eq!(
             detect_relative_image_path_candidates("见图（./图片.png）")[0].path,
             "./图片.png"
+        );
+        assert_eq!(
+            detect_relative_image_path_candidates("路径：图片/日落.png")
+                .into_iter()
+                .map(|candidate| candidate.path)
+                .collect::<Vec<_>>(),
+            vec!["图片/日落.png".to_owned()],
+            "one candidate, opened after the full-width colon and not at 路"
+        );
+        // A quoted reference keeps its spaces; a quoted region that is prose is re-read from
+        // inside, so a reference sitting in it is still found.
+        assert_eq!(
+            detect_relative_image_path_candidates(r#""dir/my pic.webp""#)[0].path,
+            "dir/my pic.webp"
+        );
+        assert_eq!(
+            detect_relative_image_path_candidates(r#""see dir/a.png here""#)[0].path,
+            "dir/a.png"
+        );
+        // A quote opens its own candidate wherever it stands, including hard against the word in
+        // front of it — the shape every option assignment prints.
+        for quoted_after_a_word in [
+            r#"--input="./my pic.png""#,
+            r#"src="dir/my pic.png""#,
+            r#"abc"dir/my pic.png""#,
+        ] {
+            assert_eq!(
+                detect_relative_image_path_candidates(quoted_after_a_word)
+                    .into_iter()
+                    .map(|candidate| candidate.path)
+                    .collect::<Vec<_>>(),
+                vec![quoted_after_a_word.split('"').nth(1).unwrap().to_owned()],
+                "{quoted_after_a_word:?}"
+            );
+        }
+    }
+
+    /// PIN (relative path widening, 2026-08-03): the separator is the whole boundary between a
+    /// bare reference and prose, and the character classes alone — never a URL sniff — keep a bare
+    /// candidate from opening inside somebody else's text.
+    ///
+    /// RED CHECK: drop the `candidate.contains(['/', '\\'])` clause from
+    /// `is_relative_image_reference` and every single-segment case below turns red at once.
+    #[test]
+    fn bare_relative_candidates_need_a_separator_and_never_open_inside_a_url() {
+        for rejected in [
+            // One word with a dot in it is prose. This is the ruling's ambiguity boundary.
+            "readme.png",
+            "x.png",
+            "see readme.png here",
+            "见 readme.png 图",
+            "\"readme.png\"",
+            // A scheme's authority is not a place on this disk, and the `//` it leaves behind
+            // opens with a separator.
+            "https://a.b/x.png",
+            "see https://example.test/img/x.png here",
+            "http://a.b/x.png",
+            "file:///D:/x.png",
+            "file://localhost/D:/x.png",
+            // The tail behind a port colon is a well-formed relative name and is refused all the
+            // same: a colon binds leftward.
+            "https://host:8080/img/x.png",
+            // Rooted, not relative: joining it to a working directory would invent a place.
+            "/usr/share/pixmaps/x.png",
+            r"\\server\share\x.png",
+            r"\tmp\x.png",
+            // Drive-rooted text is the native scan's, quoted or not.
+            r"D:\dir\x.png",
+            "D:/dir/x.png",
+            r#""D:\dir\x.png""#,
+        ] {
+            assert!(
+                detect_relative_image_path_candidates(rejected).is_empty(),
+                "unexpected relative candidate in {rejected:?}"
+            );
+        }
+        // The refusals are boundary decisions, not judgements about the text around them: the same
+        // line that carries a URL still yields the bare reference printed beside it.
+        let text = "see https://a.b/x.png and local-images/sunset.svg";
+        assert_eq!(
+            detect_relative_image_path_candidates(text)
+                .into_iter()
+                .map(|candidate| candidate.path)
+                .collect::<Vec<_>>(),
+            vec!["local-images/sunset.svg".to_owned()]
+        );
+    }
+
+    /// PIN (relative path widening, 2026-08-03): the widened scan is linear in the line it reads.
+    ///
+    /// A bare reference has no prefix to be recognized by, so unlike the absolute scan this one
+    /// considers an opening at nearly every character of a line carrying no whitespace and no
+    /// closing delimiter — `,` and `:` are neither path characters nor token terminators, so the
+    /// whole line is one token that opens a candidate every few characters. Such a line reaches
+    /// this scan whole: a wrapped logical line is joined before it is read.
+    ///
+    /// Two things keep it linear, and dropping either one leaves this test running for hours: the
+    /// token end is found once per token rather than once per opening, and the bare opening test —
+    /// which stops at the first non-path character, and every opening has one in front of it, so
+    /// no two openings read the same stretch — is asked before the tests that read the whole
+    /// candidate.
+    #[test]
+    fn a_long_line_without_terminators_is_scanned_in_time_proportional_to_its_length() {
+        let started = std::time::Instant::now();
+        for line in [
+            "a:1,b:2,c:3,".repeat(20_000),
+            "dir/a,dir/b,dir/c,".repeat(20_000),
+            "a.png,b.png,c.png,".repeat(20_000),
+        ] {
+            assert!(detect_relative_image_path_candidates(&line).is_empty());
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "three long lines took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// PIN (relative path widening, 2026-08-03): no text is claimed twice. A line carrying all
+    /// three shapes at once yields exactly one candidate per printed reference, and their spans do
+    /// not overlap — the widened bare scan reaches across the native scan's paths and the URI
+    /// scan's URIs without touching either.
+    #[test]
+    fn overlapping_scans_never_claim_the_same_text_twice() {
+        let cwd = PathBuf::from(r"D:\work");
+        let text = "D:\\abs.png file:///D:/uri.png local-images/sunset.svg ./a.png \
+                    https://a.b/x.png";
+        let candidates = detect_peek_image_candidates(text, Some(&cwd));
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (
+                    &text[candidate.byte_start..candidate.byte_end],
+                    candidate.path.as_str()
+                ))
+                .collect::<std::collections::BTreeSet<_>>(),
+            [
+                (r"D:\abs.png", r"D:\abs.png"),
+                ("file:///D:/uri.png", r"D:\uri.png"),
+                (
+                    "local-images/sunset.svg",
+                    r"D:\work\local-images\sunset.svg"
+                ),
+                ("./a.png", r"D:\work\a.png"),
+            ]
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert_eq!(candidates.len(), 4, "one candidate per printed reference");
+        let mut spans = candidates
+            .iter()
+            .map(|candidate| (candidate.byte_start, candidate.byte_end))
+            .collect::<Vec<_>>();
+        spans.sort_unstable();
+        assert!(
+            spans.windows(2).all(|pair| pair[0].1 <= pair[1].0),
+            "no two candidates overlap: {spans:?}"
         );
     }
 

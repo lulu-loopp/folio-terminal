@@ -29,7 +29,8 @@ ESC ] 7 ; file:///<percent-encoded $PWD> BEL
 
 This is the standard Windows Terminal / iTerm convention and it is the **only** way BetterTerminal
 learns where a session's output is being printed from. It exists to resolve relative image path
-text (`./shot.png`, `../a/b.svg`) — see `docs/M2-preview-matrix-and-verbs.md` §6.3. A session that
+text (`./shot.png`, `../a/b.svg`, and bare references carrying a separator such as
+`local-images/sunset.svg`) — see `docs/M2-preview-matrix-and-verbs.md` §6.3. A session that
 never receives OSC 7 leaves relative paths undetected rather than guessing a directory, exactly as
 a screen that never emits OSC 133 keeps the cursor/WRAPLINE heuristics.
 
