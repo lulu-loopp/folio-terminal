@@ -26,8 +26,9 @@ pub use inline_image::{
     DecodedInlineImage, InlineImageDecodeError, InlineImageDecoder, InlineImageScaleTask,
     InlineImageSource, InlineImageTask, LocalImagePathCandidate, MAX_INLINE_IMAGE_BYTES,
     ScaledInlineImage, ShellIntegrationMarker, decode_inline_image,
-    detect_local_image_path_candidates, display_texture_key, normalized_local_image_path_key,
-    scale_inline_image,
+    detect_local_image_path_candidates, detect_local_image_uri_candidates,
+    detect_peek_image_candidates, display_texture_key, file_uri_to_local_image_path,
+    normalized_local_image_path_key, scale_inline_image,
 };
 pub use lifecycle::{
     LIFECYCLE_RULES, LifecycleDirective, LifecycleRule, MatchValue, ResizePlan, RowAction,

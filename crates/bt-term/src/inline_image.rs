@@ -364,8 +364,10 @@ pub struct LocalImagePathCandidate {
 }
 
 /// Allocation-light lexical candidate scan for the event thread. It recognizes only drive-rooted
-/// Windows paths. Unquoted paths stop at whitespace or `]`; quoted paths may contain whitespace
-/// and must have a closing quote. Existence, size, content format, and decode remain worker-only.
+/// Windows paths. Unquoted paths open at a token boundary (`candidate_start_boundary`) and close
+/// at whitespace or a closing delimiter (`is_path_terminator_char`); quoted paths may contain
+/// whitespace and any delimiter, and must have a closing quote. Existence, size, content format,
+/// and decode remain worker-only.
 pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
     let bytes = text.as_bytes();
     let mut candidates = Vec::new();
@@ -377,7 +379,7 @@ pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandi
         } else {
             cursor
         };
-        if !is_drive_prefix_at(bytes, start) || (!quoted && !candidate_start_boundary(bytes, start))
+        if !is_drive_prefix_at(bytes, start) || (!quoted && !candidate_start_boundary(text, start))
         {
             cursor += 1;
             continue;
@@ -388,12 +390,7 @@ pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandi
                 .position(|byte| *byte == b'"')
                 .map(|offset| start + offset)
         } else {
-            Some(
-                bytes[start..]
-                    .iter()
-                    .position(|byte| byte.is_ascii_whitespace() || *byte == b']')
-                    .map_or(bytes.len(), |offset| start + offset),
-            )
+            Some(token_end(text, start))
         };
         let Some(end) = end.filter(|end| *end > start) else {
             cursor += 1;
@@ -424,11 +421,240 @@ fn is_drive_prefix_at(bytes: &[u8], start: usize) -> bool {
             .is_some_and(|byte| matches!(*byte, b'\\' | b'/'))
 }
 
-fn candidate_start_boundary(bytes: &[u8], start: usize) -> bool {
+/// Characters that could legitimately be the tail of a longer token, so a drive prefix that
+/// follows one is a suffix of that token rather than a path of its own: alphanumerics of **any**
+/// script (`prefixXC:\a.png`, `图片D:\a.png`) plus the path-structure characters that continue a
+/// path or a filename stem (`sub\D:\a.png`, `file:///D:/a.png`, `v1.2D:\a.png`, `x-D:\a.png`).
+///
+/// `/` and `\` are on this list for one load-bearing reason: it is what keeps the `D:/…` embedded
+/// in a `file:///D:/…` URI from being read as a native path. URIs reach the peek through
+/// `detect_local_image_uri_candidates`, which decodes them properly; they must never be half-read
+/// here.
+///
+/// Everything else opens a path — whitespace of any width, opening brackets and quotes of any
+/// script (`(`、`（`、`「`、`“`), separators (`:`、`：`、`=`、`,`), and the rest of punctuation.
+/// That generality is the point: a path is no less a path for sitting in CJK prose.
+fn is_path_tail_char(character: char) -> bool {
+    character.is_alphanumeric() || matches!(character, '/' | '\\' | '.' | '-' | '_')
+}
+
+/// Closing delimiters that end an unquoted path token. Unicode General_Category Pe
+/// (Close_Punctuation) as it appears in terminal prose, plus ASCII `>` and its full-width form —
+/// `<>` is a bracket pair everywhere and neither character is legal in a Windows path anyway.
+///
+/// Final_Punctuation (Pf) is deliberately split: `»`、`›`、`”` are admitted because they only ever
+/// close, while `’` is not, because it doubles as an apostrophe inside ordinary filenames
+/// (`Bob’s photo.png`). A filename that really ends in a closing delimiter can still be quoted.
+fn is_closing_delimiter(character: char) -> bool {
+    matches!(
+        character,
+        ')' | ']'
+            | '}'
+            | '>'
+            | '\u{ff09}' // ）
+            | '\u{ff3d}' // ］
+            | '\u{ff5d}' // ｝
+            | '\u{ff60}' // ｠
+            | '\u{ff63}' // ｣
+            | '\u{ff1e}' // ＞
+            | '\u{3009}' // 〉
+            | '\u{300b}' // 》
+            | '\u{300d}' // 」
+            | '\u{300f}' // 』
+            | '\u{3011}' // 】
+            | '\u{3015}' // 〕
+            | '\u{3017}' // 〗
+            | '\u{3019}' // 〙
+            | '\u{301b}' // 〛
+            | '\u{27e9}' // ⟩
+            | '\u{27eb}' // ⟫
+            | '\u{00bb}' // »
+            | '\u{203a}' // ›
+            | '\u{201d}' // ”
+    )
+}
+
+fn is_path_terminator_char(character: char) -> bool {
+    character.is_whitespace() || is_closing_delimiter(character)
+}
+
+/// End of the unquoted token starting at `start` (a byte offset on a character boundary).
+fn token_end(text: &str, start: usize) -> usize {
+    text[start..]
+        .char_indices()
+        .find(|(_, character)| is_path_terminator_char(*character))
+        .map_or(text.len(), |(offset, _)| start + offset)
+}
+
+/// Whether a candidate at byte offset `start` opens a token rather than continuing one. The
+/// decision is per *character*: the byte before a candidate is the last byte of a multi-byte
+/// character in every CJK-adjacent line, so a byte test would reject `（D:\a.png）` and
+/// `路径：D:\a.png` on the strength of a UTF-8 continuation byte alone.
+fn candidate_start_boundary(text: &str, start: usize) -> bool {
     start == 0
-        || bytes.get(start.saturating_sub(1)).is_some_and(|byte| {
-            byte.is_ascii_whitespace() || matches!(*byte, b'[' | b'(' | b'=' | b':' | b'\'')
-        })
+        || text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !is_path_tail_char(character))
+}
+
+/// Peek-only lexical scan for `file://` URIs that name an admissible local image.
+///
+/// Kept apart from `detect_local_image_path_candidates` because the two shapes earn different
+/// presentations: a printed native path grows an inline band on the primary screen, a URI never
+/// does. A URI is a reference to a file, not the file's name in the flow, so it answers hover and
+/// nothing else. `path` on the returned candidate is therefore the **resolved** local path, while
+/// the byte span covers the URI text that must be hovered to reach it.
+pub fn detect_local_image_uri_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
+    const SCHEME: &str = "file://";
+    let bytes = text.as_bytes();
+    let mut candidates = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        // The scheme is ASCII, so a byte match proves `cursor` is a character boundary before
+        // `candidate_start_boundary` decodes the character preceding it.
+        let scheme_matches = bytes
+            .get(cursor..cursor + SCHEME.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(SCHEME.as_bytes()));
+        if !scheme_matches || !candidate_start_boundary(text, cursor) {
+            cursor += 1;
+            continue;
+        }
+        let end = uri_token_end(text, cursor + SCHEME.len());
+        if let Some(path) = file_uri_to_local_image_path(&text[cursor..end]) {
+            candidates.push(LocalImagePathCandidate {
+                path: path.to_string_lossy().into_owned(),
+                byte_start: cursor,
+                byte_end: end,
+            });
+        }
+        cursor = end.max(cursor + 1);
+    }
+    candidates
+}
+
+/// Every image one line of text offers the hover peek: native drive-rooted paths and `file://`
+/// URIs. Inline admission scans only the former, so this is the peek's own reading of the line.
+/// The two shapes cannot overlap — a URI's embedded `D:/…` is preceded by `/`, which
+/// `is_path_tail_char` rejects as a path opening.
+pub fn detect_peek_image_candidates(text: &str) -> Vec<LocalImagePathCandidate> {
+    let mut candidates = detect_local_image_path_candidates(text);
+    candidates.extend(detect_local_image_uri_candidates(text));
+    candidates
+}
+
+/// End of a URI token that starts at `scheme_end`. A URI is ASCII by construction (RFC 3986 —
+/// anything else must be percent-encoded), so any character outside the allowed set ends it,
+/// which is what lets a full-width `）` close a URI that ASCII `)` cannot. Trailing sentence
+/// punctuation is then released, matching `bt_transcript::detect_http_urls`, whose prose-boundary
+/// problem is the same one.
+fn uri_token_end(text: &str, scheme_end: usize) -> usize {
+    let bytes = text.as_bytes();
+    let mut end = scheme_end;
+    while end < bytes.len() && is_uri_byte(bytes[end]) {
+        end += 1;
+    }
+    while end > scheme_end
+        && matches!(
+            bytes[end - 1],
+            b')' | b'.' | b',' | b';' | b':' | b'!' | b'?'
+        )
+    {
+        end -= 1;
+    }
+    end
+}
+
+/// RFC 3986 unreserved + reserved + the percent sign.
+fn is_uri_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'%'
+                | b':'
+                | b'/'
+                | b'?'
+                | b'#'
+                | b'['
+                | b']'
+                | b'@'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+        )
+}
+
+/// Resolve a `file://` URI to the local image path it names, or `None` when it names something
+/// this terminal will not preview.
+///
+/// The URI is a *reference*; the gates it must pass are the same ones printed path text passes
+/// (`is_admissible_local_image_path`: drive-rooted and an allowlisted image extension), so no
+/// shape buys a privilege another lacks. Existence, size, and decode stay worker-side as always.
+///
+/// Resolution is per URI segment: each is percent-decoded on its own and the results are joined
+/// with `\`. That is what RFC 3986 means — a `%2F` inside a segment decodes to a literal `/` in a
+/// filename, never to a separator — and it costs nothing, since such a name simply fails to exist.
+///
+/// A non-empty authority other than `localhost` is a remote share (`file://host/share/a.png`) and
+/// is rejected: this is the *local* image peek, and a UNC fetch is not a hover's business.
+pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri
+        .get(..7)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("file://"))
+        .map(|scheme| &uri[scheme.len()..])?;
+    let (authority, path) = rest.split_at(rest.find('/')?);
+    if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
+        return None;
+    }
+    // Query and fragment are not part of the path; a filename containing `?` or `#` must have
+    // percent-encoded them.
+    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
+    let mut native = String::new();
+    for segment in path.split('/').skip(1) {
+        let decoded = percent_decode(segment)?;
+        if decoded.is_empty() {
+            return None;
+        }
+        if !native.is_empty() {
+            native.push('\\');
+        }
+        native.push_str(&decoded);
+    }
+    let path = PathBuf::from(native);
+    is_admissible_local_image_path(&path).then_some(path)
+}
+
+/// Percent-decode one URI segment. `None` when an escape is malformed, the result is not UTF-8,
+/// or it carries a control character — each of which means the text was never a path we may read.
+fn percent_decode(segment: &str) -> Option<String> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0usize;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = segment
+                .get(index + 1..index + 3)
+                .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    let decoded = String::from_utf8(decoded).ok()?;
+    (!decoded.chars().any(char::is_control)).then_some(decoded)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -952,6 +1178,145 @@ mod tests {
                 "unexpected candidate in {rejected:?}"
             );
         }
+    }
+
+    /// PIN (boundary defect, 2026-08-02): a path is opened by any character that could not be
+    /// continuing a token, and closed by any closing delimiter — in every script, not only ASCII.
+    /// The report that produced this: a path inside full-width parentheses in CJK prose was
+    /// invisible to the detector from both ends at once, because the byte before `D` was a UTF-8
+    /// continuation byte and the byte after `.png` was another one.
+    #[test]
+    fn path_candidates_open_after_any_non_token_character_and_close_at_any_closing_delimiter() {
+        for accepted in [
+            "（D:\\Developer\\BetterTerminal\\layout-preview.png）",
+            "见图（D:\\Developer\\BetterTerminal\\layout-preview.png）",
+            "「D:\\Developer\\BetterTerminal\\layout-preview.png」",
+            "【D:\\Developer\\BetterTerminal\\layout-preview.png】",
+            "路径：D:\\Developer\\BetterTerminal\\layout-preview.png",
+            "(D:\\Developer\\BetterTerminal\\layout-preview.png)",
+            "<D:\\Developer\\BetterTerminal\\layout-preview.png>",
+            "《D:\\Developer\\BetterTerminal\\layout-preview.png》",
+            "“D:\\Developer\\BetterTerminal\\layout-preview.png”",
+            "图\u{3000}D:\\Developer\\BetterTerminal\\layout-preview.png",
+        ] {
+            let candidates = detect_local_image_path_candidates(accepted);
+            assert_eq!(
+                candidates
+                    .iter()
+                    .map(|candidate| candidate.path.as_str())
+                    .collect::<Vec<_>>(),
+                vec![r"D:\Developer\BetterTerminal\layout-preview.png"],
+                "a path in {accepted:?} must be seen whole"
+            );
+            assert_eq!(
+                &accepted[candidates[0].byte_start..candidates[0].byte_end],
+                candidates[0].path,
+                "the span must address the path text exactly in {accepted:?}"
+            );
+        }
+        for rejected in [
+            // A drive prefix that continues a token is a suffix of that token, never a path. The
+            // `/` case is load-bearing: it is what keeps a `file://` URI out of the native scan.
+            "file:///D:/Developer/BetterTerminal/layout-preview.png",
+            "见D:\\a\\b.png",
+            "v1.D:\\a\\b.png",
+            "x-D:\\a\\b.png",
+            "x_D:\\a\\b.png",
+            "sub\\D:\\a\\b.png",
+        ] {
+            assert!(
+                detect_local_image_path_candidates(rejected).is_empty(),
+                "unexpected native candidate in {rejected:?}"
+            );
+        }
+        // A quoted path keeps every delimiter it contains; quoting is how a filename that really
+        // ends in `）` is spelled.
+        assert_eq!(
+            detect_local_image_path_candidates("（\"D:\\a\\b（1）.png\"）")[0].path,
+            "D:\\a\\b（1）.png"
+        );
+    }
+
+    /// PIN (file:// peek admission, 2026-08-02): a URI reaching the peek is decoded as a URI —
+    /// per-segment percent decoding, authority checked — and then passes exactly the gates a
+    /// printed path passes. Nothing here loosens what may be previewed; it only widens how the
+    /// same file may be *named*.
+    #[test]
+    fn file_uris_resolve_to_local_image_paths_under_the_same_admission_gates() {
+        for (uri, expected) in [
+            (
+                "file:///D:/Developer/BetterTerminal/layout-preview.png",
+                r"D:\Developer\BetterTerminal\layout-preview.png",
+            ),
+            ("file:///D:/x%20y.png", r"D:\x y.png"),
+            ("file:///D:/%E5%9B%BE%E7%89%87.PNG", r"D:\图片.PNG"),
+            // A `%2F` is a literal slash inside one name, not a separator; the name simply will
+            // not exist, which the worker discovers as it discovers every other absence.
+            ("file:///D:/a%2Fb.png", "D:\\a/b.png"),
+            ("FILE:///D:/a.png", r"D:\a.png"),
+            ("file://localhost/D:/a.png", r"D:\a.png"),
+            ("file:///D:/a.png#anchor", r"D:\a.png"),
+            ("file:///D:/a.png?v=2", r"D:\a.png"),
+        ] {
+            assert_eq!(
+                file_uri_to_local_image_path(uri),
+                Some(PathBuf::from(expected)),
+                "{uri:?}"
+            );
+        }
+        for rejected in [
+            // A remote share is not the local image peek's business.
+            "file://host/share/a.png",
+            "file://192.168.0.2/pics/a.png",
+            // The same allowlist and drive-root gate printed paths meet.
+            "file:///D:/notes.txt",
+            "file:///D:/a.bmp",
+            "file:///etc/a.png",
+            "file:///a.png",
+            // Not a file URI, or not a URI at all.
+            "https://example.test/a.png",
+            "file://",
+            "file://host",
+            // Malformed escapes and names no filesystem may hold.
+            "file:///D:/a%zz.png",
+            "file:///D:/a%2.png",
+            "file:///D:/a%00.png",
+            "file:///D://a.png",
+        ] {
+            assert_eq!(file_uri_to_local_image_path(rejected), None, "{rejected:?}");
+        }
+    }
+
+    /// PIN (file:// peek admission, 2026-08-02): bare URI text in a line is found the way path
+    /// text is, and reports the resolved path under the span of the URI that must be hovered.
+    #[test]
+    fn file_uri_candidates_are_found_in_prose_and_carry_the_resolved_path() {
+        let text = "see file:///D:/a/layout-preview.png, and （file:///D:/b.png）, not \
+                    file:///D:/notes.txt or xfile:///D:/c.png";
+        let candidates = detect_local_image_uri_candidates(text);
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| (
+                    candidate.path.as_str(),
+                    &text[candidate.byte_start..candidate.byte_end]
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    r"D:\a\layout-preview.png",
+                    "file:///D:/a/layout-preview.png"
+                ),
+                (r"D:\b.png", "file:///D:/b.png"),
+            ]
+        );
+        // The two shapes never claim the same text: the `D:/…` inside a URI is not a native path.
+        assert!(detect_local_image_path_candidates(text).is_empty());
+        assert_eq!(
+            detect_peek_image_candidates(text).len(),
+            2,
+            "the peek reads one line once, through both shapes"
+        );
     }
 
     #[test]

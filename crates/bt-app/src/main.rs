@@ -694,6 +694,21 @@ fn peek_scale_task(
     }
 }
 
+/// One hovered cell resolves to at most one image. Text under the pointer wins over the link the
+/// cell belongs to: where a link's text spells the file itself both sources name the same picture
+/// anyway, and where they differ the visible text is what the pointer was actually put on.
+///
+/// A link target that is not a local image URI contributes nothing and the hover stays an ordinary
+/// link hover — `https://`, a `file://` pointing at a `.txt`, a remote `file://host/share`. The
+/// judgement of what a `file://` URI names belongs to bt-term, beside the admission gates printed
+/// paths pass, so this seam only decides *which source* speaks.
+fn peek_target_from_sources(
+    probe: Option<PathBuf>,
+    hyperlink_uri: Option<String>,
+) -> Option<PathBuf> {
+    probe.or_else(|| bt_term::file_uri_to_local_image_path(&hyperlink_uri?))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum HyperlinkActivation {
     None,
@@ -1348,16 +1363,31 @@ impl Runtime {
         self.session.decoded_local_image_path_at(&anchor)
     }
 
-    /// The path text under the pointer by lexical probe rather than decoration record, so the
+    /// The image a hover at `hit` may preview, from either shape the screen can offer it in.
+    ///
+    /// The line's own text comes first, by lexical probe rather than decoration record, so the
     /// peek answers uniformly — including on lines whose band creation is suppressed (the input
-    /// line, the cursor line) where no record exists.
-    fn local_image_peek_probe(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
+    /// line, the cursor line, every line of the alternate screen) where no record exists. Failing
+    /// that, the cell may belong to an OSC 8 hyperlink, whose target is a URI the text never
+    /// spells: `[layout](file:///D:/layout-preview.png)` renders as the word alone, and the file
+    /// it points at is knowable only from the link. Both sources pass the same admission gates.
+    ///
+    /// The complement of inline admission is checked once, here, before either source is
+    /// consulted — a link that happens to lie across a banded content point does not smuggle a
+    /// second presentation of it.
+    fn peek_target(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
         let anchor = self
             .last_presented_frame
             .as_ref()?
             .anchor_at(hit.row, hit.column, Bias::Before)
             .ok()??;
-        self.session.local_image_path_probe_at(&anchor)
+        if !self.session.peek_admits_at(&anchor) {
+            return None;
+        }
+        peek_target_from_sources(
+            self.session.local_image_path_probe_at(&anchor),
+            self.hyperlink_hit(hit).map(|hyperlink| hyperlink.uri),
+        )
     }
 
     /// Present a pure peek-overlay change. The overlay lives beside the frame, not inside it, so
@@ -1835,7 +1865,7 @@ impl Runtime {
             .filter(|_| {
                 math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
             })
-            .and_then(|hit| self.local_image_peek_probe(hit));
+            .and_then(|hit| self.peek_target(hit));
         if self.peek_hover.observe(peek_path, position, now) {
             self.present_peek_overlay(None)?;
         }
@@ -3376,6 +3406,44 @@ mod tests {
             .activate_if_due(start + Duration::from_millis(700))
             .expect("second span settles on its own deadline");
         assert_eq!(settled.path, second);
+    }
+
+    /// PIN (user repro, 2026-08-02): a hovered cell's link is the peek's second source, so an
+    /// `[layout](file:///D:/layout-preview.png)` whose visible text names no file still previews.
+    /// It is a strict fallback — text under the pointer decides when it can — and it carries no
+    /// privilege of its own: only a local image URI resolves, by the same gates printed path text
+    /// meets. The alternate-screen chain from grid cell to link target is pinned in bt-term's
+    /// `every_image_reference_shape_answers_the_alternate_screen_peek`.
+    #[test]
+    fn a_link_target_is_the_peeks_second_source_and_only_for_local_images() {
+        let probed = PathBuf::from(r"D:\from-text.png");
+        let linked = PathBuf::from(r"D:\layout-preview.png");
+        assert_eq!(
+            peek_target_from_sources(
+                Some(probed.clone()),
+                Some("file:///D:/layout-preview.png".to_owned())
+            ),
+            Some(probed),
+            "text under the pointer is what the pointer was put on"
+        );
+        assert_eq!(
+            peek_target_from_sources(None, Some("file:///D:/layout-preview.png".to_owned())),
+            Some(linked),
+            "a link target is read when the text names nothing"
+        );
+        for inert in [
+            "https://example.test/a.png",
+            "file:///D:/notes.txt",
+            "file://host/share/a.png",
+            "file:///D:/a.bmp",
+        ] {
+            assert_eq!(
+                peek_target_from_sources(None, Some(inert.to_owned())),
+                None,
+                "{inert:?} must leave the hover an ordinary link hover"
+            );
+        }
+        assert_eq!(peek_target_from_sources(None, None), None);
     }
 
     /// Pin (a) of the peek raster defect: every peek pixel that reaches the renderer is one the

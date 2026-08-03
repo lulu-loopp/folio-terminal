@@ -49,7 +49,7 @@ use crate::{
     inline_image::{
         DecodedInlineImage, InlineImageDecodeError, InlineImageScaleTask, InlineImageSource,
         InlineImageTask, ScaledInlineImage, ShellIntegrationMarker, decode_inline_image,
-        detect_local_image_path_candidates, scale_inline_image,
+        detect_local_image_path_candidates, detect_peek_image_candidates, scale_inline_image,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
@@ -1147,14 +1147,21 @@ impl DualPlaneSession {
     /// one content point gets one presentation, never both. Suppressed lines have no record, so
     /// they keep the peek; a future "inline rendering off" policy bit removes the records and the
     /// peek takes over everywhere without further changes here.
+    ///
+    /// The probe reads both shapes a line can carry (`detect_peek_image_candidates`): a native
+    /// drive-rooted path and a `file://` URI. The complement stays positional, over the hovered
+    /// content point rather than over file identity — a URI is its own point in the text and grows
+    /// no band of its own, so it keeps its peek even on a primary screen where the same picture is
+    /// already banded under a native path printed elsewhere. Those are two references to one file,
+    /// not one reference served twice.
     pub fn local_image_path_probe_at(&self, anchor: &ContentAnchor) -> Option<PathBuf> {
-        if self.inline_image_record_covers(anchor) {
+        if !self.peek_admits_at(anchor) {
             return None;
         }
         match anchor {
             ContentAnchor::History { id, offset, .. } => {
                 let entry = self.document.entries().get(id)?;
-                detect_local_image_path_candidates(&entry.line.text)
+                detect_peek_image_candidates(&entry.line.text)
                     .into_iter()
                     .find_map(|candidate| {
                         let start = grapheme_offset_at_byte(
@@ -1170,7 +1177,7 @@ impl DualPlaneSession {
             }
             ContentAnchor::Live { point, .. } => {
                 let (logical_text, segments) = self.live_logical_line_containing(point.row)?;
-                detect_local_image_path_candidates(&logical_text)
+                detect_peek_image_candidates(&logical_text)
                     .into_iter()
                     .find_map(|candidate| {
                         let start = live_path_point(&segments, candidate.byte_start, false)?;
@@ -1180,6 +1187,15 @@ impl DualPlaneSession {
             }
             ContentAnchor::Staging { .. } => None,
         }
+    }
+
+    /// Whether a peek may be presented at `anchor` at all — the complement of inline admission,
+    /// stated once so every source of a peek target obeys it. The line's own text goes through
+    /// `local_image_path_probe_at`, which asks this first; an OSC 8 link target is resolved by the
+    /// app from the frame and has no text to probe, so the app asks this directly. Neither may
+    /// float a flyout over a content point that already renders its image in the flow.
+    pub fn peek_admits_at(&self, anchor: &ContentAnchor) -> bool {
+        !self.inline_image_record_covers(anchor)
     }
 
     /// Whether a live (non-failed) local-path record covers `anchor`: its image is on screen as a
@@ -14728,6 +14744,10 @@ mod tests {
     }
 
     fn temporary_path_image() -> (PathBuf, PathBuf) {
+        temporary_path_image_named("one pixel.png")
+    }
+
+    fn temporary_path_image_named(file_name: &str) -> (PathBuf, PathBuf) {
         use base64::Engine as _;
 
         let unique = SystemTime::now()
@@ -14739,7 +14759,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir(&directory).unwrap();
-        let path = directory.join("one pixel.png");
+        let path = directory.join(file_name);
         let png = base64::engine::general_purpose::STANDARD
             .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
             .unwrap();
@@ -15852,6 +15872,71 @@ mod tests {
             .unwrap();
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL * 3);
         assert_no_band_but_a_peek(&mut session, "after a synchronized full-screen repaint");
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (user repro, 2026-08-02): on the alternate screen — where the band ruling leaves hover
+    /// as the only image affordance — every shape an assistant puts an image reference in reaches
+    /// the peek. The report that produced this pin had three of them on one screen and none
+    /// answered: a native path wrapped in full-width parentheses, a bare `file://` URI, and an
+    /// OSC 8 link whose visible text names no file at all.
+    ///
+    /// The link is checked at its seam: the frame carries the target, and `bt-term` decides what
+    /// that target names. bt-app's two-source choice is pinned beside it in
+    /// `a_link_target_is_the_peeks_second_source_and_only_for_local_images`.
+    #[test]
+    fn every_image_reference_shape_answers_the_alternate_screen_peek() {
+        // The user's own file name: no space, so the unquoted native shape is the one they saw.
+        let (directory, path) = temporary_path_image_named("layout-preview.png");
+        let uri = format!("file:///{}", path.display().to_string().replace('\\', "/"));
+        let text_uri = uri.replace("layout-preview.png", "notes.txt");
+        let mut session = DualPlaneSession::new(nz(240), nz(8));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let screen = format!(
+            "\u{1b}[?1049h（{path}）\r\nsee {uri}\r\n\u{1b}]8;;{uri}\u{1b}\\layout\u{1b}]8;;\u{1b}\\\r\nsee {text_uri}",
+            path = path.display()
+        );
+        session.feed_at(screen.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert!(
+            session.inline_images.is_empty(),
+            "the alternate screen still admits no band: {:?}",
+            session.inline_image_records()
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let peek_at = |row: u32, column: u32| {
+            let anchor = frame.anchor_at(row, column, Bias::Before).unwrap().unwrap();
+            assert!(
+                session.peek_admits_at(&anchor),
+                "no band covers row {row}, so the peek is admitted there"
+            );
+            session.local_image_path_probe_at(&anchor)
+        };
+
+        // A full-width `（` opens the path and a full-width `）` closes it: the pointer is on the
+        // path text, two columns in from the wide opening paren.
+        assert_eq!(peek_at(0, 10), Some(path.clone()), "full-width parentheses");
+        assert_eq!(peek_at(1, 10), Some(path.clone()), "bare file:// URI text");
+        assert_eq!(
+            peek_at(3, 10),
+            None,
+            "a file:// URI to a .txt meets the same extension gate printed paths meet"
+        );
+
+        // The link's own text is the word "layout"; nothing under the pointer names a file.
+        assert_eq!(peek_at(2, 3), None, "link text is not path text");
+        let hyperlink = frame.hyperlink_at(2, 3).expect("the link covers its text");
+        assert_eq!(hyperlink.uri, uri);
+        assert_eq!(
+            crate::inline_image::file_uri_to_local_image_path(&hyperlink.uri),
+            Some(path.clone()),
+            "the link target resolves to the very file the peek must show"
+        );
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();

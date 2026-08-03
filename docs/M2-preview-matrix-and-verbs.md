@@ -147,6 +147,53 @@
   `texture-residency-feel` 379→91;残余即同一录制里 primary 段的 band,证明只副屏被裁),
   这是裁决本身,不是回归。
 
+### 6.2 图片引用的三种形状都要能 peek(用户报告 2026-08-02)
+
+副屏只剩 hover 这一条图片通路之后,用户在 Claude Code 里 hover 了三种引用形状,一种都没出图。
+根因是两条独立的:词法边界只认 ASCII,以及 peek 只读原生路径文本。
+
+- **词法边界改为按字符判定(A)**。`detect_local_image_path_candidates` 的开闭两端原来都是
+  按字节:开端只接受 ASCII 空白与 `[ ( = : '`,闭端只在 ASCII 空白或 `]` 处停。CJK 语境里
+  `（D:\...\layout-preview.png）` 因此两头同时判错——`D` 前面是 UTF-8 续接字节,`.png` 后面
+  也是,于是既开不了口也收不了尾。现在:
+  - **开端**:`start == 0`,或前一个**字符**不是「可能是更长 token 的尾巴」的字符。后者定义为
+    `is_path_tail_char` = 任意脚本的 alphanumeric ∪ `/ \ . - _`。任意脚本的开括号/引号/分隔号
+    (`(`、`（`、`「`、`【`、`“`、`：`、`=`、`,`)与任意宽度的空白都因此开口。
+    `/` 在这条排除表里是**承重**的:它正是 `file:///D:/…` 里那截 `D:/…` **不**被当成原生路径的
+    唯一原因,URI 只准走本节下文的 URI 通道被正确解码。
+  - **闭端**:ASCII/Unicode 空白,或任意**闭合定界符**(`is_closing_delimiter`:Unicode Pe 类在
+    终端文本里的常见成员,加 ASCII `>` 与全角 `＞`)。这是把原来「在 `]` 处停」这条既有规则从
+    单个字符推广到整类。Pf 类里 `»`、`›`、`”` 一并收(它们只作闭合),`’` 不收(它在普通文件名
+    里当撇号:`Bob’s photo.png`)。真的以闭合定界符结尾的文件名仍可用**引号**表达,引号分支
+    原样保留。
+  - 该改动落在**共享**的检测函数上,因此 primary 的内联准入同样受益(`(D:\a.png)` 从前也是
+    检测不到的)。钉死于 `path_candidates_open_after_any_non_token_character_and_close_at_any_closing_delimiter`。
+- **`file://` URI 加入 peek,且只加入 peek(B)**。URI 是对文件的**引用**,不是文件在流里的名字,
+  所以它不长 band,只答 hover。
+  - `file_uri_to_local_image_path(uri)`(`crates/bt-term/src/inline_image.rs`)是唯一裁决点:
+    scheme 大小写无关;authority 必须为空或 `localhost`(`file://host/share/a.png` 这类远程共享
+    直接拒);query/fragment 不属于路径;**逐 segment** 百分号解码后以 `\` 连接(`%2F` 因此是某个
+    文件名里的字面斜杠而非分隔符,符合 RFC 3986,且这种名字自然不存在);随后过**与打印路径完全
+    相同**的准入门 `is_admissible_local_image_path`(盘符绝对 + 扩展名白名单),存在性/大小/解码
+    照旧只在 worker。没有任何形状因此获得别的形状没有的特权。
+  - 两个来源、一个接缝:行文本里的裸 URI 由 `detect_local_image_uri_candidates` 词法扫出
+    (URI 按 RFC 3986 是 ASCII,故全角 `）` 天然收尾,尾随句读按 `bt_transcript::detect_http_urls`
+    的同一条规则释放),与原生路径合流于 `detect_peek_image_candidates`,`local_image_path_probe_at`
+    读的就是它;OSC 8 链接的目标只有帧知道,由 bt-app 的 `peek_target` 取出后交给同一个
+    `file_uri_to_local_image_path`。文本优先、链接兜底(`peek_target_from_sources`)。
+  - **补集不变量仍按内容点判定**,不按文件身份:`peek_admits_at(anchor)` 是唯一判据,`peek_target`
+    在问任何来源之前先问它一次(所以横跨已成 band 内容点的链接不能夹带第二次呈现)。反过来,
+    primary 上一处原生路径已经成 band 时,别处指向同一文件的 `file://` URI **仍然 peek**——那是
+    两处引用指向一个文件,不是一处引用被呈现两次。
+  - 钉死于 `every_image_reference_shape_answers_the_alternate_screen_peek`(全角括号 / 裸 URI /
+    OSC 8 目标 / `.txt` 不出图,全部在副屏)、`file_uris_resolve_to_local_image_paths_under_the_same_admission_gates`、
+    `file_uri_candidates_are_found_in_prose_and_carry_the_resolved_path`、
+    `a_link_target_is_the_peeks_second_source_and_only_for_local_images`。
+- **回放影响(2026-08-02 实测)**:55 份 `.tmp-repaint-capture/*.vt` 在**默认**与
+  **`BT_PROBE_IMAGE_PATHS=1`** 两种模式下,release oracle 前后对拍 stdout+stderr **全部逐字节相同**
+  (0/55 差异)。即录制语料里没有一条 CJK 邻接或括号包裹的路径,边界推广对既有录制无观测效应;
+  peek 本就不在回放里跑。
+
 ## 7. OSC 133 输入区权威来源(2026-07-30)
 
 - PowerShell opt-in shell integration 发 FTCS `133;A/B/C/D`;安装与状态机详见
