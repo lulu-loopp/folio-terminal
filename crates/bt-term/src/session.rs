@@ -4933,6 +4933,41 @@ impl DualPlaneSession {
         })
     }
 
+    /// The screen column a banded reference begins at, in the physical row that shows it.
+    ///
+    /// The band measures its width budget from the START of the reference — the room the pane still
+    /// has to the right of where the picture's name begins — and that is a *column*, never an
+    /// offset. A `Live` anchor already carries one. A `History` anchor carries a grapheme offset
+    /// along the whole logical line and a `Staging` anchor one along a captured row; on a
+    /// soft-wrapped line the former runs clean past the pane, and reading it as a column is what
+    /// collapsed a wrapped reference's band to a thumbnail (user report 2026-08-04: a 320x200 SVG
+    /// drawn about seventy pixels wide). Both are resolved here through the projection's own
+    /// arithmetic, so wide characters cost the two cells they occupy and a wrap costs nothing.
+    ///
+    /// The rule this fixes on: **wrapping is invisible to a band**. A reference standing at column
+    /// c of the row that shows it gets the same display box whether that row is a logical line's
+    /// first or its fourth. Measuring from the row start instead would have made every frozen band
+    /// full-width and silently disagreed with the live plane, where the column is real and the same
+    /// reference on the same screen must not change size merely by being frozen.
+    fn reference_screen_column(&self, anchor: &ContentAnchor) -> u32 {
+        let columns = self.layout_key.width_cells.get() as usize;
+        match anchor {
+            ContentAnchor::Live { point, .. } => point.column,
+            ContentAnchor::History { id, offset, .. } => {
+                self.document.entries().get(id).map_or(offset.0, |entry| {
+                    bt_viewport::frozen_line_screen_column(&entry.line, offset.0, columns)
+                })
+            }
+            ContentAnchor::Staging { id, offset, .. } => self
+                .transcript
+                .staged_rows()
+                .find(|staged| staged.id == *id)
+                .map_or(offset.0, |staged| {
+                    bt_viewport::staged_row_screen_column(staged, offset.0)
+                }),
+        }
+    }
+
     fn inline_image_geometry(
         &self,
         record: &InlineImageRecord,
@@ -4942,12 +4977,7 @@ impl DualPlaneSession {
             InlineImageRecordKind::Osc1337 { .. } => record.end_anchor,
             InlineImageRecordKind::LocalPath { start_anchor, .. } => start_anchor,
         };
-        let column = match self.document.anchor(display_anchor).ok()? {
-            ContentAnchor::Live { point, .. } => point.column,
-            ContentAnchor::History { offset, .. } | ContentAnchor::Staging { offset, .. } => {
-                offset.0
-            }
-        };
+        let column = self.reference_screen_column(self.document.anchor(display_anchor).ok()?);
         let available_columns = self
             .layout_key
             .width_cells
@@ -15196,6 +15226,130 @@ mod tests {
         session
             .inline_image_geometry(record, decoded)
             .expect("a decoded band has geometry")
+    }
+
+    /// Print one line carrying an image reference into a `columns`-wide grid, scroll it out until
+    /// it freezes, and give back the grapheme offset its history anchor holds together with the
+    /// geometry the band derives. Forty rows keep the one-third/text-floor height caps loose, so
+    /// the width fit — the subject — is the binding one.
+    ///
+    /// The decode is synthetic: the reference need only be *lexically* admissible, because
+    /// existence is the worker's question and this fixture answers for the worker. That keeps the
+    /// pin off the disk and lets the native size be chosen for arithmetic that is checkable by eye.
+    fn frozen_reference_band(
+        columns: u32,
+        text: &str,
+        native: (u32, u32),
+    ) -> (u32, InlineImageGeometry) {
+        let cell = NonZeroI64::new(10 * SUBPIXELS_PER_PX).unwrap();
+        let mut session = DualPlaneSession::with_cell_height(nz(columns), nz(40), cell);
+        session.set_cell_width_subpixels(cell);
+        session.restore_retired_image_bands();
+        enable_path_detection(&mut session);
+        let mut stream = format!("{text}\r\n");
+        for index in 0..44 {
+            stream.push_str(&format!("filler {index}\r\n"));
+        }
+        session.feed_at(stream.as_bytes(), Instant::now()).unwrap();
+
+        assert_eq!(
+            session.inline_images.len(),
+            1,
+            "the fixture must print exactly one image reference"
+        );
+        let occurrence = *session.inline_images.keys().next().unwrap();
+        let InlineImageRecordKind::LocalPath { start_anchor, .. } =
+            session.inline_images[&occurrence].kind
+        else {
+            panic!("a printed path is a local-path record");
+        };
+        let ContentAnchor::History { offset, .. } = session.document.anchor(start_anchor).unwrap()
+        else {
+            panic!("the reference must have scrolled all the way into history");
+        };
+        let offset = offset.0;
+
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let SessionDecorationTask::InlineImage(task) = task {
+                let decoded = decoded_test_image(task.occurrence_id, native.0, native.1, false);
+                assert!(session.complete_inline_image_result(task, Ok(decoded)));
+            }
+        }
+        settle_inline_image_displays(&mut session);
+        (offset, sole_band_geometry(&session))
+    }
+
+    /// PIN (user report 2026-08-04, "the image is too small"): a reference on a soft-wrapped
+    /// history line gets the same display box as the identical reference standing at the same
+    /// screen column on a line that never wrapped.
+    ///
+    /// This is the discriminating pin for reading a `History` anchor's grapheme offset as a screen
+    /// column. On a wrapped line the offset counts along the whole logical line, so it runs past
+    /// the pane: `width_cells - offset` saturates to nothing, the width fit collapses, and the band
+    /// is resampled down to a thumbnail — a 320x200 SVG drawn about seventy pixels wide in the
+    /// user's screenshot. Here the wrapped reference stands at logical offset 46 of a forty-column
+    /// grid; before the fix its band measured 10x4 against the unwrapped line's 340x114.
+    #[test]
+    fn a_wrapped_history_reference_gets_the_display_box_of_its_own_screen_column() {
+        let path = r"C:\a\b.png";
+        let (unwrapped_offset, unwrapped) =
+            frozen_reference_band(40, &format!("yyyyy {path}"), (1200, 400));
+        let (wrapped_offset, wrapped) =
+            frozen_reference_band(40, &format!("{} {path}", "y".repeat(45)), (1200, 400));
+
+        assert_eq!(unwrapped_offset, 6);
+        assert_eq!(
+            wrapped_offset, 46,
+            "the wrapped reference must really carry an offset past the pane, \
+             or this pin proves nothing",
+        );
+        // Both references begin at column 6 of the row that shows them, so both bands measure the
+        // same 34 columns of room: 340px against a 1200px-wide decode is a 283-milli fit, and the
+        // display box is 340x114. The height caps (a third of 400px, and the 32-row text floor)
+        // are both looser than that, as is the 1000-milli DPI ceiling.
+        assert_eq!(
+            (unwrapped.display_width_px, unwrapped.display_height_px),
+            (340, 114),
+        );
+        assert_eq!(
+            (wrapped.display_width_px, wrapped.display_height_px),
+            (unwrapped.display_width_px, unwrapped.display_height_px),
+            "a wrapped reference and an unwrapped one at the same column are the same picture",
+        );
+        assert_eq!(wrapped.display_rows, unwrapped.display_rows);
+        assert_eq!(
+            wrapped.display_height_subpixels,
+            unwrapped.display_height_subpixels
+        );
+    }
+
+    /// PIN (user report 2026-08-04): the screen column a wrapped reference is measured from counts
+    /// cells, not graphemes, exactly as the projection lays the line out.
+    ///
+    /// Twenty wide characters fill a forty-column row on the nose; the reference then begins after
+    /// two more wide characters and a space on the second row — column 5, grapheme offset 23.
+    /// Reading the offset gives 17 columns of room; counting the second row's graphemes instead of
+    /// its cells gives 37. Only the projection's own arithmetic gives 35.
+    #[test]
+    fn a_wrapped_reference_behind_wide_characters_measures_cells_not_graphemes() {
+        let path = r"C:\a\b.png";
+        let (unwrapped_offset, unwrapped) =
+            frozen_reference_band(40, &format!("中中 {path}"), (1200, 400));
+        let (wrapped_offset, wrapped) =
+            frozen_reference_band(40, &format!("{}中中 {path}", "中".repeat(20)), (1200, 400));
+
+        assert_eq!(unwrapped_offset, 3);
+        assert_eq!(wrapped_offset, 23);
+        // Column 5 leaves 35 columns = 350px; 350000/1200 is a 291-milli fit, so the box is
+        // 350x117 (each axis rounded up, so a band never shows less than it was allotted).
+        assert_eq!(
+            (unwrapped.display_width_px, unwrapped.display_height_px),
+            (350, 117),
+        );
+        assert_eq!(
+            (wrapped.display_width_px, wrapped.display_height_px),
+            (unwrapped.display_width_px, unwrapped.display_height_px),
+        );
     }
 
     #[test]

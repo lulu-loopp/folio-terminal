@@ -3222,6 +3222,61 @@ fn cell_in_link_group(cell: &CapturedCell, link: &CellHyperlink) -> bool {
         .is_some_and(|other| other.id == link.id && other.uri == link.uri)
 }
 
+/// The screen column at which the grapheme `offset` of a frozen logical line sits, *within the
+/// physical row that carries it*.
+///
+/// A `History` anchor's offset counts graphemes along the whole logical line, so on a soft-wrapped
+/// line it runs past the pane and is not a column at all. This replays the same greedy wrap
+/// `layout_frozen_line` performs — one cluster at a time, `cluster_width` per cluster, a new row
+/// whenever the next cluster would overflow — and reports the column the cluster is placed at. It
+/// is the projection's own arithmetic, so a wide character costs the two cells it actually
+/// occupies and a zero-width cluster reports the column of the cell it joined.
+///
+/// An offset at or past the end of the line reports the column just past the last cell, which is
+/// exactly where `pad_frozen_row` closes the final row.
+pub fn frozen_line_screen_column(line: &FrozenLine, offset: u32, columns: usize) -> u32 {
+    let mut used = 0usize;
+    let mut last_cell_column = 0usize;
+    for (index, cluster) in graphemes(&line.text).enumerate() {
+        let at_offset = index as u32 == offset;
+        let width = cluster_width(cluster).min(columns);
+        if width == 0 {
+            if at_offset {
+                return last_cell_column as u32;
+            }
+            continue;
+        }
+        if used != 0 && used + width > columns {
+            used = 0;
+        }
+        if at_offset {
+            return used as u32;
+        }
+        last_cell_column = used;
+        used += width;
+    }
+    used as u32
+}
+
+/// The screen column at which the grapheme `offset` of one staged physical row sits.
+///
+/// A `Staging` anchor's offset counts the row's inked cells, so wide-character spacers make it
+/// differ from the column even though a staged row never wraps. This walks the row's cells exactly
+/// as `captured_staged_visual_row` assigns their anchors, so the two always agree.
+pub fn staged_row_screen_column(staged: &StagedRow, offset: u32) -> u32 {
+    let mut grapheme_offset = 0u32;
+    for (column, cell) in staged.row.cells.iter().enumerate() {
+        if cell.wide_spacer {
+            continue;
+        }
+        if grapheme_offset == offset {
+            return column as u32;
+        }
+        grapheme_offset += u32::from(!cell.text.is_empty());
+    }
+    staged.row.cells.len() as u32
+}
+
 fn frozen_visual_line_count(text: &str, columns: usize) -> usize {
     let mut rows = 1usize;
     let mut used = 0usize;
@@ -3487,6 +3542,70 @@ mod tests {
             font_rev: 1,
             theme_rev: 1,
         }
+    }
+
+    /// PIN (wrapped-reference geometry, 2026-08-04): the column a frozen grapheme offset resolves
+    /// to is the column `layout_frozen_line` actually places it at — inside its own physical row,
+    /// with wide characters costing two cells. Read as a column, the raw offset runs past the pane
+    /// on every soft-wrapped line.
+    #[test]
+    fn a_frozen_offset_resolves_to_the_column_its_own_physical_row_shows_it_at() {
+        let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
+        let mut capture = |text: &str, continues: bool| {
+            store
+                .capture(CapturedRow::plain(text, continues))
+                .finalized
+                .pop()
+        };
+        capture("0123456789", true);
+        let line = capture("abcXdef", false).unwrap().line;
+
+        // One logical line of 17 graphemes laid out ten columns wide: offsets 0..=9 sit on the
+        // first row at their own index, and offsets 10.. restart at column zero on the second.
+        assert_eq!(frozen_line_screen_column(&line, 3, 10), 3);
+        assert_eq!(frozen_line_screen_column(&line, 10, 10), 0);
+        assert_eq!(frozen_line_screen_column(&line, 13, 10), 3);
+        // Past the end is the column just after the last cell, where the row's padding begins.
+        assert_eq!(frozen_line_screen_column(&line, 17, 10), 7);
+        // Laid out wide enough not to wrap, the same offsets are their own columns again.
+        assert_eq!(frozen_line_screen_column(&line, 13, 40), 13);
+
+        let mut store = TranscriptStore::new(NonZeroUsize::new(8).unwrap());
+        let wide = store
+            .capture(CapturedRow::plain("中中 x.png", false))
+            .finalized
+            .pop()
+            .unwrap()
+            .line;
+        // Two wide characters occupy four cells, so the fourth grapheme stands at column five.
+        assert_eq!(frozen_line_screen_column(&wide, 3, 40), 5);
+    }
+
+    /// PIN (wrapped-reference geometry, 2026-08-04): a staged row's grapheme offset resolves
+    /// through its own cells, so a wide-character spacer moves the column exactly as
+    /// `captured_staged_visual_row` moves the anchor.
+    #[test]
+    fn a_staged_offset_resolves_through_the_rows_own_cells() {
+        let mut cells = Vec::new();
+        for _ in 0..2 {
+            cells.push(CapturedCell::plain("中"));
+            cells.push(CapturedCell {
+                wide_spacer: true,
+                ..CapturedCell::default()
+            });
+        }
+        cells.extend(" x.png".chars().map(|c| CapturedCell::plain(c.to_string())));
+        let staged = StagedRow {
+            id: StagingId(1),
+            row: CapturedRow {
+                cells,
+                continues: false,
+                shell_mark: None,
+            },
+        };
+        assert_eq!(staged_row_screen_column(&staged, 0), 0);
+        assert_eq!(staged_row_screen_column(&staged, 1), 2);
+        assert_eq!(staged_row_screen_column(&staged, 3), 5);
     }
 
     #[test]
