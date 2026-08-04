@@ -17,6 +17,11 @@ use portable_pty::{
 };
 use thiserror::Error;
 
+mod shell;
+pub use shell::{
+    ResolvedShell, ShellChoice, ShellEnvironment, SystemShellEnvironment, resolve_default_shell,
+};
+
 #[cfg(windows)]
 pub use portable_pty::win::{CONPTY_SIDECAR_VERSION, ConPtySource};
 
@@ -251,7 +256,15 @@ impl PtyCommand {
     }
 
     pub fn powershell() -> Self {
-        let mut command = Self::new("powershell.exe").arg("-NoLogo");
+        Self::interactive_shell("powershell.exe")
+    }
+
+    /// An interactive, color-capable shell command for `program` — `-NoLogo` plus the same
+    /// `COLORTERM`/`TERM` declaration policy as [`Self::powershell`]. `pwsh.exe` accepts the same
+    /// `-NoLogo` flag as `powershell.exe`, so `spawn_default`'s resolved shell shares this
+    /// constructor with the Windows PowerShell default it may fall back to.
+    fn interactive_shell(program: impl Into<OsString>) -> Self {
+        let mut command = Self::new(program).arg("-NoLogo");
         command.declare_color_support = true;
         command
     }
@@ -343,6 +356,14 @@ pub enum PtyError {
 
 fn backend(error: impl std::fmt::Display) -> PtyError {
     PtyError::Backend(error.to_string())
+}
+
+/// `spawn_default`'s fallback is a single retry against `powershell.exe`: once resolution has
+/// already landed on `WindowsPowerShell` (nothing overrode it, no `pwsh` was found), a spawn
+/// failure has no further shell left to fall back to, so it propagates instead of retrying the
+/// identical command.
+fn shell_spawn_failure_should_fall_back(choice: ShellChoice) -> bool {
+    choice != ShellChoice::WindowsPowerShell
 }
 
 #[derive(Default)]
@@ -472,13 +493,66 @@ pub struct PtySession {
     conpty_source: ConPtySource,
     /// Shared with the reader thread so `resize` can interleave `# RESIZE` markers with chunks.
     dump: Option<Arc<Mutex<PtyDump>>>,
+    /// Set once, only when `spawn_default` had to fall back to `powershell.exe` after its
+    /// resolved shell failed to spawn. `Runtime` surfaces this through the same status-text
+    /// channel as the math-worker downgrade notice, then discards it.
+    shell_fallback_notice: Option<String>,
 }
 
 impl PtySession {
+    /// Shell selection order (ruling 2026-08-04): `BT_SHELL` wins outright; otherwise
+    /// `pwsh.exe` (PowerShell 7) is used when [`resolve_default_shell`]'s probe can find an
+    /// install, and `powershell.exe` (Windows PowerShell 5.1) is the default. See
+    /// `docs/shell-integration.md` and `crate::shell` for the full rationale and the exact
+    /// `BT_SHELL` semantics.
+    ///
+    /// If the resolved shell fails to spawn, this falls back to `powershell.exe` once and
+    /// records a one-line notice (`take_shell_fallback_notice`) instead of failing the session —
+    /// a Windows PowerShell 5.1 install is effectively guaranteed, while a `BT_SHELL` override or
+    /// a `pwsh` resolved from a stale PATH entry is not.
+    ///
+    /// Whichever program resolution picks — `BT_SHELL`'s value, a found `pwsh.exe`, or the
+    /// `powershell.exe` default — is spawned exactly as `spawn_default` always has: `-NoLogo`
+    /// plus the terminal's color-capable environment declarations (`PtyCommand::interactive_shell`).
+    /// `BT_SHELL` exists to pick *which* PowerShell-family build runs, not to swap in an unrelated
+    /// shell, so this is a single uniform rule rather than a per-source special case.
     pub fn spawn_default(size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        let command = PtyCommand::powershell()
-            .working_directory(std::env::current_dir().map_err(PtyError::Io)?);
-        Self::spawn(command, size, wake)
+        Self::spawn_default_with(size, wake, &SystemShellEnvironment)
+    }
+
+    /// The testable core of `spawn_default`: shell resolution goes through the injected
+    /// `environment` rather than `std::env`/the real filesystem, so resolution-order and
+    /// fallback-on-failure tests are deterministic regardless of what is installed on the host.
+    fn spawn_default_with(
+        size: PtySize,
+        wake: OutputWake,
+        environment: &dyn ShellEnvironment,
+    ) -> Result<Self, PtyError> {
+        let working_directory = std::env::current_dir().map_err(PtyError::Io)?;
+        let resolved = resolve_default_shell(environment);
+        let command = PtyCommand::interactive_shell(resolved.program.clone())
+            .working_directory(working_directory.clone());
+        match Self::spawn(command, size, wake.clone()) {
+            Ok(session) => Ok(session),
+            Err(spawn_error) if shell_spawn_failure_should_fall_back(resolved.choice) => {
+                let notice = format!(
+                    "{} failed to start ({spawn_error}); using powershell.exe instead",
+                    Path::new(&resolved.program).display()
+                );
+                eprintln!("recoverable shell spawn failure: {notice}");
+                let fallback = PtyCommand::powershell().working_directory(working_directory);
+                let mut session = Self::spawn(fallback, size, wake)?;
+                session.shell_fallback_notice = Some(notice);
+                Ok(session)
+            }
+            Err(spawn_error) => Err(spawn_error),
+        }
+    }
+
+    /// Take the one-shot notice left by a `spawn_default` fallback, if any. `None` once taken, and
+    /// `None` for every session that started its resolved shell cleanly.
+    pub fn take_shell_fallback_notice(&mut self) -> Option<String> {
+        self.shell_fallback_notice.take()
     }
 
     pub fn spawn(command: PtyCommand, size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
@@ -524,6 +598,7 @@ impl PtySession {
             reader: Some(reader_thread),
             conpty_source,
             dump,
+            shell_fallback_notice: None,
         })
     }
 
@@ -1347,6 +1422,100 @@ mod tests {
         assert!(session.child_id().is_none());
     }
 
+    /// A path that is guaranteed not to exist on the test host, so a spawn attempt against it
+    /// deterministically fails regardless of what shells happen to be installed.
+    fn nonexistent_program(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "bt-pty-missing-{label}-{}-{}.exe",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn spawn_default_honors_bt_shell_override_when_it_resolves() {
+        // `BT_SHELL` set to a real, spawnable shell: the resolved-shell path runs and no fallback
+        // notice is left behind. `powershell.exe` is a bare name here deliberately — it exercises
+        // the "resolved by the OS at spawn time" half of the documented `BT_SHELL` semantics.
+        let environment = shell::FakeShellEnvironment::new().with_var("BT_SHELL", "powershell.exe");
+        let mut session =
+            PtySession::spawn_default_with(size(40, 8), no_wake(), &environment).unwrap();
+        assert!(session.take_shell_fallback_notice().is_none());
+        assert!(session.child_id().is_some());
+        session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn spawn_default_falls_back_to_windows_powershell_when_bt_shell_cannot_start() {
+        let missing = nonexistent_program("bt-shell");
+        let environment = shell::FakeShellEnvironment::new().with_var("BT_SHELL", &missing);
+        let mut session =
+            PtySession::spawn_default_with(size(40, 8), no_wake(), &environment).unwrap();
+        let notice = session
+            .take_shell_fallback_notice()
+            .expect("a spawn failure on the resolved shell must leave a fallback notice");
+        assert!(
+            notice.contains("powershell.exe"),
+            "fallback notice should name the shell it fell back to: {notice:?}"
+        );
+        assert!(
+            session.take_shell_fallback_notice().is_none(),
+            "the notice is one-shot"
+        );
+        assert!(session.child_id().is_some());
+        session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn spawn_default_falls_back_to_windows_powershell_when_resolved_pwsh_cannot_start() {
+        // No `BT_SHELL`; the fake probe reports a `pwsh.exe` inside a real, existing directory
+        // (`std::env::temp_dir()`, so `PATH` search itself is exercised faithfully), but the fake
+        // never actually creates that file, so the real spawn attempt genuinely fails with "not
+        // found". The resolution order still prefers `pwsh` (`PowerShellCore`), and it is that
+        // *spawn* failure that drives the fallback, exactly as an unavailable real install would
+        // drive it in production.
+        let pwsh_path = std::env::temp_dir().join("pwsh.exe");
+        let environment = shell::FakeShellEnvironment::new()
+            .with_var(
+                "PATH",
+                std::env::join_paths([std::env::temp_dir()]).unwrap(),
+            )
+            .with_file(&pwsh_path);
+        let resolved = resolve_default_shell(&environment);
+        assert_eq!(resolved.choice, ShellChoice::PowerShellCore);
+        assert_eq!(resolved.program, pwsh_path.as_os_str());
+
+        let mut session =
+            PtySession::spawn_default_with(size(40, 8), no_wake(), &environment).unwrap();
+        let notice = session
+            .take_shell_fallback_notice()
+            .expect("an unresolvable pwsh.exe path must still fall back and leave a notice");
+        assert!(
+            notice.contains("powershell.exe"),
+            "fallback notice should name the shell it fell back to: {notice:?}"
+        );
+        assert!(session.child_id().is_some());
+        session.shutdown().unwrap();
+    }
+
+    #[test]
+    fn fallback_retry_is_only_attempted_for_a_resolved_shell_other_than_windows_powershell() {
+        // Pins the exact condition `spawn_default_with` retries on. A `WindowsPowerShell`
+        // resolution is already `powershell.exe`; retrying it on failure would just repeat the
+        // identical, already-failed spawn, so `spawn_default` must propagate that error instead
+        // of manufacturing an infinite-seeming loop of one.
+        assert!(shell_spawn_failure_should_fall_back(ShellChoice::Override));
+        assert!(shell_spawn_failure_should_fall_back(
+            ShellChoice::PowerShellCore
+        ));
+        assert!(!shell_spawn_failure_should_fall_back(
+            ShellChoice::WindowsPowerShell
+        ));
+    }
+
     #[test]
     fn sidecar_resize_keeps_history_navigation_on_a_clean_prompt_line() {
         let source = conpty_source();
@@ -1860,9 +2029,28 @@ mod tests {
     /// prompt plus the input wraps once the pane narrows.
     const PROFILE_PROBE_TYPED: &str =
         "echo D:\\Developer\\BetterTerminal\\local-images\\sunset.svg";
+    /// The same command, long enough that prompt plus input **already** occupies two rows at
+    /// `PROFILE_PROBE_WIDE`. This is the one property of the reported gesture that no earlier probe
+    /// shape varied: `PROFILE_PROBE_TYPED` is deliberately short enough to fit on one row until the
+    /// pane narrows, and a line editor that re-derives its render anchor from the post-resize
+    /// cursor is only wrong by the number of rows the input occupied *before* the resize.
+    const PROFILE_PROBE_TYPED_WRAPPED: &str =
+        "echo D:\\Developer\\BetterTerminal\\local-images\\sunset-wrapped2.svg";
     const PROFILE_PROBE_WIDE: u16 = 100;
     const PROFILE_PROBE_NARROW: u16 = 70;
     const PROFILE_PROBE_ROWS: u16 = 26;
+
+    /// The repository root as a plain path. Deliberately not canonicalized: `canonicalize` returns
+    /// a `\?\` extended-length path, and the prompt is a function of the working directory, so
+    /// that would change the very geometry the recorded gesture is measured in.
+    fn repository_root() -> PathBuf {
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        manifest
+            .parent()
+            .and_then(Path::parent)
+            .expect("the crate is two levels below the repository root")
+            .to_path_buf()
+    }
 
     fn integration_script_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1911,6 +2099,11 @@ mod tests {
                 | ProfileScenario::RealCondaIntegration
         ) {
             startup.push_str(&format!(". '{}'; ", integration_script_path().display()));
+        }
+        if matches!(shape.scenario, ProfileScenario::RealProfile) {
+            // The reporting host's own profile prints the conda noise line; adding the probe's copy
+            // would push the prompt down a row and change the very geometry under test.
+            return startup;
         }
         if shape.filled {
             startup.push_str(
@@ -2430,18 +2623,26 @@ mod tests {
         }
 
         fn settle_at_prompt(&mut self, prompt: &str) -> bool {
+            self.settle_at_prompt_matching(&|line| line == prompt.trim_end())
+                .is_some()
+        }
+
+        /// Park at a prompt the probe cannot predict — the host's own `$PROFILE` writes it — and
+        /// report the text it settled on, with the trailing space every prompt ends in restored.
+        fn settle_at_prompt_matching(&mut self, accept: &dyn Fn(&str) -> bool) -> Option<String> {
             let deadline = Instant::now() + Duration::from_secs(25);
             while Instant::now() < deadline {
                 self.pump_once();
-                if self.current_line() == prompt.trim_end() {
+                if accept(&self.current_line()) {
                     self.pump_until_quiet(Duration::from_secs(5));
-                    if self.current_line() == prompt.trim_end() {
-                        return true;
+                    let line = self.current_line();
+                    if accept(&line) {
+                        return Some(format!("{line} "));
                     }
                 }
                 std::thread::sleep(Duration::from_millis(2));
             }
-            false
+            None
         }
     }
 
@@ -2463,6 +2664,86 @@ mod tests {
         keystroke_mid_burst: bool,
         /// Resume the next burst without letting the child's post-commit redraw arrive first.
         resume_before_settling: bool,
+        /// Wake the line editor after the drag with keys that move the cursor but leave the input
+        /// buffer identical (Left then Right). The recording's repaint carries no new character, so
+        /// whatever woke that editor did not change what it had to draw — and PSReadLine's
+        /// unchanged-buffer re-anchor is a different branch from its changed-buffer one.
+        wake_without_edit: bool,
+        /// Whether the input already wraps onto a second row *before* the pointer moves. Every
+        /// earlier shape typed a command that fits on one row until the pane narrows, so the line
+        /// editor's post-resize anchor happened to be right; the reported gesture had already
+        /// wrapped, and a stale anchor is off by exactly the rows the input occupied.
+        wrapped_input: bool,
+        /// The pane the gesture happens in, and how much scrollback is behind the prompt. Every
+        /// earlier shape drove a full 100x26 screen, where the prompt sits on the bottom row and
+        /// reflow scrolls it; the reported gesture happened in a short pane whose prompt was the
+        /// second row from the top, where reflow scrolls nothing at all.
+        stage: BurstStage,
+    }
+
+    /// Pane and scrollback the drag is performed in.
+    #[derive(Clone, Copy, Debug)]
+    struct BurstStage {
+        wide: u16,
+        /// Rows the pane has before the drag. The recording states the committed size but not the
+        /// one before it, so this is the parameter a sweep has to cover.
+        wide_rows: u16,
+        narrow: u16,
+        rows: u16,
+        /// A screen already full of scrollback (the prompt is on the last row), versus a session
+        /// that has printed one line (the prompt is the second row, and nothing can scroll).
+        filled: bool,
+        /// What the typed command is, when the shape asks for input that already wraps at `wide`.
+        wrapped_typed: &'static str,
+        /// Run the host's real `$PROFILE` chain instead of a reconstruction of it. The prompt is
+        /// then read off the settled screen rather than asserted, and the editor is configured the
+        /// way the reporting user actually configured it.
+        real_profile: bool,
+        /// How long the gesture is left alone after the last commit before anything else is sent.
+        /// The line editor notices a pseudoconsole resize on its own poll, not on the resize: the
+        /// recording's editor repainted 827 ms after the commit, with no keystroke involved, and a
+        /// probe that stops pumping 150 ms after the child goes quiet never sees that repaint.
+        settle_after_commit: Duration,
+    }
+
+    /// The stage every burst shape before the recording was driven on.
+    const BURST_STAGE_FULL_SCREEN: BurstStage = BurstStage {
+        wide: PROFILE_PROBE_WIDE,
+        wide_rows: PROFILE_PROBE_ROWS,
+        narrow: PROFILE_PROBE_NARROW,
+        rows: PROFILE_PROBE_ROWS,
+        filled: true,
+        wrapped_typed: PROFILE_PROBE_TYPED_WRAPPED,
+        real_profile: false,
+        settle_after_commit: Duration::from_millis(0),
+    };
+
+    /// The stage `.tmp-repaint-capture/s12-rearm-verify.vt` was recorded on, read off the recording
+    /// itself: 74 columns before the drag (the prompt plus the typed command is 76 cells, and the
+    /// child placed its cursor at row 3 column 3), 61x17 committed, one printed line above the
+    /// prompt, and the user's own command.
+    const BURST_STAGE_RECORDED: BurstStage = BurstStage {
+        wide: 74,
+        wide_rows: 17,
+        narrow: 61,
+        rows: 17,
+        filled: false,
+        wrapped_typed: RECORDED_TYPED,
+        real_profile: false,
+        settle_after_commit: Duration::from_millis(2_500),
+    };
+
+    /// The command in the recording, byte for byte. 37 cells after a 39-cell prompt.
+    const RECORDED_TYPED: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
+
+    impl BurstShape {
+        fn typed(self) -> &'static str {
+            if self.wrapped_input {
+                self.stage.wrapped_typed
+            } else {
+                PROFILE_PROBE_TYPED
+            }
+        }
     }
 
     #[derive(Debug)]
@@ -2495,11 +2776,16 @@ mod tests {
     /// which is what makes a paused drag more than one pseudoconsole resize.
     fn burst_drag_steps(shape: BurstShape) -> Vec<DragBurst> {
         const STEPS_PER_BURST: usize = 4;
-        let width_span = f64::from(PROFILE_PROBE_WIDE - PROFILE_PROBE_NARROW);
-        let row_span = if shape.shortens { 8.0 } else { 0.0 };
+        let width_span = f64::from(shape.stage.wide - shape.stage.narrow);
+        let stage_row_span = f64::from(shape.stage.wide_rows) - f64::from(shape.stage.rows);
+        let row_span = if shape.shortens {
+            stage_row_span.max(8.0)
+        } else {
+            stage_row_span
+        };
         let at = |fraction: f64, wobble: f64| {
-            let columns = f64::from(PROFILE_PROBE_WIDE) - width_span * fraction + wobble;
-            let rows = f64::from(PROFILE_PROBE_ROWS) - row_span * fraction + wobble;
+            let columns = f64::from(shape.stage.wide) - width_span * fraction + wobble;
+            let rows = f64::from(shape.stage.wide_rows) - row_span * fraction + wobble;
             (
                 columns.round().max(12.0) as u16,
                 rows.round().max(4.0) as u16,
@@ -2526,30 +2812,51 @@ mod tests {
 
     fn run_resize_burst_probe(shell: &str, shape: BurstShape) -> Option<BurstOutcome> {
         let profile = ProfileShape {
-            scenario: ProfileScenario::CondaIntegration,
-            filled: true,
+            scenario: if shape.stage.real_profile {
+                ProfileScenario::RealProfile
+            } else {
+                ProfileScenario::CondaIntegration
+            },
+            filled: shape.stage.filled,
         };
-        let prompt = format!("(base) {PROFILE_PROBE_PROMPT}");
+        let mut startup = profile_probe_startup(profile);
+        if shape.stage.real_profile {
+            // The reporting session's working directory is the repository root, and the prompt is
+            // a function of it. Tests run from the crate directory, so state it.
+            startup = format!("Set-Location '{}'; {startup}", repository_root().display());
+        }
         let mut oracle = AppResizeOracle::spawn(
             shell,
-            &profile_probe_startup(profile),
-            PROFILE_PROBE_WIDE,
-            PROFILE_PROBE_ROWS,
-            false,
+            &startup,
+            shape.stage.wide,
+            shape.stage.wide_rows,
+            shape.stage.real_profile,
         );
-        if !oracle.settle_at_prompt(&prompt) {
+        let settled = if shape.stage.real_profile {
+            oracle.settle_at_prompt_matching(&|line| line.ends_with('>'))
+        } else {
+            let want = format!("(base) {PROFILE_PROBE_PROMPT}");
+            oracle.settle_at_prompt(&want).then_some(want)
+        };
+        let Some(prompt) = settled else {
             eprintln!(
                 "BT_CONPTY_BURST_PROBE shell={shell} {} SETUP-FAILED line={:?}",
                 shape.label,
                 oracle.current_line()
             );
             return None;
-        }
+        };
 
-        oracle.pty.write(PROFILE_PROBE_TYPED.as_bytes()).unwrap();
+        oracle.pty.write(shape.typed().as_bytes()).unwrap();
         oracle.pump_for(Duration::from_millis(400));
 
+        // Whether the conda startup line the drag must not destroy is on screen at all. A stage
+        // driving the host's real `$PROFILE` inherits whatever that profile prints, which for pwsh
+        // is no conda hook and therefore no such line; requiring its survival there would report a
+        // clean gesture as corrupt.
+        let noise_present_before = has_noise(&oracle.composed_rows());
         let mut typed_after = String::new();
+        let emit_mark = oracle.raw_output.len();
         let bursts = burst_drag_steps(shape);
         let last_burst = bursts.len().saturating_sub(1);
         for (index, (moving, resting)) in bursts.into_iter().enumerate() {
@@ -2583,14 +2890,24 @@ mod tests {
             }
         }
         oracle.pump_until_quiet(Duration::from_secs(6));
+        // The editor's own resize poll fires well after the child's post-commit output goes quiet.
+        oracle.pump_for(shape.stage.settle_after_commit);
+        oracle.pump_until_quiet(Duration::from_secs(6));
         // What is on screen when the gesture ends. A later keystroke makes the line editor repaint
         // its whole input from a freshly asked cursor position, which can *heal* a corrupted screen,
         // so the damage has to be read here as well as after.
         let settled_rows = oracle.composed_rows();
         let settled_input_line = oracle.composed_input_line(&prompt);
-        let settled_expected = format!("{prompt}{PROFILE_PROBE_TYPED}{typed_after}");
+        let settled_expected = format!("{prompt}{}{typed_after}", shape.typed());
         let settled_spliced_rows = spliced_prompt_rows(&settled_rows, &prompt);
 
+        if shape.wake_without_edit {
+            oracle.pty.write(b"[D").unwrap();
+            oracle.pump_for(Duration::from_millis(300));
+            oracle.pty.write(b"[C").unwrap();
+            oracle.pump_for(Duration::from_millis(300));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+        }
         // The trailing keystroke every earlier probe ends with: the line editor redraws its input
         // against whatever row it believes it is on.
         oracle.pty.write(b"Z").unwrap();
@@ -2598,16 +2915,18 @@ mod tests {
         oracle.pump_for(Duration::from_millis(900));
         oracle.pump_until_quiet(Duration::from_secs(6));
 
-        let expected_input_line = format!("{prompt}{PROFILE_PROBE_TYPED}{typed_after}");
+        let expected_input_line = format!("{prompt}{}{typed_after}", shape.typed());
         let input_line = oracle.composed_input_line(&prompt);
         let composed_rows = oracle.composed_rows();
-        let noise_intact = composed_rows
-            .iter()
-            .any(|row| row.trim_end() == PROFILE_PROBE_NOISE)
-            || composed_rows
-                .windows(2)
-                .any(|pair| format!("{}{}", pair[0], pair[1]).contains(PROFILE_PROBE_NOISE));
+        let noise_intact = !noise_present_before || has_noise(&composed_rows);
         let spliced_rows = spliced_prompt_rows(&composed_rows, &prompt);
+        if std::env::var_os("BT_BURST_EMIT").is_some() {
+            eprintln!(
+                "BT_CONPTY_BURST_PROBE_EMIT shell={shell} {} emitted={:?}",
+                shape.label,
+                escaped(&oracle.raw_output[emit_mark..])
+            );
+        }
         Some(BurstOutcome {
             shell: shell.to_owned(),
             label: shape.label,
@@ -2623,6 +2942,14 @@ mod tests {
             spliced_rows,
             composed_rows,
         })
+    }
+
+    /// Whether the conda startup line survives on the composed frame, whole or across a wrap.
+    fn has_noise(rows: &[String]) -> bool {
+        rows.iter().any(|row| row.trim_end() == PROFILE_PROBE_NOISE)
+            || rows
+                .windows(2)
+                .any(|pair| format!("{}{}", pair[0], pair[1]).contains(PROFILE_PROBE_NOISE))
     }
 
     /// The reported artifact, stated as a property of the composed frame: a prompt that begins
@@ -2647,7 +2974,16 @@ mod tests {
     /// also shortens, whether a keystroke lands between the bursts, and whether the pointer resumes
     /// before the child's answer to the previous commit has arrived.
     ///
-    /// Read the `BT_CONPTY_BURST_PROBE` lines on stderr.
+    /// The recorded shapes come from `.tmp-repaint-capture/s12-rearm-verify.vt`, the reporting
+    /// user's own post-fix session: one commit, 74 columns down to 61x17, one printed line above
+    /// the prompt, and a typed command that already wraps. That last property is the one no earlier
+    /// shape varied, and the recording's own bytes show why it matters — a line editor that
+    /// re-derives its anchor from the post-resize cursor is wrong by the rows its input occupied.
+    ///
+    /// Read the `BT_CONPTY_BURST_PROBE` lines on stderr. `BT_BURST_ONLY=<label>` drives a single
+    /// shape (the full matrix is two shells by every shape, which is minutes of live child), and
+    /// `BT_BURST_EMIT=1` dumps the child's own bytes for the gesture, which is what a claim about
+    /// where the child anchored its redraw has to be read off.
     #[test]
     #[ignore = "dev probe: drives real interactive shells through ConPTY; host-timing sensitive"]
     fn resize_burst_composed_frame_probe() {
@@ -2660,6 +2996,9 @@ mod tests {
             keystroke_between: false,
             keystroke_mid_burst: false,
             resume_before_settling: false,
+            wake_without_edit: false,
+            wrapped_input: false,
+            stage: BURST_STAGE_FULL_SCREEN,
         };
         let shapes = [
             control,
@@ -2709,10 +3048,101 @@ mod tests {
                 resume_before_settling: true,
                 ..control
             },
+            // The reported gesture, isolated: the input already wraps when the drag begins, and
+            // nothing else differs from `control`.
+            BurstShape {
+                label: "one-commit-wrapped",
+                wrapped_input: true,
+                ..control
+            },
+            BurstShape {
+                label: "two-commit-wrapped",
+                bursts: 2,
+                wrapped_input: true,
+                ..control
+            },
+            // The recording's own pane, one property at a time: the short, nearly empty screen
+            // whose prompt cannot scroll, then that screen with the input already wrapped, which
+            // together are the gesture `s12-rearm-verify.vt` captured.
+            BurstShape {
+                label: "recorded-pane",
+                stage: BURST_STAGE_RECORDED,
+                ..control
+            },
+            BurstShape {
+                label: "recorded-gesture",
+                wrapped_input: true,
+                stage: BURST_STAGE_RECORDED,
+                ..control
+            },
+            BurstShape {
+                label: "recorded-gesture-real-profile",
+                wrapped_input: true,
+                stage: BurstStage {
+                    real_profile: true,
+                    ..BURST_STAGE_RECORDED
+                },
+                ..control
+            },
+            BurstShape {
+                label: "recorded-gesture-woken",
+                wrapped_input: true,
+                wake_without_edit: true,
+                stage: BURST_STAGE_RECORDED,
+                ..control
+            },
+            BurstShape {
+                label: "recorded-gesture-woken-real-profile",
+                wrapped_input: true,
+                wake_without_edit: true,
+                stage: BurstStage {
+                    real_profile: true,
+                    ..BURST_STAGE_RECORDED
+                },
+                ..control
+            },
+            BurstShape {
+                label: "recorded-gesture-taller",
+                wrapped_input: true,
+                stage: BurstStage {
+                    wide_rows: 25,
+                    ..BURST_STAGE_RECORDED
+                },
+                ..control
+            },
+            BurstShape {
+                label: "recorded-gesture-shorter",
+                wrapped_input: true,
+                stage: BurstStage {
+                    wide_rows: 12,
+                    ..BURST_STAGE_RECORDED
+                },
+                ..control
+            },
+            BurstShape {
+                label: "recorded-gesture-filled",
+                wrapped_input: true,
+                stage: BurstStage {
+                    filled: true,
+                    ..BURST_STAGE_RECORDED
+                },
+                ..control
+            },
+            BurstShape {
+                label: "recorded-gesture-two-commit",
+                bursts: 2,
+                wrapped_input: true,
+                stage: BURST_STAGE_RECORDED,
+                ..control
+            },
         ];
+        let only = std::env::var("BT_BURST_ONLY").ok();
         let mut outcomes = Vec::new();
         for shell in ["powershell.exe", "pwsh.exe"] {
             for shape in shapes {
+                if only.as_deref().is_some_and(|want| want != shape.label) {
+                    continue;
+                }
                 let Some(outcome) = run_resize_burst_probe(shell, shape) else {
                     continue;
                 };

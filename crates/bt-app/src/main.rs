@@ -252,6 +252,10 @@ struct Runtime {
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
+    /// One-shot startup notice from `PtySession::spawn_default` falling back to `powershell.exe`.
+    /// Shown on the first frame published, then discarded — see `shell_fallback_notice` at the
+    /// `spawn_default` call site.
+    shell_fallback_notice: Option<String>,
     projection: ViewportProjection,
     pending_frames: LatestFrameSlot,
     grid: GridSize,
@@ -983,7 +987,7 @@ impl Runtime {
             let _ = pty_proxy.send_event(AppEvent::PtyOutput);
         });
         let phase_started = Instant::now();
-        let pty = if probe_input.is_none() {
+        let mut pty = if probe_input.is_none() {
             Some(
                 PtySession::spawn_default(
                     pty_size(grid, terminal_pty_physical(&renderer, render_physical)),
@@ -994,6 +998,13 @@ impl Runtime {
         } else {
             None
         };
+        // `spawn_default` already fell back to `powershell.exe` and logged the failure if its
+        // resolved shell (a `BT_SHELL` override, or `pwsh.exe`) could not start; surface that
+        // one-line notice on the very first frame through the same status-text channel the
+        // math-worker downgrade notice uses.
+        let shell_fallback_notice = pty
+            .as_mut()
+            .and_then(PtySession::take_shell_fallback_notice);
         let conpty_source = pty
             .as_ref()
             .map(|pty| pty.conpty_source().to_string())
@@ -1037,6 +1048,7 @@ impl Runtime {
             math_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
+            shell_fallback_notice,
             projection,
             pending_frames: LatestFrameSlot::default(),
             grid,
@@ -1390,6 +1402,9 @@ impl Runtime {
         }
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
             terminal_frame.status_text = Some(notice.to_owned());
+        }
+        if let Some(notice) = self.shell_fallback_notice.take() {
+            terminal_frame.status_text = Some(notice);
         }
         let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
             .context("reject non-rectangular frame before IME composition")?;

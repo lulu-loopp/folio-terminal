@@ -12317,6 +12317,146 @@ mod tests {
         );
     }
 
+    /// Everything the reporting session's child wrote before the pane was narrowed, byte for byte
+    /// from `.tmp-repaint-capture/s12-rearm-verify.vt` chunks 0..13. Conda's startup line, the
+    /// shell-integration prompt with its OSC 133 `A`/`B` pair, and the line editor's first render of
+    /// the typed command at absolute row 2 column 40. Its own closing `CUP` to row 3 column 3 states
+    /// that the pane was 74 columns wide: 39 prompt cells plus 37 typed cells is 76, and 76 = 74 + 2.
+    const RECORDED_BEFORE_RESIZE: &[u8] = b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001hDid not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\x1b]7;file:///D:/Developer/BetterTerminal\x07\x1b]133;A\x07PS D:\\Developer\\BetterTerminal> \x1b]133;B\x07\x1b[?25l\x1b[2;40H\x1b[93mWrite-Output\x1b[39;49m \x1b[37m(\x1b[36m'BT_APP_'\x1b[39;49m \x1b[90m+\x1b[39;49m \x1b[36m'INPUT_OK'\x1b[37m)\x1b[39;49m\x1b[0m\x1b[3;3H\x1b[?25h";
+
+    /// The child's own cursor-position request, and its own statement of where the reflow put the
+    /// cursor: `CUP` row 3 column 16, which is 76 = 61 + 15 — the truth at the committed width.
+    const RECORDED_AFTER_RESIZE_CURSOR: &[u8] = b"\x1b[6n\x1b[3;16H";
+
+    /// What the child wrote next, unchanged. It erases 22 cells from row 3 column 40 and 15 from
+    /// row 4 column 1 — exactly the 37 typed cells laid out from an anchor of row 3 column 40 — and
+    /// then redraws the command there. The truth is row 2 column 40, which the child had just
+    /// stated it knew: the erase spans a region the terminal never put anything in, so the original
+    /// copy survives and the redraw becomes a second one.
+    const RECORDED_STALE_ANCHOR_REPAINT: &[u8] = b"\x1b[?25l\x1b[3;40H\x1b[39;49m                      \x1b[4;1H               \x1b[0m\x1b[3;40H\x1b[?25h\x1b[?25l\x1b[3;40H\x1b[93mWrite-Output\x1b[39;49m \x1b[37m(\x1b[36m'BT_APP_'\x1b[39;49m \x1b[90m+\x1b[39;49m \x1b[36m'INPUT_OK'\x1b[37m)\x1b[39;49m\x1b[0m\x1b[4;16H\x1b[?25h";
+
+    /// The one pseudoconsole size the recording committed, from its `# RESIZE 61 17` marker.
+    use crate::RESIZE_REQUEST_QUIET;
+
+    const RECORDED_COMMIT: (u32, u32) = (61, 17);
+    /// The pane before that commit. The columns are stated by the child's own pre-resize cursor
+    /// (see `RECORDED_BEFORE_RESIZE`); the rows are not observable from the recording and do not
+    /// enter any assertion below, because every row of content is at the top of the grid.
+    const RECORDED_BEFORE: (u32, u32) = (74, 17);
+
+    /// Drive the recorded gesture through the product's own resize path.
+    fn recorded_gesture_session(start: Instant) -> DualPlaneSession {
+        let mut session = DualPlaneSession::new(nz(RECORDED_BEFORE.0), nz(RECORDED_BEFORE.1));
+        session.feed_at(RECORDED_BEFORE_RESIZE, start).unwrap();
+        let _ = session.take_pty_writes();
+        // One pointer rest, one coalesced commit: the recording contains exactly one `# RESIZE`.
+        // The pointer still passes through sizes on its way there, none of which ConPTY hears
+        // about. They are included because the gesture contains them, not because this content can
+        // tell them apart: three rows at the top of the grid reflow losslessly through every one of
+        // them. What the canonical branch buys is pinned separately, on content that scrolls.
+        let mut projected = start;
+        for (columns, rows) in [(71u32, 17u32), (66, 16), (58, 14), (63, 15)] {
+            projected += Duration::from_millis(16);
+            session.resize_at(nz(columns), nz(rows), projected).unwrap();
+        }
+        projected += Duration::from_millis(16);
+        session
+            .resize_at(nz(RECORDED_COMMIT.0), nz(RECORDED_COMMIT.1), projected)
+            .unwrap();
+        let committed = projected + RESIZE_REQUEST_QUIET;
+        assert!(
+            session.mark_pty_resize_requested_at(
+                nz(RECORDED_COMMIT.0),
+                nz(RECORDED_COMMIT.1),
+                committed,
+            ),
+            "the only commit in the recording must land inside an open transaction"
+        );
+        session
+    }
+
+    /// A cursor-position report is a statement about the grid the child has, not about the grid the
+    /// pointer is passing through.
+    ///
+    /// The reporting session's child asked `CSI 6 n` 827 ms after the pseudoconsole was resized, and
+    /// the recording shows it then stating its own belief as `CUP 3;16`. This pins that the answer
+    /// this terminal produces for that request is the same row and the same column — so the stale
+    /// anchor the child went on to use was not something the terminal told it. The red check is the
+    /// identical request answered before the commit: it reports row 3 column 3, the 74-column truth,
+    /// which is what a report computed from any grid but the committed one looks like.
+    #[test]
+    fn the_recorded_cursor_report_is_answered_from_the_committed_pseudoconsole_grid() {
+        let start = Instant::now();
+
+        // Red check: the same request against the pre-commit grid is a different answer, so this
+        // pin can tell the two grids apart.
+        let mut before = DualPlaneSession::new(nz(RECORDED_BEFORE.0), nz(RECORDED_BEFORE.1));
+        before.feed_at(RECORDED_BEFORE_RESIZE, start).unwrap();
+        let _ = before.take_pty_writes();
+        before.feed_at(b"\x1b[6n", start).unwrap();
+        assert_eq!(
+            before.take_pty_writes(),
+            vec![b"\x1b[3;3R".to_vec()],
+            "the 74-column grid is the one the child had before the commit"
+        );
+
+        let mut session = recorded_gesture_session(start);
+        let at = start + Duration::from_millis(400) + RESIZE_REQUEST_QUIET;
+        assert!(
+            session.finish_resize_if_quiescent(at).unwrap(),
+            "the transaction closes 200 ms after the commit; the child's request arrives later"
+        );
+        session.feed_at(RECORDED_AFTER_RESIZE_CURSOR, at).unwrap();
+        assert_eq!(
+            session.take_pty_writes(),
+            vec![b"\x1b[3;16R".to_vec()],
+            "the report must be the child's own post-reflow cursor, which the recording states"
+        );
+    }
+
+    /// The reported duplication is in the child's bytes, and this terminal composes them faithfully.
+    ///
+    /// Replaying the recording through the product's resize path reproduces the screenshot: the
+    /// prompt and the first half of the command on row 2, the command's tail on row 3 followed by a
+    /// second copy of its head starting mid-row at column 40, and that copy's own tail on row 4.
+    /// Every cell of the second copy is at a coordinate the child named with an absolute `CUP`.
+    /// This is a characterisation pin, not an aspiration: it must change only when the terminal
+    /// stops honouring an absolute cursor address, and it exists so a future change that *adds* a
+    /// duplication of its own is not mistaken for this one.
+    #[test]
+    fn the_recorded_duplicate_input_line_is_written_by_the_child_at_its_own_anchor() {
+        let start = Instant::now();
+        let mut session = recorded_gesture_session(start);
+        let at = start + Duration::from_millis(400) + RESIZE_REQUEST_QUIET;
+        assert!(session.finish_resize_if_quiescent(at).unwrap());
+
+        // The committed reflow alone leaves one copy, laid out at the committed width.
+        session.feed_at(RECORDED_AFTER_RESIZE_CURSOR, at).unwrap();
+        let reflowed = session.terminal().visible_text();
+        assert_eq!(
+            &reflowed[..3],
+            [
+                "Did not find path entry D:\\App\\Base\\anaconda3\\bin",
+                "(base) PS D:\\Developer\\BetterTerminal> Write-Output ('BT_APP_",
+                "' + 'INPUT_OK')",
+            ],
+            "the committed reflow puts the whole input line on rows 2 and 3"
+        );
+
+        session.feed_at(RECORDED_STALE_ANCHOR_REPAINT, at).unwrap();
+        let composed = session.terminal().visible_text();
+        assert_eq!(
+            &composed[..4],
+            [
+                "Did not find path entry D:\\App\\Base\\anaconda3\\bin",
+                "(base) PS D:\\Developer\\BetterTerminal> Write-Output ('BT_APP_",
+                "' + 'INPUT_OK')                        Write-Output ('BT_APP_",
+                "' + 'INPUT_OK')",
+            ],
+            "the second copy must appear exactly where the child's absolute CUP put it"
+        );
+    }
+
     #[test]
     fn primary_resize_keeps_formula_rendered_through_the_post_quiescence_repaint() {
         // Regression for the residual resize-completes flash. 002acc7 preserves formulas *during*
