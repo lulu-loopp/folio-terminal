@@ -13,7 +13,7 @@ use alacritty_terminal::{
     index::{Column, Line},
     term::{
         Config, ScrollOutCause, ScrollRegionScope, TermDamage, TermMode, TranscriptEvent,
-        TranscriptScreen,
+        TranscriptScreen, cell::Flags,
     },
     vte::{Params, Parser, Perform, ansi::Processor},
 };
@@ -636,6 +636,22 @@ impl TerminalAdapter {
                 .collect::<Vec<_>>();
             to_captured_row(&cells)
         })
+    }
+
+    /// Whether `row` soft-wraps into the row below it — the `continues` flag of `visible_row`, read
+    /// without capturing the row.
+    ///
+    /// The affordance scan asks this once per presentation row of every published frame, only to
+    /// decide where one logical line ends, so capturing (and cloning) a whole row of cells for one
+    /// bit is the wrong price. The bit itself is where the capture reads it: WRAPLINE on the row's
+    /// last cell.
+    pub fn visible_row_continues(&self, row: u32) -> bool {
+        let columns = self.columns.get() as usize;
+        row < self.rows.get()
+            && columns != 0
+            && self.term.grid()[Line(row as i32)][Column(columns - 1)]
+                .flags
+                .contains(Flags::WRAPLINE)
     }
 
     pub(crate) fn visible_row_fingerprint(&self, row: u32) -> Option<CapturedRowFingerprint> {

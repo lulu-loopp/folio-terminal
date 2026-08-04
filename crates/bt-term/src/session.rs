@@ -50,7 +50,8 @@ use crate::{
         DecodedInlineImage, ImageReferenceShape, InlineImageDecodeError, InlineImageScaleTask,
         InlineImageSource, InlineImageTask, ScaledInlineImage, ShellIntegrationMarker,
         decode_inline_image, detect_peek_image_candidates, file_uri_to_local_image_path,
-        file_uri_to_local_path, local_host_name, scale_inline_image,
+        file_uri_to_local_path, local_host_name, normalized_local_image_path_key,
+        scale_inline_image,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
     scheduling::{EnqueueOutcome, PARSE_QUANTUM, ResizeEpoch, WORKER_QUEUE_CAP, WorkerScheduler},
@@ -152,16 +153,55 @@ pub struct InlineImageRecordView {
     pub local_path: Option<PathBuf>,
 }
 
-/// One verified image reference as the affordance layer sees it: where it is, and what it says.
+/// One image reference **as one frame shows it**: the file it names, and the cells of that frame
+/// which display it.
 ///
-/// The text travels with the anchors on purpose. A span alone is a coordinate, and the whole point
-/// of the 2026-08-04 stray-underline fix is that a coordinate is not evidence — whoever paints or
-/// acts on this span re-checks that the cells still spell `text` before doing so.
+/// This is the whole vocabulary of the affordance layer since the 2026-08-04 frame-derived ruling.
+/// There is no anchor here and no occurrence id, because there is nothing to remember: the list is
+/// re-derived from the frame's own text every time a frame is published, so an occurrence that
+/// scrolled, re-wrapped, was overwritten, or appears twice needs no bookkeeping to be right. Two
+/// printings of one file are two entries with the same `path` and disjoint `cells` — which is
+/// exactly what the two of them are.
+///
+/// `cells` are indices into `frame.cells`, ascending and never empty. The four verbs (resting
+/// dots, hover solid, Ctrl+click, hover peek) all read this one list, so they cannot disagree
+/// about where a reference is.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ImageReferenceSpan {
-    pub start: ContentAnchor,
-    pub end: ContentAnchor,
-    pub text: String,
+pub struct FrameImageReference {
+    pub path: PathBuf,
+    pub cells: Vec<u32>,
+    /// Whether the decoration worker has opened and decoded this file. Only a verified reference
+    /// wears the underline and answers Ctrl+click; the peek answers on either, because hovering an
+    /// unverified reference is how a file that no record ever named still gets read.
+    pub verified: bool,
+}
+
+impl FrameImageReference {
+    pub fn covers(&self, cell: u32) -> bool {
+        self.cells.binary_search(&cell).is_ok()
+    }
+}
+
+/// One logical line of a frame, as the affordance scan reads it: the text its cells spell, and the
+/// byte range each cell contributed to that text.
+///
+/// One of these is allocated per scanned frame and reused for every line of it. The scan runs on
+/// every publish, and a fresh `String` plus a fresh cell vector per line was the larger half of its
+/// cost.
+#[derive(Default)]
+struct FrameLine {
+    text: String,
+    cells: Vec<FrameLineCell>,
+}
+
+struct FrameLineCell {
+    byte_start: usize,
+    byte_end: usize,
+    /// Index into `frame.cells`.
+    cell: u32,
+    /// Whether the cell spells nothing, so a soft-wrapped row's trailing pad can be dropped before
+    /// the next row is joined onto it.
+    blank: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -176,17 +216,6 @@ enum InlineImageRecordKind {
     LocalPath {
         path: PathBuf,
         source_text: String,
-        /// The reference's OWN printed characters — exactly the text between `start_anchor` and
-        /// `end_anchor`, which is a strict substring of `source_text` (the whole logical line).
-        ///
-        /// This is the record's content witness. An anchor pair is a coordinate, and a coordinate
-        /// outlives the text that earned it: the line editor rewrites its buffer in place, a
-        /// history recall erases the tail with spaces, a repaint moves the reference elsewhere.
-        /// Painting the resting affordance from the coordinate alone put dotted runs on cells that
-        /// had gone blank (user repro 2026-08-04, `.tmp-repaint-capture/affordance-verify.vt`).
-        /// The affordance is therefore a function of what those cells currently *spell*, and this
-        /// is what they have to spell — see `reference_span_content`.
-        reference_text: String,
         start_anchor: AnchorId,
         /// How the reference is spelled — the record's copy of the detector's own verdict, so
         /// `projected_inline_image` can refuse a band to a URI without re-reading the line.
@@ -222,9 +251,6 @@ struct InlineImageGeometry {
 struct DetectedLiveImagePath {
     path: PathBuf,
     source_text: String,
-    /// The reference's own printed characters, in the cell normalization
-    /// `captured_row_text_and_boundaries` produces. Becomes the record's content witness.
-    reference_text: String,
     shape: ImageReferenceShape,
     start: GridPoint,
     end: GridPoint,
@@ -381,9 +407,9 @@ const INLINE_IMAGE_BANDS: bool = false;
 /// its own schedule, so anchoring bands to its lines produced the float/occlusion/awkward-scroll
 /// family.
 ///
-/// This costs the peek layer nothing, which is why both rulings are cheap: `local_image_path_probe_at`
-/// refuses exactly where a non-failed record covers the anchor (peek is the complement of inline
-/// admission), so a session that creates no records is a session where the probe always answers.
+/// This costs the peek layer nothing, which is why both rulings are cheap: the peek refuses exactly
+/// where a non-failed record covers the hovered anchor (`peek_admits_at` — peek is the complement of
+/// inline admission), so a session that creates no records is a session where it always answers.
 const fn inline_image_bands_admitted(bands: bool, screen: ScreenId) -> bool {
     bands && matches!(screen, ScreenId::Primary)
 }
@@ -1220,59 +1246,6 @@ impl DualPlaneSession {
             .collect()
     }
 
-    /// Read-only lexical probe for the hover-peek layer: the admissible local image path whose
-    /// character span covers `anchor`, independent of decoration records and creation gates
-    /// (docs/M2-preview-matrix-and-verbs.md §6 hover-peek upgrade slot). Cursor-line and semantic
-    /// input-region suppression gate band *creation*; the peek is presentation policy on top of
-    /// plain text, so this probe answers on suppressed lines too and never registers anything.
-    ///
-    /// Peek is the complement of inline admission (user ruling 2026-07-31): where a non-failed
-    /// record already renders (or is about to render) the image in the flow, the probe refuses —
-    /// one content point gets one presentation, never both. Suppressed lines have no record, so
-    /// they keep the peek; a future "inline rendering off" policy bit removes the records and the
-    /// peek takes over everywhere without further changes here.
-    ///
-    /// The probe reads both shapes a line can carry (`detect_peek_image_candidates`): a native
-    /// drive-rooted path and a `file://` URI. The complement stays positional, over the hovered
-    /// content point rather than over file identity — a URI is its own point in the text and grows
-    /// no band of its own, so it keeps its peek even on a primary screen where the same picture is
-    /// already banded under a native path printed elsewhere. Those are two references to one file,
-    /// not one reference served twice.
-    pub fn local_image_path_probe_at(&self, anchor: &ContentAnchor) -> Option<PathBuf> {
-        if !self.peek_admits_at(anchor) {
-            return None;
-        }
-        match anchor {
-            ContentAnchor::History { id, offset, .. } => {
-                let entry = self.document.entries().get(id)?;
-                detect_peek_image_candidates(&entry.line.text, self.working_directory.as_deref())
-                    .into_iter()
-                    .find_map(|candidate| {
-                        let start = grapheme_offset_at_byte(
-                            &entry.line.grapheme_boundaries,
-                            candidate.byte_start,
-                        )?;
-                        let end = grapheme_offset_at_byte(
-                            &entry.line.grapheme_boundaries,
-                            candidate.byte_end,
-                        )?;
-                        (start <= *offset && *offset < end).then(|| PathBuf::from(candidate.path))
-                    })
-            }
-            ContentAnchor::Live { point, .. } => {
-                let (logical_text, segments) = self.live_logical_line_containing(point.row)?;
-                detect_peek_image_candidates(&logical_text, self.working_directory.as_deref())
-                    .into_iter()
-                    .find_map(|candidate| {
-                        let start = live_path_point(&segments, candidate.byte_start, false)?;
-                        let end = live_path_point(&segments, candidate.byte_end, true)?;
-                        (start <= *point && *point < end).then(|| PathBuf::from(candidate.path))
-                    })
-            }
-            ContentAnchor::Staging { .. } => None,
-        }
-    }
-
     /// The decoder's content key for an OSC 1337 payload whose `[image]` placeholder covers
     /// `anchor` — the peek's third source, and the only one that does not name a file.
     ///
@@ -1322,10 +1295,11 @@ impl DualPlaneSession {
     }
 
     /// Whether a peek may be presented at `anchor` at all — the complement of inline admission,
-    /// stated once so every source of a peek target obeys it. The line's own text goes through
-    /// `local_image_path_probe_at`, which asks this first; an OSC 8 link target is resolved by the
-    /// app from the frame and has no text to probe, so the app asks this directly. Neither may
-    /// float a flyout over a content point that already renders its image in the flow.
+    /// stated once so every source of a peek target obeys it. Every shape the screen can offer now
+    /// reaches the app through one frame-derived list (`frame_image_references`), which knows only
+    /// what the frame draws; this is the one question it cannot answer, so the app asks it here,
+    /// before consulting the list. Nothing may float a flyout over a content point that already
+    /// renders its image in the flow.
     pub fn peek_admits_at(&self, anchor: &ContentAnchor) -> bool {
         !self.inline_image_record_covers(anchor)
     }
@@ -1407,173 +1381,256 @@ impl DualPlaneSession {
         None
     }
 
-    /// Resolve a click capability only from a local-path record whose worker validation and decode
-    /// succeeded. Path-looking terminal text that is pending or failed is intentionally inert.
+    /// Whether the decoration worker has **verified** this file: opened it, size-checked it,
+    /// format-checked it, and decoded it.
     ///
-    /// The span is the affordance's own — content-witnessed, not remembered — so the verb reaches
-    /// exactly the cells wearing the underline that promised it, and a cell whose text has been
-    /// overwritten is as inert as one that never named a picture.
-    pub fn decoded_local_image_path_at(&self, anchor: &ContentAnchor) -> Option<PathBuf> {
-        self.inline_images.values().find_map(|record| {
-            let InlineImageRecordKind::LocalPath { path, .. } = &record.kind else {
-                return None;
-            };
-            let span = self.verified_image_reference_span(record)?;
-            content_anchor_between(anchor, &span.start, &span.end).then(|| path.clone())
+    /// The verified set is keyed by path (user ruling 2026-08-04, frame-derived rework), because
+    /// verification is a fact about a file and not about a place. Once the worker has opened
+    /// `D:\shots\a.png`, that is true of every printing of it on the screen — which is exactly why
+    /// the same path echoed twice is underlined at both echoes without either echo owning a record.
+    /// Records still put files in front of the worker and still hold the decode; what they no longer
+    /// do is say *where* the file is named. A pending record has not answered yet and a failed one
+    /// has answered no, so neither is here: the three-state honesty every image verb shares.
+    pub fn image_path_is_verified(&self, path: &Path) -> bool {
+        let key = normalized_local_image_path_key(path);
+        self.inline_images.values().any(|record| {
+            record.artifact.is_some()
+                && matches!(
+                    &record.kind,
+                    InlineImageRecordKind::LocalPath { path, .. }
+                        if normalized_local_image_path_key(path) == key
+                )
         })
     }
 
-    /// The anchor span of every image reference a worker has **verified** — opened, size-checked,
-    /// format-checked and decoded.
+    /// Every image reference **this frame shows**, as the cells of this frame that show it.
     ///
-    /// This is the one source of the resting underline (user ruling 2026-08-04, part B). Lexical
-    /// detection is deliberately not enough: a path-looking word that names no file must stay plain
-    /// text, because an affordance is a promise and this terminal does not promise a picture it
-    /// cannot produce. A pending record has not answered yet and a failed one has answered "no", so
-    /// neither is here — the same three-state honesty the peek and the Ctrl+click verb already use,
-    /// read off the same `artifact` field.
+    /// This is the affordance layer's single seam (user ruling 2026-08-04, superseding the anchored
+    /// spans of 84764c1/1378a55). The rule is one sentence: scan the text the frame draws with the
+    /// detector the peek uses, resolve each occurrence to a file, and hand back the cells it stands
+    /// on. Nothing is remembered between frames — no anchors, no spans, no per-occurrence records —
+    /// so the whole family of stale-mark defects is answered by construction rather than by a
+    /// witness:
     ///
-    /// Spans are half-open `[start, end)` over the reference's own characters, which is the URI's
-    /// text for a URI and the path's text for a path — exactly the span the peek answers on.
-    pub fn verified_image_reference_spans(&self) -> Vec<ImageReferenceSpan> {
-        self.inline_images
-            .values()
-            .filter_map(|record| self.verified_image_reference_span(record))
-            .collect()
+    ///   * the same path echoed twice is two occurrences, marked at both and only there — the defect
+    ///     that overturned the anchored design, where a text witness could not tell one echo from
+    ///     the other and kept the mark on the stale one;
+    ///   * a line the editor rewrites yields different occurrences in the very frame that rewrote
+    ///     it, because the scan reads the rewritten cells;
+    ///   * a reference that scrolls or re-wraps is found wherever it now stands;
+    ///   * a cell that spells nothing is in no occurrence, so it can wear no mark.
+    ///
+    /// Verification is the only thing that is *not* frame-derived, and it deliberately is not: the
+    /// frame cannot know whether a file opens. `verified` is the path-keyed answer of the worker
+    /// (`image_path_is_verified`), so a pending or failed path yields an occurrence the peek may try
+    /// and the underline must refuse.
+    ///
+    /// Work is bounded by what is drawn: one pass over the frame's drawable cells, the detector once
+    /// per logical line, and one hyperlink walk. Nothing here reads the transcript, the scrollback,
+    /// or a row the frame does not show. The line buffer is allocated once for the whole frame and
+    /// reused, because this runs on every publish and a per-line allocation was measurably the
+    /// larger half of the cost (91 → 36 µs on a full 200x60 screen).
+    pub fn frame_image_references(&self, frame: &ViewportFrame) -> Vec<FrameImageReference> {
+        if !self.math_layout_options.detect_image_paths {
+            return Vec::new();
+        }
+        let columns = frame.columns.get() as usize;
+        let drawable = frame.drawable_rows().min(frame.rows.get() as usize);
+        let mut references = Vec::new();
+        let mut line = FrameLine::default();
+        let mut row = 0usize;
+        while row < drawable {
+            let mut last = row;
+            while last + 1 < drawable && self.frame_row_continues(frame, last) {
+                last += 1;
+            }
+            self.collect_frame_line_references(
+                frame,
+                row,
+                last,
+                columns,
+                &mut line,
+                &mut references,
+            );
+            row = last + 1;
+        }
+        references
     }
 
-    /// One verified record's span, **if the content between its anchors still spells its
-    /// reference**.
+    /// Whether the logical line drawn on presentation row `row` continues onto the row below it.
     ///
-    /// An anchor pair is a memory of where the reference was, and that memory outlives the text.
-    /// The line editor rewrites its buffer in place; a history recall erases the old command's tail
-    /// with spaces; a repaint moves the reference to another column. Between the rewrite and the
-    /// next stability window that re-seats or retires the record (`reconcile_live_image_paths`),
-    /// the remembered coordinate names cells that spell something else — or nothing at all. Paint
-    /// from the coordinate and you get the user's repro: dotted runs lying across blank rows
-    /// (`.tmp-repaint-capture/affordance-verify.vt`, 146 blank cells underlined at its peak).
-    ///
-    /// So the coordinate does not decide; the content does. The record carries the characters it
-    /// was verified from, and the affordance appears only where those exact characters are still
-    /// shown. This is the identity discipline the bands already use — a proven row is matched by
-    /// its text, not by its row number — and it is the same question `local_image_path_probe_at`
-    /// asks the peek: both re-read the plane, so both answer about the frame that exists now.
-    ///
-    /// A `Staging` anchor answers `None`, exactly as the peek does: a row on its way from the grid
-    /// to the transcript is a coordinate in flight, and neither the affordance nor the peek claims
-    /// anything about it until it lands.
-    fn verified_image_reference_span(
-        &self,
-        record: &InlineImageRecord,
-    ) -> Option<ImageReferenceSpan> {
-        record.artifact.as_ref()?;
-        let InlineImageRecordKind::LocalPath {
-            start_anchor,
-            reference_text,
-            ..
-        } = &record.kind
-        else {
-            return None;
-        };
-        let start = self.document.anchor(*start_anchor).ok()?.clone();
-        let end = self.document.anchor(record.end_anchor).ok()?.clone();
-        (self.reference_span_content(&start, &end).as_deref() == Some(reference_text.as_str()))
-            .then_some(ImageReferenceSpan {
-                start,
-                end,
-                text: reference_text.clone(),
-            })
-    }
-
-    /// The characters the terminal currently shows between two anchors of the same plane, in the
-    /// one normalization the path detectors read (`captured_cells_text` / the line's own text).
-    ///
-    /// `None` when the two anchors do not name one readable stretch of one plane: different
-    /// screens, a superseded grid generation, two different transcript lines, a staged row, or a
-    /// span running past the end of what is there. A caller comparing against a witness therefore
-    /// treats "cannot read" and "reads differently" alike, which is the honest reading of both.
-    fn reference_span_content(&self, start: &ContentAnchor, end: &ContentAnchor) -> Option<String> {
-        match (start, end) {
+    /// A frame draws rows; a detector reads lines. This is the only place the two are reconciled,
+    /// and it is answered from what the frame's own cells are anchored to: two rows of one transcript
+    /// entry are one line, and two live rows are one line exactly when the grid soft-wrapped the
+    /// first into the second. Anything else — a plane change, a screen change, a superseded
+    /// generation, a staged row — ends the line, so no scan ever joins text the terminal never
+    /// joined.
+    fn frame_row_continues(&self, frame: &ViewportFrame, row: usize) -> bool {
+        let columns = frame.columns.get() as usize;
+        let here = frame
+            .cell_anchors
+            .get(row * columns)
+            .map(|cell| &cell.start);
+        let below = frame
+            .cell_anchors
+            .get(row.saturating_add(1) * columns)
+            .map(|cell| &cell.start);
+        match (here, below) {
             (
-                ContentAnchor::Live {
+                Some(ContentAnchor::Live {
                     screen,
-                    point: start_point,
+                    point,
                     generation,
                     ..
-                },
-                ContentAnchor::Live {
-                    screen: end_screen,
-                    point: end_point,
-                    generation: end_generation,
+                }),
+                Some(ContentAnchor::Live {
+                    screen: below_screen,
+                    point: below_point,
+                    generation: below_generation,
                     ..
-                },
+                }),
             ) => {
-                if screen != end_screen
-                    || generation != end_generation
-                    || *screen != self.live_screen
-                    || *generation != self.grid_generation
-                    || end_point <= start_point
-                {
-                    return None;
-                }
-                // The whole WRAPLINE-joined logical line, so a reference that soft-wraps is read
-                // across its rows exactly as the detector wrote it.
-                let (logical_text, segments) =
-                    self.live_logical_line_containing(start_point.row)?;
-                let mut content = String::new();
-                for segment in &segments {
-                    let row_text = logical_text.get(segment.byte_start..segment.byte_end)?;
-                    for cell in boundary_cells(row_text, &segment.boundaries) {
-                        let point = GridPoint {
-                            row: segment.row,
-                            column: cell.columns.0,
-                        };
-                        if *start_point <= point && point < *end_point {
-                            content.push_str(cell.text);
-                        }
-                    }
-                }
-                Some(content)
+                screen == below_screen
+                    && generation == below_generation
+                    && *screen == self.live_screen
+                    && *generation == self.grid_generation
+                    && below_point.row == point.row.saturating_add(1)
+                    && self.terminal.visible_row_continues(point.row)
             }
             (
-                ContentAnchor::History {
-                    id,
-                    offset: start_offset,
-                    generation,
+                Some(ContentAnchor::History { id, generation, .. }),
+                Some(ContentAnchor::History {
+                    id: below_id,
+                    generation: below_generation,
                     ..
-                },
-                ContentAnchor::History {
-                    id: end_id,
-                    offset: end_offset,
-                    generation: end_generation,
-                    ..
-                },
-            ) => {
-                if id != end_id || generation != end_generation {
-                    return None;
-                }
-                let entry = self.document.entries().get(id)?;
-                if entry.line.source_generation != *generation {
-                    return None;
-                }
-                frozen_text_between(&entry.line, *start_offset, *end_offset).map(str::to_owned)
-            }
-            _ => None,
+                }),
+            ) => id == below_id && generation == below_generation,
+            _ => false,
         }
     }
 
-    /// The verified reference span covering `anchor`, for the pointer's hover upgrade. Same set as
-    /// `verified_image_reference_spans`, asked positionally.
-    pub fn verified_image_reference_at(
+    /// Scan one logical line of a frame — presentation rows `first..=last` — into occurrences.
+    ///
+    /// The line's text is the cells' own text in the one normalization every path detector reads
+    /// (`captured_row_text_and_boundaries`): a wide glyph's spacer column has no text of its own, and
+    /// an empty cell is the space it draws. Each cell keeps the byte range it contributed, which is
+    /// what turns a detector's byte span back into cells without a coordinate ever being stored.
+    ///
+    /// Both sources the line can carry are read here: its printed text (native paths, OSC 7 relative
+    /// forms and bare `file://` URIs) and the OSC 8 link targets its cells point at — the fourth
+    /// shape, whose file the visible text never spells. Printed text is pushed first so that a cell
+    /// carrying both answers with what the pointer is actually standing on.
+    fn collect_frame_line_references(
         &self,
-        anchor: &ContentAnchor,
-    ) -> Option<ImageReferenceSpan> {
-        self.verified_image_reference_spans()
-            .into_iter()
-            .find(|span| content_anchor_between(anchor, &span.start, &span.end))
+        frame: &ViewportFrame,
+        first: usize,
+        last: usize,
+        columns: usize,
+        line: &mut FrameLine,
+        references: &mut Vec<FrameImageReference>,
+    ) {
+        let FrameLine { text, cells } = line;
+        text.clear();
+        cells.clear();
+        for row in first..=last {
+            for column in 0..columns {
+                let index = row * columns + column;
+                let Some(cell) = frame.cells.get(index) else {
+                    break;
+                };
+                if cell.wide_spacer {
+                    // The spacer column of a wide glyph shares the glyph's characters, exactly as it
+                    // shares its anchor, so marking the glyph marks both of its columns.
+                    if let Some(lead) = cells.last() {
+                        let (byte_start, byte_end) = (lead.byte_start, lead.byte_end);
+                        cells.push(FrameLineCell {
+                            byte_start,
+                            byte_end,
+                            cell: index as u32,
+                            blank: false,
+                        });
+                    }
+                    continue;
+                }
+                let byte_start = text.len();
+                text.push_str(if cell.text.is_empty() {
+                    " "
+                } else {
+                    cell.text.as_str()
+                });
+                cells.push(FrameLineCell {
+                    byte_start,
+                    byte_end: text.len(),
+                    cell: index as u32,
+                    blank: cell.text.trim().is_empty(),
+                });
+            }
+            if row == last {
+                continue;
+            }
+            // A row that soft-wraps has no trailing blank of its own — it wrapped because it was
+            // full. Empty cells at its right edge are the gap a wide glyph left when it moved to the
+            // next row, and carrying them into the joined text would print a space through the
+            // middle of the line.
+            while cells.last().is_some_and(|cell| cell.blank) {
+                let cell = cells.pop().expect("the last cell was just inspected");
+                text.truncate(cell.byte_start);
+            }
+        }
+
+        let cells_between = |byte_start: usize, byte_end: usize| {
+            cells
+                .iter()
+                .filter(|cell| cell.byte_start < byte_end && byte_start < cell.byte_end)
+                .map(|cell| cell.cell)
+                .collect::<Vec<_>>()
+        };
+        let push = |path: PathBuf, marked: Vec<u32>, references: &mut Vec<FrameImageReference>| {
+            if marked.is_empty() {
+                return;
+            }
+            references.push(FrameImageReference {
+                verified: self.image_path_is_verified(&path),
+                path,
+                cells: marked,
+            });
+        };
+
+        for candidate in detect_peek_image_candidates(text, self.working_directory.as_deref()) {
+            let marked = cells_between(candidate.byte_start, candidate.byte_end);
+            push(PathBuf::from(candidate.path), marked, references);
+        }
+
+        let mut index = 0;
+        while index < cells.len() {
+            let Some(link) = frame
+                .cells
+                .get(cells[index].cell as usize)
+                .and_then(|cell| cell.hyperlink.as_ref())
+            else {
+                index += 1;
+                continue;
+            };
+            let uri = link.uri.as_str();
+            let mut end = index + 1;
+            while end < cells.len()
+                && frame
+                    .cells
+                    .get(cells[end].cell as usize)
+                    .and_then(|cell| cell.hyperlink.as_ref())
+                    .is_some_and(|other| other.uri == uri)
+            {
+                end += 1;
+            }
+            if let Some(path) = file_uri_to_local_image_path(uri) {
+                let marked = cells[index..end].iter().map(|cell| cell.cell).collect();
+                push(path, marked, references);
+            }
+            index = end;
+        }
     }
 
-    /// Paint the resting affordance of every verified reference onto one frame.
+    /// Paint the resting affordance of every verified reference this frame shows.
     ///
     /// A *text* affordance, not a band: it decorates the characters that are already there instead
     /// of injecting a row, which is why it is not subject to the rulings that keep bands out of the
@@ -1581,9 +1638,14 @@ impl DualPlaneSession {
     /// about row injection and are untouched; this mark is what a link on the same line already
     /// wears, and it appears wherever the reference is — including inside the command line the user
     /// is typing.
+    ///
+    /// The frame decides where, and the worker decides whether: the marks land on the cells the scan
+    /// of this frame's own text produced, and only for files the worker has opened.
     fn decorate_image_reference_affordance(&self, frame: &mut ViewportFrame) {
-        for span in self.verified_image_reference_spans() {
-            frame.underline_reference_span(&span.start, &span.end, false, &span.text);
+        for reference in self.frame_image_references(frame) {
+            if reference.verified {
+                frame.underline_cells(&reference.cells, false);
+            }
         }
     }
 
@@ -6331,7 +6393,6 @@ impl DualPlaneSession {
                 let occurrence = self.register_local_image_path(
                     candidate.path,
                     candidate.source_text,
-                    candidate.reference_text,
                     candidate.shape,
                     ContentAnchor::Live {
                         screen,
@@ -6413,10 +6474,12 @@ impl DualPlaneSession {
     /// Every image reference the live grid currently shows, in the coverage the hover peek answers
     /// on — `detect_peek_image_candidates`, not the narrower inline-admission scan.
     ///
-    /// The detector is shared with `local_image_path_probe_at` on purpose (user ruling 2026-08-04):
-    /// the resting underline may not promise a picture on a span the peek would stay silent about,
-    /// nor stay silent on one it would answer, and the cheapest way to make that true is for both to
-    /// read the same list. A URI reaching this scan is a widening — it earns a record and therefore
+    /// The detector is `frame_image_references`'s own on purpose (user ruling 2026-08-04): what the
+    /// affordance layer can find, the verification pipeline must ask the worker about, or a
+    /// reference the user can see would never earn the mark it deserves. The two scans read the same
+    /// planes through the same detector — this one to decide *what to ask*, the frame one to decide
+    /// *where to paint* — and this one alone keeps coordinates, because a record has to be matched
+    /// and retired across stability windows. A URI reaching this scan earns a record and therefore
     /// verification, while `projected_inline_image` keeps refusing it a band on both settings of the
     /// policy bit.
     fn detected_live_image_paths(&self, stable: &[bool]) -> Vec<DetectedLiveImagePath> {
@@ -6434,15 +6497,9 @@ impl DualPlaneSession {
                 let Some(end) = live_path_point(segments, candidate.byte_end, true) else {
                     continue;
                 };
-                let Some(reference_text) =
-                    logical_text.get(candidate.byte_start..candidate.byte_end)
-                else {
-                    continue;
-                };
                 detected.push(DetectedLiveImagePath {
                     path: PathBuf::from(candidate.path),
                     source_text: logical_text.to_owned(),
-                    reference_text: reference_text.to_owned(),
                     shape: candidate.shape,
                     start,
                     end,
@@ -6498,9 +6555,6 @@ impl DualPlaneSession {
                     detected.push(DetectedLiveImagePath {
                         path,
                         source_text,
-                        // A link's printed text is its label, not its target; the label is what
-                        // these cells spell and therefore what the witness has to find there.
-                        reference_text: captured_cells_text(&captured.cells[column..end]),
                         shape: ImageReferenceShape::Uri,
                         start: GridPoint {
                             row,
@@ -6620,16 +6674,9 @@ impl DualPlaneSession {
             if band_gates && self.semantic_input_overlaps_history_through(id, Some(end_offset)) {
                 continue;
             }
-            // Both shapes reached here as grapheme ranges over this one line, so one slice is the
-            // witness for both: a printed path spells itself, a link spells its label.
-            let Some(reference_text) = frozen_text_between(&line, start_offset, end_offset) else {
-                continue;
-            };
-            let reference_text = reference_text.to_owned();
             self.register_local_image_path(
                 path,
                 line.text.clone(),
-                reference_text,
                 shape,
                 ContentAnchor::History {
                     id,
@@ -6659,7 +6706,6 @@ impl DualPlaneSession {
         &mut self,
         path: PathBuf,
         source_text: String,
-        reference_text: String,
         shape: ImageReferenceShape,
         start: ContentAnchor,
         end: ContentAnchor,
@@ -6677,7 +6723,6 @@ impl DualPlaneSession {
                 kind: InlineImageRecordKind::LocalPath {
                     path: path.clone(),
                     source_text,
-                    reference_text,
                     start_anchor,
                     shape,
                 },
@@ -9336,6 +9381,7 @@ fn live_candidate_rows(
 
 /// The text a run of grid cells spells, in the one normalization every path detector reads: a
 /// wide-character spacer has no text of its own, and an empty cell is the space it draws.
+#[cfg(test)]
 fn captured_cells_text(cells: &[bt_transcript::CapturedCell]) -> String {
     cells
         .iter()
@@ -9441,18 +9487,6 @@ fn live_path_point(
         row: segment.row,
         column,
     })
-}
-
-/// The characters one transcript line currently shows between two grapheme offsets. The inverse of
-/// `grapheme_offset_at_byte`, and the frozen half of the reference affordance's content witness.
-fn frozen_text_between(
-    line: &FrozenLine,
-    start: GraphemeOffset,
-    end: GraphemeOffset,
-) -> Option<&str> {
-    let start_byte = *line.grapheme_boundaries.get(start.0 as usize)? as usize;
-    let end_byte = *line.grapheme_boundaries.get(end.0 as usize)? as usize;
-    line.text.get(start_byte..end_byte)
 }
 
 fn grapheme_offset_at_byte(boundaries: &[u32], byte: usize) -> Option<GraphemeOffset> {
@@ -16171,6 +16205,53 @@ mod tests {
         (dotted, solid)
     }
 
+    /// The one list every image verb reads, asked at one cell of one frame — the app's own lookup
+    /// (`FrameImageReferences::at`) written out. A pin that asks this is asking exactly what the
+    /// resting underline, the hover upgrade, Ctrl+click and the peek would each be told.
+    fn reference_at(
+        session: &DualPlaneSession,
+        frame: &ViewportFrame,
+        row: u32,
+        column: u32,
+    ) -> Option<FrameImageReference> {
+        let cell = row * frame.columns.get() + column;
+        session
+            .frame_image_references(frame)
+            .into_iter()
+            .find(|reference| reference.covers(cell))
+    }
+
+    /// What the hover peek is offered at one cell: the file this frame names there, verified or not
+    /// — a hover is how an unverified file gets opened for the first time.
+    fn peek_at(
+        session: &DualPlaneSession,
+        frame: &ViewportFrame,
+        row: u32,
+        column: u32,
+    ) -> Option<PathBuf> {
+        reference_at(session, frame, row, column).map(|reference| reference.path)
+    }
+
+    /// What Ctrl+click may open at one cell: only a file a worker has actually opened.
+    fn verified_at(
+        session: &DualPlaneSession,
+        frame: &ViewportFrame,
+        row: u32,
+        column: u32,
+    ) -> Option<PathBuf> {
+        reference_at(session, frame, row, column)
+            .filter(|reference| reference.verified)
+            .map(|reference| reference.path)
+    }
+
+    /// One frame of the session as it stands, through a fresh projection at its own layout.
+    fn current_frame(session: &mut DualPlaneSession) -> ViewportFrame {
+        let mut projection = session.new_projection(session.layout_key());
+        session
+            .viewport_frame(&mut projection)
+            .expect("the session must project a rectangular frame")
+    }
+
     fn feed_ascii_one_byte_at_a_time(
         session: &mut DualPlaneSession,
         text: &str,
@@ -16786,23 +16867,19 @@ mod tests {
             panic!("stable absolute image path must enqueue the decoration worker");
         };
         let record = session.inline_images.get(&task.occurrence_id).unwrap();
-        let InlineImageRecordKind::LocalPath { start_anchor, .. } = record.kind else {
-            panic!("candidate must retain local-path provenance");
-        };
-        let start = session.document.anchor(start_anchor).unwrap().clone();
-        assert_eq!(
-            session.decoded_local_image_path_at(&start),
-            None,
-            "pending text is not an activation capability"
+        assert!(
+            matches!(record.kind, InlineImageRecordKind::LocalPath { .. }),
+            "candidate must retain local-path provenance",
+        );
+        assert!(
+            !session.image_path_is_verified(&path),
+            "pending text is not an activation capability",
         );
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let result = decoder.decode(task.clone());
         assert!(session.complete_inline_image_result(task, result));
         settle_inline_image_displays(&mut session);
-        assert_eq!(
-            session.decoded_local_image_path_at(&start),
-            Some(path.clone())
-        );
+        assert!(session.image_path_is_verified(&path));
 
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
@@ -17024,17 +17101,19 @@ mod tests {
         session
             .feed_at(format!("{line}\r\nprompt").as_bytes(), started)
             .unwrap();
-        let probe_anchor = ContentAnchor::Live {
-            screen: ScreenId::Primary,
-            point: GridPoint { row: 0, column: 20 },
-            bias: Bias::Before,
-            generation: session.grid_generation,
+        // The app's own peek: the complement of inline admission asked first, then the frame's own
+        // reference list. Both halves are needed to see a flyout, which is what "one content point,
+        // one presentation" means at this seam.
+        let peek = |session: &mut DualPlaneSession| {
+            let frame = current_frame(session);
+            let anchor = frame.anchor_at(0, 20, Bias::Before).unwrap().unwrap();
+            session
+                .peek_admits_at(&anchor)
+                .then(|| peek_at(session, &frame, 0, 20))
+                .flatten()
         };
         // No record yet (line not stable): the peek answers.
-        assert_eq!(
-            session.local_image_path_probe_at(&probe_anchor),
-            Some(path.clone())
-        );
+        assert_eq!(peek(&mut session), Some(path.clone()));
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         let SessionDecorationTask::InlineImage(task) =
             session.take_decoration_worker_task().unwrap()
@@ -17042,13 +17121,13 @@ mod tests {
             panic!("stable path must enqueue the worker");
         };
         // Registered with the decode in flight: the band is imminent, the peek yields.
-        assert_eq!(session.local_image_path_probe_at(&probe_anchor), None);
+        assert_eq!(peek(&mut session), None);
         let mut decoder = crate::inline_image::InlineImageDecoder::default();
         let result = decoder.decode(task.clone());
         assert!(session.complete_inline_image_result(task, result));
         settle_inline_image_displays(&mut session);
         // Rendered inline: still no peek over the same span.
-        assert_eq!(session.local_image_path_probe_at(&probe_anchor), None);
+        assert_eq!(peek(&mut session), None);
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
@@ -17081,28 +17160,21 @@ mod tests {
         assert!(session.complete_inline_image_result(task, result));
         settle_inline_image_displays(&mut session);
         let record = session.inline_images.values().next().unwrap();
-        let InlineImageRecordKind::LocalPath { start_anchor, .. } = record.kind else {
-            panic!("expected local path record");
-        };
         assert!(
-            session
-                .decoded_local_image_path_at(session.document.anchor(start_anchor).unwrap())
-                .is_none()
+            matches!(record.kind, InlineImageRecordKind::LocalPath { .. }),
+            "expected local path record",
         );
         assert!(record.failed);
-        // A failed record does not cover its span: the peek complement lets the probe answer,
-        // and the peek's own decode fails the same gates and stays silent.
-        assert_eq!(
-            session.local_image_path_probe_at(&ContentAnchor::Live {
-                screen: ScreenId::Primary,
-                point: GridPoint { row: 0, column: 20 },
-                bias: Bias::Before,
-                generation: session.grid_generation,
-            }),
-            Some(missing.clone())
+        assert!(
+            !session.image_path_is_verified(&missing),
+            "the worker refused, so nothing about this file is clickable",
         );
-        let mut projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&mut projection).unwrap();
+        let frame = current_frame(&mut session);
+        // A failed record does not cover its span: the peek complement admits the hover, the frame
+        // still names the file there, and the peek's own decode fails the same gates and stays
+        // silent.
+        assert_eq!(verified_at(&session, &frame, 0, 20), None);
+        assert_eq!(peek_at(&session, &frame, 0, 20), Some(missing.clone()));
         assert_eq!(session.terminal().visible_text()[0], line);
         assert!(frame.math_blocks.iter().all(|placement| !matches!(
             placement.artifact.kind,
@@ -17111,95 +17183,92 @@ mod tests {
     }
 
     #[test]
-    fn hover_peek_probe_answers_on_the_live_cursor_line_without_any_record() {
+    fn the_frame_scan_answers_on_the_live_cursor_line_without_any_record() {
         // The cursor sits on this line, so band creation is suppressed and no record exists —
-        // exactly the input-line scenario the peek layer serves. The probe is lexical and
-        // read-only: it must answer inside the span, refuse outside it, and register nothing.
+        // exactly the input-line scenario the peek layer serves. The scan reads the frame's own
+        // text: it answers inside the reference, refuses outside it, and registers nothing.
         let mut session = DualPlaneSession::new(nz(60), nz(4));
+        enable_path_detection(&mut session);
         let started = Instant::now();
         session
             .feed_at(br"type C:\pictures\wallpaper.png here", started)
             .unwrap();
-        let anchor = |column: u32| ContentAnchor::Live {
-            screen: ScreenId::Primary,
-            point: GridPoint { row: 0, column },
-            bias: Bias::Before,
-            generation: session.grid_generation,
-        };
-        assert_eq!(
-            session.local_image_path_probe_at(&anchor(5)),
-            Some(PathBuf::from(r"C:\pictures\wallpaper.png"))
+        let frame = current_frame(&mut session);
+        let wallpaper = PathBuf::from(r"C:\pictures\wallpaper.png");
+        assert_eq!(peek_at(&session, &frame, 0, 5), Some(wallpaper.clone()));
+        assert_eq!(peek_at(&session, &frame, 0, 10), Some(wallpaper.clone()));
+        assert_eq!(peek_at(&session, &frame, 0, 28), Some(wallpaper));
+        assert_eq!(peek_at(&session, &frame, 0, 2), None);
+        assert_eq!(peek_at(&session, &frame, 0, 30), None);
+        assert!(
+            session.inline_images.is_empty(),
+            "reading a frame registers nothing",
         );
         assert_eq!(
-            session.local_image_path_probe_at(&anchor(28)),
-            Some(PathBuf::from(r"C:\pictures\wallpaper.png"))
+            verified_at(&session, &frame, 0, 10),
+            None,
+            "and nothing has been verified, so the file is not clickable",
         );
-        assert_eq!(session.local_image_path_probe_at(&anchor(2)), None);
-        assert_eq!(session.local_image_path_probe_at(&anchor(30)), None);
-        assert!(session.inline_images.is_empty(), "probe must not register");
-
-        // Round-trip through a projected frame: the anchors the app's hover hit-test hands the
-        // probe must resolve exactly like hand-built grid points.
-        let mut projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&mut projection).unwrap();
-        let hovered = frame
-            .anchor_at(0, 10, Bias::Before)
-            .unwrap()
-            .expect("path cell must carry an anchor");
-        assert_eq!(
-            session.local_image_path_probe_at(&hovered),
-            Some(PathBuf::from(r"C:\pictures\wallpaper.png"))
-        );
-        let outside = frame
-            .anchor_at(0, 2, Bias::Before)
-            .unwrap()
-            .expect("prefix cell must carry an anchor");
-        assert_eq!(session.local_image_path_probe_at(&outside), None);
     }
 
     #[test]
-    fn hover_peek_probe_follows_wrapline_continuation_rows() {
+    fn the_frame_scan_follows_wrapline_continuation_rows() {
+        // The reference is longer than the pane, so the grid soft-wraps it onto a second row. The
+        // scan has to join the two rows back into one line, or the tail spells nothing at all.
         let mut session = DualPlaneSession::new(nz(20), nz(4));
+        enable_path_detection(&mut session);
         let started = Instant::now();
         session
             .feed_at(br"C:\a\b\c\verylongname.png", started)
             .unwrap();
-        let anchor = ContentAnchor::Live {
-            screen: ScreenId::Primary,
-            point: GridPoint { row: 1, column: 2 },
-            bias: Bias::Before,
-            generation: session.grid_generation,
-        };
+        let frame = current_frame(&mut session);
+        let expected = PathBuf::from(r"C:\a\b\c\verylongname.png");
+        assert_eq!(peek_at(&session, &frame, 0, 0), Some(expected.clone()));
         assert_eq!(
-            session.local_image_path_probe_at(&anchor),
-            Some(PathBuf::from(r"C:\a\b\c\verylongname.png"))
+            peek_at(&session, &frame, 1, 2),
+            Some(expected),
+            "the continuation row carries the same one reference",
+        );
+        assert_eq!(
+            peek_at(&session, &frame, 1, 6),
+            None,
+            "and it ends where the characters do",
         );
     }
 
     #[test]
-    fn hover_peek_probe_reads_history_lines() {
+    fn the_frame_scan_reads_frozen_lines_the_frame_shows() {
         let mut session = DualPlaneSession::new(nz(60), nz(3));
+        enable_path_detection(&mut session);
         let started = Instant::now();
         session
             .feed_at(b"C:\\img\\shot.png done\r\nb\r\nc\r\nd\r\ne\r\nf", started)
             .unwrap();
-        let (id, entry) = session
+        let (id, _) = session
             .document
             .entries()
             .iter()
             .find(|(_, entry)| entry.line.text.contains("shot.png"))
             .expect("scrolled-out path line must reach history");
-        let anchor = |offset: u32| ContentAnchor::History {
-            id: *id,
-            offset: GraphemeOffset(offset),
-            bias: Bias::Before,
-            generation: entry.line.source_generation,
-        };
+        let id = *id;
+        let mut projection = session.new_projection(session.layout_key());
+        session.refresh_projection(&mut projection);
+        let _ = session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let row = (0..frame.rows.get())
+            .find(|row| {
+                matches!(
+                    frame.anchor_at(*row, 0, Bias::Before).ok().flatten(),
+                    Some(ContentAnchor::History { id: shown, .. }) if shown == id
+                )
+            })
+            .expect("scrolling to the top must put the frozen line on screen");
         assert_eq!(
-            session.local_image_path_probe_at(&anchor(3)),
-            Some(PathBuf::from(r"C:\img\shot.png"))
+            peek_at(&session, &frame, row, 3),
+            Some(PathBuf::from(r"C:\img\shot.png")),
         );
-        assert_eq!(session.local_image_path_probe_at(&anchor(17)), None);
+        assert_eq!(peek_at(&session, &frame, row, 17), None);
     }
 
     #[test]
@@ -17220,8 +17289,8 @@ mod tests {
 
     /// PIN (alternate-screen image ruling, 2026-08-02; re-adjudicated 2026-08-04): path text on the
     /// alternate screen grows no band, at first stability and across a full-screen repaint, while
-    /// `local_image_path_probe_at` keeps answering on that very anchor — and the reference is
-    /// verified there, so its resting underline is honest and its peek is warm.
+    /// the peek keeps answering on those very cells — and the reference is verified there, so its
+    /// resting underline is honest and its peek is warm.
     ///
     /// RE-ADJUDICATED twice. First from
     /// `alternate_repaint_reuses_the_ready_path_occurrence_without_flash_or_decode` (which asserted
@@ -17242,12 +17311,6 @@ mod tests {
         session.feed_at(enter.as_bytes(), started).unwrap();
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
 
-        let peek_anchor = ContentAnchor::Live {
-            screen: ScreenId::Alternate,
-            point: GridPoint { row: 0, column: 20 },
-            bias: Bias::Before,
-            generation: session.grid_generation,
-        };
         let assert_verified_but_never_banded = |session: &mut DualPlaneSession, phase: &str| {
             drain_image_decodes(session);
             assert_eq!(
@@ -17256,20 +17319,19 @@ mod tests {
                 "{phase}: one reference, one carrier: {:?}",
                 session.inline_image_records()
             );
-            // The complement: with no band presenting the anchor, the probe answers, so hover peek
-            // serves the image with zero changes to the peek layer.
+            let frame = current_frame(session);
+            // The complement: with no band presenting this cell, the peek answers there, and the
+            // carrier's verification is what makes it clickable and its decode warm.
             assert_eq!(
-                session.local_image_path_probe_at(&peek_anchor),
+                peek_at(session, &frame, 0, 20),
                 Some(path.clone()),
                 "{phase}: the peek must answer where inline admission is refused"
             );
             assert_eq!(
-                session.decoded_local_image_path_at(&peek_anchor),
+                verified_at(session, &frame, 0, 20),
                 Some(path.clone()),
                 "{phase}: and the carrier verified it"
             );
-            let mut projection = session.new_projection(session.layout_key());
-            let frame = session.viewport_frame(&mut projection).unwrap();
             assert!(
                 image_placements(&frame).is_empty(),
                 "{phase}: no band may reach the frame"
@@ -17353,18 +17415,18 @@ mod tests {
             generation: session.grid_generation,
         };
         assert!(session.peek_admits_at(&live_anchor));
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(
-            session.local_image_path_probe_at(&live_anchor),
+            peek_at(&session, &frame, 0, 20),
             Some(path.clone()),
-            "nothing presents the image in the flow, so the probe answers",
+            "nothing presents the image in the flow, so the peek answers",
         );
         assert_eq!(
-            session.decoded_local_image_path_at(&live_anchor),
+            verified_at(&session, &frame, 0, 20),
             Some(path.clone()),
             "and the worker is what said the file is really there",
         );
-        let mut projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&mut projection).unwrap();
         assert!(image_placements(&frame).is_empty());
         assert_eq!(
             underlined_columns(&frame, 0),
@@ -17395,19 +17457,13 @@ mod tests {
             generation: entry.line.source_generation,
         };
         assert!(session.peek_admits_at(&history_anchor));
-        assert_eq!(
-            session.local_image_path_probe_at(&history_anchor),
-            Some(path.clone()),
-            "the frozen line keeps its peek too",
-        );
-        assert_eq!(
-            session.decoded_local_image_path_at(&history_anchor),
-            Some(path.clone()),
-            "and its verification followed it into history",
+        assert!(
+            session.image_path_is_verified(&path),
+            "verification is about the file, so freezing the line cannot lose it",
         );
 
-        // Scroll the view back over it. The mark is now computed from a `History` anchor and a
-        // re-wrapped projection of the frozen text, and it must land on the same characters.
+        // Scroll the view back over it. The mark is now derived from the re-wrapped projection of
+        // the frozen text, and it must land on the same characters.
         session.refresh_projection(&mut projection);
         let frame = session.viewport_frame(&mut projection).unwrap();
         assert!(image_placements(&frame).is_empty());
@@ -17427,6 +17483,15 @@ mod tests {
             underlined_columns(&frame, frozen_row),
             (reference_columns, Vec::new()),
             "freezing changes which coordinate carries the mark, never whether it is worn",
+        );
+        assert_eq!(
+            peek_at(&session, &frame, frozen_row, 20),
+            Some(path.clone()),
+            "the frozen line keeps its peek too, on the very cells wearing the mark",
+        );
+        assert_eq!(
+            verified_at(&session, &frame, frozen_row, 20),
+            Some(path.clone()),
         );
 
         std::fs::remove_file(&path).unwrap();
@@ -17509,28 +17574,28 @@ mod tests {
     ///   * a reference the grid scrolls is underlined at its new place **and nowhere else**;
     ///   * no cell that spells nothing ever wears the mark, in any phase.
     ///
-    /// This is the plane's half of the witness — what the grid and the transcript say. The frame
-    /// has a half of its own, because a reflow can make the frame's cell anchors disagree with a
-    /// span the plane still vouches for; that is
-    /// `bt_viewport::…::an_anchor_span_the_frame_cells_do_not_spell_paints_nothing`, and neither
-    /// half subsumes the other.
+    /// The witness that answered this first (1378a55) could not: two printings of one path spell the
+    /// same characters, so a stale coordinate whose cells still spelled the reference kept its mark.
+    /// The frame-derived scan has no coordinate to be stale (user ruling 2026-08-04) — see
+    /// `the_same_path_echoed_twice_is_marked_at_both_echoes_and_nowhere_else` for the case that
+    /// overturned the design, which this pin's phase B is the one-echo special case of.
     ///
     /// The reference is deliberately a *substring* of a *soft-wrapped* line, because both are ways
-    /// the witness could be wrong while still looking right: reading the whole logical line instead
-    /// of the reference's own characters, or reading one grid row instead of the WRAPLINE-joined
-    /// line the reference actually occupies.
+    /// the scan could be wrong while still looking right: marking the whole line instead of the
+    /// reference's own characters, or reading one grid row instead of the WRAPLINE-joined line the
+    /// reference actually occupies.
     ///
     /// RED CHECKS, each verified to red this pin on its own:
-    ///   * returning the span from `verified_image_reference_span` without consulting
-    ///     `reference_span_content` — the shipped 84764c1 behaviour — reds phase B while leaving A
-    ///     and C green, which is exactly the shape of the defect;
-    ///   * comparing the content against `source_text` (the whole logical line) instead of
-    ///     `reference_text` reds phase A, because the reference's own characters are a substring of
-    ///     the line it sits in;
-    ///   * reading only `start_point.row` in `reference_span_content` instead of the joined logical
-    ///     line reds phase A, because the reference's tail is on the next grid row;
-    ///   * removing the row shift `capture_rows_transaction` applies to surviving live anchors reds
-    ///     phase C, where the content moves up and the coordinate must move with it.
+    ///   * painting from the record's anchors instead of the frame scan — the shipped 84764c1
+    ///     behaviour — reds phase B while leaving A and C green, which is exactly the shape of the
+    ///     defect;
+    ///   * marking the detector's whole logical line instead of the candidate's own byte range reds
+    ///     phase A, because the reference is a substring of the line it sits in;
+    ///   * scanning each presentation row on its own instead of joining WRAPLINE continuations
+    ///     (`frame_row_continues` always false) reds phase A, because the reference's tail is on the
+    ///     next grid row and neither half spells a path;
+    ///   * dropping the `verified` filter in `decorate_image_reference_affordance` leaves phase B
+    ///     green here but reds `nonexistent_path_is_plain_text_at_rest_and_peeks_nothing`.
     #[test]
     fn the_resting_affordance_follows_the_text_and_never_the_remembered_coordinate() {
         // A name without a space, because the reference under test is printed bare (the user's
@@ -17606,18 +17671,17 @@ mod tests {
             "phase B: the erased span is blank, and blank cells wear nothing",
         );
         assert!(
-            session.verified_image_reference_spans().is_empty(),
-            "the hover upgrade reads the same content witness the paint does",
+            session.frame_image_references(&frame).is_empty(),
+            "the hover upgrade and the peek read the very list the paint read",
         );
         assert_eq!(
-            session.decoded_local_image_path_at(&ContentAnchor::Live {
-                screen: ScreenId::Primary,
-                point: GridPoint { row: 2, column: 20 },
-                bias: Bias::Before,
-                generation: session.grid_generation,
-            }),
+            verified_at(&session, &frame, 2, 20),
             None,
             "and so does the Ctrl+click verb, so an overwritten cell opens nothing",
+        );
+        assert!(
+            session.image_path_is_verified(&path),
+            "the file is still verified — it is the *place* that stopped naming it",
         );
 
         // Phase C: the same reference, still spelled, carried up the grid by a scroll. The mark
@@ -17658,6 +17722,118 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// PIN (user report 2026-08-04, the report that overturned the anchored design): **one path
+    /// printed twice is two references, and each of them is exactly where it is printed.**
+    ///
+    /// This is the case no witness could decide. 1378a55 kept the record's anchors and only painted
+    /// where the cells still spelled the reference's own characters — which is true at the *stale*
+    /// coordinate whenever the same path is on screen twice, because the two printings spell the
+    /// same thing. The user saw it as "the underline errs and does not disappear": a history recall
+    /// rewrote one line, the mark stayed on the old place, and the witness cheerfully agreed with it.
+    ///
+    /// Both halves of the report are here:
+    ///   * two echoes of one path on screen at once are marked at both, over their own cells only;
+    ///   * a recall that rewrites the second echo into a *different* path moves the mark with the
+    ///     text in the same frame — the first echo keeps its mark, the second one's mark is now on
+    ///     the new file's characters, and the record set has not changed at all.
+    ///
+    /// RED CHECK: painting from any per-occurrence record — anchors alone or anchors plus a text
+    /// witness — reds the second half, because one record cannot say which of two identical
+    /// spellings it is about.
+    #[test]
+    fn the_same_path_echoed_twice_is_marked_at_both_echoes_and_nowhere_else() {
+        let (directory, path) = temporary_path_image_named("twice.png");
+        let (other_directory, other) = temporary_path_image_named("other.png");
+        let printed = path.display().to_string();
+        let width = printed.chars().count() as u32;
+        // Wide enough that `see {path} and {path}` fits on one grid row: what is under test here is
+        // two echoes, not the wrap (which `..._follows_the_text_...` phase A already pins).
+        let mut session = DualPlaneSession::new(nz(240), nz(6));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        // The same path echoed on two lines, and a second time on the first line, so both "twice on
+        // one line" and "twice on two lines" are under test.
+        session
+            .feed_at(
+                format!("see {printed} and {printed}\r\n{printed}\r\nPS> ").as_bytes(),
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        drain_image_decodes(&mut session);
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let second_echo = 4 + width + 5;
+        assert_eq!(
+            dotted_rows(&frame),
+            vec![
+                (
+                    0,
+                    (4..4 + width)
+                        .chain(second_echo..second_echo + width)
+                        .collect::<Vec<_>>()
+                ),
+                (1, (0..width).collect::<Vec<_>>()),
+            ],
+            "each printing wears its own mark, and the words between them wear none",
+        );
+        assert_eq!(blank_cells_wearing_the_affordance(&frame), Vec::new());
+        for (row, column) in [(0, 5), (0, second_echo + 1), (1, 2)] {
+            assert_eq!(
+                verified_at(&session, &frame, row, column),
+                Some(path.clone()),
+                "every echo of a verified file is live at ({row}, {column})",
+            );
+        }
+
+        // The recall: the second line is rewritten in place to name a different file, tail erased
+        // with spaces, with no stability window after it — this is the frame the user is looking at.
+        // `CSI K` is how the line editor erases what it did not overwrite, and it makes this
+        // fixture independent of which of the two temporary names happens to be longer.
+        let recall = format!("\x1b[2;1H{}\x1b[K", other.display());
+        session
+            .feed_at(
+                recall.as_bytes(),
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1),
+            )
+            .unwrap();
+        let records_before = session.inline_images.len();
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            session.inline_images.len(),
+            records_before,
+            "no record moved, was retired, or was created: the paint is a function of the frame",
+        );
+        assert_eq!(
+            dotted_rows(&frame),
+            vec![(
+                0,
+                (4..4 + width)
+                    .chain(second_echo..second_echo + width)
+                    .collect::<Vec<_>>()
+            )],
+            "the rewritten line keeps no mark, and the untouched echoes keep theirs",
+        );
+        assert_eq!(
+            peek_at(&session, &frame, 1, 2),
+            Some(other.clone()),
+            "the new text is peekable at once — it is simply not verified yet",
+        );
+        assert_eq!(
+            verified_at(&session, &frame, 1, 2),
+            None,
+            "and until the worker opens it, it promises nothing",
+        );
+        assert_eq!(blank_cells_wearing_the_affordance(&frame), Vec::new());
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+        std::fs::remove_file(&other).unwrap();
+        std::fs::remove_dir(&other_directory).unwrap();
+    }
+
     /// PIN (verification ruling 2026-08-04, part B): a path-looking string that names no file stays
     /// plain text. No dots, no solid underline, no click.
     ///
@@ -17687,35 +17863,26 @@ mod tests {
         session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
         drain_image_decodes(&mut session);
 
-        let anchor = ContentAnchor::Live {
-            screen: ScreenId::Primary,
-            point: GridPoint { row: 0, column: 20 },
-            bias: Bias::Before,
-            generation: session.grid_generation,
-        };
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(
-            session.decoded_local_image_path_at(&anchor),
+            verified_at(&session, &frame, 0, 20),
             None,
             "the worker refused, so the verb is inert",
         );
         assert!(
-            session.verified_image_reference_spans().is_empty(),
+            !session.image_path_is_verified(&missing),
             "and there is nothing to underline",
         );
-        let mut projection = session.new_projection(session.layout_key());
-        let frame = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(
             underlined_columns(&frame, 0),
             (Vec::new(), Vec::new()),
             "a path-looking word that names no file is ordinary text",
         );
         assert!(image_placements(&frame).is_empty());
-        // The lexical probe still recognizes the shape — that is how the worker was asked at all —
-        // and the peek's own decode fails the same gates, so the flyout stays silent.
-        assert_eq!(
-            session.local_image_path_probe_at(&anchor),
-            Some(missing.clone()),
-        );
+        // The scan still recognizes the shape — that is how the worker was asked at all — and the
+        // peek's own decode fails the same gates, so the flyout stays silent.
+        assert_eq!(peek_at(&session, &frame, 0, 20), Some(missing.clone()));
     }
 
     /// PIN (verification ruling 2026-08-04, part 3 — the scope ruling): the resting underline is a
@@ -17773,8 +17940,9 @@ mod tests {
     /// underline over exactly the reference's own cells and nothing else — the same upgrade an OSC 8
     /// link gets, through the same two flags.
     ///
-    /// RED CHECK: passing `false` for `hover` leaves the span dotted and turns the solid assertion
-    /// red; widening the span past `end` marks the closing quote.
+    /// RED CHECK: passing `false` for `hover` leaves the run dotted and turns the solid assertion
+    /// red; upgrading every reference of the frame instead of the hovered one marks the second
+    /// echo too.
     #[test]
     fn the_pointer_upgrades_a_verified_reference_from_dotted_to_solid() {
         let (directory, path) = temporary_path_image();
@@ -17797,13 +17965,12 @@ mod tests {
             (reference_columns.clone(), Vec::new()),
         );
 
-        // What the app does on every publish: resolve the pointer's cell to a content anchor, ask
-        // the session for the verified span covering it, and upgrade that span.
-        let hovered = frame.anchor_at(0, 20, Bias::Before).unwrap().unwrap();
-        let span = session
-            .verified_image_reference_at(&hovered)
+        // What the app does on every publish: take the reference this frame draws under the pointer
+        // and repaint its cells solid.
+        let hovered = reference_at(&session, &frame, 0, 20)
+            .filter(|reference| reference.verified)
             .expect("the pointer is standing on a verified reference");
-        assert!(frame.underline_reference_span(&span.start, &span.end, true, &span.text));
+        assert!(frame.underline_cells(&hovered.cells, true));
         assert_eq!(
             underlined_columns(&frame, 0),
             (Vec::new(), reference_columns),
@@ -17811,8 +17978,7 @@ mod tests {
         );
 
         // Off the reference there is nothing to upgrade.
-        let outside = frame.anchor_at(0, 3, Bias::Before).unwrap().unwrap();
-        assert_eq!(session.verified_image_reference_at(&outside), None);
+        assert_eq!(reference_at(&session, &frame, 0, 3), None);
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
@@ -18061,14 +18227,20 @@ mod tests {
     ///
     /// Verification is asserted per shape as well, because the OSC 8 row is the one place where the
     /// affordance would look right while being hollow: the link wears its dots whatever happens, so
-    /// only `decoded_local_image_path_at` can say whether the target was ever opened — which is what
-    /// makes that peek warm and its Ctrl+click live before the first hover.
+    /// only the scan's `verified` can say whether the target was ever opened — which is what makes
+    /// that peek warm and its Ctrl+click live before the first hover.
     ///
-    /// RED CHECKS: dropping the URI shape from `detected_live_image_paths` leaves the bare-URI row
-    /// peeking with no affordance and turns the first direction red; dropping
-    /// `detected_live_image_links` leaves the OSC 8 target unverified and turns the per-shape
-    /// verification red; underlining on the record's mere existence rather than on `artifact` turns
-    /// the second direction red as soon as a reference names a missing file.
+    /// Since the frame-derived ruling (2026-08-04) the two directions are asked of *one list*: the
+    /// underline is painted from `frame_image_references` and the peek is resolved from it, so this
+    /// pin now guards the list's coverage rather than an agreement between two scans that could
+    /// drift apart. What could still drift is which shapes reach it, and that is what the fixture's
+    /// four columns are for.
+    ///
+    /// RED CHECKS: dropping the URI shape from `detect_peek_image_candidates`'s use here leaves the
+    /// bare-URI row peeking with no affordance and turns the first direction red; dropping the link
+    /// walk from `collect_frame_line_references` leaves the OSC 8 row peeking nothing and reds its
+    /// per-shape verification; dropping the `verified` filter in the paint turns the second
+    /// direction red as soon as a reference names a missing file.
     #[test]
     fn underline_coverage_equals_peek_coverage_for_every_reference_shape() {
         // The user's own file name: no space, so the unquoted native shape is the one they saw.
@@ -18093,34 +18265,33 @@ mod tests {
             "the alternate screen still admits no band: {:?}",
             session.inline_image_records()
         );
-        let peek_at = |row: u32, column: u32| {
+        let peek = |row: u32, column: u32| {
             let anchor = frame.anchor_at(row, column, Bias::Before).unwrap().unwrap();
             assert!(
                 session.peek_admits_at(&anchor),
                 "no band covers row {row}, so the peek is admitted there"
             );
-            session.local_image_path_probe_at(&anchor).or_else(|| {
-                // The app's second source: a link target the visible text never spells.
-                frame
-                    .hyperlink_at(row, column)
-                    .and_then(|link| file_uri_to_local_image_path(&link.uri))
-            })
+            peek_at(&session, &frame, row, column)
         };
 
         // A full-width `（` opens the path and a full-width `）` closes it: the pointer is on the
         // path text, two columns in from the wide opening paren.
-        assert_eq!(peek_at(0, 10), Some(path.clone()), "full-width parentheses");
-        assert_eq!(peek_at(1, 10), Some(path.clone()), "bare file:// URI text");
-        assert_eq!(peek_at(2, 3), Some(path.clone()), "OSC 8 link target");
+        assert_eq!(peek(0, 10), Some(path.clone()), "full-width parentheses");
+        assert_eq!(peek(1, 10), Some(path.clone()), "bare file:// URI text");
+        assert_eq!(peek(2, 3), Some(path.clone()), "OSC 8 link target");
         assert_eq!(
-            peek_at(3, 10),
+            peek(3, 10),
             None,
             "a file:// URI to a .txt meets the same extension gate printed paths meet"
         );
-        // The link's own text is the word "layout"; nothing under the pointer names a file, which
-        // is exactly why the target had to be consulted.
-        let anchor = frame.anchor_at(2, 3, Bias::Before).unwrap().unwrap();
-        assert_eq!(session.local_image_path_probe_at(&anchor), None);
+        // The link's own text is the word "layout": the reference the scan found there came from the
+        // link target, which is exactly why that shape has to be in the scan at all.
+        assert_eq!(
+            frame
+                .hyperlink_at(2, 3)
+                .and_then(|link| file_uri_to_local_image_path(&link.uri)),
+            Some(path.clone()),
+        );
 
         // Every shape that answers was actually opened by a worker, the OSC 8 target included.
         for (row, column, shape) in [
@@ -18128,15 +18299,13 @@ mod tests {
             (1, 10, "bare file:// URI text"),
             (2, 3, "OSC 8 link target"),
         ] {
-            let anchor = frame.anchor_at(row, column, Bias::Before).unwrap().unwrap();
             assert_eq!(
-                session.decoded_local_image_path_at(&anchor),
+                verified_at(&session, &frame, row, column),
                 Some(path.clone()),
                 "{shape}: the affordance stands on a verification, not on a lexical guess",
             );
         }
-        let control = frame.anchor_at(3, 10, Bias::Before).unwrap().unwrap();
-        assert_eq!(session.decoded_local_image_path_at(&control), None);
+        assert_eq!(verified_at(&session, &frame, 3, 10), None);
 
         let columns = frame.columns.get();
         let mut peeking_without_affordance = Vec::new();
@@ -18148,7 +18317,7 @@ mod tests {
                     bt_transcript::CellFlags::UNDERLINE
                         | bt_transcript::CellFlags::DOTTED_UNDERLINE,
                 );
-                let peeks = peek_at(row, column).is_some();
+                let peeks = peek(row, column).is_some();
                 if peeks && !underlined {
                     peeking_without_affordance.push((row, column));
                 }
@@ -18319,12 +18488,12 @@ mod tests {
         let anchor = frame.anchor_at(0, 6, Bias::Before).unwrap().unwrap();
         assert!(session.peek_admits_at(&anchor));
         assert_eq!(
-            session.local_image_path_probe_at(&anchor),
+            peek_at(&session, &frame, 0, 6),
             Some(image.clone()),
             "the peek serves the image where inline admission is refused"
         );
         assert_eq!(
-            session.decoded_local_image_path_at(&anchor),
+            verified_at(&session, &frame, 0, 6),
             Some(image),
             "and the verified carrier is what makes the affordance and the click honest",
         );
@@ -18394,7 +18563,7 @@ mod tests {
         let anchor = frame.anchor_at(0, 6, Bias::Before).unwrap().unwrap();
         assert!(alternate.peek_admits_at(&anchor));
         assert_eq!(
-            alternate.local_image_path_probe_at(&anchor),
+            peek_at(&alternate, &frame, 0, 6),
             Some(sunset),
             "the peek serves the image where inline admission is refused"
         );
@@ -18409,9 +18578,8 @@ mod tests {
         assert!(unreported.take_decoration_worker_task().is_none());
         let mut projection = unreported.new_projection(unreported.layout_key());
         let frame = unreported.viewport_frame(&mut projection).unwrap();
-        let anchor = frame.anchor_at(0, 6, Bias::Before).unwrap().unwrap();
         assert_eq!(
-            unreported.local_image_path_probe_at(&anchor),
+            peek_at(&unreported, &frame, 0, 6),
             None,
             "a bare reference without an authority is text, exactly as an anchored one is"
         );
@@ -18442,8 +18610,7 @@ mod tests {
         assert!(session.take_decoration_worker_task().is_none());
         let mut projection = session.new_projection(session.layout_key());
         let frame = session.viewport_frame(&mut projection).unwrap();
-        let anchor = frame.anchor_at(0, 6, Bias::Before).unwrap().unwrap();
-        assert_eq!(session.local_image_path_probe_at(&anchor), None);
+        assert_eq!(peek_at(&session, &frame, 0, 6), None);
 
         // A report this terminal cannot resolve leaves it in the same state, and retracts a
         // directory it had already been given rather than letting a stale one answer.

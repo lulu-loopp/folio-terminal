@@ -620,8 +620,8 @@ impl ViewportFrame {
         true
     }
 
-    /// Paint the reference affordance over the cells of one anchor span: dotted at rest, solid
-    /// under the pointer. Returns whether any cell was marked.
+    /// Paint the reference affordance over an explicit set of this frame's cells: dotted at rest,
+    /// solid under the pointer. Returns whether any cell was marked.
     ///
     /// This is the hyperlink vocabulary applied to a second content type, and deliberately the
     /// *same* vocabulary rather than a parallel one (user ruling 2026-08-04): §4's verb gradient is
@@ -630,70 +630,19 @@ impl ViewportFrame {
     /// the flags are `DOTTED_UNDERLINE`/`UNDERLINE`, and the renderer's run merging then joins a
     /// reference's dots to an adjacent link's without knowing which is which.
     ///
-    /// Cells are chosen by their own content anchor, not by a row/column rectangle, so a reference
-    /// that soft-wraps is underlined on both of its rows and a reference that has scrolled halfway
-    /// off the top is underlined on the part that is still shown. Source cells and transcript
-    /// styles are untouched; this frame is the only thing that changes.
-    ///
-    /// `reference_text` is the reference's own printed characters, and nothing is marked unless the
-    /// selected cells still spell them (user repro 2026-08-04). An anchor span is a claim about
-    /// content that the *frame* has to agree with: a reflow can leave a row's cells sharing an
-    /// anchor with the reference while spelling the blank tail of the row, and painting from the
-    /// anchor alone then laid a dotted run across the blanks and three cells of the next row. The
-    /// content the cells hold is the only thing that can settle this, so it does.
-    ///
-    /// A span the viewport shows only part of is admitted on that part: the run can lose a prefix
-    /// off the top of the frame or a suffix off the bottom, and nothing else — the frame's edge is
-    /// the only thing that may clip it, so the edge is what licenses a partial match.
-    pub fn underline_reference_span(
-        &mut self,
-        start: &ContentAnchor,
-        end: &ContentAnchor,
-        hover: bool,
-        reference_text: &str,
-    ) -> bool {
-        let selected = self
-            .cell_anchors
-            .iter()
-            .enumerate()
-            .filter(|(_, anchors)| bt_doc::content_anchor_between(&anchors.start, start, end))
-            .map(|(index, _)| index)
-            .collect::<Vec<_>>();
-        let (Some(first), Some(last)) = (selected.first().copied(), selected.last().copied())
-        else {
-            return false;
-        };
-        // The same normalization every path detector reads the grid through: a wide-character
-        // spacer has no text of its own, and an empty cell is the space it draws.
-        let spelled = selected
-            .iter()
-            .filter(|index| !self.cells[**index].wide_spacer)
-            .map(|index| {
-                let text = self.cells[*index].text.as_str();
-                if text.is_empty() { " " } else { text }
-            })
-            .collect::<String>();
-        // Both edges of what the viewport shows: the frame's first cell, and the last cell it will
-        // draw. The overscan suffix is counted too, because a frame with an exact presentation
-        // offset draws it — the run may legitimately end at either boundary.
-        let drawable_end = self
-            .drawable_rows()
-            .saturating_mul(self.columns.get() as usize)
-            .min(self.cells.len());
-        let clipped_head = first == 0;
-        let clipped_tail = last + 1 == self.cells.len() || last + 1 == drawable_end;
-        let spells_the_reference = !spelled.is_empty()
-            && match (clipped_head, clipped_tail) {
-                (false, false) => spelled == reference_text,
-                (true, false) => reference_text.ends_with(&spelled),
-                (false, true) => reference_text.starts_with(&spelled),
-                (true, true) => reference_text.contains(&spelled),
+    /// The argument is cell indices and nothing else, because the affordance no longer has an
+    /// opinion about *which* cells (user ruling 2026-08-04, frame-derived rework). Its caller found
+    /// them by reading this frame's own text, so there is nothing left for the painter to verify:
+    /// there is no anchor to be stale, no remembered span to disagree with, and no witness to
+    /// compare — a cell is marked because this frame draws a reference on it. Source cells and
+    /// transcript styles are untouched; this frame is the only thing that changes.
+    pub fn underline_cells(&mut self, cells: &[u32], hover: bool) -> bool {
+        let mut marked = false;
+        for index in cells.iter().map(|index| *index as usize) {
+            let Some(cell) = self.cells.get_mut(index) else {
+                continue;
             };
-        if !spells_the_reference {
-            return false;
-        }
-        for index in selected {
-            let cell = &mut self.cells[index];
+            marked = true;
             if hover {
                 cell.style.flags.remove(CellFlags::DOTTED_UNDERLINE);
                 cell.style.flags.insert(CellFlags::UNDERLINE);
@@ -704,7 +653,7 @@ impl ViewportFrame {
                 cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
             }
         }
-        true
+        marked
     }
 
     /// Expand a cell hit to a word using the terminal selection delimiter policy. Whitespace and
@@ -3903,8 +3852,16 @@ mod tests {
     /// RED CHECK: deleting the `spells_the_reference` gate marks the over-wide span here, and reds
     /// the second assertion below. The truthful span in the same frame stays green either way,
     /// which is what makes this a pin about the disagreement rather than about the affordance.
+    /// PIN (frame-derived affordance ruling, 2026-08-04): the painter marks the cells it is given,
+    /// all of them and only them, and it never weakens a mark that is already there.
+    ///
+    /// This is all that is left of the frame half of the old content witness, and deliberately so.
+    /// The witness existed because a caller handed over an anchor span — a claim about *where* — that
+    /// the frame could disagree with. The caller now hands over cells it found by reading this
+    /// frame's own text, so there is no claim left to check: what is asserted here is that painting
+    /// is exact and non-destructive, which is the whole of the painter's contract.
     #[test]
-    fn an_anchor_span_the_frame_cells_do_not_spell_paints_nothing() {
+    fn the_painter_marks_the_cells_it_is_given_and_never_weakens_a_solid() {
         let projection = ViewportProjection::new(
             key(10),
             DetectionRevision(1),
@@ -3914,7 +3871,7 @@ mod tests {
             GridGeneration(1),
         );
         let build = || {
-            projection
+            let mut frame = projection
                 .live_frame(
                     nz32(10),
                     vec![
@@ -3927,51 +3884,51 @@ mod tests {
                         visible: true,
                     },
                 )
-                .unwrap()
+                .unwrap();
+            // The application's own SGR 4 on the reference's first cell.
+            frame.cells[0].style.flags.insert(CellFlags::UNDERLINE);
+            frame
         };
-        let live = |row, column, bias| ContentAnchor::Live {
-            screen: ScreenId::Primary,
-            point: GridPoint { row, column },
-            bias,
-            generation: GridGeneration(1),
-        };
-        let marked = |frame: &ViewportFrame| {
+        let marked = |frame: &ViewportFrame, flag: CellFlags| {
             frame
                 .cells
                 .iter()
                 .enumerate()
-                .filter(|(_, cell)| {
-                    cell.style
-                        .flags
-                        .intersects(CellFlags::UNDERLINE | CellFlags::DOTTED_UNDERLINE)
-                })
+                .filter(|(_, cell)| cell.style.flags.contains(flag))
                 .map(|(index, _)| index)
                 .collect::<Vec<_>>()
         };
 
-        // The truthful span: the reference's own seven cells, which spell it exactly.
         let mut frame = build();
-        assert!(frame.underline_reference_span(
-            &live(0, 0, Bias::Before),
-            &live(0, 7, Bias::After),
-            false,
-            "x/a.png",
-        ));
-        assert_eq!(marked(&frame), (0..7).collect::<Vec<_>>());
-
-        // The reflowed span, running past the reference into the row's blank tail and on into the
-        // line below — the exact shape `image-accept` produced at a resize.
-        let mut frame = build();
-        assert!(!frame.underline_reference_span(
-            &live(0, 0, Bias::Before),
-            &live(1, 3, Bias::After),
-            false,
-            "x/a.png",
-        ));
+        assert!(frame.underline_cells(&[0, 1, 2, 3, 4, 5, 6], false));
         assert_eq!(
-            marked(&frame),
+            marked(&frame, CellFlags::DOTTED_UNDERLINE),
+            (1..7).collect::<Vec<_>>(),
+            "every given cell but the one already wearing the application's solid underline",
+        );
+        assert_eq!(
+            marked(&frame, CellFlags::UNDERLINE),
+            vec![0],
+            "and that one keeps the stronger mark it came with",
+        );
+
+        // The hover upgrade is the same cells, solid, with no dots left behind.
+        assert!(frame.underline_cells(&[0, 1, 2, 3, 4, 5, 6], true));
+        assert_eq!(
+            marked(&frame, CellFlags::UNDERLINE),
+            (0..7).collect::<Vec<_>>(),
+        );
+        assert_eq!(
+            marked(&frame, CellFlags::DOTTED_UNDERLINE),
             Vec::<usize>::new(),
-            "a span the cells do not spell promises nothing, not even on the part that matches",
+        );
+
+        // A cell index this frame does not have marks nothing and says so.
+        let mut frame = build();
+        assert!(!frame.underline_cells(&[frame.cells.len() as u32], false));
+        assert_eq!(
+            marked(&frame, CellFlags::DOTTED_UNDERLINE),
+            Vec::<usize>::new(),
         );
     }
 

@@ -450,6 +450,109 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
   `the_recorded_cursor_report_is_answered_from_the_committed_pseudoconsole_grid` 钉的是同一族:
   子进程用了过期锚,终端忠实合成。与本节的 affordance 无关,前后回放该行完全一致。
 
+#### 6.1.1.1 翻案:affordance 是**帧的纯函数**,不是任何被记住的位置(用户裁决 2026-08-04)
+
+§6.1.1 那版没修好。用户复报:**同屏出现两条相似的行(同一条路径被 echo 两次,或历史召回打出一条
+几乎一样的行)时,下划线「出错且不消失」,黏在旧地方。** 根因就在 §6.1.1 的修法本身:内容见证问的是
+「两锚之间的格子还拼不拼得出这条引用的字」——而**两次打印同一条路径,拼出来的字一模一样**。见证在
+过期坐标上照样成立,于是标记留在原地。**锚点 + 文字相等仍然是坐标记忆,只是换了件衣服。**
+
+裁决:**affordance 变成帧的纯函数。**
+
+- **每帧现扫**:对每一帧发布出去的画面,拿 peek 探针用的**同一支探测器**扫**这一帧自己显示的文字**
+  (原生路径 / OSC 7 相对 / 裸 `file://` / 加上 OSC 8 的链接目标),把每一处**解析出的路径落在
+  VERIFIED 集合里**的出现,画上下划线。没有锚,没有记住的跨度,没有任何「按记录逐条出现」的上妆。
+- **VERIFIED 只回答「这个文件打得开吗」**,按路径归档(`normalized_local_image_path_key`),由
+  worker 一如既往地喂(`image_path_is_verified`)。**记录仍然是问 worker 的理由与解码的载体,
+  但它不再供给位置。** 解码失败或仍在飞的路径,哪里都不画。
+- 于是那一家子缺陷是**构造性**地没有了,而不是被见证挡住的:同一路径两次出现就是两处出现,各画各的;
+  被改写的行在**改写它的那一帧**就换了扫描结果;滚动 / 重新折行只是格子换了地方;空白格不在任何一处
+  出现里,所以永远不可能带线。
+
+- **一份名单,四个动词**。`DualPlaneSession::frame_image_references(&frame) -> Vec<FrameImageReference>`
+  是唯一的接缝,`{ path, cells, verified }`——`cells` 是**这一帧的格子下标**。静止点线
+  (`decorate_image_reference_affordance`,在 `viewport_frame` 里现扫现画)、hover 实线、Ctrl+单击、
+  hover peek 全部读它;bt-app 在 publish 时算一次并连同帧一起存着(`FrameImageReferences { columns,
+  references }`),指针事件查的就是那一份。**四个动词逐格一致因此是结构事实,不是两套扫描之间的约定。**
+- **帧只画行,探测器只读行(line)**,两者的唯一调和点是 `frame_row_continues`:同一条转录条目的两
+  行是一行;两行 live 是一行当且仅当网格把上一行软折到了下一行(`TerminalAdapter::visible_row_continues`,
+  只读末列 WRAPLINE,不 capture 整行)。平面变了、屏变了、generation 变了、暂存行——一律断行,
+  所以扫描永远不会把终端没接起来的文字接起来。软折行的**行尾空白**在接行前丢掉:它之所以折行是因为
+  写满了,末尾的空格只可能是宽字形挪到下一行留下的空当。
+- **顺带取消的一条特例**:旧探针对 `Staging` 锚一律沉默(「在途的坐标不作答」)。帧扫描没有这个概念——
+  暂存行是**帧正在显示的一行文字**,于是它和别的行一样被扫、一样能带线能 peek。这不是放宽,是坐标语汇
+  消失之后那条特例失去了主语:它保护的是「锚点指的地方可能已经不是它了」,而现在没有锚点。
+- **删掉的机器(不留两套)**:`ImageReferenceSpan`、`verified_image_reference_spans` /
+  `verified_image_reference_at` / `verified_image_reference_span`、`reference_span_content`、
+  记录里的 `reference_text` 见证(连同 `DetectedLiveImagePath` / `register_local_image_path` 的那一列
+  与 `frozen_text_between`)、`decoded_local_image_path_at`、`local_image_path_probe_at`、
+  `ViewportFrame::underline_reference_span`(改为 `underline_cells(&[u32], hover)`)、
+  bt-app 的 `peek_target_from_sources`。**peek 的词法探针也一并删掉**:它与帧扫描回答的是同一个问题,
+  留着就是第二套答案。
+- **代价(实测,release,best-of-20 × 50 次)**:满屏文字 200x60 **85 µs/帧**(纯文字)、
+  **137 µs/帧**(每行都带路径);104x26 是 **19 / 31 µs/帧**。同一帧的 `viewport_frame` 整体是
+  **737–875 µs**(200x60)/ **132–142 µs**(104x26),扫描占其 **11–14%**。
+  **裁决给的备选(按 `frame_content_digest` memoize)实测不划算**:只哈希 index+text 的**下限**就已经
+  是 **88 µs/帧**(200x60),而真的 `frame_content_digest` 每格还要再哈两个颜色——**memo key 比被 memo
+  的扫描还贵**,因为两者都得把每个格子流一遍。所以不 memoize,改为把逐行的 `String`/`Vec` 缓冲提到整帧
+  复用(同机多次:91 → 79–86 µs),并让扫描在 `detect_image_paths` 关闭时直接返回空。
+  一次 publish 实际扫**两遍**(session 在 `viewport_frame` 里画静止点线一遍,bt-app 为四个动词存一遍),
+  最坏合计 200x60 约 **170 µs**、104x26 约 **40 µs**。没有把它并成一遍:唯一的并法是把扫描结果作为状态
+  挂在 session 上,而那正是这次要拆掉的那一类东西——**为了省一遍扫描而重新引入一份「上次算的位置」,
+  是把刚翻掉的架构再请回来。**
+- **pin(逐条红检)**:
+  - `the_same_path_echoed_twice_is_marked_at_both_echoes_and_nowhere_else`——**本次翻案的那一条**:
+    同一路径三处出现(一行两处 + 下一行一处)各带各的线;随后就地把第二行改写成**另一条**路径,
+    同一帧里旧标记消失、新文字立刻可 peek 但**未验证故不带线**,且 `inline_images` 一条没动。
+  - `the_resting_affordance_follows_the_text_and_never_the_remembered_coordinate`——原三段保留
+    (软折行子串 / 被覆盖同帧掉线 / 滚动后只在新位置),phase B 额外断言
+    `frame_image_references(&frame)` 空且**文件仍然 verified**——「不再被标记的是**位置**,不是文件」。
+  - `the_frame_scan_answers_on_the_live_cursor_line_without_any_record`、
+    `the_frame_scan_follows_wrapline_continuation_rows`、
+    `the_frame_scan_reads_frozen_lines_the_frame_shows`——三平面各一条,替下原来的三条探针 pin。
+  - `underline_coverage_equals_peek_coverage_for_every_reference_shape` 保留并改述:两个方向现在问的
+    是**同一份名单**,四种形状同屏、逐格双向。
+  - `the_painter_marks_the_cells_it_is_given_and_never_weakens_a_solid`(bt-viewport)——替下
+    `an_anchor_span_the_frame_cells_do_not_spell_paints_nothing`:画笔的合同只剩「给什么画什么、
+    已有实线不被降级、越界格子什么都不画」,因为**调用方交出来的格子就是从这一帧读出来的**,
+    没有「哪里」可供核对了。
+  - `one_hit_resolves_to_one_reference_through_the_frames_own_stride`(bt-app)——替下
+    `a_link_target_is_the_peeks_second_source_and_only_for_local_images`:一次 `GridHit` 按帧自己的
+    列宽落到一个格子下标,打印文字排在链接目标之前,所以指针答的是它真正站着的那串字。
+  - band 护栏原样:上述 session pin 仍全部断言 `image_placements(&frame).is_empty()`,
+    `INLINE_IMAGE_BANDS` 依旧是 `false`。
+- **红检实测(逐条单独做过,做完复原)**:①`frame_row_continues` 恒 `false` → 软折行 pin 与 phase A 红;
+  ②上妆去掉 `verified` 过滤 → `nonexistent_path_...` 红;③扫描去掉链接那一段 → 覆盖一致性 pin 红;
+  ④按候选整行(而非候选自己的字节区间)上妆 → phase A 与命令行 pin 红(共 9 条);⑤同一路径只保留
+  **第一处**出现——这正是「一条记录只能说出一个地方」的形状 → 双 echo pin 红,连带覆盖一致性与
+  命令行 pin 红(共 3 条)。
+- **回放足迹(72 份 `.tmp-repaint-capture/*.vt` × sync/latency = 144 次,104x26,release oracle
+  对拍 stdout+stderr;「前」= 1378a55 的 release oracle)**:
+  - **默认模式:144/144 逐字节全同**(stdout 与 stderr;语料自上次起长到 72 份)。默认回放不检测路径,
+    扫描直接返回空。
+  - **`BT_PROBE_IMAGE_PATHS=1`:144/144 逐字节全同**,stdout 与 stderr 都是。**注意这不表示两版画得
+    一样**——`rendered=[…]`、帧数、装饰状态、`UNDERLINE_AUDIT` 的空白带线峰值都没变,而逐帧的下划线
+    足迹是 `BT_PROBE_UNDERLINE` 的 opt-in 转储,不进这条对拍。
+  - **空白带线普查**:`UNDERLINE_AUDIT` 的 `max_blank_underlined` 逐份、逐模式**等于把路径检测整条关掉
+    时的数值**——`envsteal-verify` 2、`links-accept` 5、`perf-check` 2、`quantum-verify` 3、
+    `rearch-acceptance` 2、`repro-unified` 20、`resize-repro` 3/4、`uri-peek-feel` 1、`zoom-accept` 1、
+    `zoom-flash` 1/3,**合计 78**,与 §6.1.1 记的检测-off 基线逐项相同。即 OSC 8 标签与应用自己的
+    SGR 4 落在空格上,**引用 affordance 的贡献仍然正好是 0**。
+  - **逐帧下划线足迹(`BT_PROBE_UNDERLINE=1`,144 次全跑,逐帧逐行按格集合对拍)**:
+    **多出 156905 格,少了 4012 格**,81 份出现差异;**空白带线格数两侧完全相同(各 1177,全是 OSC 8
+    标签与应用自己的 SGR 4)**。三处「少了」逐一看过,没有一处是丢标记:
+    - `shellcheck` −826(且一格都没多):那一行是 `…\sunset.svgp`,1378a55 给里面的 59 格
+      `…\sunset.svg` 上了妆,而**那一串并不是这行现在写的词**——探测器按 `is_path_tail_char` 收到 `p`
+      才收尾,于是 peek 在那里从来不作答。**旧版在语料里就违反了「下划线 ⊆ peek」这条 pin**,
+      现在两边同源,自然一起沉默。
+    - `underline-fix-verify` −1003 / `peek-only-final` −177(同时各多出 3632 / 2596):同一行同一批格子,
+      **只是帧号早了几帧**——逐帧看,帧扫描从第 202 帧就开始画,而记录版要等到第 207 帧(下一个稳定窗口
+      把锚重新落座)才画;敲下一个键、文字不再拼出这条路径时,帧扫描当帧就撤,记录版还留到第 213 帧。
+      **早到、早走,正是「每帧现扫」的定义。**
+    - 典型的「多出」在用户自己那份 `affordance-verify` 里:某帧第 9 行,1378a55 只给上一行折下来的
+      `.jpg` 四格上妆,而**同一行右半那条一模一样的引用**(它自己还折到第 10 行)一格没有;帧扫描把
+      两处都画上。**这正是用户报的形状**——不是「多画了一处」,是旧版**只认得一处**。
+
 ### 6.2 图片引用的三种形状都要能 peek(用户报告 2026-08-02)
 
 副屏只剩 hover 这一条图片通路之后,用户在 Claude Code 里 hover 了三种引用形状,一种都没出图。

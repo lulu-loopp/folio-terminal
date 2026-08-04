@@ -293,12 +293,14 @@ struct Runtime {
     pending_pty_resize: Option<PendingPtyResize>,
     pending_resize_present: Option<GridSize>,
     hyperlink_hover: HyperlinkHover,
-    /// The verified image reference the frame currently on screen was drawn with the solid
-    /// underline over. Written only where a frame is composed, read only to decide whether the
-    /// pointer has moved onto or off a reference and a repaint is therefore owed — so there is one
-    /// source of truth (the session, asked at compose time) and this is a record of what it last
-    /// said, never a second opinion.
-    underlined_image_reference: Option<bt_term::ImageReferenceSpan>,
+    /// Every image reference the frame currently on screen draws, as the cells that draw it — the
+    /// session's scan of that frame, kept because the four verbs must read the *same* list the paint
+    /// read (user ruling 2026-08-04). Rescanning on each pointer event would be a second opinion
+    /// about a frame that has not changed; this is the first one, held.
+    frame_image_references: FrameImageReferences,
+    /// The reference the frame on screen was drawn with the solid underline over. Read only to
+    /// decide whether the pointer has moved onto or off a reference and a repaint is therefore owed.
+    underlined_image_reference: Option<bt_term::FrameImageReference>,
     peek_hover: PeekHover,
     peek_cache: std::collections::HashMap<String, PeekCacheEntry>,
     /// The one display-sized thumbnail the flyout can draw, and the one resample in flight. See
@@ -816,19 +818,28 @@ fn peek_cache_key_for_decode(
     }
 }
 
-/// One hovered cell resolves to at most one image. Text under the pointer wins over the link the
-/// cell belongs to: where a link's text spells the file itself both sources name the same picture
-/// anyway, and where they differ the visible text is what the pointer was actually put on.
+/// One frame's image references, with the row stride they were scanned at.
 ///
-/// A link target that is not a local image URI contributes nothing and the hover stays an ordinary
-/// link hover — `https://`, a `file://` pointing at a `.txt`, a remote `file://host/share`. The
-/// judgement of what a `file://` URI names belongs to bt-term, beside the admission gates printed
-/// paths pass, so this seam only decides *which source* speaks.
-fn peek_target_from_sources(
-    probe: Option<PathBuf>,
-    hyperlink_uri: Option<String>,
-) -> Option<PathBuf> {
-    probe.or_else(|| bt_term::file_uri_to_local_image_path(&hyperlink_uri?))
+/// The stride travels with the list because a `GridHit` is a row and a column while a reference is
+/// a set of cell indices; keeping the frame's own column count beside the scan is what makes the
+/// two the same coordinate rather than two coordinates that usually agree.
+///
+/// One hovered cell resolves to at most one reference: the first that covers it. The scan pushes
+/// printed text before link targets, so where a cell carries both — a link whose label spells the
+/// path — the answer is what the pointer is actually standing on. Both name the same file anyway.
+#[derive(Default)]
+struct FrameImageReferences {
+    columns: u32,
+    references: Vec<bt_term::FrameImageReference>,
+}
+
+impl FrameImageReferences {
+    fn at(&self, hit: bt_render::GridHit) -> Option<&bt_term::FrameImageReference> {
+        let cell = hit.row.checked_mul(self.columns)?.checked_add(hit.column)?;
+        self.references
+            .iter()
+            .find(|reference| reference.covers(cell))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1104,6 +1115,7 @@ impl Runtime {
             pending_pty_resize: None,
             pending_resize_present: None,
             hyperlink_hover: HyperlinkHover::default(),
+            frame_image_references: FrameImageReferences::default(),
             underlined_image_reference: None,
             peek_hover: PeekHover::default(),
             peek_cache: std::collections::HashMap::new(),
@@ -1423,12 +1435,22 @@ impl Runtime {
                 .hyperlink_hover
                 .status_text(terminal_frame.columns.get() as usize);
         }
+        // This frame's own references, scanned once for the whole of this frame's life on screen.
+        // The hover upgrade below, the Ctrl+click verb and the peek all read this one list, so no
+        // two of them can disagree about where a reference is or whether it is one. The session
+        // scanned the same frame once more when it painted the resting dots inside `viewport_frame`;
+        // collapsing the two would mean hanging the scan on the session as state, which is the very
+        // kind of thing this affordance was rebuilt to be rid of.
+        self.frame_image_references = FrameImageReferences {
+            columns: terminal_frame.columns.get(),
+            references: self.session.frame_image_references(&terminal_frame),
+        };
         // The verified reference under the pointer turns solid, on the same terms the link does:
         // the underline is the affordance and follows the pointer immediately, while the 300ms
         // settle belongs to what the hover *reveals* — a tooltip there, a thumbnail here.
         let hovered_reference = self.hovered_image_reference();
-        if let Some(span) = hovered_reference.as_ref() {
-            terminal_frame.underline_reference_span(&span.start, &span.end, true, &span.text);
+        if let Some(reference) = hovered_reference.as_ref() {
+            terminal_frame.underline_cells(&reference.cells, true);
         }
         self.underlined_image_reference = hovered_reference;
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
@@ -1747,47 +1769,34 @@ impl Runtime {
     /// product"). Never path-*looking* text: the verb has always required that a worker actually
     /// opened and decoded the file, so that a misdetected word cannot launch anything.
     ///
-    /// With inline image bands retired (docs §6.1.1) there is no decoration record left to carry
-    /// that verification on the primary screen, so the verification the verb requires is now the
-    /// peek's own — the same worker, the same decoder, the same admission gates, recorded in
-    /// `peek_cache`. Consequence, stated plainly: the file must have been peeked at least once
-    /// before Ctrl+click opens it. Pending and failed entries stay inert exactly as before, and
-    /// when the band policy is restored the record answers first again.
+    /// The cells are the frame's own — the very cells wearing the underline that promised the
+    /// picture — so the verb and the mark cannot reach different text. Verification is the scan's
+    /// `verified` (the decoration worker's record of this file) or the peek's own cache entry, which
+    /// is the same worker and the same decoder reached by hovering rather than by detection.
     fn local_image_path_hit(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
-        let anchor = self
-            .last_presented_frame
-            .as_ref()?
-            .anchor_at(hit.row, hit.column, Bias::Before)
-            .ok()??;
-        if let Some(path) = self.session.decoded_local_image_path_at(&anchor) {
-            return Some(path);
-        }
-        let path = peek_target_from_sources(
-            self.session.local_image_path_probe_at(&anchor),
-            self.hyperlink_hit(hit).map(|hyperlink| hyperlink.uri),
-        )?;
-        matches!(
-            self.peek_cache.get(&normalized_local_image_path_key(&path)),
-            Some(PeekCacheEntry::Ready { .. })
-        )
-        .then_some(path)
+        let reference = self.frame_image_references.at(hit)?;
+        (reference.verified
+            || matches!(
+                self.peek_cache
+                    .get(&normalized_local_image_path_key(&reference.path)),
+                Some(PeekCacheEntry::Ready { .. })
+            ))
+        .then(|| reference.path.clone())
     }
 
-    /// The verified image reference the pointer is currently standing on, if any — the span whose
+    /// The verified image reference the pointer is currently standing on, if any — the cells whose
     /// resting dots become a solid underline for as long as the pointer is there.
     ///
-    /// Resolved from session state per publish rather than remembered in hover state, because it is
-    /// a pure function of "where is the pointer" and "what has the worker verified", and both can
-    /// change without a pointer event: a decode landing turns a plain span into an underlined one
-    /// under a pointer that never moved.
-    fn hovered_image_reference(&self) -> Option<bt_term::ImageReferenceSpan> {
+    /// Resolved from the frame's own scan per publish rather than remembered in hover state, because
+    /// it is a pure function of "where is the pointer" and "what does this frame draw there", and
+    /// both can change without a pointer event: a decode landing turns plain text into an underlined
+    /// reference under a pointer that never moved.
+    fn hovered_image_reference(&self) -> Option<bt_term::FrameImageReference> {
         let hit = self.frame_hit()?;
-        let anchor = self
-            .last_presented_frame
-            .as_ref()?
-            .anchor_at(hit.row, hit.column, Bias::Before)
-            .ok()??;
-        self.session.verified_image_reference_at(&anchor)
+        self.frame_image_references
+            .at(hit)
+            .filter(|reference| reference.verified)
+            .cloned()
     }
 
     /// Repaint when the pointer has moved onto or off a verified reference, so the solid underline
@@ -1805,13 +1814,12 @@ impl Runtime {
 
     /// The image a hover at `hit` may preview, from any shape the screen can offer it in.
     ///
-    /// The line's own text comes first, by lexical probe rather than decoration record, so the
-    /// peek answers uniformly — including on lines whose band creation is suppressed (the input
-    /// line, the cursor line, and since the 2026-08-03 ruling every line of both screens) where no
-    /// record exists. Failing that, the cell may belong to an OSC 8 hyperlink, whose target is a
-    /// URI the text never spells: `[layout](file:///D:/layout-preview.png)` renders as the word
-    /// alone, and the file it points at is knowable only from the link. Both sources pass the same
-    /// admission gates.
+    /// The frame's own scan comes first, and it already carries every shape whose file can be named
+    /// from what is drawn: a printed path, an OSC 7 relative form, a bare `file://` URI, and the
+    /// target of an OSC 8 link whose visible text names no file at all. It is the same list the
+    /// underline is painted from, which is what makes "you can peek exactly what is marked" a fact
+    /// about one list rather than an agreement between two. Verification is not required here: a
+    /// hover is how a picture nobody has opened yet gets opened.
     ///
     /// Last comes the one shape that names no file: an OSC 1337 payload, hovered over the
     /// `[image]` placeholder the adapter wrote for it. It is asked last because it is the only
@@ -1830,16 +1838,14 @@ impl Runtime {
         if !self.session.peek_admits_at(&anchor) {
             return None;
         }
-        peek_target_from_sources(
-            self.session.local_image_path_probe_at(&anchor),
-            self.hyperlink_hit(hit).map(|hyperlink| hyperlink.uri),
-        )
-        .map(PeekSubject::from_path)
-        .or_else(|| {
-            self.session
-                .inline_image_payload_peek_at(&anchor)
-                .map(PeekSubject::from_content_key)
-        })
+        self.frame_image_references
+            .at(hit)
+            .map(|reference| PeekSubject::from_path(reference.path.clone()))
+            .or_else(|| {
+                self.session
+                    .inline_image_payload_peek_at(&anchor)
+                    .map(PeekSubject::from_content_key)
+            })
     }
 
     /// Present a pure peek-overlay change. The overlay lives beside the frame, not inside it, so
@@ -4255,42 +4261,56 @@ mod tests {
         assert_eq!(settled.subject, second);
     }
 
-    /// PIN (user repro, 2026-08-02): a hovered cell's link is the peek's second source, so an
-    /// `[layout](file:///D:/layout-preview.png)` whose visible text names no file still previews.
-    /// It is a strict fallback — text under the pointer decides when it can — and it carries no
-    /// privilege of its own: only a local image URI resolves, by the same gates printed path text
-    /// meets. The alternate-screen chain from grid cell to link target is pinned in bt-term's
-    /// `every_image_reference_shape_answers_the_alternate_screen_peek`.
+    /// PIN (user repro 2026-08-02, re-seated by the frame-derived ruling 2026-08-04): one hovered
+    /// cell resolves to one reference, through the frame's own row stride, and where a printed path
+    /// and a link target cover the same cell the pointer answers with the text it is standing on.
+    ///
+    /// What the four verbs share is this lookup: the scan produced the list, and hover, click and
+    /// peek all ask it the same question about the same `GridHit`. The list's own contents — which
+    /// shapes are in it, and that a `file://` to a `.txt` is in none — are bt-term's to pin, beside
+    /// the detector that decides it (`underline_coverage_equals_peek_coverage_for_every_shape`).
     #[test]
-    fn a_link_target_is_the_peeks_second_source_and_only_for_local_images() {
-        let probed = PathBuf::from(r"D:\from-text.png");
+    fn one_hit_resolves_to_one_reference_through_the_frames_own_stride() {
+        let printed = PathBuf::from(r"D:\from-text.png");
         let linked = PathBuf::from(r"D:\layout-preview.png");
+        let references = FrameImageReferences {
+            columns: 10,
+            references: vec![
+                // The scan's order: printed text first, link targets after it.
+                bt_term::FrameImageReference {
+                    path: printed.clone(),
+                    cells: vec![12, 13, 14],
+                    verified: true,
+                },
+                bt_term::FrameImageReference {
+                    path: linked.clone(),
+                    cells: vec![10, 11, 12, 13, 14, 15],
+                    verified: true,
+                },
+            ],
+        };
+        let at = |row, column| {
+            references
+                .at(bt_render::GridHit { row, column })
+                .map(|reference| reference.path.clone())
+        };
         assert_eq!(
-            peek_target_from_sources(
-                Some(probed.clone()),
-                Some("file:///D:/layout-preview.png".to_owned())
-            ),
-            Some(probed),
-            "text under the pointer is what the pointer was put on"
+            at(1, 2),
+            Some(printed),
+            "text under the pointer is what the pointer was put on",
         );
         assert_eq!(
-            peek_target_from_sources(None, Some("file:///D:/layout-preview.png".to_owned())),
+            at(1, 0),
             Some(linked),
-            "a link target is read when the text names nothing"
+            "and the link answers where its label spells no file",
         );
-        for inert in [
-            "https://example.test/a.png",
-            "file:///D:/notes.txt",
-            "file://host/share/a.png",
-            "file:///D:/a.bmp",
-        ] {
-            assert_eq!(
-                peek_target_from_sources(None, Some(inert.to_owned())),
-                None,
-                "{inert:?} must leave the hover an ordinary link hover"
-            );
-        }
-        assert_eq!(peek_target_from_sources(None, None), None);
+        assert_eq!(at(1, 6), None, "one column past the link is ordinary text");
+        assert_eq!(at(0, 2), None, "the row is part of the address");
+        assert_eq!(
+            FrameImageReferences::default().at(bt_render::GridHit { row: 0, column: 0 }),
+            None,
+            "a frame with no references answers nothing anywhere",
+        );
     }
 
     /// PIN (band retirement ruling, 2026-08-03, docs §6.1): the peek's third source is an OSC 1337
