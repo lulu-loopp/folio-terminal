@@ -293,6 +293,12 @@ struct Runtime {
     pending_pty_resize: Option<PendingPtyResize>,
     pending_resize_present: Option<GridSize>,
     hyperlink_hover: HyperlinkHover,
+    /// The verified image reference the frame currently on screen was drawn with the solid
+    /// underline over. Written only where a frame is composed, read only to decide whether the
+    /// pointer has moved onto or off a reference and a repaint is therefore owed — so there is one
+    /// source of truth (the session, asked at compose time) and this is a record of what it last
+    /// said, never a second opinion.
+    underlined_image_reference: Option<(bt_doc::ContentAnchor, bt_doc::ContentAnchor)>,
     peek_hover: PeekHover,
     peek_cache: std::collections::HashMap<String, PeekCacheEntry>,
     /// The one display-sized thumbnail the flyout can draw, and the one resample in flight. See
@@ -794,6 +800,22 @@ fn peek_scale_task(
     }
 }
 
+/// The `peek_cache` identity a decoration-worker decode must be remembered under, so that the
+/// hover which later asks for the same picture finds it instead of asking the disk again.
+///
+/// It is `PeekSubject`'s own rule, stated once: a named file is its normalized path, a stream
+/// payload is the decoder's content key. Deriving it here rather than at the two call sites is what
+/// makes "verification warms the peek" a fact about one key rather than a coincidence between two.
+fn peek_cache_key_for_decode(
+    source: &bt_term::InlineImageSource,
+    decoded: &bt_term::DecodedInlineImage,
+) -> String {
+    match source {
+        bt_term::InlineImageSource::Osc1337(_) => decoded.key.clone(),
+        bt_term::InlineImageSource::LocalPath(path) => normalized_local_image_path_key(path),
+    }
+}
+
 /// One hovered cell resolves to at most one image. Text under the pointer wins over the link the
 /// cell belongs to: where a link's text spells the file itself both sources name the same picture
 /// anyway, and where they differ the visible text is what the pointer was actually put on.
@@ -1082,6 +1104,7 @@ impl Runtime {
             pending_pty_resize: None,
             pending_resize_present: None,
             hyperlink_hover: HyperlinkHover::default(),
+            underlined_image_reference: None,
             peek_hover: PeekHover::default(),
             peek_cache: std::collections::HashMap::new(),
             peek_thumbnail: None,
@@ -1400,6 +1423,14 @@ impl Runtime {
                 .hyperlink_hover
                 .status_text(terminal_frame.columns.get() as usize);
         }
+        // The verified reference under the pointer turns solid, on the same terms the link does:
+        // the underline is the affordance and follows the pointer immediately, while the 300ms
+        // settle belongs to what the hover *reveals* — a tooltip there, a thumbnail here.
+        let hovered_reference = self.hovered_image_reference();
+        if let Some((start, end)) = hovered_reference.as_ref() {
+            terminal_frame.underline_reference_span(start, end, true);
+        }
+        self.underlined_image_reference = hovered_reference;
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
             terminal_frame.status_text = Some(notice.to_owned());
         }
@@ -1468,7 +1499,7 @@ impl Runtime {
                             }
                         },
                         DecorationWorkerCompletion::InlineImage { task, result } => {
-                            self.remember_stream_payload_for_peek(&task, result.as_ref().ok());
+                            self.remember_decode_for_peek(&task, result.as_ref().ok());
                             self.session.complete_inline_image_result(task, result)
                         }
                         DecorationWorkerCompletion::ScaleInlineImage { scaled } => {
@@ -1742,6 +1773,36 @@ impl Runtime {
         .then_some(path)
     }
 
+    /// The verified image reference the pointer is currently standing on, if any — the span whose
+    /// resting dots become a solid underline for as long as the pointer is there.
+    ///
+    /// Resolved from session state per publish rather than remembered in hover state, because it is
+    /// a pure function of "where is the pointer" and "what has the worker verified", and both can
+    /// change without a pointer event: a decode landing turns a plain span into an underlined one
+    /// under a pointer that never moved.
+    fn hovered_image_reference(&self) -> Option<(bt_doc::ContentAnchor, bt_doc::ContentAnchor)> {
+        let hit = self.frame_hit()?;
+        let anchor = self
+            .last_presented_frame
+            .as_ref()?
+            .anchor_at(hit.row, hit.column, Bias::Before)
+            .ok()??;
+        self.session.verified_image_reference_at(&anchor)
+    }
+
+    /// Repaint when the pointer has moved onto or off a verified reference, so the solid underline
+    /// arrives with the pointer rather than with the next unrelated frame.
+    ///
+    /// The other direction — a decode landing under a pointer that never moved — needs nothing
+    /// here: `apply_math_results` already republishes when a completion changed session state, and
+    /// the compose step asks the session afresh.
+    fn refresh_image_reference_underline(&mut self) -> Result<()> {
+        if self.hovered_image_reference() == self.underlined_image_reference {
+            return Ok(());
+        }
+        self.publish_interaction_frame()
+    }
+
     /// The image a hover at `hit` may preview, from any shape the screen can offer it in.
     ///
     /// The line's own text comes first, by lexical probe rather than decoration record, so the
@@ -1896,31 +1957,32 @@ impl Runtime {
         Ok(())
     }
 
-    /// Remember an OSC 1337 decode under its content key so a hover over the `[image]` placeholder
-    /// can show it.
+    /// Remember a decoration-worker decode in the peek cache, under the identity the peek asks by:
+    /// the decoder's content key for an OSC 1337 payload, the normalized path for a named file.
     ///
-    /// A stream payload is the one image the peek cannot go and fetch: the bytes were in the
-    /// stream, the session decoded them once, and with inline image bands retired
-    /// (`INLINE_IMAGE_BANDS`, docs §6.1) nothing else will ever ask for them again. Catching the
-    /// decode here — where it passes through on its way into the session — is the whole of the
-    /// cost, and it is why the placeholder can peek at all.
+    /// Two reasons, one seam. A stream payload is the one image the peek cannot go and fetch — the
+    /// bytes were in the stream, the session decoded them once, and nothing else will ever ask for
+    /// them again — so catching it here is the only way the `[image]` placeholder can peek at all.
+    /// A named file *can* be re-read, but under the 2026-08-04 verification ruling the session has
+    /// just had a worker open, size-check, format-check and decode it in order to earn the resting
+    /// underline; letting that decode reach the flyout's cache is what makes the promised peek
+    /// appear at once instead of after a second read of the same file. The ruling names that as the
+    /// beneficial side effect to preserve, and this is where it is preserved.
     ///
-    /// A named file is deliberately not remembered here: its identity in the cache is its path,
-    /// the peek's own decoder produces it on demand, and duplicating it under a second key would
-    /// give one file two entries that can disagree.
-    fn remember_stream_payload_for_peek(
+    /// One file still has one entry: the key is `normalized_local_image_path_key`, the very key
+    /// `PeekSubject::from_path` computes, so this fills the entry the peek would have created
+    /// rather than adding a second one that could disagree.
+    fn remember_decode_for_peek(
         &mut self,
         task: &bt_term::InlineImageTask,
         decoded: Option<&bt_term::DecodedInlineImage>,
     ) {
-        if !matches!(task.source, bt_term::InlineImageSource::Osc1337(_)) {
-            return;
-        }
         let Some(decoded) = decoded else {
             return;
         };
+        let cache_key = peek_cache_key_for_decode(&task.source, decoded);
         self.peek_cache.insert(
-            decoded.key.clone(),
+            cache_key,
             PeekCacheEntry::Ready {
                 key: decoded.key.clone(),
                 rgba: Arc::clone(&decoded.rgba),
@@ -2001,6 +2063,9 @@ impl Runtime {
         if hyperlink_changed {
             self.publish_interaction_frame()?;
         }
+        // The pointer is gone, so `hovered_image_reference` now answers `None`: any solid underline
+        // still on screen must fall back to its resting dots.
+        self.refresh_image_reference_underline()?;
         Ok(())
     }
 
@@ -2307,6 +2372,7 @@ impl Runtime {
         if self.hyperlink_hover.observe(hyperlink, now) {
             self.publish_interaction_frame()?;
         }
+        self.refresh_image_reference_underline()?;
         let peek_path = hit
             .filter(|_| {
                 math_hit.is_none() && !matches!(self.mouse_route, Some(MouseRoute::Local(_)))
@@ -4258,6 +4324,57 @@ mod tests {
             "a stream payload has no file behind it, so a cache miss reads nothing",
         );
         assert_ne!(payload, by_path);
+    }
+
+    /// PIN (verification ruling 2026-08-04, the warm peek): the decode a verified reference already
+    /// paid for is filed under the very key the hover looks up, so the flyout opens from cache and
+    /// no second read of the same file is ever scheduled.
+    ///
+    /// `show_or_request_peek` sends a `PeekImage` task on exactly one condition — a `None` entry
+    /// under `PeekSubject::key`. So "the peek is warm" and "the two keys are the same string" are
+    /// the same statement, and it is the one asserted here. The stream-payload arm is asserted
+    /// beside it because both shapes go through this one function and must not converge: a payload
+    /// has no path to key by.
+    ///
+    /// RED CHECK: keying a named file's verification decode by `decoded.key` (its content identity)
+    /// instead of its path leaves the hover's lookup missing, and the first assertion goes red —
+    /// which is precisely the "decoded twice, cached twice" defect the shared key rules out.
+    #[test]
+    fn a_verified_references_decode_is_filed_under_the_key_the_hover_asks_by() {
+        let path = PathBuf::from(r"C:\img\Sunset.PNG");
+        let decoded = bt_term::DecodedInlineImage {
+            occurrence_id: 7,
+            key: "image:0123456789abcdef0123456789abcdef".to_owned(),
+            rgba: Arc::from(vec![0u8; 4]),
+            width_px: 1,
+            height_px: 1,
+            animated: false,
+        };
+
+        assert_eq!(
+            peek_cache_key_for_decode(
+                &bt_term::InlineImageSource::LocalPath(path.clone()),
+                &decoded
+            ),
+            PeekSubject::from_path(path.clone()).key,
+            "the verification decode lands exactly where the hover will look for it",
+        );
+        assert_eq!(
+            peek_cache_key_for_decode(
+                &bt_term::InlineImageSource::LocalPath(PathBuf::from(r"c:/img/sunset.png")),
+                &decoded
+            ),
+            PeekSubject::from_path(path).key,
+            "and one file spelled two ways is still one warm entry",
+        );
+        assert_eq!(
+            peek_cache_key_for_decode(
+                &bt_term::InlineImageSource::Osc1337(b"AAAA".to_vec()),
+                &decoded
+            ),
+            PeekSubject::from_content_key(decoded.key.clone()).key,
+            "a stream payload has no path, so it stays keyed by content",
+        );
     }
 
     /// Pin (a) of the peek raster defect: every peek pixel that reaches the renderer is one the

@@ -372,11 +372,27 @@ fn is_windows_drive_absolute(text: &str) -> bool {
         && matches!(bytes[2], b'\\' | b'/')
 }
 
+/// How a reference is *spelled* on the line — the one property that decides whether it may ever
+/// grow an inline band, kept on the candidate so the verification layer never has to re-derive it.
+///
+/// The distinction is older than this type: a printed native path is the file's name in the flow
+/// and has always been band-eligible, while a `file://` URI is a reference *to* a file and never
+/// was. Both are verified and both wear the resting underline; only `Native` reaches
+/// `projected_inline_image`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageReferenceShape {
+    /// A drive-rooted path, or a relative reference resolved against the OSC 7 working directory.
+    Native,
+    /// A `file://` URI, whose printed form is not its path.
+    Uri,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalImagePathCandidate {
     pub path: String,
     pub byte_start: usize,
     pub byte_end: usize,
+    pub shape: ImageReferenceShape,
 }
 
 /// Allocation-light lexical candidate scan for the event thread. It recognizes only drive-rooted
@@ -418,6 +434,7 @@ pub fn detect_local_image_path_candidates(text: &str) -> Vec<LocalImagePathCandi
                 path: path.to_owned(),
                 byte_start: start,
                 byte_end: end,
+                shape: ImageReferenceShape::Native,
             });
         }
         cursor = if quoted {
@@ -513,6 +530,7 @@ pub fn detect_relative_image_path_candidates(text: &str) -> Vec<LocalImagePathCa
                 path: candidate.to_owned(),
                 byte_start: start,
                 byte_end: end,
+                shape: ImageReferenceShape::Native,
             });
         }
         // An admitted candidate consumes its text, so nothing is read out of the middle of one. A
@@ -777,6 +795,7 @@ pub fn detect_local_image_uri_candidates(text: &str) -> Vec<LocalImagePathCandid
                 path: path.to_string_lossy().into_owned(),
                 byte_start: cursor,
                 byte_end: end,
+                shape: ImageReferenceShape::Uri,
             });
         }
         cursor = end.max(cursor + 1);
@@ -1545,6 +1564,7 @@ mod tests {
                 path: r"C:\Users\weiyi\Pictures\1.png".to_owned(),
                 byte_start: 16,
                 byte_end: 45,
+                shape: ImageReferenceShape::Native,
             }]
         );
         assert_eq!(

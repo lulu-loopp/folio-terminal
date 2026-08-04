@@ -62,6 +62,8 @@
 3. **hover 延迟只作用于浮层/提示条(~300ms)**,防链接密集输出的浮层乱闪;**下划线
    affordance 即时跟随指针**(2026-07-30 手感修订:即时性告知"这是链接",延迟保护的
    是浮层不是下划线)。GIF 在 peek 浮层内可动(瞬态生命周期有界,与内联首帧规则不冲突)。
+   **2026-08-04 起这套词汇跨内容类型统一**:一条**经 worker 验证过**的图片引用穿的是同一对
+   flag(静止点线、指针下实线),分野只在 hover 揭示什么——URL 是信息条,图片是缩略图。详见 §6.1.2。
 4. **分期**:hover 信息卡版可先行(不依赖 pane 树);单击进 pane 等 M2 预览 pane;
    Ctrl+单击=系统打开在超链接片 v1 即有。URL 单击在 M2 网页预览落地前无事可做,
    落地后自动升级进 pane——政策位升级,零返工。
@@ -183,6 +185,8 @@
   - **创建侧**三个接缝:`reconcile_live_image_paths`(live 路径)、`detect_frozen_image_paths`
     (冻结转录行——本次新加的门,§6.1 时代它不存在,因为那时 primary 还建记录)、
     `register_inline_image`(OSC 1337,见下)。路径/`file://`/相对引用文本因此**任何平面都不建记录**。
+    **(本条已被 §6.1.2 于 2026-08-04 取代:记录回来了,回来的身份是「验证载体」;政策位管的仍然
+    只是 band。)**
   - **投影侧**一个接缝:`projected_inline_image` 开头一行。frozen / live / history-path 三条投影
     全部经它,所以这是「图片记录不再是 band」的**唯一**那一行。
   - **调度侧**一个接缝:`take_decoration_worker_task` 不再调用 `request_inline_image_displays`。
@@ -192,6 +196,9 @@
   覆盖该锚」时拒答。**一条记录都不建 ⇒ 覆盖恒假 ⇒ 探针在一切可准入跨度上必然作答**。这条组合性
   钉死于 `path_text_creates_no_record_anywhere_and_the_peek_answers_everywhere`(live 与 history
   两个平面各一遍)。peek 层**一行都没改**。
+  **(§6.1.2 修订:记录回来之后,补集的说法从「一条都不建」换成「一条都不呈现」——
+  `inline_image_record_covers` 的第一问仍是政策位,答案因此一样;pin 更名为
+  `a_verified_reference_wears_the_resting_underline_in_every_plane_and_bands_in_none`。)**
 - **OSC 1337:记录活下来,但它不再是 band,而是「解码载体」**。这是本次唯一需要新机器的地方,
   理由是**不对称的**:打印出来的路径,peek 层随时可以从行文本里重新读出来;OSC 1337 的图**只在
   流里出现过一次**,退役 band 之后如果不锚在占位符上,它就**一点呈现都没有**了。所以:
@@ -218,6 +225,7 @@
   因此翻案回来时它们是**被验证过**的,不是被一句注释承诺过的。
   组合钉死于 `flipping_the_policy_bit_back_on_restores_the_whole_band_pipeline`:同样的字节,
   同一份 fixture,只差这一位——关着是 `(0 记录, 0 band)`,开着是 `(1 记录, 1 band)`。
+  **(§6.1.2 修订:关侧现在是 `(1 记录, 0 band)`——记录两侧都在,这一位拥有的是 band。)**
 - **对照组**:`formulas_still_band_while_images_do_not`——同一帧里公式照常成 band,图片不成。
 - **补集不变量两侧都钉住**:`inline_image_record_covers` 的第一问就是政策位——「覆盖」的含义是
   **在流里呈现**,一条投影不出去的记录什么也没呈现,所以补集恒真、探针必答。翻案回来时旧的拒答
@@ -228,6 +236,7 @@
   这份验证改由 **peek 自己那份**承担——同一个 worker、同一个解码器、同一道准入门,记在
   `peek_cache` 里(`local_image_path_hit`)。**代价说清楚:必须先 hover 过一次,Ctrl+单击才开得动。**
   pending / 失败条目照旧完全惰性;政策位翻案后记录重新第一个作答,老行为原样回来。
+  **(本条代价已于 2026-08-04 由 §6.1.2 取消:验证载体让记录在政策位关着时也第一个作答。)**
   单击进预览 pane 仍按裁决随 M2 图像族落地。
 - **回放足迹(2026-08-03 实测,62 份 `.tmp-repaint-capture/*.vt` × 2 模式,release oracle 前后对拍
   stdout+stderr)**:
@@ -254,6 +263,136 @@
     `hover-peek-complement` 329→80、`relief-chip-feel` 253→148、`texture-residency-feel` 379→91,
     **残余即同一录制里 primary 段的 band**。今天正是把那些残余一并裁掉,所以它们各自的旧「after」
     就是今天的「before」——两次裁决在同一批数字上首尾相接。
+
+### 6.1.2 可 peek 的引用要有静止 affordance,且**先验证后承诺**(用户裁决 2026-08-04)
+
+band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**先知道这里可以 hover**。§6.1.1 把
+呈现拿掉了,却没有给「这里有张图」留下任何静止的告知,于是一整屏路径文本和普通文本长得一模一样。
+本节补的就是这一半。
+
+- **裁决(A)affordance 用超链接的同一套词汇**:一条可 peek 的图片引用,**静止时点线下划线,
+  指针下变实线**——与 142ca48 给 OSC 8 落的那套**一模一样**(跨格合并、物理像素对齐、hover 升级)。
+  不是「像」,是**同一对 flag、同一条渲染路径**。理由在 §4 已经写好:动词梯度**本来就跨内容类型统一**,
+  静止态两者必须无法区分;**分野出现在 hover 揭示什么**——URL 揭示一条真实目标信息条,图片揭示一张
+  缩略图。
+- **裁决(B)先验证后承诺**:只有 **worker 真的验证过**的引用才配这条下划线——文件存在、是文件、
+  尺寸在预算内、是我们解得开的格式、**并且真的解开了**。看起来像路径但不存在的字符串,**保持纯文本**,
+  peek 也照旧沉默(今天就有的诚实行为)。下划线是一句承诺,**这个终端不承诺自己交付不了的东西**。
+  - **顺带的好处,裁决点名要留住**:验证顺手把解码烘热了,所以那张图的 hover peek 是**从缓存直接出**,
+    不再等一次解码。
+- **实现即扩展,不是新机器**:OSC 1337 早就有「记录活着当解码载体,但永不投影 band」这个形状
+  (§6.1.1,828fc9a)。本次只是把**路径 / `file://` / 相对引用**也接进同一个形状:
+  - **注册 ≠ 建 band**。`reconcile_live_image_paths` 与 `detect_frozen_image_paths` 不再被政策位
+    整段挡住;挡住的是**那些为了「别把行注进某处」而存在的门**——副屏、shell 输入区、光标所在逻辑行——
+    它们现在只在 `inline_image_bands` 为真时发问(`band_gates`)。翻案时三道门原样回来。
+  - **投影侧多了第二道拒绝,且两侧都成立**:`file://` URI 是**对文件的引用**,不是文件在流里的名字,
+    它从来不长 band,不会因为拿到了记录就开始长。记录里存 `ImageReferenceShape::{Native, Uri}`,
+    `projected_inline_image` 见 `Uri` 直接拒。
+  - **补集因此仍然诚实**:`inline_image_record_covers` 只认**真的会在流里呈现**的记录(政策位为真
+    且形状是 `Native`),所以一条 URI 记录不会因为存在就把自己那块地方的 peek 掐掉。
+  - **覆盖面由探测器本身保证**:注册走的就是 peek 自己那支 `detect_peek_image_candidates`
+    (原生路径 + OSC 7 相对 + 裸 `file://` 文本),再加上 `detected_live_image_links` /
+    `frozen_image_link_spans` 补上**文本里根本拼不出来的第四种形状**——OSC 8 的链接目标。
+    一份名单,两个消费者,**下划线覆盖面与 peek 覆盖面不可能各走各的**。
+  - **热 peek 的接缝只有一处**:bt-app 在 `DecorationWorkerCompletion::InlineImage` 经过时把解码记进
+    `peek_cache`(`remember_decode_for_peek`),命名文件用 `normalized_local_image_path_key`
+    ——**正是 hover 稍后查的那把 key**(`PeekSubject::from_path`)。`show_or_request_peek` 只在条目
+    为 `None` 时才发 `PeekImage`,所以「peek 是热的」与「两把 key 是同一个字符串」是同一句话。
+    一个文件仍然只有一条缓存条目。
+- **裁决(3)作用域:下划线是文本 affordance,不是 band,所以它落在引用所在的任何地方——包括用户
+  正在敲的命令行。** 那些禁止装饰命令区的裁决讲的是 **band 往命令行注入行**,原样不动:
+  `semantic_input_overlaps` 仍然在政策位为真时把创建与完成两侧都关掉。**在字符本身上做个记号不是注入**,
+  而用户敲的路径不会因为它在命令里就不是路径——他应该看到和两行之下同一条路径一样的点线。
+- **渲染侧零新增路径**:静止点线走 `apply_implicit_hyperlinks` 用的同一个 `DOTTED_UNDERLINE`,
+  hover 实线走 `underline_hyperlink` 用的同一个 `UNDERLINE`。运行合并逻辑抽成
+  `dotted_underline_run_end`,它**只看格子穿了什么,不问为什么穿**——所以一条引用与一条链接并排时
+  合成**一条**点线节奏,在交界处不重起相位。这就是「看起来是一个系统」在像素层的含义。
+- **新接缝清单**:`bt_doc::content_anchor_between`(从 bt-term 上提,bt-viewport 现在也要用它)、
+  `ViewportFrame::underline_reference_span`(按锚跨度上妆,dotted/solid 二选一)、
+  `DualPlaneSession::verified_image_reference_spans` / `verified_image_reference_at`(唯一的真值源:
+  `record.artifact.is_some()`)、`decorate_image_reference_affordance`(在 `viewport_frame` 里,
+  紧接 `decorate_math_frame`)、bt-app 的 `hovered_image_reference`(每次 publish 现算,因为解码落地
+  可以在指针没动的情况下把一段文本变成有下划线的)。
+- **Ctrl+单击的连带后果被翻回来了(诚实记账)**:§6.1.1 记的「必须先 hover 过一次,Ctrl+单击才开得动」
+  **不再成立**——记录回来了,`decoded_local_image_path_at` 重新第一个作答,四种形状(含 OSC 8 目标)
+  都在第一次 hover 之前就是活的。
+- **被重新裁定的 pin**:`path_text_creates_no_record_anywhere_and_the_peek_answers_everywhere`
+  → `a_verified_reference_wears_the_resting_underline_in_every_plane_and_bands_in_none`;
+  `alternate_screen_path_text_creates_no_record_and_the_peek_answers_instead`
+  → `alternate_screen_path_text_is_verified_across_a_repaint_and_never_bands`;
+  `a_relative_path_on_the_alternate_screen_peeks_and_creates_no_record`
+  → `a_relative_path_on_the_alternate_screen_is_verified_and_still_grows_no_band`;
+  `every_image_reference_shape_answers_the_alternate_screen_peek`
+  → `underline_coverage_equals_peek_coverage_for_every_reference_shape`;
+  `flipping_the_policy_bit_back_on_restores_the_whole_band_pipeline` 的关侧从 `(0 记录, 0 band)`
+  改为 **`(1 记录, 0 band)`**——记录在政策位两侧都在,**band 才是那一位拥有的东西**;
+  `soft_wrapped_path_is_suppressed_when_cursor_is_on_its_lower_half` 与
+  `psreadline_paste_hidden_chunk_keeps_input_line_suppressed_at_stability` 改为**在翻案侧**跑,
+  因为它们钉的是 band 的门。
+- **本次的 pin(逐条都做过红检)**:
+  - `a_verified_reference_wears_the_resting_underline_in_every_plane_and_bands_in_none`
+    ——静止点线正好落在引用自己的字符上(引号都不沾),live / 离开网格 / 冻结三段都成立,
+    `image_placements` 全程为空。
+  - `nonexistent_path_is_plain_text_at_rest_and_peeks_nothing`——不存在的路径**一个 flag 都不穿**,
+    动词惰性;词法探针仍然认得这个形状(那正是 worker 被问到的原因)。
+  - `underline_coverage_equals_peek_coverage_for_every_reference_shape`——四种形状同屏,
+    **逐格双向**比对:peek 会答的格子必穿 affordance;**非链接**的格子穿了 affordance 就必然 peek 会答。
+    唯一的不对称被写进 pin 而不是抹掉:OSC 8 无论指向什么都由作者声明穿点线,它在那里承诺的是
+    链接自己的信息条。四种形状**各自**都断言 `decoded_local_image_path_at` 有答——OSC 8 那行是
+    唯一「下划线看着对但可能是空心的」的地方,只有验证能说话。
+  - `a_reference_inside_the_command_line_is_underlined_like_any_other`——OSC 133 命令区里的引用与
+    两行之下输出里的同一条引用,**点线跨度完全一致**;全程无 band。
+  - `the_pointer_upgrades_a_verified_reference_from_dotted_to_solid`——指针下整条变实线,旁边一格不沾。
+  - `a_verified_references_decode_is_filed_under_the_key_the_hover_asks_by`(bt-app)——验证解码写进的
+    key **恒等于** `PeekSubject::from_path(...).key`,一个文件两种拼法仍是一条热条目;流内 payload
+    没有路径可 key,仍按内容 key。
+  - `a_reference_and_a_link_side_by_side_are_one_dotted_run`(bt-render)——并排合成一条运行;
+    实线(hover 升级)与换色各自断开运行;跨行必断。
+  - band 回归护栏:上述四条 session pin 全部断言 `image_placements(&frame).is_empty()`,把
+    `INLINE_IMAGE_BANDS` 翻回 `true` 会同时点红它们(实测 8 条红)。
+- **红检实测(逐条单独做过,做完复原)**:
+  1. 静止 flag 不上妆 → 5 条 pin 红(三条 session 覆盖 pin + 命令行 pin + hover pin)。
+  2. affordance 改由「记录存在」而非 `record.artifact` 驱动 → `nonexistent_path_...` 红,
+     其余正向 pin 全绿——**这正是这条 pin 存在的理由**。
+  3. 注册只走 `Native` 形状 → 覆盖一致性 pin 红(裸 URI 那行有 peek 无 affordance)。
+  4. 去掉 `detected_live_image_links` → 覆盖一致性 pin 红(OSC 8 目标未验证)。
+  5. `INLINE_IMAGE_BANDS = true` → 8 条 pin 红(含 band 护栏与两条 OSC 1337 补集 pin)。
+  6. hover 永不升实线 → hover pin 红。
+  7. 命名文件的验证解码改按内容 key 归档 → bt-app 热 peek pin 红。
+  8. 运行合并每格自断 → bt-render「一个系统」pin 红。
+- **回放足迹(2026-08-04 实测,69 份 `.tmp-repaint-capture/*.vt` × 2 模式,release oracle 前后对拍
+  stdout+stderr)**:
+  - **默认模式(未设 `BT_PROBE_IMAGE_PATHS`):0/69 有差异,逐字节全同。** 默认回放不检测路径,
+    所以验证管线整条没开,affordance 也就无从谈起。
+  - **`BT_PROBE_IMAGE_PATHS=1`:30/69 有差异,另 39 份逐字节全同。** **全部差异都是纯插入**——
+    多出来的是验证解码落地后多发的那几帧 publish(`event=math-ready` / `event=pty`),
+    其装饰状态与前后帧逐字节相同;**30 份里一条 `<`(删除/改写)都没有**,每份的**最后一帧完全相同**。
+    `rendered=[…]` 全程为空(图片 band 依旧一条不生),语料里唯一带公式 band 的 `pixel-scroll-feel`
+    公式帧数 **1541 → 1541**,分毫未动。
+  - **affordance 足迹(用一次性插桩量的最大值,量完复原,oracle 未留改动)**:30 份出现新点线,
+    39 份为 0。**实线(solid)计数逐份不变**——静止上妆只在 `UNDERLINE` 不在场时插 `DOTTED_UNDERLINE`,
+    结构上不可能加减实线。逐份新增点线格数:
+    `alt-peek-only-feel` +461、`band-stuck-trace` +416、`bare-relative-feel` +566、`cc-image-repro` +41、
+    `cursor-accept` +82、`daily-b35ce24` +205、`final-input-accept` +82、`hover-peek-complement` +170、
+    `hover-peek-feel` +123、`hover-peek-feel-2` +123、`image-accept` +98、`inline-trial2` +123、
+    `inline-trial3` +164、`inline-trial4` +200、`osc133-accept` +164、`osc133-accept2` +369、
+    `osc133-accept3` +328、`osc7-relative-feel` +614、`paste-accept` +82、`paste-round3` +82、
+    `path-accept` +82、`peek-only-final` +154、`pixel-scroll-feel` +127、`pwsh-default-verify` +359、
+    `relief-chip-feel` +423、`seat-fix2-feel` +118、`svg-slice-feel` +298、`texture-residency-feel` +475、
+    `uri-peek-feel` +491、`zero-resize-restore` +118。
+  - 逐份多出的帧数(before→after):`alt-peek-only-feel` 4667→4683、`band-stuck-trace` 76→80、
+    `bare-relative-feel` 331→337、`cc-image-repro` 424→429、`cursor-accept` 90→92、
+    `daily-b35ce24` 1152→1158、`final-input-accept` 40→42、`hover-peek-complement` 732→769、
+    `hover-peek-feel` 135→139、`hover-peek-feel-2` 51→55、`image-accept` 350→351、
+    `inline-trial2` 50→55、`inline-trial3` 33→37、`inline-trial4` 56→61、`osc133-accept` 129→135、
+    `osc133-accept2` 830→841、`osc133-accept3` 320→326、`osc7-relative-feel` 390→402、
+    `paste-accept` 110→116、`paste-round3` 90→92、`path-accept` 95→97、`peek-only-final` 83→89、
+    `pixel-scroll-feel` 3427→3432、`pwsh-default-verify` 186→195、`relief-chip-feel` 426→455、
+    `seat-fix2-feel` 58→60、`svg-slice-feel` 4038→4064、`texture-residency-feel` 679→717、
+    `uri-peek-feel` 621→628、`zero-resize-restore` 57→60。
+  - **源不变**:下划线只写进投影出来的那一帧的 cell,转录/网格的字节**一个都没动**——
+    `BT_PROBE_STYLES` 打印的冻结行 `StyleSpan` 因此前后无差异,pin 里也逐条断言
+    `session.terminal().visible_text()` 原样。
 
 ### 6.2 图片引用的三种形状都要能 peek(用户报告 2026-08-02)
 

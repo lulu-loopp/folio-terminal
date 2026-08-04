@@ -6,6 +6,7 @@ mod versions;
 
 pub use anchor::{
     AnchorError, AnchorId, Bias, ContentAnchor, GridPoint, ScreenId, Selection, compare_anchors,
+    content_anchor_between,
 };
 pub use document::{HistoryDocument, HistoryEntry, LiveRowRemoval};
 pub use versions::{

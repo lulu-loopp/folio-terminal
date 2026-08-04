@@ -620,6 +620,45 @@ impl ViewportFrame {
         true
     }
 
+    /// Paint the reference affordance over the cells of one anchor span: dotted at rest, solid
+    /// under the pointer. Returns whether any cell was marked.
+    ///
+    /// This is the hyperlink vocabulary applied to a second content type, and deliberately the
+    /// *same* vocabulary rather than a parallel one (user ruling 2026-08-04): §4's verb gradient is
+    /// already unified across content types, so at rest a peekable reference and a declared link
+    /// must be indistinguishable, and what differs is what the hover reveals. Reuse is literal —
+    /// the flags are `DOTTED_UNDERLINE`/`UNDERLINE`, and the renderer's run merging then joins a
+    /// reference's dots to an adjacent link's without knowing which is which.
+    ///
+    /// Cells are chosen by their own content anchor, not by a row/column rectangle, so a reference
+    /// that soft-wraps is underlined on both of its rows and a reference that has scrolled halfway
+    /// off the top is underlined on the part that is still shown. Source cells and transcript
+    /// styles are untouched; this frame is the only thing that changes.
+    pub fn underline_reference_span(
+        &mut self,
+        start: &ContentAnchor,
+        end: &ContentAnchor,
+        hover: bool,
+    ) -> bool {
+        let mut marked = false;
+        for (cell, anchors) in self.cells.iter_mut().zip(&self.cell_anchors) {
+            if !bt_doc::content_anchor_between(&anchors.start, start, end) {
+                continue;
+            }
+            marked = true;
+            if hover {
+                cell.style.flags.remove(CellFlags::DOTTED_UNDERLINE);
+                cell.style.flags.insert(CellFlags::UNDERLINE);
+            } else if !cell.style.flags.contains(CellFlags::UNDERLINE) {
+                // A cell already wearing a solid underline keeps it: that is either the application's
+                // own SGR 4 or a hover already resolved, and the resting affordance may not overrule
+                // either into a weaker mark.
+                cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
+            }
+        }
+        marked
+    }
+
     /// Expand a cell hit to a word using the terminal selection delimiter policy. Whitespace and
     /// shell punctuation delimit words; every other grapheme (including emoji clusters) stays in
     /// the same run. Wide spacers share their lead cell's anchors and can never split a cluster.

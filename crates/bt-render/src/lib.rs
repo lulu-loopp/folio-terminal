@@ -3243,18 +3243,7 @@ impl Renderer {
             let row = index / columns;
             let start_column = index % columns;
             let (foreground, _) = resolve_colors(&cell.style);
-            let mut end = index + 1;
-            while end < drawable_cells && end / columns == row {
-                let next = &frame.cells[end];
-                let (next_foreground, _) = resolve_colors(&next.style);
-                if next.style.flags.contains(CellFlags::UNDERLINE)
-                    || !next.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
-                    || next_foreground != foreground
-                {
-                    break;
-                }
-                end += 1;
-            }
+            let end = dotted_underline_run_end(&frame.cells, index, columns, drawable_cells);
 
             let [left, _, _, bottom] = frame_cell_bounds_px(self.metrics, frame, row, start_column);
             let right = left + (end - index) as f32 * self.metrics.cell_width_px;
@@ -3854,6 +3843,37 @@ fn frame_cell_bounds_px(
         left + metrics.cell_width_px,
         top + mapped.height_subpixels as f32 / SUBPIXELS_PER_PX as f32,
     ]
+}
+
+/// The end of the dotted underline run that begins at `index`: the first cell of the same row that
+/// is not dotted in the same colour, or the row's end.
+///
+/// The run is defined by what a cell *wears*, never by why it wears it. That is what makes an
+/// explicit OSC 8 link, an inferred URL and a verified image reference one visual system rather than
+/// three: two of them standing side by side merge into a single dash pattern that does not restart
+/// at their boundary, because nothing here can tell where one ends and the next begins. A solid
+/// underline breaks the run, since the solid mark is drawn instead of the dots for that cell.
+fn dotted_underline_run_end(
+    cells: &[bt_transcript::CapturedCell],
+    index: usize,
+    columns: usize,
+    drawable_cells: usize,
+) -> usize {
+    let row = index / columns;
+    let (foreground, _) = resolve_colors(&cells[index].style);
+    let mut end = index + 1;
+    while end < drawable_cells && end / columns == row {
+        let next = &cells[end];
+        let (next_foreground, _) = resolve_colors(&next.style);
+        if next.style.flags.contains(CellFlags::UNDERLINE)
+            || !next.style.flags.contains(CellFlags::DOTTED_UNDERLINE)
+            || next_foreground != foreground
+        {
+            break;
+        }
+        end += 1;
+    }
+    end
 }
 
 /// Split one contiguous dotted underline run into opaque, physical-pixel-aligned rectangles.
@@ -6807,6 +6827,54 @@ mod tests {
                 expected
             );
         }
+    }
+
+    /// PIN (verification ruling 2026-08-04, part 4): a verified image reference standing next to a
+    /// link is drawn as *one* dash pattern, because the run is defined by the mark and not by its
+    /// source.
+    ///
+    /// This is what "the same vocabulary" has to mean at the pixel level. Had the reference been
+    /// given a parallel flag or a parallel drawing path, the two spans would each start their own
+    /// dash phase and a reader would see the seam — the exact tell that two systems are pretending
+    /// to be one. The solid case is pinned beside it because that is the hover upgrade: a cell that
+    /// has gone solid closes the dotted run rather than being absorbed by it.
+    #[test]
+    fn a_reference_and_a_link_side_by_side_are_one_dotted_run() {
+        let dotted = |foreground: Option<bt_transcript::TerminalColor>| {
+            let mut cell = bt_transcript::CapturedCell::plain("x");
+            cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
+            if let Some(foreground) = foreground {
+                cell.style.foreground = foreground;
+            }
+            cell
+        };
+        let mut solid = bt_transcript::CapturedCell::plain("x");
+        solid.style.flags.insert(CellFlags::UNDERLINE);
+
+        // Columns 0..3 an OSC 8 link, columns 3..6 a verified image reference: one run, 0..6.
+        let mut cells = vec![dotted(None); 6];
+        cells.push(bt_transcript::CapturedCell::plain("x"));
+        assert_eq!(dotted_underline_run_end(&cells, 0, 8, cells.len()), 6);
+
+        // The hover upgrade closes the run where it starts.
+        let mut hovered = vec![dotted(None); 3];
+        hovered.extend(vec![solid; 3]);
+        assert_eq!(dotted_underline_run_end(&hovered, 0, 8, hovered.len()), 3);
+
+        // A colour change is still a new run: the dots take the text's own colour.
+        let mut recoloured = vec![dotted(None); 3];
+        recoloured.extend(vec![
+            dotted(Some(bt_transcript::TerminalColor::Indexed(4)));
+            3
+        ]);
+        assert_eq!(
+            dotted_underline_run_end(&recoloured, 0, 8, recoloured.len()),
+            3
+        );
+
+        // A row boundary always ends the run, whatever the next row wears.
+        let across = vec![dotted(None); 6];
+        assert_eq!(dotted_underline_run_end(&across, 1, 3, across.len()), 3);
     }
 
     #[test]

@@ -101,6 +101,109 @@ pub fn compare_anchors(
     Ok(left.cmp(&right))
 }
 
+/// Whether `candidate` lies in the half-open span `[start, end)`, comparing *within one plane*.
+///
+/// Deliberately not `compare_anchors`: that is the primary document's total order, which by
+/// construction cannot see the alternate screen (`IsolatedScreen`) and would happily order a
+/// `History` endpoint against a `Live` one across a generation boundary. A span is a claim about
+/// one carrier — one transcript line, one staged row, one grid generation of one screen — so all
+/// three anchors must name the same carrier or the answer is simply "no". That makes the predicate
+/// total, alternate-screen safe, and unable to spread a decoration across a plane boundary.
+///
+/// Bias is ignored: an endpoint's bias says which side of a grapheme it clings to as content moves,
+/// not where the span ends. Shared by the record-coverage questions in bt-term and by the frame
+/// decoration in bt-viewport, so a decoration is painted over exactly the cells a record claims.
+pub fn content_anchor_between(
+    candidate: &ContentAnchor,
+    start: &ContentAnchor,
+    end: &ContentAnchor,
+) -> bool {
+    match (candidate, start, end) {
+        (
+            ContentAnchor::History {
+                id,
+                offset,
+                generation,
+                ..
+            },
+            ContentAnchor::History {
+                id: start_id,
+                offset: start_offset,
+                generation: start_generation,
+                ..
+            },
+            ContentAnchor::History {
+                id: end_id,
+                offset: end_offset,
+                generation: end_generation,
+                ..
+            },
+        ) => {
+            id == start_id
+                && id == end_id
+                && generation == start_generation
+                && generation == end_generation
+                && start_offset <= offset
+                && offset < end_offset
+        }
+        (
+            ContentAnchor::Staging {
+                id,
+                offset,
+                generation,
+                ..
+            },
+            ContentAnchor::Staging {
+                id: start_id,
+                offset: start_offset,
+                generation: start_generation,
+                ..
+            },
+            ContentAnchor::Staging {
+                id: end_id,
+                offset: end_offset,
+                generation: end_generation,
+                ..
+            },
+        ) => {
+            id == start_id
+                && id == end_id
+                && generation == start_generation
+                && generation == end_generation
+                && start_offset <= offset
+                && offset < end_offset
+        }
+        (
+            ContentAnchor::Live {
+                screen,
+                point,
+                generation,
+                ..
+            },
+            ContentAnchor::Live {
+                screen: start_screen,
+                point: start_point,
+                generation: start_generation,
+                ..
+            },
+            ContentAnchor::Live {
+                screen: end_screen,
+                point: end_point,
+                generation: end_generation,
+                ..
+            },
+        ) => {
+            screen == start_screen
+                && screen == end_screen
+                && generation == start_generation
+                && generation == end_generation
+                && (point.row, point.column) >= (start_point.row, start_point.column)
+                && (point.row, point.column) < (end_point.row, end_point.column)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
