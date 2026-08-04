@@ -12175,6 +12175,148 @@ mod tests {
         );
     }
 
+    /// Every drawable row of a composed frame as plain text: frozen transcript, staging and live
+    /// rows alike, which is the plane the user actually reads.
+    fn composed_frame_rows(frame: &ViewportFrame) -> Vec<String> {
+        let columns = frame.columns.get() as usize;
+        frame
+            .cells
+            .chunks(columns)
+            .take(frame.drawable_rows())
+            .map(|row| {
+                row.iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_owned()
+            })
+            .collect()
+    }
+
+    /// The screen the user's report describes: conda's startup warning, the prompt beneath it, and
+    /// a typed, unsubmitted command long enough to wrap once the pane narrows.
+    fn divider_drag_screen(session: &mut DualPlaneSession, at: Instant) {
+        const NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+        const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal> ";
+        const TYPED: &str = "echo D:\\Developer\\BetterTerminal\\local-images\\sunset.svg";
+        let mut bytes = Vec::new();
+        for index in 0..14 {
+            bytes.extend_from_slice(
+                format!("scrollback-{index:02} {}\r\n", "w".repeat(74)).as_bytes(),
+            );
+        }
+        bytes.extend_from_slice(format!("{NOISE}\r\n{PROMPT}{TYPED}").as_bytes());
+        session.feed_at(&bytes, at).unwrap();
+    }
+
+    /// PSReadLine's own redraw: it addresses its prompt row absolutely, erases from there down, and
+    /// reprints the prompt and the unsubmitted input.
+    const REDRAW: &[u8] =
+        b"\x1b[13;1H\x1b[J(base) PS D:\\Developer\\BetterTerminal> echo D:\\Developer\\BetterTerminal\\local-images\\sunset.svg";
+
+    /// A real drag is not one pseudoconsole commit, and the frame is not one plane.
+    ///
+    /// The app commits the coalesced size after 200 ms of pointer silence and closes the resize
+    /// transaction only once that request *and* the child's output have both been quiet. A drag that
+    /// pauses to look and then moves again therefore commits a second pseudoconsole size while the
+    /// first transaction is still open. Everything the child writes between those two commits — and
+    /// after the first commit the child always writes, because that is when it redraws its input
+    /// line — is addressed against the size the child was last told about. Applying those bytes to a
+    /// grid that has since followed the pointer through other sizes is how an absolute `CUP` lands on
+    /// the wrong row: the redraw is spliced into the middle of the row still holding the previous
+    /// one, and the composed frame shows the prompt and the typed command merged into a single line,
+    /// exactly as reported. The composed frame after such a drag must be the frame the child's own
+    /// sequence of sizes produces, cell for cell.
+    #[test]
+    fn a_paused_drag_composes_the_frame_the_child_actually_received() {
+        let start = Instant::now();
+        // A window-edge drag that also shortens the pane, which is what makes the child's absolute
+        // row addressing observable: the intermediate heights are rows the child never had.
+        let first_burst = [(96u32, 12u32), (88, 10), (74, 7), (83, 9)];
+        let second_burst = [(72u32, 8u32), (64, 5), (75, 9)];
+        let first_commit = (nz(80), nz(14));
+        let second_commit = (nz(70), nz(14));
+
+        // What the child received: the two committed sizes, the redraw in between, nothing else.
+        let mut direct = DualPlaneSession::new(nz(100), nz(14));
+        divider_drag_screen(&mut direct, start);
+        let mut at = start + Duration::from_millis(200);
+        direct
+            .resize_at(first_commit.0, first_commit.1, at)
+            .unwrap();
+        direct.mark_pty_resize_requested_at(first_commit.0, first_commit.1, at);
+        at += Duration::from_millis(200);
+        direct.feed_at(REDRAW, at).unwrap();
+        at += Duration::from_millis(200);
+        direct
+            .resize_at(second_commit.0, second_commit.1, at)
+            .unwrap();
+        direct.mark_pty_resize_requested_at(second_commit.0, second_commit.1, at);
+        assert!(
+            direct
+                .finish_resize_if_quiescent(at + Duration::from_millis(400))
+                .unwrap()
+        );
+        let mut direct_projection = direct.new_projection(direct.layout_key());
+        let direct_frame = direct.viewport_frame(&mut direct_projection).unwrap();
+        let direct_rows = composed_frame_rows(&direct_frame);
+
+        // What the pointer did: two bursts of projected sizes with one commit at the end of each,
+        // the child's redraw arriving mid-burst, all inside the one transaction the quiet windows
+        // keep open.
+        let mut drag = DualPlaneSession::new(nz(100), nz(14));
+        divider_drag_screen(&mut drag, start);
+        let mut at = start;
+        for (columns, rows) in first_burst {
+            at += Duration::from_millis(16);
+            drag.resize_at(nz(columns), nz(rows), at).unwrap();
+        }
+        at += Duration::from_millis(16);
+        drag.resize_at(first_commit.0, first_commit.1, at).unwrap();
+        at += Duration::from_millis(200);
+        drag.mark_pty_resize_requested_at(first_commit.0, first_commit.1, at);
+        for (index, (columns, rows)) in second_burst.into_iter().enumerate() {
+            at += Duration::from_millis(16);
+            if index == 1 {
+                drag.feed_at(REDRAW, at).unwrap();
+            }
+            drag.resize_at(nz(columns), nz(rows), at).unwrap();
+        }
+        at += Duration::from_millis(16);
+        drag.resize_at(second_commit.0, second_commit.1, at)
+            .unwrap();
+        at += Duration::from_millis(200);
+        assert!(
+            !drag
+                .finish_resize_if_quiescent(at)
+                .expect("the second commit still lands inside the first transaction"),
+        );
+        drag.mark_pty_resize_requested_at(second_commit.0, second_commit.1, at);
+        assert!(
+            drag.finish_resize_if_quiescent(at + Duration::from_millis(400))
+                .unwrap()
+        );
+        let mut drag_projection = drag.new_projection(drag.layout_key());
+        let drag_frame = drag.viewport_frame(&mut drag_projection).unwrap();
+        let drag_rows = composed_frame_rows(&drag_frame);
+
+        assert!(
+            drag_rows
+                .iter()
+                .all(|row| !row.contains("(base) PS") || row.starts_with("(base) PS")),
+            "the redraw was spliced into the middle of the row still holding the previous one: \
+             {drag_rows:?}"
+        );
+        assert_eq!(
+            drag_rows, direct_rows,
+            "the composed frame carries rows only the drag's intermediate sizes explain"
+        );
+        assert_eq!(
+            drag_frame.cursor, direct_frame.cursor,
+            "the composed cursor moved to a row the child never addressed"
+        );
+    }
+
     #[test]
     fn primary_resize_keeps_formula_rendered_through_the_post_quiescence_repaint() {
         // Regression for the residual resize-completes flash. 002acc7 preserves formulas *during*

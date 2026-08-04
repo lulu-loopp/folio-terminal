@@ -625,7 +625,7 @@ mod tests {
     };
 
     use super::*;
-    use bt_term::{TerminalAdapter, TerminalCursor};
+    use bt_term::{DualPlaneSession, RESIZE_REQUEST_QUIET, TerminalAdapter, TerminalCursor};
 
     const ORACLE_EMPTY_PROMPT_LINE: &str = concat!(
         "PPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
@@ -661,6 +661,12 @@ mod tests {
         terminal: TerminalAdapter,
         raw_output: Vec<u8>,
         pty_replies: Vec<u8>,
+        /// Every cursor-position report this terminal answered, with the grid it was computed
+        /// from. Under the sidecar that answer becomes the child's own cursor, so it is evidence
+        /// about *us*, not about ConPTY.
+        cpr_log: Vec<CprExchange>,
+        /// The width the probe last projected onto the local grid, recorded alongside each reply.
+        cpr_columns: u16,
     }
 
     impl InteractiveOracle {
@@ -679,12 +685,25 @@ mod tests {
         /// part of the probe's subject: `bt-app` seats spawn `pwsh.exe`, whose PSReadLine is not
         /// the 2.0.0 that ships inside Windows PowerShell.
         fn spawn_shell_with(shell: &str, startup: &str, columns: u16, rows: u16) -> Self {
-            let command = PtyCommand::new(shell)
-                .arg("-NoLogo")
-                .arg("-NoProfile")
-                .arg("-NoExit")
-                .arg("-Command")
-                .arg(startup);
+            Self::spawn_shell_profile(shell, startup, columns, rows, false)
+        }
+
+        /// `load_profile` runs the host's real `$PROFILE` chain instead of `-NoProfile`. Nothing a
+        /// reconstruction can do is as faithful as the user's own conda hook and their own
+        /// dot-source of `scripts/shell-integration/betterterminal.ps1`, so the corruption hunt
+        /// gets the real thing and the reconstruction is kept only as the controlled comparison.
+        fn spawn_shell_profile(
+            shell: &str,
+            startup: &str,
+            columns: u16,
+            rows: u16,
+            load_profile: bool,
+        ) -> Self {
+            let mut command = PtyCommand::new(shell).arg("-NoLogo");
+            if !load_profile {
+                command = command.arg("-NoProfile");
+            }
+            let command = command.arg("-NoExit").arg("-Command").arg(startup);
             let session = PtySession::spawn(command, size(columns, rows), no_wake()).unwrap();
             let terminal = TerminalAdapter::new(nz32(columns), nz32(rows));
             Self {
@@ -692,6 +711,8 @@ mod tests {
                 terminal,
                 raw_output: Vec::new(),
                 pty_replies: Vec::new(),
+                cpr_log: Vec::new(),
+                cpr_columns: columns,
             }
         }
 
@@ -703,6 +724,13 @@ mod tests {
                 self.terminal.feed(&bytes);
             }
             for reply in self.terminal.take_pty_writes() {
+                if reply.starts_with(b"\x1b[") && reply.ends_with(b"R") {
+                    self.cpr_log.push(CprExchange {
+                        reply: escaped(&reply),
+                        local_columns: self.cpr_columns,
+                        cursor: self.terminal.cursor(),
+                    });
+                }
                 self.pty_replies.extend_from_slice(&reply);
                 self.session.write(&reply).unwrap();
             }
@@ -1756,5 +1784,976 @@ mod tests {
         oracle.pump_until_quiet(Duration::from_secs(10));
         oracle.wait_for_current_line("BTP>");
         oracle
+    }
+
+    /// One profile shape the corruption hunt can put a real shell into. The reconstruction shapes
+    /// isolate single ingredients; the `Real*` shapes are the reporting host's own environment,
+    /// because nothing synthesized here is as faithful as the user's own conda hook and their own
+    /// dot-source of `scripts/shell-integration/betterterminal.ps1`.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ProfileScenario {
+        /// A plain one-part prompt, no integration: the control.
+        Bare,
+        /// A conda-style two-part prompt: a profile function writes its prefix with `Write-Host`
+        /// and returns the rest, so the column the cursor starts in is wider than the string the
+        /// line editor was handed.
+        Conda,
+        /// BetterTerminal's own OSC 133 / OSC 7 wrappers over a plain prompt.
+        Integration,
+        /// Both, in the order `$PROFILE` produces them: conda's `profile.ps1` first, our
+        /// dot-source from `Microsoft.PowerShell_profile.ps1` second.
+        CondaIntegration,
+        /// The host's real conda hook plus the real integration script, same order.
+        RealCondaIntegration,
+        /// The host's own `$PROFILE` chain, run untouched.
+        RealProfile,
+    }
+
+    impl ProfileScenario {
+        fn label(self) -> &'static str {
+            match self {
+                Self::Bare => "bare",
+                Self::Conda => "conda",
+                Self::Integration => "integration",
+                Self::CondaIntegration => "conda+integration",
+                Self::RealCondaIntegration => "real-conda+real-integration",
+                Self::RealProfile => "real-profile",
+            }
+        }
+
+        /// The host's own profile chain is the only shape that must not be suppressed.
+        fn loads_profile(self) -> bool {
+            self == Self::RealProfile
+        }
+
+        /// Whether the probe can predict the prompt text, or has to read it off the settled screen.
+        fn synthetic_prompt(self) -> Option<String> {
+            match self {
+                Self::Bare | Self::Integration => Some(PROFILE_PROBE_PROMPT.to_owned()),
+                Self::Conda | Self::CondaIntegration => {
+                    Some(format!("(base) {PROFILE_PROBE_PROMPT}"))
+                }
+                Self::RealCondaIntegration | Self::RealProfile => None,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    struct ProfileShape {
+        scenario: ProfileScenario,
+        /// A screen already full of scrollback, some of it long enough to re-wrap at the narrow
+        /// width. Reflow then scrolls the prompt, which is what a stale anchor is measured against.
+        filled: bool,
+    }
+
+    impl ProfileShape {
+        fn label(&self) -> String {
+            format!("{} filled={}", self.scenario.label(), self.filled)
+        }
+    }
+
+    /// The reporting host's own prompt, minus the conda prefix that the hook writes separately.
+    const PROFILE_PROBE_PROMPT: &str = "PS D:\\Developer\\BetterTerminal> ";
+    /// The line the user's screenshot shows being overwritten; it is conda's own startup noise.
+    const PROFILE_PROBE_NOISE: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    /// The command in the user's screenshot: typed, never submitted, and long enough that the
+    /// prompt plus the input wraps once the pane narrows.
+    const PROFILE_PROBE_TYPED: &str =
+        "echo D:\\Developer\\BetterTerminal\\local-images\\sunset.svg";
+    const PROFILE_PROBE_WIDE: u16 = 100;
+    const PROFILE_PROBE_NARROW: u16 = 70;
+    const PROFILE_PROBE_ROWS: u16 = 26;
+
+    fn integration_script_path() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("scripts")
+            .join("shell-integration")
+            .join("betterterminal.ps1")
+    }
+
+    /// Rebuild the reporting host's profile in one `-Command` startup: the base prompt, conda's
+    /// `Write-Host`-prefixed wrapper around it, then our integration script wrapping *that* — the
+    /// same order `$PROFILE` produces, because `profile.ps1` (conda) runs before
+    /// `Microsoft.PowerShell_profile.ps1` (our dot-source).
+    fn profile_probe_startup(shape: ProfileShape) -> String {
+        let mut startup = String::from("Set-PSReadLineOption -HistorySaveStyle SaveNothing; ");
+        match shape.scenario {
+            ProfileScenario::Bare | ProfileScenario::Integration => {
+                startup.push_str(&format!(
+                    "function global:prompt {{ '{PROFILE_PROBE_PROMPT}' }}; "
+                ));
+            }
+            ProfileScenario::Conda | ProfileScenario::CondaIntegration => {
+                startup.push_str(&format!(
+                    "function global:prompt {{ '{PROFILE_PROBE_PROMPT}' }}; "
+                ));
+                startup.push_str(
+                    "$global:BTBASEPROMPT = (Get-Command prompt -CommandType Function).ScriptBlock; \
+                     function global:prompt { Write-Host -NoNewline '(base) '; \
+                     & $global:BTBASEPROMPT }; ",
+                );
+            }
+            ProfileScenario::RealCondaIntegration => {
+                startup.push_str(
+                    "$btconda = Get-Command conda.exe -ErrorAction SilentlyContinue; \
+                     if ($btconda) { (& $btconda.Source shell.powershell hook) | Out-String | \
+                     Invoke-Expression }; ",
+                );
+            }
+            ProfileScenario::RealProfile => {}
+        }
+        if matches!(
+            shape.scenario,
+            ProfileScenario::Integration
+                | ProfileScenario::CondaIntegration
+                | ProfileScenario::RealCondaIntegration
+        ) {
+            startup.push_str(&format!(". '{}'; ", integration_script_path().display()));
+        }
+        if shape.filled {
+            startup.push_str(
+                "0..17 | ForEach-Object { Write-Host (('BTSHORT{0:D2} ' -f $_) + ('s' * 26)) }; \
+                 0..2 | ForEach-Object { Write-Host (('BTLONG{0:D2} ' -f $_) + ('L' * 66)) }; ",
+            );
+        }
+        startup.push_str(&format!("Write-Host '{PROFILE_PROBE_NOISE}'"));
+        startup
+    }
+
+    /// Park a live child at its prompt and report what that prompt's text actually is. A shape the
+    /// probe cannot predict (the host's own profile) is read off the settled screen rather than
+    /// asserted, so an unexpected prompt is an observation instead of a panic.
+    fn profile_probe_child(
+        shell: &str,
+        shape: ProfileShape,
+        columns: u16,
+        rows: u16,
+    ) -> Option<(InteractiveOracle, String)> {
+        let mut oracle = InteractiveOracle::spawn_shell_profile(
+            shell,
+            &profile_probe_startup(shape),
+            columns,
+            rows,
+            shape.scenario.loads_profile(),
+        );
+        let expected = shape.scenario.synthetic_prompt();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        while Instant::now() < deadline {
+            oracle.pump_once();
+            let settled = match &expected {
+                Some(prompt) => oracle.current_line() == prompt.trim_end(),
+                None => oracle.current_line().ends_with('>'),
+            };
+            if settled {
+                oracle.pump_until_quiet(Duration::from_secs(10));
+                let line = oracle.current_line();
+                let still_settled = match &expected {
+                    Some(prompt) => line == prompt.trim_end(),
+                    None => line.ends_with('>'),
+                };
+                if still_settled {
+                    // The trailing space a prompt ends with is trimmed out of the grid row, and
+                    // every prompt this probe drives ends in one.
+                    return Some((oracle, format!("{line} ")));
+                }
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        eprintln!(
+            "BT_CONPTY_PROFILE_PROBE shell={shell} {} SETUP-FAILED line={:?} rows={:?}",
+            shape.label(),
+            oracle.current_line(),
+            occupied_rows(&oracle.terminal.visible_text())
+        );
+        None
+    }
+
+    #[derive(Debug)]
+    struct ProfileProbeOutcome {
+        shell: String,
+        shape: ProfileShape,
+        clean: bool,
+        input_line: String,
+        expected_input_line: String,
+        noise_intact: bool,
+        emitted: String,
+        before_rows: Vec<(usize, String)>,
+        settled_rows: Vec<(usize, String)>,
+        final_rows: Vec<(usize, String)>,
+        final_cursor: TerminalCursor,
+    }
+
+    /// Concatenate the visual rows the prompt's logical line occupies, from the row the prompt
+    /// starts on through the cursor row. A stale render anchor shows up here as either a missing
+    /// prompt row or a prompt line with foreign text spliced into it.
+    fn profile_probe_input_line(oracle: &InteractiveOracle, prompt: &str) -> String {
+        let opening = prompt.trim_end();
+        let rows = oracle.terminal.visible_text();
+        let cursor_row = (oracle.terminal.cursor().row as usize).min(rows.len().saturating_sub(1));
+        (0..=cursor_row)
+            .rev()
+            .find(|row| rows[*row].starts_with(opening))
+            .map(|start| rows[start..=cursor_row].concat())
+            .unwrap_or_default()
+    }
+
+    /// One run of the user's exact gesture: type without submitting, drag the divider narrower by
+    /// thirty columns through a resize transaction (many local widths, one committed pseudoconsole
+    /// size, the vendor reconcile in between — the product's own path), then one more keystroke.
+    fn run_profile_probe(shell: &str, shape: ProfileShape) -> Option<ProfileProbeOutcome> {
+        let (mut oracle, prompt) =
+            profile_probe_child(shell, shape, PROFILE_PROBE_WIDE, PROFILE_PROBE_ROWS)?;
+
+        oracle
+            .session
+            .write(PROFILE_PROBE_TYPED.as_bytes())
+            .unwrap();
+        oracle.pump_for(Duration::from_millis(400));
+        let before_rows = occupied_rows(&oracle.terminal.visible_text());
+
+        let drag = [96u16, 91, 87, 84, 80, 77, 74, 72, PROFILE_PROBE_NARROW];
+        oracle.terminal.begin_resize_transaction();
+        for width in drag {
+            oracle.resize_terminal(width, PROFILE_PROBE_ROWS);
+            oracle.pump_for(Duration::from_millis(4));
+        }
+        oracle.resize_conpty(PROFILE_PROBE_NARROW, PROFILE_PROBE_ROWS);
+        oracle.terminal.reconcile_resize_transaction_to_viewport();
+        oracle.pump_for(Duration::from_millis(500));
+        oracle.terminal.finish_resize_transaction();
+        let settled_rows = occupied_rows(&oracle.terminal.visible_text());
+
+        let mark = oracle.raw_output.len();
+        oracle.session.write(b"Z").unwrap();
+        oracle.pump_for(Duration::from_millis(900));
+
+        let input_line = profile_probe_input_line(&oracle, &prompt);
+        let expected_input_line = format!("{prompt}{PROFILE_PROBE_TYPED}Z");
+        let final_rows = occupied_rows(&oracle.terminal.visible_text());
+        let noise_intact = final_rows
+            .iter()
+            .any(|(_, row)| row.trim_end() == PROFILE_PROBE_NOISE)
+            || final_rows
+                .windows(2)
+                .any(|pair| format!("{}{}", pair[0].1, pair[1].1).contains(PROFILE_PROBE_NOISE));
+        Some(ProfileProbeOutcome {
+            shell: shell.to_owned(),
+            shape,
+            clean: input_line == expected_input_line && noise_intact,
+            input_line,
+            expected_input_line,
+            noise_intact,
+            emitted: escaped(&oracle.raw_output[mark..]),
+            before_rows,
+            settled_rows,
+            final_rows,
+            final_cursor: oracle.terminal.cursor(),
+        })
+    }
+
+    /// Dev probe for the corruption the user hits every time they narrow a pane mid-edit, run
+    /// against the *reporting host's own profile shape* rather than a sterile prompt.
+    ///
+    /// Read the `BT_CONPTY_PROFILE_PROBE` lines on stderr. Each row of the sweep is one live child;
+    /// the shapes isolate whether the conda-style two-part prompt, BetterTerminal's own shell
+    /// integration, the host's real profile chain, or a screen full of scrollback is what turns a
+    /// narrowing resize into a stale render anchor.
+    #[test]
+    #[ignore = "dev probe: drives real interactive shells through ConPTY; host-timing sensitive"]
+    fn profile_shape_narrow_resize_probe() {
+        let source = conpty_source();
+        let mut outcomes = Vec::new();
+        for shell in ["powershell.exe", "pwsh.exe"] {
+            for filled in [false, true] {
+                for scenario in [
+                    ProfileScenario::Bare,
+                    ProfileScenario::Conda,
+                    ProfileScenario::Integration,
+                    ProfileScenario::CondaIntegration,
+                    ProfileScenario::RealCondaIntegration,
+                    ProfileScenario::RealProfile,
+                ] {
+                    let shape = ProfileShape { scenario, filled };
+                    let Some(outcome) = run_profile_probe(shell, shape) else {
+                        continue;
+                    };
+                    eprintln!(
+                        "BT_CONPTY_PROFILE_PROBE source={source} shell={shell} {} clean={} \
+                         input={:?} expected={:?} noise_intact={} cursor={:?}",
+                        shape.label(),
+                        outcome.clean,
+                        outcome.input_line,
+                        outcome.expected_input_line,
+                        outcome.noise_intact,
+                        outcome.final_cursor
+                    );
+                    eprintln!(
+                        "BT_CONPTY_PROFILE_PROBE_DETAIL shell={shell} {} emitted={:?}",
+                        shape.label(),
+                        outcome.emitted
+                    );
+                    for (stage, rows) in [
+                        ("before", &outcome.before_rows),
+                        ("settled", &outcome.settled_rows),
+                        ("final", &outcome.final_rows),
+                    ] {
+                        eprintln!(
+                            "BT_CONPTY_PROFILE_PROBE_ROWS shell={shell} {} {stage}={rows:?}",
+                            shape.label()
+                        );
+                    }
+                    outcomes.push(outcome);
+                }
+            }
+        }
+        eprintln!("BT_CONPTY_PROFILE_PROBE_SUMMARY source={source}");
+        for outcome in &outcomes {
+            eprintln!(
+                "  {:<15} {:<40} -> {}",
+                outcome.shell,
+                outcome.shape.label(),
+                if outcome.clean { "clean" } else { "CORRUPT" }
+            );
+        }
+        assert!(
+            !outcomes.is_empty(),
+            "the sweep must actually have driven at least one live shell"
+        );
+    }
+
+    /// One `CSI 6 n` exchange, as this terminal answered it.
+    ///
+    /// Under the pinned sidecar the answer is not a diagnostic: ConPTY adopts the row we report as
+    /// the child's own cursor, so a reply computed from a grid the child does not have yet is a
+    /// corruption *this terminal causes*. `local_columns` is the width our grid was on when we
+    /// answered; the child was on whatever width the last committed pseudoconsole resize gave it.
+    #[derive(Debug)]
+    struct CprExchange {
+        reply: String,
+        local_columns: u16,
+        cursor: TerminalCursor,
+    }
+
+    #[derive(Debug)]
+    struct MistimedCprOutcome {
+        shell: String,
+        staggered: bool,
+        clean: bool,
+        input_line: String,
+        expected_input_line: String,
+        exchanges: Vec<CprExchange>,
+        emitted: String,
+        final_rows: Vec<(usize, String)>,
+    }
+
+    /// The mistimed-CPR hypothesis, tested rather than argued.
+    ///
+    /// A drag that pauses longer than the app's ConPTY quiet window commits *two* pseudoconsole
+    /// resizes. Each one makes the sidecar ask `CSI 6 n`. Nothing makes the child's question arrive
+    /// while our grid is still on the width that question was asked about — so if a second drag has
+    /// already moved our grid, we answer the first question from the second grid, and the sidecar
+    /// writes that stale row into the child. `staggered=false` answers every DSR from the grid the
+    /// child actually has; `staggered=true` answers the first one from the next drag's grid, which
+    /// is exactly what a two-stage divider drag produces.
+    fn run_mistimed_cpr_probe(shell: &str, staggered: bool) -> Option<MistimedCprOutcome> {
+        let shape = ProfileShape {
+            scenario: ProfileScenario::CondaIntegration,
+            filled: true,
+        };
+        let (mut oracle, prompt) =
+            profile_probe_child(shell, shape, PROFILE_PROBE_WIDE, PROFILE_PROBE_ROWS)?;
+        oracle
+            .session
+            .write(PROFILE_PROBE_TYPED.as_bytes())
+            .unwrap();
+        oracle.pump_for(Duration::from_millis(400));
+
+        const FIRST: u16 = 85;
+        const SECOND: u16 = 70;
+        oracle.cpr_columns = PROFILE_PROBE_WIDE;
+
+        // Drag one, committed to the pseudoconsole exactly as the app's quiet window would.
+        oracle.terminal.begin_resize_transaction();
+        for width in [96u16, 92, 88, FIRST] {
+            oracle.resize_terminal(width, PROFILE_PROBE_ROWS);
+            oracle.cpr_columns = width;
+            oracle.pump_for(Duration::from_millis(4));
+        }
+        oracle.resize_conpty(FIRST, PROFILE_PROBE_ROWS);
+        oracle.terminal.reconcile_resize_transaction_to_viewport();
+        oracle.terminal.finish_resize_transaction();
+        if !staggered {
+            // Let the child's question be answered by the grid the child actually has.
+            oracle.pump_for(Duration::from_millis(500));
+        }
+
+        // Drag two. In the staggered run the first drag's `CSI 6 n` is still unread in the pipe.
+        oracle.terminal.begin_resize_transaction();
+        for width in [82u16, 78, 74, SECOND] {
+            oracle.resize_terminal(width, PROFILE_PROBE_ROWS);
+            oracle.cpr_columns = width;
+            if staggered {
+                oracle.pump_for(Duration::from_millis(4));
+            }
+        }
+        oracle.terminal.reconcile_resize_transaction_to_viewport();
+        oracle.pump_for(Duration::from_millis(300));
+        oracle.resize_conpty(SECOND, PROFILE_PROBE_ROWS);
+        oracle.terminal.reconcile_resize_transaction_to_viewport();
+        oracle.pump_for(Duration::from_millis(500));
+        oracle.terminal.finish_resize_transaction();
+
+        let mark = oracle.raw_output.len();
+        oracle.session.write(b"Z").unwrap();
+        oracle.pump_for(Duration::from_millis(900));
+
+        let input_line = profile_probe_input_line(&oracle, &prompt);
+        let expected_input_line = format!("{prompt}{PROFILE_PROBE_TYPED}Z");
+        Some(MistimedCprOutcome {
+            shell: shell.to_owned(),
+            staggered,
+            clean: input_line == expected_input_line,
+            input_line,
+            expected_input_line,
+            exchanges: std::mem::take(&mut oracle.cpr_log),
+            emitted: escaped(&oracle.raw_output[mark..]),
+            final_rows: occupied_rows(&oracle.terminal.visible_text()),
+        })
+    }
+
+    /// Dev probe: does a two-stage drag make *this terminal* hand the sidecar a stale cursor row?
+    #[test]
+    #[ignore = "dev probe: drives real interactive shells through ConPTY; host-timing sensitive"]
+    fn mistimed_cpr_narrow_resize_probe() {
+        let source = conpty_source();
+        let mut outcomes = Vec::new();
+        for shell in ["powershell.exe", "pwsh.exe"] {
+            for staggered in [false, true] {
+                let Some(outcome) = run_mistimed_cpr_probe(shell, staggered) else {
+                    continue;
+                };
+                eprintln!(
+                    "BT_CONPTY_CPR_PROBE source={source} shell={shell} staggered={staggered} \
+                     clean={} input={:?} expected={:?}",
+                    outcome.clean, outcome.input_line, outcome.expected_input_line
+                );
+                for exchange in &outcome.exchanges {
+                    eprintln!(
+                        "BT_CONPTY_CPR_PROBE_EXCHANGE shell={shell} staggered={staggered} \
+                         reply={:?} answered_from_columns={} cursor={:?}",
+                        exchange.reply, exchange.local_columns, exchange.cursor
+                    );
+                }
+                eprintln!(
+                    "BT_CONPTY_CPR_PROBE_EXCHANGE_COUNT shell={shell} staggered={staggered} {}",
+                    outcome.exchanges.len()
+                );
+                eprintln!(
+                    "BT_CONPTY_CPR_PROBE_DETAIL shell={shell} staggered={staggered} emitted={:?}",
+                    outcome.emitted
+                );
+                eprintln!(
+                    "BT_CONPTY_CPR_PROBE_ROWS shell={shell} staggered={staggered} final={:?}",
+                    outcome.final_rows
+                );
+                outcomes.push(outcome);
+            }
+        }
+        eprintln!("BT_CONPTY_CPR_PROBE_SUMMARY source={source}");
+        for outcome in &outcomes {
+            eprintln!(
+                "  {:<15} staggered={:<5} -> {}",
+                outcome.shell,
+                outcome.staggered,
+                if outcome.clean { "clean" } else { "CORRUPT" }
+            );
+        }
+        assert!(!outcomes.is_empty(), "the probe drove no live shell");
+    }
+
+    /// The application's own resize loop, driven against a live child.
+    ///
+    /// `bt-app` projects every `Resized` onto the terminal immediately (`resize_at`) and commits
+    /// only the last size to the pseudoconsole after `RESIZE_REQUEST_QUIET` of pointer silence
+    /// (`take_due_pty_resize` -> `PtySession::resize` -> `mark_pty_resize_requested_at`), closing the
+    /// transaction only once that request *and* the child's output have both been quiet
+    /// (`finish_resize_if_quiescent`). Everything below drives exactly that loop, so a burst shape
+    /// which corrupts here corrupts in the product, and the frame it is judged on is the composed
+    /// one the user actually reads — frozen transcript, staging and live rows together.
+    struct AppResizeOracle {
+        pty: PtySession,
+        session: DualPlaneSession,
+        raw_output: Vec<u8>,
+        pending: Option<(u16, u16, Instant)>,
+        commits: Vec<(u16, u16)>,
+    }
+
+    impl AppResizeOracle {
+        fn spawn(shell: &str, startup: &str, columns: u16, rows: u16, load_profile: bool) -> Self {
+            let mut command = PtyCommand::new(shell).arg("-NoLogo");
+            if !load_profile {
+                command = command.arg("-NoProfile");
+            }
+            let command = command.arg("-NoExit").arg("-Command").arg(startup);
+            let pty = PtySession::spawn(command, size(columns, rows), no_wake()).unwrap();
+            Self {
+                pty,
+                session: DualPlaneSession::new(nz32(columns), nz32(rows)),
+                raw_output: Vec::new(),
+                pending: None,
+                commits: Vec::new(),
+            }
+        }
+
+        /// One turn of the app's event loop.
+        fn pump_once(&mut self) -> bool {
+            let now = Instant::now();
+            let bytes = self.pty.read_output();
+            let had_output = !bytes.is_empty();
+            if had_output {
+                self.raw_output.extend_from_slice(&bytes);
+                self.session.feed_at(&bytes, now).unwrap();
+            }
+            for reply in self.session.take_pty_writes() {
+                self.pty.write(&reply).unwrap();
+            }
+            self.flush_pending_resize(now);
+            self.session.finish_resize_if_quiescent(now).unwrap();
+            had_output
+        }
+
+        /// `bt-app::flush_pending_pty_resize`: the coalesced size reaches ConPTY and the terminal
+        /// reconciles to it, both at the quiet boundary and never before.
+        fn flush_pending_resize(&mut self, now: Instant) {
+            let Some((columns, rows, deadline)) = self.pending else {
+                return;
+            };
+            if now < deadline {
+                return;
+            }
+            self.pending = None;
+            self.pty.resize(size(columns, rows)).unwrap();
+            self.session
+                .mark_pty_resize_requested_at(nz32(columns), nz32(rows), now);
+            self.commits.push((columns, rows));
+        }
+
+        /// One `WindowEvent::Resized`: projected onto the grid at once, coalesced towards ConPTY.
+        fn project_resize(&mut self, columns: u16, rows: u16) {
+            let now = Instant::now();
+            self.session
+                .resize_at(nz32(columns), nz32(rows), now)
+                .unwrap();
+            self.pending = Some((columns, rows, now + RESIZE_REQUEST_QUIET));
+        }
+
+        fn pump_for(&mut self, duration: Duration) {
+            let deadline = Instant::now() + duration;
+            while Instant::now() < deadline {
+                self.pump_once();
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            self.pump_once();
+        }
+
+        /// Pump only until the coalescer's quiet window elapses and the size reaches ConPTY, and
+        /// not one millisecond further. The child's answer to that commit — the cursor-position
+        /// round trip and the line editor's redraw — is still in flight when this returns, which is
+        /// the state a pointer that resumes immediately after the pause finds the session in.
+        fn pump_until_committed(&mut self, maximum: Duration) {
+            let deadline = Instant::now() + maximum;
+            while Instant::now() < deadline {
+                self.pump_once();
+                if self.pending.is_none() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn pump_until_quiet(&mut self, maximum: Duration) {
+            let deadline = Instant::now() + maximum;
+            let mut quiet_since = Instant::now();
+            while Instant::now() < deadline {
+                if self.pump_once() {
+                    quiet_since = Instant::now();
+                } else if quiet_since.elapsed() >= Duration::from_millis(150) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+
+        /// Every drawable row of the composed frame, which is what the window presents.
+        fn composed_rows(&self) -> Vec<String> {
+            let mut projection = self.session.new_projection(self.session.layout_key());
+            self.session.refresh_projection(&mut projection);
+            let frame = self.session.viewport_frame(&mut projection).unwrap();
+            let columns = frame.columns.get() as usize;
+            frame
+                .cells
+                .chunks(columns)
+                .take(frame.drawable_rows())
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| cell.text.as_str())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_owned()
+                })
+                .collect()
+        }
+
+        fn current_line(&self) -> String {
+            let cursor = self.session.terminal().cursor();
+            self.session
+                .terminal()
+                .visible_text()
+                .get(cursor.row as usize)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        /// The logical input line as composed: from the row the prompt opens on down to the cursor.
+        fn composed_input_line(&self, prompt: &str) -> String {
+            let opening = prompt.trim_end();
+            let rows = self.composed_rows();
+            let cursor_row =
+                (self.session.terminal().cursor().row as usize).min(rows.len().saturating_sub(1));
+            (0..=cursor_row)
+                .rev()
+                .find(|row| rows[*row].starts_with(opening))
+                .map(|start| rows[start..=cursor_row].concat())
+                .unwrap_or_default()
+        }
+
+        fn settle_at_prompt(&mut self, prompt: &str) -> bool {
+            let deadline = Instant::now() + Duration::from_secs(25);
+            while Instant::now() < deadline {
+                self.pump_once();
+                if self.current_line() == prompt.trim_end() {
+                    self.pump_until_quiet(Duration::from_secs(5));
+                    if self.current_line() == prompt.trim_end() {
+                        return true;
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(2));
+            }
+            false
+        }
+    }
+
+    /// One shape of drag, described by what the *pointer* did rather than by what it should produce.
+    #[derive(Clone, Copy, Debug)]
+    struct BurstShape {
+        label: &'static str,
+        /// How many times the pointer stops long enough for the coalescer to commit. One is the
+        /// gesture every earlier probe drove; a human drag that pauses to look is more than one.
+        bursts: usize,
+        /// Whether the pane also shortens as it narrows: a window-edge or corner drag, whose
+        /// intermediate heights are rows the child never had.
+        shortens: bool,
+        /// A keystroke sent between two bursts, so the child is mid-write when the drag resumes.
+        keystroke_between: bool,
+        /// A keystroke sent while the pointer is still moving, which is the user's own report:
+        /// narrowing the pane *mid-edit*. The line editor redraws at an absolute row while the grid
+        /// is passing through sizes the child was never told about.
+        keystroke_mid_burst: bool,
+        /// Resume the next burst without letting the child's post-commit redraw arrive first.
+        resume_before_settling: bool,
+    }
+
+    #[derive(Debug)]
+    struct BurstOutcome {
+        shell: String,
+        label: &'static str,
+        clean: bool,
+        commits: Vec<(u16, u16)>,
+        input_line: String,
+        expected_input_line: String,
+        noise_intact: bool,
+        spliced_rows: Vec<String>,
+        /// The composed frame the instant the drag quiesced, before any later keystroke could make
+        /// the line editor repaint over the damage.
+        settled_clean: bool,
+        settled_rows: Vec<String>,
+        settled_spliced_rows: Vec<String>,
+        composed_rows: Vec<String>,
+    }
+
+    /// One pane size the pointer projects, in cells.
+    type DragSize = (u16, u16);
+    /// One burst of a drag: the sizes the pointer moves through, then the size it comes to rest at
+    /// — the only one of them the coalescer commits to the pseudoconsole.
+    type DragBurst = (Vec<DragSize>, DragSize);
+
+    /// The drag, as the pointer performs it: `bursts` groups of moving positions, each group ending
+    /// where the pointer comes to rest. The resting size is the one the coalescer commits, so only
+    /// the final burst rests at the narrow end — an intermediate pause commits an intermediate size,
+    /// which is what makes a paused drag more than one pseudoconsole resize.
+    fn burst_drag_steps(shape: BurstShape) -> Vec<DragBurst> {
+        const STEPS_PER_BURST: usize = 4;
+        let width_span = f64::from(PROFILE_PROBE_WIDE - PROFILE_PROBE_NARROW);
+        let row_span = if shape.shortens { 8.0 } else { 0.0 };
+        let at = |fraction: f64, wobble: f64| {
+            let columns = f64::from(PROFILE_PROBE_WIDE) - width_span * fraction + wobble;
+            let rows = f64::from(PROFILE_PROBE_ROWS) - row_span * fraction + wobble;
+            (
+                columns.round().max(12.0) as u16,
+                rows.round().max(4.0) as u16,
+            )
+        };
+        (0..shape.bursts)
+            .map(|burst| {
+                let start = burst as f64 / shape.bursts as f64;
+                let rest = (burst + 1) as f64 / shape.bursts as f64;
+                let moving = (0..STEPS_PER_BURST)
+                    .map(|step| {
+                        let within = (step + 1) as f64 / (STEPS_PER_BURST + 1) as f64;
+                        let fraction = start + (rest - start) * within;
+                        // A real pointer overshoots and comes back; the sine makes the projected
+                        // sizes differ from the resting one without leaving the drag's range.
+                        let wobble = (within * std::f64::consts::PI).sin() * 4.0;
+                        at(fraction, wobble)
+                    })
+                    .collect();
+                (moving, at(rest, 0.0))
+            })
+            .collect()
+    }
+
+    fn run_resize_burst_probe(shell: &str, shape: BurstShape) -> Option<BurstOutcome> {
+        let profile = ProfileShape {
+            scenario: ProfileScenario::CondaIntegration,
+            filled: true,
+        };
+        let prompt = format!("(base) {PROFILE_PROBE_PROMPT}");
+        let mut oracle = AppResizeOracle::spawn(
+            shell,
+            &profile_probe_startup(profile),
+            PROFILE_PROBE_WIDE,
+            PROFILE_PROBE_ROWS,
+            false,
+        );
+        if !oracle.settle_at_prompt(&prompt) {
+            eprintln!(
+                "BT_CONPTY_BURST_PROBE shell={shell} {} SETUP-FAILED line={:?}",
+                shape.label,
+                oracle.current_line()
+            );
+            return None;
+        }
+
+        oracle.pty.write(PROFILE_PROBE_TYPED.as_bytes()).unwrap();
+        oracle.pump_for(Duration::from_millis(400));
+
+        let mut typed_after = String::new();
+        let bursts = burst_drag_steps(shape);
+        let last_burst = bursts.len().saturating_sub(1);
+        for (index, (moving, resting)) in bursts.into_iter().enumerate() {
+            for (step, (columns, rows)) in moving.into_iter().enumerate() {
+                if shape.keystroke_mid_burst && index == last_burst && step == 1 {
+                    oracle.pty.write(b"Z").unwrap();
+                    typed_after.push('Z');
+                }
+                oracle.project_resize(columns, rows);
+                // ~60 Hz, the rate winit delivers a live drag at.
+                oracle.pump_for(Duration::from_millis(16));
+            }
+            oracle.project_resize(resting.0, resting.1);
+            // The pointer stops: the coalescer's quiet window elapses and the size is committed.
+            if shape.resume_before_settling && index != last_burst {
+                oracle.pump_until_committed(Duration::from_secs(3));
+            } else {
+                oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(40));
+            }
+            if index == last_burst {
+                break;
+            }
+            if shape.keystroke_between {
+                oracle.pty.write(b"Z").unwrap();
+                typed_after.push('Z');
+            }
+            if !shape.resume_before_settling {
+                // Let the child finish answering the commit before the pointer moves again, which
+                // is what an unhurried human pause looks like; the transaction stays open either way.
+                oracle.pump_for(Duration::from_millis(120));
+            }
+        }
+        oracle.pump_until_quiet(Duration::from_secs(6));
+        // What is on screen when the gesture ends. A later keystroke makes the line editor repaint
+        // its whole input from a freshly asked cursor position, which can *heal* a corrupted screen,
+        // so the damage has to be read here as well as after.
+        let settled_rows = oracle.composed_rows();
+        let settled_input_line = oracle.composed_input_line(&prompt);
+        let settled_expected = format!("{prompt}{PROFILE_PROBE_TYPED}{typed_after}");
+        let settled_spliced_rows = spliced_prompt_rows(&settled_rows, &prompt);
+
+        // The trailing keystroke every earlier probe ends with: the line editor redraws its input
+        // against whatever row it believes it is on.
+        oracle.pty.write(b"Z").unwrap();
+        typed_after.push('Z');
+        oracle.pump_for(Duration::from_millis(900));
+        oracle.pump_until_quiet(Duration::from_secs(6));
+
+        let expected_input_line = format!("{prompt}{PROFILE_PROBE_TYPED}{typed_after}");
+        let input_line = oracle.composed_input_line(&prompt);
+        let composed_rows = oracle.composed_rows();
+        let noise_intact = composed_rows
+            .iter()
+            .any(|row| row.trim_end() == PROFILE_PROBE_NOISE)
+            || composed_rows
+                .windows(2)
+                .any(|pair| format!("{}{}", pair[0], pair[1]).contains(PROFILE_PROBE_NOISE));
+        let spliced_rows = spliced_prompt_rows(&composed_rows, &prompt);
+        Some(BurstOutcome {
+            shell: shell.to_owned(),
+            label: shape.label,
+            clean: input_line == expected_input_line && noise_intact && spliced_rows.is_empty(),
+            commits: oracle.commits.clone(),
+            input_line,
+            expected_input_line,
+            noise_intact,
+            settled_clean: settled_input_line == settled_expected
+                && settled_spliced_rows.is_empty(),
+            settled_rows,
+            settled_spliced_rows,
+            spliced_rows,
+            composed_rows,
+        })
+    }
+
+    /// The reported artifact, stated as a property of the composed frame: a prompt that begins
+    /// anywhere but at the start of a row is a redraw spliced into a row still holding an older one
+    /// — "Did not fi", the typed input and the prompt merged into a single line.
+    fn spliced_prompt_rows(rows: &[String], prompt: &str) -> Vec<String> {
+        let opening = prompt.trim_end();
+        rows.iter()
+            .filter(|row| row.contains(opening) && !row.starts_with(opening))
+            .cloned()
+            .collect()
+    }
+
+    /// Dev probe: does a drag that commits *more than one* pseudoconsole size corrupt the child's
+    /// screen, and which property of the burst is responsible?
+    ///
+    /// Every earlier narrow-resize probe drove one committed resize, because that is what a single
+    /// coalescing window produces. The application's window is 200 ms of pointer silence and its
+    /// transaction closes only after the *child* has also been quiet, so an ordinary human drag —
+    /// move, pause to look, move again — commits twice or more inside one open transaction. The
+    /// shapes below vary exactly one property at a time: the number of commits, whether the pane
+    /// also shortens, whether a keystroke lands between the bursts, and whether the pointer resumes
+    /// before the child's answer to the previous commit has arrived.
+    ///
+    /// Read the `BT_CONPTY_BURST_PROBE` lines on stderr.
+    #[test]
+    #[ignore = "dev probe: drives real interactive shells through ConPTY; host-timing sensitive"]
+    fn resize_burst_composed_frame_probe() {
+        let source = conpty_source();
+        // One property varies per row, against the same control.
+        let control = BurstShape {
+            label: "one-commit",
+            bursts: 1,
+            shortens: false,
+            keystroke_between: false,
+            keystroke_mid_burst: false,
+            resume_before_settling: false,
+        };
+        let shapes = [
+            control,
+            BurstShape {
+                label: "one-commit-mid-edit",
+                keystroke_mid_burst: true,
+                ..control
+            },
+            BurstShape {
+                label: "two-commit",
+                bursts: 2,
+                ..control
+            },
+            BurstShape {
+                label: "two-commit-shortens",
+                bursts: 2,
+                shortens: true,
+                ..control
+            },
+            BurstShape {
+                label: "two-commit-between",
+                bursts: 2,
+                shortens: true,
+                keystroke_between: true,
+                ..control
+            },
+            BurstShape {
+                label: "two-commit-unsettled",
+                bursts: 2,
+                shortens: true,
+                resume_before_settling: true,
+                ..control
+            },
+            BurstShape {
+                label: "two-commit-mid-edit",
+                bursts: 2,
+                shortens: true,
+                keystroke_mid_burst: true,
+                resume_before_settling: true,
+                ..control
+            },
+            BurstShape {
+                label: "four-commit-mid-edit",
+                bursts: 4,
+                shortens: true,
+                keystroke_mid_burst: true,
+                resume_before_settling: true,
+                ..control
+            },
+        ];
+        let mut outcomes = Vec::new();
+        for shell in ["powershell.exe", "pwsh.exe"] {
+            for shape in shapes {
+                let Some(outcome) = run_resize_burst_probe(shell, shape) else {
+                    continue;
+                };
+                eprintln!(
+                    "BT_CONPTY_BURST_PROBE source={source} shell={shell} {} clean={} \
+                     settled_clean={} commits={:?} input={:?} expected={:?} noise_intact={} \
+                     spliced={:?} settled_spliced={:?}",
+                    outcome.label,
+                    outcome.clean,
+                    outcome.settled_clean,
+                    outcome.commits,
+                    outcome.input_line,
+                    outcome.expected_input_line,
+                    outcome.noise_intact,
+                    outcome.spliced_rows,
+                    outcome.settled_spliced_rows,
+                );
+                if !outcome.clean || !outcome.settled_clean {
+                    eprintln!(
+                        "BT_CONPTY_BURST_PROBE_ROWS shell={shell} {} settled={:?} composed={:?}",
+                        outcome.label, outcome.settled_rows, outcome.composed_rows
+                    );
+                }
+                outcomes.push(outcome);
+            }
+        }
+        eprintln!("BT_CONPTY_BURST_PROBE_SUMMARY source={source}");
+        for outcome in &outcomes {
+            eprintln!(
+                "  {:<15} {:<22} commits={} -> settled {:<7} after-keystroke {}",
+                outcome.shell,
+                outcome.label,
+                outcome.commits.len(),
+                if outcome.settled_clean {
+                    "clean"
+                } else {
+                    "CORRUPT"
+                },
+                if outcome.clean { "clean" } else { "CORRUPT" }
+            );
+        }
+        assert!(!outcomes.is_empty(), "the probe drove no live shell");
     }
 }

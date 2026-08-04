@@ -513,6 +513,17 @@ impl TerminalAdapter {
         }
 
         let restored = self.term.begin_resize_transaction();
+        self.arm_resize_canonical();
+        restored
+    }
+
+    /// Fork the branch that will only ever be given the sizes ConPTY is actually told about.
+    ///
+    /// Armed at every point where the displayed grid and the child's grid are known to agree: the
+    /// start of a transaction, and each commit inside it. Between two such points the displayed
+    /// branch follows the pointer through sizes the child never had, so it is the canonical fork —
+    /// which receives the same bytes and exactly one resize — that the next commit installs.
+    fn arm_resize_canonical(&mut self) {
         let listener = CaptureListener::default();
         let mut term = self.term.fork(listener.clone());
         install_transcript_hook(&mut term, &listener);
@@ -531,7 +542,6 @@ impl TerminalAdapter {
             processor,
             listener,
         });
-        restored
     }
 
     pub fn finish_resize_transaction(&mut self) -> Vec<CapturedRow> {
@@ -597,6 +607,12 @@ impl TerminalAdapter {
         self.term = canonical.term;
         self.processor = canonical.processor;
         self.listener = canonical.listener;
+        // One drag is not one commit: the app coalesces `Resized` on a silence, so a drag that
+        // pauses and moves again commits a second pseudoconsole size inside this same transaction.
+        // The branch just installed is the child's grid as of this commit, which makes it the only
+        // honest starting point for the next one — so re-arm immediately. Without this the second
+        // commit inherited the path-dependent displayed branch and reintroduced the S12 desync.
+        self.arm_resize_canonical();
         (history_before, history_after)
     }
 
@@ -1100,57 +1116,60 @@ mod tests {
         assert!(reconciled.finish_resize_transaction().is_empty());
     }
 
-    #[test]
-    fn coalesced_final_resize_replaces_the_path_dependent_live_branch() {
-        let sizes = [
-            (111, 20),
-            (46, 7),
-            (12, 1),
-            (13, 2),
-            (28, 7),
-            (71, 15),
-            (79, 16),
-            (66, 14),
-            (22, 7),
-            (18, 6),
-            (42, 12),
-            (98, 21),
-            (60, 14),
-            (16, 6),
-            (27, 9),
-            (79, 17),
-            (89, 19),
-            (85, 18),
-            (25, 7),
-            (19, 7),
-            (51, 11),
-            (90, 16),
-            (53, 11),
-            (11, 5),
-            (42, 10),
-            (86, 15),
-            (85, 15),
-            (49, 10),
-            (31, 8),
-            (64, 13),
-            (104, 18),
-            (99, 17),
-            (46, 10),
-            (38, 9),
-            (59, 14),
-            (117, 21),
-            (118, 21),
-            (72, 13),
-            (33, 9),
-            (39, 10),
-            (79, 18),
-            (92, 20),
-            (95, 20),
-            (96, 20),
-        ];
-        // Deterministic reduction of the S12 mix: soft wraps, CUP, save/restore, erase, and cursor
-        // visibility. The transient storm finishes with no native history, but its cursor is still
-        // path-dependent; this is exactly the branch the old history-only reconcile skipped.
+    /// The local sizes one divider drag projects onto the grid before ConPTY hears anything. Both
+    /// coalescing pins below are measured against these same bytes and these same sizes; the only
+    /// difference between them is how many pseudoconsole commits the drag contains.
+    const S12_STORM_SIZES: [(u32, u32); 44] = [
+        (111, 20),
+        (46, 7),
+        (12, 1),
+        (13, 2),
+        (28, 7),
+        (71, 15),
+        (79, 16),
+        (66, 14),
+        (22, 7),
+        (18, 6),
+        (42, 12),
+        (98, 21),
+        (60, 14),
+        (16, 6),
+        (27, 9),
+        (79, 17),
+        (89, 19),
+        (85, 18),
+        (25, 7),
+        (19, 7),
+        (51, 11),
+        (90, 16),
+        (53, 11),
+        (11, 5),
+        (42, 10),
+        (86, 15),
+        (85, 15),
+        (49, 10),
+        (31, 8),
+        (64, 13),
+        (104, 18),
+        (99, 17),
+        (46, 10),
+        (38, 9),
+        (59, 14),
+        (117, 21),
+        (118, 21),
+        (72, 13),
+        (33, 9),
+        (39, 10),
+        (79, 18),
+        (92, 20),
+        (95, 20),
+        (96, 20),
+    ];
+
+    /// Deterministic reduction of the S12 mix: soft wraps, CUP, save/restore, erase, and cursor
+    /// visibility. The transient storm finishes with no native history, but its cursor is still
+    /// path-dependent; this is exactly the branch the old history-only reconcile skipped.
+    fn s12_storm_input() -> String {
         let mut state = 10u64;
         let mut input = String::new();
         for _ in 0..48 {
@@ -1172,6 +1191,13 @@ mod tests {
                 _ => input.push_str("\x1b[?25l\x1b[?25h"),
             }
         }
+        input
+    }
+
+    #[test]
+    fn coalesced_final_resize_replaces_the_path_dependent_live_branch() {
+        let sizes = S12_STORM_SIZES;
+        let input = s12_storm_input();
 
         let mut direct = TerminalAdapter::new(nz(119), nz(23));
         direct.feed(input.as_bytes());
@@ -1193,6 +1219,59 @@ mod tests {
         assert_eq!(storm.reconcile_resize_transaction_to_viewport(), (0, 0));
         assert_eq!(storm.cursor(), direct_cursor);
         assert_eq!(storm.visible_text(), direct_rows);
+    }
+
+    /// One human drag is not one pseudoconsole commit.
+    ///
+    /// The app coalesces `Resized` on a 200 ms silence, so a drag that pauses to look, then moves
+    /// again, commits a *second* pseudoconsole size while the same resize transaction is still open
+    /// (the transaction only closes after the final request and the child's output have both been
+    /// quiet). Every commit is a size the child really received, so after each one the displayed
+    /// grid owes the same debt the first one does: it must be the child's bytes reflowed to the
+    /// sizes ConPTY actually saw, never to the sizes only the pointer passed through.
+    #[test]
+    fn every_coalesced_commit_in_one_transaction_replaces_the_path_dependent_branch() {
+        let (first_drag, second_drag) = S12_STORM_SIZES.split_at(S12_STORM_SIZES.len() / 2);
+        let first_commit = (96, 20);
+        let second_commit = (64, 14);
+        let input = s12_storm_input();
+
+        // What the child saw: the start size, then the two committed sizes, in order.
+        let mut direct = TerminalAdapter::new(nz(119), nz(23));
+        direct.feed(input.as_bytes());
+        direct.begin_resize_transaction();
+        direct.resize(nz(first_commit.0), nz(first_commit.1));
+        direct.reconcile_resize_transaction_to_viewport();
+        direct.resize(nz(second_commit.0), nz(second_commit.1));
+        direct.reconcile_resize_transaction_to_viewport();
+        let direct_cursor = direct.cursor();
+        let direct_rows = direct.visible_text();
+
+        // What the pointer did: two bursts of projected sizes, one commit at the end of each.
+        let mut storm = TerminalAdapter::new(nz(119), nz(23));
+        storm.feed(input.as_bytes());
+        storm.begin_resize_transaction();
+        for (columns, rows) in first_drag {
+            storm.resize(nz(*columns), nz(*rows));
+        }
+        storm.resize(nz(first_commit.0), nz(first_commit.1));
+        storm.reconcile_resize_transaction_to_viewport();
+        for (columns, rows) in second_drag {
+            storm.resize(nz(*columns), nz(*rows));
+        }
+        storm.resize(nz(second_commit.0), nz(second_commit.1));
+        storm.reconcile_resize_transaction_to_viewport();
+
+        assert_eq!(
+            storm.cursor(),
+            direct_cursor,
+            "the second commit left the cursor on a row only the drag's intermediate sizes explain"
+        );
+        assert_eq!(
+            storm.visible_text(),
+            direct_rows,
+            "the second commit published a screen the child's own sizes never produced"
+        );
     }
 
     #[test]
