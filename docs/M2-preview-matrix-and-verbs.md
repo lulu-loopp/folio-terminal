@@ -410,17 +410,37 @@
   的共同权威 gate,该 screen 的光标/WRAPLINE/CUP/粘滞记忆退出裁决。
 - B..C 包含 live 编辑与提交后的命令回显,永远不装饰;C..D 是输出,照常装饰。区域内容锚随
   live→staging→history 迁移,resize/reflow 以命令文本见证重新落位,不得清空后猜测。
-- **区域的终点是一段内容的终点,不是某个光标点(2026-08-04 修订,`wrapped_region_end`)**:
-  本终端能算出的两个 B..C 终点都是**点**——区域还开着时是 live 光标,关闭时是 shell 报
-  `133;C` 那一刻的光标。命令一旦软换行占了多个物理行,点就不再等于范围:行编辑器爱把光标停哪
-  停哪(Home、←、点一下),而它按自己以为的宽度算出的绝对列在更窄的网格上会被**夹回第一行**。
-  把区域停在那个点,续行——同一串用户敲进去的字符——就落在“永远不装饰”的区域之外,于是四行
-  命令的第四行上的引用长出 band,而同一个引用在第一行上不长。终点因此沿 `CapturedRow::continues`
-  走完这条软换行链(即 §6 的 WRAPLINE 合并,只是作用在区域终点而非光标行),并且**只走进这个
-  区域自己写过的行**(`written_rows`):那既是“哪些行是这条命令”的权威记录,也保证同一个 PTY
-  chunk 里跟在标记后面的输出不会被链条捎带进来。语料 67 份 × 默认/图片探针/强开 band 三种模式
-  逐字节无差异——没有一份录制把引用打在命令回显的续行上,这正是它一直没被抓到的原因;
-  钉死于 `a_wrapped_command_echo_never_decorates_on_any_of_its_rows`。
+- **换行时撑开的是「被问的那条逻辑行」,永远不是权威区域(用户裁决 2026-08-04)**:
+  `133;C` 是一个**排他的语义边界点**,区域严格是半开跨度 `[B, C)`。命令一旦软换行占了多个
+  物理行,「点」就不再等于「范围」——行编辑器爱把光标停哪停哪(Home、←、点一下),它按自己
+  以为的宽度算出的绝对列在更窄的网格上会被**夹回第一行**,而 reflow 之后旧坐标干脆指向别处。
+  于是四行命令的第四行上的引用长出 band,而同一个引用在第一行上不长。
+  - **正确的做法是把问题放大,而不是把区域放大**:候选先按 WRAPLINE 合并到**它自己那条逻辑行
+    的行首**,再与 `[B, C)` 求交(`merged_live_candidate_start`)。跨度因此是
+    `[逻辑行首, 引用末尾]`,它与 `[B, C)` 相交**当且仅当**「引用结束于 B 之后」——命令文本
+    的任何一行都满足,提示符里(A..B 段)的引用正确地不满足,第一行输出也不满足(它的逻辑行
+    从 C 开始)。**只放大起点**:把终点也往下长会把下一次绝对 CUP 重画写到同一物理行上的东西
+    一并拖进来(`inline-trial3.vt` 实测:拖进来的正是下一个提示符,于是输出行丢了 band)。
+  - **终点必须是左黏(`Bias::Before`)**:C 命名的是命令**停止**的地方,而 shell 的第一行输出
+    恰恰就写在那个点上;右黏的终点会把它吸进区域——这正是用户看到的「输出那行一个 band 都没有」。
+  - **行粒度投影同样保排他**:`semantic_input_region_rows` 给出 `B.row ..= (C.column==0 ?
+    C.row-1 : C.row)`,绝不无条件 `B.row..=C.row`。
+  - **冻结面问同一个问题**:`semantic_input_overlaps_history_through(id, 引用末尾)` ——转录行
+    本身就是 WRAPLINE 合并的结果,所以起点无需再放大,终点则与 live 面同理停在引用处。
+    问「整行有没有碰到命令区」会让提示符里的引用在**冻结的那一刻**改判,而迁移只许换坐标载体,
+    不许换答案。
+  - **翻案记录**:本条取代 2026-08-04 早些时候「终点沿 WRAPLINE 链走完」的写法(38b9aea)。
+    那一版把 C 往下长,恰好吞掉第一行输出;用户在 trial 版上同时看到「回显长了 band」和
+    「输出没有 band」两种症状,就是这一条的两半。
+  - 钉死于 `a_wrapped_command_echo_never_decorates_on_any_of_its_rows`、
+    `a_wrapped_command_echo_gets_one_verdict_at_every_migration_stage`、
+    `a_frozen_line_answers_for_the_reference_it_was_asked_about`、
+    `a_command_spans_the_rows_its_half_open_range_touches_and_no_more`。
+  - **已知残余(诚实记账,非本次裁决内容)**:reflow 之后区域的坐标仍由**改宽之前**捕获的
+    staging 行承载,而检测器读的是改宽之后的 live 网格;两种载体之间没有公共坐标
+    (`compare_anchors` 先比载体类别)。因此「先 reflow、再滚出屏幕」的组合在 staging 中段会
+    短暂改判。该缺陷早于本条(e78e6b9 与 38b9aea 同样复现),记录在
+    `a_reflow_keeps_the_verdict_while_both_ends_share_a_carrier` 里。
 - 从未见标记的 screen 完全保留本节 §6 的既有启发式。外层 PowerShell 标记不冒充 nested
   alternate-screen TUI 的内部轮次;未标记的 Codex/Claude Code screen 继续走降级模式。
 - v1 接受 OSC 标记可由子进程伪造的风险:影响仅限装饰门控/命令元数据,不赋予资源权限;

@@ -6,7 +6,7 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     io::Write as _,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
-    ops::Bound,
+    ops::{Bound, RangeInclusive},
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -2194,10 +2194,13 @@ impl DualPlaneSession {
                     bias: Bias::Before,
                     generation: self.grid_generation,
                 });
+                // The region is the half-open span [B, C): `C` names where the command stops,
+                // not a cell inside it. A left-affinity end therefore excludes whatever is written
+                // *at* the end point, which is exactly where the first line of output begins.
                 let end = self.document.register_anchor(ContentAnchor::Live {
                     screen,
                     point,
-                    bias: Bias::After,
+                    bias: Bias::Before,
                     generation: self.grid_generation,
                 });
                 let region = self.semantic_input_regions.len();
@@ -2240,14 +2243,13 @@ impl DualPlaneSession {
             return;
         };
         let end = region.end;
-        let derived = self.semantic_input_end_point(region_index, screen, point);
-        let point = self.wrapped_region_end(region_index, derived);
+        let point = self.semantic_input_end_point(region_index, screen, point);
         let _ = self.document.replace_anchor(
             end,
             ContentAnchor::Live {
                 screen,
                 point,
-                bias: Bias::After,
+                bias: Bias::Before,
                 generation: self.grid_generation,
             },
         );
@@ -2304,69 +2306,6 @@ impl DualPlaneSession {
             .unwrap_or(*start)
     }
 
-    /// Follow a command region's end point through the soft-wrap chain leaving its row.
-    ///
-    /// Every end this terminal computes for a B..C region is a *point*: the cursor where the shell
-    /// reported `133;C`, or the live cursor itself while the region is still open. A command that
-    /// soft-wraps is not a point and not a row — it is one range of content laid out over several
-    /// physical rows, and a point can legitimately sit on the first of them. A line editor
-    /// repositions the cursor wherever it likes before the marker, and an absolute column it
-    /// computed for one width clamps back onto the first row at a narrower one. Stopping the region
-    /// at that point leaves the continuation rows — the same characters the user typed — outside the
-    /// region that must never decorate, so a reference on the fourth row of a four-row command grows
-    /// a band while the identical reference on the first row does not.
-    ///
-    /// `CapturedRow::continues` is the grid's own statement that the next row is the same content,
-    /// so the end follows it and points at the last column that row carries. This is §6's WRAPLINE
-    /// merge, applied to the region end instead of the cursor line.
-    ///
-    /// The walk only enters rows this region actually wrote. That bound is not caution, it is the
-    /// definition: `written_rows` is the record of which physical rows received printable writes
-    /// between B and C, so it says exactly which rows are the command. It also keeps the answer
-    /// honest about *when* it is computed — a marker carries the point the shell was at when it
-    /// emitted it, while this runs once the whole PTY chunk has been parsed, by which time output
-    /// printed after the marker in the same chunk can already be on the grid below.
-    fn wrapped_region_end(&self, region_index: usize, point: GridPoint) -> GridPoint {
-        let Some(region) = self.semantic_input_regions.get(region_index) else {
-            return point;
-        };
-        let row_count = u32::try_from(self.live_rows.len()).unwrap_or(u32::MAX);
-        let mut row = point.row;
-        while row.saturating_add(1) < row_count
-            && region
-                .written_rows
-                .contains(&(self.grid_generation.0, row.saturating_add(1)))
-            && self
-                .terminal
-                .visible_row(row)
-                .is_some_and(|captured| captured.continues)
-        {
-            row += 1;
-        }
-        // Back off any trailing rows of the chain that carry no content. A command whose last row
-        // is exactly full leaves WRAPLINE set on it, so the chain can reach a row the line editor
-        // touched and then cleared. Content is the region, and an empty row is not content.
-        while row > point.row
-            && self
-                .terminal
-                .visible_row(row)
-                .is_none_or(|captured| captured_row_text_and_boundaries(&captured).0.is_empty())
-        {
-            row -= 1;
-        }
-        if row == point.row {
-            return point;
-        }
-        let Some(captured) = self.terminal.visible_row(row) else {
-            return point;
-        };
-        let (_, boundaries) = captured_row_text_and_boundaries(&captured);
-        GridPoint {
-            row,
-            column: boundaries.last().map_or(0, |(_, column)| *column),
-        }
-    }
-
     fn record_semantic_input_writes(&mut self, screen: ScreenId, rows: Vec<u32>) {
         let Some(ShellIntegrationPhase::Input(region_index)) =
             self.shell_phases.get(&screen).copied()
@@ -2381,6 +2320,53 @@ impl DualPlaneSession {
             .extend(rows.into_iter().map(|row| (self.grid_generation.0, row)));
     }
 
+    /// Widen a live candidate's start to the beginning of the logical line the grid says it is on.
+    ///
+    /// This is the half of the wrap problem that is allowed to move. The command region is
+    /// authoritative and exact — `[B, C)`, `C` exclusive — and stretching `C` is what swallows the
+    /// first line of output, because `C` characteristically lands at column 0 of exactly that row.
+    /// What has to grow is the *question*: a soft-wrapped command is one range of content laid out
+    /// over several physical rows, and whether a reference is inside the command must not depend on
+    /// which of those rows it happened to land on.
+    ///
+    /// Widening the *start* alone is exactly enough, and widening the end as well would be wrong.
+    /// The query becomes `[line_start, reference_end]`, which meets `[B, C)` if and only if
+    /// `line_start < C` and `reference_end > B` — that is, if and only if the reference ends after
+    /// the command began. Every reference in the command text satisfies it on any row of the wrap,
+    /// and a reference that lives in the *prompt*, before `B`, correctly still does not (A..B is not
+    /// the command region). Growing the end downward instead would drag in whatever the next
+    /// absolute-CUP repaint wrote onto the reference's last row: measured on `inline-trial3.vt`,
+    /// that is the next prompt, and the output line loses its band.
+    ///
+    /// The start is returned as an anchor rather than a point because a logical line can straddle
+    /// planes: while a resize settles, the head of a line has already been captured into staging
+    /// while its tail is still on the live grid. Anchors are ordered by carrier before coordinate,
+    /// so a live query can never meet a staging endpoint however close the content is — the verdict
+    /// would flip on a migration that changed nothing the user can see. `active_staging_tail` is the
+    /// vendor's own statement that the trailing staging row still wraps into live row zero, so a
+    /// query whose line begins there begins in staging.
+    fn merged_live_candidate_start(&self, screen: ScreenId, start: GridPoint) -> ContentAnchor {
+        let row = self
+            .logical_line_containing(start.row)
+            .map_or(start.row, |line| line.0);
+        if row == 0
+            && let Some(staging) = self.active_staging_tail
+        {
+            return ContentAnchor::Staging {
+                id: staging,
+                offset: GraphemeOffset(0),
+                bias: Bias::Before,
+                generation: self.transcript.source_generation(),
+            };
+        }
+        ContentAnchor::Live {
+            screen,
+            point: GridPoint { row, column: 0 },
+            bias: Bias::Before,
+            generation: self.grid_generation,
+        }
+    }
+
     fn semantic_input_overlaps_live(
         &self,
         screen: ScreenId,
@@ -2390,12 +2376,7 @@ impl DualPlaneSession {
         if !self.shell_integration_is_authoritative(screen) {
             return false;
         }
-        let candidate_start = ContentAnchor::Live {
-            screen,
-            point: start,
-            bias: Bias::Before,
-            generation: self.grid_generation,
-        };
+        let candidate_start = self.merged_live_candidate_start(screen, start);
         let candidate_end = ContentAnchor::Live {
             screen,
             point: end,
@@ -2405,7 +2386,18 @@ impl DualPlaneSession {
         self.semantic_input_overlaps(&candidate_start, &candidate_end)
     }
 
-    fn semantic_input_overlaps_history(&self, id: TranscriptId) -> bool {
+    /// The same question `semantic_input_overlaps_live` asks, asked of a frozen line: does the span
+    /// from the start of the line to the end of *this* reference meet a command region?
+    ///
+    /// A transcript line already is the WRAPLINE merge — freezing is what performs it — so the
+    /// start needs no widening here, and the end must stay at the reference for the same reason it
+    /// does live. Passing `None` asks about the whole line, which is the line-level question the
+    /// decoration reconciler asks.
+    fn semantic_input_overlaps_history_through(
+        &self,
+        id: TranscriptId,
+        through: Option<GraphemeOffset>,
+    ) -> bool {
         let Some(line) = self.document.entries().get(&id).map(|entry| &entry.line) else {
             return false;
         };
@@ -2417,13 +2409,22 @@ impl DualPlaneSession {
         };
         let end = ContentAnchor::History {
             id,
-            offset: GraphemeOffset(
-                u32::try_from(line.grapheme_boundaries.len().saturating_sub(1)).unwrap_or(u32::MAX),
-            ),
+            offset: through.unwrap_or_else(|| {
+                GraphemeOffset(
+                    u32::try_from(line.grapheme_boundaries.len().saturating_sub(1))
+                        .unwrap_or(u32::MAX),
+                )
+            }),
             bias: Bias::After,
             generation: line.source_generation,
         };
         self.semantic_input_overlaps(&start, &end)
+    }
+
+    /// Does any part of this frozen line meet a command region? The line-level question, which is
+    /// the one the decoration reconciler asks — it owns whole lines, not references within them.
+    fn semantic_input_overlaps_history(&self, id: TranscriptId) -> bool {
+        self.semantic_input_overlaps_history_through(id, None)
     }
 
     fn semantic_input_overlaps(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
@@ -2439,21 +2440,18 @@ impl DualPlaneSession {
                     && self.shell_phases.get(&region.screen)
                         == Some(&ShellIntegrationPhase::Input(region_index))
                 {
+                    // An open region's frontier is the cursor: the cell it stands on has not been
+                    // typed yet, so the span stays half-open there too.
                     ContentAnchor::Live {
                         screen: region.screen,
                         point: {
                             let cursor = self.terminal.cursor();
-                            // The live end is the cursor, and the cursor inside a wrapped command
-                            // being edited is routinely on an earlier row than the text after it.
-                            self.wrapped_region_end(
-                                region_index,
-                                GridPoint {
-                                    row: cursor.row,
-                                    column: cursor.column,
-                                },
-                            )
+                            GridPoint {
+                                row: cursor.row,
+                                column: cursor.column,
+                            }
                         },
-                        bias: Bias::After,
+                        bias: Bias::Before,
                         generation: self.grid_generation,
                     }
                 } else {
@@ -2666,17 +2664,16 @@ impl DualPlaneSession {
                 ContentAnchor::Live {
                     screen: region.screen,
                     point: end,
-                    bias: Bias::After,
+                    bias: Bias::Before,
                     generation: self.grid_generation,
                 },
             );
-            if let Some(region) = self.semantic_input_regions.get_mut(index) {
-                let last_written_row = end.row.saturating_sub(u32::from(end.column == 0));
-                if start.row <= last_written_row {
-                    region.written_rows.extend(
-                        (start.row..=last_written_row).map(|row| (self.grid_generation.0, row)),
-                    );
-                }
+            if let Some(region) = self.semantic_input_regions.get_mut(index)
+                && let Some(rows) = semantic_input_region_rows(start, end)
+            {
+                region
+                    .written_rows
+                    .extend(rows.map(|row| (self.grid_generation.0, row)));
             }
         }
         self.reconcile_decorations_against_semantic_input();
@@ -6214,9 +6211,6 @@ impl DualPlaneSession {
         if !self.inline_image_bands {
             return;
         }
-        if self.semantic_input_overlaps_history(id) {
-            return;
-        }
         let Some(line) = self
             .document
             .entries()
@@ -6260,6 +6254,12 @@ impl DualPlaneSession {
             else {
                 continue;
             };
+            // Same question the live plane asks, same span: from the start of the line through the
+            // end of this reference. Freezing changes which coordinate carries the answer, never
+            // the answer — see `a_wrapped_command_echo_gets_one_verdict_at_every_migration_stage`.
+            if self.semantic_input_overlaps_history_through(id, Some(end_offset)) {
+                continue;
+            }
             self.register_local_image_path(
                 path,
                 line.text.clone(),
@@ -9439,6 +9439,17 @@ fn compare_selection_anchors(
         ) => Some((left_point, left_bias).cmp(&(right_point, right_bias))),
         _ => compare_anchors(left, right).ok(),
     }
+}
+
+/// Row-granular projection of the half-open command span `[start, end)`.
+///
+/// A physical row belongs to the region when any of its cells does, so the end row is included
+/// exactly when the end point lies past that row's first cell. `C` at column zero names the
+/// beginning of a row and therefore contributes none of it — which matters because column zero of
+/// the row after a submitted command is precisely where its first line of output begins.
+fn semantic_input_region_rows(start: GridPoint, end: GridPoint) -> Option<RangeInclusive<u32>> {
+    let last = end.row.checked_sub(u32::from(end.column == 0))?;
+    (start.row <= last).then_some(start.row..=last)
 }
 
 fn selection_overlaps(
@@ -18006,12 +18017,17 @@ mod tests {
     /// back onto the first row at a narrower width — and either way the continuation rows, which
     /// are the same characters the user typed, fell outside the region that must never decorate.
     ///
+    /// The answer is to widen the *question*, never the region: `B` and `C` stay exactly where the
+    /// shell put them and `C` stays exclusive, while the query runs from the start of the
+    /// reference's own logical line through the reference's end. That span meets `[B, C)` exactly
+    /// when the reference ends after the command began — true on every row of a wrapped command,
+    /// false for the first line of output, whose line starts at `C`. This pin therefore also states
+    /// the negative: `C` is left where it was reported. Moving it is what swallowed the output.
+    ///
     /// Both stages are pinned here because both are the same defect at the same seam.
     ///
-    /// RED CHECK: drop `wrapped_region_end` from the live arm of `semantic_input_overlaps` and the
-    /// first stage takes an occurrence anchored on row 1 — a continuation row of the command being
-    /// edited. Drop it from `close_semantic_input_region` and the second stage ends the region on
-    /// row 0 and keeps that occurrence after the command is executed.
+    /// RED CHECK: drop `merged_live_candidate_start` and both stages take an occurrence anchored on
+    /// row 1 — a continuation row of the command.
     #[test]
     fn a_wrapped_command_echo_never_decorates_on_any_of_its_rows() {
         let (directory, path) = temporary_path_image();
@@ -18070,9 +18086,10 @@ mod tests {
         assert!(
             matches!(
                 &region_end,
-                ContentAnchor::Live { point, .. } if point.row == echo_last_row
+                ContentAnchor::Live { point, bias, .. }
+                    if *point == GridPoint { row: 0, column: 4 } && *bias == Bias::Before
             ),
-            "the command region must end on the last row the command wrapped into: {region_end:?}"
+            "the region ends exactly where the shell reported it, and exclusively: {region_end:?}"
         );
 
         let starts = inline_image_start_rows(&session);
@@ -18088,6 +18105,266 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// The half-open span, projected onto rows, keeps `C`'s exclusivity.
+    ///
+    /// `C` at column zero names the beginning of its row and contributes none of it; `C` past the
+    /// first cell of its row contributes that row. Both spellings of a two-row command therefore
+    /// project to the same two rows, and neither reaches the row output starts on.
+    ///
+    /// RED CHECK: project `start.row..=end.row` unconditionally and the first case claims row 12,
+    /// which is where the first line of output lives.
+    #[test]
+    fn a_command_spans_the_rows_its_half_open_range_touches_and_no_more() {
+        let rows = |start: GridPoint, end: GridPoint| {
+            semantic_input_region_rows(start, end).map(|range| range.collect::<Vec<_>>())
+        };
+        assert_eq!(
+            rows(
+                GridPoint { row: 10, column: 5 },
+                GridPoint { row: 12, column: 0 }
+            ),
+            Some(vec![10, 11]),
+            "an end at column zero contributes none of its row"
+        );
+        assert_eq!(
+            rows(
+                GridPoint { row: 10, column: 5 },
+                GridPoint { row: 11, column: 9 }
+            ),
+            Some(vec![10, 11]),
+            "an end past the first cell contributes its row"
+        );
+        assert_eq!(
+            rows(
+                GridPoint { row: 10, column: 5 },
+                GridPoint { row: 10, column: 0 }
+            ),
+            None,
+            "an empty span touches no row at all"
+        );
+        assert_eq!(
+            rows(
+                GridPoint { row: 0, column: 0 },
+                GridPoint { row: 0, column: 0 }
+            ),
+            None,
+            "and it stays empty at the top of the grid"
+        );
+    }
+
+    /// A frozen line answers about the reference it was asked about, not about all of itself.
+    ///
+    /// `A..B` is the prompt and `B..C` is the command; only the second never decorates. One
+    /// physical line routinely holds both, so asking a frozen line the whole-line question — "does
+    /// any of you meet a command region?" — answers "yes" for a reference sitting in the prompt,
+    /// which the live plane would have banded. That is a verdict that changes at the moment of
+    /// freezing, which is exactly what may not happen.
+    ///
+    /// The line here freezes before it can ever be scanned live, so the frozen seam is the only one
+    /// that can produce the record.
+    ///
+    /// RED CHECK: ask `semantic_input_overlaps_history` (the whole line) instead of
+    /// `semantic_input_overlaps_history_through` (this reference) and the prompt's reference is
+    /// refused, leaving zero records.
+    #[test]
+    fn a_frozen_line_answers_for_the_reference_it_was_asked_about() {
+        let (prompt_directory, prompt_path) = temporary_path_image_named("in-prompt.png");
+        let mut session = DualPlaneSession::new(nz(200), nz(2));
+        enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
+        let started = Instant::now();
+        let prompt_image = format!("[Image: source: \"{}\"]", prompt_path.display());
+        session
+            .feed_at(
+                format!(
+                    "\x1b]133;A\x07{prompt_image}> \x1b]133;B\x07echo hi\x1b]133;C\x07\r\nout\r\nmore\r\nstill\r\n\x1b]133;D;0\x07"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+
+        let frozen = session
+            .document
+            .entries()
+            .values()
+            .any(|entry| entry.line.text.contains("echo hi"));
+        assert!(frozen, "the fixture must freeze the prompt line");
+        let records = session
+            .inline_images
+            .values()
+            .filter(|record| {
+                matches!(&record.kind, InlineImageRecordKind::LocalPath { path, .. } if *path == prompt_path)
+            })
+            .count();
+        assert_eq!(
+            records, 1,
+            "a reference in the prompt is outside B..C and keeps its band once frozen"
+        );
+
+        std::fs::remove_file(&prompt_path).unwrap();
+        std::fs::remove_dir(&prompt_directory).unwrap();
+    }
+
+    /// One reference, one verdict, whatever plane currently carries it.
+    ///
+    /// The command's own line holds a reference that never runs (it sits behind a comment) and its
+    /// output holds a different one, so the two can be told apart by file rather than by reading
+    /// grid text whose rows an absolute-CUP repaint may share. The echo wraps, putting the command's
+    /// reference wholly on a continuation row, and `133;C` arrives at the row the output then
+    /// occupies — the two facts that pull the answer in opposite directions. Filler then scrolls the
+    /// block so the pair migrates live → staging → history one row at a time. Migration changes
+    /// which coordinate carries the answer, never the answer.
+    ///
+    /// RED CHECKS, both measured, both giving `(0, 0)` at every one of the twenty steps — the
+    /// output loses its band, which is the second half of what the user saw:
+    /// * Give the region end `Bias::After`. `C` names where the command stops and the first line of
+    ///   output is written at exactly that point, so a right-sticky end absorbs it.
+    /// * Grow `C` down its WRAPLINE chain instead (the rule this replaces). It reaches the same row
+    ///   by the other route.
+    ///
+    /// The first half — the command's own reference banding — is red-checked on
+    /// `a_wrapped_command_echo_never_decorates_on_any_of_its_rows`, whose fixture is the one where
+    /// `C` is stale rather than exact.
+    #[test]
+    fn a_wrapped_command_echo_gets_one_verdict_at_every_migration_stage() {
+        let trajectory = wrapped_command_migration_trajectory(60, None);
+        assert!(
+            trajectory.iter().all(|verdict| *verdict == (0, 1)),
+            "the command's own reference never bands and its output's always does: {trajectory:?}"
+        );
+    }
+
+    /// The same invariant across a reflow, for the stages this document model can express.
+    ///
+    /// A resize re-wraps the command onto a different set of physical rows while the region's
+    /// coordinates go on being carried by the rows captured *before* the reflow. Steps 0..=4 are the
+    /// live and early-staging stages and they hold — which is the part this gate is responsible for,
+    /// and the part that was red before it.
+    ///
+    /// From step 5 the region's endpoints are staging anchors describing the pre-reflow wrap while
+    /// the detector reads the post-reflow live grid. `compare_anchors` orders by carrier before
+    /// coordinate, so those two have no common coordinate at all and the verdict flips. That is a
+    /// gap in the document model rather than in this gate: it is reached only through a reflow, no
+    /// endpoint rule can close it, and `reanchor_semantic_input_regions_after_resize` — the
+    /// machinery that exists to re-seat a region by its command-text witness — declines to run once
+    /// either endpoint has left the live plane. Asserted only as far as it holds, so the day the
+    /// carriers are reconciled this pin is the thing that notices.
+    #[test]
+    fn a_reflow_keeps_the_verdict_while_both_ends_share_a_carrier() {
+        let trajectory = wrapped_command_migration_trajectory(200, Some(60));
+        assert!(
+            trajectory[..=4].iter().all(|verdict| *verdict == (0, 1)),
+            "live and early-staging stages must agree with the unreflowed run: {trajectory:?}"
+        );
+        assert_eq!(
+            trajectory[0],
+            (0, 1),
+            "the reflowed command's own reference never bands while it is live"
+        );
+    }
+
+    /// Feed one wrapped command whose echo and output each carry a distinct image reference, then
+    /// scroll the pair off the screen, reporting `(references in the command, references in the
+    /// output)` after every step.
+    fn wrapped_command_migration_trajectory(
+        columns: u32,
+        reflow_to: Option<u32>,
+    ) -> Vec<(usize, usize)> {
+        let (command_directory, command_path) = temporary_path_image_named("in-command.png");
+        let (output_directory, output_path) = temporary_path_image_named("in-output.png");
+        let mut session = DualPlaneSession::new(nz(columns), nz(12));
+        enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
+        let started = Instant::now();
+
+        let command_image = format!("[Image: source: \"{}\"]", command_path.display());
+        let output_image = format!("[Image: source: \"{}\"]", output_path.display());
+        // Fill the echo's first row exactly, so the command's own reference begins at column zero of
+        // a row the command merely wrapped into.
+        let filler = "#".repeat(columns as usize - "PS> echo ".len() - 1);
+        let command = format!("echo {filler} {command_image}");
+        session
+            .feed_at(
+                format!(
+                    // PSReadLine's accept-line touches and clears the row below the command before
+                    // emitting the marker, so `133;C` really does land on column zero of the row
+                    // the first line of output is about to occupy — the exclusivity case.
+                    "\x1b]133;A\x07PS> \x1b]133;B\x07{command}\r\n \r\x1b[K\x1b]133;C\x07{output_image}\r\n\x1b]133;D;0\x07"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+
+        let mut at = started + Duration::from_millis(10);
+        if let Some(reflow_to) = reflow_to {
+            session.resize_at(nz(reflow_to), nz(12), at).unwrap();
+            session.mark_pty_resize_requested_at(nz(reflow_to), nz(12), at);
+            at += Duration::from_secs(2);
+            session.finish_resize_if_quiescent(at).unwrap();
+        }
+
+        let mut trajectory = Vec::new();
+        let mut saw_command_line_frozen = false;
+        let mut saw_output_line_frozen = false;
+        for step in 0..20 {
+            at += LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1);
+            session.advance_live_stability(at);
+            trajectory.push(image_bands_by_path(&session, &command_path, &output_path));
+            saw_command_line_frozen |= session
+                .document
+                .entries()
+                .values()
+                .any(|entry| entry.line.text.contains("echo #"));
+            saw_output_line_frozen |= session.document.entries().values().any(|entry| {
+                entry.line.text.contains(&output_path.display().to_string())
+                    && !entry.line.text.contains("echo #")
+            });
+            at += Duration::from_millis(1);
+            session
+                .feed_at(format!("filler {step}\r\n").as_bytes(), at)
+                .unwrap();
+        }
+        assert!(
+            saw_command_line_frozen,
+            "the fixture must actually freeze the command echo"
+        );
+        assert!(
+            saw_output_line_frozen,
+            "the fixture must actually freeze the output line"
+        );
+
+        std::fs::remove_file(&command_path).unwrap();
+        std::fs::remove_dir(&command_directory).unwrap();
+        std::fs::remove_file(&output_path).unwrap();
+        std::fs::remove_dir(&output_directory).unwrap();
+        trajectory
+    }
+
+    /// Occurrences split by which file they point at, so the verdict does not depend on reading
+    /// grid text whose rows an absolute-CUP repaint may share between two different things.
+    fn image_bands_by_path(
+        session: &DualPlaneSession,
+        command_path: &Path,
+        output_path: &Path,
+    ) -> (usize, usize) {
+        let mut in_command = 0;
+        let mut in_output = 0;
+        for record in session.inline_images.values() {
+            let InlineImageRecordKind::LocalPath { path, .. } = &record.kind else {
+                continue;
+            };
+            if path == command_path {
+                in_command += 1;
+            } else if path == output_path {
+                in_output += 1;
+            }
+        }
+        (in_command, in_output)
     }
 
     fn inline_image_start_rows(session: &DualPlaneSession) -> Vec<u32> {
@@ -18262,7 +18539,10 @@ mod tests {
                     column: "PS> echo ok".len() as u32,
                 }
             );
-            assert_eq!(*bias, Bias::After);
+            // Exclusivity is what the bias says: `C` names where the command stops, so a left
+            // affinity keeps whatever is written *at* that point — the first line of output —
+            // outside the region.
+            assert_eq!(*bias, Bias::Before);
         }
     }
 
@@ -18283,7 +18563,7 @@ mod tests {
             panic!("the compact fixture keeps its command region live")
         };
         assert_eq!(*point, GridPoint { row: 1, column: 0 });
-        assert_eq!(*bias, Bias::After);
+        assert_eq!(*bias, Bias::Before);
     }
 
     #[test]
