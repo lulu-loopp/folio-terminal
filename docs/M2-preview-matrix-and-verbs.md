@@ -394,6 +394,62 @@ band 退役之后,图片只剩 hover 一条通路——而 hover 的前提是**�
     `BT_PROBE_STYLES` 打印的冻结行 `StyleSpan` 因此前后无差异,pin 里也逐条断言
     `session.terminal().visible_text()` 原样。
 
+#### 6.1.1 散点下划线:affordance 只能是「格子现在写着什么」的函数(用户实录 2026-08-04)
+
+上面那版 affordance 由**锚点跨度**直接上妆。锚点是「引用当时在哪」的记忆,而记忆比文字活得久:
+用户在窄窗里走 PSReadLine 历史,行编辑器就地改写自己的缓冲并用空格擦掉上一条更长命令的尾巴
+(录像 `.tmp-repaint-capture/affordance-verify.vt` 里就是 `CUP 13;1` 后面跟十六个空格)。
+记录要等到下一个稳定窗口才被 `reconcile_live_image_paths` 重新落座或退休,这中间那一帧里,
+锚点指着的格子已经空了——**点线就横躺在空白行上**。用户截到两条:一条占某空白行右半,
+一条占下一空白行左三分之一。120x25 回放该录像,单帧空白带线格数峰值 **146**。
+
+修法是**内容见证,不是坐标记忆**——与 band 一直用的「按行文本认身份,不认行号」是同一条纪律,
+也正是 `local_image_path_probe_at` 给 peek 的那套答法(两边都重读平面,所以两边都在回答现在这一帧)。
+**两半,互不包含**:
+
+- **平面这一半**(`DualPlaneSession::reference_span_content` / `verified_image_reference_span`):
+  记录多带一个 `reference_text`——引用**自己**的那串字符(不是 `source_text` 那整条逻辑行)。
+  取跨度时按当前网格 / 转录读回两锚之间的文字,不等就不给跨度。`Staging` 一律不给,与
+  `local_image_path_probe_at` 对暂存行的沉默完全一致。下划线、hover 升实线、Ctrl+单击
+  (`decoded_local_image_path_at`)因此共用**同一个**真值源,不会出现「格子空了还能点出图」。
+- **帧这一半**(`ViewportFrame::underline_reference_span` 多收一个 `reference_text`):
+  reflow 之后帧的 cell 锚点可能与平面还认可的跨度**对不上**——`image-accept` 在一次加宽 resize 上
+  就把一条 44 字符路径的跨度算成了「本行剩下的 48 个空格 + 下一行头三格」。只有格子自己的文字
+  能裁决,所以上妆前先拼出选中格的文字:视口只截头(第一格)或只截尾(最后一个可绘格)时按
+  前缀/后缀放行,其余情况必须**逐字相等**,否则**一格都不上**。
+
+- **pin**:`the_resting_affordance_follows_the_text_and_never_the_remembered_coordinate`
+  (bt-term,三段:被覆盖的行同帧掉线 / 滚动后只在新位置 / 任何阶段都不给空白格上妆;
+  引用故意做成**软换行行里的子串**,以便同时钉住「读整行」与「只读一行」两种错法)与
+  `an_anchor_span_the_frame_cells_do_not_spell_paints_nothing`(bt-viewport,帧那一半)。
+- **红检(逐条单独做过,做完复原,五条各自点红)**:① 跳过 `reference_span_content` 直接给跨度
+  (即 84764c1 的行为)→ 第二段红,一三段仍绿,**正是缺陷本身的形状**;② 拿 `source_text` 当见证
+  → 第一段红;③ `reference_span_content` 只读 `start_point.row` 而非 WRAPLINE 合并行 → 第一段红;
+  ④ 去掉 `capture_rows_transaction` 给存活 live 锚的行位移 → 第三段红;⑤ 删掉帧那一半的
+  `spells_the_reference` 闸 → bt-viewport pin 红。
+- **回放足迹(70 份 `.tmp-repaint-capture/*.vt` × sync/latency × 两种探针,104x26,release oracle
+  前后对拍 stdout+stderr;「前」= 两半见证都关掉的当前树,以隔离行为改动)**:
+  - **默认模式:140/140 逐字节全同**(stdout 与 stderr 都是)。默认回放不检测路径。
+  - **`BT_PROBE_IMAGE_PATHS=1`:stdout 140/140 逐字节全同**,`rendered=[…]`、帧数、装饰状态
+    分毫未动;**50/140 的 stderr 有差异,且差异只有 `UNDERLINE_AUDIT` 这一行**(为这次排查加进
+    oracle 的 opt-in 普查:每帧统计「写着空白却带下划线」的格数)。
+  - **空白带线格数(单帧峰值之和):5334 → 78。** 剩下的 78 **逐份、逐帧等于把路径检测整条关掉
+    时的数值**(`envsteal-verify` 2、`links-accept` 5、`perf-check` 2、`quantum-verify` 3、
+    `rearch-acceptance` 2、`repro-unified` 20、`resize-repro` 3/4、`uri-peek-feel` 1、
+    `zoom-accept` 1、`zoom-flash` 1/3),即 OSC 8 链接标签与应用自己的 SGR 4 落在空格上——
+    与图片引用无关,本次未动。**引用 affordance 的贡献现在正好是 0。**
+  - 清零幅度最大的几份:`affordance-verify` 146/211→0、`osc133-accept2` 349→0、
+    `band-stuck-trace` 263→0、`svg-slice-feel` 265→0、`alt-peek-only-feel` 202→0、
+    `bare-relative-feel` 197→0、`osc7-relative-feel` 171→0、`pwsh-default-verify` 166→0、
+    `image-accept` 51→0。
+- **顺带定案(不是我们的)**:同一份录像里最后一条提示符渲染成 `(base) PS ` 加命令,而更早的
+  提示符是完整的 `(base) PS D:\Developer\BetterTerminal>`。**回放逐字节重现**(`BT_PROBE_DOCDUMP`
+  的 `DOC[6]`),因为它就在字节流里:录像从 37→29→53 列改过尺寸,我们对 `CSI 6 n` 的回答是
+  `CUP 10;40`(39 列提示符之后的真值,子进程随即照抄),然后子进程**自己**用 `CUP 10;11` 去重画
+  缓冲——那是它从 29 列窄窗记住的输入锚。与 `RECORDED_STALE_ANCHOR_REPAINT` /
+  `the_recorded_cursor_report_is_answered_from_the_committed_pseudoconsole_grid` 钉的是同一族:
+  子进程用了过期锚,终端忠实合成。与本节的 affordance 无关,前后回放该行完全一致。
+
 ### 6.2 图片引用的三种形状都要能 peek(用户报告 2026-08-02)
 
 副屏只剩 hover 这一条图片通路之后,用户在 Claude Code 里 hover 了三种引用形状,一种都没出图。

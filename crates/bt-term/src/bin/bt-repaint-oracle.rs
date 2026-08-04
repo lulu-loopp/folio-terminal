@@ -13,6 +13,7 @@ use bt_term::{
     LIVE_MATH_STABLE_INTERVAL, MathLayoutOptions, SessionDecorationTask, SessionMathTask,
     band_owns_its_rows, is_banded_artifact, render_detection_task, render_live_detection_task,
 };
+use bt_transcript::CellFlags;
 use bt_viewport::MATH_TEXTURE_CACHE_BUDGET_BYTES;
 use bt_viewport::{ViewportFrame, ViewportProjection};
 
@@ -106,6 +107,12 @@ struct HeadlessOracle {
     max_textureless_bands: usize,
     /// A human-readable exemplar of the worst textureless band seen.
     textureless_band_worst: Option<String>,
+    /// Peak count of blank cells wearing the reference/link underline in one frame — a stray
+    /// affordance run painted over text that is no longer there. Zero in a healthy frame.
+    max_blank_underlined: usize,
+    blank_underlined_worst: Option<String>,
+    /// Per-row underline dump, opt-in via `BT_PROBE_UNDERLINE`.
+    underline_probe: bool,
 }
 
 impl HeadlessOracle {
@@ -150,6 +157,9 @@ impl HeadlessOracle {
             layout_worst: None,
             max_textureless_bands: 0,
             textureless_band_worst: None,
+            max_blank_underlined: 0,
+            blank_underlined_worst: None,
+            underline_probe: env::var_os("BT_PROBE_UNDERLINE").is_some(),
         }
     }
 
@@ -670,6 +680,7 @@ impl HeadlessOracle {
         self.audit_occlusion_residue(&frame, elapsed);
         self.audit_live_band_ownership(&frame);
         self.audit_band_texture_backing(&frame);
+        self.audit_underline(&frame, event);
         self.frame_sequence = self.frame_sequence.saturating_add(1);
         Ok(())
     }
@@ -869,6 +880,68 @@ impl HeadlessOracle {
             "REVIEW_AUDIT pages={pages} rendered_history={total_rendered_history} source_rows={total_source_rows}"
         );
         Ok(())
+    }
+
+    /// Opt-in census of the reference/link affordance actually painted into one frame.
+    ///
+    /// The resting mark is a *text* affordance, so its only honest footprint is on cells that still
+    /// spell something. A cell that is blank yet carries `UNDERLINE`/`DOTTED_UNDERLINE` is a stray
+    /// run: the paint outlived the text it was promising about. `blank=` is that count.
+    ///
+    /// It is a diagnostic, not a gate, and it counts two other things that are nobody's defect: a
+    /// declared OSC 8 link whose label runs over a blank cell, and an application's own SGR 4 on an
+    /// empty cell. Both survive with `BT_PROBE_IMAGE_PATHS` unset, which is how to tell them apart
+    /// from the reference affordance — replaying the corpus with path detection off reproduces
+    /// exactly those counts and no others.
+    fn audit_underline(&mut self, frame: &ViewportFrame, event: &str) {
+        let columns = frame.columns.get() as usize;
+        let mut frame_blank = 0usize;
+        for (row, cells) in frame
+            .cells
+            .chunks(columns)
+            .take(frame.drawable_rows())
+            .enumerate()
+        {
+            let marked = cells
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| {
+                    cell.style
+                        .flags
+                        .intersects(CellFlags::UNDERLINE | CellFlags::DOTTED_UNDERLINE)
+                })
+                .map(|(column, _)| column)
+                .collect::<Vec<_>>();
+            if marked.is_empty() {
+                continue;
+            }
+            let blank = marked
+                .iter()
+                .filter(|column| {
+                    cells[**column].text.trim().is_empty() && !cells[**column].wide_spacer
+                })
+                .count();
+            frame_blank += blank;
+            if self.underline_probe {
+                let text = cells
+                    .iter()
+                    .map(|cell| cell.text.as_str())
+                    .collect::<String>();
+                eprintln!(
+                    "UNDERLINE frame={} event={event} row={row} cols={:?} blank={blank} |{}",
+                    self.frame_sequence,
+                    marked,
+                    text.trim_end(),
+                );
+            }
+        }
+        if frame_blank > self.max_blank_underlined {
+            self.max_blank_underlined = frame_blank;
+            self.blank_underlined_worst = Some(format!(
+                "frame={} event={event} cells={frame_blank}",
+                self.frame_sequence
+            ));
+        }
     }
 
     fn dump_geometry(&self, frame: &ViewportFrame) {
@@ -1212,6 +1285,13 @@ fn main() -> Result<(), Box<dyn Error>> {
             "TEXTURE_AUDIT max_textureless_bands={} worst={}",
             oracle.max_textureless_bands,
             oracle.textureless_band_worst.as_deref().unwrap_or("none"),
+        );
+    }
+    if oracle.max_blank_underlined > 0 || env::var_os("BT_PROBE_UNDERLINE").is_some() {
+        eprintln!(
+            "UNDERLINE_AUDIT max_blank_underlined={} worst={}",
+            oracle.max_blank_underlined,
+            oracle.blank_underlined_worst.as_deref().unwrap_or("none"),
         );
     }
     if oracle.max_textureless_bands > 0 {

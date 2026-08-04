@@ -634,18 +634,66 @@ impl ViewportFrame {
     /// that soft-wraps is underlined on both of its rows and a reference that has scrolled halfway
     /// off the top is underlined on the part that is still shown. Source cells and transcript
     /// styles are untouched; this frame is the only thing that changes.
+    ///
+    /// `reference_text` is the reference's own printed characters, and nothing is marked unless the
+    /// selected cells still spell them (user repro 2026-08-04). An anchor span is a claim about
+    /// content that the *frame* has to agree with: a reflow can leave a row's cells sharing an
+    /// anchor with the reference while spelling the blank tail of the row, and painting from the
+    /// anchor alone then laid a dotted run across the blanks and three cells of the next row. The
+    /// content the cells hold is the only thing that can settle this, so it does.
+    ///
+    /// A span the viewport shows only part of is admitted on that part: the run can lose a prefix
+    /// off the top of the frame or a suffix off the bottom, and nothing else — the frame's edge is
+    /// the only thing that may clip it, so the edge is what licenses a partial match.
     pub fn underline_reference_span(
         &mut self,
         start: &ContentAnchor,
         end: &ContentAnchor,
         hover: bool,
+        reference_text: &str,
     ) -> bool {
-        let mut marked = false;
-        for (cell, anchors) in self.cells.iter_mut().zip(&self.cell_anchors) {
-            if !bt_doc::content_anchor_between(&anchors.start, start, end) {
-                continue;
-            }
-            marked = true;
+        let selected = self
+            .cell_anchors
+            .iter()
+            .enumerate()
+            .filter(|(_, anchors)| bt_doc::content_anchor_between(&anchors.start, start, end))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        let (Some(first), Some(last)) = (selected.first().copied(), selected.last().copied())
+        else {
+            return false;
+        };
+        // The same normalization every path detector reads the grid through: a wide-character
+        // spacer has no text of its own, and an empty cell is the space it draws.
+        let spelled = selected
+            .iter()
+            .filter(|index| !self.cells[**index].wide_spacer)
+            .map(|index| {
+                let text = self.cells[*index].text.as_str();
+                if text.is_empty() { " " } else { text }
+            })
+            .collect::<String>();
+        // Both edges of what the viewport shows: the frame's first cell, and the last cell it will
+        // draw. The overscan suffix is counted too, because a frame with an exact presentation
+        // offset draws it — the run may legitimately end at either boundary.
+        let drawable_end = self
+            .drawable_rows()
+            .saturating_mul(self.columns.get() as usize)
+            .min(self.cells.len());
+        let clipped_head = first == 0;
+        let clipped_tail = last + 1 == self.cells.len() || last + 1 == drawable_end;
+        let spells_the_reference = !spelled.is_empty()
+            && match (clipped_head, clipped_tail) {
+                (false, false) => spelled == reference_text,
+                (true, false) => reference_text.ends_with(&spelled),
+                (false, true) => reference_text.starts_with(&spelled),
+                (true, true) => reference_text.contains(&spelled),
+            };
+        if !spells_the_reference {
+            return false;
+        }
+        for index in selected {
+            let cell = &mut self.cells[index];
             if hover {
                 cell.style.flags.remove(CellFlags::DOTTED_UNDERLINE);
                 cell.style.flags.insert(CellFlags::UNDERLINE);
@@ -656,7 +704,7 @@ impl ViewportFrame {
                 cell.style.flags.insert(CellFlags::DOTTED_UNDERLINE);
             }
         }
-        marked
+        true
     }
 
     /// Expand a cell hit to a word using the terminal selection delimiter policy. Whitespace and
@@ -3839,6 +3887,91 @@ mod tests {
         assert!(
             frame.anchor_at(2, 0, Bias::Before).unwrap().is_some(),
             "overscan cells and anchors are part of the same presentation rectangle"
+        );
+    }
+
+    /// PIN (user repro 2026-08-04): the resting affordance may not be painted from an anchor span
+    /// the frame's own cells disagree with.
+    ///
+    /// An anchor pair says "the reference is between here and here". The frame decides which cells
+    /// that names, and after a reflow the two can disagree badly: replaying `image-accept` at a
+    /// pane-widening resize handed a 44-character path's span the rest of its row — 48 blank cells
+    /// — plus the first three cells of the line below, and the paint dutifully dotted all of them.
+    /// The cells' own text is the only thing that can settle the disagreement, so the paint asks
+    /// it: mark the run only when it still spells the reference.
+    ///
+    /// RED CHECK: deleting the `spells_the_reference` gate marks the over-wide span here, and reds
+    /// the second assertion below. The truthful span in the same frame stays green either way,
+    /// which is what makes this a pin about the disagreement rather than about the affordance.
+    #[test]
+    fn an_anchor_span_the_frame_cells_do_not_spell_paints_nothing() {
+        let projection = ViewportProjection::new(
+            key(10),
+            DetectionRevision(1),
+            nz32(2),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        let build = || {
+            projection
+                .live_frame(
+                    nz32(10),
+                    vec![
+                        CapturedRow::plain("x/a.png   ", false),
+                        CapturedRow::plain("before    ", false),
+                    ],
+                    GridCursor {
+                        row: 1,
+                        column: 0,
+                        visible: true,
+                    },
+                )
+                .unwrap()
+        };
+        let live = |row, column, bias| ContentAnchor::Live {
+            screen: ScreenId::Primary,
+            point: GridPoint { row, column },
+            bias,
+            generation: GridGeneration(1),
+        };
+        let marked = |frame: &ViewportFrame| {
+            frame
+                .cells
+                .iter()
+                .enumerate()
+                .filter(|(_, cell)| {
+                    cell.style
+                        .flags
+                        .intersects(CellFlags::UNDERLINE | CellFlags::DOTTED_UNDERLINE)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>()
+        };
+
+        // The truthful span: the reference's own seven cells, which spell it exactly.
+        let mut frame = build();
+        assert!(frame.underline_reference_span(
+            &live(0, 0, Bias::Before),
+            &live(0, 7, Bias::After),
+            false,
+            "x/a.png",
+        ));
+        assert_eq!(marked(&frame), (0..7).collect::<Vec<_>>());
+
+        // The reflowed span, running past the reference into the row's blank tail and on into the
+        // line below — the exact shape `image-accept` produced at a resize.
+        let mut frame = build();
+        assert!(!frame.underline_reference_span(
+            &live(0, 0, Bias::Before),
+            &live(1, 3, Bias::After),
+            false,
+            "x/a.png",
+        ));
+        assert_eq!(
+            marked(&frame),
+            Vec::<usize>::new(),
+            "a span the cells do not spell promises nothing, not even on the part that matches",
         );
     }
 

@@ -152,6 +152,18 @@ pub struct InlineImageRecordView {
     pub local_path: Option<PathBuf>,
 }
 
+/// One verified image reference as the affordance layer sees it: where it is, and what it says.
+///
+/// The text travels with the anchors on purpose. A span alone is a coordinate, and the whole point
+/// of the 2026-08-04 stray-underline fix is that a coordinate is not evidence — whoever paints or
+/// acts on this span re-checks that the cells still spell `text` before doing so.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImageReferenceSpan {
+    pub start: ContentAnchor,
+    pub end: ContentAnchor,
+    pub text: String,
+}
+
 #[derive(Clone, Debug)]
 enum InlineImageRecordKind {
     Osc1337 {
@@ -164,6 +176,17 @@ enum InlineImageRecordKind {
     LocalPath {
         path: PathBuf,
         source_text: String,
+        /// The reference's OWN printed characters — exactly the text between `start_anchor` and
+        /// `end_anchor`, which is a strict substring of `source_text` (the whole logical line).
+        ///
+        /// This is the record's content witness. An anchor pair is a coordinate, and a coordinate
+        /// outlives the text that earned it: the line editor rewrites its buffer in place, a
+        /// history recall erases the tail with spaces, a repaint moves the reference elsewhere.
+        /// Painting the resting affordance from the coordinate alone put dotted runs on cells that
+        /// had gone blank (user repro 2026-08-04, `.tmp-repaint-capture/affordance-verify.vt`).
+        /// The affordance is therefore a function of what those cells currently *spell*, and this
+        /// is what they have to spell — see `reference_span_content`.
+        reference_text: String,
         start_anchor: AnchorId,
         /// How the reference is spelled — the record's copy of the detector's own verdict, so
         /// `projected_inline_image` can refuse a band to a URI without re-reading the line.
@@ -199,6 +222,9 @@ struct InlineImageGeometry {
 struct DetectedLiveImagePath {
     path: PathBuf,
     source_text: String,
+    /// The reference's own printed characters, in the cell normalization
+    /// `captured_row_text_and_boundaries` produces. Becomes the record's content witness.
+    reference_text: String,
     shape: ImageReferenceShape,
     start: GridPoint,
     end: GridPoint,
@@ -1383,18 +1409,17 @@ impl DualPlaneSession {
 
     /// Resolve a click capability only from a local-path record whose worker validation and decode
     /// succeeded. Path-looking terminal text that is pending or failed is intentionally inert.
+    ///
+    /// The span is the affordance's own — content-witnessed, not remembered — so the verb reaches
+    /// exactly the cells wearing the underline that promised it, and a cell whose text has been
+    /// overwritten is as inert as one that never named a picture.
     pub fn decoded_local_image_path_at(&self, anchor: &ContentAnchor) -> Option<PathBuf> {
         self.inline_images.values().find_map(|record| {
-            record.artifact.as_ref()?;
-            let InlineImageRecordKind::LocalPath {
-                path, start_anchor, ..
-            } = &record.kind
-            else {
+            let InlineImageRecordKind::LocalPath { path, .. } = &record.kind else {
                 return None;
             };
-            let start = self.document.anchor(*start_anchor).ok()?;
-            let end = self.document.anchor(record.end_anchor).ok()?;
-            content_anchor_between(anchor, start, end).then(|| path.clone())
+            let span = self.verified_image_reference_span(record)?;
+            content_anchor_between(anchor, &span.start, &span.end).then(|| path.clone())
         })
     }
 
@@ -1410,19 +1435,131 @@ impl DualPlaneSession {
     ///
     /// Spans are half-open `[start, end)` over the reference's own characters, which is the URI's
     /// text for a URI and the path's text for a path — exactly the span the peek answers on.
-    pub fn verified_image_reference_spans(&self) -> Vec<(ContentAnchor, ContentAnchor)> {
+    pub fn verified_image_reference_spans(&self) -> Vec<ImageReferenceSpan> {
         self.inline_images
             .values()
-            .filter_map(|record| {
-                record.artifact.as_ref()?;
-                let InlineImageRecordKind::LocalPath { start_anchor, .. } = &record.kind else {
-                    return None;
-                };
-                let start = self.document.anchor(*start_anchor).ok()?.clone();
-                let end = self.document.anchor(record.end_anchor).ok()?.clone();
-                Some((start, end))
-            })
+            .filter_map(|record| self.verified_image_reference_span(record))
             .collect()
+    }
+
+    /// One verified record's span, **if the content between its anchors still spells its
+    /// reference**.
+    ///
+    /// An anchor pair is a memory of where the reference was, and that memory outlives the text.
+    /// The line editor rewrites its buffer in place; a history recall erases the old command's tail
+    /// with spaces; a repaint moves the reference to another column. Between the rewrite and the
+    /// next stability window that re-seats or retires the record (`reconcile_live_image_paths`),
+    /// the remembered coordinate names cells that spell something else — or nothing at all. Paint
+    /// from the coordinate and you get the user's repro: dotted runs lying across blank rows
+    /// (`.tmp-repaint-capture/affordance-verify.vt`, 146 blank cells underlined at its peak).
+    ///
+    /// So the coordinate does not decide; the content does. The record carries the characters it
+    /// was verified from, and the affordance appears only where those exact characters are still
+    /// shown. This is the identity discipline the bands already use — a proven row is matched by
+    /// its text, not by its row number — and it is the same question `local_image_path_probe_at`
+    /// asks the peek: both re-read the plane, so both answer about the frame that exists now.
+    ///
+    /// A `Staging` anchor answers `None`, exactly as the peek does: a row on its way from the grid
+    /// to the transcript is a coordinate in flight, and neither the affordance nor the peek claims
+    /// anything about it until it lands.
+    fn verified_image_reference_span(
+        &self,
+        record: &InlineImageRecord,
+    ) -> Option<ImageReferenceSpan> {
+        record.artifact.as_ref()?;
+        let InlineImageRecordKind::LocalPath {
+            start_anchor,
+            reference_text,
+            ..
+        } = &record.kind
+        else {
+            return None;
+        };
+        let start = self.document.anchor(*start_anchor).ok()?.clone();
+        let end = self.document.anchor(record.end_anchor).ok()?.clone();
+        (self.reference_span_content(&start, &end).as_deref() == Some(reference_text.as_str()))
+            .then_some(ImageReferenceSpan {
+                start,
+                end,
+                text: reference_text.clone(),
+            })
+    }
+
+    /// The characters the terminal currently shows between two anchors of the same plane, in the
+    /// one normalization the path detectors read (`captured_cells_text` / the line's own text).
+    ///
+    /// `None` when the two anchors do not name one readable stretch of one plane: different
+    /// screens, a superseded grid generation, two different transcript lines, a staged row, or a
+    /// span running past the end of what is there. A caller comparing against a witness therefore
+    /// treats "cannot read" and "reads differently" alike, which is the honest reading of both.
+    fn reference_span_content(&self, start: &ContentAnchor, end: &ContentAnchor) -> Option<String> {
+        match (start, end) {
+            (
+                ContentAnchor::Live {
+                    screen,
+                    point: start_point,
+                    generation,
+                    ..
+                },
+                ContentAnchor::Live {
+                    screen: end_screen,
+                    point: end_point,
+                    generation: end_generation,
+                    ..
+                },
+            ) => {
+                if screen != end_screen
+                    || generation != end_generation
+                    || *screen != self.live_screen
+                    || *generation != self.grid_generation
+                    || end_point <= start_point
+                {
+                    return None;
+                }
+                // The whole WRAPLINE-joined logical line, so a reference that soft-wraps is read
+                // across its rows exactly as the detector wrote it.
+                let (logical_text, segments) =
+                    self.live_logical_line_containing(start_point.row)?;
+                let mut content = String::new();
+                for segment in &segments {
+                    let row_text = logical_text.get(segment.byte_start..segment.byte_end)?;
+                    for cell in boundary_cells(row_text, &segment.boundaries) {
+                        let point = GridPoint {
+                            row: segment.row,
+                            column: cell.columns.0,
+                        };
+                        if *start_point <= point && point < *end_point {
+                            content.push_str(cell.text);
+                        }
+                    }
+                }
+                Some(content)
+            }
+            (
+                ContentAnchor::History {
+                    id,
+                    offset: start_offset,
+                    generation,
+                    ..
+                },
+                ContentAnchor::History {
+                    id: end_id,
+                    offset: end_offset,
+                    generation: end_generation,
+                    ..
+                },
+            ) => {
+                if id != end_id || generation != end_generation {
+                    return None;
+                }
+                let entry = self.document.entries().get(id)?;
+                if entry.line.source_generation != *generation {
+                    return None;
+                }
+                frozen_text_between(&entry.line, *start_offset, *end_offset).map(str::to_owned)
+            }
+            _ => None,
+        }
     }
 
     /// The verified reference span covering `anchor`, for the pointer's hover upgrade. Same set as
@@ -1430,10 +1567,10 @@ impl DualPlaneSession {
     pub fn verified_image_reference_at(
         &self,
         anchor: &ContentAnchor,
-    ) -> Option<(ContentAnchor, ContentAnchor)> {
+    ) -> Option<ImageReferenceSpan> {
         self.verified_image_reference_spans()
             .into_iter()
-            .find(|(start, end)| content_anchor_between(anchor, start, end))
+            .find(|span| content_anchor_between(anchor, &span.start, &span.end))
     }
 
     /// Paint the resting affordance of every verified reference onto one frame.
@@ -1445,8 +1582,8 @@ impl DualPlaneSession {
     /// wears, and it appears wherever the reference is — including inside the command line the user
     /// is typing.
     fn decorate_image_reference_affordance(&self, frame: &mut ViewportFrame) {
-        for (start, end) in self.verified_image_reference_spans() {
-            frame.underline_reference_span(&start, &end, false);
+        for span in self.verified_image_reference_spans() {
+            frame.underline_reference_span(&span.start, &span.end, false, &span.text);
         }
     }
 
@@ -6111,6 +6248,7 @@ impl DualPlaneSession {
                     source_text,
                     start_anchor,
                     shape,
+                    ..
                 } = &record.kind
                 else {
                     return None;
@@ -6193,6 +6331,7 @@ impl DualPlaneSession {
                 let occurrence = self.register_local_image_path(
                     candidate.path,
                     candidate.source_text,
+                    candidate.reference_text,
                     candidate.shape,
                     ContentAnchor::Live {
                         screen,
@@ -6295,9 +6434,15 @@ impl DualPlaneSession {
                 let Some(end) = live_path_point(segments, candidate.byte_end, true) else {
                     continue;
                 };
+                let Some(reference_text) =
+                    logical_text.get(candidate.byte_start..candidate.byte_end)
+                else {
+                    continue;
+                };
                 detected.push(DetectedLiveImagePath {
                     path: PathBuf::from(candidate.path),
                     source_text: logical_text.to_owned(),
+                    reference_text: reference_text.to_owned(),
                     shape: candidate.shape,
                     start,
                     end,
@@ -6353,6 +6498,9 @@ impl DualPlaneSession {
                     detected.push(DetectedLiveImagePath {
                         path,
                         source_text,
+                        // A link's printed text is its label, not its target; the label is what
+                        // these cells spell and therefore what the witness has to find there.
+                        reference_text: captured_cells_text(&captured.cells[column..end]),
                         shape: ImageReferenceShape::Uri,
                         start: GridPoint {
                             row,
@@ -6472,9 +6620,16 @@ impl DualPlaneSession {
             if band_gates && self.semantic_input_overlaps_history_through(id, Some(end_offset)) {
                 continue;
             }
+            // Both shapes reached here as grapheme ranges over this one line, so one slice is the
+            // witness for both: a printed path spells itself, a link spells its label.
+            let Some(reference_text) = frozen_text_between(&line, start_offset, end_offset) else {
+                continue;
+            };
+            let reference_text = reference_text.to_owned();
             self.register_local_image_path(
                 path,
                 line.text.clone(),
+                reference_text,
                 shape,
                 ContentAnchor::History {
                     id,
@@ -6504,6 +6659,7 @@ impl DualPlaneSession {
         &mut self,
         path: PathBuf,
         source_text: String,
+        reference_text: String,
         shape: ImageReferenceShape,
         start: ContentAnchor,
         end: ContentAnchor,
@@ -6521,6 +6677,7 @@ impl DualPlaneSession {
                 kind: InlineImageRecordKind::LocalPath {
                     path: path.clone(),
                     source_text,
+                    reference_text,
                     start_anchor,
                     shape,
                 },
@@ -9177,6 +9334,22 @@ fn live_candidate_rows(
     candidates
 }
 
+/// The text a run of grid cells spells, in the one normalization every path detector reads: a
+/// wide-character spacer has no text of its own, and an empty cell is the space it draws.
+fn captured_cells_text(cells: &[bt_transcript::CapturedCell]) -> String {
+    cells
+        .iter()
+        .filter(|cell| !cell.wide_spacer)
+        .map(|cell| {
+            if cell.text.is_empty() {
+                " "
+            } else {
+                cell.text.as_str()
+            }
+        })
+        .collect()
+}
+
 fn captured_row_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32)>) {
     let mut text = String::new();
     let mut boundaries = vec![(0, 0)];
@@ -9268,6 +9441,18 @@ fn live_path_point(
         row: segment.row,
         column,
     })
+}
+
+/// The characters one transcript line currently shows between two grapheme offsets. The inverse of
+/// `grapheme_offset_at_byte`, and the frozen half of the reference affordance's content witness.
+fn frozen_text_between(
+    line: &FrozenLine,
+    start: GraphemeOffset,
+    end: GraphemeOffset,
+) -> Option<&str> {
+    let start_byte = *line.grapheme_boundaries.get(start.0 as usize)? as usize;
+    let end_byte = *line.grapheme_boundaries.get(end.0 as usize)? as usize;
+    line.text.get(start_byte..end_byte)
 }
 
 fn grapheme_offset_at_byte(boundaries: &[u32], byte: usize) -> Option<GraphemeOffset> {
@@ -17248,6 +17433,231 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
+    /// Every cell of a frame that wears either affordance mark while spelling nothing. The resting
+    /// underline is a *text* affordance: it decorates characters, so a marked blank cell is a mark
+    /// with nothing under it to be about.
+    fn blank_cells_wearing_the_affordance(frame: &ViewportFrame) -> Vec<(u32, u32)> {
+        let columns = frame.columns.get() as usize;
+        frame
+            .cells
+            .chunks(columns)
+            .take(frame.drawable_rows())
+            .enumerate()
+            .flat_map(|(row, cells)| {
+                cells
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, cell)| {
+                        cell.style.flags.intersects(
+                            bt_transcript::CellFlags::UNDERLINE
+                                | bt_transcript::CellFlags::DOTTED_UNDERLINE,
+                        ) && !cell.wide_spacer
+                            && cell.text.trim().is_empty()
+                    })
+                    .map(move |(column, _)| (row as u32, column as u32))
+            })
+            .collect()
+    }
+
+    /// Every (row, columns) pair of a frame carrying the resting affordance, so a pin can say where
+    /// the mark is *and* that it is nowhere else in one assertion.
+    fn dotted_rows(frame: &ViewportFrame) -> Vec<(u32, Vec<u32>)> {
+        (0..frame.drawable_rows() as u32)
+            .filter_map(|row| {
+                let (dotted, _) = underlined_columns(frame, row);
+                (!dotted.is_empty()).then_some((row, dotted))
+            })
+            .collect()
+    }
+
+    /// The dotted cells a reference of `width` characters starting at frame row `row`, column
+    /// `column` must occupy once the frame's own soft wrap has laid it out.
+    fn wrapped_reference_dots(
+        row: u32,
+        column: u32,
+        width: u32,
+        columns: u32,
+    ) -> Vec<(u32, Vec<u32>)> {
+        let mut dots: Vec<(u32, Vec<u32>)> = Vec::new();
+        for index in 0..width {
+            let absolute = column + index;
+            let cell = (row + absolute / columns, absolute % columns);
+            match dots.last_mut() {
+                Some((last_row, marked)) if *last_row == cell.0 => marked.push(cell.1),
+                _ => dots.push((cell.0, vec![cell.1])),
+            }
+        }
+        dots
+    }
+
+    /// PIN (user repro 2026-08-04, `.tmp-repaint-capture/affordance-verify.vt`): **the resting
+    /// affordance is a function of what the grid currently spells, never of a coordinate the record
+    /// remembers.**
+    ///
+    /// The recording is a PSReadLine history walk in a narrow pane. The editor rewrites its buffer
+    /// in place and erases what the previous, longer command left behind — the recorded bytes are
+    /// literally `CUP 13;1` followed by sixteen spaces. The record's anchors still name that stretch
+    /// and stay there until the next stability window re-seats or retires them, so an affordance
+    /// painted from the anchors alone laid dotted runs across rows that had gone blank: replaying
+    /// that recording at 120x25 under `BT_PROBE_IMAGE_PATHS=1` peaked at 146 blank underlined
+    /// cells, and the user photographed two of them (one across the right half of a blank row, one
+    /// across the left third of the next).
+    ///
+    /// Three properties, one cause:
+    ///   * a reference whose line is overwritten stops being underlined **in the same frame** — not
+    ///     one stability window later, because this frame is the one the user is looking at;
+    ///   * a reference the grid scrolls is underlined at its new place **and nowhere else**;
+    ///   * no cell that spells nothing ever wears the mark, in any phase.
+    ///
+    /// This is the plane's half of the witness — what the grid and the transcript say. The frame
+    /// has a half of its own, because a reflow can make the frame's cell anchors disagree with a
+    /// span the plane still vouches for; that is
+    /// `bt_viewport::…::an_anchor_span_the_frame_cells_do_not_spell_paints_nothing`, and neither
+    /// half subsumes the other.
+    ///
+    /// The reference is deliberately a *substring* of a *soft-wrapped* line, because both are ways
+    /// the witness could be wrong while still looking right: reading the whole logical line instead
+    /// of the reference's own characters, or reading one grid row instead of the WRAPLINE-joined
+    /// line the reference actually occupies.
+    ///
+    /// RED CHECKS, each verified to red this pin on its own:
+    ///   * returning the span from `verified_image_reference_span` without consulting
+    ///     `reference_span_content` — the shipped 84764c1 behaviour — reds phase B while leaving A
+    ///     and C green, which is exactly the shape of the defect;
+    ///   * comparing the content against `source_text` (the whole logical line) instead of
+    ///     `reference_text` reds phase A, because the reference's own characters are a substring of
+    ///     the line it sits in;
+    ///   * reading only `start_point.row` in `reference_span_content` instead of the joined logical
+    ///     line reds phase A, because the reference's tail is on the next grid row;
+    ///   * removing the row shift `capture_rows_transaction` applies to surviving live anchors reds
+    ///     phase C, where the content moves up and the coordinate must move with it.
+    #[test]
+    fn the_resting_affordance_follows_the_text_and_never_the_remembered_coordinate() {
+        // A name without a space, because the reference under test is printed bare (the user's
+        // repro is `echo D:\...\sunset.svg`): an unquoted candidate is a run of path characters,
+        // and a space would end it.
+        let (directory, path) = temporary_path_image_named("sunset.png");
+        let printed = path.display().to_string();
+        let width = printed.chars().count() as u32;
+        let columns = 60u32;
+        // `see ` puts the reference four columns into its line, and 60 columns is narrower than the
+        // path, so the reference soft-wraps onto a second grid row.
+        let line = format!("see {printed} ok");
+        assert!(width > columns, "the fixture reference must soft-wrap");
+        let build = |started: Instant| {
+            let mut session = DualPlaneSession::new(nz(columns), nz(12));
+            enable_path_detection(&mut session);
+            // Two filler lines above and the prompt below, so the reference is never on the
+            // cursor's own logical line and only the affordance is under test here.
+            session
+                .feed_at(format!("a\r\nb\r\n{line}\r\nPS> ").as_bytes(), started)
+                .unwrap();
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+            drain_image_decodes(&mut session);
+            session
+        };
+        let started = Instant::now();
+        let mut session = build(started);
+        let mut projection = session.new_projection(session.layout_key());
+
+        // Phase A: the verified reference wears the mark on its own characters, across the wrap.
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            dotted_rows(&frame),
+            wrapped_reference_dots(2, 4, width, columns),
+            "the reference's own cells, on both of its rows, and nothing else",
+        );
+        assert_eq!(
+            blank_cells_wearing_the_affordance(&frame),
+            Vec::new(),
+            "phase A: a text affordance may not stand on a cell with no text",
+        );
+
+        // Phase B: the line editor recalls a shorter command over the reference's first row and
+        // erases what it does not overwrite, exactly as the recording does. No stability window
+        // follows — this is the very frame the user is looking at — and the record is deliberately
+        // still alive, so what is under test is the paint and not a retirement.
+        let overwrite = format!(
+            "\x1b[3;1HWrite-Output{}",
+            " ".repeat(columns as usize - "Write-Output".len())
+        );
+        session
+            .feed_at(
+                overwrite.as_bytes(),
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert_eq!(
+            session.inline_images.len(),
+            1,
+            "the carrier is still alive: this pin is about the paint, not about retirement",
+        );
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            dotted_rows(&frame),
+            Vec::new(),
+            "the characters the mark promised about are gone, so the mark is gone with them — \
+             including the tail that survives on the next row, because half a reference is not one",
+        );
+        assert_eq!(
+            blank_cells_wearing_the_affordance(&frame),
+            Vec::new(),
+            "phase B: the erased span is blank, and blank cells wear nothing",
+        );
+        assert!(
+            session.verified_image_reference_spans().is_empty(),
+            "the hover upgrade reads the same content witness the paint does",
+        );
+        assert_eq!(
+            session.decoded_local_image_path_at(&ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point: GridPoint { row: 2, column: 20 },
+                bias: Bias::Before,
+                generation: session.grid_generation,
+            }),
+            None,
+            "and so does the Ctrl+click verb, so an overwritten cell opens nothing",
+        );
+
+        // Phase C: the same reference, still spelled, carried up the grid by a scroll. The mark
+        // must follow the text rather than stay on the row the record was registered at.
+        let mut session = build(started);
+        let mut projection = session.new_projection(session.layout_key());
+        session
+            .feed_at(
+                b"\r\nc\r\nd\r\ne\r\nf\r\ng\r\nh\r\ni\r\nj",
+                started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1),
+            )
+            .unwrap();
+        session.refresh_projection(&mut projection);
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let moved = frame
+            .row_map
+            .iter()
+            .position(|mapped| {
+                mapped.live_grid_row.is_some_and(|row| {
+                    session.terminal().visible_row(row).is_some_and(|captured| {
+                        captured_cells_text(&captured.cells).starts_with("see ")
+                    })
+                })
+            })
+            .expect("the reference's first row is still on the grid") as u32;
+        assert_eq!(
+            dotted_rows(&frame),
+            wrapped_reference_dots(moved, 4, width, columns),
+            "underlined at its new place and nowhere else",
+        );
+        assert_eq!(
+            blank_cells_wearing_the_affordance(&frame),
+            Vec::new(),
+            "phase C: and the rows it left behind keep nothing",
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
     /// PIN (verification ruling 2026-08-04, part B): a path-looking string that names no file stays
     /// plain text. No dots, no solid underline, no click.
     ///
@@ -17390,10 +17800,10 @@ mod tests {
         // What the app does on every publish: resolve the pointer's cell to a content anchor, ask
         // the session for the verified span covering it, and upgrade that span.
         let hovered = frame.anchor_at(0, 20, Bias::Before).unwrap().unwrap();
-        let (start, end) = session
+        let span = session
             .verified_image_reference_at(&hovered)
             .expect("the pointer is standing on a verified reference");
-        assert!(frame.underline_reference_span(&start, &end, true));
+        assert!(frame.underline_reference_span(&span.start, &span.end, true, &span.text));
         assert_eq!(
             underlined_columns(&frame, 0),
             (Vec::new(), reference_columns),

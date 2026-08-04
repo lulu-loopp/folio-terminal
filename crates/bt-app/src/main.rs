@@ -298,7 +298,7 @@ struct Runtime {
     /// pointer has moved onto or off a reference and a repaint is therefore owed — so there is one
     /// source of truth (the session, asked at compose time) and this is a record of what it last
     /// said, never a second opinion.
-    underlined_image_reference: Option<(bt_doc::ContentAnchor, bt_doc::ContentAnchor)>,
+    underlined_image_reference: Option<bt_term::ImageReferenceSpan>,
     peek_hover: PeekHover,
     peek_cache: std::collections::HashMap<String, PeekCacheEntry>,
     /// The one display-sized thumbnail the flyout can draw, and the one resample in flight. See
@@ -1427,8 +1427,8 @@ impl Runtime {
         // the underline is the affordance and follows the pointer immediately, while the 300ms
         // settle belongs to what the hover *reveals* — a tooltip there, a thumbnail here.
         let hovered_reference = self.hovered_image_reference();
-        if let Some((start, end)) = hovered_reference.as_ref() {
-            terminal_frame.underline_reference_span(start, end, true);
+        if let Some(span) = hovered_reference.as_ref() {
+            terminal_frame.underline_reference_span(&span.start, &span.end, true, &span.text);
         }
         self.underlined_image_reference = hovered_reference;
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
@@ -1780,7 +1780,7 @@ impl Runtime {
     /// a pure function of "where is the pointer" and "what has the worker verified", and both can
     /// change without a pointer event: a decode landing turns a plain span into an underlined one
     /// under a pointer that never moved.
-    fn hovered_image_reference(&self) -> Option<(bt_doc::ContentAnchor, bt_doc::ContentAnchor)> {
+    fn hovered_image_reference(&self) -> Option<bt_term::ImageReferenceSpan> {
         let hit = self.frame_hit()?;
         let anchor = self
             .last_presented_frame
