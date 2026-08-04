@@ -259,6 +259,14 @@ struct Runtime {
     projection: ViewportProjection,
     pending_frames: LatestFrameSlot,
     grid: GridSize,
+    /// The size the child has actually been told about — never a size that has only been solved or
+    /// queued. It is the same value as `grid` at rest, and the two are deliberately separate only
+    /// where they genuinely differ: inside the `WINDOW_RESIZE_QUIET` coalescing window our grid has
+    /// already reflowed while the child has not heard yet, and under the typed-input deferral
+    /// (`schedule_grid_change`) neither has moved but a target is queued. Asking "does the child
+    /// need to hear this?" of our own grid answers that question with the wrong fact, and a drag
+    /// that comes back to where the child already sits would then still send it a resize.
+    conpty_grid: GridSize,
     modifiers: ModifiersState,
     pending_keyboard_at: Option<Instant>,
     math_context_menu: bt_platform::MathContextMenu,
@@ -368,7 +376,7 @@ fn take_due_pty_resize(
 
 /// The single gate between a solved grid and ConPTY.
 ///
-/// A solve that answers what `current_grid` already holds must schedule nothing: the ConPTY
+/// A solve that answers what `conpty_grid` already holds must schedule nothing: the ConPTY
 /// sidecar review pinned at 83dbcd3 found that any live resize call is unsafe while a shell is
 /// still initializing (PSReadLine caches its own cursor anchor, and a reflow invalidates it — a
 /// defect in conhost itself, not the sidecar), and a call whose columns and rows do not move is
@@ -378,18 +386,87 @@ fn take_due_pty_resize(
 /// — whose spawn-time grid already *is* the seat's resolved grid — reaches zero ConPTY resize
 /// requests after spawn. Returns whether the grid actually changed, so a call site can gate its own
 /// terminal-actor resize on the identical decision.
+///
+/// `conpty_grid` is what the child was last *told*, which is why the same answer also cancels a
+/// queued request: a drag that wanders out and comes back leaves the child exactly where it already
+/// was, and replaying the intermediate size at release would be a resize nobody asked for. (Before
+/// the typed-input deferral the two grids could not diverge far enough for this to be observable;
+/// under it they can, and "exactly one resize at release, carrying the final size" would otherwise
+/// be false whenever the final size is the one the child never left.)
 fn coalesce_pty_resize_on_grid_change(
     pending: &mut Option<PendingPtyResize>,
     next_grid: GridSize,
-    current_grid: GridSize,
+    conpty_grid: GridSize,
     physical: PhysicalSize<u32>,
     observed_at: Instant,
 ) -> bool {
-    let changed = next_grid != current_grid;
+    let changed = next_grid != conpty_grid;
     if changed {
         coalesce_pty_resize(pending, next_grid, physical, observed_at);
+    } else {
+        *pending = None;
     }
     changed
+}
+
+/// The typed-input half of the same gate (user ruling 2026-08-04).
+///
+/// PSReadLine — 2.0.0 and 2.4.5 alike — reduces its cached render-anchor *column* modulo the new
+/// width whenever the pane narrows, and never restores it when the pane widens again. The fault
+/// arms only while its input buffer is non-empty across that narrowing; the next redraw then
+/// splices into the prompt row. Three commits of ours produced byte-identical corruption and an
+/// independent reference terminal reproduced it from the child's own bytes, so there is nothing on
+/// our side to correct — the only faithful mitigation is not to tell the child about a width it
+/// would re-anchor against while it is holding text.
+///
+/// So a due resize is held back while `typed_input_live`, and released the moment that is false.
+/// The release is a *question about current state*, never a timer: the input region closing
+/// (submission), its content going empty (the line cleared), a screen switch, a reset, ED 2 or an
+/// alternate-screen transition all make `DualPlaneSession::typed_shell_input_live` answer `false`,
+/// and every one of them reaches us as child output — which wakes the event loop on its own. That
+/// is also why `pty_resize_wake_deadline` withholds the deadline while the gate holds: there is
+/// nothing to wait *for*, and offering an already-past instant would spin the loop.
+fn release_due_pty_resize(
+    pending: &mut Option<PendingPtyResize>,
+    now: Instant,
+    typed_input_live: bool,
+) -> Option<PendingPtyResize> {
+    (!typed_input_live)
+        .then(|| take_due_pty_resize(pending, now))
+        .flatten()
+}
+
+/// The whole scheduling decision `Runtime::schedule_grid_change` makes, with no window in it:
+/// queue (or cancel) what the child still owes, and answer the grid our own actor should reflow to
+/// *now* — `None` while the gate holds, because the ruling forbids letting our grid and ConPTY's
+/// drift apart across the deferral. They move together at release instead.
+fn plan_grid_change(
+    pending: &mut Option<PendingPtyResize>,
+    next_grid: GridSize,
+    conpty_grid: GridSize,
+    local_grid: GridSize,
+    physical: PhysicalSize<u32>,
+    observed_at: Instant,
+    typed_input_live: bool,
+) -> Option<GridSize> {
+    coalesce_pty_resize_on_grid_change(pending, next_grid, conpty_grid, physical, observed_at);
+    (next_grid != local_grid && !typed_input_live).then_some(next_grid)
+}
+
+/// The instant the coalesced ConPTY resize falls due, or `None` while nothing is owed or the
+/// typed-input gate is holding it.
+///
+/// Withholding it while held is not an optimisation: the deadline has usually already passed by
+/// then, and handing an event loop a past instant to wait until is a spin. There is nothing to
+/// wait *for* either — every release is child output, which wakes the loop by itself.
+fn pty_resize_wake_deadline(
+    pending: Option<PendingPtyResize>,
+    typed_input_live: bool,
+) -> Option<Instant> {
+    (!typed_input_live)
+        .then_some(pending)
+        .flatten()
+        .map(|pending| pending.deadline)
 }
 
 #[derive(Clone)]
@@ -1085,6 +1162,8 @@ impl Runtime {
             projection,
             pending_frames: LatestFrameSlot::default(),
             grid,
+            // `PtySession::spawn_default` above was handed exactly this grid.
+            conpty_grid: grid,
             modifiers: ModifiersState::default(),
             pending_keyboard_at: None,
             math_context_menu,
@@ -1330,23 +1409,16 @@ impl Runtime {
         self.renderer.set_peek_overlay(None);
         let next_grid = self.resolve_seat_layout(render_physical);
         let now = Instant::now();
-        if coalesce_pty_resize_on_grid_change(
-            &mut self.pending_pty_resize,
+        self.schedule_grid_change(
             next_grid,
-            self.grid,
             terminal_pty_physical(&self.renderer, render_physical),
             now,
-        ) {
-            self.session
-                .resize(
-                    nonzero_u32(next_grid.columns.get()),
-                    nonzero_u32(next_grid.rows.get()),
-                )
-                .context("resize terminal actor for a seat layout change")?;
-            self.grid = next_grid;
-        }
+            "resize terminal actor for a seat layout change",
+        )?;
         self.sync_math_layout_key();
-        self.pending_resize_present = Some(next_grid);
+        // The grid actually in force, which under the typed-input gate is still the old one. The
+        // present gate admits the grid the frame will really carry, never the one merely solved.
+        self.pending_resize_present = Some(self.grid);
         self.mark_session_dirty(now);
         self.publish_frame(FrameTrigger {
             occurred_at: now,
@@ -1718,14 +1790,85 @@ impl Runtime {
         Ok(())
     }
 
-    fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<()> {
-        let Some(pending) = take_due_pty_resize(&mut self.pending_pty_resize, now) else {
+    /// Carry a freshly solved grid to the child and to our own grid — or, while the shell is
+    /// holding typed input, to neither.
+    ///
+    /// The seat rectangle has already moved by the time this is called (`resolve_seat_layout` is
+    /// what produced `next_grid`), so a drag stays exactly as responsive as it is today. What is
+    /// deferred is the pair: the ruling forbids desynchronizing our grid from ConPTY's, so under
+    /// the gate they both stay at the old width and `flush_pending_pty_resize` moves them together.
+    /// A grid that is wider than its seat is already the ordinary case for the renderer — the seat
+    /// viewport scissors it — and it is the case a divider drag produces on every frame.
+    fn schedule_grid_change(
+        &mut self,
+        next_grid: GridSize,
+        physical: PhysicalSize<u32>,
+        observed_at: Instant,
+        context: &'static str,
+    ) -> Result<()> {
+        let deferred = self.typed_input_defers_resize();
+        let Some(reflow) = plan_grid_change(
+            &mut self.pending_pty_resize,
+            next_grid,
+            self.conpty_grid,
+            self.grid,
+            physical,
+            observed_at,
+            deferred,
+        ) else {
             return Ok(());
         };
+        self.session
+            .resize(
+                nonzero_u32(reflow.columns.get()),
+                nonzero_u32(reflow.rows.get()),
+            )
+            .context(context)?;
+        self.grid = reflow;
+        Ok(())
+    }
+
+    fn pty_resize_wake_deadline(&self) -> Option<Instant> {
+        pty_resize_wake_deadline(self.pending_pty_resize, self.typed_input_defers_resize())
+    }
+
+    /// Is a PTY resize deferred right now?
+    ///
+    /// A child holding typed input is the whole reason to defer, so `BT_PROBE_INPUT` — which feeds
+    /// a recording straight into the session and spawns no child at all — is not deferred by a
+    /// region that recording happens to contain. There is no PTY resize to withhold there, and a
+    /// diagnostic replay must reflow when the window says so.
+    fn typed_input_defers_resize(&self) -> bool {
+        self.pty.is_some() && self.session.typed_shell_input_live()
+    }
+
+    fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<()> {
+        let deferred = self.typed_input_defers_resize();
+        let Some(pending) = release_due_pty_resize(&mut self.pending_pty_resize, now, deferred)
+        else {
+            return Ok(());
+        };
+        // The deferred local reflow lands here, immediately before the child hears the same size,
+        // in the same order the undeferred path uses (actor first, then ConPTY, then the vendor
+        // reconcile). When nothing was deferred this is a no-op: our grid already moved at the
+        // `Resized` that scheduled this.
+        let reflowed = pending.grid != self.grid;
+        if reflowed {
+            self.session
+                .resize(
+                    nonzero_u32(pending.grid.columns.get()),
+                    nonzero_u32(pending.grid.rows.get()),
+                )
+                .context("resize terminal actor for a released ConPTY resize")?;
+            self.grid = pending.grid;
+            self.sync_math_layout_key();
+            self.pending_resize_present = Some(pending.grid);
+        }
         if let Some(pty) = self.pty.as_ref() {
             pty.resize(pty_size(pending.grid, pending.physical))
                 .context("commit coalesced final ConPTY resize")?;
         }
+        self.conpty_grid = pending.grid;
         // The quiet boundary is also where a resize *ends*, so it is the
         // meaningful change §5.1 asks the session write to be debounced behind.
         // Marking it on every intermediate `Resized` would turn one drag of a
@@ -1736,7 +1879,7 @@ impl Runtime {
             nonzero_u32(pending.grid.rows.get()),
             now,
         );
-        if reconciled {
+        if reconciled || reflowed {
             self.publish_frame(FrameTrigger {
                 occurred_at: now,
                 source: FrameSource::Resize,
@@ -3123,23 +3266,15 @@ impl Runtime {
         // A `Resized` that settles back onto the grid ConPTY already has — the common shape of
         // the very first delivery after a clean, same-DPI session restore — must not schedule a
         // real ConPTY resize at all; see `coalesce_pty_resize_on_grid_change`.
-        if coalesce_pty_resize_on_grid_change(
-            &mut self.pending_pty_resize,
+        self.schedule_grid_change(
             next_grid,
-            self.grid,
             terminal_pty_physical(&self.renderer, render_physical),
             observed_at,
-        ) {
-            self.session
-                .resize(
-                    nonzero_u32(next_grid.columns.get()),
-                    nonzero_u32(next_grid.rows.get()),
-                )
-                .context("resize terminal actor")?;
-            self.grid = next_grid;
-        }
+            "resize terminal actor",
+        )?;
         self.sync_math_layout_key();
-        self.pending_resize_present = Some(next_grid);
+        // The grid actually in force, which under the typed-input gate is still the old one.
+        self.pending_resize_present = Some(self.grid);
         self.publish_frame(resize_trigger)?;
         // Windows dispatches Resized from its modal move/size loop. `Renderer::resize` only records
         // the requested swapchain geometry; `present` prepares this newly projected frame first,
@@ -3200,21 +3335,12 @@ impl Runtime {
             self.refresh_work_area();
             self.apply_window_min_inner_size();
             let next_grid = self.resolve_seat_layout(render_physical);
-            if coalesce_pty_resize_on_grid_change(
-                &mut self.pending_pty_resize,
+            self.schedule_grid_change(
                 next_grid,
-                self.grid,
                 terminal_pty_physical(&self.renderer, render_physical),
                 Instant::now(),
-            ) {
-                self.session
-                    .resize(
-                        nonzero_u32(next_grid.columns.get()),
-                        nonzero_u32(next_grid.rows.get()),
-                    )
-                    .context("rebuild terminal grid after authoritative DPI correction")?;
-                self.grid = next_grid;
-            }
+                "rebuild terminal grid after authoritative DPI correction",
+            )?;
         }
         self.sync_math_layout_key();
         self.publish_frame(FrameTrigger {
@@ -3529,7 +3655,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         let wake_deadline = [
             startup_deadline,
             runtime.ime_cursor_throttle.deadline(),
-            runtime.pending_pty_resize.map(|pending| pending.deadline),
+            runtime.pty_resize_wake_deadline(),
             runtime.session.resize_finish_deadline(),
             runtime.session.synchronized_update_deadline(),
             runtime.session.live_stability_deadline(),
@@ -5417,6 +5543,255 @@ mod tests {
         assert!(
             take_due_pty_resize(&mut pending, now + WINDOW_RESIZE_QUIET).is_some(),
             "an unconditional coalesce call schedules a resize even for an unchanged grid"
+        );
+    }
+
+    /// The scheduling half of `Runtime`, with no GPU in it.
+    ///
+    /// Every decision below is taken by the *production* functions — `plan_grid_change`,
+    /// `release_due_pty_resize`, `pty_resize_wake_deadline` — and the gate answer comes from a real
+    /// `DualPlaneSession` fed real OSC 133 bytes, not from a bool a test invented. What the harness
+    /// itself owns is only the bookkeeping the runtime does around them: applying the reflow to the
+    /// session, and recording the ConPTY requests that were actually issued.
+    struct ResizeGateHarness {
+        session: DualPlaneSession,
+        pending: Option<PendingPtyResize>,
+        grid: GridSize,
+        conpty: GridSize,
+        requests: Vec<GridSize>,
+    }
+
+    impl ResizeGateHarness {
+        fn new(columns: u16, rows: u16) -> Self {
+            let grid = grid_of(columns, rows);
+            Self {
+                session: DualPlaneSession::new(
+                    NonZeroU32::from(grid.columns),
+                    NonZeroU32::from(grid.rows),
+                ),
+                pending: None,
+                grid,
+                conpty: grid,
+                requests: Vec::new(),
+            }
+        }
+
+        fn feed(&mut self, bytes: &[u8], at: Instant) {
+            self.session.feed_at(bytes, at).unwrap();
+        }
+
+        /// One `WindowEvent::Resized` worth of work: the seat has already moved, the solve has
+        /// answered `columns`, and this is everything `Runtime::resize` does with that answer.
+        fn drag_to(&mut self, columns: u16, at: Instant) {
+            let next = grid_of(columns, self.grid.rows.get());
+            if let Some(reflow) = plan_grid_change(
+                &mut self.pending,
+                next,
+                self.conpty,
+                self.grid,
+                PhysicalSize::new(u32::from(columns) * 8, 600),
+                at,
+                self.session.typed_shell_input_live(),
+            ) {
+                self.session
+                    .resize(
+                        NonZeroU32::from(reflow.columns),
+                        NonZeroU32::from(reflow.rows),
+                    )
+                    .unwrap();
+                self.grid = reflow;
+            }
+        }
+
+        /// One `about_to_wait`: drain has already happened, so the gate is asked again here.
+        fn tick(&mut self, at: Instant) {
+            let Some(pending) = release_due_pty_resize(
+                &mut self.pending,
+                at,
+                self.session.typed_shell_input_live(),
+            ) else {
+                return;
+            };
+            if pending.grid != self.grid {
+                self.session
+                    .resize(
+                        NonZeroU32::from(pending.grid.columns),
+                        NonZeroU32::from(pending.grid.rows),
+                    )
+                    .unwrap();
+                self.grid = pending.grid;
+            }
+            self.conpty = pending.grid;
+            self.requests.push(pending.grid);
+        }
+
+        fn wake_deadline(&self) -> Option<Instant> {
+            pty_resize_wake_deadline(self.pending, self.session.typed_shell_input_live())
+        }
+    }
+
+    fn grid_of(columns: u16, rows: u16) -> GridSize {
+        GridSize {
+            columns: std::num::NonZeroU16::new(columns).unwrap(),
+            rows: std::num::NonZeroU16::new(rows).unwrap(),
+        }
+    }
+
+    /// PIN (user ruling 2026-08-04): while an OSC 133 input region holds typed content, a PTY
+    /// resize is deferred — zero requests during the drag, exactly one at release carrying the
+    /// final dragged size, and our own grid held in lockstep with the child's the whole way.
+    ///
+    /// This is the minimal repro's shape, in the app's own scheduling terms: type without
+    /// submitting, drag narrower than the prompt, drag wider again, and only then let go.
+    #[test]
+    fn a_drag_while_the_shell_holds_typed_input_reaches_conpty_exactly_once_at_release() {
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(100, 24);
+        harness.feed(
+            b"\x1b]133;A\x07PS D:\\Developer\\BetterTerminal> \x1b]133;B\x07Get-ChildItem",
+            start,
+        );
+        assert!(harness.session.typed_shell_input_live());
+
+        // The narrowing drag, then the widening one, with the loop turning between each step.
+        for (step, columns) in [92_u16, 84, 70, 39, 55, 80, 96].into_iter().enumerate() {
+            let at = start + Duration::from_millis(20 * step as u64);
+            harness.drag_to(columns, at);
+            harness.tick(at + Duration::from_millis(1));
+        }
+        // Long past every quiet deadline the drag ever set: the gate is not a debounce.
+        harness.tick(start + Duration::from_secs(3600));
+
+        assert!(
+            harness.requests.is_empty(),
+            "zero ConPTY resizes are owed while the child is holding text, got {:?}",
+            harness.requests
+        );
+        assert_eq!(
+            (harness.grid, harness.conpty),
+            (grid_of(100, 24), grid_of(100, 24)),
+            "our grid and the child's stay in lockstep at the old width across the whole drag"
+        );
+        assert!(
+            harness.wake_deadline().is_none(),
+            "a held resize must not offer the loop a deadline it would spin on"
+        );
+
+        // RELEASE: the command is submitted. The very drain that carries `133;C` is the tick that
+        // lets go, and it carries the last size the drag reached — not the narrow one it passed
+        // through, and not one request per step.
+        let released_at = start + Duration::from_secs(3600);
+        harness.feed(b"\r\n\x1b]133;C\x07", released_at);
+        harness.tick(released_at);
+        assert_eq!(
+            harness.requests,
+            vec![grid_of(96, 24)],
+            "exactly one resize lands at release, carrying the final dragged size"
+        );
+        assert_eq!(harness.grid, grid_of(96, 24));
+        assert_eq!(harness.conpty, grid_of(96, 24));
+    }
+
+    /// PIN: the three cases that must stay exactly as cheap as they are today.
+    #[test]
+    fn an_idle_prompt_a_bare_screen_and_a_cleared_line_all_resize_without_deferral() {
+        let start = Instant::now();
+
+        // An empty prompt: the drag lands as it always has.
+        let mut idle = ResizeGateHarness::new(100, 24);
+        idle.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start);
+        idle.drag_to(80, start);
+        assert_eq!(
+            idle.grid,
+            grid_of(80, 24),
+            "an empty prompt reflows immediately"
+        );
+        idle.tick(start + WINDOW_RESIZE_QUIET);
+        assert_eq!(idle.requests, vec![grid_of(80, 24)]);
+
+        // A screen that never emitted OSC 133 is untouched by any of this.
+        let mut bare = ResizeGateHarness::new(100, 24);
+        bare.feed(b"PS> Get-ChildItem", start);
+        bare.drag_to(80, start);
+        assert_eq!(bare.grid, grid_of(80, 24));
+        bare.tick(start + WINDOW_RESIZE_QUIET);
+        assert_eq!(
+            bare.requests,
+            vec![grid_of(80, 24)],
+            "honest degradation: without shell integration this is today's path, unchanged"
+        );
+
+        // Clearing the line is a release in its own right — no submission needed.
+        let mut cleared = ResizeGateHarness::new(100, 24);
+        cleared.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
+        cleared.drag_to(80, start);
+        cleared.tick(start + WINDOW_RESIZE_QUIET);
+        assert!(cleared.requests.is_empty());
+        cleared.feed(b"\x1b[5G\x1b[K", start);
+        cleared.tick(start + WINDOW_RESIZE_QUIET);
+        assert_eq!(
+            cleared.requests,
+            vec![grid_of(80, 24)],
+            "an emptied line releases the gate with no timer and no submission"
+        );
+    }
+
+    /// PIN: a drag that wanders away and comes back tells the child nothing at all. Without this,
+    /// "exactly one resize at release" would be false whenever the final size is the one the child
+    /// never left — and that resize would be a gratuitous reflow of a settled prompt.
+    #[test]
+    fn a_drag_that_returns_to_the_childs_own_size_releases_nothing() {
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(100, 24);
+        harness.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
+        for columns in [70_u16, 39, 100] {
+            harness.drag_to(columns, start);
+        }
+        harness.feed(b"\r\n\x1b]133;C\x07", start);
+        harness.tick(start + WINDOW_RESIZE_QUIET);
+        assert!(
+            harness.requests.is_empty(),
+            "the child is already 100 columns wide; nothing is owed"
+        );
+        assert_eq!(harness.grid, grid_of(100, 24));
+    }
+
+    /// RED-CHECK for the deferral pin: prove it is not vacuous. This is the pre-mitigation path —
+    /// the same drag with the gate answer forced to `false` — and it is exactly what the forensic
+    /// run showed reaching PSReadLine: the 39-column width, narrower than the prompt, delivered
+    /// while the input buffer is non-empty.
+    #[test]
+    fn without_the_gate_the_same_drag_hands_conpty_the_narrow_width_mid_input() {
+        let start = Instant::now();
+        let mut pending = None;
+        let mut conpty = grid_of(100, 24);
+        let mut local = conpty;
+        let mut requests = Vec::new();
+        for (step, columns) in [92_u16, 84, 70, 39, 55, 80, 96].into_iter().enumerate() {
+            let at = start + Duration::from_millis(20 * step as u64);
+            let next = grid_of(columns, 24);
+            // `typed_input_live: false` is the clause removed.
+            if let Some(reflow) = plan_grid_change(
+                &mut pending,
+                next,
+                conpty,
+                local,
+                PhysicalSize::new(u32::from(columns) * 8, 600),
+                at,
+                false,
+            ) {
+                local = reflow;
+            }
+            if let Some(due) = release_due_pty_resize(&mut pending, at + WINDOW_RESIZE_QUIET, false)
+            {
+                conpty = due.grid;
+                requests.push(due.grid);
+            }
+        }
+        assert!(
+            requests.contains(&grid_of(39, 24)),
+            "the ungated path really does hand the child a width narrower than the prompt, \
+             which is the whole precondition of the PSReadLine anchor fault: {requests:?}"
         );
     }
 

@@ -2481,6 +2481,13 @@ mod tests {
         raw_output: Vec<u8>,
         pending: Option<(u16, u16, Instant)>,
         commits: Vec<(u16, u16)>,
+        /// The typed-input ConPTY resize gate (user ruling 2026-08-04). `false` is the loop exactly
+        /// as it was before the mitigation, which is what makes the before/after pair one probe.
+        typed_input_gate: bool,
+        /// What our own grid holds, and what the child was last told. They are the same number at
+        /// rest; the gate's whole contract is that they stay the same number across a deferral too.
+        grid: (u16, u16),
+        conpty: (u16, u16),
     }
 
     impl AppResizeOracle {
@@ -2497,7 +2504,15 @@ mod tests {
                 raw_output: Vec::new(),
                 pending: None,
                 commits: Vec::new(),
+                typed_input_gate: false,
+                grid: (columns, rows),
+                conpty: (columns, rows),
             }
+        }
+
+        /// The one question the gate asks, or `false` when the probe is running the old loop.
+        fn deferring(&self) -> bool {
+            self.typed_input_gate && self.session.typed_shell_input_live()
         }
 
         /// One turn of the app's event loop.
@@ -2526,8 +2541,22 @@ mod tests {
             if now < deadline {
                 return;
             }
+            // The gate. Held, this returns without taking the pending request, so the request keeps
+            // its final size and lands whole once the shell lets go.
+            if self.deferring() {
+                return;
+            }
             self.pending = None;
+            if (columns, rows) != self.grid {
+                // The reflow deferral owed from `project_resize`, paid here so our grid and the
+                // child's change together rather than drifting apart across the drag.
+                self.session
+                    .resize_at(nz32(columns), nz32(rows), now)
+                    .unwrap();
+                self.grid = (columns, rows);
+            }
             self.pty.resize(size(columns, rows)).unwrap();
+            self.conpty = (columns, rows);
             self.session
                 .mark_pty_resize_requested_at(nz32(columns), nz32(rows), now);
             self.commits.push((columns, rows));
@@ -2536,10 +2565,20 @@ mod tests {
         /// One `WindowEvent::Resized`: projected onto the grid at once, coalesced towards ConPTY.
         fn project_resize(&mut self, columns: u16, rows: u16) {
             let now = Instant::now();
+            // A drag that comes back to the size the child already has owes it nothing, so the
+            // queued intermediate size is dropped rather than replayed at release.
+            self.pending = ((columns, rows) != self.conpty).then_some((
+                columns,
+                rows,
+                now + RESIZE_REQUEST_QUIET,
+            ));
+            if self.deferring() {
+                return;
+            }
             self.session
                 .resize_at(nz32(columns), nz32(rows), now)
                 .unwrap();
-            self.pending = Some((columns, rows, now + RESIZE_REQUEST_QUIET));
+            self.grid = (columns, rows);
         }
 
         fn pump_for(&mut self, duration: Duration) {
@@ -3185,5 +3224,275 @@ mod tests {
             );
         }
         assert!(!outcomes.is_empty(), "the probe drove no live shell");
+    }
+
+    /// The 2026-08-04 minimal repro, as geometry.
+    ///
+    /// The upstream rule the forensic run established: PSReadLine reduces its cached render-anchor
+    /// *column* modulo the new width when the pane narrows, and never restores it when the pane
+    /// widens again. Narrowing below the prompt's own width is what makes the reduced column land
+    /// somewhere the prompt does not reach, and a non-empty buffer across that narrowing is what
+    /// makes the stale anchor survive to be re-used. So the prompt is deliberately wide, the narrow
+    /// step is deliberately narrower than it, and the widening step deliberately returns.
+    const DEFER_PROBE_PROMPT: &str = "BTDEFER D:\\Developer\\BetterTerminal> ";
+    /// Long enough that prompt plus input already occupies two rows at `DEFER_PROBE_WIDE`. The
+    /// forensic sweep found this to be the decisive property: a line editor that re-derives its
+    /// anchor from the post-resize cursor is wrong by exactly the rows its input occupied.
+    const DEFER_PROBE_TYPED: &str =
+        "echo D:\\Developer\\BetterTerminal\\local-images\\sunset-wrapped2.svg";
+    const DEFER_PROBE_NOISE: &str = "BTDEFER_NOISE_ROW_MUST_SURVIVE";
+    const DEFER_PROBE_WIDE: u16 = 100;
+    const DEFER_PROBE_NARROW: u16 = 24;
+    const DEFER_PROBE_ROWS: u16 = 17;
+    /// The line editor notices a pseudoconsole resize on its own poll, not on the resize itself:
+    /// the reporting user's recording repainted 827 ms after the commit with no keystroke involved,
+    /// so a probe that stops pumping when the child goes quiet never sees the repaint that carries
+    /// the stale anchor. Same wait, same reason, as `BURST_STAGE_RECORDED`.
+    const DEFER_PROBE_SETTLE: Duration = Duration::from_millis(2_500);
+
+    /// The prompt above, then BetterTerminal's own shell integration on top of it. The OSC 133 pair
+    /// is not decoration here: it *is* the mitigation's information source. Without `A`/`B` the
+    /// terminal has never been told where input begins, `typed_shell_input_live` answers `false`,
+    /// and the gate correctly declines to act — which is the honest-degradation half of the ruling
+    /// and is why this probe dot-sources the script the product ships.
+    fn defer_probe_startup() -> String {
+        format!(
+            "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+             function global:prompt {{ '{DEFER_PROBE_PROMPT}' }}; \
+             . '{}'; Write-Host '{DEFER_PROBE_NOISE}'",
+            integration_script_path().display()
+        )
+    }
+
+    #[derive(Debug)]
+    struct DeferProbeOutcome {
+        gated: bool,
+        /// Whether the terminal ever saw an armed input region — the mitigation's precondition.
+        armed: bool,
+        clean: bool,
+        input_line: String,
+        expected_input_line: String,
+        noise_intact: bool,
+        /// The reported artifact itself: a row that contains the prompt but does not begin with it,
+        /// which is a redraw spliced into a row still holding an older one.
+        spliced_rows: Vec<String>,
+        /// The same three judgements taken when the drag quiesced, before the trailing keystroke
+        /// could repaint over the damage — a later redraw can *heal* a corrupted screen.
+        live_clean: bool,
+        live_spliced_rows: Vec<String>,
+        live_rows: Vec<(usize, String)>,
+        /// Every size the child was actually told about, in order.
+        commits: Vec<(u16, u16)>,
+        /// Sizes the child heard while its buffer was non-empty. The fault's precondition, counted.
+        commits_while_typing: Vec<(u16, u16)>,
+        composed_rows: Vec<(usize, String)>,
+    }
+
+    /// One run of the minimal repro through the application's own resize loop.
+    ///
+    /// Type without submitting; drag narrower than the prompt; drag wider again; press a key that
+    /// redraws. `gated` selects the mitigation, and nothing else about the run changes.
+    fn run_deferred_resize_probe(gated: bool) -> Option<DeferProbeOutcome> {
+        let mut oracle = AppResizeOracle::spawn(
+            "pwsh.exe",
+            &defer_probe_startup(),
+            DEFER_PROBE_WIDE,
+            DEFER_PROBE_ROWS,
+            false,
+        );
+        oracle.typed_input_gate = gated;
+        if !oracle.settle_at_prompt(DEFER_PROBE_PROMPT) {
+            eprintln!(
+                "BT_CONPTY_DEFER_PROBE gated={gated} SETUP-FAILED line={:?} rows={:?}",
+                oracle.current_line(),
+                occupied_rows(&oracle.composed_rows())
+            );
+            return None;
+        }
+
+        oracle.pty.write(DEFER_PROBE_TYPED.as_bytes()).unwrap();
+        oracle.pump_for(Duration::from_millis(500));
+        let armed = oracle.session.typed_shell_input_live();
+        let emit_mark = oracle.raw_output.len();
+
+        // Sizes the child hears while it is holding text. Sampling the gate's own question at each
+        // commit is what makes "the child is never told about the narrow width while its buffer is
+        // non-empty" a measured fact rather than an inference from the picture.
+        let mut commits_while_typing = Vec::new();
+        let mut seen_commits = 0usize;
+        fn record(oracle: &AppResizeOracle, seen: &mut usize, into: &mut Vec<(u16, u16)>) {
+            while *seen < oracle.commits.len() {
+                into.push(oracle.commits[*seen]);
+                *seen += 1;
+            }
+        }
+
+        // Two gestures with a pause between them, which is what a hand does: drag narrower, let go,
+        // drag wider again. Each pause is long enough for the coalescer's quiet window, so the
+        // ungated loop commits each phase's final width — including the narrow one — and long
+        // enough after that for the line editor's own resize poll to repaint.
+        let mut typed_after = String::new();
+        for (phase, keystroke) in [
+            ([92_u16, 80, 64, 48, 36, DEFER_PROBE_NARROW], 'X'),
+            ([36, 48, 64, 80, 92, DEFER_PROBE_WIDE], 'Z'),
+        ] {
+            for width in phase {
+                oracle.project_resize(width, DEFER_PROBE_ROWS);
+                // ~60 Hz, the rate winit delivers a live drag at.
+                oracle.pump_for(Duration::from_millis(16));
+            }
+            oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(40));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            oracle.pump_for(DEFER_PROBE_SETTLE);
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            if oracle.session.typed_shell_input_live() {
+                record(&oracle, &mut seen_commits, &mut commits_while_typing);
+            }
+            // The keystroke that makes the editor *render* at the width it has just been given.
+            // Rendering is where the reduction happens — PSReadLine folds its cached anchor column
+            // modulo the buffer width when it finds the column no longer fits — so a narrowing the
+            // editor never renders at is a narrowing it never reduces against. The second one is
+            // "press any key that redraws" from the repro: the render that reads the anchor the
+            // first one broke, now that the pane is wide again.
+            oracle.pty.write(keystroke.to_string().as_bytes()).unwrap();
+            typed_after.push(keystroke);
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            if oracle.session.typed_shell_input_live() {
+                record(&oracle, &mut seen_commits, &mut commits_while_typing);
+            }
+        }
+
+        // What the composed frame says, and what the *live grid alone* says. The composed frame is
+        // the picture the window presents; the live grid is the child's own screen with none of our
+        // transcript or staging in it, which is where a splice has to be visible for the claim to
+        // be about the child rather than about us.
+        let live = oracle.session.terminal().visible_text();
+        let live_input_line = oracle.composed_input_line(DEFER_PROBE_PROMPT);
+        let live_expected = format!("{DEFER_PROBE_PROMPT}{DEFER_PROBE_TYPED}{typed_after}");
+        let live_spliced_rows = spliced_prompt_rows(&live, DEFER_PROBE_PROMPT);
+
+        let input_line = oracle.composed_input_line(DEFER_PROBE_PROMPT);
+        let expected_input_line = live_expected.clone();
+        let composed = oracle.composed_rows();
+        let noise_intact = composed
+            .iter()
+            .any(|row| row.trim_end() == DEFER_PROBE_NOISE)
+            || composed
+                .windows(2)
+                .any(|pair| format!("{}{}", pair[0], pair[1]).contains(DEFER_PROBE_NOISE));
+        let spliced_rows = spliced_prompt_rows(&composed, DEFER_PROBE_PROMPT);
+        if std::env::var_os("BT_DEFER_EMIT").is_some() {
+            eprintln!(
+                "BT_CONPTY_DEFER_PROBE_EMIT gated={gated} emitted={:?}",
+                escaped(&oracle.raw_output[emit_mark..])
+            );
+        }
+        Some(DeferProbeOutcome {
+            gated,
+            armed,
+            clean: input_line == expected_input_line && noise_intact && spliced_rows.is_empty(),
+            input_line,
+            expected_input_line,
+            noise_intact,
+            spliced_rows,
+            live_clean: live_input_line == live_expected && live_spliced_rows.is_empty(),
+            live_spliced_rows,
+            live_rows: occupied_rows(&live),
+            commits: oracle.commits.clone(),
+            commits_while_typing,
+            composed_rows: occupied_rows(&composed),
+        })
+    }
+
+    /// ACCEPTANCE PROBE for the typed-input ConPTY resize deferral (user ruling 2026-08-04).
+    ///
+    /// The mitigation was shelved once because nobody could reproduce the corruption and therefore
+    /// nobody could prove a mitigation worked. This is that proof, both directions in one run
+    /// against one real pwsh child through the product's own resize loop:
+    ///
+    /// * `gated=false` — the loop as it was. The child hears widths narrower than its prompt while
+    ///   its buffer is non-empty, PSReadLine's reduced anchor column survives the widening, and the
+    ///   redraw splices into the prompt row.
+    /// * `gated=true` — the same drag, the same keystroke, the same child. The buffer is never
+    ///   empty across the narrowing, so the resize never leaves us, and there is no stale anchor to
+    ///   splice from.
+    ///
+    /// Measured on a 37-cell prompt at 100 columns narrowed to 24 (`BT_DEFER_EMIT=1` prints the
+    /// child's own bytes). Ungated, the render that follows the narrow commit addresses
+    /// `CSI 4;14H` — column 13, and `37 mod 24 == 13`, the upstream rule stated as a number — and
+    /// the render after the pane is 100 columns wide again *still* addresses column 13
+    /// (`CSI 3;14H`), which is the splice. Gated, both renders address `CSI 2;38H`: column 37, the
+    /// prompt's true width, because the child was never told about the 24.
+    ///
+    /// Read the `BT_CONPTY_DEFER_PROBE` lines on stderr:
+    ///   `cargo test -p bt-pty typed_input_resize_deferral -- --ignored --nocapture`
+    #[test]
+    #[ignore = "dev probe: drives a real interactive PowerShell through ConPTY; host-timing sensitive"]
+    fn typed_input_resize_deferral_probe() {
+        let source = conpty_source();
+        let mut outcomes = Vec::new();
+        for gated in [false, true] {
+            let Some(outcome) = run_deferred_resize_probe(gated) else {
+                continue;
+            };
+            eprintln!(
+                "BT_CONPTY_DEFER_PROBE source={source} gated={} armed={} live_clean={} \
+                 clean={} commits={:?} commits_while_typing={:?} noise_intact={} \
+                 spliced={:?} live_spliced={:?} input={:?} expected={:?}",
+                outcome.gated,
+                outcome.armed,
+                outcome.live_clean,
+                outcome.clean,
+                outcome.commits,
+                outcome.commits_while_typing,
+                outcome.noise_intact,
+                outcome.spliced_rows,
+                outcome.live_spliced_rows,
+                outcome.input_line,
+                outcome.expected_input_line,
+            );
+            if !outcome.clean || !outcome.live_clean {
+                eprintln!(
+                    "BT_CONPTY_DEFER_PROBE_ROWS gated={} live={:?} composed={:?}",
+                    outcome.gated, outcome.live_rows, outcome.composed_rows
+                );
+            }
+            outcomes.push(outcome);
+        }
+        assert_eq!(outcomes.len(), 2, "the probe drove no live shell");
+        let before = &outcomes[0];
+        let after = &outcomes[1];
+        assert!(
+            after.armed,
+            "the mitigation cannot be judged unless the shell integration armed the gate"
+        );
+        assert!(
+            after.commits_while_typing.is_empty(),
+            "the child must never be told a new size while its buffer is non-empty, got {:?}",
+            after.commits_while_typing
+        );
+        assert!(
+            !before.commits_while_typing.is_empty(),
+            "the ungated run must reach the fault's own precondition, or it proves nothing"
+        );
+        assert!(
+            !before.clean || !before.live_clean,
+            "the ungated run did not reproduce the splice; the pair proves nothing until it does. \
+             live={:?} input={:?} expected={:?} rows={:?}",
+            before.live_rows,
+            before.input_line,
+            before.expected_input_line,
+            before.composed_rows
+        );
+        assert!(
+            after.live_clean && after.clean,
+            "the gated run must present the prompt, the typed text and the keystroke and nothing \
+             else. live={:?} input={:?} expected={:?} rows={:?}",
+            after.live_rows,
+            after.input_line,
+            after.expected_input_line,
+            after.composed_rows
+        );
     }
 }

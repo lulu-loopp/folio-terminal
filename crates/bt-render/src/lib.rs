@@ -1784,6 +1784,9 @@ impl HeadlessRenderProbe {
             self.status_overlay.as_deref(),
             self.metrics,
             frame,
+            // A headless probe has no seat: it renders into the whole target, so the surface is
+            // the pane.
+            self.width as f32,
         )
         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
         let atlas_prepared_at = Instant::now();
@@ -2282,6 +2285,7 @@ impl Renderer {
                 self.status_overlay.as_deref(),
                 self.metrics,
                 frame,
+                self.seat.width as f32,
             ),
             Err(error) => Err(error),
         };
@@ -2355,7 +2359,9 @@ impl Renderer {
         let status_rects = frame
             .status_text
             .as_deref()
-            .and_then(|status| status_overlay_geometry(self.metrics, frame, status))
+            .and_then(|status| {
+                status_overlay_geometry(self.metrics, frame, status, self.seat.width as f32)
+            })
             .map(|geometry| {
                 self.pixel_rect(
                     geometry.rect[0],
@@ -3703,6 +3709,7 @@ fn prepare_status_text_atlas(
     status_overlay: Option<&ComposedRow>,
     metrics: CellMetrics,
     frame: &ViewportFrame,
+    seat_width_px: f32,
 ) -> Result<(), PrepareError> {
     let Some(status) = frame.status_text.as_deref() else {
         return Ok(());
@@ -3710,7 +3717,7 @@ fn prepare_status_text_atlas(
     let Some(row) = status_overlay else {
         return Ok(());
     };
-    let Some(geometry) = status_overlay_geometry(metrics, frame, status) else {
+    let Some(geometry) = status_overlay_geometry(metrics, frame, status, seat_width_px) else {
         return Ok(());
     };
     let narrow_text_areas = row.narrow_glyphs.iter().map(|glyph| {
@@ -3786,21 +3793,38 @@ fn status_overlay_cells(columns: usize, status: &str) -> Vec<CapturedCell> {
     displayed
 }
 
+/// Where the "N rows above" indicator sits, right-aligned against the *visible* pane.
+///
+/// The pane and the grid are the same width at rest, and then this is the arithmetic that was
+/// always here. They differ while the grid is wider than its seat, which is what the typed-input
+/// ConPTY resize deferral (`bt-app`, user ruling 2026-08-04) leaves on screen for the length of a
+/// narrowing drag: the seat rectangle moves immediately, the grid waits for the child. Aligning to
+/// the grid there would place the entire indicator to the right of the scissor rectangle, so the
+/// one affordance that says "you are not at the bottom" would disappear exactly while the drag that
+/// scrolled it away is happening. `first_column` stays a *grid* column because it indexes the
+/// prepared glyph row, not a pixel.
 fn status_overlay_geometry(
     metrics: CellMetrics,
     frame: &ViewportFrame,
     status: &str,
+    seat_width_px: f32,
 ) -> Option<StatusOverlayGeometry> {
     if frame.drawable_rows() < 2 {
         return None;
     }
     let columns = frame.columns.get() as usize;
-    let shown = status.chars().count().min(columns);
+    // The same count `CellMetrics::grid_for_pixels` would answer for this seat, so a grid that fits
+    // its seat is bounded by itself and this whole clamp is inert.
+    let visible_columns = ((seat_width_px - 2.0 * metrics.padding_px) / metrics.cell_width_px)
+        .floor()
+        .clamp(0.0, u16::MAX as f32) as usize;
+    let shown = status.chars().count().min(columns.min(visible_columns));
     if shown == 0 {
         return None;
     }
     let first_column = columns - shown;
-    let right = metrics.padding_px + columns as f32 * metrics.cell_width_px;
+    let right = (metrics.padding_px + columns as f32 * metrics.cell_width_px)
+        .min(seat_width_px - metrics.padding_px);
     let left = right - shown as f32 * metrics.cell_width_px;
     Some(StatusOverlayGeometry {
         rect: [
@@ -3811,6 +3835,13 @@ fn status_overlay_geometry(
         ],
         first_column,
     })
+}
+
+/// The seat width a grid of `frame.columns` exactly fits into, i.e. the resting case where the
+/// pane and the grid are the same thing.
+#[cfg(test)]
+fn fitting_seat_width(metrics: CellMetrics, frame: &ViewportFrame) -> f32 {
+    2.0 * metrics.padding_px + frame.columns.get() as f32 * metrics.cell_width_px
 }
 
 #[cfg(test)]
@@ -5311,6 +5342,82 @@ mod tests {
         );
     }
 
+    /// PIN: the "N rows above" indicator ends inside the seat, not inside the grid.
+    ///
+    /// The two are the same rectangle at rest. They differ while the grid is wider than its seat,
+    /// which the typed-input ConPTY resize deferral (`bt-app`, user ruling 2026-08-04) leaves on
+    /// screen for the length of a narrowing drag. Right-aligning to the grid there puts the whole
+    /// indicator past the scissor rectangle — the affordance that says "you are not at the bottom"
+    /// would vanish exactly while the drag that scrolled it away is under way. The red gate is the
+    /// second half: hand the same call a seat that fits the grid and the overlay does sit at the
+    /// grid's right edge, so this pin is not asserting an unconditional clamp.
+    #[test]
+    fn the_rows_above_indicator_ends_inside_the_seat_not_inside_an_over_wide_grid() {
+        let metrics = CellMetrics {
+            cell_width_px: 10.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 8.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 15.0,
+            primary_advance_px: 10.0,
+            primary_cap_height_px: 11.0,
+            primary_cap_center_y_px: 9.0,
+        };
+        let columns = 80_usize;
+        let rows = 4_usize;
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(columns as u32).unwrap(),
+            grid_rows: NonZeroU32::new(rows as u32).unwrap(),
+            rows: NonZeroU32::new(rows as u32).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::default(); columns * rows],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors(columns * rows),
+            row_map: test_row_map(rows as u32),
+            selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: Some("7 rows above · Shift+wheel".to_owned()),
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(columns as u32),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        let status = frame.status_text.clone().unwrap();
+
+        // The resting case: a seat the grid exactly fits. The overlay ends at the grid's right edge,
+        // which is also the seat's, and every earlier frame in the product is this case.
+        let fitting = fitting_seat_width(metrics, &frame);
+        let resting = status_overlay_geometry(metrics, &frame, &status, fitting).unwrap();
+        assert!((resting.rect[2] - (fitting - metrics.padding_px)).abs() <= 0.01);
+
+        // Mid-deferral: an 80-column grid inside a seat that only holds 40 columns.
+        let narrow_seat = 2.0 * metrics.padding_px + 40.0 * metrics.cell_width_px;
+        let clamped = status_overlay_geometry(metrics, &frame, &status, narrow_seat).unwrap();
+        assert!(
+            clamped.rect[2] <= narrow_seat - metrics.padding_px + 0.01,
+            "the indicator ran to {}, past the {narrow_seat}px seat",
+            clamped.rect[2]
+        );
+        assert!(
+            clamped.rect[0] >= metrics.padding_px - 0.01,
+            "the indicator started at {}, before the pane's own left edge",
+            clamped.rect[0]
+        );
+        assert!(
+            resting.rect[2] > narrow_seat,
+            "the pin would pass even if the geometry still read the grid"
+        );
+        // `first_column` indexes the prepared glyph row, which is a grid row, so it must keep
+        // naming grid columns however far left the pixels moved.
+        assert_eq!(clamped.first_column + status.chars().count(), columns);
+    }
+
     #[test]
     fn math_toolbar_shrinks_to_the_visible_source_row_band() {
         for (scale, top, bottom) in [(1.0, 8.0, 26.0), (1.25, 10.0, 32.5)] {
@@ -5947,7 +6054,13 @@ mod tests {
                 .collect::<String>(),
             "bottom-line"
         );
-        let geometry = status_overlay_geometry(metrics, &frame, "2 rows above").unwrap();
+        let geometry = status_overlay_geometry(
+            metrics,
+            &frame,
+            "2 rows above",
+            fitting_seat_width(metrics, &frame),
+        )
+        .unwrap();
         let bottom_row_top = frame_cell_bounds_px(metrics, &frame, rows - 1, 0)[1];
         assert!(
             geometry.rect[3] <= bottom_row_top,
@@ -6277,7 +6390,13 @@ mod tests {
             terminal_last_row.as_slice(),
             "the independent overflow overlay must not rewrite final-row cells"
         );
-        let status_geometry = status_overlay_geometry(metrics, &selected, status).unwrap();
+        let status_geometry = status_overlay_geometry(
+            metrics,
+            &selected,
+            status,
+            fitting_seat_width(metrics, &selected),
+        )
+        .unwrap();
         let last_row_top = frame_cell_bounds_px(metrics, &selected, 23, 0)[1];
         assert!(
             status_geometry.rect[3] <= last_row_top,

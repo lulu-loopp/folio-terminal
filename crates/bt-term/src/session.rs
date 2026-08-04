@@ -2432,6 +2432,97 @@ impl DualPlaneSession {
         self.shell_phases.contains_key(&screen)
     }
 
+    /// Is the live screen sitting inside an open OSC 133 input region that currently holds typed
+    /// content?
+    ///
+    /// This is the single question the ConPTY resize gate asks (ruling 2026-08-04). PSReadLine —
+    /// 2.0.0 and 2.4.5 alike — reduces its cached render-anchor *column* modulo the new width when
+    /// the pane narrows and never restores it when the pane widens again; the fault arms only while
+    /// its input buffer is non-empty across that narrowing, and it then splices the next redraw into
+    /// the prompt row. So the child must simply not be told about a width change while the buffer it
+    /// would re-anchor is non-empty.
+    ///
+    /// Three answers of `false` matter as much as the `true`:
+    /// * a screen that has never emitted OSC 133 has no phase at all, so it answers `false` and
+    ///   keeps today's behaviour byte for byte (honest degradation — we cannot see a buffer we were
+    ///   never told about);
+    /// * an *empty* prompt answers `false`, so dragging at an idle prompt stays exactly as cheap as
+    ///   it is today;
+    /// * a closed region — the command was submitted — answers `false`, which is one of the release
+    ///   conditions rather than a special case.
+    ///
+    /// Every hard lifecycle boundary releases for free because this is a pure question about
+    /// *current* state: a screen switch moves `live_screen` away from the region's screen, and a
+    /// reset, ED 2 or clear blanks the very cells the content scan reads.
+    pub fn typed_shell_input_live(&self) -> bool {
+        let Some(ShellIntegrationPhase::Input(index)) =
+            self.shell_phases.get(&self.live_screen).copied()
+        else {
+            return false;
+        };
+        self.semantic_input_region_holds_content(index)
+    }
+
+    /// Does region `index` have anything visible in it right now?
+    ///
+    /// The span is read from the grid rather than from the witness string, because the witness is
+    /// only refreshed at reflow and marker boundaries and this question is asked between them —
+    /// clearing the line has to release the gate in the same drain that cleared it.
+    ///
+    /// The rows scanned are the region's start row through the furthest of the cursor's row and the
+    /// rows this region has written in the current generation. Taking the cursor alone would be
+    /// wrong: `Home` puts the cursor back on `B` while the buffer is still full, and a gate that
+    /// read only `[B, cursor)` would then call a full line empty and resize into the fault. Within
+    /// those rows the content test is "any non-blank cell at or after `B`". A grid cannot tell a
+    /// typed space from padding, so a buffer made *entirely* of spaces reads as empty here; that is
+    /// the limit of what the screen knows, not a shortcut.
+    fn semantic_input_region_holds_content(&self, index: usize) -> bool {
+        let Some(region) = self.semantic_input_regions.get(index) else {
+            return false;
+        };
+        if region.closed {
+            return false;
+        }
+        let Ok(ContentAnchor::Live {
+            screen,
+            point: start,
+            generation,
+            ..
+        }) = self.document.anchor(region.start)
+        else {
+            return false;
+        };
+        // A start we cannot place on *this* grid is a start we cannot scan from. Answering `false`
+        // hands the drag back to today's behaviour rather than deferring on a coordinate we do not
+        // believe.
+        if *screen != self.live_screen || *generation != self.grid_generation {
+            return false;
+        }
+        let start = *start;
+        let last_row = region
+            .written_rows
+            .iter()
+            .filter(|(generation, _)| *generation == self.grid_generation.0)
+            .map(|(_, row)| *row)
+            .chain(std::iter::once(self.terminal.cursor().row))
+            .max()
+            .unwrap_or(start.row)
+            .max(start.row);
+        (start.row..=last_row).any(|row| {
+            let Some(captured) = self.terminal.visible_row(row) else {
+                return false;
+            };
+            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let byte_start = if row == start.row {
+                byte_offset_at_column(&boundaries, start.column, text.len())
+            } else {
+                0
+            };
+            text.get(byte_start..)
+                .is_some_and(|tail| tail.chars().any(|glyph| !glyph.is_whitespace()))
+        })
+    }
+
     fn handle_shell_integration_marker(
         &mut self,
         screen: ScreenId,
@@ -19636,6 +19727,160 @@ mod tests {
         assert_eq!(
             session.shell_phases.get(&ScreenId::Primary),
             Some(&ShellIntegrationPhase::Input(0))
+        );
+    }
+
+    /// PIN (ConPTY resize gate, user ruling 2026-08-04): the whole release-condition set, asked of
+    /// one session as a single question about current state.
+    ///
+    /// The upstream fault this gate exists for is PSReadLine's: it reduces its cached render-anchor
+    /// column modulo the new width when the pane narrows and never restores it, and it arms only
+    /// while its input buffer is non-empty across that narrowing. So the gate must be *exactly* as
+    /// wide as "an open input region holding text" — no wider, or an idle prompt would stop
+    /// resizing; no narrower, or the fault would still be reachable.
+    #[test]
+    fn typed_shell_input_gate_opens_and_closes_on_state_alone() {
+        let started = Instant::now();
+
+        // No OSC 133 at all: today's behaviour, byte for byte. We were never told where input
+        // begins, so we never claim to know that one is live.
+        let mut bare = DualPlaneSession::new(nz(80), nz(6));
+        bare.feed_at(b"PS> echo ok", started).unwrap();
+        assert!(
+            !bare.typed_shell_input_live(),
+            "a screen that has never emitted OSC 133 must keep resizing exactly as it does today"
+        );
+
+        // An empty prompt. Dragging here must stay free.
+        let mut session = DualPlaneSession::new(nz(80), nz(6));
+        session
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", started)
+            .unwrap();
+        assert!(
+            !session.typed_shell_input_live(),
+            "an empty input region is not typed content"
+        );
+
+        // Typed content arms it.
+        session.feed_at(b"echo ok", started).unwrap();
+        assert!(
+            session.typed_shell_input_live(),
+            "typed input holds the gate"
+        );
+
+        // `Home` — the cursor walks back onto B while the buffer is still full. Reading only
+        // `[B, cursor)` would call this empty and resize straight into the fault.
+        session.feed_at(b"\x1b[5G", started).unwrap();
+        assert!(
+            session.typed_shell_input_live(),
+            "a cursor moved back to the start of a full line does not empty it"
+        );
+
+        // RELEASE: the line is cleared.
+        session.feed_at(b"\x1b[5G\x1b[K", started).unwrap();
+        assert!(
+            !session.typed_shell_input_live(),
+            "clearing the line releases the gate"
+        );
+
+        // RELEASE: the command is submitted.
+        session.feed_at(b"echo ok", started).unwrap();
+        assert!(session.typed_shell_input_live());
+        session.feed_at(b"\r\n\x1b]133;C\x07", started).unwrap();
+        assert!(
+            !session.typed_shell_input_live(),
+            "a closed region is a released gate"
+        );
+
+        // RELEASE: a hard lifecycle boundary. ED 2 blanks the very cells the scan reads, and the
+        // alternate screen is a different screen with no phase of its own.
+        let mut cleared = DualPlaneSession::new(nz(80), nz(6));
+        cleared
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07echo ok", started)
+            .unwrap();
+        assert!(cleared.typed_shell_input_live());
+        cleared.feed_at(b"\x1b[2J", started).unwrap();
+        assert!(
+            !cleared.typed_shell_input_live(),
+            "ED 2 releases the gate: there is no content left to protect"
+        );
+
+        let mut switched = DualPlaneSession::new(nz(80), nz(6));
+        switched
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07echo ok", started)
+            .unwrap();
+        assert!(switched.typed_shell_input_live());
+        switched.feed_at(b"\x1b[?1049h", started).unwrap();
+        assert!(
+            !switched.typed_shell_input_live(),
+            "the alternate screen carries no input region of the primary's"
+        );
+        switched.feed_at(b"\x1b[?1049l", started).unwrap();
+        assert!(
+            switched.typed_shell_input_live(),
+            "returning to the primary restores the primary's own answer"
+        );
+    }
+
+    /// RED-CHECK for the pin above, clause by clause. Each of these is what the gate would answer
+    /// if the named clause were removed, so none of the assertions above is vacuous.
+    #[test]
+    fn every_clause_of_the_typed_input_gate_is_load_bearing() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(6));
+        session
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07echo ok", started)
+            .unwrap();
+
+        // Clause "an open region": drop `region.closed` and a submitted command would keep the gate
+        // shut forever, because the shell sits in `Output` with the text still on screen.
+        let region = 0;
+        session.feed_at(b"\r\n\x1b]133;C\x07", started).unwrap();
+        assert!(session.semantic_input_regions[region].closed);
+        assert!(
+            !session.typed_shell_input_live(),
+            "the phase is no longer Input, so the region is not consulted"
+        );
+
+        // Clause "holds content": drop the content scan and an *empty* prompt would defer every
+        // drag. The phase alone says Input the instant B arrives.
+        let mut empty = DualPlaneSession::new(nz(80), nz(6));
+        empty
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", started)
+            .unwrap();
+        assert_eq!(
+            empty.shell_phases.get(&ScreenId::Primary),
+            Some(&ShellIntegrationPhase::Input(0)),
+            "the phase alone would hold an idle prompt hostage"
+        );
+        assert!(!empty.typed_shell_input_live());
+
+        // Clause "the live screen": drop the `live_screen` key and an input region left open on the
+        // primary would gate resizes for the whole life of a full-screen TUI.
+        let mut switched = DualPlaneSession::new(nz(80), nz(6));
+        switched
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07vim\x1b[?1049h", started)
+            .unwrap();
+        assert_eq!(
+            switched.shell_phases.get(&ScreenId::Primary),
+            Some(&ShellIntegrationPhase::Input(0)),
+            "the primary's region is still open behind the alternate screen"
+        );
+        assert!(!switched.typed_shell_input_live());
+
+        // Clause "rows the region wrote, not just the cursor's": a wrapped command whose cursor was
+        // sent home still holds content on its continuation rows.
+        let mut wrapped = DualPlaneSession::new(nz(12), nz(6));
+        wrapped
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07aaaaaaaaaaaaaaaa\x1b[1;5H",
+                started,
+            )
+            .unwrap();
+        assert_eq!(wrapped.terminal.cursor().row, 0);
+        assert!(
+            wrapped.typed_shell_input_live(),
+            "content below the cursor's row is still content"
         );
     }
 
