@@ -2090,17 +2090,27 @@ impl DualPlaneSession {
         self.cursor_logical_line_memory = Some(memory);
     }
 
-    fn effective_cursor_logical_line_memory(&self) -> Option<CursorLogicalLineMemory> {
-        self.visible_cursor_logical_line_memory().or_else(|| {
-            self.cursor_logical_line_memory
-                .filter(|memory| memory.screen == self.live_screen)
-        })
+    /// The cursor's logical line and the memory it came from, as of the grid right now.
+    ///
+    /// A visible cursor reads its line from the grid it is standing on, so those rows are already
+    /// the merge. The sticky memory is a pair of row numbers recorded against an older grid, so it
+    /// has to be merged again before it can be read as a logical line — see `merged_logical_line`.
+    fn effective_cursor_logical_line(&self) -> Option<(CursorLogicalLineMemory, (u32, u32))> {
+        if let Some(memory) = self.visible_cursor_logical_line_memory() {
+            let line = (memory.start, memory.end);
+            return Some((memory, line));
+        }
+        let memory = self
+            .cursor_logical_line_memory
+            .filter(|memory| memory.screen == self.live_screen)?;
+        let line = self.merged_logical_line((memory.start, memory.end));
+        Some((memory, line))
     }
 
     #[cfg(test)]
     fn cursor_suppressed_logical_line(&self) -> Option<(u32, u32)> {
-        self.effective_cursor_logical_line_memory()
-            .map(|memory| (memory.start, memory.end))
+        self.effective_cursor_logical_line()
+            .map(|(memory, _)| (memory.start, memory.end))
     }
 
     fn logical_line_is_blank(&self, line: (u32, u32)) -> bool {
@@ -2122,9 +2132,28 @@ impl DualPlaneSession {
         }
     }
 
+    /// Re-merge a pair of physical row numbers into the logical line the grid says they form *now*.
+    ///
+    /// A remembered cursor line is two row numbers, and row numbers alone do not say which physical
+    /// rows are one logical line — WRAPLINE does, and it changes while the line is being edited: one
+    /// more typed character turns a one-row input into a two-row input. The sticky memory is
+    /// captured the last time the cursor was visible, which for PSReadLine is *before* the
+    /// hide→redraw→show burst that grows the line. Reading the remembered rows without merging them
+    /// again would leave the continuation rows the burst created outside the gate, which is exactly
+    /// the case §6 names: a path in the upper half and the cursor in the lower half must both be
+    /// suppressed, and which half is which is the current grid's answer, not the old one.
+    fn merged_logical_line(&self, line: (u32, u32)) -> (u32, u32) {
+        let start = self
+            .logical_line_containing(line.0)
+            .map_or(line.0, |merged| merged.0);
+        let end = self
+            .logical_line_containing(line.1)
+            .map_or(line.1, |merged| merged.1);
+        (start.min(line.0), end.max(line.1))
+    }
+
     fn cursor_line_suppression(&self) -> Option<CursorLineSuppression> {
-        let memory = self.effective_cursor_logical_line_memory()?;
-        let cursor_line = (memory.start, memory.end);
+        let (memory, cursor_line) = self.effective_cursor_logical_line()?;
         let preceding_nonblank_line = (memory.explicitly_positioned
             && self.logical_line_is_blank(cursor_line))
         .then(|| self.preceding_nonblank_logical_line(cursor_line.0))
@@ -2211,7 +2240,8 @@ impl DualPlaneSession {
             return;
         };
         let end = region.end;
-        let point = self.semantic_input_end_point(region_index, screen, point);
+        let derived = self.semantic_input_end_point(region_index, screen, point);
+        let point = self.wrapped_region_end(region_index, derived);
         let _ = self.document.replace_anchor(
             end,
             ContentAnchor::Live {
@@ -2272,6 +2302,69 @@ impl DualPlaneSession {
                 })
             })
             .unwrap_or(*start)
+    }
+
+    /// Follow a command region's end point through the soft-wrap chain leaving its row.
+    ///
+    /// Every end this terminal computes for a B..C region is a *point*: the cursor where the shell
+    /// reported `133;C`, or the live cursor itself while the region is still open. A command that
+    /// soft-wraps is not a point and not a row — it is one range of content laid out over several
+    /// physical rows, and a point can legitimately sit on the first of them. A line editor
+    /// repositions the cursor wherever it likes before the marker, and an absolute column it
+    /// computed for one width clamps back onto the first row at a narrower one. Stopping the region
+    /// at that point leaves the continuation rows — the same characters the user typed — outside the
+    /// region that must never decorate, so a reference on the fourth row of a four-row command grows
+    /// a band while the identical reference on the first row does not.
+    ///
+    /// `CapturedRow::continues` is the grid's own statement that the next row is the same content,
+    /// so the end follows it and points at the last column that row carries. This is §6's WRAPLINE
+    /// merge, applied to the region end instead of the cursor line.
+    ///
+    /// The walk only enters rows this region actually wrote. That bound is not caution, it is the
+    /// definition: `written_rows` is the record of which physical rows received printable writes
+    /// between B and C, so it says exactly which rows are the command. It also keeps the answer
+    /// honest about *when* it is computed — a marker carries the point the shell was at when it
+    /// emitted it, while this runs once the whole PTY chunk has been parsed, by which time output
+    /// printed after the marker in the same chunk can already be on the grid below.
+    fn wrapped_region_end(&self, region_index: usize, point: GridPoint) -> GridPoint {
+        let Some(region) = self.semantic_input_regions.get(region_index) else {
+            return point;
+        };
+        let row_count = u32::try_from(self.live_rows.len()).unwrap_or(u32::MAX);
+        let mut row = point.row;
+        while row.saturating_add(1) < row_count
+            && region
+                .written_rows
+                .contains(&(self.grid_generation.0, row.saturating_add(1)))
+            && self
+                .terminal
+                .visible_row(row)
+                .is_some_and(|captured| captured.continues)
+        {
+            row += 1;
+        }
+        // Back off any trailing rows of the chain that carry no content. A command whose last row
+        // is exactly full leaves WRAPLINE set on it, so the chain can reach a row the line editor
+        // touched and then cleared. Content is the region, and an empty row is not content.
+        while row > point.row
+            && self
+                .terminal
+                .visible_row(row)
+                .is_none_or(|captured| captured_row_text_and_boundaries(&captured).0.is_empty())
+        {
+            row -= 1;
+        }
+        if row == point.row {
+            return point;
+        }
+        let Some(captured) = self.terminal.visible_row(row) else {
+            return point;
+        };
+        let (_, boundaries) = captured_row_text_and_boundaries(&captured);
+        GridPoint {
+            row,
+            column: boundaries.last().map_or(0, |(_, column)| *column),
+        }
     }
 
     fn record_semantic_input_writes(&mut self, screen: ScreenId, rows: Vec<u32>) {
@@ -2350,10 +2443,15 @@ impl DualPlaneSession {
                         screen: region.screen,
                         point: {
                             let cursor = self.terminal.cursor();
-                            GridPoint {
-                                row: cursor.row,
-                                column: cursor.column,
-                            }
+                            // The live end is the cursor, and the cursor inside a wrapped command
+                            // being edited is routinely on an earlier row than the text after it.
+                            self.wrapped_region_end(
+                                region_index,
+                                GridPoint {
+                                    row: cursor.row,
+                                    column: cursor.column,
+                                },
+                            )
                         },
                         bias: Bias::After,
                         generation: self.grid_generation,
@@ -17892,6 +17990,184 @@ mod tests {
                 .live_decorations
                 .values()
                 .all(|record| record.span.original_source.contains("output"))
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// A command that soft-wraps is one range of content, so a reference on its fourth row is as
+    /// much inside the command region as one on its first.
+    ///
+    /// Both ends this terminal ever computes for a B..C region are *points*: the live cursor while
+    /// the region is open, and the cursor the shell was at when it reported `133;C`. Neither is the
+    /// command's extent once the command occupies more than one physical row. A line editor parks
+    /// the cursor wherever the user put it (Home, ←, a click) and a recorded absolute column clamps
+    /// back onto the first row at a narrower width — and either way the continuation rows, which
+    /// are the same characters the user typed, fell outside the region that must never decorate.
+    ///
+    /// Both stages are pinned here because both are the same defect at the same seam.
+    ///
+    /// RED CHECK: drop `wrapped_region_end` from the live arm of `semantic_input_overlaps` and the
+    /// first stage takes an occurrence anchored on row 1 — a continuation row of the command being
+    /// edited. Drop it from `close_semantic_input_region` and the second stage ends the region on
+    /// row 0 and keeps that occurrence after the command is executed.
+    #[test]
+    fn a_wrapped_command_echo_never_decorates_on_any_of_its_rows() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(40), nz(14));
+        enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
+        let started = Instant::now();
+        let image = format!("[Image: source: \"{}\"]", path.display());
+        // Pad so the reference begins exactly at the start of the first continuation row: it is
+        // wholly on a row the command wrapped into, never touching the row the region starts on.
+        let command = format!("echo {}{image}", "-".repeat(40 - "PS> echo ".len()));
+        let echo_columns = "PS> ".len() + command.chars().count();
+        let echo_last_row = u32::try_from(echo_columns / 40).unwrap();
+        let echo_last_column = u32::try_from(echo_columns % 40).unwrap();
+        assert!(
+            echo_last_row >= 3,
+            "the fixture must wrap the echo over several rows"
+        );
+
+        // The user typed a wrapping command and pressed Home: the region is open and its end is
+        // the live cursor, parked on the first of the command's rows.
+        session
+            .feed_at(
+                format!("\x1b]133;A\x07PS> \x1b]133;B\x07{command}\x1b[1;5H").as_bytes(),
+                started,
+            )
+            .unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            inline_image_start_rows(&session),
+            Vec::<u32>::new(),
+            "a command still being edited owns no occurrence on any of its rows"
+        );
+
+        // The shell reports the command executed from that same parked point, and only then does
+        // the editor move to the end of the buffer and emit the newline the output follows.
+        let at = started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1);
+        session
+            .feed_at(
+                format!(
+                    "\x1b]133;C\x07\x1b[{};{}H\r\n{image}\r\n\x1b]133;D;0\x07",
+                    echo_last_row + 1,
+                    echo_last_column + 1
+                )
+                .as_bytes(),
+                at,
+            )
+            .unwrap();
+        session.advance_live_stability(at + LIVE_MATH_STABLE_INTERVAL);
+
+        let region_end = session
+            .document
+            .anchor(session.semantic_input_regions[0].end)
+            .unwrap()
+            .clone();
+        assert!(
+            matches!(
+                &region_end,
+                ContentAnchor::Live { point, .. } if point.row == echo_last_row
+            ),
+            "the command region must end on the last row the command wrapped into: {region_end:?}"
+        );
+
+        let starts = inline_image_start_rows(&session);
+        assert_eq!(
+            starts.len(),
+            1,
+            "the echo owns no occurrence and the output owns one: {starts:?}"
+        );
+        assert!(
+            starts[0] > echo_last_row,
+            "the sole occurrence must belong to the output below the echo: {starts:?}"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    fn inline_image_start_rows(session: &DualPlaneSession) -> Vec<u32> {
+        let mut rows = session
+            .inline_images
+            .values()
+            .map(|record| {
+                let InlineImageRecordKind::LocalPath { start_anchor, .. } = &record.kind else {
+                    panic!("this fixture registers only printed paths")
+                };
+                let ContentAnchor::Live { point, .. } =
+                    session.document.anchor(*start_anchor).unwrap()
+                else {
+                    panic!("this fixture never scrolls, so every occurrence stays live")
+                };
+                point.row
+            })
+            .collect::<Vec<_>>();
+        rows.sort_unstable();
+        rows
+    }
+
+    /// The degraded path owes the same answer, and owes it against the grid as it is now.
+    ///
+    /// Without shell integration the only authority is §6's cursor logical line, merged through
+    /// WRAPLINE in both directions so a path in the upper half and the cursor in the lower half are
+    /// both suppressed. The sticky memory that covers PSReadLine's hide→redraw→show burst stores
+    /// two physical row numbers, and one more typed character turns a one-row input into a several
+    /// row one: the rows it remembers were captured before the line grew. Re-merging them against
+    /// the current grid is what makes the remembered line still be a *logical* line.
+    ///
+    /// RED CHECK: read `(memory.start, memory.end)` directly instead of `merged_logical_line` and
+    /// the wrapped input line takes an occurrence of its own on the continuation row.
+    #[test]
+    fn a_wrapped_input_line_suppresses_the_rows_it_grew_while_the_cursor_was_hidden() {
+        let (directory, path) = temporary_path_image();
+        let mut session = DualPlaneSession::new(nz(40), nz(14));
+        enable_path_detection(&mut session);
+        session.restore_retired_image_bands();
+        let started = Instant::now();
+        let image = format!("[Image: source: \"{}\"]", path.display());
+
+        // Settled output above carrying the same reference: it must keep its band, so this pin
+        // cannot pass by a gate that simply swallows the screen.
+        session
+            .feed_at(format!("{image}\r\n").as_bytes(), started)
+            .unwrap();
+        let prompt = format!("PS> echo {}", "-".repeat(40 - "PS> echo ".len()));
+        session.feed_at(prompt.as_bytes(), started).unwrap();
+        session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+        let output_rows = session.inline_images.len();
+        assert_eq!(output_rows, 1, "the output above must own its occurrence");
+        let cursor_line = session.cursor_suppressed_logical_line();
+
+        // PSReadLine hides the cursor, redraws, and shows it again. The redraw wraps the input line
+        // onto rows the remembered cursor line did not contain.
+        let at = started + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(1);
+        session
+            .feed_at(format!("\x1b[?25l{image}").as_bytes(), at)
+            .unwrap();
+        session.advance_live_stability(at + LIVE_MATH_STABLE_INTERVAL);
+
+        assert!(
+            !session.terminal.cursor().visible,
+            "the burst is the point: the gate must answer from the sticky memory"
+        );
+        assert_ne!(
+            session.cursor_suppressed_logical_line(),
+            None,
+            "the sticky memory survives the hide"
+        );
+        assert_eq!(
+            session.cursor_suppressed_logical_line(),
+            cursor_line,
+            "the memory itself is unchanged; only how it is read against the grid is"
+        );
+        assert_eq!(
+            session.inline_images.len(),
+            1,
+            "the input line that wrapped while the cursor was hidden owns no occurrence"
         );
 
         std::fs::remove_file(&path).unwrap();
