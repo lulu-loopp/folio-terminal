@@ -55,6 +55,14 @@ const IME_CURSOR_AREA_INTERVAL: Duration = Duration::from_millis(16);
 /// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
 /// silence interval while the local surface and terminal grid continue to follow every event.
 const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
+/// Whether a live OSC 133 input buffer withholds terminal and ConPTY resizes (user ruling
+/// 2026-08-06). **A policy bit, not a structure.**
+///
+/// `false` lets every resize through the existing 200 ms coalescer even while input is present.
+/// The post-commit `InvokePrompt` injection remains active, so PSReadLine recomputes its anchor at
+/// every landed width. Flipping this back to `true` restores the retained confirm-then-release
+/// machine verbatim; `typed_input_defers_resize` is the single production convergence point.
+const TYPED_INPUT_RESIZE_DEFERRAL: bool = false;
 /// M0-alpha's single-session frozen-line budget; later configuration work may expose it.
 const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
 const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
@@ -455,7 +463,8 @@ fn coalesce_pty_resize_on_grid_change(
     changed
 }
 
-/// The typed-input half of the same gate (user ruling 2026-08-04).
+/// The retained typed-input half of the same gate (policy introduced 2026-08-04, default disabled
+/// by user ruling 2026-08-06).
 ///
 /// PSReadLine — 2.0.0 and 2.4.5 alike — reduces its cached render-anchor *column* modulo the new
 /// width whenever the pane narrows, and never restores it when the pane widens again. The fault
@@ -465,8 +474,9 @@ fn coalesce_pty_resize_on_grid_change(
 /// our side to correct — the only faithful mitigation is not to tell the child about a width it
 /// would re-anchor against while it is holding text.
 ///
-/// So a due resize is held back while `typed_input_live`, and released once that has been false for
-/// an unbroken `WINDOW_RESIZE_QUIET`. What releases is still a *question about current state* and
+/// When the policy feeds this machine `typed_input_live = true`, a due resize is held back and
+/// released once that has been false for an unbroken `WINDOW_RESIZE_QUIET`. What releases is still
+/// a *question about current state* and
 /// never a timer over the drag: the input region closing (submission), its content going empty (the
 /// line cleared), a screen switch, a reset, ED 2 or an alternate-screen transition all make
 /// `DualPlaneSession::typed_shell_input_live` answer `false`, and every one of them reaches us as
@@ -492,8 +502,8 @@ fn release_due_pty_resize(
 
 /// The whole scheduling decision `Runtime::schedule_grid_change` makes, with no window in it:
 /// queue (or cancel) what the child still owes, and answer the grid our own actor should reflow to
-/// *now* — `None` while the gate holds, because the ruling forbids letting our grid and ConPTY's
-/// drift apart across the deferral. They move together at release instead.
+/// *now* — `None` while the retained gate holds. With the policy off, `typed_input_live` reaches
+/// this function as false and the actor always follows the solved grid immediately.
 fn plan_grid_change(
     pending: &mut Option<PendingPtyResize>,
     next_grid: GridSize,
@@ -551,6 +561,14 @@ fn service_pending_pty_resize(
     let due = release_due_pty_resize(pending, now, typed_input_live);
     let wake = pty_resize_wake_deadline(*pending, typed_input_live, now);
     (due, wake)
+}
+
+const fn typed_input_resize_deferral_active(
+    policy: bool,
+    pty_present: bool,
+    typed_input_live: bool,
+) -> bool {
+    policy && pty_present && typed_input_live
 }
 
 /// The private shell-integration input owed after one successful ConPTY resize commit.
@@ -1883,8 +1901,8 @@ impl Runtime {
         Ok(())
     }
 
-    /// Carry a freshly solved grid to the child and to our own grid — or, while the shell is
-    /// holding typed input, to neither.
+    /// Carry a freshly solved grid to the child and to our own grid — or, when the retained
+    /// typed-input policy is enabled and the shell is holding input, to neither.
     ///
     /// The seat rectangle has already moved by the time this is called (`resolve_seat_layout` is
     /// what produced `next_grid`), so a drag stays exactly as responsive as it is today. What is
@@ -1923,12 +1941,15 @@ impl Runtime {
 
     /// Is a PTY resize deferred right now?
     ///
-    /// A child holding typed input is the whole reason to defer, so `BT_PROBE_INPUT` — which feeds
-    /// a recording straight into the session and spawns no child at all — is not deferred by a
-    /// region that recording happens to contain. There is no PTY resize to withhold there, and a
-    /// diagnostic replay must reflow when the window says so.
+    /// This is the single policy convergence point. With `TYPED_INPUT_RESIZE_DEFERRAL` off it is
+    /// always false. If that bit is restored, a child holding typed input defers as before, while
+    /// `BT_PROBE_INPUT` — which spawns no child — still reflows immediately.
     fn typed_input_defers_resize(&self) -> bool {
-        self.pty.is_some() && self.session.typed_shell_input_live()
+        typed_input_resize_deferral_active(
+            TYPED_INPUT_RESIZE_DEFERRAL,
+            self.pty.is_some(),
+            self.session.typed_shell_input_live(),
+        )
     }
 
     fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
@@ -5677,10 +5698,15 @@ mod tests {
         grid: GridSize,
         conpty: GridSize,
         requests: Vec<GridSize>,
+        typed_input_resize_deferral: bool,
     }
 
     impl ResizeGateHarness {
         fn new(columns: u16, rows: u16) -> Self {
+            Self::with_policy(columns, rows, TYPED_INPUT_RESIZE_DEFERRAL)
+        }
+
+        fn with_policy(columns: u16, rows: u16, typed_input_resize_deferral: bool) -> Self {
             let grid = grid_of(columns, rows);
             Self {
                 session: DualPlaneSession::new(
@@ -5691,7 +5717,16 @@ mod tests {
                 grid,
                 conpty: grid,
                 requests: Vec::new(),
+                typed_input_resize_deferral,
             }
+        }
+
+        fn deferring(&self) -> bool {
+            typed_input_resize_deferral_active(
+                self.typed_input_resize_deferral,
+                true,
+                self.session.typed_shell_input_live(),
+            )
         }
 
         fn feed(&mut self, bytes: &[u8], at: Instant) {
@@ -5702,6 +5737,7 @@ mod tests {
         /// answered `columns`, and this is everything `Runtime::resize` does with that answer.
         fn drag_to(&mut self, columns: u16, at: Instant) {
             let next = grid_of(columns, self.grid.rows.get());
+            let deferred = self.deferring();
             if let Some(reflow) = plan_grid_change(
                 &mut self.pending,
                 next,
@@ -5709,7 +5745,7 @@ mod tests {
                 self.grid,
                 PhysicalSize::new(u32::from(columns) * 8, 600),
                 at,
-                self.session.typed_shell_input_live(),
+                deferred,
             ) {
                 self.session
                     .resize(
@@ -5723,11 +5759,8 @@ mod tests {
 
         /// One `about_to_wait`: drain has already happened, so the gate is asked again here.
         fn tick(&mut self, at: Instant) {
-            let (pending, _) = service_pending_pty_resize(
-                &mut self.pending,
-                at,
-                self.session.typed_shell_input_live(),
-            );
+            let deferred = self.deferring();
+            let (pending, _) = service_pending_pty_resize(&mut self.pending, at, deferred);
             let Some(pending) = pending else {
                 return;
             };
@@ -5745,7 +5778,7 @@ mod tests {
         }
 
         fn wake_deadline(&self, now: Instant) -> Option<Instant> {
-            pty_resize_wake_deadline(self.pending, self.session.typed_shell_input_live(), now)
+            pty_resize_wake_deadline(self.pending, self.deferring(), now)
         }
     }
 
@@ -5754,6 +5787,43 @@ mod tests {
             columns: std::num::NonZeroU16::new(columns).unwrap(),
             rows: std::num::NonZeroU16::new(rows).unwrap(),
         }
+    }
+
+    /// POLICY PIN (user ruling 2026-08-06): typed input does not hold a resize by default. The
+    /// local grid follows the drag immediately, while ConPTY still receives exactly the coalesced
+    /// final size at the ordinary quiet boundary.
+    #[test]
+    fn typed_input_resize_deferral_is_off_and_live_resize_is_the_default() {
+        const {
+            assert!(!TYPED_INPUT_RESIZE_DEFERRAL);
+        }
+        assert!(!typed_input_resize_deferral_active(false, true, true));
+        assert!(typed_input_resize_deferral_active(true, true, true));
+        assert!(!typed_input_resize_deferral_active(true, false, true));
+        assert!(!typed_input_resize_deferral_active(true, true, false));
+
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(100, 24);
+        harness.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
+        assert!(harness.session.typed_shell_input_live());
+
+        harness.drag_to(80, start);
+        assert_eq!(
+            harness.grid,
+            grid_of(80, 24),
+            "policy=false must reflow locally even while the shell holds text"
+        );
+        harness.tick(start + WINDOW_RESIZE_QUIET - Duration::from_millis(1));
+        assert!(
+            harness.requests.is_empty(),
+            "the 200 ms coalescer remains in force"
+        );
+        harness.tick(start + WINDOW_RESIZE_QUIET);
+        assert_eq!(
+            harness.requests,
+            vec![grid_of(80, 24)],
+            "policy=false commits the coalesced resize while input remains live"
+        );
     }
 
     /// PIN: a PTY deadline handed to `ControlFlow::WaitUntil` must still be in the future.
@@ -5787,7 +5857,7 @@ mod tests {
         );
     }
 
-    /// PIN (user ruling 2026-08-04): while an OSC 133 input region holds typed content, a PTY
+    /// MACHINERY PIN (policy=true): while an OSC 133 input region holds typed content, a PTY
     /// resize is deferred — zero requests during the drag, exactly one at release carrying the
     /// final dragged size, and our own grid held in lockstep with the child's the whole way.
     ///
@@ -5796,7 +5866,7 @@ mod tests {
     #[test]
     fn a_drag_while_the_shell_holds_typed_input_reaches_conpty_exactly_once_at_release() {
         let start = Instant::now();
-        let mut harness = ResizeGateHarness::new(100, 24);
+        let mut harness = ResizeGateHarness::with_policy(100, 24, true);
         harness.feed(
             b"\x1b]133;A\x07PS D:\\Developer\\BetterTerminal> \x1b]133;B\x07Get-ChildItem",
             start,
@@ -5852,7 +5922,7 @@ mod tests {
         assert_eq!(harness.conpty, grid_of(96, 24));
     }
 
-    /// PIN: the three cases that must stay exactly as cheap as they are today.
+    /// MACHINERY PIN (policy=true): the three non-holding/release cases stay cheap.
     #[test]
     fn an_idle_prompt_a_bare_screen_and_a_cleared_line_all_resize_without_deferral() {
         let start = Instant::now();
@@ -5860,7 +5930,7 @@ mod tests {
         // An empty prompt: the drag lands as it always has. The confirmation window a release now
         // waits out started at this drag's own first frame, so it has already elapsed when the
         // coalescer's deadline arrives — the deadline the loop is given is the coalescer's own.
-        let mut idle = ResizeGateHarness::new(100, 24);
+        let mut idle = ResizeGateHarness::with_policy(100, 24, true);
         idle.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start);
         idle.drag_to(80, start);
         assert_eq!(
@@ -5877,7 +5947,7 @@ mod tests {
         assert_eq!(idle.requests, vec![grid_of(80, 24)]);
 
         // A screen that never emitted OSC 133 is untouched by any of this.
-        let mut bare = ResizeGateHarness::new(100, 24);
+        let mut bare = ResizeGateHarness::with_policy(100, 24, true);
         bare.feed(b"PS> Get-ChildItem", start);
         bare.drag_to(80, start);
         assert_eq!(bare.grid, grid_of(80, 24));
@@ -5891,7 +5961,7 @@ mod tests {
         // Clearing the line is a release in its own right — no submission needed. What it does need
         // is the confirmation window, because "the line is empty" is exactly what a redraw's erase
         // chunk also says one millisecond before its rewrite arrives.
-        let mut cleared = ResizeGateHarness::new(100, 24);
+        let mut cleared = ResizeGateHarness::with_policy(100, 24, true);
         cleared.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
         cleared.drag_to(80, start);
         cleared.tick(start + WINDOW_RESIZE_QUIET);
@@ -5911,13 +5981,14 @@ mod tests {
         );
     }
 
-    /// PIN: a drag that wanders away and comes back tells the child nothing at all. Without this,
+    /// MACHINERY PIN (policy=true): a drag that wanders away and comes back tells the child
+    /// nothing at all. Without this,
     /// "exactly one resize at release" would be false whenever the final size is the one the child
     /// never left — and that resize would be a gratuitous reflow of a settled prompt.
     #[test]
     fn a_drag_that_returns_to_the_childs_own_size_releases_nothing() {
         let start = Instant::now();
-        let mut harness = ResizeGateHarness::new(100, 24);
+        let mut harness = ResizeGateHarness::with_policy(100, 24, true);
         harness.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
         for columns in [70_u16, 39, 100] {
             harness.drag_to(columns, start);
@@ -5931,7 +6002,8 @@ mod tests {
         assert_eq!(harness.grid, grid_of(100, 24));
     }
 
-    /// PIN (confirm-then-release): the blank instant inside a redraw is not an empty prompt.
+    /// MACHINERY PIN (policy=true, confirm-then-release): the blank instant inside a redraw is not
+    /// an empty prompt.
     ///
     /// The reader thread hands the loop whatever a single read returned — up to 16 KiB — and wakes
     /// it for every chunk. PSReadLine redraws a line by parking the cursor on `B`, erasing, and
@@ -5946,7 +6018,7 @@ mod tests {
     #[test]
     fn a_redraw_split_across_two_reads_never_releases_in_its_blank_window() {
         let start = Instant::now();
-        let mut harness = ResizeGateHarness::new(100, 24);
+        let mut harness = ResizeGateHarness::with_policy(100, 24, true);
         // A 12-column prompt: `B` lands on column 12, which is CUP column 13.
         harness.feed(
             b"\x1b]133;A\x07PS D:\\dist> \x1b]133;B\x07Get-ChildItem",

@@ -3410,7 +3410,8 @@ mod tests {
     /// One run of the minimal repro through the application's own resize loop.
     ///
     /// Type without submitting; drag narrower than the prompt; drag wider again; press a key that
-    /// redraws. `gated` selects the mitigation, and nothing else about the run changes.
+    /// redraws. `gated` is the app policy bit: `false` is the 2026-08-06 production default,
+    /// `true` is the reversible retained mitigation, and nothing else about the run changes.
     fn run_deferred_resize_probe(gated: bool) -> Option<DeferProbeOutcome> {
         let mut oracle = AppResizeOracle::spawn(
             "pwsh.exe",
@@ -3524,18 +3525,19 @@ mod tests {
         })
     }
 
-    /// ACCEPTANCE PROBE for the typed-input ConPTY resize deferral (user ruling 2026-08-04).
+    /// TWO-POLICY ACCEPTANCE PROBE for typed-input ConPTY resize behavior (user rulings 2026-08-04
+    /// and 2026-08-06).
     ///
     /// The mitigation was shelved once because nobody could reproduce the corruption and therefore
     /// nobody could prove a mitigation worked. This is that proof, both directions in one run
     /// against one real pwsh child through the product's own resize loop:
     ///
-    /// * `gated=false` — the loop as it was. The child hears widths narrower than its prompt while
-    ///   its buffer is non-empty, PSReadLine's reduced anchor column survives the widening, and the
-    ///   redraw splices into the prompt row.
-    /// * `gated=true` — the same drag, the same keystroke, the same child. The buffer is never
-    ///   empty across the narrowing, so the resize never leaves us, and there is no stale anchor to
-    ///   splice from.
+    /// * `gated=false` — the current default policy. The child hears widths narrower than its
+    ///   prompt while its buffer is non-empty, PSReadLine's reduced anchor column survives the
+    ///   widening, and the redraw splices into the prompt row.
+    /// * `gated=true` — the retained policy. The same drag, the same keystroke, the same child. The
+    ///   buffer is never empty across the narrowing, so the resize never leaves us, and there is no
+    ///   stale anchor to splice from.
     ///
     /// Measured on a 37-cell prompt at 100 columns narrowed to 24 (`BT_DEFER_EMIT=1` prints the
     /// child's own bytes). Ungated, the render that follows the narrow commit addresses
@@ -3615,7 +3617,10 @@ mod tests {
         );
     }
 
-    /// ACCEPTANCE PROBE for confirm-then-release, against a live child.
+    /// MACHINERY ACCEPTANCE PROBE for confirm-then-release, against a live child.
+    ///
+    /// This pins the retained gate machine, not the default policy. Both arms keep the typed-input
+    /// gate enabled and vary only single-sample release versus confirmed release.
     ///
     /// The gate reads the grid, and the grid is written by whatever a single `read` returned — the
     /// reader thread hands the loop up to 16 KiB and wakes it per chunk. PSReadLine redraws a line
