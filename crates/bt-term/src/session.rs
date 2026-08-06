@@ -2473,32 +2473,19 @@ impl DualPlaneSession {
     /// rows this region has written in the current generation. Taking the cursor alone would be
     /// wrong: `Home` puts the cursor back on `B` while the buffer is still full, and a gate that
     /// read only `[B, cursor)` would then call a full line empty and resize into the fault. Within
-    /// those rows the content test is "any non-blank cell at or after `B`". A grid cannot tell a
-    /// typed space from padding, so a buffer made *entirely* of spaces reads as empty here; that is
-    /// the limit of what the screen knows, not a shortcut.
+    /// those rows the content test is "any non-blank cell at or after `B`".
+    ///
+    /// A grid cannot tell a typed space from padding, so the cell scan alone would read a buffer
+    /// made *entirely* of spaces as empty. The region's own write history is the second witness that
+    /// closes that gap — see `typed_writes_precede_the_cursor`.
     fn semantic_input_region_holds_content(&self, index: usize) -> bool {
         let Some(region) = self.semantic_input_regions.get(index) else {
             return false;
         };
-        if region.closed {
+        if region.closed || region.screen != self.live_screen {
             return false;
         }
-        let Ok(ContentAnchor::Live {
-            screen,
-            point: start,
-            generation,
-            ..
-        }) = self.document.anchor(region.start)
-        else {
-            return false;
-        };
-        // A start we cannot place on *this* grid is a start we cannot scan from. Answering `false`
-        // hands the drag back to today's behaviour rather than deferring on a coordinate we do not
-        // believe.
-        if *screen != self.live_screen || *generation != self.grid_generation {
-            return false;
-        }
-        let start = *start;
+        let start = self.semantic_input_scan_start(region);
         let last_row = region
             .written_rows
             .iter()
@@ -2508,7 +2495,7 @@ impl DualPlaneSession {
             .max()
             .unwrap_or(start.row)
             .max(start.row);
-        (start.row..=last_row).any(|row| {
+        let visible_content = (start.row..=last_row).any(|row| {
             let Some(captured) = self.terminal.visible_row(row) else {
                 return false;
             };
@@ -2520,6 +2507,62 @@ impl DualPlaneSession {
             };
             text.get(byte_start..)
                 .is_some_and(|tail| tail.chars().any(|glyph| !glyph.is_whitespace()))
+        });
+        visible_content || self.typed_writes_precede_the_cursor(region, start)
+    }
+
+    /// Where the region begins *on this grid*.
+    ///
+    /// A row that scrolls off the top takes its anchors with it: `apply_removed_rows` ->
+    /// `Document::capture_rows_transaction` re-seats an anchor on a captured row as a `Staging` one,
+    /// so a command long enough to outgrow the screen loses its live start while every visible
+    /// character of it is still there. That is not a coordinate we disbelieve — it is a statement
+    /// that the region's beginning is above row 0, and what remains on screen therefore begins at
+    /// the top-left cell. Clamping there scans exactly the visible remainder of the region.
+    ///
+    /// The same clamp answers every other way the start can stop naming a live cell (a finalized
+    /// history anchor, a generation the transaction did not rebase). Each of them means the same
+    /// thing — the beginning is no longer on this grid — and each of them errs towards holding the
+    /// gate, which costs a deferred resize and never costs a corrupted screen.
+    fn semantic_input_scan_start(&self, region: &SemanticInputRegion) -> GridPoint {
+        match self.document.anchor(region.start) {
+            Ok(ContentAnchor::Live {
+                screen,
+                point,
+                generation,
+                ..
+            }) if *screen == self.live_screen && *generation == self.grid_generation => *point,
+            _ => GridPoint { row: 0, column: 0 },
+        }
+    }
+
+    /// The second content witness: this region wrote to *this* grid, and the cursor now stands past
+    /// where those writes began.
+    ///
+    /// The cell scan reads glyphs, and a space is indistinguishable from an untouched cell — so a
+    /// buffer of nothing but spaces reads as empty, while PSReadLine holds it as four characters and
+    /// re-anchors against it exactly as it would against text. What separates typed spaces from a
+    /// blank screen is the pair of facts below, not either one alone:
+    ///
+    /// * a printable write recorded by this region in the *current* grid generation. A scroll
+    ///   capture retires those writes by bumping the generation they were recorded under; ED 2
+    ///   removes no row and moves no generation, so it retires them explicitly
+    ///   (`retire_semantic_input_writes`). Either way, blanking the screen releases the gate instead
+    ///   of holding it on a buffer that is gone.
+    /// * the cursor strictly past the start in row-major order. Clearing the line puts the cursor
+    ///   back on `B`, and `B` is not past `B`; so does the erase half of PSReadLine's own
+    ///   erase-then-rewrite redraw, which is why this witness cannot mask that transient.
+    fn typed_writes_precede_the_cursor(
+        &self,
+        region: &SemanticInputRegion,
+        start: GridPoint,
+    ) -> bool {
+        let cursor = self.terminal.cursor();
+        if (cursor.row, cursor.column) <= (start.row, start.column) {
+            return false;
+        }
+        region.written_rows.iter().any(|(generation, row)| {
+            *generation == self.grid_generation.0 && start.row <= *row && *row <= cursor.row
         })
     }
 
@@ -2659,6 +2702,19 @@ impl DualPlaneSession {
                 })
             })
             .unwrap_or(*start)
+    }
+
+    /// ED 2 blanks the viewport in place: no row is removed, so no generation moves and the write
+    /// record the open region carries would otherwise keep asserting content the screen no longer
+    /// holds. Rows removed by a scroll retire the same record for free, because the generation they
+    /// were recorded under stops being current.
+    fn retire_semantic_input_writes(&mut self) {
+        let live_screen = self.live_screen;
+        for region in &mut self.semantic_input_regions {
+            if region.screen == live_screen && !region.closed {
+                region.written_rows.clear();
+            }
+        }
     }
 
     fn record_semantic_input_writes(&mut self, screen: ScreenId, rows: Vec<u32>) {
@@ -6187,6 +6243,10 @@ impl DualPlaneSession {
                 }
                 LifecycleDirective::GridCoordinatesInvalidated => {
                     self.cursor_logical_line_memory = None;
+                }
+                LifecycleDirective::ScreenCleared => {
+                    self.cursor_logical_line_memory = None;
+                    self.retire_semantic_input_writes();
                 }
                 LifecycleDirective::ClearHistoryAndStaging => {
                     self.terminal.clear_resize_transaction_history();
@@ -19881,6 +19941,77 @@ mod tests {
         assert!(
             wrapped.typed_shell_input_live(),
             "content below the cursor's row is still content"
+        );
+    }
+
+    /// PIN: an open input region whose start row has scrolled off the top of the live grid still
+    /// holds the gate.
+    ///
+    /// A captured row takes its anchors with it — `apply_removed_rows` ->
+    /// `Document::capture_rows_transaction` re-seats the region's start as a `Staging` anchor — so
+    /// the start stops being a coordinate on this grid the moment the command grows past the screen.
+    /// The text is still there; only its beginning is off-screen, and the visible part of the region
+    /// therefore begins at row 0. Answering `false` here would hand PSReadLine the narrow width for
+    /// exactly the long commands that reach the top of a 35-column pane soonest.
+    #[test]
+    fn typed_shell_input_gate_holds_when_the_region_start_scrolls_off_the_top() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(12), nz(4));
+        session
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", started)
+            .unwrap();
+        session.feed_at("a".repeat(60).as_bytes(), started).unwrap();
+
+        assert!(
+            !matches!(
+                session
+                    .document
+                    .anchor(session.semantic_input_regions[0].start),
+                Ok(ContentAnchor::Live { .. })
+            ),
+            "the fixture must actually scroll the region's start row off the live grid, or this \
+             pin proves nothing: {:?}",
+            session
+                .document
+                .anchor(session.semantic_input_regions[0].start)
+        );
+        assert!(
+            session.typed_shell_input_live(),
+            "a command that outgrew the screen is still a buffer PSReadLine would re-anchor"
+        );
+
+        // And the clamp must not stick: submitting still releases.
+        session.feed_at(b"\r\n\x1b]133;C\x07", started).unwrap();
+        assert!(
+            !session.typed_shell_input_live(),
+            "a closed region releases the gate whether or not its start is still on the grid"
+        );
+    }
+
+    /// PIN: a buffer made entirely of spaces is typed content.
+    ///
+    /// A grid cannot tell a typed space from padding, so the cell scan alone reads this line as
+    /// empty — and PSReadLine's anchor fault does not care what the glyphs are, only that its buffer
+    /// is non-empty across the narrowing. The witness that separates the two is the region's own
+    /// history: it wrote to this grid in this generation, and the cursor has since moved past where
+    /// those writes began.
+    #[test]
+    fn typed_shell_input_gate_reads_a_buffer_of_spaces_as_content() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(80), nz(6));
+        session
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07    ", started)
+            .unwrap();
+        assert!(
+            session.typed_shell_input_live(),
+            "four typed spaces are four characters PSReadLine is holding"
+        );
+
+        // The same release conditions still hold: clearing the line puts the cursor back on `B`.
+        session.feed_at(b"\x1b[5G\x1b[K", started).unwrap();
+        assert!(
+            !session.typed_shell_input_live(),
+            "a cleared line leaves the cursor on `B`, which is not past it"
         );
     }
 

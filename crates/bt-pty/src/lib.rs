@@ -2484,6 +2484,13 @@ mod tests {
         /// The typed-input ConPTY resize gate (user ruling 2026-08-04). `false` is the loop exactly
         /// as it was before the mitigation, which is what makes the before/after pair one probe.
         typed_input_gate: bool,
+        /// `bt-app::PendingPtyResize::blank_since`: when the gate started answering "empty" for the
+        /// queued request. A real child's redraw arrives in whatever pieces a read returns, so a
+        /// single "empty" sample is not an empty buffer — only an unbroken quiet window of them is.
+        blank_since: Option<Instant>,
+        /// Whether that window is honoured. `false` is the loop as it was before
+        /// confirm-then-release, which is what makes the blank-window probe's pair one probe.
+        confirm_blank_gate: bool,
         /// What our own grid holds, and what the child was last told. They are the same number at
         /// rest; the gate's whole contract is that they stay the same number across a deferral too.
         grid: (u16, u16),
@@ -2505,6 +2512,8 @@ mod tests {
                 pending: None,
                 commits: Vec::new(),
                 typed_input_gate: false,
+                blank_since: None,
+                confirm_blank_gate: true,
                 grid: (columns, rows),
                 conpty: (columns, rows),
             }
@@ -2513,6 +2522,18 @@ mod tests {
         /// The one question the gate asks, or `false` when the probe is running the old loop.
         fn deferring(&self) -> bool {
             self.typed_input_gate && self.session.typed_shell_input_live()
+        }
+
+        /// `bt-app::sample_typed_input_gate`: record this turn's answer against the queued request.
+        fn sample_gate(&mut self, now: Instant) {
+            if self.pending.is_none() {
+                return;
+            }
+            if self.deferring() {
+                self.blank_since = None;
+            } else {
+                self.blank_since.get_or_insert(now);
+            }
         }
 
         /// One turn of the app's event loop.
@@ -2535,6 +2556,7 @@ mod tests {
         /// `bt-app::flush_pending_pty_resize`: the coalesced size reaches ConPTY and the terminal
         /// reconciles to it, both at the quiet boundary and never before.
         fn flush_pending_resize(&mut self, now: Instant) {
+            self.sample_gate(now);
             let Some((columns, rows, deadline)) = self.pending else {
                 return;
             };
@@ -2542,11 +2564,20 @@ mod tests {
                 return;
             }
             // The gate. Held, this returns without taking the pending request, so the request keeps
-            // its final size and lands whole once the shell lets go.
-            if self.deferring() {
+            // its final size and lands whole once the shell lets go — and letting go means the
+            // buffer has read empty for an unbroken quiet window, not for one sample.
+            let released = if self.confirm_blank_gate {
+                self.blank_since
+                    .is_some_and(|since| now >= since + RESIZE_REQUEST_QUIET)
+            } else {
+                // The pre-fix loop: one sample of the gate is the whole release condition.
+                !self.deferring()
+            };
+            if !released {
                 return;
             }
             self.pending = None;
+            self.blank_since = None;
             if (columns, rows) != self.grid {
                 // The reflow deferral owed from `project_resize`, paid here so our grid and the
                 // child's change together rather than drifting apart across the drag.
@@ -2572,6 +2603,12 @@ mod tests {
                 rows,
                 now + RESIZE_REQUEST_QUIET,
             ));
+            if self.pending.is_none() {
+                self.blank_since = None;
+            }
+            // A pointer frame samples the gate like any other turn, which is what keeps a drag over
+            // an idle prompt free of a second quiet window.
+            self.sample_gate(now);
             if self.deferring() {
                 return;
             }
@@ -3493,6 +3530,170 @@ mod tests {
             after.input_line,
             after.expected_input_line,
             after.composed_rows
+        );
+    }
+
+    /// ACCEPTANCE PROBE for confirm-then-release, against a live child.
+    ///
+    /// The gate reads the grid, and the grid is written by whatever a single `read` returned — the
+    /// reader thread hands the loop up to 16 KiB and wakes it per chunk. PSReadLine redraws a line
+    /// by parking the cursor on `B`, erasing, and writing the buffer back, so a redraw cut between
+    /// two reads leaves a wake where the grid honestly holds nothing while the *buffer* holds a
+    /// command the user is still typing. Chunk boundaries are the operating system's to choose, so
+    /// this probe does not try to place one: it types a command, never submits it, and hammers the
+    /// keystrokes that force redraw after redraw while a narrowing resize sits queued. Every sample
+    /// taken in that span is a sample whose ground truth is "non-empty" by construction.
+    ///
+    /// * `BT_CONPTY_BLANK_WINDOW_PROBE blank_samples=` counts the wakes where the gate read empty
+    ///   anyway. Each one is a release the pre-fix loop would have taken.
+    /// * `commits` must stay empty across the whole storm — the confirmation window is what makes a
+    ///   count above zero harmless — and then carry exactly the dragged size once the command is
+    ///   submitted and the line stays empty for `RESIZE_REQUEST_QUIET`.
+    ///
+    ///   `cargo test -p bt-pty typed_input_gate_blank_window -- --ignored --nocapture`
+    #[derive(Debug)]
+    struct BlankWindowOutcome {
+        confirmed: bool,
+        samples: usize,
+        blank_samples: usize,
+        /// Sizes the child was told about while the buffer provably held 1200 characters.
+        commits_while_typing: Vec<(u16, u16)>,
+        commits: Vec<(u16, u16)>,
+    }
+
+    /// One run of the storm. `confirmed` selects confirm-then-release; nothing else changes.
+    fn run_blank_window_probe(confirmed: bool) -> Option<BlankWindowOutcome> {
+        let mut oracle = AppResizeOracle::spawn(
+            "pwsh.exe",
+            &defer_probe_startup(),
+            DEFER_PROBE_WIDE,
+            DEFER_PROBE_ROWS,
+            false,
+        );
+        oracle.typed_input_gate = true;
+        oracle.confirm_blank_gate = confirmed;
+        if !oracle.settle_at_prompt(DEFER_PROBE_PROMPT) {
+            eprintln!(
+                "BT_CONPTY_BLANK_WINDOW_PROBE confirmed={confirmed} SETUP-FAILED line={:?}",
+                oracle.current_line()
+            );
+            return None;
+        }
+
+        // Narrow the pane first, at an *empty* prompt where the gate has nothing to protect. This
+        // is the reporting user's geometry: a pane already narrower than its prompt, so the prompt
+        // wraps and every redraw of the input line repaints several rows — which is the payload a
+        // 16 KiB read can cut in half.
+        oracle.project_resize(DEFER_PROBE_NARROW, DEFER_PROBE_ROWS);
+        oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(40));
+        oracle.pump_until_quiet(Duration::from_secs(6));
+        assert_eq!(
+            oracle.commits,
+            vec![(DEFER_PROBE_NARROW, DEFER_PROBE_ROWS)],
+            "an idle prompt must still resize, or the probe never reaches the narrow geometry \
+             (confirmed={confirmed})"
+        );
+
+        // A command long enough to outgrow the pane: at 24 columns this wraps past the seventeen
+        // rows the child has, so every redraw repaints the whole visible window *and* the region's
+        // own start scrolls off the top of it. Both halves of the fault live here — the payload big
+        // enough for a read to cut, and the start anchor the capture transaction re-seats.
+        oracle.pty.write(DEFER_PROBE_TYPED.as_bytes()).unwrap();
+        oracle.pty.write("a".repeat(1_200).as_bytes()).unwrap();
+        oracle.pump_for(Duration::from_millis(1_500));
+        oracle.pump_until_quiet(Duration::from_secs(6));
+        assert!(
+            oracle.session.typed_shell_input_live(),
+            "the shell integration must arm the gate, or the probe measures nothing \
+             (confirmed={confirmed})"
+        );
+
+        // The drag, queued while the buffer is full.
+        oracle.project_resize(DEFER_PROBE_WIDE, DEFER_PROBE_ROWS);
+        oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(40));
+
+        // The storm. Each keystroke is one erase-and-rewrite of the whole line, and the loop is
+        // pumped at its own rate throughout — which is exactly where a split lands.
+        let mut samples = 0usize;
+        let mut blank_samples = 0usize;
+        for index in 0..40 {
+            // A character and its backspace: the buffer ends where it started, and every one of the
+            // forty keystrokes between is a full redraw of a line taller than the pane.
+            let keystroke: &[u8] = if index % 2 == 0 { b"1" } else { b"\x7f" };
+            oracle.pty.write(keystroke).unwrap();
+            let deadline = Instant::now() + Duration::from_millis(50);
+            while Instant::now() < deadline {
+                oracle.pump_once();
+                samples += 1;
+                if !oracle.session.typed_shell_input_live() {
+                    blank_samples += 1;
+                }
+            }
+        }
+        let commits_while_typing = oracle.commits[1..].to_vec();
+
+        // RELEASE: the command is submitted and the line stays empty through the quiet window.
+        oracle.pty.write(b"\r").unwrap();
+        oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(200));
+        oracle.pump_until_quiet(Duration::from_secs(6));
+
+        Some(BlankWindowOutcome {
+            confirmed,
+            samples,
+            blank_samples,
+            commits_while_typing,
+            commits: oracle.commits.clone(),
+        })
+    }
+
+    #[test]
+    #[ignore = "dev probe: drives a real interactive PowerShell through ConPTY; host-timing sensitive"]
+    fn typed_input_gate_blank_window_probe() {
+        let source = conpty_source();
+        let mut outcomes = Vec::new();
+        for confirmed in [false, true] {
+            let Some(outcome) = run_blank_window_probe(confirmed) else {
+                continue;
+            };
+            eprintln!(
+                "BT_CONPTY_BLANK_WINDOW_PROBE source={source} confirmed={} samples={} \
+                 blank_samples={} commits_while_typing={:?} commits={:?}",
+                outcome.confirmed,
+                outcome.samples,
+                outcome.blank_samples,
+                outcome.commits_while_typing,
+                outcome.commits
+            );
+            outcomes.push(outcome);
+        }
+        assert_eq!(outcomes.len(), 2, "the probe drove no live shell");
+        let before = &outcomes[0];
+        let after = &outcomes[1];
+        // RED-CHECK: releasing on one sample really does hand the child a size mid-buffer. The
+        // gate has no bypass in it and the buffer is never empty in this span — the release comes
+        // from the blank instant of a redraw, which is the whole fault.
+        assert!(
+            !before.commits_while_typing.is_empty(),
+            "releasing on a single blank sample must reach the fault's precondition, or the pair \
+             proves nothing: blank_samples={} of {}",
+            before.blank_samples,
+            before.samples
+        );
+        assert!(
+            after.commits_while_typing.is_empty(),
+            "no size may reach the child across the redraw storm, got {:?} (blank_samples={} of \
+             {})",
+            after.commits_while_typing,
+            after.blank_samples,
+            after.samples
+        );
+        assert_eq!(
+            after.commits,
+            vec![
+                (DEFER_PROBE_NARROW, DEFER_PROBE_ROWS),
+                (DEFER_PROBE_WIDE, DEFER_PROBE_ROWS)
+            ],
+            "the queued size lands exactly once, after the submitted line stays empty"
         );
     }
 }

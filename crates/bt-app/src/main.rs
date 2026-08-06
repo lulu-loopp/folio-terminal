@@ -346,6 +346,48 @@ struct PendingPtyResize {
     grid: GridSize,
     physical: PhysicalSize<u32>,
     deadline: Instant,
+    /// When the typed-input gate started answering "empty", or `None` if the last sample of it
+    /// found content. See `sample_typed_input_gate`.
+    blank_since: Option<Instant>,
+}
+
+impl PendingPtyResize {
+    /// Has the gate answered "empty" for an unbroken `WINDOW_RESIZE_QUIET`, ending at `now`?
+    fn blank_confirmed_at(&self, now: Instant) -> bool {
+        self.blank_since
+            .is_some_and(|since| now >= since + WINDOW_RESIZE_QUIET)
+    }
+
+    /// The first instant this request could be released: its own coalescing deadline, and — once a
+    /// blank run has started — the end of that run's confirmation window.
+    fn release_deadline(&self) -> Instant {
+        self.blank_since.map_or(self.deadline, |since| {
+            self.deadline.max(since + WINDOW_RESIZE_QUIET)
+        })
+    }
+}
+
+/// Record what the typed-input gate answered at this wake.
+///
+/// The gate is a question about the grid's *current* contents, and the child rewrites that grid in
+/// whatever pieces a 16 KiB read happens to cut its output into. PSReadLine redraws by parking the
+/// cursor on `B`, erasing, and writing the buffer back; when the erase and the rewrite arrive in
+/// different reads, the wake in between finds a grid that honestly holds nothing. So a single
+/// sample cannot be a release condition — only an unbroken run of them can, and any sample that
+/// finds content starts the next run from scratch.
+fn sample_typed_input_gate(
+    pending: &mut Option<PendingPtyResize>,
+    now: Instant,
+    typed_input_live: bool,
+) {
+    let Some(pending) = pending.as_mut() else {
+        return;
+    };
+    if typed_input_live {
+        pending.blank_since = None;
+    } else {
+        pending.blank_since.get_or_insert(now);
+    }
 }
 
 fn coalesce_pty_resize(
@@ -358,6 +400,10 @@ fn coalesce_pty_resize(
         grid,
         physical,
         deadline: observed_at + WINDOW_RESIZE_QUIET,
+        // A new size is not a new answer about the child's buffer: a drag over an idle prompt keeps
+        // sampling "empty" from its first frame on, so the confirmation window it started runs
+        // alongside the coalescer's and adds nothing to the wait.
+        blank_since: pending.as_ref().and_then(|pending| pending.blank_since),
     });
 }
 
@@ -419,19 +465,27 @@ fn coalesce_pty_resize_on_grid_change(
 /// our side to correct — the only faithful mitigation is not to tell the child about a width it
 /// would re-anchor against while it is holding text.
 ///
-/// So a due resize is held back while `typed_input_live`, and released the moment that is false.
-/// The release is a *question about current state*, never a timer: the input region closing
-/// (submission), its content going empty (the line cleared), a screen switch, a reset, ED 2 or an
-/// alternate-screen transition all make `DualPlaneSession::typed_shell_input_live` answer `false`,
-/// and every one of them reaches us as child output — which wakes the event loop on its own. That
-/// is also why `pty_resize_wake_deadline` withholds the deadline while the gate holds: there is
-/// nothing to wait *for*, and offering an already-past instant would spin the loop.
+/// So a due resize is held back while `typed_input_live`, and released once that has been false for
+/// an unbroken `WINDOW_RESIZE_QUIET`. What releases is still a *question about current state* and
+/// never a timer over the drag: the input region closing (submission), its content going empty (the
+/// line cleared), a screen switch, a reset, ED 2 or an alternate-screen transition all make
+/// `DualPlaneSession::typed_shell_input_live` answer `false`, and every one of them reaches us as
+/// child output — which wakes the event loop on its own. A buffer that still holds text is held for
+/// as long as it holds it, however long the drag has been over.
+///
+/// The confirmation window is what a single sample cannot give: the gate reads the grid, and a
+/// redraw split across two reads leaves the grid momentarily empty between them
+/// (`sample_typed_input_gate`). Waiting out the same quiet period the coalescer already uses costs
+/// an idle prompt nothing — its blank run starts at the drag's first frame — and costs a line that
+/// was genuinely emptied one quiet window.
 fn release_due_pty_resize(
     pending: &mut Option<PendingPtyResize>,
     now: Instant,
     typed_input_live: bool,
 ) -> Option<PendingPtyResize> {
-    (!typed_input_live)
+    sample_typed_input_gate(pending, now, typed_input_live);
+    pending
+        .is_some_and(|pending| pending.blank_confirmed_at(now))
         .then(|| take_due_pty_resize(pending, now))
         .flatten()
 }
@@ -450,15 +504,23 @@ fn plan_grid_change(
     typed_input_live: bool,
 ) -> Option<GridSize> {
     coalesce_pty_resize_on_grid_change(pending, next_grid, conpty_grid, physical, observed_at);
+    // A pointer frame is a sample of the gate like any other, and taking it here is what keeps the
+    // confirmation window free for the case it must stay free for: a drag over an idle prompt has
+    // been reading "empty" since its first frame, so the window has long since elapsed by the time
+    // the drag stops and the coalescer's own deadline arrives.
+    sample_typed_input_gate(pending, observed_at, typed_input_live);
     (next_grid != local_grid && !typed_input_live).then_some(next_grid)
 }
 
-/// The instant the coalesced ConPTY resize falls due, or `None` while nothing is owed or the
-/// typed-input gate is holding it.
+/// The instant the coalesced ConPTY resize could next be released, or `None` while nothing is owed
+/// or the typed-input gate is holding it.
 ///
 /// Withholding it while held is not an optimisation: the deadline has usually already passed by
 /// then, and handing an event loop a past instant to wait until is a spin. There is nothing to
-/// wait *for* either — every release is child output, which wakes the loop by itself.
+/// wait *for* either — a gate that is holding on *content* is released by child output, which wakes
+/// the loop by itself. A gate reading empty is the opposite case: the confirmation window it is
+/// serving may well end with no further output at all, so the loop is given that instant to wake
+/// at.
 fn pty_resize_wake_deadline(
     pending: Option<PendingPtyResize>,
     typed_input_live: bool,
@@ -466,7 +528,7 @@ fn pty_resize_wake_deadline(
     (!typed_input_live)
         .then_some(pending)
         .flatten()
-        .map(|pending| pending.deadline)
+        .map(|pending| pending.release_deadline())
 }
 
 #[derive(Clone)]
@@ -5677,12 +5739,20 @@ mod tests {
             "a held resize must not offer the loop a deadline it would spin on"
         );
 
-        // RELEASE: the command is submitted. The very drain that carries `133;C` is the tick that
-        // lets go, and it carries the last size the drag reached — not the narrow one it passed
-        // through, and not one request per step.
+        // RELEASE: the command is submitted, and the empty line that follows it is confirmed over
+        // one quiet window (`a_redraw_split_across_two_reads_never_releases_in_its_blank_window` is
+        // why the drain that carries `133;C` cannot be trusted on its own). It carries the last size
+        // the drag reached — not the narrow one it passed through, and not one request per step.
         let released_at = start + Duration::from_secs(3600);
         harness.feed(b"\r\n\x1b]133;C\x07", released_at);
         harness.tick(released_at);
+        assert!(harness.requests.is_empty());
+        assert_eq!(
+            harness.wake_deadline(),
+            Some(released_at + WINDOW_RESIZE_QUIET),
+            "the loop is told when to come back and confirm, since no further output need arrive"
+        );
+        harness.tick(released_at + WINDOW_RESIZE_QUIET);
         assert_eq!(
             harness.requests,
             vec![grid_of(96, 24)],
@@ -5697,7 +5767,9 @@ mod tests {
     fn an_idle_prompt_a_bare_screen_and_a_cleared_line_all_resize_without_deferral() {
         let start = Instant::now();
 
-        // An empty prompt: the drag lands as it always has.
+        // An empty prompt: the drag lands as it always has. The confirmation window a release now
+        // waits out started at this drag's own first frame, so it has already elapsed when the
+        // coalescer's deadline arrives — the deadline the loop is given is the coalescer's own.
         let mut idle = ResizeGateHarness::new(100, 24);
         idle.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start);
         idle.drag_to(80, start);
@@ -5705,6 +5777,11 @@ mod tests {
             idle.grid,
             grid_of(80, 24),
             "an empty prompt reflows immediately"
+        );
+        assert_eq!(
+            idle.wake_deadline(),
+            Some(start + WINDOW_RESIZE_QUIET),
+            "confirming an already-idle prompt must not add a second quiet window to the drag"
         );
         idle.tick(start + WINDOW_RESIZE_QUIET);
         assert_eq!(idle.requests, vec![grid_of(80, 24)]);
@@ -5721,18 +5798,26 @@ mod tests {
             "honest degradation: without shell integration this is today's path, unchanged"
         );
 
-        // Clearing the line is a release in its own right — no submission needed.
+        // Clearing the line is a release in its own right — no submission needed. What it does need
+        // is the confirmation window, because "the line is empty" is exactly what a redraw's erase
+        // chunk also says one millisecond before its rewrite arrives.
         let mut cleared = ResizeGateHarness::new(100, 24);
         cleared.feed(b"\x1b]133;A\x07PS> \x1b]133;B\x07Get-ChildItem", start);
         cleared.drag_to(80, start);
         cleared.tick(start + WINDOW_RESIZE_QUIET);
         assert!(cleared.requests.is_empty());
-        cleared.feed(b"\x1b[5G\x1b[K", start);
-        cleared.tick(start + WINDOW_RESIZE_QUIET);
+        let emptied_at = start + WINDOW_RESIZE_QUIET;
+        cleared.feed(b"\x1b[5G\x1b[K", emptied_at);
+        cleared.tick(emptied_at);
+        assert!(
+            cleared.requests.is_empty(),
+            "the first blank sample only starts the confirmation"
+        );
+        cleared.tick(emptied_at + WINDOW_RESIZE_QUIET);
         assert_eq!(
             cleared.requests,
             vec![grid_of(80, 24)],
-            "an emptied line releases the gate with no timer and no submission"
+            "a line that stays empty releases the gate with no submission"
         );
     }
 
@@ -5754,6 +5839,89 @@ mod tests {
             "the child is already 100 columns wide; nothing is owed"
         );
         assert_eq!(harness.grid, grid_of(100, 24));
+    }
+
+    /// PIN (confirm-then-release): the blank instant inside a redraw is not an empty prompt.
+    ///
+    /// The reader thread hands the loop whatever a single read returned — up to 16 KiB — and wakes
+    /// it for every chunk. PSReadLine redraws a line by parking the cursor on `B`, erasing, and
+    /// writing the buffer back, so a redraw that straddles two reads leaves a wake in between where
+    /// the grid honestly holds nothing. Sampling the gate once at that wake and releasing on it is
+    /// how the narrow width reached the child through a gate with no bypass in it.
+    ///
+    /// So a release needs the *same* answer for `WINDOW_RESIZE_QUIET` — the quiet period already
+    /// used for "the drag has stopped" — and any sample that reads content restarts the clock. The
+    /// millisecond-scale blank of a redraw can never clear that bar; a line the user actually
+    /// emptied always does.
+    #[test]
+    fn a_redraw_split_across_two_reads_never_releases_in_its_blank_window() {
+        let start = Instant::now();
+        let mut harness = ResizeGateHarness::new(100, 24);
+        // A 12-column prompt: `B` lands on column 12, which is CUP column 13.
+        harness.feed(
+            b"\x1b]133;A\x07PS D:\\dist> \x1b]133;B\x07Get-ChildItem",
+            start,
+        );
+        assert!(harness.session.typed_shell_input_live());
+
+        harness.drag_to(35, start);
+        harness.tick(start + Duration::from_millis(1));
+        assert!(
+            harness.requests.is_empty(),
+            "the buffer is full; nothing is owed"
+        );
+
+        // The chunk that carries the erase but not the rewrite, drained at a wake past the
+        // coalescer's own deadline.
+        let erased_at = start + WINDOW_RESIZE_QUIET + Duration::from_millis(5);
+        harness.feed(b"\x1b[13G\x1b[J", erased_at);
+        assert!(
+            !harness.session.typed_shell_input_live(),
+            "the fixture must really empty the grid, or this pin proves nothing"
+        );
+        harness.tick(erased_at);
+        assert!(
+            harness.requests.is_empty(),
+            "one blank sample is not an empty prompt: {:?}",
+            harness.requests
+        );
+
+        // The rewrite lands three milliseconds later. The buffer was never empty.
+        let rewritten_at = erased_at + Duration::from_millis(3);
+        harness.feed(b"Get-ChildItem2", rewritten_at);
+        harness.tick(rewritten_at);
+        assert!(harness.requests.is_empty());
+
+        // A second redraw's erase, ten milliseconds after the first. The confirmation window must
+        // restart here, not run from the first blank sample.
+        let erased_again_at = erased_at + Duration::from_millis(10);
+        harness.feed(b"\x1b[13G\x1b[J", erased_again_at);
+        harness.tick(erased_again_at);
+        harness.tick(erased_at + WINDOW_RESIZE_QUIET);
+        assert!(
+            harness.requests.is_empty(),
+            "a content sample between the two blanks restarts the confirmation: {:?}",
+            harness.requests
+        );
+
+        harness.feed(b"Get-ChildItem23", erased_at + WINDOW_RESIZE_QUIET);
+        harness.tick(erased_again_at + WINDOW_RESIZE_QUIET);
+        assert!(harness.requests.is_empty());
+
+        // RELEASE: the command is submitted, and the line stays empty through the window.
+        let submitted_at = start + Duration::from_secs(1);
+        harness.feed(b"\r\n\x1b]133;C\x07", submitted_at);
+        harness.tick(submitted_at);
+        assert!(
+            harness.requests.is_empty(),
+            "even a submission is confirmed before it releases"
+        );
+        harness.tick(submitted_at + WINDOW_RESIZE_QUIET);
+        assert_eq!(
+            harness.requests,
+            vec![grid_of(35, 24)],
+            "exactly one resize, carrying the dragged size, once the line is confirmed empty"
+        );
     }
 
     /// RED-CHECK for the deferral pin: prove it is not vacuous. This is the pre-mitigation path —

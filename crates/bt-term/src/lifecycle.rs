@@ -116,6 +116,9 @@ pub enum LifecycleDirective {
         rows: Vec<RowDirective>,
     },
     GridCoordinatesInvalidated,
+    /// The viewport's cells were erased in place (ED 2). No row was removed, so nothing is captured
+    /// and no generation moves — but every claim about what those cells hold is now void.
+    ScreenCleared,
     ClearHistoryAndStaging,
     InvalidateStaging,
     ParkPrimary,
@@ -167,9 +170,8 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
                 .map(|row| classify_row(context, row))
                 .collect(),
         },
-        AdapterEvent::GridScrolled | AdapterEvent::ScreenCleared => {
-            LifecycleDirective::GridCoordinatesInvalidated
-        }
+        AdapterEvent::GridScrolled => LifecycleDirective::GridCoordinatesInvalidated,
+        AdapterEvent::ScreenCleared => LifecycleDirective::ScreenCleared,
         AdapterEvent::ClearHistory => LifecycleDirective::ClearHistoryAndStaging,
         AdapterEvent::Reset | AdapterEvent::Deccolm => LifecycleDirective::InvalidateStaging,
         AdapterEvent::PrimaryParked => LifecycleDirective::ParkPrimary,
