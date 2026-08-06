@@ -524,11 +524,33 @@ fn plan_grid_change(
 fn pty_resize_wake_deadline(
     pending: Option<PendingPtyResize>,
     typed_input_live: bool,
+    now: Instant,
 ) -> Option<Instant> {
     (!typed_input_live)
         .then_some(pending)
         .flatten()
         .map(|pending| pending.release_deadline())
+        // `about_to_wait` has already serviced everything due at `now`. Re-offering that instant
+        // (or an older coalescing deadline retained across a gate transition) makes winit wake
+        // immediately and re-enter this turn without an external event. Only a future confirmation
+        // boundary is a useful wake-up request.
+        .filter(|deadline| *deadline > now)
+}
+
+/// Advance the resize gate and derive its next wake from the same gate sample.
+///
+/// Keeping these two decisions together prevents `about_to_wait` from servicing a content-holding
+/// state and then deriving `WaitUntil` from a different, empty-state reading of the session. The
+/// latter can expose the request's already-due coalescing deadline while `blank_since` still says
+/// that no empty confirmation run has begun.
+fn service_pending_pty_resize(
+    pending: &mut Option<PendingPtyResize>,
+    now: Instant,
+    typed_input_live: bool,
+) -> (Option<PendingPtyResize>, Option<Instant>) {
+    let due = release_due_pty_resize(pending, now, typed_input_live);
+    let wake = pty_resize_wake_deadline(*pending, typed_input_live, now);
+    (due, wake)
 }
 
 #[derive(Clone)]
@@ -1890,10 +1912,6 @@ impl Runtime {
         Ok(())
     }
 
-    fn pty_resize_wake_deadline(&self) -> Option<Instant> {
-        pty_resize_wake_deadline(self.pending_pty_resize, self.typed_input_defers_resize())
-    }
-
     /// Is a PTY resize deferred right now?
     ///
     /// A child holding typed input is the whole reason to defer, so `BT_PROBE_INPUT` — which feeds
@@ -1904,11 +1922,12 @@ impl Runtime {
         self.pty.is_some() && self.session.typed_shell_input_live()
     }
 
-    fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<()> {
+    fn flush_pending_pty_resize(&mut self, now: Instant) -> Result<Option<Instant>> {
         let deferred = self.typed_input_defers_resize();
-        let Some(pending) = release_due_pty_resize(&mut self.pending_pty_resize, now, deferred)
-        else {
-            return Ok(());
+        let (pending, wake_deadline) =
+            service_pending_pty_resize(&mut self.pending_pty_resize, now, deferred);
+        let Some(pending) = pending else {
+            return Ok(wake_deadline);
         };
         // The deferred local reflow lands here, immediately before the child hears the same size,
         // in the same order the undeferred path uses (actor first, then ConPTY, then the vendor
@@ -1947,7 +1966,7 @@ impl Runtime {
                 source: FrameSource::Resize,
             })?;
         }
-        Ok(())
+        Ok(wake_deadline)
     }
 
     fn frame_hit(&self) -> Option<bt_render::GridHit> {
@@ -3686,10 +3705,6 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
-        if let Err(error) = runtime.flush_pending_pty_resize(now) {
-            self.fail(event_loop, error);
-            return;
-        }
         runtime.session_store.flush_if_due(now);
         runtime.flush_ime_cursor_area(now);
         if let Err(error) = runtime.finish_resize_if_quiescent(now) {
@@ -3712,12 +3727,21 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        // Service the PTY gate after every other due task that can mutate session state, then carry
+        // the deadline derived from that exact sample into the control-flow decision below.
+        let pty_resize_deadline = match runtime.flush_pending_pty_resize(now) {
+            Ok(deadline) => deadline,
+            Err(error) => {
+                self.fail(event_loop, error);
+                return;
+            }
+        };
         let startup_deadline =
             startup_poll_delay(runtime.first_text_presented).map(|delay| now + delay);
         let wake_deadline = [
             startup_deadline,
             runtime.ime_cursor_throttle.deadline(),
-            runtime.pty_resize_wake_deadline(),
+            pty_resize_deadline,
             runtime.session.resize_finish_deadline(),
             runtime.session.synchronized_update_deadline(),
             runtime.session.live_stability_deadline(),
@@ -5667,11 +5691,12 @@ mod tests {
 
         /// One `about_to_wait`: drain has already happened, so the gate is asked again here.
         fn tick(&mut self, at: Instant) {
-            let Some(pending) = release_due_pty_resize(
+            let (pending, _) = service_pending_pty_resize(
                 &mut self.pending,
                 at,
                 self.session.typed_shell_input_live(),
-            ) else {
+            );
+            let Some(pending) = pending else {
                 return;
             };
             if pending.grid != self.grid {
@@ -5687,8 +5712,8 @@ mod tests {
             self.requests.push(pending.grid);
         }
 
-        fn wake_deadline(&self) -> Option<Instant> {
-            pty_resize_wake_deadline(self.pending, self.session.typed_shell_input_live())
+        fn wake_deadline(&self, now: Instant) -> Option<Instant> {
+            pty_resize_wake_deadline(self.pending, self.session.typed_shell_input_live(), now)
         }
     }
 
@@ -5697,6 +5722,37 @@ mod tests {
             columns: std::num::NonZeroU16::new(columns).unwrap(),
             rows: std::num::NonZeroU16::new(rows).unwrap(),
         }
+    }
+
+    /// PIN: a PTY deadline handed to `ControlFlow::WaitUntil` must still be in the future.
+    ///
+    /// The gate can be sampled as live while servicing the pending resize and read empty by the
+    /// later control-flow calculation. In that state `blank_since` is still `None`, so the pending
+    /// request's coalescing deadline is the only deadline available -- and it is already due. A
+    /// past `WaitUntil` makes winit immediately re-enter `about_to_wait` instead of sleeping.
+    #[test]
+    fn a_gate_transition_cannot_offer_wait_until_an_already_due_resize_deadline() {
+        let start = Instant::now();
+        let mut pending = None;
+        coalesce_pty_resize(
+            &mut pending,
+            grid_of(80, 24),
+            PhysicalSize::new(800, 600),
+            start,
+        );
+        let now = start + WINDOW_RESIZE_QUIET;
+
+        assert!(
+            pty_resize_wake_deadline(pending, false, now).is_none_or(|deadline| deadline > now),
+            "ControlFlow::WaitUntil must never receive an already-due PTY deadline"
+        );
+        let (released, wake_deadline) = service_pending_pty_resize(&mut pending, now, false);
+        assert!(released.is_none(), "one empty sample cannot release");
+        assert_eq!(
+            wake_deadline,
+            Some(now + WINDOW_RESIZE_QUIET),
+            "the same gate sample starts confirmation and schedules its future boundary"
+        );
     }
 
     /// PIN (user ruling 2026-08-04): while an OSC 133 input region holds typed content, a PTY
@@ -5735,7 +5791,9 @@ mod tests {
             "our grid and the child's stay in lockstep at the old width across the whole drag"
         );
         assert!(
-            harness.wake_deadline().is_none(),
+            harness
+                .wake_deadline(start + Duration::from_secs(3600))
+                .is_none(),
             "a held resize must not offer the loop a deadline it would spin on"
         );
 
@@ -5748,7 +5806,7 @@ mod tests {
         harness.tick(released_at);
         assert!(harness.requests.is_empty());
         assert_eq!(
-            harness.wake_deadline(),
+            harness.wake_deadline(released_at),
             Some(released_at + WINDOW_RESIZE_QUIET),
             "the loop is told when to come back and confirm, since no further output need arrive"
         );
@@ -5779,7 +5837,7 @@ mod tests {
             "an empty prompt reflows immediately"
         );
         assert_eq!(
-            idle.wake_deadline(),
+            idle.wake_deadline(start),
             Some(start + WINDOW_RESIZE_QUIET),
             "confirming an already-idle prompt must not add a second quiet window to the drag"
         );
