@@ -2432,6 +2432,20 @@ impl DualPlaneSession {
         self.shell_phases.contains_key(&screen)
     }
 
+    /// Is the live screen sitting inside the open OSC 133 input region begun by `B`?
+    ///
+    /// Unlike `typed_shell_input_live`, this deliberately includes an empty prompt. The app uses
+    /// it only after a ConPTY resize has landed, to ask the installed shell integration to repaint
+    /// the prompt and any PSReadLine buffer against the new width. A session that has never emitted
+    /// OSC 133, a submitted command, and an alternate screen all answer `false`, so no private
+    /// input is injected without an active integration-owned prompt.
+    pub fn shell_input_region_open(&self) -> bool {
+        matches!(
+            self.shell_phases.get(&self.live_screen),
+            Some(ShellIntegrationPhase::Input(_))
+        )
+    }
+
     /// Is the live screen sitting inside an open OSC 133 input region that currently holds typed
     /// content?
     ///
@@ -19810,6 +19824,10 @@ mod tests {
             !bare.typed_shell_input_live(),
             "a screen that has never emitted OSC 133 must keep resizing exactly as it does today"
         );
+        assert!(
+            !bare.shell_input_region_open(),
+            "a session without OSC 133 must never authorize private repaint input"
+        );
 
         // An empty prompt. Dragging here must stay free.
         let mut session = DualPlaneSession::new(nz(80), nz(6));
@@ -19819,6 +19837,10 @@ mod tests {
         assert!(
             !session.typed_shell_input_live(),
             "an empty input region is not typed content"
+        );
+        assert!(
+            session.shell_input_region_open(),
+            "the repaint channel includes an empty, already-printed prompt"
         );
 
         // Typed content arms it.
@@ -19851,6 +19873,10 @@ mod tests {
             !session.typed_shell_input_live(),
             "a closed region is a released gate"
         );
+        assert!(
+            !session.shell_input_region_open(),
+            "a submitted command closes the repaint channel too"
+        );
 
         // RELEASE: a hard lifecycle boundary. ED 2 blanks the very cells the scan reads, and the
         // alternate screen is a different screen with no phase of its own.
@@ -19875,11 +19901,16 @@ mod tests {
             !switched.typed_shell_input_live(),
             "the alternate screen carries no input region of the primary's"
         );
+        assert!(
+            !switched.shell_input_region_open(),
+            "the private repaint chord must not leak into an alternate-screen application"
+        );
         switched.feed_at(b"\x1b[?1049l", started).unwrap();
         assert!(
             switched.typed_shell_input_live(),
             "returning to the primary restores the primary's own answer"
         );
+        assert!(switched.shell_input_region_open());
     }
 
     /// RED-CHECK for the pin above, clause by clause. Each of these is what the gate would answer

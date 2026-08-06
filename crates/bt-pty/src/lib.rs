@@ -53,6 +53,8 @@ pub fn conpty_source() -> ConPtySource {
 pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 /// Matches the serialized Term actor quantum from DESIGN.md §1.3.
 pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap();
+/// VT input translated by ConPTY to the shell integration's Ctrl+Alt+Shift+F12 private chord.
+pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 const TERM_PROGRAM: &str = "BetterTerminal";
@@ -2491,6 +2493,10 @@ mod tests {
         /// Whether that window is honoured. `false` is the loop as it was before
         /// confirm-then-release, which is what makes the blank-window probe's pair one probe.
         confirm_blank_gate: bool,
+        /// Product channel under test: after a successful ConPTY resize, send the shipped private
+        /// chord only while the live OSC 133 input region is open.
+        invoke_prompt_after_resize: bool,
+        invoke_prompt_writes: usize,
         /// What our own grid holds, and what the child was last told. They are the same number at
         /// rest; the gate's whole contract is that they stay the same number across a deferral too.
         grid: (u16, u16),
@@ -2514,6 +2520,8 @@ mod tests {
                 typed_input_gate: false,
                 blank_since: None,
                 confirm_blank_gate: true,
+                invoke_prompt_after_resize: false,
+                invoke_prompt_writes: 0,
                 grid: (columns, rows),
                 conpty: (columns, rows),
             }
@@ -2588,9 +2596,17 @@ mod tests {
             }
             self.pty.resize(size(columns, rows)).unwrap();
             self.conpty = (columns, rows);
+            if self.invoke_prompt_after_resize && self.session.shell_input_region_open() {
+                self.write_invoke_prompt();
+            }
             self.session
                 .mark_pty_resize_requested_at(nz32(columns), nz32(rows), now);
             self.commits.push((columns, rows));
+        }
+
+        fn write_invoke_prompt(&mut self) {
+            self.pty.write(PSREADLINE_INVOKE_PROMPT_INPUT).unwrap();
+            self.invoke_prompt_writes += 1;
         }
 
         /// One `WindowEvent::Resized`: projected onto the grid at once, coalesced towards ConPTY.
@@ -3037,6 +3053,72 @@ mod tests {
             .filter(|row| row.contains(opening) && !row.starts_with(opening))
             .cloned()
             .collect()
+    }
+
+    fn cursor_addresses(bytes: &[u8]) -> Vec<(u16, u16)> {
+        let mut addresses = Vec::new();
+        let mut index = 0;
+        while index + 3 < bytes.len() {
+            if bytes[index] != 0x1b || bytes[index + 1] != b'[' {
+                index += 1;
+                continue;
+            }
+            let start = index + 2;
+            let Some(end_offset) = bytes[start..]
+                .iter()
+                .position(|byte| byte.is_ascii_alphabetic())
+            else {
+                break;
+            };
+            let end = start + end_offset;
+            if matches!(bytes[end], b'H' | b'f')
+                && let Some(separator) = bytes[start..end].iter().position(|byte| *byte == b';')
+            {
+                let separator = start + separator;
+                if let (Ok(row), Ok(column)) = (
+                    std::str::from_utf8(&bytes[start..separator])
+                        .unwrap_or_default()
+                        .parse(),
+                    std::str::from_utf8(&bytes[separator + 1..end])
+                        .unwrap_or_default()
+                        .parse(),
+                ) {
+                    addresses.push((row, column));
+                }
+            }
+            index = end + 1;
+        }
+        addresses
+    }
+
+    fn redraw_addresses(bytes: &[u8]) -> Vec<(u16, u16)> {
+        let hide = b"\x1b[?25l";
+        bytes
+            .windows(hide.len())
+            .position(|window| window == hide)
+            .map_or_else(Vec::new, |position| {
+                cursor_addresses(&bytes[position + hide.len()..])
+            })
+    }
+
+    fn wrapped_input_line(rows: &[String], cursor_row: u32, prompt: &str, columns: u16) -> String {
+        let opening = &prompt[..usize::from(columns).min(prompt.len())];
+        let cursor_row = (cursor_row as usize).min(rows.len().saturating_sub(1));
+        (0..=cursor_row)
+            .rev()
+            .find(|row| rows[*row].starts_with(opening))
+            .map(|start| rows[start..=cursor_row].concat().trim_end().to_owned())
+            .unwrap_or_default()
+    }
+
+    fn psreadline_version(bytes: &[u8]) -> String {
+        let text = String::from_utf8_lossy(bytes);
+        let marker = "BT_PSRL_VERSION=";
+        text.find(marker)
+            .map(|start| &text[start + marker.len()..])
+            .and_then(|tail| tail.split(['\u{7}', '\r', '\n']).next())
+            .unwrap_or("unknown")
+            .to_owned()
     }
 
     /// Dev probe: does a drag that commits *more than one* pseudoconsole size corrupt the child's
@@ -3694,6 +3776,392 @@ mod tests {
                 (DEFER_PROBE_WIDE, DEFER_PROBE_ROWS)
             ],
             "the queued size lands exactly once, after the submitted line stays empty"
+        );
+    }
+
+    fn invoke_prompt_probe_startup(prompt: &str) -> String {
+        format!(
+            "Import-Module PSReadLine; \
+             [Console]::Write(([string][char]27) + ']777;BT_PSRL_VERSION=' + \
+             (Get-Module PSReadLine).Version + [char]7); \
+             Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+             function global:prompt {{ '{prompt}' }}; . '{}'",
+            integration_script_path().display()
+        )
+    }
+
+    /// Dev probe: pins the VT-input spelling that ConPTY translates into the physical key used by
+    /// the shell integration's private InvokePrompt binding. The sentinel comes from the handler,
+    /// not from the startup script, so observing it proves the complete VT -> ConPTY -> PSReadLine
+    /// chord path.
+    #[test]
+    #[ignore = "dev probe: drives real PSReadLine handlers through ConPTY"]
+    fn invoke_prompt_key_translation_probe() {
+        let startup = "Import-Module PSReadLine; \
+            [Console]::Write(([string][char]27) + ']777;BT_PSRL_VERSION=' + \
+            (Get-Module PSReadLine).Version + [char]7); \
+            Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+            Set-PSReadLineKeyHandler -Chord F24 -ScriptBlock { \
+            [Console]::Write(([string][char]27) + ']777;BT_KEY_F24' + [char]7) }; \
+            Set-PSReadLineKeyHandler -Chord Ctrl+Alt+F12 -ScriptBlock { \
+            [Console]::Write(([string][char]27) + ']777;BT_KEY_CAF12' + [char]7) }; \
+            Set-PSReadLineKeyHandler -Chord Ctrl+Alt+Shift+F12 -ScriptBlock { \
+            [Console]::Write(([string][char]27) + ']777;BT_KEY_CASF12' + [char]7) }; \
+            function global:prompt { 'BTKEY> ' }";
+        let candidates: [(&str, &[u8]); 5] = [
+            ("xterm-f24", b"\x1b[45~"),
+            ("shift-f12", b"\x1b[24;2~"),
+            ("ctrl-alt-f12", b"\x1b[24;7~"),
+            ("ctrl-alt-shift-f12", b"\x1b[24;8~"),
+            ("ctrl-alt-shift-f4", b"\x1b[1;8S"),
+        ];
+
+        for shell in ["pwsh.exe", "powershell.exe"] {
+            let mut oracle = InteractiveOracle::spawn_shell_with(shell, startup, 80, 10);
+            oracle.wait_for_output_since(0, b"BT_PSRL_VERSION=");
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            let version = psreadline_version(&oracle.raw_output);
+            for (label, input) in candidates {
+                let mark = oracle.raw_output.len();
+                oracle.session.write(input).unwrap();
+                oracle.pump_for(Duration::from_millis(400));
+                let output = &oracle.raw_output[mark..];
+                eprintln!(
+                    "BT_CONPTY_INVOKE_KEY_PROBE source={} shell={shell} psreadline={version} \
+                     candidate={label} \
+                     input={} output={}",
+                    conpty_source(),
+                    escaped(input),
+                    escaped(output)
+                );
+                if label == "ctrl-alt-shift-f12" {
+                    assert!(
+                        output
+                            .windows(b"BT_KEY_CASF12".len())
+                            .any(|window| { window == b"BT_KEY_CASF12" }),
+                        "the shipped VT sequence must reach the private chord on {shell} \
+                         PSReadLine {version}"
+                    );
+                }
+                if label == "xterm-f24" {
+                    assert!(
+                        !output
+                            .windows(b"BT_KEY_F24".len())
+                            .any(|window| window == b"BT_KEY_F24"),
+                        "F24 unexpectedly became usable; reconsider the private chord"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "dev probe: compares an empty-prompt resize with and without InvokePrompt"]
+    fn empty_prompt_resize_invoke_prompt_pair_probe() {
+        const PROMPT: &str = "BTINVOKE 012345678901234567890123456789012> ";
+        const HISTORY: &str = "Write-Output BT_INVOKE_HISTORY";
+        const HISTORY_OUTPUT: &str = "BT_INVOKE_HISTORY";
+        let startup = invoke_prompt_probe_startup(PROMPT);
+        let wide_tail = PROMPT[38..].trim_end();
+        let expected = format!("{PROMPT}{HISTORY}");
+        for shell in ["pwsh.exe", "powershell.exe"] {
+            let mut outcomes = Vec::new();
+            for invoke in [false, true] {
+                let mut oracle = AppResizeOracle::spawn(shell, &startup, 38, 14, false);
+                // The product-timing arm is the version that actually repaints. For 2.0.0, land
+                // the resize first and bracket the no-op injection at one stable geometry so the
+                // before/after row comparison measures the handler and nothing else.
+                oracle.invoke_prompt_after_resize = invoke && shell == "pwsh.exe";
+                assert!(
+                    oracle
+                        .settle_at_prompt_matching(&|line| line == wide_tail)
+                        .is_some()
+                );
+                oracle.pty.write(HISTORY.as_bytes()).unwrap();
+                oracle.pty.write(b"\r").unwrap();
+                oracle.pump_for(Duration::from_millis(700));
+                assert!(
+                    oracle
+                        .settle_at_prompt_matching(&|line| line == wide_tail)
+                        .is_some()
+                );
+                let mark = oracle.raw_output.len();
+                oracle.project_resize(29, 14);
+                oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(100));
+                oracle.pump_for(Duration::from_millis(1_500));
+                oracle.pump_until_quiet(Duration::from_secs(6));
+
+                let mut no_op_output = Vec::new();
+                if shell == "powershell.exe" && invoke {
+                    let before_injection = oracle.session.terminal().visible_text();
+                    let injection_mark = oracle.raw_output.len();
+                    oracle.write_invoke_prompt();
+                    oracle.pump_for(Duration::from_millis(500));
+                    oracle.pump_until_quiet(Duration::from_secs(6));
+                    no_op_output.extend_from_slice(&oracle.raw_output[injection_mark..]);
+                    let after_injection = oracle.session.terminal().visible_text();
+                    assert_eq!(
+                        after_injection, before_injection,
+                        "PSReadLine 2.0.0 no-op must preserve every visible row"
+                    );
+                    assert!(
+                        no_op_output.is_empty(),
+                        "the production no-op emits no repaint or literal input: {}",
+                        escaped(&no_op_output)
+                    );
+                    assert!(
+                        !after_injection.concat().contains("24;8~"),
+                        "the consumed VT chord must not leak into the PSReadLine buffer"
+                    );
+                }
+
+                let recall_mark = oracle.raw_output.len();
+                oracle.pty.write(b"\x1b[A").unwrap();
+                oracle.pump_for(Duration::from_millis(900));
+                oracle.pump_until_quiet(Duration::from_secs(6));
+                let resize_output = &oracle.raw_output[mark..recall_mark];
+                let recall_output = &oracle.raw_output[recall_mark..];
+                let recall_addresses = redraw_addresses(recall_output);
+                let rows = oracle.session.terminal().visible_text();
+                let cursor = oracle.session.terminal().cursor();
+                let input = wrapped_input_line(&rows, cursor.row, PROMPT, 29);
+                let version = psreadline_version(&oracle.raw_output);
+                let history_output_survived =
+                    rows.iter().any(|row| row.trim_end() == HISTORY_OUTPUT);
+                eprintln!(
+                    "BT_CONPTY_EMPTY_INVOKE_PAIR source={} shell={shell} psreadline={version} \
+                     invoke={invoke} writes={} resize_addresses={:?} recall_addresses={:?} \
+                     history_output_survived={history_output_survived} input={input:?} \
+                     expected={expected:?} rows={:?} no_op_output={} resize_output={} \
+                     recall_output={}",
+                    conpty_source(),
+                    oracle.invoke_prompt_writes,
+                    cursor_addresses(resize_output),
+                    recall_addresses,
+                    occupied_rows(&rows),
+                    escaped(&no_op_output),
+                    escaped(resize_output),
+                    escaped(recall_output)
+                );
+                outcomes.push((
+                    invoke,
+                    oracle.invoke_prompt_writes,
+                    recall_addresses,
+                    input,
+                    history_output_survived,
+                ));
+            }
+
+            let red = &outcomes[0];
+            let green = &outcomes[1];
+            assert!(!red.0 && green.0);
+            assert_eq!(red.1, 0, "the red arm injects no repaint chord");
+            assert_eq!(green.1, 1, "the green arm injects exactly one chord");
+            if shell == "pwsh.exe" {
+                assert_eq!(
+                    red.2.first().map(|address| address.1),
+                    Some(7),
+                    "red check: history recall must start at the old prompt tail"
+                );
+                assert_ne!(
+                    red.3, expected,
+                    "red check: the stale anchor must overwrite the resized prompt tail"
+                );
+                assert_eq!(
+                    green.2.first().map(|address| address.1),
+                    Some(16),
+                    "InvokePrompt must move history recall to the new prompt tail"
+                );
+                assert_eq!(
+                    green.3, expected,
+                    "the pwsh green arm must leave one clean input line"
+                );
+                assert!(
+                    green.4,
+                    "InvokePrompt must preserve the command output printed before injection"
+                );
+            } else {
+                assert_eq!(
+                    green.3, red.3,
+                    "the 2.0.0 no-op must not change the subsequent redraw outcome"
+                );
+                assert_eq!(green.4, red.4);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "dev probe: proves sessions without OSC 133 receive no private repaint input"]
+    fn invoke_prompt_requires_open_osc133_input_region_probe() {
+        let startup = "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+            function global:prompt { 'BTNOINTEGRATION> ' }";
+        let mut oracle = AppResizeOracle::spawn("pwsh.exe", startup, 50, 10, false);
+        oracle.invoke_prompt_after_resize = true;
+        assert!(oracle.settle_at_prompt("BTNOINTEGRATION> "));
+        oracle.project_resize(40, 10);
+        oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(300));
+        oracle.pump_until_quiet(Duration::from_secs(6));
+        eprintln!(
+            "BT_CONPTY_INVOKE_SCOPE source={} shell=pwsh.exe osc133_open={} writes={} commits={:?}",
+            conpty_source(),
+            oracle.session.shell_input_region_open(),
+            oracle.invoke_prompt_writes,
+            oracle.commits
+        );
+        assert_eq!(oracle.commits, vec![(40, 10)]);
+        assert_eq!(oracle.invoke_prompt_writes, 0);
+    }
+
+    #[test]
+    #[ignore = "dev probe: proves the shipped PSReadLine 2.0.0 handler consumes the private chord"]
+    fn psreadline_2_no_op_handler_consumes_invoke_prompt_chord_probe() {
+        const SENTINEL: &[u8] = b"BT_PSREADLINE_NOOP";
+        let startup = format!(
+            "$env:BT_PSREADLINE_NOOP_PROBE = '1'; {}",
+            invoke_prompt_probe_startup("BTNOOP> ")
+        );
+        let mut oracle = InteractiveOracle::spawn_shell_with("powershell.exe", &startup, 80, 10);
+        oracle.wait_for_output_since(0, b"BT_PSRL_VERSION=2.0.0");
+        oracle.wait_for_current_line("BTNOOP>");
+        oracle.pump_until_quiet(Duration::from_secs(6));
+        let before = oracle.terminal.visible_text();
+        let mark = oracle.raw_output.len();
+        oracle
+            .session
+            .write(PSREADLINE_INVOKE_PROMPT_INPUT)
+            .unwrap();
+        oracle.wait_for_output_since(mark, SENTINEL);
+        oracle.pump_until_quiet(Duration::from_secs(6));
+        let output = &oracle.raw_output[mark..];
+        let after = oracle.terminal.visible_text();
+        eprintln!(
+            "BT_CONPTY_PSREADLINE2_NOOP source={} shell=powershell.exe psreadline=2.0.0 \
+             input={} sentinel_seen={} rows_unchanged={} output={}",
+            conpty_source(),
+            escaped(PSREADLINE_INVOKE_PROMPT_INPUT),
+            output
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL),
+            before == after,
+            escaped(output)
+        );
+        assert!(
+            output
+                .windows(SENTINEL.len())
+                .any(|window| window == SENTINEL),
+            "the environment-gated sentinel proves the shipped no-op handler ran"
+        );
+        assert_eq!(after, before, "the no-op must preserve every visible row");
+        assert!(
+            !output
+                .windows(b"\x1b[2J".len())
+                .any(|window| window == b"\x1b[2J"),
+            "the 2.0.0 branch must never call InvokePrompt's ED 2 path"
+        );
+        assert!(
+            !output
+                .windows(b"24;8~".len())
+                .any(|window| window == b"24;8~"),
+            "the chord was consumed, not inserted as literal input"
+        );
+    }
+
+    #[test]
+    #[ignore = "dev probe: live-resizes a non-empty wrapped PSReadLine buffer through InvokePrompt"]
+    fn nonempty_buffer_invoke_prompt_live_resize_retirement_probe() {
+        const PROMPT: &str = "BTINVOKE 012345678901234567890123456789012> ";
+        const TYPED: &str =
+            "Write-Output 012345678901234567890123456789012345678901234567890123456789";
+        let startup = invoke_prompt_probe_startup(PROMPT);
+        let expected = format!("{PROMPT}{TYPED}");
+        let mut every_version_clean = true;
+        for shell in ["pwsh.exe", "powershell.exe"] {
+            let mut oracle = AppResizeOracle::spawn(shell, &startup, 38, 16, false);
+            oracle.invoke_prompt_after_resize = true;
+            assert!(
+                oracle
+                    .settle_at_prompt_matching(&|line| line == PROMPT[38..].trim_end())
+                    .is_some()
+            );
+            oracle.pty.write(TYPED.as_bytes()).unwrap();
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            assert!(oracle.session.typed_shell_input_live());
+            let version = psreadline_version(&oracle.raw_output);
+            let mut version_clean = true;
+            let mut version_anchors_correct = true;
+
+            for columns in [29_u16, 52, 29] {
+                let mark = oracle.raw_output.len();
+                let prior_writes = oracle.invoke_prompt_writes;
+                oracle.project_resize(columns, 16);
+                oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(100));
+                oracle.pump_for(Duration::from_millis(1_500));
+                oracle.pump_until_quiet(Duration::from_secs(6));
+                let emitted = &oracle.raw_output[mark..];
+                let marker = b"\x1b]133;B\x07";
+                let after_b = emitted
+                    .windows(marker.len())
+                    .rposition(|window| window == marker)
+                    .map_or(emitted, |position| &emitted[position + marker.len()..]);
+                let typed_at = after_b
+                    .windows(b"Write-Output".len())
+                    .position(|window| window == b"Write-Output")
+                    .unwrap_or(after_b.len());
+                let anchor_addresses = cursor_addresses(&after_b[..typed_at]);
+                let addresses = cursor_addresses(after_b);
+                let rows = oracle.session.terminal().visible_text();
+                let cursor = oracle.session.terminal().cursor();
+                let input = wrapped_input_line(&rows, cursor.row, PROMPT, columns);
+                let prompt_copies = rows.concat().match_indices("BTINVOKE ").count();
+                let expected_anchor =
+                    u16::try_from(PROMPT.len() % usize::from(columns)).unwrap() + 1;
+                // PSReadLine 2.4.5 explicitly CUPs to B before writing the buffer. Version 2.0.0
+                // clears and prints prompt + buffer as one stream, so no CUP before the first typed
+                // character is the equally direct proof that writing starts at B.
+                let anchor_correct = anchor_addresses
+                    .last()
+                    .is_none_or(|address| address.1 == expected_anchor);
+                let clean = input == expected && prompt_copies == 1;
+                version_clean &= clean;
+                version_anchors_correct &= anchor_correct;
+                if version == "2.0.0" {
+                    assert!(
+                        !emitted
+                            .windows(b"\x1b[2J".len())
+                            .any(|window| window == b"\x1b[2J"),
+                        "the version-gated no-op must keep InvokePrompt's ED 2 off the wire"
+                    );
+                }
+                eprintln!(
+                    "BT_CONPTY_NONEMPTY_INVOKE source={} shell={shell} psreadline={version} \
+                     columns={columns} writes={} anchor_addresses={anchor_addresses:?} \
+                     addresses={addresses:?} \
+                     expected_anchor={expected_anchor} anchor_correct={anchor_correct} \
+                     clean={clean} prompt_copies={prompt_copies} input={input:?} \
+                     expected={expected:?} rows={:?} output={}",
+                    conpty_source(),
+                    oracle.invoke_prompt_writes,
+                    occupied_rows(&rows),
+                    escaped(emitted)
+                );
+                assert_eq!(oracle.invoke_prompt_writes, prior_writes + 1);
+            }
+            every_version_clean &= version_clean;
+            eprintln!(
+                "BT_CONPTY_NONEMPTY_INVOKE_SUMMARY shell={shell} psreadline={version} \
+                 anchors_correct={version_anchors_correct} retirement_safe={version_clean}"
+            );
+            if version == "2.4.5" {
+                assert!(
+                    version_anchors_correct,
+                    "the enabled InvokePrompt branch must recompute every 2.4.x anchor"
+                );
+            }
+        }
+        assert!(
+            !every_version_clean,
+            "if this turns green on every supported version, the typed-input deferral can retire"
         );
     }
 }

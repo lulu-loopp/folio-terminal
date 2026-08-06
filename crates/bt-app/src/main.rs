@@ -19,7 +19,7 @@ use bt_doc::{Bias, LayoutKey};
 use bt_layout::{Axis, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{SESSION_SCHEMA_VERSION, SessionV1, TabV1, WindowBoundsV1, WindowStateV1};
-use bt_pty::{OutputWake, PtySession, PtySize};
+use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit, MathHitTarget,
     PeekImageOverlay, Preedit, PresentOutcome, Renderer, SeatViewport, background_rgb,
@@ -551,6 +551,15 @@ fn service_pending_pty_resize(
     let due = release_due_pty_resize(pending, now, typed_input_live);
     let wake = pty_resize_wake_deadline(*pending, typed_input_live, now);
     (due, wake)
+}
+
+/// The private shell-integration input owed after one successful ConPTY resize commit.
+///
+/// `false` includes every session that has never emitted OSC 133, every closed input region, and
+/// every alternate screen. Returning `None` is what makes those cases a byte-for-byte no-op rather
+/// than a best-effort guess about which shell might be present.
+fn psreadline_resize_repaint_input(shell_input_region_open: bool) -> Option<&'static [u8]> {
+    shell_input_region_open.then_some(PSREADLINE_INVOKE_PROMPT_INPUT)
 }
 
 #[derive(Clone)]
@@ -1945,9 +1954,19 @@ impl Runtime {
             self.sync_math_layout_key();
             self.pending_resize_present = Some(pending.grid);
         }
-        if let Some(pty) = self.pty.as_ref() {
+        // Snapshot the OSC 133 phase before resize reconciliation mutates terminal geometry. This
+        // is broader than the typed-input gate on purpose: an empty, already-printed prompt caches
+        // the same PSReadLine anchor and needs the same post-resize recomputation.
+        let repaint_input = psreadline_resize_repaint_input(self.session.shell_input_region_open());
+        if let Some(pty) = self.pty.as_mut() {
             pty.resize(pty_size(pending.grid, pending.physical))
                 .context("commit coalesced final ConPTY resize")?;
+            // The private chord is one shot per resize commit, after that commit succeeds. With no
+            // open integration-owned input region this branch writes exactly zero bytes.
+            if let Some(repaint_input) = repaint_input {
+                pty.write(repaint_input)
+                    .context("request PSReadLine prompt repaint after ConPTY resize")?;
+            }
         }
         self.conpty_grid = pending.grid;
         // The quiet boundary is also where a resize *ends*, so it is the
@@ -5476,6 +5495,19 @@ mod tests {
             PhysicalSize::new(100_000, 80_000),
         );
         assert_eq!((size.pixel_width, size.pixel_height), (u16::MAX, u16::MAX));
+    }
+
+    #[test]
+    fn private_resize_repaint_input_is_exact_and_integration_gated() {
+        assert_eq!(
+            psreadline_resize_repaint_input(true),
+            Some(PSREADLINE_INVOKE_PROMPT_INPUT)
+        );
+        assert_eq!(
+            psreadline_resize_repaint_input(false),
+            None,
+            "a session without an open OSC 133 input region injects zero bytes"
+        );
     }
 
     #[test]

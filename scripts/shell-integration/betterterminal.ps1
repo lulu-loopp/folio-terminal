@@ -66,6 +66,28 @@ $Global:__BetterTerminalShellIntegration = @{
     }
 }
 
+# Private resize-repaint chord. ConPTY translates CSI 24;8~ into Ctrl+Alt+Shift+F12 on both
+# Windows PowerShell 5.1/PSReadLine 2.0.0 and pwsh/PSReadLine 2.4.5. Only 2.4.x is allowed to invoke
+# the repaint API: the real-ConPTY probe established that 2.0.0 implements InvokePrompt with ED 2,
+# which clears the visible viewport. Unsupported/unproven versions bind the same chord as a no-op
+# so BetterTerminal's injected sequence is consumed rather than leaking into the input buffer.
+$psReadLineVersion = (Get-Module PSReadLine).Version
+if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
+    Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
+        param($key, $arg)
+        [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg)
+    }
+} else {
+    Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
+        param($key, $arg)
+        # Dev-gated proof that this handler, rather than an unbound-key fallback, consumed the VT
+        # input. OSC 777 is ignored by the terminal and the variable is absent in product sessions.
+        if ($env:BT_PSREADLINE_NOOP_PROBE -eq '1') {
+            [Console]::Write(([string][char]27) + ']777;BT_PSREADLINE_NOOP' + [char]7)
+        }
+    }
+}
+
 function Global:PSConsoleHostReadLine {
     $original = $Global:__BetterTerminalShellIntegration.OriginalReadLine
     $commandLine = & $original
