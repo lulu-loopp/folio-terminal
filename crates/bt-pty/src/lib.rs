@@ -53,7 +53,9 @@ pub fn conpty_source() -> ConPtySource {
 pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 /// Matches the serialized Term actor quantum from DESIGN.md §1.3.
 pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap();
-/// VT input translated by ConPTY to the shell integration's Ctrl+Alt+Shift+F12 private chord.
+/// VT input translated by ConPTY to the shell integration's Ctrl+Alt+Shift+F12 resize-anchor chord.
+/// On PSReadLine 2.4.x the handler repairs an empty buffer without repainting and retains
+/// InvokePrompt for non-empty buffers; older/unproven versions consume the chord as a no-op.
 pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
@@ -3993,6 +3995,116 @@ mod tests {
                 assert_eq!(green.4, red.4);
             }
         }
+    }
+
+    /// Dev probe for the real divider gesture: every stop is long enough to commit, so the
+    /// red arm restores the old unconditional InvokePrompt handler; the green arm drives the
+    /// shipped empty-buffer re-anchor-only handler. The prompt deliberately wraps at both narrow
+    /// widths; any abandoned repaint is therefore visible both as another `BTCHAIN` opening and as
+    /// text outside the one expected logical prompt.
+    #[test]
+    #[ignore = "dev probe: drives a chain of committed resizes through real PSReadLine"]
+    fn empty_prompt_committed_resize_chain_reanchor_pair_probe() {
+        const PROMPT: &str = "BTCHAIN 012345678901234567890123456789012> ";
+        const WIDTHS: [u16; 4] = [100, 29, 100, 29];
+        let startup = invoke_prompt_probe_startup(PROMPT);
+        let initial_tail = PROMPT[38..].trim_end();
+        let mut outcomes = Vec::new();
+
+        for reanchor_only in [false, true] {
+            let arm_startup = if reanchor_only {
+                startup.clone()
+            } else {
+                format!(
+                    "{startup}; Set-PSReadLineKeyHandler -Chord Ctrl+Alt+Shift+F12 \
+                     -ScriptBlock {{ param($key, $arg) \
+                     [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg) }}"
+                )
+            };
+            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, 38, 24, false);
+            oracle.invoke_prompt_after_resize = true;
+            assert!(
+                oracle
+                    .settle_at_prompt_matching(&|line| line == initial_tail)
+                    .is_some()
+            );
+            let initial_rows = oracle.session.terminal().visible_text();
+            let initial_prompt_lines = initial_rows.concat().match_indices("BTCHAIN ").count();
+            assert_eq!(initial_prompt_lines, 1);
+
+            for columns in WIDTHS {
+                let mark = oracle.raw_output.len();
+                oracle.project_resize(columns, 24);
+                oracle.pump_for(RESIZE_REQUEST_QUIET * 2 + Duration::from_millis(100));
+                oracle.pump_until_quiet(Duration::from_secs(6));
+                let rows = oracle.session.terminal().visible_text();
+                let prompt_lines = rows.concat().match_indices("BTCHAIN ").count();
+                let visible = occupied_rows(&rows);
+                let visible_text = visible
+                    .iter()
+                    .map(|(_, row)| row.as_str())
+                    .collect::<String>();
+                eprintln!(
+                    "BT_CONPTY_EMPTY_CHAIN_STEP source={} psreadline={} \
+                     reanchor_only={reanchor_only} \
+                     columns={columns} writes={} prompt_lines={prompt_lines} rows={visible:?} \
+                     output={}",
+                    conpty_source(),
+                    psreadline_version(&oracle.raw_output),
+                    oracle.invoke_prompt_writes,
+                    escaped(&oracle.raw_output[mark..])
+                );
+                if reanchor_only {
+                    assert_eq!(
+                        prompt_lines, 1,
+                        "every green-arm commit must retain one prompt: {visible:?}"
+                    );
+                    assert_eq!(
+                        visible_text,
+                        PROMPT.trim_end(),
+                        "every green-arm commit must leave no wrapped fragment: {visible:?}"
+                    );
+                }
+            }
+
+            let rows = oracle.session.terminal().visible_text();
+            let visible = occupied_rows(&rows);
+            let prompt_lines = rows.concat().match_indices("BTCHAIN ").count();
+            let visible_text = visible
+                .iter()
+                .map(|(_, row)| row.as_str())
+                .collect::<String>();
+            let clean = prompt_lines == 1 && visible_text == PROMPT.trim_end();
+            eprintln!(
+                "BT_CONPTY_EMPTY_CHAIN_SUMMARY source={} psreadline={} \
+                 reanchor_only={reanchor_only} \
+                 writes={} prompt_lines={prompt_lines} clean={clean} rows={visible:?}",
+                conpty_source(),
+                psreadline_version(&oracle.raw_output),
+                oracle.invoke_prompt_writes
+            );
+            outcomes.push((reanchor_only, prompt_lines, clean, visible));
+        }
+
+        let red = &outcomes[0];
+        let green = &outcomes[1];
+        assert!(!red.0 && green.0);
+        assert!(
+            red.1 > 1,
+            "red arm must reproduce the reported prompt-line growth: {:?}",
+            red.3
+        );
+        assert!(!red.2, "red arm must retain old wrapped prompt fragments");
+        assert_eq!(
+            green.1, 1,
+            "re-anchor arm must retain exactly one visible prompt: {:?}",
+            green.3
+        );
+        assert!(
+            green.2,
+            "re-anchor arm must leave no old wrapped prompt fragments: {:?}",
+            green.3
+        );
     }
 
     #[test]

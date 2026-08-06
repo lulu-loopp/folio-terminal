@@ -59,9 +59,11 @@ const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
 /// 2026-08-06). **A policy bit, not a structure.**
 ///
 /// `false` lets every resize through the existing 200 ms coalescer even while input is present.
-/// The post-commit `InvokePrompt` injection remains active, so PSReadLine recomputes its anchor at
-/// every landed width. Flipping this back to `true` restores the retained confirm-then-release
-/// machine verbatim; `typed_input_defers_resize` is the single production convergence point.
+/// The post-commit private shell-integration injection remains active, so PSReadLine repairs its
+/// cached anchor at every landed width. Empty buffers use the integration's output-free re-anchor;
+/// non-empty buffers retain InvokePrompt. Flipping this back to `true` restores the retained
+/// confirm-then-release machine verbatim; `typed_input_defers_resize` is the single production
+/// convergence point.
 const TYPED_INPUT_RESIZE_DEFERRAL: bool = false;
 /// M0-alpha's single-session frozen-line budget; later configuration work may expose it.
 const M0_FROZEN_LINE_QUOTA: NonZeroUsize = NonZeroUsize::new(100_000).unwrap();
@@ -1977,7 +1979,9 @@ impl Runtime {
         }
         // Snapshot the OSC 133 phase before resize reconciliation mutates terminal geometry. This
         // is broader than the typed-input gate on purpose: an empty, already-printed prompt caches
-        // the same PSReadLine anchor and needs the same post-resize recomputation.
+        // the same PSReadLine anchor and needs the same post-resize repair. Its 2.4.x handler is
+        // output-free for an empty buffer; using InvokePrompt there abandons old wrapped rows on
+        // every committed divider stop (the real-ConPTY chain probe pins that distinction).
         let repaint_input = psreadline_resize_repaint_input(self.session.shell_input_region_open());
         if let Some(pty) = self.pty.as_mut() {
             pty.resize(pty_size(pending.grid, pending.physical))
@@ -1986,7 +1990,7 @@ impl Runtime {
             // open integration-owned input region this branch writes exactly zero bytes.
             if let Some(repaint_input) = repaint_input {
                 pty.write(repaint_input)
-                    .context("request PSReadLine prompt repaint after ConPTY resize")?;
+                    .context("request PSReadLine anchor repair after ConPTY resize")?;
             }
         }
         self.conpty_grid = pending.grid;

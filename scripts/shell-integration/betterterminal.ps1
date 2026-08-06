@@ -75,7 +75,42 @@ $psReadLineVersion = (Get-Module PSReadLine).Version
 if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
         param($key, $arg)
-        [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg)
+        $line = $null
+        $cursor = 0
+        [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
+        if ($line.Length -eq 0) {
+            # InvokePrompt erases only `_initialY`, then prints the complete prompt again. After a
+            # width reflow `_initialY` can name the prompt's tail row, so every idle resize strands
+            # the old wrapped rows above it. With an empty buffer the physical cursor is exactly B:
+            # repair PSReadLine's cached input anchor to that authoritative point without emitting
+            # output. Reflection is deliberately version-gated with the handler; 2.4.x has no
+            # public re-anchor-only API. If its private shape ever changes, retain the proven
+            # InvokePrompt fallback rather than silently leaving history recall on a stale anchor.
+            try {
+                $type = [Microsoft.PowerShell.PSConsoleReadLine]
+                $static = [Reflection.BindingFlags]'Static,NonPublic'
+                $instance = [Reflection.BindingFlags]'Instance,NonPublic'
+                $singleton = $type.GetField('_singleton', $static).GetValue($null)
+                $type.GetField('_initialX', $instance).SetValue($singleton, [Console]::CursorLeft)
+                $type.GetField('_initialY', $instance).SetValue($singleton, [Console]::CursorTop)
+                # Match InvokePrompt's render-baseline reset as well as its coordinate reset. If
+                # `_previousRender` keeps the pre-resize dimensions, the next history key asks
+                # RecomputeInitialCoords to locate a cursor offset in an obsolete render and 2.4.5
+                # raises instead of recalling the line.
+                $previous = $type.GetField('_initialPrevRender', $static).GetValue($null)
+                $type.GetField('_previousRender', $instance).SetValue($singleton, $previous)
+                $previous.UpdateConsoleInfo(
+                    [Console]::BufferWidth,
+                    [Console]::BufferHeight,
+                    [Console]::CursorLeft,
+                    [Console]::CursorTop)
+                $previous.initialY = [Console]::CursorTop
+            } catch {
+                [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg)
+            }
+        } else {
+            [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg)
+        }
     }
 } else {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
