@@ -740,7 +740,7 @@ pub fn build(
 /// A surface that floats: its lift, its hairline, its face — the three planes
 /// the hover-peek flyout is already built from, in the same order.
 #[allow(clippy::too_many_arguments)]
-fn push_float_window(
+pub(crate) fn push_float_window(
     quads: &mut Vec<OverlayQuad>,
     frame: [f32; 4],
     radius: f32,

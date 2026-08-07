@@ -14,6 +14,7 @@ use std::{
 mod input;
 mod marks;
 mod persist;
+mod profiles;
 mod seats;
 mod settings;
 
@@ -557,6 +558,10 @@ struct Runtime {
     /// so the session file never does either — a window that reopened with a
     /// question on it would be answering one nobody asked.
     settings: settings::SettingsPanel,
+    /// Whether the tab strip's profile picker is up. Beside `settings` and for
+    /// the same reasons — and separate from it because the two are different
+    /// kinds of surface: one is modal and one is a popup.
+    profile_menu: profiles::ProfileMenu,
     /// The overlay's own mark rasters. A second cache rather than a share,
     /// because `ChromeMarkRasters::resolve` keeps exactly what the call asked
     /// for: one cache serving two lists would evict each on the other's turn.
@@ -1903,6 +1908,7 @@ impl Runtime {
             seat_pointer: seats::ChromePointer::default(),
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
+            profile_menu: profiles::ProfileMenu::default(),
             settings_marks: marks::ChromeMarkRasters::default(),
             divider_drag: None,
             work_area: WorkAreaHint::NeverKnown,
@@ -1961,7 +1967,22 @@ impl Runtime {
         Ok(runtime)
     }
 
+    /// The `+`'s verb: a tab on the default profile, which is what the button's
+    /// own tooltip promises in the mock-up (`New tab (${defaultProfile().title})`).
     fn new_tab(&mut self) -> Result<()> {
+        self.new_tab_with_profile(profiles::DEFAULT_PROFILE)
+    }
+
+    /// The picker's verb: a tab on the profile the row names.
+    ///
+    /// The parameter is the whole of the difference, and it is here rather than
+    /// deeper because this build launches one shell: routing it further would be
+    /// a parameter carried through three call frames to be ignored at the end of
+    /// them. What the door has to be is *open* — one entry point that takes which
+    /// profile, so a second profile is a launcher and not a new path through the
+    /// tab machinery.
+    fn new_tab_with_profile(&mut self, profile: usize) -> Result<()> {
+        debug_assert!(profile < profiles::PROFILES.len());
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
         let proxy = self.event_proxy.clone();
         let wake: OutputWake = Arc::new(move || {
@@ -2106,6 +2127,7 @@ impl Runtime {
                 active_tab: self.active_tab,
                 preview_title: preview_title.as_deref(),
                 preview_message: preview_message.as_deref(),
+                profile_menu_open: self.profile_menu.is_open(),
             },
         );
         let icons = self.chrome_marks.resolve(&sprites);
@@ -2113,8 +2135,21 @@ impl Runtime {
         // The overlay is rebuilt from the same choke point as the chrome under
         // it, so every path that already knew to repaint on a resize, a DPI
         // change or a theme switch carries the dialog with it for free.
-        let overlay_changed = self.refresh_settings_overlay();
+        let overlay_changed = self.refresh_overlay();
         chrome_changed || overlay_changed
+    }
+
+    /// Where the profile picker hangs right now, or `None` when it is shut.
+    fn profile_menu_layout(&self) -> Option<profiles::ProfileMenuLayout> {
+        if !self.profile_menu.is_open() {
+            return None;
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, _) = self.renderer.presentation_geometry().swapchain_size;
+        let anchor =
+            seats::tab_strip_geometry(width as f32, scale, self.tabs.len(), self.active_tab)
+                .new_tab_menu;
+        Some(profiles::layout(anchor, width as f32, scale))
     }
 
     /// The settings dialog's placement in the window as it is now, or `None`
@@ -2137,17 +2172,46 @@ impl Runtime {
         )
     }
 
-    /// Rebuild the modal overlay. Returns whether anything visible changed.
-    fn refresh_settings_overlay(&mut self) -> bool {
-        let Some(layout) = self.settings_layout() else {
+    /// Rebuild the blended layer over the chrome. Returns whether anything
+    /// visible changed.
+    ///
+    /// One layer, because there is only ever one thing in it: the scrim outranks
+    /// every popup, so a modal that is up owns the layer outright, and the
+    /// picker is closed the moment the dialog opens.
+    fn refresh_overlay(&mut self) -> bool {
+        let (quads, labels, sprites) = if let Some(layout) = self.settings_layout() {
+            settings::build(&layout, self.settings.hover(), self.selected_theme)
+        } else if let Some(layout) = self.profile_menu_layout() {
+            profiles::build(&layout, self.profile_menu.hover())
+        } else {
             return self
                 .renderer
                 .set_modal_overlay(Vec::new(), Vec::new(), Vec::new());
         };
-        let (quads, labels, sprites) =
-            settings::build(&layout, self.settings.hover(), self.selected_theme);
         let icons = self.settings_marks.resolve(&sprites);
         self.renderer.set_modal_overlay(quads, labels, icons)
+    }
+
+    /// The `˅`'s verb: show the profile list, or put away the one on screen.
+    fn toggle_profile_menu(&mut self) -> Result<()> {
+        self.profile_menu.toggle();
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Put the picker away and repaint if it was up. Every press that is not the
+    /// chevron's and not the menu's own goes through here first, exactly as the
+    /// mock-up's document-level `click` handler does.
+    fn close_profile_menu(&mut self) -> Result<bool> {
+        if !self.profile_menu.close() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
     }
 
     /// The gear's verb: open the dialog, or shut the one that is open.
@@ -3815,10 +3879,22 @@ impl Runtime {
         // hover, no divider, no hyperlink, no peek settle behind the scrim.
         if let Some(layout) = self.settings_layout() {
             let hover = settings::hit(&layout, position.x, position.y);
-            if self.settings.set_hover(Some(hover)) && self.refresh_settings_overlay() {
+            if self.settings.set_hover(Some(hover)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
             return Ok(());
+        }
+        // The picker is not modal, so it takes the pointer only where it is: over
+        // its own box the rows answer, and everywhere else the window carries on.
+        if let Some(layout) = self.profile_menu_layout() {
+            let over = profiles::hit(&layout, position.x, position.y);
+            if self.profile_menu.set_hover(over.flatten()) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            if over.is_some() {
+                self.update_chrome_hover_target(None)?;
+                return Ok(());
+            }
         }
         // A divider drag owns the pointer outright: while one is in flight the
         // terminal hears nothing, which is the same rule an in-progress
@@ -3944,21 +4020,32 @@ impl Runtime {
     fn chrome_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
         let scale = self.renderer.metrics().scale_factor as f32;
         let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
-        seats::hit_tab_chrome(width, scale, self.tabs.len(), position.x, position.y)
-            .or_else(|| seats::hit_window_chrome(width, scale, position.x, position.y))
-            .or_else(|| {
-                seats::hit_chrome(
-                    &self.seats,
-                    &self.seat_layout,
-                    scale,
-                    position.x,
-                    position.y,
-                )
-            })
+        seats::hit_tab_chrome(
+            width,
+            scale,
+            self.tabs.len(),
+            self.active_tab,
+            position.x,
+            position.y,
+        )
+        .or_else(|| seats::hit_window_chrome(width, scale, position.x, position.y))
+        .or_else(|| {
+            seats::hit_chrome(
+                &self.seats,
+                &self.seat_layout,
+                scale,
+                position.x,
+                position.y,
+            )
+        })
     }
 
     fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         let hover = self.chrome_target_at(position);
+        self.update_chrome_hover_target(hover)
+    }
+
+    fn update_chrome_hover_target(&mut self, hover: Option<seats::ChromeTarget>) -> Result<()> {
         if self.seat_pointer.hover == hover {
             return Ok(());
         }
@@ -4099,6 +4186,7 @@ impl Runtime {
             seats::ChromeTarget::Tab(index) => self.activate_tab(index, false)?,
             seats::ChromeTarget::TabClose(index) => self.close_tab(index)?,
             seats::ChromeTarget::NewTab => self.new_tab()?,
+            seats::ChromeTarget::NewTabMenu => self.toggle_profile_menu()?,
             seats::ChromeTarget::Settings => self.toggle_settings_panel()?,
             seats::ChromeTarget::Minimize => self.window.set_minimized(true),
             seats::ChromeTarget::Maximize => {
@@ -4120,6 +4208,34 @@ impl Runtime {
         // press reaches a divider, a seat, the terminal's selection or a peek.
         if let (Some(layout), Some(position)) = (self.settings_layout(), self.pointer_position) {
             return self.settings_mouse_input(&layout, state, button, position);
+        }
+        // The picker takes the press only where it is drawn. A press on a row
+        // starts that profile's tab; a press on the menu's own padding is the
+        // menu's and does nothing; a press anywhere else puts it away and then
+        // goes on to be the press it always was.
+        if let (Some(layout), Some(position)) = (self.profile_menu_layout(), self.pointer_position)
+        {
+            match profiles::hit(&layout, position.x, position.y) {
+                Some(row) => {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        self.close_profile_menu()?;
+                        if let Some(index) = row {
+                            self.new_tab_with_profile(index)?;
+                        }
+                    }
+                    return Ok(());
+                }
+                None => {
+                    if state == ElementState::Pressed
+                        && !matches!(
+                            self.chrome_target_at(position),
+                            Some(seats::ChromeTarget::NewTabMenu)
+                        )
+                    {
+                        self.close_profile_menu()?;
+                    }
+                }
+            }
         }
         if let Some(position) = self.pointer_position
             && self.chrome_mouse_input(state, button, position)?
@@ -4481,6 +4597,14 @@ impl Runtime {
                     self.present_chrome_change()?;
                 }
             }
+            return Ok(());
+        }
+        // A popup is not a modal, so it owns exactly one key: the one that puts
+        // it away. Everything else is still the terminal's.
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && !event.repeat
+            && self.close_profile_menu()?
+        {
             return Ok(());
         }
 

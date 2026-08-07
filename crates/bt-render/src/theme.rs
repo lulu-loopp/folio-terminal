@@ -66,11 +66,42 @@ pub struct ChromePalette {
     /// bar's foot is exactly the line that severs the tab from the terminal it
     /// is shaped to join.
     pub title_bar: [u8; 3],
-    /// Title text and the `×` at rest. Bars are wayfinding, not content, so
-    /// this ink sits a step below the terminal's own.
+    /// Title text and a caption button's glyph at rest (`--ink2` over
+    /// `--panel`). Bars are wayfinding, not content, so this ink sits a step
+    /// below the terminal's own.
     pub title_text: [u8; 3],
-    /// The `×` under the pointer: the one moment a bar glyph is the subject.
+    /// A title-bar glyph under the pointer: the one moment a bar glyph is the
+    /// subject.
     pub title_text_hover: [u8; 3],
+    /// `--ink3` over `--panel`: the step *below* [`Self::title_text`], worn by
+    /// the tab's `×` and by the `+`/`˅` pair at the end of the strip.
+    ///
+    /// The mock-up spends three inks on the title bar and means all three:
+    /// `.capbtn` is `--ink2`, while `.tab .close` and `.newtab` are `--ink3`.
+    /// Drawing the strip's controls at `--ink2` made every tab carry a `×` as
+    /// loud as the caption run — a control you use rarely, shouting as loudly as
+    /// the one that closes the window.
+    pub title_text_muted: [u8; 3],
+    /// `.tab .close:hover` — `--active` over the *active* tab, whose fill is
+    /// `--termbg`.
+    ///
+    /// This pill is the one place in the chrome where a single mock-up
+    /// declaration lands on two different surfaces, so it gets two entries
+    /// rather than one translucent fill. That is not a shortcut, it is the only
+    /// correct reading: this pipeline composites in **linear** light and a
+    /// browser composites in sRGB, so handing the blender `--active`'s own .09
+    /// does not reproduce `--active` — measured on the dark palette, a
+    /// translucent pill came out at 89 where the design's own renderer puts it
+    /// at 48, nearly twice the lift. An alpha is only ever honest here when
+    /// nothing under it is known (see [`Self::menu_border`]); when the surface
+    /// *is* known, the composite is.
+    pub tab_close_pill_on_content: [u8; 3],
+    /// `--active` over `--hover` over `--panel` — the same pill on a tab you are
+    /// merely hovering, where the tab's own hover fill is already down.
+    ///
+    /// The two are the whole set: `.tab.active` never takes `--hover`, and a tab
+    /// that is not hovered cannot have a hovered `×` on it.
+    pub tab_close_pill_on_hovered_tab: [u8; 3],
     /// Body state notices — an empty pane's invitation, "Loading …", a failure.
     pub body_hint_text: [u8; 3],
     /// A divider at rest: one logical pixel of quiet separation.
@@ -174,6 +205,9 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     title_bar: [0x25, 0x25, 0x25],
     title_text: [0x9d, 0x9d, 0x9d],
     title_text_hover: [0xe3, 0xe3, 0xe3],
+    title_text_muted: [0x78, 0x78, 0x78],
+    tab_close_pill_on_content: [0x30, 0x30, 0x30],
+    tab_close_pill_on_hovered_tab: [0x44, 0x44, 0x44],
     body_hint_text: [0x75, 0x75, 0x75],
     divider: [0x35, 0x35, 0x35],
     divider_hover: [0x51, 0x51, 0x51],
@@ -218,6 +252,9 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     title_bar: [0xf7, 0xf7, 0xf5],
     title_text: [0x7a, 0x79, 0x74],
     title_text_hover: [0x37, 0x35, 0x2f],
+    title_text_muted: [0xa1, 0xa0, 0x9c],
+    tab_close_pill_on_content: [0xed, 0xed, 0xec],
+    tab_close_pill_on_hovered_tab: [0xdc, 0xdc, 0xd9],
     body_hint_text: [0xa5, 0xa4, 0xa1],
     divider: [0xe9, 0xe9, 0xe9],
     divider_hover: [0xc2, 0xc1, 0xbf],
@@ -302,11 +339,33 @@ pub const WINDOW_TAB_MARK_LOGICAL_PX: f32 = 15.0;
 /// The tab close affordance (`design/ui-mockup.html` lines 305-311).
 pub const WINDOW_TAB_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
 pub const WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
+/// `.tab .close { border-radius: 4px }` — the pill under the pointer.
+pub const WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// The two width tiers a tab crosses as the strip fills, both of them *measured*
+/// in the mock-up (`updateTabSqueeze`) rather than counted:
+///
+/// * below 140px the hover controls stand down so the title keeps its room, and
+///   a tab that is not the active one drops its `×`;
+/// * below 90px there is no legible room for words at all and the tab becomes
+///   its centred mark.
+pub const WINDOW_TAB_TIGHT_LOGICAL_PX: f32 = 140.0;
+pub const WINDOW_TAB_SQUEEZED_LOGICAL_PX: f32 = 90.0;
+/// `.tab.squeezed { padding: 0 4px }` — the only padding a squeezed tab keeps.
+pub const WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX: f32 = 4.0;
 /// The new-tab button and its placement (`design/ui-mockup.html` lines 386-408).
 pub const WINDOW_NEW_TAB_BOX_LOGICAL_PX: f32 = 28.0;
 pub const WINDOW_NEW_TAB_GLYPH_LOGICAL_PX: f32 = 10.0;
+/// `.newtab { border-radius: 6px }` — the round on the hover fill, and the whole
+/// of what the button is at rest: `background: none` until the pointer arrives.
+pub const WINDOW_NEW_TAB_RADIUS_LOGICAL_PX: f32 = 6.0;
 pub const WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX: f32 = 6.0;
 pub const WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 3.0;
+/// `.chevbtn svg { width: 9px; height: 6px }` — the profile picker's arrow. It
+/// wears the same 28px `.newtab` box as the `+` beside it (`.tabs-inline
+/// .chevbtn { margin-left: 0 }`): two buttons of the same kind, side by side, at
+/// two different widths reads as a mistake rather than as a hierarchy.
+pub const WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX: f32 = 9.0;
+pub const WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 6.0;
 /// A seat title's font size (`.panehead { font-size: 11.5px }`).
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;
 /// The inset between a title bar's edge and its first item

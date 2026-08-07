@@ -39,6 +39,11 @@ pub enum ChromeMark {
     TabClose,
     /// `#i-plus` — the new-tab button.
     Plus,
+    /// `#i-chev` — the profile picker beside the `+`. The mock-up rotates the
+    /// one arrow rather than swapping glyphs (`.chevbtn.open svg { transform:
+    /// rotate(180deg) }`): it points down at a list that is folded away and up
+    /// at one that is already on screen, and the turn is the sentence.
+    Chevron { open: bool },
     /// `#p-pwsh` — the PowerShell profile mark, which carries its own colours.
     /// The mock-up is explicit that a mark's colour is its own and the active
     /// tab does not recolour it (`.pmark`, and the comment above it).
@@ -55,6 +60,20 @@ pub enum ChromeMark {
     ActiveTab { radius_px: u32 },
     /// A regular tab's rounded body, used only for the inactive hover fill.
     TabBody { radius_px: u32 },
+    /// A title-bar control's hover pill: one round on all four corners, filled
+    /// edge to edge. `.newtab` wears it at 6px and `.tab .close` at 4px.
+    ///
+    /// It is a mark rather than a [`bt_render::ChromeQuad`] because a quad is a
+    /// rectangle and this one is not: drawn as a quad the `+`'s highlight came
+    /// out a hard-edged grey block sitting against the tab's own round, which is
+    /// what this variant exists to delete. Going through the rasterizer gets the
+    /// same analytic coverage the active tab's corners already get, instead of a
+    /// staircase assembled from nested rectangles.
+    ///
+    /// Opaque, like every other chrome fill: the palette pre-composites each
+    /// pill over the surface it lands on, because this pipeline blends in linear
+    /// light and the design's does not — see `ChromePalette::tab_close_pill_on_content`.
+    ControlPill { radius_px: u32 },
 }
 
 impl ChromeMark {
@@ -66,12 +85,15 @@ impl ChromeMark {
             Self::WindowClose => "i-close",
             Self::TabClose => "tab-close",
             Self::Plus => "i-plus",
+            Self::Chevron { open: false } => "i-chev",
+            Self::Chevron { open: true } => "i-chev-open",
             Self::ProfilePowerShell => "p-pwsh",
             Self::File => "i-file",
             Self::Folder => "i-folder",
             Self::Panel => "i-panel",
             Self::ActiveTab { .. } => "tab",
             Self::TabBody { .. } => "tab-body",
+            Self::ControlPill { .. } => "control-pill",
         }
     }
 
@@ -155,6 +177,9 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     if let ChromeMark::ActiveTab { radius_px } | ChromeMark::TabBody { radius_px } = sprite.mark {
         let _ = write!(key, ":r{radius_px}");
     }
+    if let ChromeMark::ControlPill { radius_px } = sprite.mark {
+        let _ = write!(key, ":r{radius_px}");
+    }
     let _ = write!(key, ":{width_px}x{height_px}");
     if sprite.mark.takes_current_color() {
         let _ = write!(key, ":{r:02x}{g:02x}{b:02x}");
@@ -192,6 +217,22 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 format!(r#"<path fill="currentColor" d="{path}"/>"#),
             )
         }
+        ChromeMark::ControlPill { radius_px } => {
+            let path = control_pill_path(width_px, height_px, radius_px)?;
+            (
+                format!("0 0 {width_px} {height_px}"),
+                format!(r#"<path fill="currentColor" d="{path}"/>"#),
+            )
+        }
+        // One arrow that turns over: the `open` chevron is the resting one
+        // rotated about its own centre, exactly as `.chevbtn.open svg` is.
+        ChromeMark::Chevron { open: true } => (
+            SYMBOL_VIEW_BOX[symbol_index(sprite.mark)].to_owned(),
+            format!(
+                r#"<g transform="rotate(180 5 3)">{}</g>"#,
+                SYMBOL_BODY[symbol_index(sprite.mark)]
+            ),
+        ),
         mark => (SYMBOL_VIEW_BOX[symbol_index(mark)].to_owned(), {
             SYMBOL_BODY[symbol_index(mark)].to_owned()
         }),
@@ -219,28 +260,31 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::File => 6,
         ChromeMark::Folder => 7,
         ChromeMark::Panel => 8,
-        // Handled before this function is reached; its geometry is generated,
+        ChromeMark::Chevron { .. } => 9,
+        // Handled before this function is reached; their geometry is generated,
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
         ChromeMark::TabBody { .. } => 8,
+        ChromeMark::ControlPill { .. } => 8,
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 9] = [
+const SYMBOL_VIEW_BOX: [&str; 10] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
     "0 0 10 10",
+    "0 0 10 10",
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
-    "0 0 16 16",
+    "0 0 10 6",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 9] = [
+const SYMBOL_BODY: [&str; 10] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -249,8 +293,11 @@ const SYMBOL_BODY: [&str; 9] = [
     r#"<rect x="0.5" y="0.5" width="9" height="9" rx="1.8" fill="none" stroke="currentColor" stroke-width="1"/>"#,
     // #i-close
     r#"<path d="M0.5 0.5l9 9M9.5 0.5l-9 9" fill="none" stroke="currentColor" stroke-width="1"/>"#,
-    // #i-plus
-    r#"<path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>"#,
+    // #i-plus. `fill="none"` is ours: the mock-up's own path carries no fill
+    // attribute and therefore fills black, which costs a browser nothing because
+    // two straight subpaths enclose no area — but it is a lie about the glyph,
+    // and this rasterizer has no reason to be handed one.
+    r#"<path d="M5 0.5v9M0.5 5h9" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"#,
     // #p-pwsh — flat, and its own colours (a mark carries its own).
     concat!(
         r##"<rect x="1" y="2.5" width="14" height="11" rx="1.8" fill="#2C5C9E"/>"##,
@@ -269,6 +316,8 @@ const SYMBOL_BODY: [&str; 9] = [
         r#"<rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.1"/>"#,
         r#"<path d="M6.2 2.5v11" stroke="currentColor" stroke-width="1.1"/>"#,
     ),
+    // #i-chev
+    r#"<path d="M1 1l4 3.6L9 1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
@@ -313,6 +362,27 @@ fn active_tab_path(width: u32, height: u32, radius: u32) -> Option<String> {
         two_r = 2 * r,
         top_right = w - 2 * r,
         body_right = w - r,
+    ))
+}
+
+/// A `border-radius: Npx` box, all four corners, in physical pixels.
+///
+/// The radius is clamped to half the shorter side the way a browser clamps it,
+/// so a pill asked for more round than it has room for becomes a stadium rather
+/// than a self-intersecting path.
+fn control_pill_path(width: u32, height: u32, radius: u32) -> Option<String> {
+    let (w, h) = (width as i64, height as i64);
+    let r = (radius as i64).min(w / 2).min(h / 2);
+    if r < 1 || w < 2 || h < 2 {
+        return None;
+    }
+    Some(format!(
+        "M{r},0 L{right},0 A{r},{r} 0 0 1 {w},{r} \
+         L{w},{bottom} A{r},{r} 0 0 1 {right},{h} \
+         L{r},{h} A{r},{r} 0 0 1 0,{bottom} \
+         L0,{r} A{r},{r} 0 0 1 {r},0 Z",
+        right = w - r,
+        bottom = h - r,
     ))
 }
 
@@ -363,6 +433,8 @@ mod tests {
             (ChromeMark::WindowMinimize, 10.0),
             (ChromeMark::WindowMaximize, 10.0),
             (ChromeMark::WindowClose, 10.0),
+            (ChromeMark::TabClose, 8.0),
+            (ChromeMark::Plus, 10.0),
             (ChromeMark::ProfilePowerShell, 15.0),
             (ChromeMark::File, 14.0),
             (ChromeMark::Folder, 13.0),
@@ -564,6 +636,136 @@ mod tests {
             partial >= radius as usize,
             "an antialiased quarter-circle spends at least one partial pixel per row, saw {partial}"
         );
+    }
+
+    /// PIN (`+` hover fidelity) — a control's hover fill is **round**, and the
+    /// round is analytic: its corners spend partial-coverage pixels, which is
+    /// the whole difference between a curve and the staircase a stack of nested
+    /// rectangles leaves.
+    ///
+    /// Red gate: this is the shape the `+` did not have. Drawn as a
+    /// `ChromeQuad` its corner pixel was fully opaque — assertion one — and
+    /// there were no partial pixels anywhere in it — assertion three.
+    #[test]
+    fn a_control_pill_is_round_at_its_corners_and_solid_in_its_middle() {
+        for (side, radius) in [(28_u32, 6_u32), (42, 9), (56, 12), (17, 4), (34, 8)] {
+            let mut rasters = ChromeMarkRasters::default();
+            let icons = rasters.resolve(&[sprite(
+                ChromeMark::ControlPill { radius_px: radius },
+                side as f32,
+                side as f32,
+                [0x33, 0x44, 0x55],
+            )]);
+            let pill = icons.first().expect("a pill must rasterize");
+            assert_eq!((pill.width_px, pill.height_px), (side, side));
+
+            // Round: the box's own corner pixel is outside the shape, and a
+            // radius in from it the fill is solid.
+            for (x, y) in [(0, 0), (side - 1, 0), (0, side - 1), (side - 1, side - 1)] {
+                assert_eq!(
+                    alpha_at(pill, x, y),
+                    0,
+                    "radius {radius}: the pill's corner pixel ({x},{y}) must be cut away"
+                );
+            }
+            assert_eq!(alpha_at(pill, side / 2, side / 2), 255);
+            assert_eq!(
+                alpha_at(pill, side / 2, 0),
+                255,
+                "radius {radius}: the top edge between the corners is solid"
+            );
+            assert_eq!(alpha_at(pill, 0, side / 2), 255);
+
+            // Analytic, not stepped: a quarter circle spends at least one
+            // partial pixel per row it crosses.
+            let partial = (0..radius)
+                .flat_map(|y| (0..radius).map(move |x| (x, y)))
+                .filter(|(x, y)| {
+                    let alpha = alpha_at(pill, *x, *y);
+                    alpha > 0 && alpha < 255
+                })
+                .count();
+            assert!(
+                partial >= radius as usize,
+                "radius {radius}: a rounded corner is not a staircase, saw {partial} partial pixels"
+            );
+        }
+    }
+
+    /// PIN — a pill is **opaque**, and the two radii the chrome uses are two
+    /// rasters rather than one stretched.
+    ///
+    /// Opacity is the claim that matters. A translucent fill would have to be
+    /// blended by the pipeline, and the pipeline blends in *linear* light while
+    /// the design's renderer blends in sRGB: handing it `--active`'s own .09
+    /// over the dark tab lands at 89 where the mock-up puts 48. Every chrome
+    /// fill is pre-composited for exactly that reason, and this one is no
+    /// exception.
+    #[test]
+    fn a_pill_is_opaque_and_each_radius_is_its_own_raster() {
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[
+            sprite(
+                ChromeMark::ControlPill { radius_px: 4 },
+                17.0,
+                17.0,
+                [0xed, 0xed, 0xec],
+            ),
+            sprite(
+                ChromeMark::ControlPill { radius_px: 6 },
+                17.0,
+                17.0,
+                [0xed, 0xed, 0xec],
+            ),
+        ]);
+        for icon in &icons {
+            assert_eq!(
+                alpha_at(icon, 8, 8),
+                255,
+                "a chrome fill carries no alpha of its own"
+            );
+            assert_eq!(rgb_at(icon, 8, 8), [0xed, 0xed, 0xec]);
+        }
+        assert_ne!(icons[0].key, icons[1].key, "the radius is part of identity");
+    }
+
+    /// PIN — the chevron is one arrow that turns over. The open glyph is the
+    /// resting one rotated 180° about its own centre, so the two are mirror
+    /// images across the symbol's mid-line rather than two drawings.
+    #[test]
+    fn the_chevron_turns_over_instead_of_swapping_glyphs() {
+        let ink = [0x9d, 0x9d, 0x9d];
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[
+            sprite(ChromeMark::Chevron { open: false }, 18.0, 12.0, ink),
+            sprite(ChromeMark::Chevron { open: true }, 18.0, 12.0, ink),
+        ]);
+        let (down, up) = (&icons[0], &icons[1]);
+        assert_ne!(down.key, up.key);
+        let ink_of = |icon: &ChromeIcon, y: u32| {
+            (0..icon.width_px)
+                .map(|x| u32::from(alpha_at(icon, x, y)))
+                .sum::<u32>()
+        };
+        // A down chevron carries its two arms at the top and its point at the
+        // bottom; rotating it swaps which row is which.
+        assert!(
+            ink_of(down, 1) > ink_of(down, down.height_px - 2),
+            "a resting chevron points down"
+        );
+        assert!(
+            ink_of(up, up.height_px - 2) > ink_of(up, 1),
+            "an open chevron points up"
+        );
+        for y in 0..down.height_px {
+            let mirrored = down.height_px - 1 - y;
+            let (a, b) = (ink_of(down, y), ink_of(up, mirrored));
+            assert!(
+                a.abs_diff(b) * 20 <= a.max(b).max(1) * 3,
+                "row {y} of the turned arrow is not row {mirrored} of the resting one \
+                 ({a} against {b}) — it is a second glyph, not the same one rotated"
+            );
+        }
     }
 
     /// A raster is produced once and reused while it stays on screen, and the
