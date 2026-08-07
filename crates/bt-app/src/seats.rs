@@ -410,6 +410,20 @@ pub fn seat_viewport(layout: &SeatLayout, seat: SeatId) -> Option<SeatViewport> 
     })
 }
 
+/// The drawable body of a preview seat, excluding its existing title bar.
+pub fn preview_body_viewport(
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+) -> Option<SeatViewport> {
+    let mut viewport = seat_viewport(layout, seat)?;
+    let title_height = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let consumed = title_height.min(viewport.height.saturating_sub(1));
+    viewport.y = viewport.y.saturating_add(consumed);
+    viewport.height = viewport.height.saturating_sub(consumed).max(1);
+    Some(viewport)
+}
+
 /// Something in the chrome the pointer can be over.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChromeTarget {
@@ -522,11 +536,24 @@ pub struct ChromePointer {
 /// Empty for a lone terminal leaf: there is no divider, no other seat, and the
 /// terminal's own pixels are not chrome. That emptiness is what makes the
 /// byte-identity gate an argument about *values* rather than about a flag.
+#[cfg(test)]
 pub fn build_chrome(
     seats: &Seats,
     layout: &SeatLayout,
     scale: f32,
     pointer: ChromePointer,
+) -> (Vec<ChromeQuad>, Vec<ChromeLabel>) {
+    build_chrome_with_preview(seats, layout, scale, pointer, None, None)
+}
+
+/// Build chrome while supplying the preview seat's content title and optional body placeholder.
+pub fn build_chrome_with_preview(
+    seats: &Seats,
+    layout: &SeatLayout,
+    scale: f32,
+    pointer: ChromePointer,
+    preview_title: Option<&str>,
+    preview_message: Option<&str>,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>) {
     let mut quads = Vec::new();
     let mut labels = Vec::new();
@@ -577,7 +604,12 @@ pub fn build_chrome(
                 let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
                 let close = close_button_rect(rect, scale);
                 labels.push(ChromeLabel {
-                    text: seat_title(placement.kind).to_owned(),
+                    text: if placement.kind == SeatKind::Preview {
+                        preview_title.unwrap_or_else(|| seat_title(placement.kind))
+                    } else {
+                        seat_title(placement.kind)
+                    }
+                    .to_owned(),
                     rect: [
                         rect[0] + pad,
                         rect[1],
@@ -595,6 +627,22 @@ pub fn build_chrome(
                     color: SEAT_TITLE_TEXT_RGB,
                     align_right: true,
                 });
+                if placement.kind == SeatKind::Preview
+                    && let Some(message) = preview_message
+                {
+                    labels.push(ChromeLabel {
+                        text: message.to_owned(),
+                        rect: [
+                            rect[0] + pad,
+                            title_bottom + pad,
+                            rect[2] - pad,
+                            rect[3] - pad,
+                        ],
+                        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                        color: SEAT_TITLE_TEXT_RGB,
+                        align_right: false,
+                    });
+                }
             }
         }
     }

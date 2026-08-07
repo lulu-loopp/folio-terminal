@@ -22,9 +22,9 @@ use bt_persist::{SESSION_SCHEMA_VERSION, SessionV1, TabV1, WindowBoundsV1, Windo
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit, MathHitTarget,
-    PeekImageOverlay, Preedit, PresentOutcome, Renderer, SeatViewport, background_rgb,
-    compose_preedit, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
-    theme_revision,
+    PeekImageOverlay, Preedit, PresentOutcome, PreviewImage, Renderer, SeatViewport,
+    background_rgb, compose_preedit, foreground_rgb, frame_content_digest,
+    frame_is_alternate_screen, preview_image_extent, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, SessionDecorationTask,
@@ -100,6 +100,7 @@ enum MathWorkerRequest {
     /// resample, and for the same reason: a wallpaper-sized Lanczos3 pass is tens of milliseconds
     /// and the event thread must not spend them. The completion routes only to the peek slot.
     PeekScale(bt_term::InlineImageScaleTask),
+    PreviewScale(bt_term::InlineImageScaleTask),
 }
 
 enum DecorationWorkerCompletion {
@@ -122,6 +123,9 @@ enum DecorationWorkerCompletion {
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     },
     PeekScaledImage {
+        scaled: bt_term::ScaledInlineImage,
+    },
+    PreviewScaledImage {
         scaled: bt_term::ScaledInlineImage,
     },
 }
@@ -186,6 +190,11 @@ impl MathWorker {
                         }
                         MathWorkerRequest::PeekScale(task) => {
                             DecorationWorkerCompletion::PeekScaledImage {
+                                scaled: bt_term::scale_inline_image(&task),
+                            }
+                        }
+                        MathWorkerRequest::PreviewScale(task) => {
+                            DecorationWorkerCompletion::PreviewScaledImage {
                                 scaled: bt_term::scale_inline_image(&task),
                             }
                         }
@@ -331,6 +340,7 @@ struct Runtime {
     /// `PeekThumbnail` for why a single entry is the whole policy.
     peek_thumbnail: Option<PeekThumbnail>,
     peek_thumbnail_pending: Option<PeekThumbnailTarget>,
+    preview_image: Option<PreviewImageState>,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
     pending_math_context_anchor: Option<MathBlockAnchor>,
@@ -675,8 +685,7 @@ struct SelectionDrag {
     origin: ViewSelection,
     hyperlink: Option<HyperlinkHit>,
     open_hyperlink_on_release: bool,
-    local_image_path: Option<PathBuf>,
-    open_local_image_on_release: bool,
+    local_image_activation: LocalImageActivation,
 }
 
 #[derive(Clone, Copy)]
@@ -962,6 +971,40 @@ struct PeekThumbnail {
     height_px: u32,
 }
 
+/// Persistent preview-seat state. Native pixels remain in `peek_cache`; this holds only the one
+/// display-sized raster and the question currently in flight for the solver's body rectangle.
+struct PreviewImageState {
+    path: PathBuf,
+    pending: Option<PeekThumbnailTarget>,
+    raster: Option<PeekThumbnail>,
+    failure: Option<String>,
+}
+
+impl PreviewImageState {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            pending: None,
+            raster: None,
+            failure: None,
+        }
+    }
+
+    fn title(&self) -> String {
+        self.path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| self.path.to_string_lossy().into_owned())
+    }
+
+    fn message(&self) -> Option<&str> {
+        self.failure.as_deref().or_else(|| {
+            (self.pending.is_some() || self.raster.is_none()).then_some("Loading image…")
+        })
+    }
+}
+
 impl PeekThumbnail {
     fn from_scaled(scaled: bt_term::ScaledInlineImage) -> Self {
         Self {
@@ -1076,12 +1119,35 @@ fn hyperlink_activation(control: bool, click_no_drag: bool, uri: &str) -> Hyperl
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum LocalImageActivation {
+    None,
+    Preview(PathBuf),
+    External(PathBuf),
+}
+
+impl LocalImageActivation {
+    fn path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::None => None,
+            Self::Preview(path) | Self::External(path) => Some(path),
+        }
+    }
+}
+
 fn local_image_activation(
     control: bool,
     click_no_drag: bool,
     worker_verified_path: Option<&std::path::Path>,
-) -> bool {
-    control && click_no_drag && worker_verified_path.is_some()
+) -> LocalImageActivation {
+    let Some(path) = worker_verified_path.filter(|_| click_no_drag) else {
+        return LocalImageActivation::None;
+    };
+    if control {
+        LocalImageActivation::External(path.to_path_buf())
+    } else {
+        LocalImageActivation::Preview(path.to_path_buf())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1333,6 +1399,7 @@ impl Runtime {
             peek_cache: std::collections::HashMap::new(),
             peek_thumbnail: None,
             peek_thumbnail_pending: None,
+            preview_image: None,
             math_hover_anchor: None,
             math_hover_clear_at: None,
             pending_math_context_anchor: None,
@@ -1404,6 +1471,7 @@ impl Runtime {
         let (layout, terminal_seat) = solve_seats(&self.seats, &self.renderer, render_physical);
         self.seat_layout = layout;
         self.renderer.set_seat_viewport(terminal_seat);
+        self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.renderer
             .metrics()
@@ -1418,8 +1486,19 @@ impl Runtime {
     /// whether anything visible changed.
     fn refresh_chrome(&mut self) -> bool {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let (quads, labels) =
-            seats::build_chrome(&self.seats, &self.seat_layout, scale, self.seat_pointer);
+        let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
+        let preview_message = self
+            .preview_image
+            .as_ref()
+            .and_then(PreviewImageState::message);
+        let (quads, labels) = seats::build_chrome_with_preview(
+            &self.seats,
+            &self.seat_layout,
+            scale,
+            self.seat_pointer,
+            preview_title.as_deref(),
+            preview_message,
+        );
         self.renderer.set_chrome(quads, labels)
     }
 
@@ -1512,13 +1591,146 @@ impl Runtime {
     /// the session file all follow it, in that order.
     fn toggle_preview_seat(&mut self) -> Result<()> {
         let metrics = self.seat_metrics();
+        let was_open = self.seats.preview().is_some();
         if !self.seats.toggle_preview(&metrics) {
             return Ok(());
+        }
+        if was_open {
+            self.preview_image = None;
+            self.renderer.set_preview_image(None);
         }
         self.seat_pointer = seats::ChromePointer::default();
         self.divider_drag = None;
         self.apply_window_min_inner_size();
         self.commit_seat_geometry()
+    }
+
+    /// Open the ruled preview seat if necessary, otherwise reuse its geometry, then ask the shared
+    /// worker/cache pipeline for this image. Keyboard focus deliberately remains on the terminal.
+    fn open_preview_image(&mut self, path: PathBuf) -> Result<()> {
+        self.preview_image = Some(PreviewImageState::new(path));
+        self.renderer.set_preview_image(None);
+        if self.seats.preview().is_none() {
+            return self.toggle_preview_seat();
+        }
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// Refit the current image to the solver's latest preview body. Every decode and Lanczos3
+    /// resample stays on the existing decoration worker; this event-thread method only routes data.
+    fn refresh_preview_for_layout(&mut self) {
+        let Some(preview_seat) = self.seats.preview() else {
+            self.renderer.set_preview_image(None);
+            return;
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::preview_body_viewport(&self.seat_layout, preview_seat, scale)
+        else {
+            self.renderer.set_preview_image(None);
+            return;
+        };
+        let Some(path) = self
+            .preview_image
+            .as_ref()
+            .map(|preview| preview.path.clone())
+        else {
+            self.renderer.set_preview_image(None);
+            return;
+        };
+        let cache_key = normalized_local_image_path_key(&path);
+        let decoded = match self.peek_cache.get(&cache_key) {
+            Some(PeekCacheEntry::Ready {
+                key,
+                rgba,
+                width_px,
+                height_px,
+            }) => Some((key.clone(), Arc::clone(rgba), *width_px, *height_px)),
+            Some(PeekCacheEntry::Pending) => {
+                self.renderer.set_preview_image(None);
+                return;
+            }
+            Some(PeekCacheEntry::Failed) => {
+                if let Some(preview) = self.preview_image.as_mut() {
+                    preview.failure.get_or_insert_with(|| {
+                        "Preview failed: image could not be loaded".to_owned()
+                    });
+                }
+                self.renderer.set_preview_image(None);
+                return;
+            }
+            None => None,
+        };
+        let Some((content_key, rgba, native_width, native_height)) = decoded else {
+            self.renderer.set_preview_image(None);
+            if !self.math_worker_running {
+                if let Some(preview) = self.preview_image.as_mut() {
+                    preview.failure =
+                        Some("Preview failed: image worker is unavailable".to_owned());
+                }
+                return;
+            }
+            if self
+                .math_worker
+                .tasks
+                .send(MathWorkerRequest::PeekImage { path })
+                .is_ok()
+            {
+                self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
+            } else if let Some(preview) = self.preview_image.as_mut() {
+                preview.failure = Some("Preview failed: image worker is unavailable".to_owned());
+            }
+            return;
+        };
+        let Some((display_width, display_height)) =
+            preview_image_extent(body.width, body.height, native_width, native_height)
+        else {
+            if let Some(preview) = self.preview_image.as_mut() {
+                preview.failure = Some("Preview failed: preview seat is too small".to_owned());
+            }
+            self.renderer.set_preview_image(None);
+            return;
+        };
+        let target = (content_key.clone(), display_width, display_height);
+        if let Some(raster) = self
+            .preview_image
+            .as_ref()
+            .and_then(|preview| preview.raster.as_ref())
+            && raster.matches(&target)
+        {
+            self.renderer.set_preview_image(Some(PreviewImage {
+                seat: body,
+                key: raster.key.clone(),
+                rgba: Arc::clone(&raster.rgba),
+                width_px: raster.width_px,
+                height_px: raster.height_px,
+            }));
+            return;
+        }
+        self.renderer.set_preview_image(None);
+        if self
+            .preview_image
+            .as_ref()
+            .is_some_and(|preview| preview.pending.as_ref() == Some(&target))
+            || !self.math_worker_running
+        {
+            return;
+        }
+        let task = peek_scale_task(&target, rgba, native_width, native_height);
+        if self
+            .math_worker
+            .tasks
+            .send(MathWorkerRequest::PreviewScale(task))
+            .is_ok()
+        {
+            if let Some(preview) = self.preview_image.as_mut() {
+                preview.pending = Some(target);
+                preview.failure = None;
+            }
+        } else if let Some(preview) = self.preview_image.as_mut() {
+            preview.failure = Some("Preview failed: image worker is unavailable".to_owned());
+        }
     }
 
     /// Re-solve after a tree edit and carry the consequences to the terminal.
@@ -1739,6 +1951,10 @@ impl Runtime {
                         }
                         DecorationWorkerCompletion::PeekScaledImage { scaled } => {
                             self.complete_peek_scale(scaled)?;
+                            false
+                        }
+                        DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
+                            self.complete_preview_scale(scaled)?;
                             false
                         }
                     };
@@ -2307,6 +2523,10 @@ impl Runtime {
         result: std::result::Result<bt_term::DecodedInlineImage, bt_term::InlineImageDecodeError>,
     ) -> Result<()> {
         let cache_key = normalized_local_image_path_key(&path);
+        let preview_matches = self
+            .preview_image
+            .as_ref()
+            .is_some_and(|preview| normalized_local_image_path_key(&preview.path) == cache_key);
         match result {
             Ok(decoded) => {
                 self.peek_cache.insert(
@@ -2324,9 +2544,18 @@ impl Runtime {
                     self.show_or_request_peek(&active)?;
                 }
             }
-            Err(_) => {
-                self.peek_cache.insert(cache_key, PeekCacheEntry::Failed);
+            Err(error) => {
+                self.peek_cache
+                    .insert(cache_key.clone(), PeekCacheEntry::Failed);
+                if preview_matches && let Some(preview) = self.preview_image.as_mut() {
+                    preview.failure = Some(format!("Preview failed: {error}"));
+                }
             }
+        }
+        if preview_matches {
+            self.refresh_preview_for_layout();
+            self.refresh_chrome();
+            self.present_chrome_change()?;
         }
         Ok(())
     }
@@ -2348,6 +2577,26 @@ impl Runtime {
             self.show_or_request_peek(&active)?;
         }
         Ok(())
+    }
+
+    fn complete_preview_scale(&mut self, scaled: bt_term::ScaledInlineImage) -> Result<()> {
+        let delivered: PeekThumbnailTarget = (
+            scaled.content_key.clone(),
+            scaled.width_px,
+            scaled.height_px,
+        );
+        let Some(preview) = self.preview_image.as_mut() else {
+            return Ok(());
+        };
+        if preview.pending.as_ref() != Some(&delivered) {
+            return Ok(());
+        }
+        preview.pending = None;
+        preview.raster = Some(PeekThumbnail::from_scaled(scaled));
+        preview.failure = None;
+        self.refresh_preview_for_layout();
+        self.refresh_chrome();
+        self.present_chrome_change()
     }
 
     fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
@@ -2546,7 +2795,7 @@ impl Runtime {
             .context("missing frame for mouse hit")?;
         let hyperlink = frame.hyperlink_at(hit.row, hit.column);
         let open_hyperlink_on_release = self.modifiers.control_key() && hyperlink.is_some();
-        let open_local_image_on_release = local_image_activation(
+        let local_image_activation = local_image_activation(
             self.modifiers.control_key(),
             true,
             local_image_path.as_deref(),
@@ -2558,14 +2807,14 @@ impl Runtime {
                     .word_selection(hit.row, hit.column)
                     .context("reject non-rectangular frame during word selection")?
                     .context("word selection hit has no anchor")?;
-                (SelectionDragMode::Word, selection.clone(), selection)
+                (SelectionDragMode::Word, selection.clone(), Some(selection))
             }
             3 => {
                 let selection = frame
                     .line_selection(hit.row)
                     .context("reject non-rectangular frame during line selection")?
                     .context("line selection hit has no anchor")?;
-                (SelectionDragMode::Line, selection.clone(), selection)
+                (SelectionDragMode::Line, selection.clone(), Some(selection))
             }
             _ => {
                 let start = frame
@@ -2582,14 +2831,13 @@ impl Runtime {
                         start: start.clone(),
                         end,
                     },
-                    ViewSelection {
-                        start: start.clone(),
-                        end: start,
-                    },
+                    None,
                 )
             }
         };
-        self.session.set_view_selection(Some(initial));
+        // A linear press begins a possible drag but owns no selection yet. Only movement creates
+        // one, so click-no-drag cannot briefly feed copy-on-select or leave a zero-width selection.
+        self.session.set_view_selection(initial);
         self.mouse_route = Some(MouseRoute::Local(SelectionDrag {
             mode,
             origin_row: hit.row,
@@ -2597,8 +2845,7 @@ impl Runtime {
             origin,
             hyperlink,
             open_hyperlink_on_release,
-            local_image_path,
-            open_local_image_on_release,
+            local_image_activation,
         }));
         self.publish_interaction_frame()
     }
@@ -2882,7 +3129,12 @@ impl Runtime {
             }
             seats::ChromeTarget::Close(seat) => {
                 let metrics = self.seat_metrics();
+                let closed_preview = self.seats.preview() == Some(seat);
                 if self.seats.close_seat(&metrics, seat) {
+                    if closed_preview {
+                        self.preview_image = None;
+                        self.renderer.set_preview_image(None);
+                    }
                     self.seat_pointer = seats::ChromePointer::default();
                     self.apply_window_min_inner_size();
                     self.commit_seat_geometry()?;
@@ -2983,15 +3235,14 @@ impl Runtime {
                 self.extend_local_selection(hit)?;
                 let release_hyperlink = self.hyperlink_hit(hit);
                 let release_local_image_path = self.local_image_path_hit(hit);
-                let (single_click, hyperlink_to_open, local_image_to_open) =
+                let (single_click, hyperlink_to_open, local_image_action) =
                     if let Some(MouseRoute::Local(SelectionDrag {
                         mode: SelectionDragMode::Linear,
                         origin_row,
                         origin_column,
                         hyperlink,
                         open_hyperlink_on_release,
-                        local_image_path,
-                        open_local_image_on_release,
+                        local_image_activation,
                         ..
                     })) = self.mouse_route.as_ref()
                         && (*origin_row, *origin_column) == (hit.row, hit.column)
@@ -3002,12 +3253,12 @@ impl Runtime {
                                 .then(|| hyperlink.clone())
                                 .flatten()
                                 .filter(|pressed| release_hyperlink.as_ref() == Some(pressed)),
-                            open_local_image_on_release
-                                .then(|| local_image_path.clone())
-                                .flatten()
-                                .filter(|pressed| {
-                                    release_local_image_path.as_ref() == Some(pressed)
-                                }),
+                            local_image_activation
+                                .path()
+                                .is_some_and(|pressed| {
+                                    release_local_image_path.as_deref() == Some(pressed)
+                                })
+                                .then(|| local_image_activation.clone()),
                         )
                     } else {
                         (false, None, None)
@@ -3024,8 +3275,14 @@ impl Runtime {
                 if let Some(hyperlink) = hyperlink_to_open {
                     self.activate_hyperlink(hyperlink)?;
                 }
-                if let Some(path) = local_image_to_open {
-                    self.activate_local_image_path(&path);
+                if let Some(activation) = local_image_action {
+                    match activation {
+                        LocalImageActivation::None => {}
+                        LocalImageActivation::Preview(path) => self.open_preview_image(path)?,
+                        LocalImageActivation::External(path) => {
+                            self.activate_local_image_path(&path)
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -4373,8 +4630,7 @@ mod tests {
             },
             hyperlink: None,
             open_hyperlink_on_release: false,
-            local_image_path: None,
-            open_local_image_on_release: false,
+            local_image_activation: LocalImageActivation::None,
         })
     }
 
@@ -4417,12 +4673,28 @@ mod tests {
     }
 
     #[test]
-    fn local_image_activation_requires_ctrl_click_and_worker_success_capability() {
+    fn local_image_click_routes_preview_external_and_no_effect() {
         let verified = std::path::Path::new(r"C:\tmp\decoded.png");
-        assert!(local_image_activation(true, true, Some(verified)));
-        assert!(!local_image_activation(false, true, Some(verified)));
-        assert!(!local_image_activation(true, false, Some(verified)));
-        assert!(!local_image_activation(true, true, None));
+        assert_eq!(
+            local_image_activation(false, true, Some(verified)),
+            LocalImageActivation::Preview(verified.to_path_buf()),
+            "plain click carries the exact hit path into preview"
+        );
+        assert_eq!(
+            local_image_activation(true, true, Some(verified)),
+            LocalImageActivation::External(verified.to_path_buf()),
+            "Ctrl+click retains the system-viewer verb"
+        );
+        assert_eq!(
+            local_image_activation(false, true, None),
+            LocalImageActivation::None,
+            "an unmarked cell has no click side effect"
+        );
+        assert_eq!(
+            local_image_activation(false, false, Some(verified)),
+            LocalImageActivation::None,
+            "dragging remains selection"
+        );
     }
 
     #[test]

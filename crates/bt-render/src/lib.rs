@@ -617,6 +617,40 @@ pub struct PeekImageOverlay {
     pub pointer_y: f32,
 }
 
+/// Persistent image content for the preview seat. Pixels are already resampled by the shared
+/// decoration worker to the exact fit returned by [`preview_image_extent`]. The seat is expressed
+/// in whole-surface physical pixels; drawing switches the pass to that viewport rather than
+/// teaching terminal-frame geometry about neighbouring seats.
+#[derive(Clone)]
+pub struct PreviewImage {
+    pub seat: SeatViewport,
+    pub key: String,
+    pub rgba: Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+/// Fit an image inside a preview body while preserving aspect ratio and never enlarging it beyond
+/// its native dimensions.
+#[must_use]
+pub fn preview_image_extent(
+    body_width_px: u32,
+    body_height_px: u32,
+    image_width_px: u32,
+    image_height_px: u32,
+) -> Option<(u32, u32)> {
+    if body_width_px == 0 || body_height_px == 0 || image_width_px == 0 || image_height_px == 0 {
+        return None;
+    }
+    let width_scale = body_width_px as f64 / image_width_px as f64;
+    let height_scale = body_height_px as f64 / image_height_px as f64;
+    let scale = width_scale.min(height_scale).min(1.0);
+    Some((
+        (image_width_px as f64 * scale).floor().max(1.0) as u32,
+        (image_height_px as f64 * scale).floor().max(1.0) as u32,
+    ))
+}
+
 struct PeekBoxLayout {
     /// Outer border rect; the interior and image rects nest inside it.
     frame: [f32; 4],
@@ -1472,6 +1506,7 @@ pub struct Renderer {
     glyph_degraded_frames: u64,
     window_focused: bool,
     peek_overlay: Option<PeekImageOverlay>,
+    preview_image: Option<PreviewImage>,
     trace_perf: bool,
     perf_frame: u64,
 }
@@ -2074,6 +2109,7 @@ impl Renderer {
             glyph_degraded_frames: 0,
             window_focused: true,
             peek_overlay: None,
+            preview_image: None,
             trace_perf,
             perf_frame: 0,
         })
@@ -2168,6 +2204,23 @@ impl Renderer {
             _ => true,
         };
         self.peek_overlay = overlay;
+        changed
+    }
+
+    /// Replace the persistent preview-seat raster. Like peek, this is presentation state beside a
+    /// terminal frame; unlike peek it owns a solver-provided neighbouring seat viewport.
+    pub fn set_preview_image(&mut self, image: Option<PreviewImage>) -> bool {
+        let changed = match (&self.preview_image, &image) {
+            (None, None) => false,
+            (Some(current), Some(next)) => {
+                current.seat != next.seat
+                    || current.key != next.key
+                    || current.width_px != next.width_px
+                    || current.height_px != next.height_px
+            }
+            _ => true,
+        };
+        self.preview_image = image;
         changed
     }
 
@@ -2337,6 +2390,15 @@ impl Renderer {
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("peek flyout image vertices"),
                     contents: bytemuck::cast_slice(&peek_vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let (preview_seat, preview_draws, preview_vertices) = self.prepare_preview_draws();
+        let preview_vertex_buffer = (!preview_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("preview seat image vertices"),
+                    contents: bytemuck::cast_slice(&preview_vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
@@ -2564,6 +2626,31 @@ impl Renderer {
                     self.chrome_text_renderer
                         .render(&self.atlas, &self.chrome_viewport, &mut pass)
                         .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                }
+            }
+            // Preview content is above that seat's body chrome, but its viewport excludes the title
+            // bar, so the filename and existing close affordance remain visible.
+            if let (Some(seat), Some(vertex_buffer)) =
+                (preview_seat, preview_vertex_buffer.as_ref())
+            {
+                pass.set_viewport(
+                    seat.x as f32,
+                    seat.y as f32,
+                    seat.width as f32,
+                    seat.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(seat.x, seat.y, seat.width, seat.height);
+                pass.set_pipeline(&self.math_pipeline);
+                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                for draw in &preview_draws {
+                    if let Some(texture) = self.math_textures.get(&draw.key)
+                        && let Some(tile) = texture.tiles.get(draw.tile_index)
+                    {
+                        pass.set_bind_group(0, &tile.bind_group, &[]);
+                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                    }
                 }
             }
         }
@@ -2868,6 +2955,62 @@ impl Renderer {
             });
         }
         (rects, draws, vertices)
+    }
+
+    fn prepare_preview_draws(&mut self) -> (Option<SeatViewport>, Vec<MathDraw>, Vec<MathVertex>) {
+        let Some(image) = self.preview_image.clone() else {
+            return (None, Vec::new(), Vec::new());
+        };
+        if self.math_textures.get(&image.key).is_none()
+            && let Some(texture) =
+                self.upload_rgba_tiles(&image.rgba, image.width_px, image.height_px)
+        {
+            let (admitted, evictions) =
+                self.math_textures
+                    .insert(image.key.clone(), texture, image.rgba.len());
+            self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+            if !admitted {
+                self.note_math_texture_refusal(&image.key, image.rgba.len());
+            }
+        }
+        let Some(tile_geometry) = self.math_textures.get(&image.key).map(|texture| {
+            texture
+                .tiles
+                .iter()
+                .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
+                .collect::<Vec<_>>()
+        }) else {
+            return (Some(image.seat), Vec::new(), Vec::new());
+        };
+        let left_inset = (image.seat.width.saturating_sub(image.width_px) / 2) as f32;
+        let top_inset = (image.seat.height.saturating_sub(image.height_px) / 2) as f32;
+        let mut draws = Vec::new();
+        let mut vertices = Vec::new();
+        for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
+            tile_geometry.into_iter().enumerate()
+        {
+            let left = left_inset + tile_x as f32;
+            let top = top_inset + tile_y as f32;
+            let first_vertex = vertices.len() as u32;
+            vertices.extend(math_quad_vertices(
+                left,
+                top,
+                left + tile_width as f32,
+                top + tile_height as f32,
+                0.0,
+                0.0,
+                1.0,
+                1.0,
+                image.seat.width,
+                image.seat.height,
+            ));
+            draws.push(MathDraw {
+                key: image.key.clone(),
+                tile_index,
+                first_vertex,
+            });
+        }
+        (Some(image.seat), draws, vertices)
     }
 
     fn math_block_geometry(
@@ -7827,6 +7970,20 @@ mod tests {
         };
         assert_eq!(cell_bounds_px(metrics, 0, 0), [8.0, 8.0, 18.0, 28.0]);
         assert_eq!(cell_bounds_px(metrics, 3, 7), [78.0, 68.0, 88.0, 88.0]);
+    }
+
+    #[test]
+    fn preview_fit_preserves_aspect_ratio_without_upscaling() {
+        assert_eq!(preview_image_extent(800, 600, 1600, 1200), Some((800, 600)));
+        assert_eq!(preview_image_extent(2000, 2000, 320, 240), Some((320, 240)));
+        assert_eq!(preview_image_extent(0, 600, 320, 240), None);
+    }
+
+    #[test]
+    fn preview_fit_handles_extreme_aspect_ratios() {
+        assert_eq!(preview_image_extent(300, 300, 10_000, 1), Some((300, 1)));
+        assert_eq!(preview_image_extent(300, 300, 1, 10_000), Some((1, 300)));
+        assert_eq!(preview_image_extent(1, 1, 10_000, 10_000), Some((1, 1)));
     }
 
     #[test]
