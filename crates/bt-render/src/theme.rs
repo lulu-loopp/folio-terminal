@@ -18,46 +18,107 @@ pub(crate) const DEFAULT_STATUS_BACKGROUND_RGB: [u8; 3] = [0x33, 0x33, 0x33];
 pub(crate) const DEFAULT_PEEK_BORDER_RGB: [u8; 3] = [0x76, 0x76, 0x76];
 
 // ---------------------------------------------------------------------------
-// Seat chrome — 临时基调 (provisional key), pending the user's styling pass.
+// Seat chrome — the styling pass (user-approved 2026-08-07).
 //
-// Every constant below is a *policy* position in the sense of
+// One structural idea: every colour the chrome wears is a field of
+// `ChromePalette`, and the palette exists twice — once for a dark canvas, once
+// for a light one — so "we support both themes" is a fact about a type rather
+// than a promise about future work. Which palette is in force follows the same
+// background-luma threshold the terminal's own default ink already uses; the
+// settings surface that will one day choose explicitly gets to *set* the
+// background and everything else follows.
+//
+// Each field is a *policy* position in the sense of
 // `docs/M2-layout-solver-spec.md` §1.4: overturning one edits this block and
-// nothing else. They are named rather than inlined precisely so that the
-// styling pass has one place to land. Nothing here is a structural ruling — the
-// structural rulings (a divider occupies real space in the allocation, a
-// collapsed seat is a real rectangle with real area) live in `bt-layout` and are
+// nothing else. Nothing here is a structural ruling — those (a divider occupies
+// real space, a collapsed seat is a real rectangle) live in `bt-layout` and are
 // not colours.
 // ---------------------------------------------------------------------------
 
-/// A non-terminal seat's body fill. Shares the terminal's background so an empty
-/// preview reads as "nothing here yet" rather than as a second product.
-pub const SEAT_BODY_BACKGROUND_RGB: [u8; 3] = [0x0c, 0x0c, 0x0c];
-/// A seat title bar's fill: one step above the body, no border.
-pub const SEAT_TITLE_BAR_BACKGROUND_RGB: [u8; 3] = [0x1a, 0x1a, 0x1a];
-/// A seat title bar's ink, and the `x` glyph's.
-pub const SEAT_TITLE_TEXT_RGB: [u8; 3] = [0xcc, 0xcc, 0xcc];
-/// Quiet ink for seat body states (an empty pane's hint, "Loading …", a failure
-/// notice): the same dim the terminal uses for SGR 2, so "not content" reads the
-/// same way everywhere.
-pub const SEAT_BODY_HINT_TEXT_RGB: [u8; 3] = [0x88, 0x88, 0x88];
-/// A divider at rest: one logical pixel of quiet separation.
-pub const SEAT_DIVIDER_RGB: [u8; 3] = [0x33, 0x33, 0x33];
-/// A divider under the pointer — the same Campbell bright-black the peek frame
-/// uses, because both say the same thing: "this edge is a thing you can touch".
-pub const SEAT_DIVIDER_HOVER_RGB: [u8; 3] = [0x76, 0x76, 0x76];
-/// A divider being dragged.
-pub const SEAT_DIVIDER_ACTIVE_RGB: [u8; 3] = [0x3b, 0x78, 0xff];
-/// A collapsed seat's clickable bar (`M2-layout-solver-spec.md` §2.6.3).
-pub const SEAT_COLLAPSE_BAR_RGB: [u8; 3] = [0x26, 0x26, 0x26];
-/// The same bar under the pointer.
-pub const SEAT_COLLAPSE_BAR_HOVER_RGB: [u8; 3] = [0x33, 0x33, 0x33];
+/// Every colour the window's own chrome is drawn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChromePalette {
+    /// A non-terminal seat's body fill. Matches the canvas so an empty pane
+    /// reads as "nothing here yet" rather than as a second product.
+    pub seat_body: [u8; 3],
+    /// A seat title bar's fill: one quiet step off the canvas.
+    pub title_bar: [u8; 3],
+    /// The hairline between a title bar and the body it captions.
+    pub title_bar_edge: [u8; 3],
+    /// Title text and the `×` at rest. Bars are wayfinding, not content, so
+    /// this ink sits a step below the terminal's own.
+    pub title_text: [u8; 3],
+    /// The `×` under the pointer: the one moment a bar glyph is the subject.
+    pub title_text_hover: [u8; 3],
+    /// Body state notices — an empty pane's invitation, "Loading …", a failure.
+    pub body_hint_text: [u8; 3],
+    /// A divider at rest: one logical pixel of quiet separation.
+    pub divider: [u8; 3],
+    /// A divider under the pointer: "this edge is a thing you can touch".
+    pub divider_hover: [u8; 3],
+    /// A divider being dragged — the accent, and the only saturated colour the
+    /// chrome is allowed.
+    pub divider_active: [u8; 3],
+    /// A collapsed seat's clickable bar (`M2-layout-solver-spec.md` §2.6.3).
+    pub collapse_bar: [u8; 3],
+    /// The same bar under the pointer.
+    pub collapse_bar_hover: [u8; 3],
+}
+
+/// Chrome over a dark canvas.
+pub const DARK_CHROME: ChromePalette = ChromePalette {
+    seat_body: [0x0c, 0x0c, 0x0c],
+    title_bar: [0x17, 0x17, 0x17],
+    title_bar_edge: [0x26, 0x26, 0x26],
+    title_text: [0xa0, 0xa0, 0xa0],
+    title_text_hover: [0xe6, 0xe6, 0xe6],
+    body_hint_text: [0x7d, 0x7d, 0x7d],
+    divider: [0x2e, 0x2e, 0x2e],
+    divider_hover: [0x6e, 0x6e, 0x6e],
+    divider_active: [0x3b, 0x78, 0xff],
+    collapse_bar: [0x1f, 0x1f, 0x1f],
+    collapse_bar_hover: [0x2e, 0x2e, 0x2e],
+};
+
+/// Chrome over a light canvas. Structurally identical; the accent deepens for
+/// contrast against white, everything else is the ladder mirrored.
+pub const LIGHT_CHROME: ChromePalette = ChromePalette {
+    seat_body: [0xf5, 0xf5, 0xf5],
+    title_bar: [0xea, 0xea, 0xea],
+    title_bar_edge: [0xd8, 0xd8, 0xd8],
+    title_text: [0x5c, 0x5c, 0x5c],
+    title_text_hover: [0x1a, 0x1a, 0x1a],
+    body_hint_text: [0x8a, 0x8a, 0x8a],
+    divider: [0xd0, 0xd0, 0xd0],
+    divider_hover: [0x9a, 0x9a, 0x9a],
+    divider_active: [0x2a, 0x5f, 0xd6],
+    collapse_bar: [0xe2, 0xe2, 0xe2],
+    collapse_bar_hover: [0xd0, 0xd0, 0xd0],
+};
+
+/// The palette in force, decided by the same background-luma threshold that
+/// already chooses the terminal's default ink — one dark/light decision for the
+/// whole product, never two.
+pub fn chrome_palette() -> ChromePalette {
+    chrome_palette_for_background(background_rgb())
+}
+
+fn chrome_palette_for_background(background: [u8; 3]) -> ChromePalette {
+    if background_is_light(background) {
+        LIGHT_CHROME
+    } else {
+        DARK_CHROME
+    }
+}
 
 /// A seat title bar's height, in logical pixels.
 pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 28.0;
 /// A seat title's font size, in logical pixels.
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 13.0;
 /// The inset between a title bar's edge and its text, in logical pixels.
-pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 8.0;
+pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 10.0;
+/// The hairline under a title bar, in logical pixels.
+pub const SEAT_TITLE_EDGE_LOGICAL_PX: f32 = 1.0;
 /// A divider's drawn width, in logical pixels. `DIVIDER` in `bt-layout` is the
 /// space it *occupies*; this is what it *looks like*, and the two are allowed to
 /// differ only because the visual one may snap to the physical grid for
@@ -104,11 +165,15 @@ pub fn theme_revision() -> u64 {
     theme_revision_for_colors(background_rgb(), foreground_rgb())
 }
 
-fn foreground_for_background(background: [u8; 3]) -> [u8; 3] {
+fn background_is_light(background: [u8; 3]) -> bool {
     let background_luma = u32::from(background[0]) * 299
         + u32::from(background[1]) * 587
         + u32::from(background[2]) * 114;
-    if background_luma >= 128_000 {
+    background_luma >= 128_000
+}
+
+fn foreground_for_background(background: [u8; 3]) -> [u8; 3] {
+    if background_is_light(background) {
         LIGHT_BACKGROUND_FOREGROUND_RGB
     } else {
         DEFAULT_FOREGROUND_RGB
@@ -165,6 +230,18 @@ pub(crate) const ANSI_16_RGB: [[u8; 3]; 16] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PIN (styling pass): the chrome's dark/light decision is the terminal
+    /// ink's decision — same threshold, one switch for the whole product.
+    #[test]
+    fn chrome_palette_follows_the_same_luma_threshold_as_the_terminal_ink() {
+        assert_eq!(chrome_palette_for_background([0x0c; 3]), DARK_CHROME);
+        assert_eq!(chrome_palette_for_background([0xf5; 3]), LIGHT_CHROME);
+        // The two palettes disagree everywhere it matters, so selecting the
+        // wrong one cannot pass unnoticed.
+        assert_ne!(DARK_CHROME.title_bar, LIGHT_CHROME.title_bar);
+        assert_ne!(DARK_CHROME.divider_active, LIGHT_CHROME.divider_active);
+    }
 
     #[test]
     fn foreground_and_revision_cover_dark_light_and_background_changes() {

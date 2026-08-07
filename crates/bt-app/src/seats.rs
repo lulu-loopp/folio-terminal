@@ -25,11 +25,9 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeQuad, SEAT_BODY_BACKGROUND_RGB, SEAT_BODY_HINT_TEXT_RGB,
-    SEAT_COLLAPSE_BAR_HOVER_RGB, SEAT_COLLAPSE_BAR_RGB, SEAT_DIVIDER_ACTIVE_RGB,
-    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_DIVIDER_HOVER_RGB, SEAT_DIVIDER_RGB,
-    SEAT_TITLE_BAR_BACKGROUND_RGB, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
-    SEAT_TITLE_PADDING_LOGICAL_PX, SEAT_TITLE_TEXT_RGB, SeatViewport,
+    ChromeLabel, ChromeQuad, SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX,
+    SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
+    SeatViewport, chrome_palette,
 };
 
 /// §2.5 asks `bt-layout` to hold its own subpixel denominator and to pin it
@@ -555,6 +553,7 @@ pub fn build_chrome_with_preview(
     preview_title: Option<&str>,
     preview_message: Option<&str>,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>) {
+    let palette = chrome_palette();
     let mut quads = Vec::new();
     let mut labels = Vec::new();
     for placement in &layout.rects {
@@ -573,9 +572,9 @@ pub fn build_chrome_with_preview(
                 quads.push(ChromeQuad {
                     rect,
                     color: if hovered {
-                        SEAT_COLLAPSE_BAR_HOVER_RGB
+                        palette.collapse_bar_hover
                     } else {
-                        SEAT_COLLAPSE_BAR_RGB
+                        palette.collapse_bar
                     },
                 });
                 collapse_bar_contents(
@@ -595,14 +594,23 @@ pub fn build_chrome_with_preview(
                 let title_bottom = (rect[1] + bar).min(rect[3]);
                 quads.push(ChromeQuad {
                     rect: [rect[0], title_bottom, rect[2], rect[3]],
-                    color: SEAT_BODY_BACKGROUND_RGB,
+                    color: palette.seat_body,
                 });
                 quads.push(ChromeQuad {
                     rect: [rect[0], rect[1], rect[2], title_bottom],
-                    color: SEAT_TITLE_BAR_BACKGROUND_RGB,
+                    color: palette.title_bar,
                 });
+                // The hairline that makes the bar a caption rather than a stripe.
+                let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
+                if title_bottom + edge <= rect[3] {
+                    quads.push(ChromeQuad {
+                        rect: [rect[0], title_bottom, rect[2], title_bottom + edge],
+                        color: palette.title_bar_edge,
+                    });
+                }
                 let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
                 let close = close_button_rect(rect, scale);
+                let close_hovered = pointer.hover == Some(ChromeTarget::Close(placement.id));
                 labels.push(ChromeLabel {
                     text: if placement.kind == SeatKind::Preview {
                         preview_title.unwrap_or_else(|| seat_title(placement.kind))
@@ -617,7 +625,7 @@ pub fn build_chrome_with_preview(
                         title_bottom,
                     ],
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                    color: SEAT_TITLE_TEXT_RGB,
+                    color: palette.title_text,
                     align_right: false,
                     align_center: false,
                 });
@@ -625,7 +633,11 @@ pub fn build_chrome_with_preview(
                     text: "\u{00d7}".to_owned(),
                     rect: [close[0], close[1], close[2] - pad, title_bottom],
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                    color: SEAT_TITLE_TEXT_RGB,
+                    color: if close_hovered {
+                        palette.title_text_hover
+                    } else {
+                        palette.title_text
+                    },
                     align_right: true,
                     align_center: false,
                 });
@@ -644,7 +656,7 @@ pub fn build_chrome_with_preview(
                             rect[3] - pad,
                         ],
                         font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                        color: SEAT_BODY_HINT_TEXT_RGB,
+                        color: palette.body_hint_text,
                         align_right: false,
                         align_center: true,
                     });
@@ -654,11 +666,11 @@ pub fn build_chrome_with_preview(
     }
     for slot in seats.split_slots(layout) {
         let color = if pointer.dragging == Some(slot.id) {
-            SEAT_DIVIDER_ACTIVE_RGB
+            palette.divider_active
         } else if pointer.hover == Some(ChromeTarget::Divider(slot.id)) {
-            SEAT_DIVIDER_HOVER_RGB
+            palette.divider_hover
         } else {
-            SEAT_DIVIDER_RGB
+            palette.divider
         };
         quads.push(ChromeQuad {
             rect: slot.band,
@@ -680,6 +692,7 @@ fn collapse_bar_contents(
     quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ChromeLabel>,
 ) {
+    let palette = chrome_palette();
     let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
     let icon = 6.0 * scale;
     let width = rect[2] - rect[0];
@@ -689,7 +702,7 @@ fn collapse_bar_contents(
     if width >= icon && height >= icon {
         quads.push(ChromeQuad {
             rect: [icon_left, icon_top, icon_left + icon, icon_top + icon],
-            color: SEAT_TITLE_TEXT_RGB,
+            color: palette.title_text,
         });
     }
     // A name only fits along the axis that was *not* squeezed. A bar squeezed on
@@ -700,7 +713,7 @@ fn collapse_bar_contents(
             text: title.to_owned(),
             rect: [rect[0] + pad, rect[1], icon_left - pad, rect[3]],
             font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-            color: SEAT_TITLE_TEXT_RGB,
+            color: palette.title_text,
             align_right: false,
             align_center: false,
         });
@@ -968,8 +981,9 @@ mod tests {
             .find(|label| label.align_center)
             .expect("the state notice must exist and be the centred label");
         assert_eq!(notice.text, "Loading sunset.svg\u{2026}");
+        let palette = chrome_palette();
         assert_eq!(
-            notice.color, SEAT_BODY_HINT_TEXT_RGB,
+            notice.color, palette.body_hint_text,
             "quiet ink, not title ink"
         );
         assert!(
@@ -980,7 +994,7 @@ mod tests {
             .iter()
             .find(|label| label.text.starts_with("sunset.svg"))
             .expect("the title carries the file name and dimensions");
-        assert_eq!(title.color, SEAT_TITLE_TEXT_RGB);
+        assert_eq!(title.color, palette.title_text);
         assert!(!title.align_center);
     }
 
@@ -1260,7 +1274,9 @@ mod tests {
 
         let (quads, _labels) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
         assert!(
-            quads.iter().any(|quad| quad.color == SEAT_COLLAPSE_BAR_RGB),
+            quads
+                .iter()
+                .any(|quad| quad.color == chrome_palette().collapse_bar),
             "a collapsed seat is drawn as a bar"
         );
         let bar = layout.get(preview).unwrap().device_rect.unwrap();

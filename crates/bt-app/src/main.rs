@@ -1655,7 +1655,7 @@ impl Runtime {
                 .seats
                 .preview()
                 .is_some()
-                .then(|| "Click an image path to preview it here".to_owned()),
+                .then(|| "Click a dotted path to preview it here".to_owned()),
         };
         let (quads, labels) = seats::build_chrome_with_preview(
             &self.seats,
