@@ -701,6 +701,7 @@ pub fn build_chrome_with_preview(
                     },
                     align_right: false,
                     align_center: false,
+                    letter_spacing_em: 0.0,
                 });
                 if placement.kind == SeatKind::Preview
                     && let Some(message) = preview_message
@@ -720,6 +721,7 @@ pub fn build_chrome_with_preview(
                         color: palette.body_hint_text,
                         align_right: false,
                         align_center: true,
+                        letter_spacing_em: 0.0,
                     });
                 }
             }
@@ -807,6 +809,7 @@ fn window_chrome(
             color: palette.pane_title_focus,
             align_right: false,
             align_center: false,
+            letter_spacing_em: 0.0,
         });
     }
 
@@ -900,6 +903,7 @@ fn collapse_bar_contents(
             color: palette.title_text,
             align_right: false,
             align_center: false,
+            letter_spacing_em: 0.0,
         });
     }
 }
@@ -1803,6 +1807,77 @@ mod tests {
             seats.tree().find_seat(preview).is_some(),
             "W1: collapsing is a presentation, never an edit"
         );
+    }
+
+    /// PIN (modal): with the settings dialog up, the three things a press in
+    /// this window can otherwise reach — a divider, another seat's bar, the
+    /// terminal's own rectangle — are all the scrim's.
+    ///
+    /// Red gate: each point is first shown to be the thing it claims to be, by
+    /// the very functions the router consults (`hit_chrome`, `terminal_contains`).
+    /// Without that half the assertions would pass over any three points at all,
+    /// including three that are inside the dialog.
+    #[test]
+    fn a_modal_swallows_the_divider_the_seat_and_the_terminal_under_it() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let (width, height) = (1_280u32, 800u32);
+        let layout = solved(&seats, viewport_of(width, height, 1_000), &metrics);
+        let overlay = crate::settings::layout(width as f32, height as f32, 1.0, false)
+            .expect("this window hosts the dialog");
+
+        let slot = seats
+            .split_slots(&layout)
+            .into_iter()
+            .next()
+            .expect("two seats have a divider between them");
+        let divider = (
+            f64::from((slot.band[0] + slot.band[2]) / 2.0),
+            f64::from((slot.band[1] + slot.band[3]) / 2.0),
+        );
+        let preview = seats.preview().expect("the preview seat is open");
+        let head = layout.get(preview).unwrap().device_rect.unwrap();
+        let seat = (
+            f64::from((head.left + head.right) as i32) / 2.0,
+            f64::from(head.top as i32) + 8.0,
+        );
+        let terminal_rect = layout
+            .get(seats.terminal())
+            .unwrap()
+            .device_rect
+            .expect("the terminal seat has a rectangle");
+        let terminal = (
+            f64::from((terminal_rect.left + terminal_rect.right) as i32) / 2.0,
+            f64::from(terminal_rect.bottom as i32) - 8.0,
+        );
+
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, divider.0, divider.1),
+            Some(ChromeTarget::Divider(slot.id)),
+            "the first point really is a divider"
+        );
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, seat.0, seat.1),
+            Some(ChromeTarget::PaneHeader(preview)),
+            "the second point really is another seat's head"
+        );
+        assert!(
+            terminal_contains(&layout, seats.terminal(), terminal.0, terminal.1),
+            "the third point really is inside the terminal"
+        );
+
+        for (what, (x, y)) in [
+            ("the divider", divider),
+            ("the seat head", seat),
+            ("the terminal", terminal),
+        ] {
+            assert_eq!(
+                crate::settings::hit(&overlay, x, y),
+                crate::settings::SettingsTarget::Scrim,
+                "a modal means MODAL: {what} is behind the scrim"
+            );
+        }
     }
 
     /// An unknown leaf kind stays visible as a placeholder rather than being

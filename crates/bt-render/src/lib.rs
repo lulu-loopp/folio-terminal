@@ -34,13 +34,11 @@ use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
 use rounded_rect::{rounded_rect_coverage, rounded_rect_halo_coverage};
-use theme::{
-    ANSI_16_RGB, CURSOR_WIDTH_CELL_RATIO, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB,
-    FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX,
-};
+use theme::{ANSI_16_RGB, CURSOR_WIDTH_CELL_RATIO, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB};
 pub use theme::{
-    ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, LIGHT_BACKGROUND_RGB, LIGHT_CHROME,
-    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, FLOAT_WINDOW_BORDER_LOGICAL_PX,
+    FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, LIGHT_BACKGROUND_RGB,
+    LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
     PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
     SEAT_DIVIDER_VISUAL_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
     SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX, Theme,
@@ -1580,6 +1578,13 @@ pub struct Renderer {
     chrome_quads: Vec<ChromeQuad>,
     chrome_labels: Vec<ChromeLabel>,
     chrome_icons: Vec<ChromeIcon>,
+    /// The modal overlay's own three lists. Kept apart from the chrome's rather
+    /// than appended to them because the two are drawn in different places in the
+    /// frame: seat chrome owns the space between seats, and a modal owns the
+    /// window — including the seats' own content, which is drawn *after* chrome.
+    overlay_quads: Vec<OverlayQuad>,
+    overlay_labels: Vec<ChromeLabel>,
+    overlay_icons: Vec<ChromeIcon>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
@@ -1591,6 +1596,7 @@ pub struct Renderer {
     text_renderer: TextRenderer,
     status_text_renderer: TextRenderer,
     chrome_text_renderer: TextRenderer,
+    overlay_text_renderer: TextRenderer,
     rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
@@ -1706,6 +1712,17 @@ pub struct ChromeLabel {
     /// states (an empty preview's hint, "Loading …", a failure notice) use this;
     /// vertical centring is what every label already gets.
     pub align_center: bool,
+    /// Extra advance between glyphs — CSS `letter-spacing`, **in em**, which is
+    /// the unit cosmic-text's own `Attrs::letter_spacing` takes: it is added to
+    /// a glyph's advance while that advance is still normalized by the face's
+    /// units-per-em, and the sum is scaled by the font size afterwards. So this
+    /// is a ratio and never needs the DPI scale applied to it.
+    ///
+    /// Zero for every label that does not ask for it. The settings dialog's
+    /// group headings (`.group-label { letter-spacing: .05em }`) are the only
+    /// user today: at 11px, uppercase and tracked is the whole difference
+    /// between a heading and a small sentence.
+    pub letter_spacing_em: f32,
 }
 
 /// One chrome mark, already rasterized to the exact physical box it occupies.
@@ -1730,6 +1747,73 @@ pub struct ChromeIcon {
     pub rgba: Arc<[u8]>,
     pub width_px: u32,
     pub height_px: u32,
+}
+
+/// One flat fill of the modal overlay, in physical pixels of the whole surface.
+///
+/// The difference from [`ChromeQuad`] is `alpha`, and the difference is the whole
+/// reason the type exists. Seat chrome is opaque by construction — every hairline
+/// it draws sits on a surface the palette knows, so the palette pre-composites it
+/// and the pipeline never has to blend. A modal overlay has no such surface under
+/// it: a scrim is *defined* as "the window, dimmed", a dialog's own hairline lies
+/// over the scrim over whatever the terminal is showing, and a rounded corner's
+/// antialiasing is a coverage fraction and nothing else. All three are honest
+/// only if the blend happens at draw time.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlayQuad {
+    /// `[left, top, right, bottom]`.
+    pub rect: [f32; 4],
+    pub color: [u8; 3],
+    /// `0.0 ..= 1.0`. Carries both the design's own alpha and, for a rounded
+    /// shape, that pixel's coverage — already multiplied together.
+    pub alpha: f32,
+}
+
+/// The fills a rounded rectangle is made of: whole runs where it covers a pixel
+/// completely, single pixels where it covers part of one, each carrying `alpha`
+/// scaled by that pixel's exact coverage.
+///
+/// This is the floating-window craft the hover-peek flyout is built from, exposed
+/// so a caller composing an overlay can build the same corners rather than a
+/// second, staircased set. A bordered box is two of these — the whole box in the
+/// border's colour, the face laid one border in with one border less radius — and
+/// that is exactly how a browser leaves a `border: 1px solid` border-box.
+#[must_use]
+pub fn rounded_overlay_fill(
+    rect: [f32; 4],
+    radius_px: f32,
+    color: [u8; 3],
+    alpha: f32,
+) -> Vec<OverlayQuad> {
+    rounded_rect_coverage(rect, radius_px)
+        .into_iter()
+        .map(|entry| OverlayQuad {
+            rect: entry.rect,
+            color,
+            alpha: entry.coverage * alpha,
+        })
+        .collect()
+}
+
+/// The ring between a rounded rectangle and the same rectangle grown by
+/// `extent_px` on every side — a floating surface's lift, with the hole a
+/// browser's own `box-shadow` leaves under the box it lifts.
+#[must_use]
+pub fn rounded_overlay_halo(
+    rect: [f32; 4],
+    radius_px: f32,
+    extent_px: f32,
+    color: [u8; 3],
+    alpha: f32,
+) -> Vec<OverlayQuad> {
+    rounded_rect_halo_coverage(rect, radius_px, extent_px)
+        .into_iter()
+        .map(|entry| OverlayQuad {
+            rect: entry.rect,
+            color,
+            alpha: entry.coverage * alpha,
+        })
+        .collect()
 }
 
 /// Identity is `key` plus placement. The bytes are a function of the key (that is
@@ -2213,6 +2297,8 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let chrome_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let overlay_text_renderer =
+            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let rect_pipeline = create_rect_pipeline(&device, config.format);
         let (math_pipeline, math_bind_group_layout, math_sampler) =
             create_math_pipeline(&device, config.format);
@@ -2229,6 +2315,9 @@ impl Renderer {
             chrome_quads: Vec::new(),
             chrome_labels: Vec::new(),
             chrome_icons: Vec::new(),
+            overlay_quads: Vec::new(),
+            overlay_labels: Vec::new(),
+            overlay_icons: Vec::new(),
             font_system,
             swash_cache,
             viewport,
@@ -2237,6 +2326,7 @@ impl Renderer {
             text_renderer,
             status_text_renderer,
             chrome_text_renderer,
+            overlay_text_renderer,
             rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
@@ -2436,6 +2526,30 @@ impl Renderer {
         self.chrome_quads = quads;
         self.chrome_labels = labels;
         self.chrome_icons = icons;
+        changed
+    }
+
+    /// Replace the modal overlay: the scrim and whatever dialog stands on it.
+    /// Returns whether the visible overlay changed, so the caller can skip a
+    /// redundant redraw. Empty vectors mean "no modal", which is the state every
+    /// frame that has never opened one is already in.
+    ///
+    /// This is presentation state beside the frame, exactly as the peek flyout is
+    /// (DESIGN §7.1.5: a modal is a window-level stance, not a property of the
+    /// terminal's content), so `ViewportFrame` equality and the replay contracts
+    /// stay untouched by a visible dialog.
+    pub fn set_modal_overlay(
+        &mut self,
+        quads: Vec<OverlayQuad>,
+        labels: Vec<ChromeLabel>,
+        icons: Vec<ChromeIcon>,
+    ) -> bool {
+        let changed = self.overlay_quads != quads
+            || self.overlay_labels != labels
+            || self.overlay_icons != icons;
+        self.overlay_quads = quads;
+        self.overlay_labels = labels;
+        self.overlay_icons = icons;
         changed
     }
 
@@ -2643,7 +2757,10 @@ impl Renderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let (chrome_icon_draws, chrome_icon_vertices) = self.prepare_chrome_icon_draws();
+        let chrome_icons = std::mem::take(&mut self.chrome_icons);
+        let (chrome_icon_draws, chrome_icon_vertices) =
+            self.prepare_chrome_icon_draws(&chrome_icons);
+        self.chrome_icons = chrome_icons;
         let chrome_icon_buffer = (!chrome_icon_vertices.is_empty()).then(|| {
             self.device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2667,6 +2784,59 @@ impl Renderer {
                 &self.chrome_viewport,
                 &mut self.swash_cache,
                 &chrome_layouts,
+            )
+            .is_ok();
+        // The modal overlay. Empty on every frame no dialog is up, and every
+        // branch below is guarded on emptiness, so a window without one issues
+        // exactly the command stream it issued before modals existed.
+        let overlay_rects: Vec<RectInstance> = self
+            .overlay_quads
+            .iter()
+            .map(|quad| {
+                surface_pixel_rect_with_alpha(
+                    quad.rect,
+                    quad.color,
+                    quad.alpha,
+                    self.config.width,
+                    self.config.height,
+                )
+            })
+            .collect();
+        let overlay_rect_buffer = (!overlay_rects.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("modal overlay rectangles"),
+                    contents: bytemuck::cast_slice(overlay_rects.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let overlay_icons = std::mem::take(&mut self.overlay_icons);
+        let (overlay_icon_draws, overlay_icon_vertices) =
+            self.prepare_chrome_icon_draws(&overlay_icons);
+        self.overlay_icons = overlay_icons;
+        let overlay_icon_buffer = (!overlay_icon_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("modal overlay mark vertices"),
+                    contents: bytemuck::cast_slice(overlay_icon_vertices.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
+        let overlay_layouts = shape_chrome_labels(
+            &mut self.font_system,
+            &self.overlay_labels,
+            self.chrome_cap_height_ratio,
+        );
+        let overlay_prepared = !overlay_layouts.is_empty()
+            && prepare_chrome_text_atlas(
+                &mut self.overlay_text_renderer,
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.atlas,
+                &self.chrome_viewport,
+                &mut self.swash_cache,
+                &overlay_layouts,
             )
             .is_ok();
         let rectangles_prepared_at = Instant::now();
@@ -2844,6 +3014,45 @@ impl Renderer {
                         pass.set_bind_group(0, &tile.bind_group, &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
                     }
+                }
+            }
+            // The modal overlay, last of everything and over the whole window.
+            // DESIGN §7.1.5: "模态遮罩 z-order 高于一切弹出层与浮窗" — and in this
+            // pass "everything" has to include the two layers that outrank seat
+            // chrome, the peek flyout and a preview seat's own picture. A scrim
+            // that anything at all can be seen through unblurred is a scrim in
+            // name only.
+            if overlay_rect_buffer.is_some() || overlay_icon_buffer.is_some() || overlay_prepared {
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                if let Some(buffer) = overlay_rect_buffer.as_ref() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    pass.draw(0..6, 0..overlay_rects.len() as u32);
+                }
+                if let Some(buffer) = overlay_icon_buffer.as_ref() {
+                    pass.set_pipeline(&self.math_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    for draw in &overlay_icon_draws {
+                        if let Some(texture) = self.math_textures.get(&draw.key)
+                            && let Some(tile) = texture.tiles.get(draw.tile_index)
+                        {
+                            pass.set_bind_group(0, &tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                        }
+                    }
+                }
+                if overlay_prepared {
+                    self.overlay_text_renderer
+                        .render(&self.atlas, &self.chrome_viewport, &mut pass)
+                        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
                 }
             }
         }
@@ -3172,8 +3381,16 @@ impl Renderer {
     /// They are keyed by their content identity, so a mark that survives a frame
     /// costs a hash lookup, and one the budget evicted simply re-uploads on the
     /// next frame from the bytes the app is still holding.
-    fn prepare_chrome_icon_draws(&mut self) -> (Vec<MathDraw>, Vec<MathVertex>) {
-        let icons = self.chrome_icons.clone();
+    ///
+    /// Takes the list rather than reading `self.chrome_icons`, because the modal
+    /// overlay's marks are the same kind of thing drawn in a different plane, and
+    /// two copies of this loop would be two places for the LRU bookkeeping to
+    /// drift apart.
+    fn prepare_chrome_icon_draws(
+        &mut self,
+        icons: &[ChromeIcon],
+    ) -> (Vec<MathDraw>, Vec<MathVertex>) {
+        let icons = icons.to_vec();
         let (surface_width, surface_height) = (self.config.width, self.config.height);
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
@@ -3945,6 +4162,20 @@ fn prepare_text_rows(
 /// call "the world", and having them side by side as one method with a flag is
 /// how the two would eventually be confused for each other.
 fn surface_pixel_rect(rect: [f32; 4], color: [u8; 3], width: u32, height: u32) -> RectInstance {
+    surface_pixel_rect_with_alpha(rect, color, 1.0, width, height)
+}
+
+/// The same rectangle, blended rather than laid down opaque — what the modal
+/// overlay draws with, because a scrim, a hairline over an unknown surface and a
+/// rounded corner's coverage are all statements about *how much* of a colour
+/// lands, and none of them can be pre-composited the way seat chrome's are.
+fn surface_pixel_rect_with_alpha(
+    rect: [f32; 4],
+    color: [u8; 3],
+    alpha: f32,
+    width: u32,
+    height: u32,
+) -> RectInstance {
     let w = width.max(1) as f32;
     let h = height.max(1) as f32;
     RectInstance {
@@ -3954,7 +4185,7 @@ fn surface_pixel_rect(rect: [f32; 4], color: [u8; 3], width: u32, height: u32) -
             rect[2] / w * 2.0 - 1.0,
             1.0 - rect[3] / h * 2.0,
         ],
-        color: rect_gpu_color_with_coverage(color, 1.0),
+        color: rect_gpu_color_with_coverage(color, alpha),
     }
 }
 
@@ -3984,12 +4215,11 @@ fn shape_chrome_labels(
                 Buffer::new(font_system, Metrics::new(label.font_size_px, line_height));
             buffer.set_wrap(Wrap::None);
             buffer.set_size(Some(width), Some(line_height));
-            buffer.set_text(
-                &label.text,
-                &Attrs::new().family(Family::SansSerif),
-                Shaping::Advanced,
-                None,
-            );
+            let mut attrs = Attrs::new().family(Family::SansSerif);
+            if label.letter_spacing_em != 0.0 {
+                attrs = attrs.letter_spacing(label.letter_spacing_em);
+            }
+            buffer.set_text(&label.text, &attrs, Shaping::Advanced, None);
             buffer.shape_until_scroll(font_system, false);
             let text_width = buffer
                 .layout_runs()
@@ -8724,6 +8954,7 @@ mod tests {
             color: [255, 255, 255],
             align_right: false,
             align_center: false,
+            letter_spacing_em: 0.0,
         };
         let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7);
         let run = layouts[0]
@@ -8796,6 +9027,7 @@ mod tests {
                 color: [255, 255, 255],
                 align_right: false,
                 align_center: false,
+                letter_spacing_em: 0.0,
             };
             let rect_centre = (label.rect[1] + label.rect[3]) / 2.0;
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
@@ -8824,6 +9056,7 @@ mod tests {
                 color: [255, 255, 255],
                 align_right: false,
                 align_center: false,
+                letter_spacing_em: 0.0,
             };
             let rect_centre = (label.rect[1] + label.rect[3]) / 2.0;
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
@@ -8832,6 +9065,175 @@ mod tests {
                 "pane head title cap band off the head's axis at {dpi_milli} milli-DPI:                  cap centre {cap_centre}, head centre {rect_centre}"
             );
         }
+    }
+
+    /// PIN (settings dialog): the two marks the mock-up sets as *text* rather
+    /// than as symbols — the combo's `▼` and a picker item's `✓` — reach a face
+    /// that has them.
+    ///
+    /// Red gate: glyph id 0 is `.notdef`, the empty box a face returns for a
+    /// character it does not carry. Before the fallback list included a symbol
+    /// face this is exactly what a tracked-down tofu would look like, and the
+    /// assertion is the one thing that tells a rendered chevron apart from a
+    /// rendered rectangle.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_chrome_face_can_set_the_combos_own_marks() {
+        let mut font_system = terminal_font_system();
+        for (what, text, size) in [
+            ("the chevron", "\u{25bc}", 8.5_f32),
+            ("the tick", "\u{2713}", 11.0),
+        ] {
+            let label = ChromeLabel {
+                text: text.to_owned(),
+                rect: [0.0, 0.0, 40.0, 28.0],
+                font_size_px: size,
+                color: [255, 255, 255],
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+            };
+            let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7);
+            let run = layouts
+                .first()
+                .and_then(|layout| layout.buffer.layout_runs().next())
+                .unwrap_or_else(|| panic!("{what} must shape"));
+            let glyphs: Vec<_> = run.glyphs.iter().collect();
+            assert_eq!(glyphs.len(), 1, "{what} is one character");
+            assert_ne!(
+                glyphs[0].glyph_id, 0,
+                "{what} came back .notdef — the chrome's face stack has no glyph for it, \
+                 which on screen is a tofu box where the mark should be"
+            );
+            assert!(run.line_w > 0.0, "{what} takes width on the line");
+        }
+    }
+
+    /// PIN (`.group-label { letter-spacing: .05em }`): tracking is real advance,
+    /// and it is *em*, so `.05` adds exactly `.05 × font-size` per glyph.
+    ///
+    /// Red gate: two of them. Tracking that never reached the shaper would leave
+    /// both runs the same width. Tracking taken for pixels — which is what this
+    /// pass shipped for one screenshot — would widen a 22px heading by 1.1 em a
+    /// glyph, over twenty times the asked-for amount, and the exact-width
+    /// assertion is what tells those two apart.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn letter_spacing_is_em_and_widens_the_run_by_exactly_that_much() {
+        let mut font_system = terminal_font_system();
+        let text = "APPEARANCE";
+        let width_of = |spacing: f32, size: f32, font_system: &mut FontSystem| {
+            let label = ChromeLabel {
+                text: text.to_owned(),
+                rect: [0.0, 0.0, 4000.0, 20.0],
+                font_size_px: size,
+                color: [255, 255, 255],
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: spacing,
+            };
+            shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7)[0]
+                .buffer
+                .layout_runs()
+                .map(|run| run.line_w)
+                .fold(0.0_f32, f32::max)
+        };
+        for size in [11.0_f32, 22.0] {
+            let plain = width_of(0.0, size, &mut font_system);
+            let tracked = width_of(0.05, size, &mut font_system);
+            let expected = plain + 0.05 * size * text.chars().count() as f32;
+            assert!(
+                (tracked - expected).abs() <= 0.5,
+                "at {size}px, .05em must add .05 x size per glyph: {tracked} vs {expected} \
+                 (untracked {plain})"
+            );
+        }
+    }
+
+    /// PIN (modal overlay): an overlay quad reaches the pipeline carrying its
+    /// own alpha, and the scrim's `rgba(15,15,15,.35)` survives the trip.
+    ///
+    /// Red gate: the chrome path this one sits beside is opaque by construction —
+    /// route an overlay quad through `surface_pixel_rect` and the alpha comes
+    /// back 1.0, which on screen is a black window instead of a dimmed one.
+    #[test]
+    fn an_overlay_quad_keeps_its_alpha_where_a_chrome_quad_has_none() {
+        let palette = chrome_palette();
+        let scrim = surface_pixel_rect_with_alpha(
+            [0.0, 0.0, 1280.0, 800.0],
+            palette.modal_scrim,
+            f32::from(palette.modal_scrim_alpha) / 255.0,
+            1280,
+            800,
+        );
+        assert!(
+            (scrim.color[3] - 0.35).abs() < 0.005,
+            "the scrim's alpha must reach the vertex, saw {}",
+            scrim.color[3]
+        );
+        let opaque = surface_pixel_rect([0.0, 0.0, 1280.0, 800.0], palette.modal_scrim, 1280, 800);
+        assert_eq!(opaque.color[3], 1.0, "a chrome quad has no alpha to carry");
+        assert_eq!(
+            [scrim.color[0], scrim.color[1], scrim.color[2]],
+            [opaque.color[0], opaque.color[1], opaque.color[2]],
+            "only the alpha differs; the colour is the same linear triple"
+        );
+        assert_eq!(scrim.rect, opaque.rect, "and so is the placement");
+    }
+
+    /// PIN (float-window craft, public form): the rounded primitives a composed
+    /// overlay is built from are the same analytic coverage the peek flyout's
+    /// own corners are, and they carry the caller's alpha through.
+    #[test]
+    fn the_public_rounded_overlay_primitives_are_the_float_windows_own_coverage() {
+        let frame = [40.0, 20.0, 280.0, 180.0];
+        let radius = 10.0_f32;
+        let fills = rounded_overlay_fill(frame, radius, [0x20, 0x20, 0x20], 0.5);
+        assert!(!fills.is_empty());
+        let partial = fills
+            .iter()
+            .filter(|quad| quad.alpha > 0.0 && quad.alpha < 0.5)
+            .count();
+        assert!(
+            partial >= radius as usize,
+            "a rounded corner spends at least one partial pixel per row, saw {partial}"
+        );
+        let full = fills.iter().filter(|quad| quad.alpha == 0.5).count();
+        assert!(
+            full > 0,
+            "the straight middle carries the caller's own alpha"
+        );
+        assert!(
+            fills.iter().all(|quad| quad.alpha <= 0.5),
+            "coverage may only take alpha away, never add it"
+        );
+        // The lift is a ring with the hole a browser's own `box-shadow` leaves:
+        // it may reach into a corner the round cut away, but never under a pixel
+        // the box covers whole — otherwise a translucent hairline is drawn over
+        // its own shadow and reads twice as dark.
+        let halo = rounded_overlay_halo(frame, radius, 3.0, [0, 0, 0], 0.18);
+        assert!(!halo.is_empty());
+        let solid = [
+            frame[0] + radius,
+            frame[1] + radius,
+            frame[2] - radius,
+            frame[3] - radius,
+        ];
+        for quad in &halo {
+            let overlaps = quad.rect[0] < solid[2]
+                && quad.rect[2] > solid[0]
+                && quad.rect[1] < solid[3]
+                && quad.rect[3] > solid[1];
+            assert!(
+                !overlaps,
+                "the lift must not be drawn under the box it lifts: {quad:?}"
+            );
+        }
+        // And it does reach around every side, not only two of them.
+        assert!(halo.iter().any(|quad| quad.rect[3] <= frame[1]), "above");
+        assert!(halo.iter().any(|quad| quad.rect[1] >= frame[3]), "below");
+        assert!(halo.iter().any(|quad| quad.rect[2] <= frame[0]), "left");
+        assert!(halo.iter().any(|quad| quad.rect[0] >= frame[2]), "right");
     }
 
     #[test]

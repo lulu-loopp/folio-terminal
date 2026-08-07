@@ -127,6 +127,41 @@ pub struct ChromePalette {
     /// The outer ring, roughly half the inner one, so the two compose into a
     /// falloff instead of a band.
     pub menu_shadow_outer_alpha: u8,
+    /// A popup menu's own lift (`.combo-menu { box-shadow: 0 10px 28px
+    /// rgba(0,0,0,.18) }`), split into the same two rings. It is *not* `--shadow`
+    /// and is deliberately not theme-varied: the mock-up gives the combo's menu
+    /// one shadow declaration and never overrides it on dark.
+    pub menu_popup_shadow_inner_alpha: u8,
+    /// Half the inner one, same falloff rule as the float window's.
+    pub menu_popup_shadow_outer_alpha: u8,
+    /// A modal dialog's face — `--win`. Three surfaces have to be told apart here
+    /// and the mock-up names all three: `--termbg` is what a terminal shows,
+    /// `--menu` is what floats over it, and `--win` is the window's own plane,
+    /// which a modal dialog borrows. On light all three are `#FFFFFF`; on dark
+    /// they are three different greys, which is why one field cannot serve.
+    pub dialog_surface: [u8; 3],
+    /// `--ink` over `--win`: the dialog's title, a row's own title, the value a
+    /// combo is showing.
+    pub dialog_title_text: [u8; 3],
+    /// `--ink2` over `--win`: a row's description, and the `×` at rest.
+    pub dialog_secondary_text: [u8; 3],
+    /// `--ink3` over `--win`: a group label, and a combo's chevron.
+    pub dialog_muted_text: [u8; 3],
+    /// `--hover` over `--win`: the `×`'s pill and a combo button under the pointer.
+    pub dialog_hover: [u8; 3],
+    /// `--ink2` over `--menu`: a combo item that is not the selected one.
+    pub menu_item_text: [u8; 3],
+    /// `--ink` over `--menu` (`.combo-item.selected { color: var(--ink) }`).
+    pub menu_item_text_selected: [u8; 3],
+    /// `--hover` over `--menu`: a combo item under the pointer.
+    pub menu_item_hover: [u8; 3],
+    /// A modal scrim's colour (`.overlay { background: rgba(15,15,15,.35) }`).
+    /// Blended at draw time over whatever the window happens to be showing, and
+    /// the one palette entry the mock-up declares once for both themes: a scrim
+    /// is not a surface of either palette, it is the absence of one.
+    pub modal_scrim: [u8; 3],
+    /// The scrim's alpha, in 1/255ths: `.35`.
+    pub modal_scrim_alpha: u8,
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
@@ -160,6 +195,18 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     menu_shadow: [0x00, 0x00, 0x00],
     menu_shadow_inner_alpha: 46,
     menu_shadow_outer_alpha: 23,
+    menu_popup_shadow_inner_alpha: 46,
+    menu_popup_shadow_outer_alpha: 23,
+    dialog_surface: [0x20, 0x20, 0x20],
+    dialog_title_text: [0xe2, 0xe2, 0xe2],
+    dialog_secondary_text: [0x9b, 0x9b, 0x9b],
+    dialog_muted_text: [0x75, 0x75, 0x75],
+    dialog_hover: [0x2c, 0x2c, 0x2c],
+    menu_item_text: [0x9f, 0x9f, 0x9f],
+    menu_item_text_selected: [0xe3, 0xe3, 0xe3],
+    menu_item_hover: [0x36, 0x36, 0x36],
+    modal_scrim: [0x0f, 0x0f, 0x0f],
+    modal_scrim_alpha: 89,
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -192,6 +239,18 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     menu_shadow: [0x00, 0x00, 0x00],
     menu_shadow_inner_alpha: 18,
     menu_shadow_outer_alpha: 9,
+    menu_popup_shadow_inner_alpha: 46,
+    menu_popup_shadow_outer_alpha: 23,
+    dialog_surface: [0xff, 0xff, 0xff],
+    dialog_title_text: [0x37, 0x35, 0x2f],
+    dialog_secondary_text: [0x7d, 0x7c, 0x78],
+    dialog_muted_text: [0xa5, 0xa4, 0xa1],
+    dialog_hover: [0xf4, 0xf4, 0xf4],
+    menu_item_text: [0x7d, 0x7c, 0x78],
+    menu_item_text_selected: [0x37, 0x35, 0x2f],
+    menu_item_hover: [0xf4, 0xf4, 0xf4],
+    modal_scrim: [0x0f, 0x0f, 0x0f],
+    modal_scrim_alpha: 89,
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -575,6 +634,68 @@ mod tests {
                 "the {ring} ring is {dark} on dark and {light} on light"
             );
         }
+    }
+
+    /// PIN (settings dialog): every token the modal wears is the mock-up's own
+    /// value, composited over the surface the mock-up actually puts it on.
+    ///
+    /// The numbers were read out of `design/ui-mockup.html`'s own renderer, one
+    /// composite per row: `--ink/2/3` and `--hover` over `--win` for the dialog,
+    /// `--ink`/`--ink2`/`--hover` over `--menu` for its popup. Three surfaces
+    /// have to stay apart on dark and the first assertion is that they do —
+    /// `--termbg #1B1B1B`, `--win #202020`, `--menu #2A2A2A`.
+    ///
+    /// Red gate: reuse one surface's ink on another and the composites collide;
+    /// each pair below is a different grey, and on the light canvas — where the
+    /// mock-up genuinely gives all three surfaces `#FFFFFF` — they are asserted
+    /// equal instead, so the test cannot be satisfied by picking one at random.
+    #[test]
+    fn the_dialogs_tokens_are_the_mock_ups_own_composites() {
+        assert_eq!(DARK_CHROME.dialog_surface, [0x20, 0x20, 0x20], "--win");
+        assert_eq!(LIGHT_CHROME.dialog_surface, [0xff, 0xff, 0xff]);
+        // Three planes, three greys — a dialog is not a flyout is not a terminal.
+        assert_ne!(DARK_CHROME.dialog_surface, DARK_CHROME.menu_surface);
+        assert_ne!(DARK_CHROME.dialog_surface, DARK_CHROME.seat_body);
+        assert_eq!(LIGHT_CHROME.dialog_surface, LIGHT_CHROME.menu_surface);
+
+        // --ink .87 / --ink2 .55 / --ink3 .38 white over #202020.
+        assert_eq!(DARK_CHROME.dialog_title_text, [0xe2, 0xe2, 0xe2]);
+        assert_eq!(DARK_CHROME.dialog_secondary_text, [0x9b, 0x9b, 0x9b]);
+        assert_eq!(DARK_CHROME.dialog_muted_text, [0x75, 0x75, 0x75]);
+        // --ink is opaque on light; --ink2/.65 and --ink3/.45 over #FFFFFF.
+        assert_eq!(LIGHT_CHROME.dialog_title_text, [0x37, 0x35, 0x2f]);
+        assert_eq!(LIGHT_CHROME.dialog_secondary_text, [0x7d, 0x7c, 0x78]);
+        assert_eq!(LIGHT_CHROME.dialog_muted_text, [0xa5, 0xa4, 0xa1]);
+
+        // --hover .055 over --win, and the same alpha over --menu, which is a
+        // different grey on dark and therefore a different hover.
+        assert_eq!(DARK_CHROME.dialog_hover, [0x2c, 0x2c, 0x2c]);
+        assert_eq!(DARK_CHROME.menu_item_hover, [0x36, 0x36, 0x36]);
+        assert_ne!(DARK_CHROME.dialog_hover, DARK_CHROME.menu_item_hover);
+        assert_eq!(LIGHT_CHROME.dialog_hover, [0xf4, 0xf4, 0xf4]);
+        assert_eq!(LIGHT_CHROME.menu_item_hover, [0xf4, 0xf4, 0xf4]);
+
+        // `.combo-item` is --ink2 and `.combo-item.selected` is --ink, both over
+        // --menu: the selected one is the one that reads at full strength.
+        assert_eq!(DARK_CHROME.menu_item_text, [0x9f, 0x9f, 0x9f]);
+        assert_eq!(DARK_CHROME.menu_item_text_selected, [0xe3, 0xe3, 0xe3]);
+        assert_eq!(LIGHT_CHROME.menu_item_text, [0x7d, 0x7c, 0x78]);
+        assert_eq!(LIGHT_CHROME.menu_item_text_selected, [0x37, 0x35, 0x2f]);
+
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            // `.overlay { background: rgba(15,15,15,.35) }` — declared once, and
+            // never overridden on dark. .35 × 255 = 89.25.
+            assert_eq!(palette.modal_scrim, [0x0f, 0x0f, 0x0f]);
+            assert_eq!(palette.modal_scrim_alpha, 89);
+            // `.combo-menu { box-shadow: 0 10px 28px rgba(0,0,0,.18) }`, split
+            // into the same two rings, and likewise not theme-varied.
+            assert_eq!(palette.menu_popup_shadow_inner_alpha, 46);
+            assert_eq!(palette.menu_popup_shadow_outer_alpha, 23);
+        }
+        assert_eq!(
+            DARK_CHROME.modal_scrim, LIGHT_CHROME.modal_scrim,
+            "a scrim is not a surface of either palette"
+        );
     }
 
     #[test]

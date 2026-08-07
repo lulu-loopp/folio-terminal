@@ -14,6 +14,7 @@ mod input;
 mod marks;
 mod persist;
 mod seats;
+mod settings;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
@@ -473,6 +474,17 @@ struct Runtime {
     /// Rasterized chrome marks, held across frames so a hover repaint costs a
     /// hash lookup rather than eight SVG renders.
     chrome_marks: marks::ChromeMarkRasters,
+    /// Whether the settings dialog is up, and what is open inside it.
+    ///
+    /// App state, deliberately beside the layout rather than in it: a dialog is
+    /// not a seat, so the solver never hears about it, and it is not an intent,
+    /// so the session file never does either — a window that reopened with a
+    /// question on it would be answering one nobody asked.
+    settings: settings::SettingsPanel,
+    /// The overlay's own mark rasters. A second cache rather than a share,
+    /// because `ChromeMarkRasters::resolve` keeps exactly what the call asked
+    /// for: one cache serving two lists would evict each on the other's turn.
+    settings_marks: marks::ChromeMarkRasters,
     divider_drag: Option<DividerDrag>,
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
@@ -1591,6 +1603,8 @@ impl Runtime {
             seat_layout,
             seat_pointer: seats::ChromePointer::default(),
             chrome_marks: marks::ChromeMarkRasters::default(),
+            settings: settings::SettingsPanel::default(),
+            settings_marks: marks::ChromeMarkRasters::default(),
             divider_drag: None,
             work_area: WorkAreaHint::NeverKnown,
             session_store,
@@ -1694,7 +1708,110 @@ impl Runtime {
             preview_message.as_deref(),
         );
         let icons = self.chrome_marks.resolve(&sprites);
-        self.renderer.set_chrome(quads, labels, icons)
+        let chrome_changed = self.renderer.set_chrome(quads, labels, icons);
+        // The overlay is rebuilt from the same choke point as the chrome under
+        // it, so every path that already knew to repaint on a resize, a DPI
+        // change or a theme switch carries the dialog with it for free.
+        let overlay_changed = self.refresh_settings_overlay();
+        chrome_changed || overlay_changed
+    }
+
+    /// The settings dialog's placement in the window as it is now, or `None`
+    /// when it is shut — or open but unhostable, which is the same thing to
+    /// everyone downstream.
+    ///
+    /// Unhostable has to read as shut and not as "open but invisible": an
+    /// invisible modal still swallows Esc and every click, and that is a window
+    /// nobody can get out of.
+    fn settings_layout(&self) -> Option<settings::SettingsLayout> {
+        if !self.settings.is_open() {
+            return None;
+        }
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        settings::layout(
+            width as f32,
+            height as f32,
+            self.renderer.metrics().scale_factor as f32,
+            self.settings.menu_is_open(),
+        )
+    }
+
+    /// Rebuild the modal overlay. Returns whether anything visible changed.
+    fn refresh_settings_overlay(&mut self) -> bool {
+        let Some(layout) = self.settings_layout() else {
+            return self
+                .renderer
+                .set_modal_overlay(Vec::new(), Vec::new(), Vec::new());
+        };
+        let (quads, labels, sprites) =
+            settings::build(&layout, self.settings.hover(), self.selected_theme);
+        let icons = self.settings_marks.resolve(&sprites);
+        self.renderer.set_modal_overlay(quads, labels, icons)
+    }
+
+    /// The gear's verb: open the dialog, or shut the one that is open.
+    ///
+    /// Opening drops the chrome's hover state, because the scrim now stands
+    /// between the pointer and the gear it is over — the highlight would be a
+    /// button claiming to be reachable through a modal.
+    fn toggle_settings_panel(&mut self) -> Result<()> {
+        self.settings.toggle();
+        if self.settings.is_open() {
+            self.seat_pointer.hover = None;
+            self.apply_pointer_cursor();
+        } else if let Some(position) = self.pointer_position {
+            self.update_chrome_hover(position)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Route a press that landed on the modal overlay. Every press is consumed:
+    /// that is what the scrim is for.
+    fn settings_mouse_input(
+        &mut self,
+        layout: &settings::SettingsLayout,
+        state: ElementState,
+        button: MouseButton,
+        position: PhysicalPosition<f64>,
+    ) -> Result<()> {
+        if state != ElementState::Pressed || button != MouseButton::Left {
+            return Ok(());
+        }
+        match settings::hit(layout, position.x, position.y) {
+            settings::SettingsTarget::Scrim => self.settings.close(),
+            settings::SettingsTarget::Close => self.settings.close(),
+            settings::SettingsTarget::ThemeCombo => {
+                let open = self.settings.menu_is_open();
+                self.settings.set_menu_open(!open);
+            }
+            target @ settings::SettingsTarget::ThemeOption(_) => {
+                self.settings.set_menu_open(false);
+                if let Some(theme) = settings::theme_requested(target) {
+                    self.apply_theme(theme)?;
+                }
+            }
+            // A press on the dialog's own body, or inside the open menu but on
+            // none of its items, lands nowhere. It notably does *not* close: the
+            // mock-up closes on the scrim and on the `×`, and nothing else.
+            settings::SettingsTarget::Panel => {}
+            settings::SettingsTarget::ThemeMenu => {}
+        }
+        if let Some(position) = self.pointer_position {
+            let hover = self
+                .settings_layout()
+                .map(|layout| settings::hit(&layout, position.x, position.y));
+            self.settings.set_hover(hover);
+            if !self.settings.is_open() {
+                self.update_chrome_hover(position)?;
+            }
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// Ask the OS for the work area of the display this window is on.
@@ -2913,7 +3030,13 @@ impl Runtime {
 
     fn pointer_left(&mut self) -> Result<()> {
         self.pointer_position = None;
-        if self.seat_pointer.hover.take().is_some() && self.refresh_chrome() {
+        // The overlay's own hover goes with it: a `×` still lit after the
+        // pointer has left the window is a button claiming to be under a
+        // pointer that is not there.
+        let settings_hover_cleared = self.settings.set_hover(None);
+        if (self.seat_pointer.hover.take().is_some() || settings_hover_cleared)
+            && self.refresh_chrome()
+        {
             self.present_chrome_change()?;
         }
         self.dismiss_peek()?;
@@ -3206,6 +3329,15 @@ impl Runtime {
 
     fn pointer_moved(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         self.pointer_position = Some(position);
+        // The overlay owns the pointer the way it owns the next click: no chrome
+        // hover, no divider, no hyperlink, no peek settle behind the scrim.
+        if let Some(layout) = self.settings_layout() {
+            let hover = settings::hit(&layout, position.x, position.y);
+            if self.settings.set_hover(Some(hover)) && self.refresh_settings_overlay() {
+                self.present_chrome_change()?;
+            }
+            return Ok(());
+        }
         // A divider drag owns the pointer outright: while one is in flight the
         // terminal hears nothing, which is the same rule an in-progress
         // selection drag already lives by.
@@ -3488,11 +3620,7 @@ impl Runtime {
                 }
             }
             seats::ChromeTarget::PaneHeader(_) => {}
-            seats::ChromeTarget::Settings => {
-                if let Some(theme) = theme_requested_by_chrome(target, self.selected_theme) {
-                    self.apply_theme(theme)?;
-                }
-            }
+            seats::ChromeTarget::Settings => self.toggle_settings_panel()?,
             seats::ChromeTarget::Minimize => self.window.set_minimized(true),
             seats::ChromeTarget::Maximize => {
                 self.window.set_maximized(!self.window.is_maximized());
@@ -3508,6 +3636,12 @@ impl Runtime {
     }
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
+        // A modal means MODAL. Ahead of the chrome router, so the caption run —
+        // the gear included — is behind the scrim like everything else, and no
+        // press reaches a divider, a seat, the terminal's selection or a peek.
+        if let (Some(layout), Some(position)) = (self.settings_layout(), self.pointer_position) {
+            return self.settings_mouse_input(&layout, state, button, position);
+        }
         if let Some(position) = self.pointer_position
             && self.chrome_mouse_input(state, button, position)?
         {
@@ -3644,6 +3778,12 @@ impl Runtime {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        // A notch behind the scrim is nobody's. The dialog's own content fits,
+        // so there is nothing here for a wheel to move — and scrolling the
+        // terminal under a modal is the same violation as clicking it.
+        if self.settings_layout().is_some() {
+            return Ok(());
+        }
         // A notch over another seat is that seat's, not the terminal's. Guarded
         // on there being another seat at all, so a lone leaf scrolls exactly as
         // it always has — including before the pointer has ever moved.
@@ -3836,6 +3976,28 @@ impl Runtime {
         // ruling) without consuming the key: typing means the user has moved on from hovering.
         self.dismiss_peek()?;
 
+        // A modal owns the keyboard. Esc unwinds one layer per press (§7.1.5:
+        // the open menu first, then the dialog); every other key is swallowed
+        // rather than typed into a terminal the user cannot see. This sits above
+        // the IME branch on purpose — a composition that outlived the dialog
+        // opening must not be able to reach the child either.
+        if self.settings_layout().is_some() {
+            if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+                && !event.repeat
+                && self.settings.close_one_layer()
+            {
+                if let Some(position) = self.pointer_position
+                    && !self.settings.is_open()
+                {
+                    self.update_chrome_hover(position)?;
+                }
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+            }
+            return Ok(());
+        }
+
         // A non-empty winit Preedit is the composition authority. Editing/navigation keys are
         // intentionally left to the IME here even if it also exposes a physical named key; no PTY
         // byte may escape this branch and regress M0-beta's composition isolation.
@@ -3943,6 +4105,13 @@ impl Runtime {
     }
 
     fn ime_input(&mut self, event: Ime) -> Result<()> {
+        // The same rule the keyboard follows: with a modal up the terminal is
+        // not who is being typed at, and a commit is a keystroke that took a
+        // longer road. Enable/disable still pass, so the IME's own bookkeeping
+        // stays consistent for when the dialog closes.
+        if self.settings_layout().is_some() && matches!(event, Ime::Preedit(..) | Ime::Commit(_)) {
+            return Ok(());
+        }
         match event {
             Ime::Enabled => {
                 self.ime_active = true;
@@ -4754,10 +4923,6 @@ fn session_theme(theme: Theme) -> SessionThemeV1 {
     }
 }
 
-fn theme_requested_by_chrome(target: seats::ChromeTarget, current: Theme) -> Option<Theme> {
-    matches!(target, seats::ChromeTarget::Settings).then(|| current.toggled())
-}
-
 fn window_hwnd(window: &Window) -> Result<std::num::NonZeroIsize> {
     let handle = window.window_handle().context("get Win32 window handle")?;
     let RawWindowHandle::Win32(handle) = handle.as_raw() else {
@@ -5015,19 +5180,27 @@ mod tests {
         })
     }
 
+    /// The gear no longer *is* the theme switch — it opens the surface the
+    /// switch lives on, and nothing about a caption button decides a colour any
+    /// more. The theme now comes from a press on a picker item, which
+    /// `settings::theme_requested` answers and `settings.rs` pins.
+    ///
+    /// Red gate: the previous version of this test asserted the gear returned
+    /// the opposite theme. That function is gone, and this one fails the moment
+    /// something starts deciding a theme from a `ChromeTarget` again.
     #[test]
-    fn settings_gear_requests_the_opposite_runtime_theme() {
+    fn the_gear_opens_the_settings_surface_rather_than_deciding_a_theme() {
+        let mut panel = settings::SettingsPanel::default();
+        panel.toggle();
+        assert!(panel.is_open(), "the gear's verb is 'open the dialog'");
         assert_eq!(
-            theme_requested_by_chrome(seats::ChromeTarget::Settings, Theme::Dark),
+            settings::theme_requested(settings::SettingsTarget::Close),
+            None,
+            "nothing but a picker item asks for a theme"
+        );
+        assert_eq!(
+            settings::theme_requested(settings::SettingsTarget::ThemeOption(Theme::Light)),
             Some(Theme::Light)
-        );
-        assert_eq!(
-            theme_requested_by_chrome(seats::ChromeTarget::Settings, Theme::Light),
-            Some(Theme::Dark)
-        );
-        assert_eq!(
-            theme_requested_by_chrome(seats::ChromeTarget::Minimize, Theme::Dark),
-            None
         );
     }
 

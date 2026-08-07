@@ -12,6 +12,9 @@
 #   .\ui-probe.ps1 capture -Pid <pid> -Out shot.png [-Margin 400]  → DPI-aware capture; Margin grows the
 #                                                                    region beyond the window (IME popups
 #                                                                    are separate windows and live outside)
+#   .\ui-probe.ps1 click -Pid <pid> -X 100 -Y 20               → left click at window+(X,Y) physical px
+#   .\ui-probe.ps1 hover -Pid <pid> -X -160 -Y 20              → park the pointer; negative counts from
+#                                                                the right/bottom edge (the caption run)
 #   .\ui-probe.ps1 close -Pid <pid>
 #
 # Capture is per-monitor-DPI-aware: pixels are 1:1 physical, so cell width can
@@ -30,7 +33,7 @@
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("launch", "type", "key", "capture", "close", "wheel", "resize")]
+  [ValidateSet("launch", "type", "key", "capture", "close", "wheel", "resize", "click", "hover")]
   [string]$Cmd,
   [int]$ProcId = 0,
   [string]$Text = "",
@@ -41,6 +44,11 @@ param(
   [int]$Delta = 3,
   [int]$W = 0,
   [int]$H = 0,
+  # click/hover: physical pixels from the window's own top-left. Negative values
+  # count back from its right/bottom edge, which is how the caption run and the
+  # gear are addressed without knowing the window's width.
+  [int]$X = 0,
+  [int]$Y = 0,
   [switch]$TraceDpi
 )
 
@@ -122,6 +130,22 @@ public class Probe {
       System.Threading.Thread.Sleep(60);
     }
   }
+  /* Buttons travel the same road the wheel does, and reach winit for the same
+     reason. The pointer is parked first and given a beat to land: bt-app routes
+     a press through the position its last CursorMoved reported, so a click sent
+     in the same tick as the move would be tested against the old point. */
+  public static void Click(int x, int y) {
+    SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(120);
+    mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);   // LEFTDOWN
+    System.Threading.Thread.Sleep(40);
+    mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);   // LEFTUP
+    System.Threading.Thread.Sleep(120);
+  }
+  public static void MoveTo(int x, int y) {
+    SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(150);
+  }
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
 }
 '@
@@ -180,6 +204,26 @@ switch ($Cmd) {
     Start-Sleep -Milliseconds 150
     [Probe]::Wheel($Delta)   # positive = scroll up (into history), negative = down
     "wheeled $Delta notches on pid=$ProcId (foreground verified)"
+  }
+  "click" {
+    $h = Get-AppWindow $ProcId
+    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not clicking blind" }
+    $r = New-Object PRECT
+    [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+    $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
+    $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+    [Probe]::Click($px, $py)
+    "clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (foreground verified)"
+  }
+  "hover" {
+    $h = Get-AppWindow $ProcId
+    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not moving the pointer blind" }
+    $r = New-Object PRECT
+    [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+    $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
+    $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+    [Probe]::MoveTo($px, $py)
+    "pointer at ($px, $py) = window+($X, $Y) on pid=$ProcId (foreground verified)"
   }
   "resize" {
     # NOT $h: PowerShell variables are case-INsensitive, so $h would overwrite
