@@ -23,6 +23,7 @@ pub struct CustomFrameMetrics {
     pub width: i32,
     pub height: i32,
     pub title_bar_height: i32,
+    pub tab_strip_right_px: i32,
     pub caption_button_width: i32,
     pub caption_button_count: i32,
     pub resize_border: i32,
@@ -74,10 +75,13 @@ pub fn custom_frame_hit_test(metrics: CustomFrameMetrics, x: i32, y: i32) -> Cus
         .max(0)
         .saturating_mul(metrics.caption_button_count.max(0));
     let buttons_left = metrics.width.saturating_sub(buttons_width);
-    if y >= border
-        && y < metrics.title_bar_height.max(border)
-        && (x < buttons_left || x >= metrics.width)
-    {
+    if y < border || y >= metrics.title_bar_height.max(border) {
+        return CustomFrameHit::Client;
+    }
+    if x < metrics.tab_strip_right_px.max(0) {
+        return CustomFrameHit::Client;
+    }
+    if x < buttons_left || x >= metrics.width {
         CustomFrameHit::Caption
     } else {
         CustomFrameHit::Client
@@ -100,7 +104,10 @@ mod windows_impl {
         ffi::c_void,
         os::windows::ffi::OsStrExt,
         path::Path,
-        sync::{Arc, Mutex, OnceLock},
+        sync::{
+            Arc, Mutex, OnceLock,
+            atomic::{AtomicI32, Ordering},
+        },
     };
     use windows::core::PCWSTR;
 
@@ -169,17 +176,20 @@ mod windows_impl {
     /// extending the client area through the system caption.
     pub struct CustomWindowFrame {
         hwnd: HWND,
+        tab_strip_right_px: Box<AtomicI32>,
     }
 
     impl CustomWindowFrame {
         pub fn install(hwnd: NonZeroIsize) -> Result<Self, String> {
             let hwnd = HWND(hwnd.get() as *mut c_void);
+            let tab_strip_right_px = Box::new(AtomicI32::new(0));
+            let reference_data = (&*tab_strip_right_px as *const AtomicI32) as usize;
             let installed = unsafe {
                 SetWindowSubclass(
                     hwnd,
                     Some(custom_frame_subclass),
                     CUSTOM_FRAME_SUBCLASS_ID,
-                    0,
+                    reference_data,
                 )
             };
             if !installed.as_bool() {
@@ -224,7 +234,15 @@ mod windows_impl {
                     std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
                 )
             };
-            Ok(Self { hwnd })
+            Ok(Self {
+                hwnd,
+                tab_strip_right_px,
+            })
+        }
+
+        pub fn set_tab_strip_right_px(&self, tab_strip_right_px: i32) {
+            self.tab_strip_right_px
+                .store(tab_strip_right_px.max(0), Ordering::Relaxed);
         }
     }
 
@@ -246,7 +264,7 @@ mod windows_impl {
         wparam: WPARAM,
         lparam: LPARAM,
         _subclass_id: usize,
-        _reference_data: usize,
+        reference_data: usize,
     ) -> LRESULT {
         match message {
             WM_NCCALCSIZE => {
@@ -286,11 +304,16 @@ mod windows_impl {
                 } else {
                     native_resize_border(dpi)
                 };
+                // SAFETY: `CustomWindowFrame` owns this allocation and removes the subclass
+                // before dropping it, so the reference-data pointer is live for every callback.
+                let tab_strip_right_px =
+                    unsafe { &*(reference_data as *const AtomicI32) }.load(Ordering::Relaxed);
                 let hit = custom_frame_hit_test(
                     CustomFrameMetrics {
                         width: client.right.saturating_sub(client.left),
                         height: client.bottom.saturating_sub(client.top),
                         title_bar_height: logical_px_for_dpi(TITLE_BAR_LOGICAL_PX, dpi),
+                        tab_strip_right_px,
                         caption_button_width: logical_px_for_dpi(CAPTION_BUTTON_LOGICAL_PX, dpi),
                         caption_button_count: CAPTION_BUTTON_COUNT,
                         resize_border,
@@ -1033,6 +1056,7 @@ mod custom_frame_tests {
             width: logical_px_for_dpi(960, dpi),
             height: logical_px_for_dpi(600, dpi),
             title_bar_height: logical_px_for_dpi(40, dpi),
+            tab_strip_right_px: logical_px_for_dpi(240, dpi),
             caption_button_width: logical_px_for_dpi(46, dpi),
             caption_button_count: 4,
             resize_border: logical_px_for_dpi(8, dpi),
@@ -1056,6 +1080,7 @@ mod custom_frame_tests {
         assert_eq!(custom_frame_hit_test(m, 959, 300), CustomFrameHit::Right);
         assert_eq!(custom_frame_hit_test(m, 400, 0), CustomFrameHit::Top);
         assert_eq!(custom_frame_hit_test(m, 400, 599), CustomFrameHit::Bottom);
+        assert_eq!(custom_frame_hit_test(m, 100, 20), CustomFrameHit::Client);
         assert_eq!(custom_frame_hit_test(m, 300, 20), CustomFrameHit::Caption);
         assert_eq!(custom_frame_hit_test(m, 800, 20), CustomFrameHit::Client);
         assert_eq!(custom_frame_hit_test(m, 300, 60), CustomFrameHit::Client);
@@ -1068,9 +1093,14 @@ mod custom_frame_tests {
         for dpi in [96, 120, 144, 168, 192, 240] {
             let m = metrics(dpi);
             assert_eq!(
-                custom_frame_hit_test(m, logical_px_for_dpi(200, dpi), logical_px_for_dpi(20, dpi),),
+                custom_frame_hit_test(m, logical_px_for_dpi(120, dpi), logical_px_for_dpi(20, dpi),),
+                CustomFrameHit::Client,
+                "tab strip at {dpi} DPI"
+            );
+            assert_eq!(
+                custom_frame_hit_test(m, logical_px_for_dpi(300, dpi), logical_px_for_dpi(20, dpi),),
                 CustomFrameHit::Caption,
-                "drag region at {dpi} DPI"
+                "drag region beside tab strip at {dpi} DPI"
             );
             assert_eq!(
                 custom_frame_hit_test(
@@ -1094,7 +1124,11 @@ mod custom_frame_tests {
         let mut m = metrics(144);
         m.resizable = false;
         m.resize_border = 0;
-        assert_eq!(custom_frame_hit_test(m, 0, 0), CustomFrameHit::Caption);
+        assert_eq!(custom_frame_hit_test(m, 0, 0), CustomFrameHit::Client);
+        assert_eq!(
+            custom_frame_hit_test(m, m.tab_strip_right_px + 1, 1),
+            CustomFrameHit::Caption
+        );
         assert_eq!(
             custom_frame_hit_test(m, m.width - 1, 1),
             CustomFrameHit::Client

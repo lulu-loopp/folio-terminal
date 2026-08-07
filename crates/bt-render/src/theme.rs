@@ -285,8 +285,10 @@ pub const WINDOW_TAB_HEIGHT_LOGICAL_PX: f32 = 34.0;
 /// outward skirt corners that join it to the content plane
 /// (`.tab.active::before/::after`).
 pub const WINDOW_TAB_RADIUS_LOGICAL_PX: f32 = 7.0;
-/// One tab's CSS cap; this slice draws exactly one current-session tab.
+/// One tab's CSS cap (`design/ui-mockup.html` line 208).
 pub const WINDOW_TAB_MAX_WIDTH_LOGICAL_PX: f32 = 200.0;
+/// Equal spacing between horizontal tabs (`design/ui-mockup.html` line 183).
+pub const WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX: f32 = 1.0;
 /// `.tab { padding: 0 6px 0 12px }` — the leading inset before the mark.
 pub const WINDOW_TAB_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
 /// `.tab { padding: 0 6px … }` — the trailing inset after the title.
@@ -297,6 +299,14 @@ pub const WINDOW_TAB_GAP_LOGICAL_PX: f32 = 8.0;
 pub const WINDOW_TAB_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.ticon`/`.pmark` inside a tab: a 15px square profile mark.
 pub const WINDOW_TAB_MARK_LOGICAL_PX: f32 = 15.0;
+/// The tab close affordance (`design/ui-mockup.html` lines 305-311).
+pub const WINDOW_TAB_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
+pub const WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
+/// The new-tab button and its placement (`design/ui-mockup.html` lines 386-408).
+pub const WINDOW_NEW_TAB_BOX_LOGICAL_PX: f32 = 28.0;
+pub const WINDOW_NEW_TAB_GLYPH_LOGICAL_PX: f32 = 10.0;
+pub const WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX: f32 = 6.0;
+pub const WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 3.0;
 /// A seat title's font size (`.panehead { font-size: 11.5px }`).
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;
 /// The inset between a title bar's edge and its first item

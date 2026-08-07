@@ -30,7 +30,10 @@ use bt_render::{
     SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX,
     SEAT_TITLE_PADDING_LOGICAL_PX, SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX,
     WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
-    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
+    WINDOW_NEW_TAB_BOX_LOGICAL_PX, WINDOW_NEW_TAB_GLYPH_LOGICAL_PX,
+    WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
+    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
     WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
     WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
     WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
@@ -109,6 +112,20 @@ impl Seats {
         }
         self.focus = seat;
         true
+    }
+
+    /// Restore the positional `leaf-N` token carried beside the persisted tree.
+    pub fn restore_focus_token(&mut self, token: &str) {
+        let Some(index) = token
+            .strip_prefix("leaf-")
+            .and_then(|value| value.parse::<usize>().ok())
+        else {
+            return;
+        };
+        let Some(id) = self.tree.seats_in_order().get(index).map(|seat| seat.id) else {
+            return;
+        };
+        self.focus = id;
     }
 
     /// Open the preview seat at its ruled fixed-right address, or close the one
@@ -457,6 +474,98 @@ pub enum ChromeTarget {
     Minimize,
     Maximize,
     CloseWindow,
+    Tab(usize),
+    TabClose(usize),
+    NewTab,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabGeometry {
+    pub body: [f32; 4],
+    pub close: [f32; 4],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabStripGeometry {
+    pub tabs: Vec<TabGeometry>,
+    pub new_tab: [f32; 4],
+}
+
+/// Equal-share horizontal tab geometry. The mock-up's 200px cap is retained; once the strip is
+/// full every tab compresses by the same amount. Scrolling is deliberately deferred.
+pub fn tab_strip_geometry(width: f32, scale: f32, tab_count: usize) -> TabStripGeometry {
+    let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
+    let caption = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+    let run_left = (width - 4.0 * caption).max(0.0);
+    let gap = WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX * scale;
+    let new_box = WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
+    let new_margin = WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX * scale;
+    let available = (run_left - radius - new_margin - new_box).max(0.0);
+    let total_gaps = gap * tab_count.saturating_sub(1) as f32;
+    let tab_width = if tab_count == 0 {
+        0.0
+    } else {
+        ((available - total_gaps).max(0.0) / tab_count as f32)
+            .min(WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale)
+    };
+    let tab_height = (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round();
+    let tab_top = title - tab_height;
+    let close_box = (WINDOW_TAB_CLOSE_BOX_LOGICAL_PX * scale).round();
+    let close_pad = WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale;
+    let tabs = (0..tab_count)
+        .map(|index| {
+            let left = radius + index as f32 * (tab_width + gap);
+            let right = left + tab_width;
+            let close_right = (right - close_pad).max(left);
+            TabGeometry {
+                body: [left, tab_top, right, title],
+                close: [
+                    (close_right - close_box).max(left),
+                    tab_top + (tab_height - close_box) / 2.0,
+                    close_right,
+                    tab_top + (tab_height + close_box) / 2.0,
+                ],
+            }
+        })
+        .collect::<Vec<_>>();
+    let tabs_right = tabs.last().map_or(radius, |tab| tab.body[2]);
+    let new_left = (tabs_right + new_margin).min(run_left);
+    let new_bottom = title - WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX * scale;
+    TabStripGeometry {
+        tabs,
+        new_tab: [
+            new_left,
+            new_bottom - new_box,
+            (new_left + new_box).min(run_left),
+            new_bottom,
+        ],
+    }
+}
+
+/// Physical right edge of the app-owned tab run, including the new-tab button.
+pub fn tab_strip_right_px(width: f32, scale: f32, tab_count: usize) -> i32 {
+    tab_strip_geometry(width, scale, tab_count).new_tab[2].ceil() as i32
+}
+
+pub fn hit_tab_chrome(
+    width: f32,
+    scale: f32,
+    tab_count: usize,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    let geometry = tab_strip_geometry(width, scale, tab_count);
+    for (index, tab) in geometry.tabs.iter().enumerate() {
+        if contains(tab.close, x, y) {
+            return Some(ChromeTarget::TabClose(index));
+        }
+        if contains(tab.body, x, y) {
+            return Some(ChromeTarget::Tab(index));
+        }
+    }
+    contains(geometry.new_tab, x, y).then_some(ChromeTarget::NewTab)
 }
 
 /// What the pointer is over, in device pixels of the window.
@@ -583,6 +692,7 @@ pub fn build_chrome(
 }
 
 /// Build chrome while supplying the preview seat's content title and optional body placeholder.
+#[cfg(test)]
 pub fn build_chrome_with_preview(
     seats: &Seats,
     layout: &SeatLayout,
@@ -592,6 +702,42 @@ pub fn build_chrome_with_preview(
     preview_title: Option<&str>,
     preview_message: Option<&str>,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+    let titles = [tab_title.unwrap_or("PowerShell").to_owned()];
+    build_chrome_for_tabs(
+        seats,
+        layout,
+        scale,
+        pointer,
+        ChromeContent {
+            tab_titles: &titles,
+            active_tab: 0,
+            preview_title,
+            preview_message,
+        },
+    )
+}
+
+pub struct ChromeContent<'a> {
+    pub tab_titles: &'a [String],
+    pub active_tab: usize,
+    pub preview_title: Option<&'a str>,
+    pub preview_message: Option<&'a str>,
+}
+
+/// Build chrome for every runtime tab while the pane layer still follows the active tab's solve.
+pub fn build_chrome_for_tabs(
+    seats: &Seats,
+    layout: &SeatLayout,
+    scale: f32,
+    pointer: ChromePointer,
+    content: ChromeContent<'_>,
+) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+    let ChromeContent {
+        tab_titles,
+        active_tab,
+        preview_title,
+        preview_message,
+    } = content;
     let palette = chrome_palette();
     let mut quads = Vec::new();
     let mut labels = Vec::new();
@@ -606,10 +752,9 @@ pub fn build_chrome_with_preview(
         surface_width,
         scale,
         pointer.hover,
-        tab_title,
-        &mut quads,
-        &mut labels,
-        &mut sprites,
+        tab_titles,
+        active_tab,
+        (&mut quads, &mut labels, &mut sprites),
     );
     for placement in &layout.rects {
         let Some(device) = placement.device_rect else {
@@ -747,11 +892,15 @@ fn window_chrome(
     width: f32,
     scale: f32,
     hover: Option<ChromeTarget>,
-    tab_title: Option<&str>,
-    quads: &mut Vec<ChromeQuad>,
-    labels: &mut Vec<ChromeLabel>,
-    sprites: &mut Vec<ChromeSprite>,
+    tab_titles: &[String],
+    active_tab: usize,
+    output: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
 ) {
+    let (quads, labels, sprites) = output;
     let palette = chrome_palette();
     let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
     // `.titlebar` in the mock-up carries a background and nothing else — no
@@ -765,51 +914,100 @@ fn window_chrome(
         color: palette.title_bar,
     });
 
-    // `.window[data-tabs="horizontal"] .titlebar .drag` starts at `--tabr`, so
-    // the first tab's skirt lands exactly on the window's left edge. The tab is
-    // 34px tall, capped at 200px wide, and its silhouette — both `--tabr` top
-    // corners and both outward skirt corners — is one rasterized path.
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * button).max(0.0);
-    let tab_left = radius;
-    // The right skirt must stay clear of the caption run, so the cap is on the
-    // silhouette's outer edge rather than on the tab's own.
-    let tab_right = (tab_left + (WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale).round())
-        .min((run_left - radius).max(tab_left));
-    let tab_height = (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round();
-    let tab_top = title - tab_height;
-    if tab_right - tab_left >= 2.0 * radius {
-        sprites.push(ChromeSprite {
-            mark: ChromeMark::ActiveTab {
-                radius_px: radius as u32,
-            },
-            rect: [tab_left - radius, tab_top, tab_right + radius, title],
-            color: palette.active_tab,
-        });
+    let geometry = tab_strip_geometry(width, scale, tab_titles.len());
+    for (index, (tab, tab_title)) in geometry.tabs.iter().zip(tab_titles).enumerate() {
+        let [tab_left, tab_top, tab_right, tab_bottom] = tab.body;
+        let active = index == active_tab;
+        if active && tab_right - tab_left >= 2.0 * radius {
+            sprites.push(ChromeSprite {
+                mark: ChromeMark::ActiveTab {
+                    radius_px: radius as u32,
+                },
+                rect: [tab_left - radius, tab_top, tab_right + radius, tab_bottom],
+                color: palette.active_tab,
+            });
+        } else if hover == Some(ChromeTarget::Tab(index))
+            || hover == Some(ChromeTarget::TabClose(index))
+        {
+            sprites.push(ChromeSprite {
+                mark: ChromeMark::TabBody {
+                    radius_px: radius as u32,
+                },
+                rect: tab.body,
+                color: palette.caption_hover,
+            });
+        }
         let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
         let mark_left = (tab_left + WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round();
-        let mark_top = (tab_top + (tab_height - mark) / 2.0).round();
-        sprites.push(ChromeSprite {
-            mark: ChromeMark::ProfilePowerShell,
-            rect: [mark_left, mark_top, mark_left + mark, mark_top + mark],
-            color: palette.accent,
+        let mark_top = (tab_top + (tab_bottom - tab_top - mark) / 2.0).round();
+        if mark_left + mark <= tab.close[0] {
+            sprites.push(ChromeSprite {
+                mark: ChromeMark::ProfilePowerShell,
+                rect: [mark_left, mark_top, mark_left + mark, mark_top + mark],
+                color: palette.accent,
+            });
+            let label_left = mark_left + mark + WINDOW_TAB_GAP_LOGICAL_PX * scale;
+            if label_left < tab.close[0] {
+                labels.push(ChromeLabel {
+                    text: tab_title.clone(),
+                    rect: [label_left, tab_top, tab.close[0], tab_bottom],
+                    font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
+                    color: if active || hover == Some(ChromeTarget::Tab(index)) {
+                        palette.pane_title_focus
+                    } else {
+                        palette.title_text
+                    },
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                });
+            }
+        }
+        let close_hovered = hover == Some(ChromeTarget::TabClose(index));
+        if close_hovered {
+            quads.push(ChromeQuad {
+                rect: tab.close,
+                color: palette.collapse_bar_hover,
+            });
+        }
+        let glyph = (WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+        let glyph_left = ((tab.close[0] + tab.close[2] - glyph) / 2.0).round();
+        let glyph_top = ((tab.close[1] + tab.close[3] - glyph) / 2.0).round();
+        if tab.close[2] > tab.close[0] {
+            sprites.push(ChromeSprite {
+                mark: ChromeMark::TabClose,
+                rect: [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+                color: if close_hovered {
+                    palette.title_text_hover
+                } else {
+                    palette.title_text
+                },
+            });
+        }
+    }
+
+    let new_hovered = hover == Some(ChromeTarget::NewTab);
+    if new_hovered {
+        quads.push(ChromeQuad {
+            rect: geometry.new_tab,
+            color: palette.caption_hover,
         });
-        labels.push(ChromeLabel {
-            text: tab_title.unwrap_or("PowerShell").to_owned(),
-            rect: [
-                mark_left + mark + WINDOW_TAB_GAP_LOGICAL_PX * scale,
-                tab_top,
-                tab_right - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
-                title,
-            ],
-            font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
-            // `.tab.active { color: var(--ink) }` — and the surface that ink
-            // sits on is the tab's own `--termbg`, not the panel beside it.
-            color: palette.pane_title_focus,
-            align_right: false,
-            align_center: false,
-            letter_spacing_em: 0.0,
+    }
+    let plus = (WINDOW_NEW_TAB_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+    let plus_left = ((geometry.new_tab[0] + geometry.new_tab[2] - plus) / 2.0).round();
+    let plus_top = ((geometry.new_tab[1] + geometry.new_tab[3] - plus) / 2.0).round();
+    if geometry.new_tab[2] > geometry.new_tab[0] {
+        sprites.push(ChromeSprite {
+            mark: ChromeMark::Plus,
+            rect: [plus_left, plus_top, plus_left + plus, plus_top + plus],
+            color: if new_hovered {
+                palette.title_text_hover
+            } else {
+                palette.title_text
+            },
         });
     }
 
@@ -1989,6 +2187,111 @@ mod tests {
             None,
         );
         assert!(fallback.iter().any(|label| label.text == "PowerShell"));
+    }
+
+    #[test]
+    fn multi_tab_strip_is_equal_width_and_exposes_plus_close_and_middle_click_targets() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 4);
+            assert_eq!(geometry.tabs.len(), 4);
+            let widths = geometry
+                .tabs
+                .iter()
+                .map(|tab| tab.body[2] - tab.body[0])
+                .collect::<Vec<_>>();
+            assert!(
+                widths
+                    .windows(2)
+                    .all(|pair| (pair[0] - pair[1]).abs() < 0.01)
+            );
+            assert!(widths[0] <= WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale);
+
+            let plus = geometry.new_tab;
+            assert_eq!(
+                hit_tab_chrome(
+                    960.0 * scale,
+                    scale,
+                    4,
+                    f64::from((plus[0] + plus[2]) / 2.0),
+                    f64::from((plus[1] + plus[3]) / 2.0),
+                ),
+                Some(ChromeTarget::NewTab)
+            );
+            let close = geometry.tabs[2].close;
+            assert_eq!(
+                hit_tab_chrome(
+                    960.0 * scale,
+                    scale,
+                    4,
+                    f64::from((close[0] + close[2]) / 2.0),
+                    f64::from((close[1] + close[3]) / 2.0),
+                ),
+                Some(ChromeTarget::TabClose(2))
+            );
+            let body = geometry.tabs[1].body;
+            assert_eq!(
+                hit_tab_chrome(
+                    960.0 * scale,
+                    scale,
+                    4,
+                    f64::from(body[0] + 2.0 * scale),
+                    f64::from((body[1] + body[3]) / 2.0),
+                ),
+                Some(ChromeTarget::Tab(1)),
+                "the tab body is the target consumed by middle-click close"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_count_layout_changes_publish_a_new_strip_right_edge() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let one = tab_strip_right_px(width, scale, 1);
+            let two = tab_strip_right_px(width, scale, 2);
+            assert!(
+                two > one,
+                "adding a tab must move the edge at scale {scale}"
+            );
+            assert_eq!(
+                one,
+                tab_strip_geometry(width, scale, 1).new_tab[2].ceil() as i32,
+                "the published edge includes the '+' button at scale {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn inactive_hover_and_new_tab_button_use_the_mockup_shapes() {
+        let metrics = seat_metrics(1_000);
+        let seats = Seats::lone_terminal();
+        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
+        let titles = vec!["one".to_owned(), "two".to_owned()];
+        let (_, _, hover_sprites) = build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                hover: Some(ChromeTarget::Tab(1)),
+                dragging: None,
+            },
+            ChromeContent {
+                tab_titles: &titles,
+                active_tab: 0,
+                preview_title: None,
+                preview_message: None,
+            },
+        );
+        assert!(
+            hover_sprites
+                .iter()
+                .any(|sprite| matches!(sprite.mark, ChromeMark::TabBody { radius_px: 7 }))
+        );
+        assert!(
+            hover_sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::Plus)
+        );
     }
 
     /// PIN — a pane head's mark and its title hang off one axis, the same way

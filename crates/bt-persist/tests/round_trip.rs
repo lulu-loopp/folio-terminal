@@ -16,7 +16,7 @@ use std::path::PathBuf;
 
 use bt_persist::{
     DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, SessionThemeV1,
-    SessionV1, read_session, write_session_atomic,
+    SessionV1, TabV1, TermLeafV1, read_session, write_session_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -99,6 +99,40 @@ fn light_theme_round_trips_through_the_public_session_api() {
     let path = dir.join("session.json");
     let session = SessionV1 {
         theme: SessionThemeV1::Light,
+        ..SessionV1::default()
+    };
+
+    write_session_atomic(&path, &session).unwrap();
+    let (loaded, report, degradation) = read_session(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert!(degradation.is_clean());
+    assert_eq!(loaded, session);
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn multi_tab_trees_and_active_index_round_trip_together() {
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-multi-tab-roundtrip-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("session.json");
+    let tabs = (0..3)
+        .map(|index| TabV1 {
+            root: LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                profile_id: "pwsh.exe".to_owned(),
+                cwd: format!(r"C:\work\tab-{index}"),
+                manual_name: Some(format!("tab {index}")),
+            })),
+            pinned: index == 0,
+            focused_leaf: "leaf-0".to_owned(),
+        })
+        .collect();
+    let session = SessionV1 {
+        tabs,
+        active_tab: 2,
         ..SessionV1::default()
     };
 

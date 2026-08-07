@@ -35,6 +35,10 @@ pub enum ChromeMark {
     WindowMaximize,
     /// `#i-close`.
     WindowClose,
+    /// The same `#i-close` source, at the tab control's smaller 8px size.
+    TabClose,
+    /// `#i-plus` — the new-tab button.
+    Plus,
     /// `#p-pwsh` — the PowerShell profile mark, which carries its own colours.
     /// The mock-up is explicit that a mark's colour is its own and the active
     /// tab does not recolour it (`.pmark`, and the comment above it).
@@ -49,6 +53,8 @@ pub enum ChromeMark {
     /// skirt corners that join it to the content plane. `radius_px` is `--tabr`
     /// in physical pixels, so the shape is generated at the size it is drawn.
     ActiveTab { radius_px: u32 },
+    /// A regular tab's rounded body, used only for the inactive hover fill.
+    TabBody { radius_px: u32 },
 }
 
 impl ChromeMark {
@@ -58,11 +64,14 @@ impl ChromeMark {
             Self::WindowMinimize => "i-min",
             Self::WindowMaximize => "i-max",
             Self::WindowClose => "i-close",
+            Self::TabClose => "tab-close",
+            Self::Plus => "i-plus",
             Self::ProfilePowerShell => "p-pwsh",
             Self::File => "i-file",
             Self::Folder => "i-folder",
             Self::Panel => "i-panel",
             Self::ActiveTab { .. } => "tab",
+            Self::TabBody { .. } => "tab-body",
         }
     }
 
@@ -143,7 +152,7 @@ impl ChromeMarkRasters {
 fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     let [r, g, b] = sprite.color;
     let mut key = format!("chrome-mark:{}", sprite.mark.id());
-    if let ChromeMark::ActiveTab { radius_px } = sprite.mark {
+    if let ChromeMark::ActiveTab { radius_px } | ChromeMark::TabBody { radius_px } = sprite.mark {
         let _ = write!(key, ":r{radius_px}");
     }
     let _ = write!(key, ":{width_px}x{height_px}");
@@ -176,6 +185,13 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 format!(r#"<path fill="currentColor" d="{path}"/>"#),
             )
         }
+        ChromeMark::TabBody { radius_px } => {
+            let path = tab_body_path(width_px, height_px, radius_px)?;
+            (
+                format!("0 0 {width_px} {height_px}"),
+                format!(r#"<path fill="currentColor" d="{path}"/>"#),
+            )
+        }
         mark => (SYMBOL_VIEW_BOX[symbol_index(mark)].to_owned(), {
             SYMBOL_BODY[symbol_index(mark)].to_owned()
         }),
@@ -197,17 +213,20 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::WindowMinimize => 1,
         ChromeMark::WindowMaximize => 2,
         ChromeMark::WindowClose => 3,
-        ChromeMark::ProfilePowerShell => 4,
-        ChromeMark::File => 5,
-        ChromeMark::Folder => 6,
-        ChromeMark::Panel => 7,
+        ChromeMark::TabClose => 3,
+        ChromeMark::Plus => 4,
+        ChromeMark::ProfilePowerShell => 5,
+        ChromeMark::File => 6,
+        ChromeMark::Folder => 7,
+        ChromeMark::Panel => 8,
         // Handled before this function is reached; its geometry is generated,
         // not quoted.
-        ChromeMark::ActiveTab { .. } => 7,
+        ChromeMark::ActiveTab { .. } => 8,
+        ChromeMark::TabBody { .. } => 8,
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 8] = [
+const SYMBOL_VIEW_BOX: [&str; 9] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -216,11 +235,12 @@ const SYMBOL_VIEW_BOX: [&str; 8] = [
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 8] = [
+const SYMBOL_BODY: [&str; 9] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -229,6 +249,8 @@ const SYMBOL_BODY: [&str; 8] = [
     r#"<rect x="0.5" y="0.5" width="9" height="9" rx="1.8" fill="none" stroke="currentColor" stroke-width="1"/>"#,
     // #i-close
     r#"<path d="M0.5 0.5l9 9M9.5 0.5l-9 9" fill="none" stroke="currentColor" stroke-width="1"/>"#,
+    // #i-plus
+    r#"<path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round"/>"#,
     // #p-pwsh — flat, and its own colours (a mark carries its own).
     concat!(
         r##"<rect x="1" y="2.5" width="14" height="11" rx="1.8" fill="#2C5C9E"/>"##,
@@ -291,6 +313,17 @@ fn active_tab_path(width: u32, height: u32, radius: u32) -> Option<String> {
         two_r = 2 * r,
         top_right = w - 2 * r,
         body_right = w - r,
+    ))
+}
+
+fn tab_body_path(width: u32, height: u32, radius: u32) -> Option<String> {
+    let (w, h, r) = (width as i64, height as i64, radius as i64);
+    if r < 1 || w < 2 * r || h < r {
+        return None;
+    }
+    Some(format!(
+        "M0,{h} L0,{r} A{r},{r} 0 0 1 {r},0 L{right},0 A{r},{r} 0 0 1 {w},{r} L{w},{h} Z",
+        right = w - r,
     ))
 }
 

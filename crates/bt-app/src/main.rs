@@ -3,6 +3,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
+    ops::{Deref, DerefMut},
     panic,
     path::PathBuf,
     sync::{Arc, mpsc},
@@ -86,22 +87,28 @@ enum AppEvent {
     MathReady,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TabId(u64);
+
 struct MathWorkerResult {
+    tab_id: TabId,
     completion: DecorationWorkerCompletion,
 }
 
 enum MathWorkerRequest {
     Math {
+        tab_id: TabId,
         task: Box<SessionMathTask>,
         foreground_rgb: [u8; 3],
     },
-    InlineImage(bt_term::InlineImageTask),
+    InlineImage {
+        tab_id: TabId,
+        task: bt_term::InlineImageTask,
+    },
     /// Hover-peek decode: read and decode a local image off-thread without touching any
     /// decoration record. The completion routes only to the app-side peek cache, so the band
     /// creation gates (cursor line, semantic input region) are never bypassed.
-    PeekImage {
-        path: PathBuf,
-    },
+    PeekImage { tab_id: TabId, path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,41 +119,71 @@ enum ScalePurpose {
 }
 
 enum ScaleWorkerRequest {
-    InlineImage(bt_term::InlineImageScaleTask),
-    Peek(bt_term::InlineImageScaleTask),
-    Preview(bt_term::InlineImageScaleTask),
+    InlineImage {
+        tab_id: TabId,
+        task: bt_term::InlineImageScaleTask,
+    },
+    Peek {
+        tab_id: TabId,
+        task: bt_term::InlineImageScaleTask,
+    },
+    Preview {
+        tab_id: TabId,
+        task: bt_term::InlineImageScaleTask,
+    },
 }
 
 impl ScaleWorkerRequest {
     fn purpose(&self) -> ScalePurpose {
         match self {
-            Self::InlineImage(task) => ScalePurpose::InlineImage(task.occurrence_id),
-            Self::Peek(_) => ScalePurpose::Peek,
-            Self::Preview(_) => ScalePurpose::Preview,
+            Self::InlineImage { task, .. } => ScalePurpose::InlineImage(task.occurrence_id),
+            Self::Peek { .. } => ScalePurpose::Peek,
+            Self::Preview { .. } => ScalePurpose::Preview,
         }
     }
 
     fn task(&self) -> &bt_term::InlineImageScaleTask {
         match self {
-            Self::InlineImage(task) | Self::Peek(task) | Self::Preview(task) => task,
+            Self::InlineImage { task, .. }
+            | Self::Peek { task, .. }
+            | Self::Preview { task, .. } => task,
+        }
+    }
+
+    fn tab_id(&self) -> TabId {
+        match self {
+            Self::InlineImage { tab_id, .. }
+            | Self::Peek { tab_id, .. }
+            | Self::Preview { tab_id, .. } => *tab_id,
         }
     }
 
     fn same_target(&self, other: &Self) -> bool {
-        self.purpose() == other.purpose() && self.task().content_key == other.task().content_key
+        self.tab_id() == other.tab_id()
+            && self.purpose() == other.purpose()
+            && self.task().content_key == other.task().content_key
     }
 
-    fn completion(self) -> DecorationWorkerCompletion {
+    fn completion(self) -> (TabId, DecorationWorkerCompletion) {
         match self {
-            Self::InlineImage(task) => DecorationWorkerCompletion::ScaleInlineImage {
-                scaled: bt_term::scale_inline_image(&task),
-            },
-            Self::Peek(task) => DecorationWorkerCompletion::PeekScaledImage {
-                scaled: bt_term::scale_inline_image(&task),
-            },
-            Self::Preview(task) => DecorationWorkerCompletion::PreviewScaledImage {
-                scaled: bt_term::scale_inline_image(&task),
-            },
+            Self::InlineImage { tab_id, task } => (
+                tab_id,
+                DecorationWorkerCompletion::ScaleInlineImage {
+                    scaled: bt_term::scale_inline_image(&task),
+                },
+            ),
+            Self::Peek { tab_id, task } => (
+                tab_id,
+                DecorationWorkerCompletion::PeekScaledImage {
+                    scaled: bt_term::scale_inline_image(&task),
+                },
+            ),
+            Self::Preview { tab_id, task } => (
+                tab_id,
+                DecorationWorkerCompletion::PreviewScaledImage {
+                    scaled: bt_term::scale_inline_image(&task),
+                },
+            ),
         }
     }
 }
@@ -250,9 +287,9 @@ impl MathWorker {
             .name("bt-image-scale-worker".to_owned())
             .spawn(move || {
                 run_scale_worker(scale_rx, |request| {
-                    let completion = request.completion();
+                    let (tab_id, completion) = request.completion();
                     if scale_result_tx
-                        .send(MathWorkerResult { completion })
+                        .send(MathWorkerResult { tab_id, completion })
                         .is_ok()
                     {
                         let _ = scale_proxy.send_event(AppEvent::MathReady);
@@ -268,39 +305,58 @@ impl MathWorker {
                 while let Ok(work) = task_rx.recv() {
                     let completion = match work {
                         MathWorkerRequest::Math {
+                            tab_id,
                             task,
                             foreground_rgb,
-                        } => match *task {
-                            SessionMathTask::Frozen(mut task) => {
-                                let result =
-                                    render_detection_task(&engine, &mut task, foreground_rgb);
-                                DecorationWorkerCompletion::Math {
-                                    task: Box::new(SessionMathTask::Frozen(task)),
-                                    result,
+                        } => (
+                            tab_id,
+                            match *task {
+                                SessionMathTask::Frozen(mut task) => {
+                                    let result =
+                                        render_detection_task(&engine, &mut task, foreground_rgb);
+                                    DecorationWorkerCompletion::Math {
+                                        task: Box::new(SessionMathTask::Frozen(task)),
+                                        result,
+                                    }
                                 }
-                            }
-                            SessionMathTask::Live(mut task) => {
-                                let result =
-                                    render_live_detection_task(&engine, &mut task, foreground_rgb);
-                                DecorationWorkerCompletion::Math {
-                                    task: Box::new(SessionMathTask::Live(task)),
-                                    result,
+                                SessionMathTask::Live(mut task) => {
+                                    let result = render_live_detection_task(
+                                        &engine,
+                                        &mut task,
+                                        foreground_rgb,
+                                    );
+                                    DecorationWorkerCompletion::Math {
+                                        task: Box::new(SessionMathTask::Live(task)),
+                                        result,
+                                    }
                                 }
-                            }
-                        },
-                        MathWorkerRequest::InlineImage(task) => {
+                            },
+                        ),
+                        MathWorkerRequest::InlineImage { tab_id, task } => {
                             let result = image_decoder.decode(task.clone());
-                            DecorationWorkerCompletion::InlineImage { task, result }
+                            (
+                                tab_id,
+                                DecorationWorkerCompletion::InlineImage { task, result },
+                            )
                         }
-                        MathWorkerRequest::PeekImage { path } => {
+                        MathWorkerRequest::PeekImage { tab_id, path } => {
                             let result = image_decoder.decode(bt_term::InlineImageTask {
                                 occurrence_id: 0,
                                 source: bt_term::InlineImageSource::LocalPath(path.clone()),
                             });
-                            DecorationWorkerCompletion::PeekImage { path, result }
+                            (
+                                tab_id,
+                                DecorationWorkerCompletion::PeekImage { path, result },
+                            )
                         }
                     };
-                    if result_tx.send(MathWorkerResult { completion }).is_err() {
+                    if result_tx
+                        .send(MathWorkerResult {
+                            tab_id: completion.0,
+                            completion: completion.1,
+                        })
+                        .is_err()
+                    {
                         break;
                     }
                     let _ = proxy.send_event(AppEvent::MathReady);
@@ -334,6 +390,7 @@ fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
 }
 
 fn dispatch_decoration_task(
+    tab_id: TabId,
     task: SessionDecorationTask,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
@@ -341,15 +398,16 @@ fn dispatch_decoration_task(
     match task {
         SessionDecorationTask::Math(task) => tasks
             .send(MathWorkerRequest::Math {
+                tab_id,
                 task,
                 foreground_rgb: foreground_rgb(),
             })
             .is_ok(),
-        SessionDecorationTask::InlineImage(task) => {
-            tasks.send(MathWorkerRequest::InlineImage(task)).is_ok()
-        }
+        SessionDecorationTask::InlineImage(task) => tasks
+            .send(MathWorkerRequest::InlineImage { tab_id, task })
+            .is_ok(),
         SessionDecorationTask::ScaleInlineImage(task) => scale_tasks
-            .send(ScaleWorkerRequest::InlineImage(task))
+            .send(ScaleWorkerRequest::InlineImage { tab_id, task })
             .is_ok(),
     }
 }
@@ -357,6 +415,7 @@ fn dispatch_decoration_task(
 /// Drain the real session queue into the renderer channel. A dead optional-decoration worker is
 /// a one-way feature downgrade, never a terminal/runtime error.
 fn dispatch_pending_math_tasks(
+    tab_id: TabId,
     session: &mut DualPlaneSession,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
@@ -367,7 +426,7 @@ fn dispatch_pending_math_tasks(
         return false;
     }
     while let Some(task) = session.take_decoration_worker_task() {
-        if !dispatch_decoration_task(task, tasks, scale_tasks) {
+        if !dispatch_decoration_task(tab_id, task, tasks, scale_tasks) {
             return disable_math_worker_state(running, notice_pending);
         }
     }
@@ -382,20 +441,41 @@ struct DpiSnapshot {
     rect: bt_platform::WindowRect,
 }
 
-struct Runtime {
-    renderer: Renderer,
+/// Everything whose identity follows a tab rather than the native window.
+///
+/// `Runtime` dereferences to its active entry so the single-tab hot path keeps using the exact
+/// same code. Background entries are only touched by the explicit PTY/timeout drains; they never
+/// publish into the window's frame slot.
+struct TabState {
+    id: TabId,
     pty: Option<PtySession>,
     session: DualPlaneSession,
+    shell_fallback_notice: Option<String>,
+    projection: ViewportProjection,
+    grid: GridSize,
+    conpty_grid: GridSize,
+    pending_keyboard_at: Option<Instant>,
+    pending_pty_resize: Option<PendingPtyResize>,
+    pending_psreadline_resize_reanchor: bool,
+    pending_resize_present: Option<GridSize>,
+    seats: seats::Seats,
+    seat_layout: SeatLayout,
+    preview_image: Option<PreviewImageState>,
+}
+
+struct Runtime {
+    renderer: Renderer,
+    tabs: Vec<TabState>,
+    active_tab: usize,
+    next_tab_id: u64,
+    event_proxy: EventLoopProxy<AppEvent>,
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
     /// One-shot startup notice from `PtySession::spawn_default` falling back to `powershell.exe`.
     /// Shown on the first frame published, then discarded — see `shell_fallback_notice` at the
     /// `spawn_default` call site.
-    shell_fallback_notice: Option<String>,
-    projection: ViewportProjection,
     pending_frames: LatestFrameSlot,
-    grid: GridSize,
     /// The size the child has actually been told about — never a size that has only been solved or
     /// queued. It is the same value as `grid` at rest, and the two are deliberately separate only
     /// where they genuinely differ: inside the `WINDOW_RESIZE_QUIET` coalescing window our grid has
@@ -403,11 +483,9 @@ struct Runtime {
     /// (`schedule_grid_change`) neither has moved but a target is queued. Asking "does the child
     /// need to hear this?" of our own grid answers that question with the wrong fact, and a drag
     /// that comes back to where the child already sits would then still send it a resize.
-    conpty_grid: GridSize,
     modifiers: ModifiersState,
-    pending_keyboard_at: Option<Instant>,
     math_context_menu: bt_platform::MathContextMenu,
-    _custom_window_frame: bt_platform::CustomWindowFrame,
+    custom_window_frame: bt_platform::CustomWindowFrame,
     window: Arc<Window>,
     startup_started: Instant,
     trace_startup: bool,
@@ -436,14 +514,11 @@ struct Runtime {
     /// routes keep their own line-quantized accumulators above; the two never pour into each
     /// other, so switching routes cannot dump parked residue as a sudden jump.
     local_wheel_subpixel_remainder: f64,
-    pending_pty_resize: Option<PendingPtyResize>,
     /// One private PSReadLine anchor repair owed by the current resize transaction. ConPTY cursor
     /// reads are a terminal round trip (`CSI 6 n` -> CPR), so writing the chord beside
     /// `PtySession::resize` can make the handler sample a cursor the child has not settled yet.
     /// A boolean is intentional: every commit in one drag replaces the same debt, and only the
     /// final transaction quiescence may pay it.
-    pending_psreadline_resize_reanchor: bool,
-    pending_resize_present: Option<GridSize>,
     hyperlink_hover: HyperlinkHover,
     /// Every image reference the frame currently on screen draws, as the cells that draw it — the
     /// session's scan of that frame, kept because the four verbs must read the *same* list the paint
@@ -459,17 +534,14 @@ struct Runtime {
     /// `PeekThumbnail` for why a single entry is the whole policy.
     peek_thumbnail: Option<PeekThumbnail>,
     peek_thumbnail_pending: Option<PeekThumbnailTarget>,
-    preview_image: Option<PreviewImageState>,
     math_hover_anchor: Option<MathBlockAnchor>,
     math_hover_clear_at: Option<Instant>,
     pending_math_context_anchor: Option<MathBlockAnchor>,
     /// The layout tree this window hosts. A lone terminal leaf by default, which
     /// is today's window written down.
-    seats: seats::Seats,
     /// The most recent answer from `solve`. Every rectangle the renderer and the
     /// input router use comes from here, so the picture and the hit test can
     /// never be two geometries (D4).
-    seat_layout: SeatLayout,
     seat_pointer: seats::ChromePointer,
     /// Rasterized chrome marks, held across frames so a hover repaint costs a
     /// hash lookup rather than eight SVG renders.
@@ -492,6 +564,28 @@ struct Runtime {
     /// Persisted user choice. Under `BT_BG` the process colors are locked but this choice is kept so
     /// a diagnostic launch cannot overwrite the user's real preference on clean exit.
     selected_theme: Theme,
+}
+
+fn active_item<T>(items: &[T], active: usize) -> &T {
+    &items[active]
+}
+
+fn active_item_mut<T>(items: &mut [T], active: usize) -> &mut T {
+    &mut items[active]
+}
+
+impl Deref for Runtime {
+    type Target = TabState;
+
+    fn deref(&self) -> &Self::Target {
+        active_item(&self.tabs, self.active_tab)
+    }
+}
+
+impl DerefMut for Runtime {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        active_item_mut(&mut self.tabs, self.active_tab)
+    }
 }
 
 /// A divider drag in flight. Holds only the split's identity: the geometry is
@@ -1388,6 +1482,151 @@ impl ImeCursorThrottle {
     }
 }
 
+fn focus_leaf_index(seats: &seats::Seats) -> usize {
+    seats
+        .tree()
+        .seats_in_order()
+        .iter()
+        .position(|seat| seat.id == seats.focus())
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabCloseAction {
+    CloseWindow,
+    Keep { active_tab: usize },
+}
+
+fn tab_close_action(tab_count: usize, active_tab: usize, closing: usize) -> TabCloseAction {
+    debug_assert!(tab_count > 0 && active_tab < tab_count && closing < tab_count);
+    if tab_count == 1 {
+        return TabCloseAction::CloseWindow;
+    }
+    let active_tab = if closing == active_tab {
+        closing.min(tab_count - 2)
+    } else if closing < active_tab {
+        active_tab - 1
+    } else {
+        active_tab
+    };
+    TabCloseAction::Keep { active_tab }
+}
+
+fn create_tab_state(
+    id: TabId,
+    seats: seats::Seats,
+    renderer: &Renderer,
+    render_physical: PhysicalSize<u32>,
+    wake: OutputWake,
+    probe_input: Option<&[u8]>,
+) -> Result<(TabState, String)> {
+    let (seat_layout, terminal_seat) = solve_seats(&seats, renderer, render_physical);
+    let grid = renderer
+        .metrics()
+        .grid_for_pixels(terminal_seat.width, terminal_seat.height);
+    let mut pty = if probe_input.is_none() {
+        Some(
+            PtySession::spawn_default(
+                pty_size(
+                    grid,
+                    PhysicalSize::new(terminal_seat.width, terminal_seat.height),
+                ),
+                wake,
+            )
+            .context("spawn default PowerShell in ConPTY")?,
+        )
+    } else {
+        None
+    };
+    let shell_fallback_notice = pty
+        .as_mut()
+        .and_then(PtySession::take_shell_fallback_notice);
+    let conpty_source = pty
+        .as_ref()
+        .map(|pty| pty.conpty_source().to_string())
+        .unwrap_or_else(|| "direct-input".to_string());
+    let columns = nonzero_u32(grid.columns.get());
+    let rows = nonzero_u32(grid.rows.get());
+    let mut session = DualPlaneSession::with_quotas_and_cell_height(
+        columns,
+        rows,
+        DEFAULT_STAGING_QUOTA,
+        M0_FROZEN_LINE_QUOTA,
+        renderer.metrics().cell_height_subpixels(),
+    );
+    session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
+    session.set_ascii_baseline_subpixels(renderer.metrics().ascii_baseline_subpixels());
+    session.set_math_layout_options(MathLayoutOptions {
+        detect_image_paths: true,
+        ..MathLayoutOptions::default()
+    });
+    session.set_layout_key(LayoutKey {
+        width_cells: columns,
+        dpi_milli: renderer.metrics().dpi_milli(),
+        font_rev: 1,
+        theme_rev: theme_revision(),
+    });
+    if let Some(bytes) = probe_input {
+        session
+            .feed(bytes)
+            .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
+    }
+    let projection = session.new_projection(session.layout_key());
+    Ok((
+        TabState {
+            id,
+            pty,
+            session,
+            shell_fallback_notice,
+            projection,
+            grid,
+            conpty_grid: grid,
+            pending_keyboard_at: None,
+            pending_pty_resize: None,
+            pending_psreadline_resize_reanchor: false,
+            pending_resize_present: None,
+            seats,
+            seat_layout,
+            preview_image: None,
+        },
+        conpty_source,
+    ))
+}
+
+fn drain_tab_pty(tab: &mut TabState) -> Result<(bool, bool)> {
+    if tab.pty.is_none() {
+        return Ok((false, false));
+    }
+    let title_before = tab.session.window_title().map(str::to_owned);
+    let mut changed = false;
+    loop {
+        let bytes = tab
+            .pty
+            .as_ref()
+            .expect("PTY mode checked above")
+            .read_output();
+        if bytes.is_empty() {
+            break;
+        }
+        debug_assert!(bytes.len() <= bt_pty::TERM_READ_QUANTUM.get());
+        tab.session
+            .feed_at(&bytes, Instant::now())
+            .context("apply PTY output")?;
+        for reply in tab.session.take_pty_writes() {
+            tab.pty
+                .as_mut()
+                .expect("PTY mode checked above")
+                .write(&reply)
+                .context("return terminal protocol reply to PTY")?;
+        }
+        changed = true;
+    }
+    Ok((
+        changed,
+        tab.session.window_title() != title_before.as_deref(),
+    ))
+}
+
 impl Runtime {
     fn create(
         event_loop: &ActiveEventLoop,
@@ -1473,94 +1712,71 @@ impl Runtime {
         // geometry -> viewport -> solve -> seat rects -> the terminal seat's
         // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
         // it produces here is computed fresh against this machine's DPI.
-        let seats = session_store
-            .loaded()
-            .tabs
-            .first()
-            .and_then(|tab| seats::Seats::from_persisted(&tab.root))
-            .unwrap_or_else(seats::Seats::lone_terminal);
-        let (seat_layout, terminal_seat) = solve_seats(&seats, &renderer, render_physical);
-        renderer.set_seat_viewport(terminal_seat);
-        let grid = renderer
-            .metrics()
-            .grid_for_pixels(terminal_seat.width, terminal_seat.height);
         let probe_input = load_probe_input()?;
         let pty_proxy = proxy.clone();
         let wake: OutputWake = Arc::new(move || {
             let _ = pty_proxy.send_event(AppEvent::PtyOutput);
         });
         let phase_started = Instant::now();
-        let mut pty = if probe_input.is_none() {
-            Some(
-                PtySession::spawn_default(
-                    pty_size(grid, terminal_pty_physical(&renderer, render_physical)),
-                    wake,
-                )
-                .context("spawn default PowerShell in ConPTY")?,
-            )
+        let restored_roots: Vec<_> =
+            if probe_input.is_some() || session_store.loaded().tabs.is_empty() {
+                vec![seats::Seats::lone_terminal()]
+            } else {
+                session_store
+                    .loaded()
+                    .tabs
+                    .iter()
+                    .map(|tab| {
+                        let mut seats = seats::Seats::from_persisted(&tab.root)
+                            .unwrap_or_else(seats::Seats::lone_terminal);
+                        seats.restore_focus_token(&tab.focused_leaf);
+                        seats
+                    })
+                    .collect()
+            };
+        let mut tabs = Vec::with_capacity(restored_roots.len());
+        let mut conpty_sources = Vec::with_capacity(restored_roots.len());
+        for (index, seats) in restored_roots.into_iter().enumerate() {
+            let (tab, conpty_source) = create_tab_state(
+                TabId(index as u64 + 1),
+                seats,
+                &renderer,
+                render_physical,
+                Arc::clone(&wake),
+                if index == 0 {
+                    probe_input.as_deref()
+                } else {
+                    None
+                },
+            )?;
+            tabs.push(tab);
+            conpty_sources.push(conpty_source);
+        }
+        let active_tab = if probe_input.is_some() {
+            0
         } else {
-            None
+            (session_store.loaded().active_tab as usize).min(tabs.len() - 1)
         };
-        // `spawn_default` already fell back to `powershell.exe` and logged the failure if its
-        // resolved shell (a `BT_SHELL` override, or `pwsh.exe`) could not start; surface that
-        // one-line notice on the very first frame through the same status-text channel the
-        // math-worker downgrade notice uses.
-        let shell_fallback_notice = pty
-            .as_mut()
-            .and_then(PtySession::take_shell_fallback_notice);
-        let conpty_source = pty
-            .as_ref()
-            .map(|pty| pty.conpty_source().to_string())
-            .unwrap_or_else(|| "direct-input".to_string());
+        let (_, terminal_seat) = solve_seats(&tabs[active_tab].seats, &renderer, render_physical);
+        renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
-            eprintln!("BT_CONPTY_SOURCE source={conpty_source:?}");
+            eprintln!("BT_CONPTY_SOURCE sources={conpty_sources:?}");
         }
         let pty_time = phase_started.elapsed();
-        let columns = nonzero_u32(grid.columns.get());
-        let rows = nonzero_u32(grid.rows.get());
-        let mut session = DualPlaneSession::with_quotas_and_cell_height(
-            columns,
-            rows,
-            DEFAULT_STAGING_QUOTA,
-            M0_FROZEN_LINE_QUOTA,
-            renderer.metrics().cell_height_subpixels(),
-        );
-        session.set_cell_width_subpixels(cell_width_subpixels(renderer.metrics()));
-        session.set_ascii_baseline_subpixels(renderer.metrics().ascii_baseline_subpixels());
-        session.set_math_layout_options(MathLayoutOptions {
-            detect_image_paths: true,
-            ..MathLayoutOptions::default()
-        });
-        session.set_layout_key(LayoutKey {
-            width_cells: columns,
-            dpi_milli: renderer.metrics().dpi_milli(),
-            font_rev: 1,
-            theme_rev: theme_revision(),
-        });
-        if let Some(bytes) = probe_input.as_deref() {
-            session
-                .feed(bytes)
-                .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
-        }
-        let projection = session.new_projection(session.layout_key());
-        let math_worker = MathWorker::spawn(proxy)?;
+        let math_worker = MathWorker::spawn(proxy.clone())?;
         let mut runtime = Self {
             renderer,
-            pty,
-            session,
+            tabs,
+            active_tab,
+            next_tab_id: conpty_sources.len() as u64 + 1,
+            event_proxy: proxy.clone(),
             math_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
-            shell_fallback_notice,
-            projection,
             pending_frames: LatestFrameSlot::default(),
-            grid,
-            // `PtySession::spawn_default` above was handed exactly this grid.
-            conpty_grid: grid,
             modifiers: ModifiersState::default(),
-            pending_keyboard_at: None,
             math_context_menu,
-            _custom_window_frame: custom_window_frame,
+            custom_window_frame,
             window,
             startup_started,
             trace_startup,
@@ -1585,9 +1801,6 @@ impl Runtime {
             pixel_wheel_remainder: 0.0,
             notch_wheel_remainder: 0.0,
             local_wheel_subpixel_remainder: 0.0,
-            pending_pty_resize: None,
-            pending_psreadline_resize_reanchor: false,
-            pending_resize_present: None,
             hyperlink_hover: HyperlinkHover::default(),
             frame_image_references: FrameImageReferences::default(),
             underlined_image_reference: None,
@@ -1595,12 +1808,9 @@ impl Runtime {
             peek_cache: std::collections::HashMap::new(),
             peek_thumbnail: None,
             peek_thumbnail_pending: None,
-            preview_image: None,
             math_hover_anchor: None,
             math_hover_clear_at: None,
             pending_math_context_anchor: None,
-            seats,
-            seat_layout,
             seat_pointer: seats::ChromePointer::default(),
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
@@ -1617,7 +1827,7 @@ impl Runtime {
         if trace_startup {
             let renderer_phases = runtime.renderer.init_timings();
             eprintln!(
-                "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_source={conpty_source:?} runtime_ready={}ms",
+                "BT_STARTUP window={}ms adapter={}ms device={}ms surface={}ms fonts={}ms metrics={}ms render_resources={}ms renderer_total={}ms pty_spawn={}ms probe_input={} conpty_sources={conpty_sources:?} runtime_ready={}ms",
                 window_time.as_millis(),
                 renderer_phases.adapter.as_millis(),
                 renderer_phases.device.as_millis(),
@@ -1661,6 +1871,92 @@ impl Runtime {
         Ok(runtime)
     }
 
+    fn new_tab(&mut self) -> Result<()> {
+        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        let proxy = self.event_proxy.clone();
+        let wake: OutputWake = Arc::new(move || {
+            let _ = proxy.send_event(AppEvent::PtyOutput);
+        });
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+        let (tab, _) = create_tab_state(
+            id,
+            seats::Seats::lone_terminal(),
+            &self.renderer,
+            render_physical,
+            wake,
+            None,
+        )?;
+        self.tabs.push(tab);
+        self.activate_tab(self.tabs.len() - 1, true)
+    }
+
+    fn activate_tab(&mut self, index: usize, force: bool) -> Result<()> {
+        if index >= self.tabs.len() || (!force && index == self.active_tab) {
+            return Ok(());
+        }
+        self.active_tab = index;
+        let _ = self.pending_frames.take();
+        self.last_presented_frame = None;
+        self.preedit = None;
+        self.mouse_route = None;
+        self.divider_drag = None;
+        self.seat_pointer = seats::ChromePointer::default();
+        self.hyperlink_hover.clear();
+        self.peek_hover.clear();
+        self.renderer.set_peek_overlay(None);
+        self.frame_image_references = FrameImageReferences::default();
+        self.underlined_image_reference = None;
+        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        let next_grid = self.resolve_seat_layout(render_physical);
+        self.schedule_grid_change(
+            next_grid,
+            terminal_pty_physical(&self.renderer, render_physical),
+            Instant::now(),
+            "resize activated tab to its seat layout",
+        )?;
+        self.sync_math_layout_key();
+        self.apply_window_min_inner_size();
+        self.window.set_title(self.display_title());
+        self.refresh_chrome();
+        self.mark_session_dirty(Instant::now());
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })
+    }
+
+    fn close_tab(&mut self, index: usize) -> Result<()> {
+        if index >= self.tabs.len() {
+            return Ok(());
+        }
+        match tab_close_action(self.tabs.len(), self.active_tab, index) {
+            TabCloseAction::CloseWindow => {
+                let hwnd = window_hwnd(&self.window)?;
+                bt_platform::request_window_close(hwnd)
+                    .map_err(|error| anyhow!(error))
+                    .context("request close after the final tab")?;
+            }
+            TabCloseAction::Keep { active_tab } => {
+                let was_active = index == self.active_tab;
+                let mut removed = self.tabs.remove(index);
+                if let Some(pty) = removed.pty.as_mut() {
+                    pty.shutdown()
+                        .context("shut down closed tab child process")?;
+                }
+                self.active_tab = active_tab;
+                if was_active {
+                    self.activate_tab(active_tab, true)?;
+                } else {
+                    self.refresh_chrome();
+                    self.mark_session_dirty(Instant::now());
+                    self.present_chrome_change()?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Re-solve the tree against the current surface and place the terminal
     /// seat. Returns the grid the terminal seat's rectangle asks for.
     ///
@@ -1687,7 +1983,18 @@ impl Runtime {
     /// whether anything visible changed.
     fn refresh_chrome(&mut self) -> bool {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let tab_title = self.session.window_title().map(str::to_owned);
+        let (width, _) = self.renderer.presentation_geometry().swapchain_size;
+        self.custom_window_frame
+            .set_tab_strip_right_px(seats::tab_strip_right_px(
+                width as f32,
+                scale,
+                self.tabs.len(),
+            ));
+        let tab_titles = self
+            .tabs
+            .iter()
+            .map(|tab| display_title(tab.session.window_title()).to_owned())
+            .collect::<Vec<_>>();
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
         let preview_message = match self.preview_image.as_ref() {
             Some(preview) => preview.message(),
@@ -1698,14 +2005,17 @@ impl Runtime {
                 .is_some()
                 .then(|| "Click a dotted path to preview it here".to_owned()),
         };
-        let (quads, labels, sprites) = seats::build_chrome_with_preview(
+        let (quads, labels, sprites) = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
             scale,
             self.seat_pointer,
-            tab_title.as_deref(),
-            preview_title.as_deref(),
-            preview_message.as_deref(),
+            seats::ChromeContent {
+                tab_titles: &tab_titles,
+                active_tab: self.active_tab,
+                preview_title: preview_title.as_deref(),
+                preview_message: preview_message.as_deref(),
+            },
         );
         let icons = self.chrome_marks.resolve(&sprites);
         let chrome_changed = self.renderer.set_chrome(quads, labels, icons);
@@ -1871,26 +2181,19 @@ impl Runtime {
             maximized: self.window.is_maximized(),
             monitor_id: session.window.monitor_id.clone(),
         };
-        session.tabs = vec![TabV1 {
-            root: self.seats.to_persisted(),
-            pinned: false,
-            // Positional rather than a stable id: this slice has no leaf-id
-            // registry to draw from, and the in-order index is a function of
-            // the same tree shape the file already carries, so it cannot point
-            // at a leaf the document does not have.
-            focused_leaf: format!("leaf-{}", self.focus_leaf_index()),
-        }];
-        session.active_tab = 0;
-        session
-    }
-
-    fn focus_leaf_index(&self) -> usize {
-        self.seats
-            .tree()
-            .seats_in_order()
+        session.tabs = self
+            .tabs
             .iter()
-            .position(|seat| seat.id == self.seats.focus())
-            .unwrap_or(0)
+            .map(|tab| TabV1 {
+                root: tab.seats.to_persisted(),
+                pinned: false,
+                // Positional rather than a stable id: the in-order index is a function of the
+                // same tree shape the file carries, so it cannot point outside that tree.
+                focused_leaf: format!("leaf-{}", focus_leaf_index(&tab.seats)),
+            })
+            .collect();
+        session.active_tab = self.active_tab as u32;
+        session
     }
 
     /// Record a meaningful change and start the debounce window (§5.1).
@@ -2038,7 +2341,10 @@ impl Runtime {
             if self
                 .math_worker
                 .tasks
-                .send(MathWorkerRequest::PeekImage { path })
+                .send(MathWorkerRequest::PeekImage {
+                    tab_id: self.id,
+                    path,
+                })
                 .is_ok()
             {
                 self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
@@ -2104,7 +2410,10 @@ impl Runtime {
         if self
             .math_worker
             .scale_tasks
-            .send(ScaleWorkerRequest::Preview(task))
+            .send(ScaleWorkerRequest::Preview {
+                tab_id: self.id,
+                task,
+            })
             .is_ok()
         {
             if let Some(preview) = self.preview_image.as_mut() {
@@ -2223,18 +2532,24 @@ impl Runtime {
         if matches!(trigger.source, FrameSource::Keyboard) {
             self.session.release_presentation_hold_for_user_input();
         }
+        let active = self.active_tab;
+        let tasks = self.math_worker.tasks.clone();
+        let scale_tasks = self.math_worker.scale_tasks.clone();
         dispatch_pending_math_tasks(
-            &mut self.session,
-            &self.math_worker.tasks,
-            &self.math_worker.scale_tasks,
+            self.tabs[active].id,
+            &mut self.tabs[active].session,
+            &tasks,
+            &scale_tasks,
             &mut self.math_worker_running,
             &mut self.math_worker_notice_pending,
         );
-        self.session.refresh_projection(&mut self.projection);
-        let mut terminal_frame = self
-            .session
-            .viewport_frame(&mut self.projection)
-            .context("project terminal grid into viewport frame")?;
+        let mut terminal_frame = {
+            let tab = &mut self.tabs[active];
+            tab.session.refresh_projection(&mut tab.projection);
+            tab.session
+                .viewport_frame(&mut tab.projection)
+                .context("project terminal grid into viewport frame")?
+        };
         // State-driven frame hold. Review displacement holds a vanished scroll anchor during a
         // resize reprint. Independently, an unmatched off-band stale-pending DPI record holds the
         // previous complete formula frame while a proven primary reprint is between clear and exact
@@ -2253,9 +2568,10 @@ impl Runtime {
         }
         if self.session.schedule_visible_artifacts(&terminal_frame) != 0 {
             dispatch_pending_math_tasks(
-                &mut self.session,
-                &self.math_worker.tasks,
-                &self.math_worker.scale_tasks,
+                self.tabs[active].id,
+                &mut self.tabs[active].session,
+                &tasks,
+                &scale_tasks,
                 &mut self.math_worker_running,
                 &mut self.math_worker_notice_pending,
             );
@@ -2344,33 +2660,57 @@ impl Runtime {
         loop {
             match self.math_worker.results.try_recv() {
                 Ok(completion) => {
+                    let target_index = self.tabs.iter().position(|tab| tab.id == completion.tab_id);
+                    let target_active = target_index == Some(self.active_tab);
                     changed |= match completion.completion {
                         DecorationWorkerCompletion::Math { task, result } => match *task {
-                            SessionMathTask::Frozen(task) => {
-                                self.session.complete_worker_result(task, result)
-                            }
-                            SessionMathTask::Live(task) => {
-                                self.session.complete_live_worker_result(task, result)
-                            }
+                            SessionMathTask::Frozen(task) => target_index.is_some_and(|index| {
+                                let applied = self.tabs[index]
+                                    .session
+                                    .complete_worker_result(task, result);
+                                target_active && applied
+                            }),
+                            SessionMathTask::Live(task) => target_index.is_some_and(|index| {
+                                let applied = self.tabs[index]
+                                    .session
+                                    .complete_live_worker_result(task, result);
+                                target_active && applied
+                            }),
                         },
                         DecorationWorkerCompletion::InlineImage { task, result } => {
-                            self.remember_decode_for_peek(&task, result.as_ref().ok());
-                            self.session.complete_inline_image_result(task, result)
+                            if target_active {
+                                self.remember_decode_for_peek(&task, result.as_ref().ok());
+                            }
+                            target_index.is_some_and(|index| {
+                                let applied = self.tabs[index]
+                                    .session
+                                    .complete_inline_image_result(task, result);
+                                target_active && applied
+                            })
                         }
-                        DecorationWorkerCompletion::ScaleInlineImage { scaled } => {
-                            self.session.complete_inline_image_scale(scaled)
-                        }
+                        DecorationWorkerCompletion::ScaleInlineImage { scaled } => target_index
+                            .is_some_and(|index| {
+                                let applied =
+                                    self.tabs[index].session.complete_inline_image_scale(scaled);
+                                target_active && applied
+                            }),
                         DecorationWorkerCompletion::PeekImage { path, result } => {
-                            self.complete_peek_image(path, result)?;
+                            if target_active {
+                                self.complete_peek_image(path, result)?;
+                            }
                             // Peek state never enters frames, so no republish is needed.
                             false
                         }
                         DecorationWorkerCompletion::PeekScaledImage { scaled } => {
-                            self.complete_peek_scale(scaled)?;
+                            if target_active {
+                                self.complete_peek_scale(scaled)?;
+                            }
                             false
                         }
                         DecorationWorkerCompletion::PreviewScaledImage { scaled } => {
-                            self.complete_preview_scale(scaled)?;
+                            if target_active {
+                                self.complete_preview_scale(scaled)?;
+                            }
                             false
                         }
                     };
@@ -2382,10 +2722,14 @@ impl Runtime {
                 }
             }
         }
+        let active = self.active_tab;
+        let tasks = self.math_worker.tasks.clone();
+        let scale_tasks = self.math_worker.scale_tasks.clone();
         dispatch_pending_math_tasks(
-            &mut self.session,
-            &self.math_worker.tasks,
-            &self.math_worker.scale_tasks,
+            self.tabs[active].id,
+            &mut self.tabs[active].session,
+            &tasks,
+            &scale_tasks,
             &mut self.math_worker_running,
             &mut self.math_worker_notice_pending,
         );
@@ -2405,10 +2749,14 @@ impl Runtime {
             .is_some_and(|deadline| now >= deadline)
         {
             self.session.advance_live_stability(now);
+            let active = self.active_tab;
+            let tasks = self.math_worker.tasks.clone();
+            let scale_tasks = self.math_worker.scale_tasks.clone();
             let disabled = dispatch_pending_math_tasks(
-                &mut self.session,
-                &self.math_worker.tasks,
-                &self.math_worker.scale_tasks,
+                self.tabs[active].id,
+                &mut self.tabs[active].session,
+                &tasks,
+                &scale_tasks,
                 &mut self.math_worker_running,
                 &mut self.math_worker_notice_pending,
             );
@@ -2491,38 +2839,23 @@ impl Runtime {
     }
 
     fn drain_pty(&mut self) -> Result<()> {
-        if self.pty.is_none() {
-            return Ok(());
-        }
-        let title_before = self.session.window_title().map(str::to_owned);
-        let mut changed = false;
-        loop {
-            let bytes = self
-                .pty
-                .as_ref()
-                .expect("PTY mode checked above")
-                .read_output();
-            if bytes.is_empty() {
-                break;
+        let mut active_changed = false;
+        let mut chrome_changed = false;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let (changed, title_changed) = drain_tab_pty(tab)?;
+            if index == self.active_tab {
+                active_changed = changed;
             }
-            debug_assert!(bytes.len() <= bt_pty::TERM_READ_QUANTUM.get());
-            self.session
-                .feed_at(&bytes, Instant::now())
-                .context("apply PTY output")?;
-            for reply in self.session.take_pty_writes() {
-                self.pty
-                    .as_mut()
-                    .expect("PTY mode checked above")
-                    .write(&reply)
-                    .context("return terminal protocol reply to PTY")?;
-            }
-            changed = true;
+            chrome_changed |= title_changed;
         }
-        if self.session.window_title() != title_before.as_deref() {
+        if chrome_changed {
             self.window.set_title(self.display_title());
             self.refresh_chrome();
+            if !active_changed {
+                self.present_chrome_change()?;
+            }
         }
-        if changed {
+        if active_changed {
             // The vendor parser withholds bytes inside an open DEC 2026 block, so projecting here
             // cannot expose its intermediate state. It can expose ordinary output before a
             // trailing BSU or a completed update before the next BSU; the unchanged-frame gate in
@@ -2533,46 +2866,60 @@ impl Runtime {
     }
 
     fn finish_synchronized_update_if_due(&mut self, now: Instant) -> Result<()> {
-        let due = self
-            .session
-            .synchronized_update_deadline()
-            .is_some_and(|deadline| deadline <= now);
-        if due {
-            let title_before = self.session.window_title().map(str::to_owned);
-            let finished = self
+        let mut active_finished = false;
+        let mut chrome_changed = false;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let due = tab
+                .session
+                .synchronized_update_deadline()
+                .is_some_and(|deadline| deadline <= now);
+            if !due {
+                continue;
+            }
+            let title_before = tab.session.window_title().map(str::to_owned);
+            let finished = tab
                 .session
                 .finish_synchronized_update(now)
                 .context("finish timed-out DEC 2026 synchronized update")?;
-            if self.session.window_title() != title_before.as_deref() {
-                self.window.set_title(self.display_title());
-                self.refresh_chrome();
-            }
-            if !finished {
-                return Ok(());
-            }
+            chrome_changed |= tab.session.window_title() != title_before.as_deref();
+            active_finished |= index == self.active_tab && finished;
+        }
+        if chrome_changed {
+            self.window.set_title(self.display_title());
+            self.refresh_chrome();
+        }
+        if active_finished {
             self.publish_pty_drain_frame(now)?;
         }
         Ok(())
     }
 
     fn finish_resize_if_quiescent(&mut self, now: Instant) -> Result<()> {
-        if self
-            .session
-            .finish_resize_if_quiescent(now)
-            .context("finish ConPTY resize transaction")?
-        {
+        let mut active_finished = false;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            if !tab
+                .session
+                .finish_resize_if_quiescent(now)
+                .context("finish ConPTY resize transaction")?
+            {
+                continue;
+            }
             // `[Console]::CursorLeft/Top` in the PSReadLine handler makes ConPTY ask the terminal
             // `CSI 6 n`. Pay the coalesced repair only after the final resize request *and* every
             // child byte it caused have been quiet. A new geometry event re-opens the transaction,
             // so a divider storm cannot install an intermediate commit's still-moving cursor.
+            let shell_input_region_open = tab.session.shell_input_region_open();
             if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
-                &mut self.pending_psreadline_resize_reanchor,
-                self.session.shell_input_region_open(),
-            ) && let Some(pty) = self.pty.as_mut()
+                &mut tab.pending_psreadline_resize_reanchor,
+                shell_input_region_open,
+            ) && let Some(pty) = tab.pty.as_mut()
             {
                 pty.write(reanchor_input)
                     .context("request PSReadLine anchor repair after resize quiescence")?;
             }
+            active_finished |= index == self.active_tab;
+        }
+        if active_finished {
             self.publish_frame(FrameTrigger {
                 occurred_at: now,
                 source: FrameSource::Expose,
@@ -2598,11 +2945,14 @@ impl Runtime {
         context: &'static str,
     ) -> Result<()> {
         let deferred = self.typed_input_defers_resize();
+        let active = self.active_tab;
+        let conpty_grid = self.tabs[active].conpty_grid;
+        let grid = self.tabs[active].grid;
         let Some(reflow) = plan_grid_change(
-            &mut self.pending_pty_resize,
+            &mut self.tabs[active].pending_pty_resize,
             next_grid,
-            self.conpty_grid,
-            self.grid,
+            conpty_grid,
+            grid,
             physical,
             observed_at,
             deferred,
@@ -2868,7 +3218,10 @@ impl Runtime {
                     if self
                         .math_worker
                         .tasks
-                        .send(MathWorkerRequest::PeekImage { path })
+                        .send(MathWorkerRequest::PeekImage {
+                            tab_id: self.id,
+                            path,
+                        })
                         .is_ok()
                     {
                         self.peek_cache.insert(cache_key, PeekCacheEntry::Pending);
@@ -2897,12 +3250,10 @@ impl Runtime {
         if self
             .math_worker
             .scale_tasks
-            .send(ScaleWorkerRequest::Peek(peek_scale_task(
-                &target,
-                native_rgba,
-                native_width_px,
-                native_height_px,
-            )))
+            .send(ScaleWorkerRequest::Peek {
+                tab_id: self.id,
+                task: peek_scale_task(&target, native_rgba, native_width_px, native_height_px),
+            })
             .is_ok()
         {
             self.peek_thumbnail_pending = Some(target);
@@ -3189,7 +3540,9 @@ impl Runtime {
 
     fn copy_selection(&mut self) -> Result<()> {
         let window = Arc::clone(&self.window);
-        if !copy_selection(&mut self.session, &mut self.projection, |text| {
+        let active = self.active_tab;
+        let tab = &mut self.tabs[active];
+        if !copy_selection(&mut tab.session, &mut tab.projection, |text| {
             write_terminal_clipboard_text(&window, text)
         }) {
             return Ok(());
@@ -3459,18 +3812,24 @@ impl Runtime {
 
     /// Repaint the chrome when the pointer moves onto or off a divider, a close
     /// affordance or a collapsed bar.
-    fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+    fn chrome_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
         let scale = self.renderer.metrics().scale_factor as f32;
         let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
-        let hover = seats::hit_window_chrome(width, scale, position.x, position.y).or_else(|| {
-            seats::hit_chrome(
-                &self.seats,
-                &self.seat_layout,
-                scale,
-                position.x,
-                position.y,
-            )
-        });
+        seats::hit_tab_chrome(width, scale, self.tabs.len(), position.x, position.y)
+            .or_else(|| seats::hit_window_chrome(width, scale, position.x, position.y))
+            .or_else(|| {
+                seats::hit_chrome(
+                    &self.seats,
+                    &self.seat_layout,
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+    }
+
+    fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        let hover = self.chrome_target_at(position);
         if self.seat_pointer.hover == hover {
             return Ok(());
         }
@@ -3534,6 +3893,18 @@ impl Runtime {
         button: MouseButton,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
+        if button == MouseButton::Middle {
+            if state == ElementState::Pressed
+                && let Some(seats::ChromeTarget::Tab(index)) = self.chrome_target_at(position)
+            {
+                self.close_tab(index)?;
+                return Ok(true);
+            }
+            return Ok(matches!(
+                self.chrome_target_at(position),
+                Some(seats::ChromeTarget::Tab(_))
+            ));
+        }
         if button != MouseButton::Left {
             return Ok(false);
         }
@@ -3549,33 +3920,9 @@ impl Runtime {
                 self.mark_session_dirty(Instant::now());
                 return Ok(true);
             }
-            let scale = self.renderer.metrics().scale_factor as f32;
-            let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
-            return Ok(
-                seats::hit_window_chrome(width, scale, position.x, position.y).is_some()
-                    || seats::hit_chrome(
-                        &self.seats,
-                        &self.seat_layout,
-                        scale,
-                        position.x,
-                        position.y,
-                    )
-                    .is_some(),
-            );
+            return Ok(self.chrome_target_at(position).is_some());
         }
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
-        let Some(target) =
-            seats::hit_window_chrome(width, scale, position.x, position.y).or_else(|| {
-                seats::hit_chrome(
-                    &self.seats,
-                    &self.seat_layout,
-                    scale,
-                    position.x,
-                    position.y,
-                )
-            })
-        else {
+        let Some(target) = self.chrome_target_at(position) else {
             // Not on chrome, but possibly not on the terminal either — a press
             // in a preview's body belongs to that seat and must not reach the
             // grid underneath it. With a lone leaf there is no other seat for a
@@ -3620,6 +3967,9 @@ impl Runtime {
                 }
             }
             seats::ChromeTarget::PaneHeader(_) => {}
+            seats::ChromeTarget::Tab(index) => self.activate_tab(index, false)?,
+            seats::ChromeTarget::TabClose(index) => self.close_tab(index)?,
+            seats::ChromeTarget::NewTab => self.new_tab()?,
             seats::ChromeTarget::Settings => self.toggle_settings_panel()?,
             seats::ChromeTarget::Minimize => self.window.set_minimized(true),
             seats::ChromeTarget::Maximize => {
@@ -4077,10 +4427,12 @@ impl Runtime {
 
     fn paste_from_clipboard(&mut self) -> Result<()> {
         let window = Arc::clone(&self.window);
-        let pty = &mut self.pty;
+        let active = self.active_tab;
+        let tab = &mut self.tabs[active];
+        let pty = &mut tab.pty;
         if !paste_from_clipboard(
-            &mut self.session,
-            &mut self.projection,
+            &mut tab.session,
+            &mut tab.projection,
             || {
                 window_hwnd(&window).and_then(|hwnd| {
                     bt_platform::clipboard_text(hwnd)
@@ -4297,9 +4649,11 @@ impl Runtime {
         // call this method. `LayoutKey` contains `theme_rev`, so a theme change must invalidate old
         // textures; the revision enters both the worker gate and GPU texture identity. The session
         // keeps same-source old pixels only while the replacement is pending.
+        let width_cells = nonzero_u32(self.grid.columns.get());
+        let dpi_milli = self.renderer.metrics().dpi_milli();
         self.session.set_layout_key(LayoutKey {
-            width_cells: nonzero_u32(self.grid.columns.get()),
-            dpi_milli: self.renderer.metrics().dpi_milli(),
+            width_cells,
+            dpi_milli,
             font_rev: 1,
             theme_rev: theme_revision(),
         });
@@ -4311,12 +4665,33 @@ impl Runtime {
             .update_scale_factor(scale_factor)
             .context("remeasure terminal font at new DPI")?;
         ensure_metrics_match_authoritative_scale(metrics.scale_factor, scale_factor)?;
-        self.session
-            .set_cell_height_subpixels(metrics.cell_height_subpixels());
-        self.session
-            .set_cell_width_subpixels(cell_width_subpixels(metrics));
-        self.session
-            .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+        for tab in &mut self.tabs {
+            tab.session
+                .set_cell_height_subpixels(metrics.cell_height_subpixels());
+            tab.session
+                .set_cell_width_subpixels(cell_width_subpixels(metrics));
+            tab.session
+                .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+        }
+        Ok(())
+    }
+
+    fn reap_exited_tabs(&mut self) -> Result<()> {
+        let mut exited = Vec::new();
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let Some(pty) = tab.pty.as_mut() else {
+                continue;
+            };
+            if pty.try_wait()?.is_some() {
+                exited.push(index);
+            }
+        }
+        for index in exited.into_iter().rev() {
+            self.close_tab(index)?;
+            if self.tabs.len() == 1 && index == 0 {
+                break;
+            }
+        }
         Ok(())
     }
 
@@ -4397,8 +4772,10 @@ impl Runtime {
         self.mark_session_dirty(Instant::now());
         self.session_store.close();
         self.ime_system_caret.destroy();
-        if let Some(pty) = self.pty.as_mut() {
-            pty.shutdown().context("shut down child process")?;
+        for tab in &mut self.tabs {
+            if let Some(pty) = tab.pty.as_mut() {
+                pty.shutdown().context("shut down child process")?;
+            }
         }
         Ok(())
     }
@@ -4589,13 +4966,24 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         };
         let startup_deadline =
             startup_poll_delay(runtime.first_text_presented).map(|delay| now + delay);
+        let resize_finish_deadline = runtime
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.session.resize_finish_deadline())
+            .min();
+        let synchronized_update_deadline = runtime
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.session.synchronized_update_deadline())
+            .min();
+        let live_stability_deadline = runtime.session.live_stability_deadline();
         let wake_deadline = [
             startup_deadline,
             runtime.ime_cursor_throttle.deadline(),
             pty_resize_deadline,
-            runtime.session.resize_finish_deadline(),
-            runtime.session.synchronized_update_deadline(),
-            runtime.session.live_stability_deadline(),
+            resize_finish_deadline,
+            synchronized_update_deadline,
+            live_stability_deadline,
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
@@ -4610,19 +4998,8 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         .min();
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
-        let Some(pty) = runtime.pty.as_mut() else {
-            return;
-        };
-        match pty.try_wait() {
-            Ok(Some(_)) => {
-                if let Err(error) = runtime.drain_pty().and_then(|_| runtime.shutdown()) {
-                    eprintln!("shell exit cleanup failed: {error:#}");
-                }
-                self.runtime = None;
-                event_loop.exit();
-            }
-            Ok(None) => {}
-            Err(error) => self.fail(event_loop, error.into()),
+        if let Err(error) = runtime.reap_exited_tabs() {
+            self.fail(event_loop, error);
         }
     }
 
@@ -5144,6 +5521,68 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use winit::keyboard::{Key, NamedKey};
+
+    #[test]
+    fn tab_state_machine_creates_switches_and_closes_to_the_adjacent_tab() {
+        let mut tabs = vec!["first"];
+        tabs.push("second");
+        let mut active = tabs.len() - 1;
+        assert_eq!(
+            (tabs.as_slice(), active),
+            (["first", "second"].as_slice(), 1)
+        );
+
+        active = 0;
+        assert_eq!(active, 0, "clicking a tab changes only the active index");
+        assert_eq!(
+            tab_close_action(tabs.len(), active, 0),
+            TabCloseAction::Keep { active_tab: 0 },
+            "closing the active left tab activates its right neighbour"
+        );
+        tabs.remove(0);
+        assert_eq!(tabs, ["second"]);
+        assert_eq!(
+            tab_close_action(tabs.len(), 0, 0),
+            TabCloseAction::CloseWindow,
+            "the last tab delegates to the existing WM_CLOSE path"
+        );
+    }
+
+    #[test]
+    fn closing_a_background_tab_preserves_the_same_active_identity() {
+        assert_eq!(
+            tab_close_action(4, 2, 0),
+            TabCloseAction::Keep { active_tab: 1 }
+        );
+        assert_eq!(
+            tab_close_action(4, 1, 3),
+            TabCloseAction::Keep { active_tab: 1 }
+        );
+    }
+
+    #[test]
+    fn input_routes_only_to_the_active_tab_and_background_output_survives_switching() {
+        let mut writes = [Vec::new(), Vec::new()];
+        let active = 1;
+        active_item_mut(&mut writes, active).extend_from_slice(b"whoami\r");
+        assert!(writes[0].is_empty());
+        assert_eq!(writes[1], b"whoami\r");
+
+        let mut sessions = [
+            DualPlaneSession::new(NonZeroU32::new(20).unwrap(), NonZeroU32::new(2).unwrap()),
+            DualPlaneSession::new(NonZeroU32::new(20).unwrap(), NonZeroU32::new(2).unwrap()),
+        ];
+        sessions[0].feed(b"kept in background").unwrap();
+        let mut projection = sessions[0].new_projection(sessions[0].layout_key());
+        sessions[0].refresh_projection(&mut projection);
+        let frame = sessions[0].viewport_frame(&mut projection).unwrap();
+        let visible = frame
+            .cells
+            .iter()
+            .map(|cell| cell.text.as_str())
+            .collect::<String>();
+        assert!(visible.contains("kept in background"));
+    }
 
     fn hyperlink_hit(uri: &str) -> HyperlinkHit {
         HyperlinkHit {
@@ -6240,6 +6679,7 @@ mod tests {
         let mut notice_pending = false;
 
         assert!(dispatch_pending_math_tasks(
+            TabId(1),
             &mut session,
             &tasks,
             &scale_tasks,
@@ -6264,6 +6704,7 @@ mod tests {
         assert!(!notice_pending);
         assert_eq!(take_math_worker_notice(&mut notice_pending), None);
         assert!(!dispatch_pending_math_tasks(
+            TabId(1),
             &mut session,
             &tasks,
             &scale_tasks,
@@ -6296,11 +6737,17 @@ mod tests {
         let (sender, receiver) = mpsc::channel();
         for width in 1..=128 {
             sender
-                .send(ScaleWorkerRequest::Preview(scale_task("same-path", width)))
+                .send(ScaleWorkerRequest::Preview {
+                    tab_id: TabId(1),
+                    task: scale_task("same-path", width),
+                })
                 .unwrap();
         }
         sender
-            .send(ScaleWorkerRequest::Peek(scale_task("same-path", 17)))
+            .send(ScaleWorkerRequest::Peek {
+                tab_id: TabId(1),
+                task: scale_task("same-path", 17),
+            })
             .unwrap();
         drop(sender);
 
@@ -6363,11 +6810,13 @@ mod tests {
         let (tasks, task_receiver) = mpsc::channel();
         let (scale_tasks, scale_receiver) = mpsc::channel();
         assert!(dispatch_decoration_task(
+            TabId(1),
             SessionDecorationTask::ScaleInlineImage(scale_task("same-path", 128)),
             &tasks,
             &scale_tasks,
         ));
         assert!(dispatch_decoration_task(
+            TabId(1),
             SessionDecorationTask::InlineImage(bt_term::InlineImageTask {
                 occurrence_id: 7,
                 source: bt_term::InlineImageSource::LocalPath(PathBuf::from("same-path.png")),
@@ -6378,14 +6827,17 @@ mod tests {
 
         assert!(matches!(
             scale_receiver.try_recv(),
-            Ok(ScaleWorkerRequest::InlineImage(_))
+            Ok(ScaleWorkerRequest::InlineImage { .. })
         ));
         assert!(matches!(
             task_receiver.try_recv(),
-            Ok(MathWorkerRequest::InlineImage(bt_term::InlineImageTask {
-                occurrence_id: 7,
+            Ok(MathWorkerRequest::InlineImage {
+                task: bt_term::InlineImageTask {
+                    occurrence_id: 7,
+                    ..
+                },
                 ..
-            }))
+            })
         ));
     }
 
