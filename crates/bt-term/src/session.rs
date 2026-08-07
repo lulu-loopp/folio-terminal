@@ -1277,7 +1277,11 @@ impl DualPlaneSession {
         let mut segments = Vec::<LiveImagePathSegment>::new();
         for row in 0..self.live_rows.len() as u32 {
             let captured = self.terminal.visible_row(row)?;
-            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let (text, boundaries) = if captured.continues {
+                captured_row_text_and_boundaries_preserving_trailing_glyphs(&captured)
+            } else {
+                captured_row_text_and_boundaries(&captured)
+            };
             let byte_start = logical_text.len();
             logical_text.push_str(&text);
             segments.push(LiveImagePathSegment {
@@ -6610,7 +6614,11 @@ impl DualPlaneSession {
             let Some(captured) = self.terminal.visible_row(row) else {
                 continue;
             };
-            let (text, boundaries) = captured_row_text_and_boundaries(&captured);
+            let (text, boundaries) = if captured.continues {
+                captured_row_text_and_boundaries_preserving_trailing_glyphs(&captured)
+            } else {
+                captured_row_text_and_boundaries(&captured)
+            };
             let byte_start = logical_text.len();
             logical_text.push_str(&text);
             segments.push(LiveImagePathSegment {
@@ -9562,8 +9570,24 @@ fn captured_cells_text(cells: &[bt_transcript::CapturedCell]) -> String {
 }
 
 fn captured_row_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32)>) {
+    captured_row_text_and_boundaries_with_trailing_glyphs(row, false)
+}
+
+/// The WRAPLINE variant keeps a real trailing whitespace glyph because it separates this row from
+/// the continuation. Glyphless cells remain right-edge padding and contribute nothing.
+fn captured_row_text_and_boundaries_preserving_trailing_glyphs(
+    row: &CapturedRow,
+) -> (String, Vec<(u32, u32)>) {
+    captured_row_text_and_boundaries_with_trailing_glyphs(row, true)
+}
+
+fn captured_row_text_and_boundaries_with_trailing_glyphs(
+    row: &CapturedRow,
+    preserve_trailing_glyphs: bool,
+) -> (String, Vec<(u32, u32)>) {
     let mut text = String::new();
     let mut boundaries = vec![(0, 0)];
+    let mut last_glyph_byte_end = 0;
     for (column, cell) in row.cells.iter().enumerate() {
         if cell.wide_spacer {
             continue;
@@ -9575,6 +9599,11 @@ fn captured_row_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32
             cell.text.as_str()
         };
         text.push_str(cell_text);
+        if !cell.text.is_empty() {
+            // A literal space or tab is still a glyph in the logical line. Only synthetic spaces
+            // contributed by glyphless cells are right-edge padding and may be discarded.
+            last_glyph_byte_end = text.len();
+        }
         let mut cell_end = column + 1;
         while row
             .cells
@@ -9592,7 +9621,11 @@ fn captured_row_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32
             u32::try_from(cell_end).unwrap_or(u32::MAX),
         ));
     }
-    text.truncate(text.trim_end_matches([' ', '\t']).len());
+    text.truncate(if preserve_trailing_glyphs {
+        last_glyph_byte_end
+    } else {
+        text.trim_end_matches([' ', '\t']).len()
+    });
     let final_byte = u32::try_from(text.len()).unwrap_or(u32::MAX);
     boundaries.retain(|(byte, _)| *byte <= final_byte);
     boundaries.sort_unstable();
@@ -18145,6 +18178,72 @@ mod tests {
             reference.cells.first().copied().map(|cell| cell % 9),
             Some(0),
             "the regression shape puts the path at the continuation row's first cell"
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// REGRESSION (user repro 2026-08-07, active PSReadLine input): the same separating space must
+    /// survive while the command is still live and unsubmitted. The wide fixture is the control:
+    /// the detector already finds a path that begins beside `echo`. The narrow fixture puts the
+    /// real space in the last cell of the first row and the path at column zero of its WRAPLINE
+    /// continuation, which must be the same logical text.
+    #[test]
+    fn an_active_command_path_starting_at_the_continuation_row_is_a_frame_reference() {
+        let (directory, path) = temporary_path_image_named("active-continuation.png");
+        let printed = path.display().to_string();
+        let started = Instant::now();
+
+        let references_at = |columns| {
+            let mut session = DualPlaneSession::new(nz(columns), nz(24));
+            enable_path_detection(&mut session);
+            session
+                .feed_at(
+                    format!("\x1b]133;A\x07PS> \x1b]133;B\x07echo {printed}").as_bytes(),
+                    started,
+                )
+                .unwrap();
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL);
+            drain_image_decodes(&mut session);
+            let mut projection = session.new_projection(session.layout_key());
+            let frame = session.viewport_frame(&mut projection).unwrap();
+            let references = session.frame_image_references(&frame);
+            (references, frame)
+        };
+
+        let (wide_references, _) = references_at(160);
+        let wide_reference = wide_references
+            .iter()
+            .find(|reference| reference.path == path)
+            .expect("the active-line control must find a path beginning beside echo");
+        assert!(
+            wide_reference.verified,
+            "the active-line control must verify the same-row path for its dotted underline"
+        );
+        let (references, frame) = references_at(9);
+        let reference = references
+            .iter()
+            .find(|reference| reference.path == path)
+            .expect("the active command path must survive WRAPLINE merging");
+        assert!(
+            reference.verified,
+            "the active continuation path must reach verification for its dotted underline"
+        );
+        assert_eq!(
+            reference.cells.first().copied().map(|cell| cell % 9),
+            Some(0),
+            "the regression shape puts the active path at the continuation row's first cell"
+        );
+        assert!(
+            reference
+                .cells
+                .iter()
+                .all(|cell| frame.cells[*cell as usize]
+                    .style
+                    .flags
+                    .contains(bt_transcript::CellFlags::DOTTED_UNDERLINE)),
+            "every cell of the verified active reference must wear the resting dotted underline"
         );
 
         std::fs::remove_file(&path).unwrap();
