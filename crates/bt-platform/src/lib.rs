@@ -16,6 +16,84 @@ pub enum WheelScrollAmount {
     Page,
 }
 
+/// Geometry consumed by the pure half of the Win32 `WM_NCHITTEST` bridge.
+/// All values are physical pixels; callers derive them from the live window DPI.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CustomFrameMetrics {
+    pub width: i32,
+    pub height: i32,
+    pub title_bar_height: i32,
+    pub caption_button_width: i32,
+    pub caption_button_count: i32,
+    pub resize_border: i32,
+    pub resizable: bool,
+}
+
+/// Win32 non-client regions expressed without Win32 constants so their mapping
+/// can be pinned on every host used by the workspace tests.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CustomFrameHit {
+    Client,
+    Caption,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// Map one client-coordinate point to the native non-client region it represents.
+/// Resize edges win over the title bar, and the complete settings/caption-button
+/// run stays `Client` so the application can paint and handle those buttons.
+#[must_use]
+pub fn custom_frame_hit_test(metrics: CustomFrameMetrics, x: i32, y: i32) -> CustomFrameHit {
+    let border = metrics.resize_border.max(0);
+    let left = metrics.resizable && x >= 0 && x < border;
+    let right = metrics.resizable && x >= metrics.width.saturating_sub(border) && x < metrics.width;
+    let top = metrics.resizable && y >= 0 && y < border;
+    let bottom =
+        metrics.resizable && y >= metrics.height.saturating_sub(border) && y < metrics.height;
+
+    match (left, right, top, bottom) {
+        (true, _, true, _) => return CustomFrameHit::TopLeft,
+        (_, true, true, _) => return CustomFrameHit::TopRight,
+        (true, _, _, true) => return CustomFrameHit::BottomLeft,
+        (_, true, _, true) => return CustomFrameHit::BottomRight,
+        (true, _, _, _) => return CustomFrameHit::Left,
+        (_, true, _, _) => return CustomFrameHit::Right,
+        (_, _, true, _) => return CustomFrameHit::Top,
+        (_, _, _, true) => return CustomFrameHit::Bottom,
+        _ => {}
+    }
+
+    let buttons_width = metrics
+        .caption_button_width
+        .max(0)
+        .saturating_mul(metrics.caption_button_count.max(0));
+    let buttons_left = metrics.width.saturating_sub(buttons_width);
+    if y >= border
+        && y < metrics.title_bar_height.max(border)
+        && (x < buttons_left || x >= metrics.width)
+    {
+        CustomFrameHit::Caption
+    } else {
+        CustomFrameHit::Client
+    }
+}
+
+/// Scale a logical chrome measurement using Win32's 96-DPI baseline.
+#[must_use]
+pub fn logical_px_for_dpi(logical_px: u32, dpi: u32) -> i32 {
+    let scaled = u64::from(logical_px)
+        .saturating_mul(u64::from(dpi.max(1)))
+        .saturating_add(48)
+        / 96;
+    scaled.min(i32::MAX as u64) as i32
+}
+
 #[cfg(windows)]
 mod windows_impl {
     use std::{
@@ -43,19 +121,26 @@ mod windows_impl {
             Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock},
         },
         UI::{
-            HiDpi::GetDpiForWindow,
+            HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi},
             Input::KeyboardAndMouse::GetKeyboardLayout,
             Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass, ShellExecuteW},
             WindowsAndMessaging::{
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
-                GCLP_HBRBACKGROUND, GetCursorPos, GetWindowRect, MF_STRING, PostMessageW,
-                SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL, SetCaretPos, SetClassLongPtrW,
-                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+                GCLP_HBRBACKGROUND, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM,
+                HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
+                HTTOPLEFT, HTTOPRIGHT, IsZoomed, MF_STRING, NCCALCSIZE_PARAMS, PostMessageW,
+                SM_CXFRAME, SM_CXPADDEDBORDER, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
+                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_NCCALCSIZE, WM_NCHITTEST,
             },
         },
     };
 
-    use super::{NonZeroIsize, WheelScrollAmount, WindowRect};
+    use super::{
+        CustomFrameHit, CustomFrameMetrics, NonZeroIsize, WheelScrollAmount, WindowRect,
+        custom_frame_hit_test, logical_px_for_dpi,
+    };
 
     static WINDOW_CLASS_BACKGROUND: OnceLock<Result<(), String>> = OnceLock::new();
     const CF_UNICODETEXT: u32 = 13;
@@ -68,6 +153,175 @@ mod windows_impl {
     const WHEEL_PAGESCROLL: u32 = u32::MAX;
     const DEFERRED_MATH_MENU_MESSAGE: u32 = WM_APP + 0x4b7;
     const MATH_MENU_SUBCLASS_ID: usize = 0x4254_4d4d;
+    const CUSTOM_FRAME_SUBCLASS_ID: usize = 0x4254_4346;
+    const TITLE_BAR_LOGICAL_PX: u32 = 40;
+    const CAPTION_BUTTON_LOGICAL_PX: u32 = 46;
+    const CAPTION_BUTTON_COUNT: i32 = 4;
+
+    /// Keeps winit's ordinary overlapped-window styles (and therefore native
+    /// snap, resize borders, minimize animation and system-menu semantics) while
+    /// extending the client area through the system caption.
+    pub struct CustomWindowFrame {
+        hwnd: HWND,
+    }
+
+    impl CustomWindowFrame {
+        pub fn install(hwnd: NonZeroIsize) -> Result<Self, String> {
+            let hwnd = HWND(hwnd.get() as *mut c_void);
+            let installed = unsafe {
+                SetWindowSubclass(
+                    hwnd,
+                    Some(custom_frame_subclass),
+                    CUSTOM_FRAME_SUBCLASS_ID,
+                    0,
+                )
+            };
+            if !installed.as_bool() {
+                return Err(format!(
+                    "SetWindowSubclass(custom frame) failed: {}",
+                    unsafe { GetLastError().0 }
+                ));
+            }
+            // Re-run non-client calculation now that the subclass owns it. No
+            // position, size or z-order changes are requested.
+            if let Err(error) = unsafe {
+                SetWindowPos(
+                    hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            } {
+                let _ = unsafe {
+                    RemoveWindowSubclass(
+                        hwnd,
+                        Some(custom_frame_subclass),
+                        CUSTOM_FRAME_SUBCLASS_ID,
+                    )
+                };
+                return Err(format!("SetWindowPos(SWP_FRAMECHANGED) failed: {error}"));
+            }
+            Ok(Self { hwnd })
+        }
+    }
+
+    impl Drop for CustomWindowFrame {
+        fn drop(&mut self) {
+            let _ = unsafe {
+                RemoveWindowSubclass(
+                    self.hwnd,
+                    Some(custom_frame_subclass),
+                    CUSTOM_FRAME_SUBCLASS_ID,
+                )
+            };
+        }
+    }
+
+    unsafe extern "system" fn custom_frame_subclass(
+        hwnd: HWND,
+        message: u32,
+        wparam: WPARAM,
+        lparam: LPARAM,
+        _subclass_id: usize,
+        _reference_data: usize,
+    ) -> LRESULT {
+        match message {
+            WM_NCCALCSIZE => {
+                // A zoomed overlapped window deliberately extends its outer
+                // resize frame beyond the monitor. With the entire outer rect
+                // made client, those pixels would clip our titlebar/content.
+                // Keep that invisible native frame as a maximized inset while
+                // still removing the ordinary system caption everywhere else.
+                if wparam.0 != 0 && lparam.0 != 0 && unsafe { IsZoomed(hwnd) }.as_bool() {
+                    let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+                    let border = native_resize_border(dpi);
+                    let params = unsafe { &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS) };
+                    params.rgrc[0].left = params.rgrc[0].left.saturating_add(border);
+                    params.rgrc[0].top = params.rgrc[0].top.saturating_add(border);
+                    params.rgrc[0].right = params.rgrc[0].right.saturating_sub(border);
+                    params.rgrc[0].bottom = params.rgrc[0].bottom.saturating_sub(border);
+                }
+                LRESULT(0)
+            }
+            WM_NCHITTEST => {
+                let mut client = RECT::default();
+                if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
+                    return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+                }
+                let mut point = POINT {
+                    x: low_word_signed(lparam.0),
+                    y: high_word_signed(lparam.0),
+                };
+                if !unsafe { windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point) }
+                    .as_bool()
+                {
+                    return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+                }
+                let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+                let resize_border = if unsafe { IsZoomed(hwnd) }.as_bool() {
+                    0
+                } else {
+                    native_resize_border(dpi)
+                };
+                let hit = custom_frame_hit_test(
+                    CustomFrameMetrics {
+                        width: client.right.saturating_sub(client.left),
+                        height: client.bottom.saturating_sub(client.top),
+                        title_bar_height: logical_px_for_dpi(TITLE_BAR_LOGICAL_PX, dpi),
+                        caption_button_width: logical_px_for_dpi(CAPTION_BUTTON_LOGICAL_PX, dpi),
+                        caption_button_count: CAPTION_BUTTON_COUNT,
+                        resize_border,
+                        resizable: resize_border > 0,
+                    },
+                    point.x,
+                    point.y,
+                );
+                LRESULT(match hit {
+                    CustomFrameHit::Client => HTCLIENT,
+                    CustomFrameHit::Caption => HTCAPTION,
+                    CustomFrameHit::Left => HTLEFT,
+                    CustomFrameHit::Right => HTRIGHT,
+                    CustomFrameHit::Top => HTTOP,
+                    CustomFrameHit::Bottom => HTBOTTOM,
+                    CustomFrameHit::TopLeft => HTTOPLEFT,
+                    CustomFrameHit::TopRight => HTTOPRIGHT,
+                    CustomFrameHit::BottomLeft => HTBOTTOMLEFT,
+                    CustomFrameHit::BottomRight => HTBOTTOMRIGHT,
+                } as isize)
+            }
+            _ => unsafe { DefSubclassProc(hwnd, message, wparam, lparam) },
+        }
+    }
+
+    fn low_word_signed(value: isize) -> i32 {
+        (value as u16 as i16) as i32
+    }
+
+    fn high_word_signed(value: isize) -> i32 {
+        ((value as usize >> 16) as u16 as i16) as i32
+    }
+
+    fn native_resize_border(dpi: u32) -> i32 {
+        unsafe {
+            GetSystemMetricsForDpi(SM_CXFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi)
+        }
+        .max(1)
+    }
+
+    pub fn request_window_close(hwnd: NonZeroIsize) -> Result<(), String> {
+        unsafe {
+            PostMessageW(
+                Some(HWND(hwnd.get() as *mut c_void)),
+                WM_CLOSE,
+                WPARAM(0),
+                LPARAM(0),
+            )
+        }
+        .map_err(|error| format!("PostMessageW(WM_CLOSE) failed: {error}"))
+    }
 
     /// Ask Windows to open one already-policy-checked target with its registered default handler.
     /// Scheme allowlisting deliberately belongs to the caller; this bridge only supplies the
@@ -745,7 +999,85 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    ImeSystemCaret, MathContextMenu, clipboard_text, get_dpi_for_window, get_window_rect,
-    get_work_area, install_window_class_background, open_local_file, set_clipboard_text,
-    shell_execute, wheel_scroll_amount,
+    CustomWindowFrame, ImeSystemCaret, MathContextMenu, clipboard_text, get_dpi_for_window,
+    get_window_rect, get_work_area, install_window_class_background, open_local_file,
+    request_window_close, set_clipboard_text, shell_execute, wheel_scroll_amount,
 };
+
+#[cfg(test)]
+mod custom_frame_tests {
+    use super::*;
+
+    fn metrics(dpi: u32) -> CustomFrameMetrics {
+        CustomFrameMetrics {
+            width: logical_px_for_dpi(960, dpi),
+            height: logical_px_for_dpi(600, dpi),
+            title_bar_height: logical_px_for_dpi(40, dpi),
+            caption_button_width: logical_px_for_dpi(46, dpi),
+            caption_button_count: 4,
+            resize_border: logical_px_for_dpi(8, dpi),
+            resizable: true,
+        }
+    }
+
+    /// Red gate: every region returned to Windows is pinned, including corners
+    /// (which must win over caption), the drag band and the app-owned buttons.
+    #[test]
+    fn custom_frame_hit_test_maps_drag_resize_edges_and_caption_buttons() {
+        let m = metrics(96);
+        assert_eq!(custom_frame_hit_test(m, 0, 0), CustomFrameHit::TopLeft);
+        assert_eq!(custom_frame_hit_test(m, 959, 0), CustomFrameHit::TopRight);
+        assert_eq!(custom_frame_hit_test(m, 0, 599), CustomFrameHit::BottomLeft);
+        assert_eq!(
+            custom_frame_hit_test(m, 959, 599),
+            CustomFrameHit::BottomRight
+        );
+        assert_eq!(custom_frame_hit_test(m, 0, 300), CustomFrameHit::Left);
+        assert_eq!(custom_frame_hit_test(m, 959, 300), CustomFrameHit::Right);
+        assert_eq!(custom_frame_hit_test(m, 400, 0), CustomFrameHit::Top);
+        assert_eq!(custom_frame_hit_test(m, 400, 599), CustomFrameHit::Bottom);
+        assert_eq!(custom_frame_hit_test(m, 300, 20), CustomFrameHit::Caption);
+        assert_eq!(custom_frame_hit_test(m, 800, 20), CustomFrameHit::Client);
+        assert_eq!(custom_frame_hit_test(m, 300, 60), CustomFrameHit::Client);
+    }
+
+    /// DPI changes scale both the logical title/button geometry and the resize
+    /// band; testing equivalent logical points catches a hard-coded 96-DPI map.
+    #[test]
+    fn custom_frame_hit_test_is_dpi_scaled() {
+        for dpi in [96, 120, 144, 168, 192, 240] {
+            let m = metrics(dpi);
+            assert_eq!(
+                custom_frame_hit_test(m, logical_px_for_dpi(200, dpi), logical_px_for_dpi(20, dpi),),
+                CustomFrameHit::Caption,
+                "drag region at {dpi} DPI"
+            );
+            assert_eq!(
+                custom_frame_hit_test(
+                    m,
+                    m.width - logical_px_for_dpi(23, dpi),
+                    logical_px_for_dpi(20, dpi),
+                ),
+                CustomFrameHit::Client,
+                "caption button at {dpi} DPI"
+            );
+            assert_eq!(
+                custom_frame_hit_test(m, 1, m.height / 2),
+                CustomFrameHit::Left,
+                "resize border at {dpi} DPI"
+            );
+        }
+    }
+
+    #[test]
+    fn maximized_frame_has_no_resize_hits_but_keeps_caption_dragging() {
+        let mut m = metrics(144);
+        m.resizable = false;
+        m.resize_border = 0;
+        assert_eq!(custom_frame_hit_test(m, 0, 0), CustomFrameHit::Caption);
+        assert_eq!(
+            custom_frame_hit_test(m, m.width - 1, 1),
+            CustomFrameHit::Client
+        );
+    }
+}

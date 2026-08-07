@@ -40,8 +40,7 @@ pub(crate) const DEFAULT_PEEK_BORDER_RGB: [u8; 3] = [0x76, 0x76, 0x76];
 /// Every colour the window's own chrome is drawn in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChromePalette {
-    /// A non-terminal seat's body fill. Matches the canvas so an empty pane
-    /// reads as "nothing here yet" rather than as a second product.
+    /// A non-terminal seat's body fill. Exactly `--termbg`, matching terminal.
     pub seat_body: [u8; 3],
     /// A seat title bar's fill: one quiet step off the canvas.
     pub title_bar: [u8; 3],
@@ -65,15 +64,33 @@ pub struct ChromePalette {
     pub collapse_bar: [u8; 3],
     /// The same bar under the pointer.
     pub collapse_bar_hover: [u8; 3],
+    /// Window title-bar button hover (`--hover`) composited over `--panel`.
+    pub caption_hover: [u8; 3],
+    /// Destructive window-close hover from `.capbtn.close-w:hover`.
+    pub caption_close_hover: [u8; 3],
+    /// Ink on the destructive close hover.
+    pub caption_close_text: [u8; 3],
+    /// The active horizontal tab, which joins the terminal surface.
+    pub active_tab: [u8; 3],
+    /// The pane-head surface: exactly `--termbg`, not panel chrome.
+    pub pane_head: [u8; 3],
+    /// `--border-soft` composited over the pane-head surface.
+    pub pane_head_edge: [u8; 3],
+    /// Unfocused `.panehead` ink (`--ink3`) over its terminal surface.
+    pub pane_title: [u8; 3],
+    /// Focused `.panehead` ink (`--ink`) over its terminal surface.
+    pub pane_title_focus: [u8; 3],
+    /// The mock-up accent used by structural pane/tab marks.
+    pub accent: [u8; 3],
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
 /// alpha hairlines pre-composited over the surface each one actually sits on
-/// (our chrome quads are opaque): `--win #202020`, `--panel #252525`,
+/// (our chrome quads are opaque): `--termbg #1B1B1B`, `--panel #252525`,
 /// `--ink/2/3` at .87/.55/.38 white, `--border` at .094 white,
 /// `--accent #828FFF`.
 pub const DARK_CHROME: ChromePalette = ChromePalette {
-    seat_body: [0x20, 0x20, 0x20],
+    seat_body: [0x1b, 0x1b, 0x1b],
     title_bar: [0x25, 0x25, 0x25],
     title_bar_edge: [0x3a, 0x3a, 0x3a],
     title_text: [0x9d, 0x9d, 0x9d],
@@ -84,6 +101,15 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     divider_active: [0x82, 0x8f, 0xff],
     collapse_bar: [0x25, 0x25, 0x25],
     collapse_bar_hover: [0x31, 0x31, 0x31],
+    caption_hover: [0x31, 0x31, 0x31],
+    caption_close_hover: [0xe5, 0x48, 0x4d],
+    caption_close_text: [0xff, 0xff, 0xff],
+    active_tab: [0x1b, 0x1b, 0x1b],
+    pane_head: [0x1b, 0x1b, 0x1b],
+    pane_head_edge: [0x29, 0x29, 0x29],
+    pane_title: [0x75, 0x75, 0x75],
+    pane_title_focus: [0xe1, 0xe1, 0xe1],
+    accent: [0x82, 0x8f, 0xff],
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -102,6 +128,15 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     divider_active: [0x5e, 0x6a, 0xd2],
     collapse_bar: [0xf7, 0xf7, 0xf5],
     collapse_bar_hover: [0xe9, 0xe9, 0xe8],
+    caption_hover: [0xec, 0xec, 0xea],
+    caption_close_hover: [0xe5, 0x48, 0x4d],
+    caption_close_text: [0xff, 0xff, 0xff],
+    active_tab: [0xff, 0xff, 0xff],
+    pane_head: [0xff, 0xff, 0xff],
+    pane_head_edge: [0xf1, 0xf1, 0xf1],
+    pane_title: [0xa5, 0xa4, 0xa1],
+    pane_title_focus: [0x37, 0x35, 0x2f],
+    accent: [0x5e, 0x6a, 0xd2],
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -121,6 +156,16 @@ fn chrome_palette_for_background(background: [u8; 3]) -> ChromePalette {
 
 /// A seat title bar's height, in logical pixels.
 pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 28.0;
+/// The self-drawn window title bar (`--titleh`).
+pub const WINDOW_TITLE_BAR_LOGICAL_PX: f32 = 40.0;
+/// Every settings/min/max/close box in `.capbtn`.
+pub const WINDOW_CAPTION_BUTTON_LOGICAL_PX: f32 = 46.0;
+/// The active horizontal tab's height.
+pub const WINDOW_TAB_HEIGHT_LOGICAL_PX: f32 = 34.0;
+/// `--tabr`, shared by the active tab's two top corners.
+pub const WINDOW_TAB_RADIUS_LOGICAL_PX: f32 = 7.0;
+/// One tab's CSS cap; this slice draws exactly one current-session tab.
+pub const WINDOW_TAB_MAX_WIDTH_LOGICAL_PX: f32 = 200.0;
 /// A seat title's font size, in logical pixels.
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 13.0;
 /// The inset between a title bar's edge and its text, in logical pixels.
@@ -249,6 +294,12 @@ mod tests {
         // wrong one cannot pass unnoticed.
         assert_ne!(DARK_CHROME.title_bar, LIGHT_CHROME.title_bar);
         assert_ne!(DARK_CHROME.divider_active, LIGHT_CHROME.divider_active);
+        assert_eq!(DARK_CHROME.caption_hover, [0x31, 0x31, 0x31]);
+        assert_eq!(LIGHT_CHROME.caption_hover, [0xec, 0xec, 0xea]);
+        assert_eq!(DARK_CHROME.caption_close_hover, [0xe5, 0x48, 0x4d]);
+        assert_eq!(LIGHT_CHROME.caption_close_hover, [0xe5, 0x48, 0x4d]);
+        assert_eq!(DARK_CHROME.active_tab, DEFAULT_BACKGROUND_RGB);
+        assert_eq!(LIGHT_CHROME.active_tab, [0xff, 0xff, 0xff]);
     }
 
     #[test]

@@ -27,7 +27,9 @@ use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
     ChromeLabel, ChromeQuad, SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX,
     SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
-    SeatViewport, chrome_palette,
+    SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX,
+    chrome_palette,
 };
 
 /// §2.5 asks `bt-layout` to hold its own subpixel denominator and to pin it
@@ -193,14 +195,14 @@ impl Seats {
         metrics: &SeatMetrics,
         work_area: WorkAreaHint,
     ) -> Option<LogicalSize> {
-        // No chrome is subtracted from the window today: the seat tree owns the
-        // whole client area. When a sidebar or a card column arrives, its extent
-        // enters here and nowhere else.
         window_min_inner_size(
             &self.tree,
             metrics,
             self.focus,
-            LogicalSize::ZERO,
+            LogicalSize {
+                width: LogicalPx::ZERO,
+                height: LogicalPx::px(WINDOW_TITLE_BAR_LOGICAL_PX as i64),
+            },
             work_area,
         )
     }
@@ -374,8 +376,8 @@ pub fn seat_metrics(dpi_milli: u32) -> SeatMetrics {
     SeatMetrics::ruled(scale_ppm(dpi_milli))
 }
 
-/// The viewport rectangle, in logical pixels, for a client area of this many
-/// device pixels.
+/// The seats viewport rectangle, in logical pixels, for a client area of this
+/// many device pixels. Its top is the lower edge of the 40px window title bar.
 ///
 /// The rounding here is the exact inverse of the solver's boundary snapping: a
 /// lone leaf's rectangle *is* this viewport, and snapping it back must land on
@@ -383,12 +385,20 @@ pub fn seat_metrics(dpi_milli: u32) -> SeatMetrics {
 /// fractional DPI. It does: the inverse errs by at most half a subpixel, which
 /// re-snaps to under 0.002 device pixels at any scale this product will meet.
 pub fn logical_viewport(width_px: u32, height_px: u32, scale_ppm: u32) -> LogicalRect {
+    let title_px =
+        logical_to_device(WINDOW_TITLE_BAR_LOGICAL_PX, scale_ppm).min(height_px.saturating_sub(1));
     LogicalRect::new(
         LogicalPx::ZERO,
-        LogicalPx::ZERO,
+        device_to_logical(title_px, scale_ppm),
         device_to_logical(width_px, scale_ppm),
         device_to_logical(height_px, scale_ppm),
     )
+}
+
+fn logical_to_device(logical_px: f32, scale_ppm: u32) -> u32 {
+    (logical_px * scale_ppm as f32 / 1_000_000.0)
+        .round()
+        .max(0.0) as u32
 }
 
 fn device_to_logical(device_px: u32, scale_ppm: u32) -> LogicalPx {
@@ -408,28 +418,39 @@ pub fn seat_viewport(layout: &SeatLayout, seat: SeatId) -> Option<SeatViewport> 
     })
 }
 
+/// A pane's content rectangle, excluding the common 28px pane head. In
+/// particular this is the only rectangle allowed to derive terminal rows.
+pub fn pane_body_viewport(layout: &SeatLayout, seat: SeatId, scale: f32) -> Option<SeatViewport> {
+    let mut viewport = seat_viewport(layout, seat)?;
+    let head_height = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let consumed = head_height.min(viewport.height.saturating_sub(1));
+    viewport.y = viewport.y.saturating_add(consumed);
+    viewport.height = viewport.height.saturating_sub(consumed).max(1);
+    Some(viewport)
+}
+
 /// The drawable body of a preview seat, excluding its existing title bar.
 pub fn preview_body_viewport(
     layout: &SeatLayout,
     seat: SeatId,
     scale: f32,
 ) -> Option<SeatViewport> {
-    let mut viewport = seat_viewport(layout, seat)?;
-    let title_height = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
-    let consumed = title_height.min(viewport.height.saturating_sub(1));
-    viewport.y = viewport.y.saturating_add(consumed);
-    viewport.height = viewport.height.saturating_sub(consumed).max(1);
-    Some(viewport)
+    pane_body_viewport(layout, seat, scale)
 }
 
 /// Something in the chrome the pointer can be over.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChromeTarget {
     Divider(SplitId),
-    /// A seat's title-bar close affordance.
-    Close(SeatId),
     /// A collapsed seat's bar (§2.6.3): the whole strip is clickable.
     CollapseBar(SeatId),
+    /// The common pane head. Tool buttons arrive in a later slice; for now the
+    /// bar is chrome and therefore never terminal input.
+    PaneHeader(SeatId),
+    Settings,
+    Minimize,
+    Maximize,
+    CloseWindow,
 }
 
 /// What the pointer is over, in device pixels of the window.
@@ -462,11 +483,9 @@ pub fn hit_chrome(
             }
             continue;
         }
-        if placement.id == seats.terminal() {
-            continue;
-        }
-        if contains(close_button_rect(rect, scale), x, y) {
-            return Some(ChromeTarget::Close(placement.id));
+        let head_bottom = (rect[1] + SEAT_TITLE_BAR_LOGICAL_PX * scale).min(rect[3]);
+        if contains([rect[0], rect[1], rect[2], head_bottom], x, y) {
+            return Some(ChromeTarget::PaneHeader(placement.id));
         }
     }
     for slot in seats.split_slots(layout) {
@@ -475,6 +494,29 @@ pub fn hit_chrome(
         }
     }
     None
+}
+
+/// Hit-test the four application-owned boxes at the right edge of the title
+/// bar. The remaining title area is deliberately absent: Win32 owns it through
+/// `HTCAPTION`, not winit client input.
+pub fn hit_window_chrome(width: f32, scale: f32, x: f64, y: f64) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    let title = WINDOW_TITLE_BAR_LOGICAL_PX * scale;
+    if y < 0.0 || y >= title || x < 0.0 || x >= width {
+        return None;
+    }
+    let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+    let run_left = (width - 4.0 * button).max(0.0);
+    if x < run_left {
+        return None;
+    }
+    let index = ((x - run_left) / button).floor() as u32;
+    match index {
+        0 => Some(ChromeTarget::Settings),
+        1 => Some(ChromeTarget::Minimize),
+        2 => Some(ChromeTarget::Maximize),
+        _ => Some(ChromeTarget::CloseWindow),
+    }
 }
 
 /// Whether this device point lands inside the terminal seat's own rectangle.
@@ -512,16 +554,6 @@ fn hit_band(slot: SplitSlot, scale: f32) -> [f32; 4] {
     }
 }
 
-fn close_button_rect(seat: [f32; 4], scale: f32) -> [f32; 4] {
-    let bar = SEAT_TITLE_BAR_LOGICAL_PX * scale;
-    [
-        (seat[2] - bar).max(seat[0]),
-        seat[1],
-        seat[2],
-        seat[1] + bar,
-    ]
-}
-
 /// The pointer state the chrome's colours depend on.
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ChromePointer {
@@ -556,6 +588,13 @@ pub fn build_chrome_with_preview(
     let palette = chrome_palette();
     let mut quads = Vec::new();
     let mut labels = Vec::new();
+    let surface_width = layout
+        .rects
+        .iter()
+        .filter_map(|placement| placement.device_rect)
+        .map(|rect| rect.right as f32)
+        .fold(1.0, f32::max);
+    window_chrome(surface_width, scale, pointer.hover, &mut quads, &mut labels);
     for placement in &layout.rects {
         let Some(device) = placement.device_rect else {
             continue;
@@ -586,31 +625,37 @@ pub fn build_chrome_with_preview(
                 );
             }
             Presentation::Full => {
-                if placement.id == seats.terminal() {
-                    // The terminal draws itself, into its own seat viewport.
-                    continue;
-                }
                 let bar = SEAT_TITLE_BAR_LOGICAL_PX * scale;
                 let title_bottom = (rect[1] + bar).min(rect[3]);
-                quads.push(ChromeQuad {
-                    rect: [rect[0], title_bottom, rect[2], rect[3]],
-                    color: palette.seat_body,
-                });
+                if placement.id != seats.terminal() {
+                    quads.push(ChromeQuad {
+                        rect: [rect[0], title_bottom, rect[2], rect[3]],
+                        color: palette.seat_body,
+                    });
+                }
                 quads.push(ChromeQuad {
                     rect: [rect[0], rect[1], rect[2], title_bottom],
-                    color: palette.title_bar,
+                    color: palette.pane_head,
                 });
                 // The hairline that makes the bar a caption rather than a stripe.
                 let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
                 if title_bottom + edge <= rect[3] {
                     quads.push(ChromeQuad {
                         rect: [rect[0], title_bottom, rect[2], title_bottom + edge],
-                        color: palette.title_bar_edge,
+                        color: palette.pane_head_edge,
                     });
                 }
                 let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
-                let close = close_button_rect(rect, scale);
-                let close_hovered = pointer.hover == Some(ChromeTarget::Close(placement.id));
+                let icon_size = 13.0 * scale;
+                let icon_left = rect[0] + pad;
+                labels.push(ChromeLabel {
+                    text: pane_icon(placement.kind).to_owned(),
+                    rect: [icon_left, rect[1], icon_left + icon_size, title_bottom],
+                    font_size_px: 10.0 * scale,
+                    color: palette.accent,
+                    align_right: false,
+                    align_center: true,
+                });
                 labels.push(ChromeLabel {
                     text: if placement.kind == SeatKind::Preview {
                         preview_title.unwrap_or_else(|| seat_title(placement.kind))
@@ -619,26 +664,18 @@ pub fn build_chrome_with_preview(
                     }
                     .to_owned(),
                     rect: [
-                        rect[0] + pad,
+                        icon_left + icon_size + 7.0 * scale,
                         rect[1],
-                        (close[0] - pad).max(rect[0]),
+                        rect[2] - pad,
                         title_bottom,
                     ],
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                    color: palette.title_text,
-                    align_right: false,
-                    align_center: false,
-                });
-                labels.push(ChromeLabel {
-                    text: "\u{00d7}".to_owned(),
-                    rect: [close[0], close[1], close[2] - pad, title_bottom],
-                    font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                    color: if close_hovered {
-                        palette.title_text_hover
+                    color: if placement.id == seats.focus() {
+                        palette.pane_title_focus
                     } else {
-                        palette.title_text
+                        palette.pane_title
                     },
-                    align_right: true,
+                    align_right: false,
                     align_center: false,
                 });
                 if placement.kind == SeatKind::Preview
@@ -678,6 +715,103 @@ pub fn build_chrome_with_preview(
         });
     }
     (quads, labels)
+}
+
+fn window_chrome(
+    width: f32,
+    scale: f32,
+    hover: Option<ChromeTarget>,
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ChromeLabel>,
+) {
+    let palette = chrome_palette();
+    let title = WINDOW_TITLE_BAR_LOGICAL_PX * scale;
+    let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
+    quads.push(ChromeQuad {
+        rect: [0.0, 0.0, width, title],
+        color: palette.title_bar,
+    });
+    quads.push(ChromeQuad {
+        rect: [0.0, (title - edge).max(0.0), width, title],
+        color: palette.title_bar_edge,
+    });
+
+    // `.window[data-tabs="horizontal"] .titlebar .drag` starts at `--tabr`;
+    // the one active tab is 34px tall, capped at 200px, and joins the content
+    // at the title bar's lower edge. Four nested rects are the raster equivalent
+    // of the specified 7px rounded top corners without inventing another radius.
+    let radius = WINDOW_TAB_RADIUS_LOGICAL_PX * scale;
+    let tab_left = radius;
+    let tab_right = (tab_left + WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale)
+        .min((width - 4.0 * WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale).max(tab_left));
+    let tab_top = title - WINDOW_TAB_HEIGHT_LOGICAL_PX * scale;
+    if tab_right > tab_left {
+        for inset in [radius, radius * 0.5, radius * 0.2, 0.0] {
+            let top = tab_top + if inset == 0.0 { radius } else { radius - inset };
+            quads.push(ChromeQuad {
+                rect: [tab_left + inset, top, tab_right - inset, title],
+                color: palette.active_tab,
+            });
+        }
+        let icon = 15.0 * scale;
+        let icon_left = tab_left + 12.0 * scale;
+        let icon_top = tab_top + (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale - icon) / 2.0;
+        quads.push(ChromeQuad {
+            rect: [icon_left, icon_top, icon_left + icon, icon_top + icon],
+            color: palette.accent,
+        });
+        labels.push(ChromeLabel {
+            text: "PowerShell".to_owned(),
+            rect: [
+                icon_left + icon + 8.0 * scale,
+                tab_top,
+                tab_right - 6.0 * scale,
+                title,
+            ],
+            font_size_px: 13.0 * scale,
+            color: palette.title_text_hover,
+            align_right: false,
+            align_center: false,
+        });
+    }
+
+    let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+    let run_left = (width - 4.0 * button).max(0.0);
+    let buttons = [
+        (ChromeTarget::Settings, "\u{2699}\u{fe0e}", 14.0),
+        (ChromeTarget::Minimize, "\u{2212}", 10.0),
+        (ChromeTarget::Maximize, "\u{25a1}", 10.0),
+        (ChromeTarget::CloseWindow, "\u{00d7}", 10.0),
+    ];
+    for (index, (target, glyph, font_size)) in buttons.into_iter().enumerate() {
+        let left = run_left + index as f32 * button;
+        let rect = [left, 0.0, (left + button).min(width), title];
+        let hovered = hover == Some(target);
+        if hovered {
+            quads.push(ChromeQuad {
+                rect,
+                color: if target == ChromeTarget::CloseWindow {
+                    palette.caption_close_hover
+                } else {
+                    palette.caption_hover
+                },
+            });
+        }
+        labels.push(ChromeLabel {
+            text: glyph.to_owned(),
+            rect,
+            font_size_px: font_size * scale,
+            color: if hovered && target == ChromeTarget::CloseWindow {
+                palette.caption_close_text
+            } else if hovered {
+                palette.title_text_hover
+            } else {
+                palette.title_text
+            },
+            align_right: false,
+            align_center: true,
+        });
+    }
 }
 
 /// A collapsed seat's bar carries a name and a state icon (§2.6.3) — except in
@@ -726,6 +860,15 @@ fn seat_title(kind: SeatKind) -> &'static str {
         SeatKind::Files => "Files",
         SeatKind::Preview => "Preview",
         SeatKind::Placeholder => "Unavailable",
+    }
+}
+
+fn pane_icon(kind: SeatKind) -> &'static str {
+    match kind {
+        SeatKind::Terminal => "\u{25a0}",
+        SeatKind::Files => "\u{25a4}",
+        SeatKind::Preview => "\u{25c7}",
+        SeatKind::Placeholder => "?",
     }
 }
 
@@ -886,6 +1029,17 @@ mod tests {
         logical_viewport(width, height, scale_ppm(dpi_milli))
     }
 
+    fn seats_surface(width: u32, height: u32, dpi_milli: u32) -> SeatViewport {
+        let title = logical_to_device(WINDOW_TITLE_BAR_LOGICAL_PX, scale_ppm(dpi_milli))
+            .min(height.saturating_sub(1));
+        SeatViewport {
+            x: 0,
+            y: title,
+            width,
+            height: height.saturating_sub(title).max(1),
+        }
+    }
+
     fn solved(seats: &Seats, viewport: LogicalRect, metrics: &SeatMetrics) -> SeatLayout {
         seats
             .solve(viewport, metrics)
@@ -894,16 +1048,15 @@ mod tests {
 
     /// The hard gate of this slice, stated as an equality rather than as a
     /// promise: a lone terminal leaf's rectangle *is* the viewport, and its
-    /// device rectangle *is* the whole surface — no origin, no inset, nothing
-    /// taken off any edge. Every downstream number the terminal computes is a
-    /// function of those two, so if this holds at every DPI the pixels cannot
-    /// have moved.
+    /// device rectangle *is* the surface below the 40px titlebar. Every
+    /// downstream number the terminal computes is a function of that one
+    /// rectangle, so the titlebar cannot be consumed twice or ignored.
     ///
     /// The second half is the red gate: shift the viewport by one physical
     /// pixel and the same assertions fail, so the equality above is testing
     /// something rather than restating a tautology.
     #[test]
-    fn a_lone_leaf_solves_to_the_whole_viewport_and_nothing_is_taken_off_it() {
+    fn title_bar_consumes_40_logical_pixels_and_moves_the_seats_viewport() {
         for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000, 2_500] {
             for (width, height) in [(960u32, 600u32), (1, 1), (1279, 721), (3840, 2160)] {
                 let seats = Seats::lone_terminal();
@@ -918,8 +1071,8 @@ mod tests {
                 );
                 assert_eq!(
                     seat_viewport(&layout, seats.terminal()),
-                    Some(SeatViewport::whole(width, height)),
-                    "{width}x{height} at {dpi_milli} milli-DPI must snap back to the whole surface"
+                    Some(seats_surface(width, height, dpi_milli)),
+                    "{width}x{height} at {dpi_milli} milli-DPI must reserve exactly the title bar"
                 );
 
                 // Red gate: one physical pixel of offset, and the seat is no
@@ -934,28 +1087,108 @@ mod tests {
                 let shifted_layout = solved(&seats, shifted, &metrics);
                 assert_ne!(
                     seat_viewport(&shifted_layout, seats.terminal()),
-                    Some(SeatViewport::whole(width, height)),
+                    Some(seats_surface(width, height, dpi_milli)),
                     "the pin would pass even with an injected offset"
                 );
             }
         }
     }
 
-    /// The other half of the byte-identity argument: with a lone leaf there is
-    /// no chrome at all, so the chrome draw calls are not merely no-ops — they
-    /// are not issued.
+    /// A lone leaf still owns two pieces of chrome now: the window titlebar and
+    /// the terminal pane head. No split/divider is introduced.
     #[test]
-    fn a_lone_leaf_draws_no_chrome_at_all() {
+    fn a_lone_leaf_draws_window_chrome_and_its_terminal_head() {
         let seats = Seats::lone_terminal();
         let metrics = seat_metrics(1_000);
         let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
         let (quads, labels) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
-        assert!(
-            quads.is_empty(),
-            "a lone leaf has no divider and no title bar"
-        );
-        assert!(labels.is_empty());
+        let palette = chrome_palette();
+        assert!(quads.iter().any(|quad| {
+            quad.rect == [0.0, 0.0, 960.0, WINDOW_TITLE_BAR_LOGICAL_PX]
+                && quad.color == palette.title_bar
+        }));
+        assert!(labels.iter().any(|label| label.text == "PowerShell"));
+        assert!(labels.iter().any(|label| label.text == "Terminal"));
+        for glyph in ["\u{2699}\u{fe0e}", "\u{2212}", "\u{25a1}", "\u{00d7}"] {
+            assert!(labels.iter().any(|label| label.text == glyph));
+        }
+        assert!(labels.iter().any(|label| label.text == "\u{25a0}"));
         assert!(hit_chrome(&seats, &layout, 1.0, 480.0, 300.0).is_none());
+    }
+
+    /// Red gate: titlebar primitives, the one active tab, all four caption
+    /// labels, and both ordinary/destructive hover colors must be emitted by the
+    /// production chrome builder.
+    #[test]
+    fn window_chrome_contains_tab_caption_buttons_and_mockup_hover_colors() {
+        let seats = Seats::lone_terminal();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
+        let palette = chrome_palette();
+
+        let (settings_quads, settings_labels) = build_chrome(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                hover: Some(ChromeTarget::Settings),
+                dragging: None,
+            },
+        );
+        assert!(settings_quads.iter().any(|quad| {
+            quad.rect == [776.0, 0.0, 822.0, 40.0] && quad.color == palette.caption_hover
+        }));
+        assert!(settings_quads.iter().any(|quad| {
+            quad.color == palette.active_tab
+                && quad.rect[0] >= WINDOW_TAB_RADIUS_LOGICAL_PX
+                && quad.rect[3] == WINDOW_TITLE_BAR_LOGICAL_PX
+        }));
+        assert!(
+            settings_labels
+                .iter()
+                .any(|label| label.text == "PowerShell")
+        );
+
+        let (close_quads, close_labels) = build_chrome(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                hover: Some(ChromeTarget::CloseWindow),
+                dragging: None,
+            },
+        );
+        assert!(close_quads.iter().any(|quad| {
+            quad.rect == [914.0, 0.0, 960.0, 40.0] && quad.color == palette.caption_close_hover
+        }));
+        assert!(close_labels.iter().any(|label| {
+            label.text == "\u{00d7}" && label.color == palette.caption_close_text
+        }));
+    }
+
+    /// The terminal's head is chrome, never a terminal row. This pins the exact
+    /// physical height passed to `CellMetrics::grid_for_pixels` at every DPI.
+    #[test]
+    fn terminal_body_viewport_deducts_the_common_pane_head_before_grid_sizing() {
+        for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000, 2_500] {
+            let seats = Seats::lone_terminal();
+            let metrics = seat_metrics(dpi_milli);
+            let layout = solved(&seats, viewport_of(1200, 900, dpi_milli), &metrics);
+            let whole = seat_viewport(&layout, seats.terminal()).unwrap();
+            let body =
+                pane_body_viewport(&layout, seats.terminal(), dpi_milli as f32 / 1_000.0).unwrap();
+            let expected_head = logical_to_device(SEAT_TITLE_BAR_LOGICAL_PX, scale_ppm(dpi_milli));
+            assert_eq!(body.y, whole.y + expected_head, "{dpi_milli} milli-DPI");
+            assert_eq!(
+                body.height,
+                whole.height - expected_head,
+                "grid height must exclude the pane head at {dpi_milli} milli-DPI"
+            );
+            assert!(
+                body.height < whole.height,
+                "red gate: passing the seat rectangle itself would count head pixels as rows"
+            );
+        }
     }
 
     /// PIN (styling pass): a preview state notice is a quiet centred note in the
@@ -978,7 +1211,7 @@ mod tests {
         );
         let notice = labels
             .iter()
-            .find(|label| label.align_center)
+            .find(|label| label.text == "Loading sunset.svg\u{2026}")
             .expect("the state notice must exist and be the centred label");
         assert_eq!(notice.text, "Loading sunset.svg\u{2026}");
         let palette = chrome_palette();
@@ -994,7 +1227,7 @@ mod tests {
             .iter()
             .find(|label| label.text.starts_with("sunset.svg"))
             .expect("the title carries the file name and dimensions");
-        assert_eq!(title.color, palette.title_text);
+        assert_eq!(title.color, palette.pane_title);
         assert!(!title.align_center);
     }
 
@@ -1200,19 +1433,14 @@ mod tests {
             let narrowed = seat_viewport(
                 &solved(
                     &Seats::lone_terminal(),
-                    viewport_of(opened.width, opened.height, dpi_milli),
+                    viewport_of(opened.width, height, dpi_milli),
                     &metrics,
                 ),
                 SeatId(1),
             )
             .expect("a lone leaf keeps a rectangle");
-            assert_eq!(
-                narrowed,
-                SeatViewport::whole(opened.width, opened.height),
-                "a lone leaf in a {}x{} window is that window at {dpi_milli} milli-DPI",
-                opened.width,
-                opened.height
-            );
+            let expected = seats_surface(opened.width, height, dpi_milli);
+            assert_eq!(narrowed, expected);
             assert_eq!(
                 (narrowed.width, narrowed.height),
                 (opened.width, opened.height),
@@ -1234,7 +1462,7 @@ mod tests {
                 seats.terminal(),
             )
             .expect("the terminal keeps a rectangle");
-            assert_eq!(closed, SeatViewport::whole(width, height));
+            assert_eq!(closed, seats_surface(width, height, dpi_milli));
         }
     }
 

@@ -400,6 +400,7 @@ struct Runtime {
     modifiers: ModifiersState,
     pending_keyboard_at: Option<Instant>,
     math_context_menu: bt_platform::MathContextMenu,
+    _custom_window_frame: bt_platform::CustomWindowFrame,
     window: Arc<Window>,
     startup_started: Instant,
     trace_startup: bool,
@@ -1399,6 +1400,9 @@ impl Runtime {
         install_theme_class_background(&window)?;
         window.set_ime_allowed(true);
         let hwnd = window_hwnd(&window)?;
+        let custom_window_frame = bt_platform::CustomWindowFrame::install(hwnd)
+            .map_err(|error| anyhow!(error))
+            .context("install self-drawn Win32 window frame")?;
         let ime_system_caret = bt_platform::ImeSystemCaret::new(hwnd);
         let math_context_menu = bt_platform::MathContextMenu::new(hwnd)
             .map_err(|error| anyhow!(error))
@@ -1526,6 +1530,7 @@ impl Runtime {
             modifiers: ModifiersState::default(),
             pending_keyboard_at: None,
             math_context_menu,
+            _custom_window_frame: custom_window_frame,
             window,
             startup_started,
             trace_startup,
@@ -3260,13 +3265,16 @@ impl Runtime {
     /// affordance or a collapsed bar.
     fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let hover = seats::hit_chrome(
-            &self.seats,
-            &self.seat_layout,
-            scale,
-            position.x,
-            position.y,
-        );
+        let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
+        let hover = seats::hit_window_chrome(width, scale, position.x, position.y).or_else(|| {
+            seats::hit_chrome(
+                &self.seats,
+                &self.seat_layout,
+                scale,
+                position.x,
+                position.y,
+            )
+        });
         if self.seat_pointer.hover == hover {
             return Ok(());
         }
@@ -3310,27 +3318,43 @@ impl Runtime {
             return Ok(false);
         }
         if state == ElementState::Released {
-            let Some(drag) = self.divider_drag.take() else {
-                return Ok(false);
-            };
-            let _ = drag;
-            self.seat_pointer.dragging = None;
-            if self.refresh_chrome() {
-                self.present_chrome_change()?;
+            if self.divider_drag.take().is_some() {
+                self.seat_pointer.dragging = None;
+                if self.refresh_chrome() {
+                    self.present_chrome_change()?;
+                }
+                // The end of a drag is a meaningful change (§5.1): the ratio that
+                // was being explored is now the ratio the user chose.
+                self.mark_session_dirty(Instant::now());
+                return Ok(true);
             }
-            // The end of a drag is a meaningful change (§5.1): the ratio that
-            // was being explored is now the ratio the user chose.
-            self.mark_session_dirty(Instant::now());
-            return Ok(true);
+            let scale = self.renderer.metrics().scale_factor as f32;
+            let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
+            return Ok(
+                seats::hit_window_chrome(width, scale, position.x, position.y).is_some()
+                    || seats::hit_chrome(
+                        &self.seats,
+                        &self.seat_layout,
+                        scale,
+                        position.x,
+                        position.y,
+                    )
+                    .is_some(),
+            );
         }
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(target) = seats::hit_chrome(
-            &self.seats,
-            &self.seat_layout,
-            scale,
-            position.x,
-            position.y,
-        ) else {
+        let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
+        let Some(target) =
+            seats::hit_window_chrome(width, scale, position.x, position.y).or_else(|| {
+                seats::hit_chrome(
+                    &self.seats,
+                    &self.seat_layout,
+                    scale,
+                    position.x,
+                    position.y,
+                )
+            })
+        else {
             // Not on chrome, but possibly not on the terminal either — a press
             // in a preview's body belongs to that seat and must not reach the
             // grid underneath it. With a lone leaf there is no other seat for a
@@ -3363,19 +3387,6 @@ impl Runtime {
                     self.present_chrome_change()?;
                 }
             }
-            seats::ChromeTarget::Close(seat) => {
-                let metrics = self.seat_metrics();
-                let closed_preview = self.seats.preview() == Some(seat);
-                if self.seats.close_seat(&metrics, seat) {
-                    if closed_preview {
-                        self.preview_image = None;
-                        self.renderer.set_preview_image(None);
-                    }
-                    self.seat_pointer = seats::ChromePointer::default();
-                    self.apply_window_min_inner_size();
-                    self.commit_seat_geometry()?;
-                }
-            }
             seats::ChromeTarget::CollapseBar(seat) => {
                 // §2.6.3: clicking a collapsed bar expands it, by promoting it
                 // to the focus — W2 then makes it the last seat to fall, and
@@ -3385,6 +3396,17 @@ impl Runtime {
                     self.apply_window_min_inner_size();
                     self.commit_seat_geometry()?;
                 }
+            }
+            seats::ChromeTarget::PaneHeader(_) | seats::ChromeTarget::Settings => {}
+            seats::ChromeTarget::Minimize => self.window.set_minimized(true),
+            seats::ChromeTarget::Maximize => {
+                self.window.set_maximized(!self.window.is_maximized());
+            }
+            seats::ChromeTarget::CloseWindow => {
+                let hwnd = window_hwnd(&self.window)?;
+                bt_platform::request_window_close(hwnd)
+                    .map_err(|error| anyhow!(error))
+                    .context("request self-drawn caption close")?;
             }
         }
         Ok(true)
@@ -4710,7 +4732,12 @@ fn solve_seats(
     let layout = seats
         .solve(viewport, &metrics)
         .unwrap_or_else(|_| seats::fit_what_fits(seats, viewport, &metrics));
-    let terminal = seats::seat_viewport(&layout, seats.terminal()).unwrap_or(SeatViewport::whole(
+    let terminal = seats::pane_body_viewport(
+        &layout,
+        seats.terminal(),
+        renderer.metrics().scale_factor as f32,
+    )
+    .unwrap_or(SeatViewport::whole(
         render_physical.width.max(1),
         render_physical.height.max(1),
     ));
@@ -6287,10 +6314,12 @@ mod tests {
         let layout = seats
             .solve(viewport, &metrics)
             .unwrap_or_else(|_| seats::fit_what_fits(seats, viewport, &metrics));
-        seats::seat_viewport(&layout, seats.terminal()).unwrap_or(bt_render::SeatViewport::whole(
-            render_physical.width.max(1),
-            render_physical.height.max(1),
-        ))
+        seats::pane_body_viewport(&layout, seats.terminal(), dpi_milli as f32 / 1_000.0).unwrap_or(
+            bt_render::SeatViewport::whole(
+                render_physical.width.max(1),
+                render_physical.height.max(1),
+            ),
+        )
     }
 
     /// PIN (startup order): a session restore with a preview seat open must spawn ConPTY at the
