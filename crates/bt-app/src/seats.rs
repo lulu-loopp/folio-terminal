@@ -1826,4 +1826,87 @@ mod tests {
             .collect();
         assert_eq!(kinds, vec![SeatKind::Terminal, SeatKind::Placeholder]);
     }
+
+    /// The chrome at one DPI, with a preview open so the terminal wears a head.
+    fn chrome_at(dpi_milli: u32) -> (Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+        let (_, labels, sprites) = build_chrome_with_preview(
+            &seats,
+            &layout,
+            dpi_milli as f32 / 1000.0,
+            ChromePointer::default(),
+            None,
+            None,
+        );
+        (labels, sprites)
+    }
+
+    fn vertical_centre(rect: [f32; 4]) -> f32 {
+        (rect[1] + rect[3]) / 2.0
+    }
+
+    /// PIN — the active tab's mark and its title hang off one axis.
+    ///
+    /// `.tab { display: flex; align-items: center }` in the mock-up: the mark box
+    /// and the title share the tab's own centre line. Both are placed from that
+    /// centre with the *same* rounding — the mark's box is rounded to whole
+    /// physical pixels so its texture lands on the grid, and the title's rect is
+    /// the tab itself — so no DPI can open a step between them by rounding one
+    /// down and the other up.
+    #[test]
+    fn tab_mark_and_title_share_one_vertical_axis() {
+        for dpi_milli in [1_000u32, 1_250, 1_500, 2_000] {
+            let (labels, sprites) = chrome_at(dpi_milli);
+            let title_bar = WINDOW_TITLE_BAR_LOGICAL_PX * dpi_milli as f32 / 1000.0;
+            let mark = sprites
+                .iter()
+                .find(|sprite| {
+                    sprite.mark == ChromeMark::ProfilePowerShell && sprite.rect[3] <= title_bar
+                })
+                .expect("the active tab wears the session's profile mark");
+            let title = labels
+                .iter()
+                .find(|label| label.text == "PowerShell")
+                .expect("the active tab carries its session's name");
+            let delta = vertical_centre(mark.rect) - vertical_centre(title.rect);
+            assert!(
+                delta.abs() <= 0.5,
+                "tab mark and title off one axis by {delta} physical px at {dpi_milli} milli-DPI \
+                 (mark {:?}, title {:?})",
+                mark.rect,
+                title.rect
+            );
+        }
+    }
+
+    /// PIN — a pane head's mark and its title hang off one axis, the same way
+    /// `.panehead { display: flex; align-items: center }` hangs them.
+    #[test]
+    fn pane_head_mark_and_title_share_one_vertical_axis() {
+        for dpi_milli in [1_000u32, 1_250, 1_500, 2_000] {
+            let (labels, sprites) = chrome_at(dpi_milli);
+            let title_bar = WINDOW_TITLE_BAR_LOGICAL_PX * dpi_milli as f32 / 1000.0;
+            let mark = sprites
+                .iter()
+                .find(|sprite| {
+                    sprite.mark == ChromeMark::ProfilePowerShell && sprite.rect[1] >= title_bar
+                })
+                .expect("the terminal head wears the session's profile mark");
+            let title = labels
+                .iter()
+                .find(|label| label.text == "Terminal")
+                .expect("the terminal head carries its name");
+            let delta = vertical_centre(mark.rect) - vertical_centre(title.rect);
+            assert!(
+                delta.abs() <= 0.5,
+                "pane head mark and title off one axis by {delta} physical px at {dpi_milli} \
+                 milli-DPI (mark {:?}, title {:?})",
+                mark.rect,
+                title.rect
+            );
+        }
+    }
 }

@@ -549,6 +549,8 @@ pub enum RenderError {
     GlyphRender(String),
     #[error("no usable monospace font metrics were produced")]
     MissingMonospaceMetrics,
+    #[error("no usable chrome sans-serif font metrics were produced")]
+    MissingChromeSansMetrics,
     #[error("surface validation failed")]
     SurfaceValidation,
 }
@@ -1507,6 +1509,9 @@ pub struct Renderer {
     math_texture_refusals: u64,
     textureless_math_blocks: u64,
     metrics: CellMetrics,
+    /// The chrome sans face's cap height per em, resolved once: it is a property
+    /// of the face, so neither a DPI change nor a new title can move it.
+    chrome_cap_height_ratio: f32,
     init_timings: RendererInitTimings,
     text_rows: Vec<Arc<ComposedRow>>,
     status_overlay: Option<Arc<ComposedRow>>,
@@ -2098,9 +2103,11 @@ impl Renderer {
         let font_system_time = phase_started.elapsed();
         let phase_started = Instant::now();
         let metrics = CellMetrics::measure(&mut font_system, scale_factor)?;
+        let mut swash_cache = SwashCache::new();
+        let chrome_cap_height_ratio = chrome_cap_height_ratio(&mut font_system, &mut swash_cache)
+            .ok_or(RenderError::MissingChromeSansMetrics)?;
         let font_metrics_time = phase_started.elapsed();
         let phase_started = Instant::now();
-        let swash_cache = SwashCache::new();
         let cache = Cache::new(&device);
         let viewport = Viewport::new(&device, &cache);
         let chrome_viewport = Viewport::new(&device, &cache);
@@ -2144,6 +2151,7 @@ impl Renderer {
             math_texture_refusals: 0,
             textureless_math_blocks: 0,
             metrics,
+            chrome_cap_height_ratio,
             init_timings: RendererInitTimings {
                 adapter: adapter_time,
                 device: device_time,
@@ -2549,7 +2557,11 @@ impl Renderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let chrome_layouts = shape_chrome_labels(&mut self.font_system, &self.chrome_labels);
+        let chrome_layouts = shape_chrome_labels(
+            &mut self.font_system,
+            &self.chrome_labels,
+            self.chrome_cap_height_ratio,
+        );
         let chrome_prepared = !chrome_layouts.is_empty()
             && prepare_chrome_text_atlas(
                 &mut self.chrome_text_renderer,
@@ -3847,13 +3859,13 @@ struct ChromeTextLayout {
 fn shape_chrome_labels(
     font_system: &mut FontSystem,
     labels: &[ChromeLabel],
+    cap_height_ratio: f32,
 ) -> Vec<ChromeTextLayout> {
     labels
         .iter()
         .filter(|label| !label.text.is_empty() && label.rect[2] > label.rect[0])
         .map(|label| {
             let width = label.rect[2] - label.rect[0];
-            let height = label.rect[3] - label.rect[1];
             let line_height = label.font_size_px * 1.4;
             let mut buffer =
                 Buffer::new(font_system, Metrics::new(label.font_size_px, line_height));
@@ -3877,15 +3889,34 @@ fn shape_chrome_labels(
             } else {
                 label.rect[0]
             };
+            // The axis `.tab { align-items: center }` and `.panehead { align-items:
+            // center }` put every item of the row on. A mark box is centred on it
+            // by `seats.rs`, and what the eye pairs with that mark is the cap band
+            // — cap line down to baseline — because that is the part of a title
+            // that has ink in it at every letter.
+            //
+            // Centring the *line box* instead (all cosmic-text's own half-leading
+            // can do, since it centres the face's ascent+descent box) hands the
+            // band whatever asymmetry the face reserves for accents and tails: the
+            // chrome's own face puts the cap band 0.09em above the line box's
+            // centre, which is ~1.75 physical pixels at 200% — a visible step
+            // between a mark and the word beside it.
+            //
+            // The band is derived from the face's cap height and the rect, never
+            // from the label's own ink, so a title that changes text does not move:
+            // "Preview" and a filename with a descender share one baseline.
+            let axis = (label.rect[1] + label.rect[3]) / 2.0;
+            let baseline = axis + cap_height_ratio * label.font_size_px / 2.0;
+            let baseline_in_buffer = buffer
+                .layout_runs()
+                .next()
+                .map(|run| run.line_y)
+                .expect("a non-empty chrome label shapes into at least one run");
             let [r, g, b] = label.color;
             ChromeTextLayout {
                 buffer,
                 left,
-                // Centre the line box in the bar rather than the ink: the ink's
-                // height depends on which characters were typed, and a title that
-                // shifts when its text changes is worse than one sitting a hair
-                // off centre.
-                top: label.rect[1] + (height - line_height) / 2.0,
+                top: baseline - baseline_in_buffer,
                 bounds: TextBounds {
                     left: label.rect[0].floor() as i32,
                     top: label.rect[1].floor() as i32,
@@ -4551,6 +4582,51 @@ fn text_coordinated_symbol_em_scale(
         return 1.0;
     }
     (cell_width_px / ink_width).min(cap_height_px / ink_height)
+}
+
+/// The chrome's sans-serif face's cap height, as a fraction of its em.
+///
+/// Resolved by shaping, not by asking the database, because `Family::SansSerif`
+/// is a *request*: only a shaped run says which face the request landed on. The
+/// answer is a property of the face alone, so one measurement serves every chrome
+/// label at every DPI and nothing here runs per frame.
+///
+/// The face's published cap height is preferred over its ink: it is exact, where
+/// a raster has already been rounded to whole pixels. A face that publishes none
+/// is measured from the capital's ink box, which is the same quantity said the
+/// long way round.
+fn chrome_cap_height_ratio(
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+) -> Option<f32> {
+    // Any size answers, since the ratio is size-free; a large one keeps the
+    // measured branch's pixel quantisation under a thousandth of an em.
+    const PROBE_PX: f32 = 512.0;
+    let mut buffer = Buffer::new(font_system, Metrics::new(PROBE_PX, PROBE_PX));
+    buffer.set_wrap(Wrap::None);
+    buffer.set_size(None, None);
+    buffer.set_text(
+        "H",
+        &Attrs::new().family(Family::SansSerif),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    let (font_id, font_weight) = buffer
+        .layout_runs()
+        .next()
+        .and_then(|run| run.glyphs.first())
+        .map(|glyph| (glyph.font_id, glyph.font_weight))?;
+    if let Some(font) = font_system.get_font(font_id, font_weight) {
+        let metrics = font.metrics();
+        if let Some(cap_height) = metrics.cap_height
+            && metrics.units_per_em > 0
+        {
+            return Some(cap_height / f32::from(metrics.units_per_em));
+        }
+    }
+    let [_, cap_top, _, cap_bottom] = glyph_ink_bounds(&buffer, font_system, swash_cache)?;
+    Some((cap_bottom - cap_top) / PROBE_PX)
 }
 
 fn glyph_ink_bounds(
@@ -8151,6 +8227,92 @@ mod tests {
             prepare_failure_policy(PrepareError::AtlasFull),
             PrepareFailurePolicy::PresentWithoutText
         );
+    }
+
+    /// The vertical centre of a chrome label's cap band — cap line to baseline,
+    /// the part of a title an icon beside it is read against — once the label has
+    /// been shaped for real.
+    #[cfg(target_os = "windows")]
+    fn cap_band_centre(
+        font_system: &mut FontSystem,
+        cap_height_ratio: f32,
+        label: &ChromeLabel,
+    ) -> f32 {
+        let layouts =
+            shape_chrome_labels(font_system, std::slice::from_ref(label), cap_height_ratio);
+        let layout = layouts.first().expect("the label shapes");
+        let baseline = layout.top
+            + layout
+                .buffer
+                .layout_runs()
+                .next()
+                .expect("the label has a run")
+                .line_y;
+        baseline - cap_height_ratio * label.font_size_px / 2.0
+    }
+
+    /// PIN — the active tab's title sits on the same axis its mark does.
+    ///
+    /// `seats.rs` centres the mark box on the tab's own centre, so the title has
+    /// to put its cap band there too: half-leading alone centres the face's
+    /// ascent+descent box, and the chrome face's is asymmetric enough to leave a
+    /// visible step between the mark and the word (measured on screen at 200%:
+    /// 3.5 physical pixels).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn tab_title_cap_band_centres_on_the_tab() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let cap_height_ratio = chrome_cap_height_ratio(&mut font_system, &mut swash_cache)
+            .expect("the chrome sans face publishes or renders a cap height");
+        for dpi_milli in [1000_u32, 1250, 1500, 2000] {
+            let scale = dpi_milli as f32 / 1000.0;
+            let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            let tab_height = (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round();
+            let tab_top = title - tab_height;
+            let label = ChromeLabel {
+                text: "PowerShell".to_owned(),
+                rect: [64.0, tab_top, 400.0, title],
+                font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
+                color: [255, 255, 255],
+                align_right: false,
+                align_center: false,
+            };
+            let rect_centre = (label.rect[1] + label.rect[3]) / 2.0;
+            let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
+            assert!(
+                (cap_centre - rect_centre).abs() <= 0.5,
+                "tab title cap band off the tab's axis at {dpi_milli} milli-DPI:                  cap centre {cap_centre}, tab centre {rect_centre}"
+            );
+        }
+    }
+
+    /// PIN — a pane head's title sits on the same axis its mark does.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn pane_head_title_cap_band_centres_on_the_head() {
+        let mut font_system = terminal_font_system();
+        let mut swash_cache = SwashCache::new();
+        let cap_height_ratio = chrome_cap_height_ratio(&mut font_system, &mut swash_cache)
+            .expect("the chrome sans face publishes or renders a cap height");
+        for dpi_milli in [1000_u32, 1250, 1500, 2000] {
+            let scale = dpi_milli as f32 / 1000.0;
+            let bar = SEAT_TITLE_BAR_LOGICAL_PX * scale;
+            let label = ChromeLabel {
+                text: "Terminal".to_owned(),
+                rect: [48.0, 0.0, 400.0, bar],
+                font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                color: [255, 255, 255],
+                align_right: false,
+                align_center: false,
+            };
+            let rect_centre = (label.rect[1] + label.rect[3]) / 2.0;
+            let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
+            assert!(
+                (cap_centre - rect_centre).abs() <= 0.5,
+                "pane head title cap band off the head's axis at {dpi_milli} milli-DPI:                  cap centre {cap_centre}, head centre {rect_centre}"
+            );
+        }
     }
 
     #[test]
