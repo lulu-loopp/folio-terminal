@@ -11,8 +11,8 @@ use std::{
 
 /// The product's terminal defaults, from `design/ui-mockup.html` (the approved
 /// styling): dark `--termbg #1B1B1B`, ink `rgba(255,255,255,.87)` composited
-/// over it, light ink `--ink #37352F`. The ANSI 16 remain Campbell — those are
-/// terminal-authored colors, not chrome.
+/// over it, light ink `--ink #37352F`. Explicit ANSI colors remain distinct
+/// from these defaults and use the palette selected by the current theme.
 pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [0x1b, 0x1b, 0x1b];
 pub const LIGHT_BACKGROUND_RGB: [u8; 3] = [0xff, 0xff, 0xff];
 pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xe1, 0xe1, 0xe1];
@@ -551,9 +551,8 @@ pub(crate) fn parse_background_rgb(value: &str) -> Option<[u8; 3]> {
 }
 
 /// ANSI colors 0-15 from Windows Terminal's built-in Campbell scheme, in normal then bright
-/// order. Explicit palette black intentionally matches the default background numerically, while
-/// remaining a separate `TerminalColor` value so SGR 39/49 can resolve through the theme defaults.
-pub(crate) const ANSI_16_RGB: [[u8; 3]; 16] = [
+/// order. This is the dark theme's compatibility palette and must remain byte-for-byte Campbell.
+const DARK_ANSI_16_RGB: [[u8; 3]; 16] = [
     [0x0c, 0x0c, 0x0c],
     [0xc5, 0x0f, 0x1f],
     [0x13, 0xa1, 0x0e],
@@ -572,9 +571,68 @@ pub(crate) const ANSI_16_RGB: [[u8; 3]; 16] = [
     [0xf2, 0xf2, 0xf2],
 ];
 
+/// ANSI colors 0-15 for the light theme, based on VS Code Light+ with Notion ink in slot 0.
+const LIGHT_ANSI_16_RGB: [[u8; 3]; 16] = [
+    [0x37, 0x35, 0x2f],
+    [0xcd, 0x31, 0x31],
+    [0x10, 0x7c, 0x10],
+    [0x94, 0x98, 0x00],
+    [0x04, 0x51, 0xa5],
+    [0xbc, 0x05, 0xbc],
+    [0x05, 0x98, 0xbc],
+    [0x55, 0x55, 0x55],
+    [0x66, 0x66, 0x66],
+    [0xcd, 0x31, 0x31],
+    [0x14, 0xce, 0x14],
+    [0xb5, 0xba, 0x00],
+    [0x04, 0x51, 0xa5],
+    [0xbc, 0x05, 0xbc],
+    [0x05, 0x98, 0xbc],
+    [0xa5, 0xa5, 0xa5],
+];
+
+/// The explicit ANSI palette selected by the process theme.
+pub(crate) fn ansi_16_rgb() -> &'static [[u8; 3]; 16] {
+    ansi_16_rgb_for(current_theme())
+}
+
+const fn ansi_16_rgb_for(theme: Theme) -> &'static [[u8; 3]; 16] {
+    match theme {
+        Theme::Dark => &DARK_ANSI_16_RGB,
+        Theme::Light => &LIGHT_ANSI_16_RGB,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ansi_palettes_pin_campbell_dark_and_light_yellows() {
+        const CAMPBELL: [[u8; 3]; 16] = [
+            [0x0c, 0x0c, 0x0c],
+            [0xc5, 0x0f, 0x1f],
+            [0x13, 0xa1, 0x0e],
+            [0xc1, 0x9c, 0x00],
+            [0x00, 0x37, 0xda],
+            [0x88, 0x17, 0x98],
+            [0x3a, 0x96, 0xdd],
+            [0xcc, 0xcc, 0xcc],
+            [0x76, 0x76, 0x76],
+            [0xe7, 0x48, 0x56],
+            [0x16, 0xc6, 0x0c],
+            [0xf9, 0xf1, 0xa5],
+            [0x3b, 0x78, 0xff],
+            [0xb4, 0x00, 0x9e],
+            [0x61, 0xd6, 0xd6],
+            [0xf2, 0xf2, 0xf2],
+        ];
+        assert_eq!(ansi_16_rgb_for(Theme::Dark), &CAMPBELL);
+        assert_eq!(ansi_16_rgb_for(Theme::Dark)[3], [0xc1, 0x9c, 0x00]);
+        assert_eq!(ansi_16_rgb_for(Theme::Dark)[11], [0xf9, 0xf1, 0xa5]);
+        assert_eq!(ansi_16_rgb_for(Theme::Light)[3], [0x94, 0x98, 0x00]);
+        assert_eq!(ansi_16_rgb_for(Theme::Light)[11], [0xb5, 0xba, 0x00]);
+    }
 
     /// PIN (styling pass): the chrome's dark/light decision is the terminal
     /// ink's decision — same threshold, one switch for the whole product.
