@@ -1,13 +1,20 @@
-//! Built-in terminal colors. M2 can replace this module with user-selectable themes without
-//! changing the renderer's distinction between default colors and explicit ANSI palette colors.
+//! Runtime-selectable built-in terminal and chrome colors, without changing the renderer's
+//! distinction between default colors and explicit ANSI palette colors.
 
-use std::sync::OnceLock;
+use std::{
+    ffi::OsStr,
+    sync::{
+        OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 /// The product's terminal defaults, from `design/ui-mockup.html` (the approved
 /// styling): dark `--termbg #1B1B1B`, ink `rgba(255,255,255,.87)` composited
 /// over it, light ink `--ink #37352F`. The ANSI 16 remain Campbell — those are
 /// terminal-authored colors, not chrome.
 pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [0x1b, 0x1b, 0x1b];
+pub const LIGHT_BACKGROUND_RGB: [u8; 3] = [0xff, 0xff, 0xff];
 pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xe1, 0xe1, 0xe1];
 const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
 /// The mock-up's `--cursor` on dark.
@@ -276,23 +283,161 @@ pub const FLOAT_WINDOW_SHADOW_LOGICAL_PX: f32 = 3.0;
 /// margin that eats the picture serves nobody.
 pub const PREVIEW_BODY_INSET_LOGICAL_PX: f32 = 12.0;
 
-/// Process-wide background selected before the first window or renderer is created.
-///
-/// `BT_BG` is a diagnostic reveal switch, not a second theme system. It stays in sRGB byte form
-/// here so the Win32 class brush and terminal default-color resolution share the same value; the
-/// renderer's existing upload boundary remains the only sRGB-to-linear conversion point.
-pub fn background_rgb() -> [u8; 3] {
-    static BACKGROUND: OnceLock<[u8; 3]> = OnceLock::new();
-    *BACKGROUND.get_or_init(|| {
-        let Some(value) = std::env::var_os("BT_BG") else {
-            return DEFAULT_BACKGROUND_RGB;
+/// The two built-in runtime themes. Theme choice is process-wide because the Win32 class brush is
+/// process-class state and every renderer/worker must agree on default terminal colors.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Theme {
+    #[default]
+    Dark,
+    Light,
+}
+
+impl Theme {
+    #[must_use]
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Dark => Self::Light,
+            Self::Light => Self::Dark,
+        }
+    }
+
+    const fn background(self) -> [u8; 3] {
+        match self {
+            Self::Dark => DEFAULT_BACKGROUND_RGB,
+            Self::Light => LIGHT_BACKGROUND_RGB,
+        }
+    }
+}
+
+/// Result of asking the process theme state to change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ThemeChange {
+    Changed,
+    Unchanged,
+    /// A valid `BT_BG` diagnostic override owns the process colors for its entire lifetime.
+    LockedByEnvironment,
+}
+
+// One acquire load is the complete read path. Keeping background, selected theme, lock bit and
+// revision in the same atomic also prevents readers from combining a new color with an old key.
+//
+// 0: selected theme, 1: BT_BG lock, 2..=25: sRGB background, 26..=63: revision.
+const LOCKED_BIT: u64 = 1 << 1;
+const RGB_SHIFT: u32 = 2;
+const RGB_MASK: u64 = 0x00ff_ffff << RGB_SHIFT;
+const REVISION_SHIFT: u32 = 26;
+const REVISION_MAX: u64 = (1 << (64 - REVISION_SHIFT)) - 1;
+
+struct ThemeState {
+    packed: AtomicU64,
+}
+
+impl ThemeState {
+    fn new(theme: Theme, background: [u8; 3], locked: bool) -> Self {
+        Self {
+            packed: AtomicU64::new(pack_theme_state(theme, background, locked, 1)),
+        }
+    }
+
+    fn from_environment(value: Option<&OsStr>, report: bool) -> Self {
+        let Some(value) = value else {
+            return Self::new(Theme::Dark, DEFAULT_BACKGROUND_RGB, false);
         };
         let Some(rgb) = value.to_str().and_then(parse_background_rgb) else {
-            eprintln!("BT_THEME invalid_BT_BG={value:?} ignored default=#0C0C0C expected=#RRGGBB");
-            return DEFAULT_BACKGROUND_RGB;
+            if report {
+                eprintln!(
+                    "BT_THEME invalid_BT_BG={value:?} ignored default=#1B1B1B expected=#RRGGBB runtime_theme_locked=false"
+                );
+            }
+            return Self::new(Theme::Dark, DEFAULT_BACKGROUND_RGB, false);
         };
-        rgb
-    })
+        if report {
+            eprintln!(
+                "BT_THEME BT_BG_override=#{:02X}{:02X}{:02X} runtime_theme_locked=true",
+                rgb[0], rgb[1], rgb[2]
+            );
+        }
+        Self::new(Theme::Dark, rgb, true)
+    }
+
+    fn load(&self) -> u64 {
+        self.packed.load(Ordering::Acquire)
+    }
+
+    fn set(&self, theme: Theme) -> ThemeChange {
+        let mut current = self.load();
+        loop {
+            if current & LOCKED_BIT != 0 {
+                return ThemeChange::LockedByEnvironment;
+            }
+            if unpack_theme(current) == theme {
+                return ThemeChange::Unchanged;
+            }
+            let revision = unpack_revision(current).saturating_add(1).min(REVISION_MAX);
+            let next = pack_theme_state(theme, theme.background(), false, revision);
+            match self.packed.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return ThemeChange::Changed,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+fn process_theme() -> &'static ThemeState {
+    static THEME: OnceLock<ThemeState> = OnceLock::new();
+    THEME.get_or_init(|| ThemeState::from_environment(std::env::var_os("BT_BG").as_deref(), true))
+}
+
+fn pack_theme_state(theme: Theme, background: [u8; 3], locked: bool, revision: u64) -> u64 {
+    let theme = u64::from(theme == Theme::Light);
+    let locked = if locked { LOCKED_BIT } else { 0 };
+    let rgb = (u64::from(background[0]) << 16)
+        | (u64::from(background[1]) << 8)
+        | u64::from(background[2]);
+    theme | locked | (rgb << RGB_SHIFT) | (revision.min(REVISION_MAX) << REVISION_SHIFT)
+}
+
+fn unpack_theme(packed: u64) -> Theme {
+    if packed & 1 == 0 {
+        Theme::Dark
+    } else {
+        Theme::Light
+    }
+}
+
+fn unpack_background(packed: u64) -> [u8; 3] {
+    let rgb = (packed & RGB_MASK) >> RGB_SHIFT;
+    [
+        ((rgb >> 16) & 0xff) as u8,
+        ((rgb >> 8) & 0xff) as u8,
+        (rgb & 0xff) as u8,
+    ]
+}
+
+fn unpack_revision(packed: u64) -> u64 {
+    packed >> REVISION_SHIFT
+}
+
+/// Switch the process theme. A valid `BT_BG` override returns
+/// [`ThemeChange::LockedByEnvironment`] and leaves all four theme readings untouched.
+pub fn set_theme(theme: Theme) -> ThemeChange {
+    process_theme().set(theme)
+}
+
+/// The selected built-in theme. Under `BT_BG`, this remains dark because the diagnostic override is
+/// deliberately not a third persisted theme.
+pub fn current_theme() -> Theme {
+    unpack_theme(process_theme().load())
+}
+
+/// Process-wide sRGB background, read with one uncontended atomic load on the render hot path.
+pub fn background_rgb() -> [u8; 3] {
+    unpack_background(process_theme().load())
 }
 
 /// Default terminal ink paired with the process theme background. The current product surface
@@ -302,11 +447,11 @@ pub fn foreground_rgb() -> [u8; 3] {
     foreground_for_background(background_rgb())
 }
 
-/// Stable identity for every color which affects theme-authored layout artifacts. A different
-/// `BT_BG` therefore invalidates CPU math rasters and their independently keyed GPU textures even
-/// when it remains on the same side of the dark/light foreground threshold.
+/// Monotonic process identity for theme-authored layout artifacts. `BT_BG` is fixed before any
+/// artifact exists; runtime dark/light changes advance this revision so CPU math rasters and their
+/// independently keyed GPU textures cannot be reused under the new colors.
 pub fn theme_revision() -> u64 {
-    theme_revision_for_colors(background_rgb(), foreground_rgb())
+    unpack_revision(process_theme().load())
 }
 
 fn background_is_light(background: [u8; 3]) -> bool {
@@ -322,19 +467,6 @@ fn foreground_for_background(background: [u8; 3]) -> [u8; 3] {
     } else {
         DEFAULT_FOREGROUND_RGB
     }
-}
-
-fn theme_revision_for_colors(background: [u8; 3], foreground: [u8; 3]) -> u64 {
-    u64::from_be_bytes([
-        1,
-        background[0],
-        background[1],
-        background[2],
-        foreground[0],
-        foreground[1],
-        foreground[2],
-        0,
-    ])
 }
 
 pub(crate) fn parse_background_rgb(value: &str) -> Option<[u8; 3]> {
@@ -446,19 +578,46 @@ mod tests {
     }
 
     #[test]
-    fn foreground_and_revision_cover_dark_light_and_background_changes() {
-        assert_eq!(
-            foreground_for_background([0x1b, 0x1b, 0x1b]),
-            [0xe1, 0xe1, 0xe1]
-        );
-        assert_eq!(
-            foreground_for_background([0xf5, 0xf5, 0xf5]),
-            [0x37, 0x35, 0x2f]
-        );
-        let dark = theme_revision_for_colors([0x1b; 3], [0xe1; 3]);
-        let other_dark = theme_revision_for_colors([0x12, 0x12, 0x12], [0xe1; 3]);
-        let light = theme_revision_for_colors([0xf5; 3], [0x37, 0x35, 0x2f]);
-        assert_ne!(dark, other_dark);
-        assert_ne!(dark, light);
+    fn runtime_switch_changes_all_readings_and_revision_is_monotonic() {
+        let state = ThemeState::new(Theme::Dark, DEFAULT_BACKGROUND_RGB, false);
+        let readings = |packed| {
+            let background = unpack_background(packed);
+            (
+                background,
+                foreground_for_background(background),
+                chrome_palette_for_background(background),
+                unpack_revision(packed),
+            )
+        };
+        let dark = readings(state.load());
+        assert_eq!(state.set(Theme::Light), ThemeChange::Changed);
+        let light = readings(state.load());
+        assert_ne!(dark.0, light.0);
+        assert_ne!(dark.1, light.1);
+        assert_ne!(dark.2, light.2);
+        assert!(light.3 > dark.3);
+
+        assert_eq!(state.set(Theme::Dark), ThemeChange::Changed);
+        let dark_again = readings(state.load());
+        assert_eq!(dark_again.0, dark.0);
+        assert!(dark_again.3 > light.3);
+        assert_eq!(state.set(Theme::Dark), ThemeChange::Unchanged);
+        assert_eq!(readings(state.load()), dark_again);
+    }
+
+    #[test]
+    fn valid_bt_bg_overrides_and_locks_while_invalid_values_keep_dark_unlocked() {
+        let locked = ThemeState::from_environment(Some(OsStr::new("#123456")), false);
+        let before = locked.load();
+        assert_eq!(unpack_background(before), [0x12, 0x34, 0x56]);
+        assert_ne!(before & LOCKED_BIT, 0);
+        assert_eq!(locked.set(Theme::Light), ThemeChange::LockedByEnvironment);
+        assert_eq!(locked.load(), before);
+
+        let invalid = ThemeState::from_environment(Some(OsStr::new("123456")), false);
+        assert_eq!(unpack_background(invalid.load()), DEFAULT_BACKGROUND_RGB);
+        assert_eq!(invalid.load() & LOCKED_BIT, 0);
+        assert_eq!(invalid.set(Theme::Light), ThemeChange::Changed);
+        assert_eq!(unpack_background(invalid.load()), LIGHT_BACKGROUND_RGB);
     }
 }

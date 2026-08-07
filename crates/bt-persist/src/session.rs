@@ -5,12 +5,26 @@ use serde::{Deserialize, Serialize};
 use crate::layout::LayoutNodeV1;
 
 /// Current `schema_version` for `session.json`.
-pub const SESSION_SCHEMA_VERSION: u32 = 1;
+pub const SESSION_SCHEMA_VERSION: u32 = 2;
+
+/// Runtime theme restored with the session. This deliberately has only the two themes the renderer
+/// can apply; `BT_BG` remains a process diagnostic override and is never persisted as a third mode.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionThemeV1 {
+    #[default]
+    Dark,
+    Light,
+}
 
 /// `session.json` v1 top-level structure — docs/M2-persistence-schema-v1.md §3.5.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionV1 {
     pub schema_version: u32,
+    /// Added in schema v2. `default` also makes hand-authored v2 documents with the field omitted
+    /// degrade to the product default rather than losing the entire session.
+    #[serde(default)]
+    pub theme: SessionThemeV1,
     pub window: WindowStateV1,
     pub tabs: Vec<TabV1>,
     pub active_tab: u32,
@@ -21,6 +35,7 @@ impl Default for SessionV1 {
     fn default() -> Self {
         Self {
             schema_version: SESSION_SCHEMA_VERSION,
+            theme: SessionThemeV1::Dark,
             window: WindowStateV1::default(),
             tabs: Vec::new(),
             active_tab: 0,
@@ -161,6 +176,7 @@ mod tests {
     fn default_session_is_empty_at_current_version() {
         let defaults = SessionV1::default();
         assert_eq!(defaults.schema_version, SESSION_SCHEMA_VERSION);
+        assert_eq!(defaults.theme, SessionThemeV1::Dark);
         assert!(defaults.tabs.is_empty());
         assert!(defaults.recent.is_empty());
         assert_eq!(defaults.active_tab, 0);

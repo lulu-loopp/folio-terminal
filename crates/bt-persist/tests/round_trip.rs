@@ -15,8 +15,8 @@
 use std::path::PathBuf;
 
 use bt_persist::{
-    DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, read_session,
-    write_session_atomic,
+    DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, SessionThemeV1,
+    SessionV1, read_session, write_session_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -26,8 +26,15 @@ fn fixture_path(name: &str) -> PathBuf {
 }
 
 fn canonical_bytes() -> Vec<u8> {
-    std::fs::read(fixture_path("session_v1_nondefault_canonical.json"))
-        .expect("canonical fixture must exist")
+    let mut bytes = std::fs::read(fixture_path("session_v1_nondefault_canonical.json"))
+        .expect("canonical fixture must exist");
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+        if bytes.last() == Some(&b'\r') {
+            bytes.pop();
+        }
+    }
+    bytes
 }
 
 #[test]
@@ -44,7 +51,8 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
     // Spot-check individual non-default fields end to end, not just an
     // opaque byte comparison — each of these would fail on its own if the
     // corresponding piece of parsing regressed.
-    assert_eq!(session.schema_version, 1);
+    assert_eq!(session.schema_version, 2);
+    assert_eq!(session.theme, SessionThemeV1::Dark);
     assert_eq!(session.active_tab, 1);
     assert_eq!(session.window.dpi, 144);
     assert!(session.window.maximized);
@@ -81,6 +89,26 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
         String::from_utf8(canonical_bytes()).unwrap(),
         "re-serialized session must match the canonical fixture byte-for-byte"
     );
+}
+
+#[test]
+fn light_theme_round_trips_through_the_public_session_api() {
+    let dir =
+        std::env::temp_dir().join(format!("bt-persist-theme-roundtrip-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("session.json");
+    let session = SessionV1 {
+        theme: SessionThemeV1::Light,
+        ..SessionV1::default()
+    };
+
+    write_session_atomic(&path, &session).unwrap();
+    let (loaded, report, degradation) = read_session(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert!(degradation.is_clean());
+    assert_eq!(loaded, session);
+
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

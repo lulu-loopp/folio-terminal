@@ -19,13 +19,16 @@ use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
 use bt_layout::{Axis, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
-use bt_persist::{SESSION_SCHEMA_VERSION, SessionV1, TabV1, WindowBoundsV1, WindowStateV1};
+use bt_persist::{
+    SESSION_SCHEMA_VERSION, SessionThemeV1, SessionV1, TabV1, WindowBoundsV1, WindowStateV1,
+};
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit, MathHitTarget,
     PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay, Preedit, PresentOutcome, PreviewImage,
-    Renderer, SeatViewport, background_rgb, compose_preedit, foreground_rgb, frame_content_digest,
-    frame_is_alternate_screen, preview_image_extent, theme_revision,
+    Renderer, SeatViewport, Theme, ThemeChange, background_rgb, compose_preedit, foreground_rgb,
+    frame_content_digest, frame_is_alternate_screen, preview_image_extent, set_theme,
+    theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, SessionDecorationTask,
@@ -474,6 +477,9 @@ struct Runtime {
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
     session_store: persist::SessionStore,
+    /// Persisted user choice. Under `BT_BG` the process colors are locked but this choice is kept so
+    /// a diagnostic launch cannot overwrite the user's real preference on clean exit.
+    selected_theme: Theme,
 }
 
 /// A divider drag in flight. Holds only the split's identity: the geometry is
@@ -1384,6 +1390,12 @@ impl Runtime {
         // be the window's opening bounds rather than a correction applied after
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
+        let selected_theme = render_theme(session_store.loaded().theme);
+        if set_theme(selected_theme) == ThemeChange::LockedByEnvironment {
+            eprintln!(
+                "BT_THEME persisted_theme={selected_theme:?} ignored_for_runtime=true reason=BT_BG"
+            );
+        }
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
             .with_title(DEFAULT_PROFILE_TITLE)
@@ -1582,6 +1594,7 @@ impl Runtime {
             divider_drag: None,
             work_area: WorkAreaHint::NeverKnown,
             session_store,
+            selected_theme,
         };
         runtime.refresh_work_area();
         runtime.apply_window_min_inner_size();
@@ -1729,6 +1742,7 @@ impl Runtime {
             .map(|p| (p.x, p.y))
             .unwrap_or((session.window.bounds.x, session.window.bounds.y));
         session.schema_version = SESSION_SCHEMA_VERSION;
+        session.theme = session_theme(self.selected_theme);
         session.window = WindowStateV1 {
             bounds: WindowBoundsV1 {
                 x: (f64::from(position.0) / scale).round() as i32,
@@ -1766,6 +1780,33 @@ impl Runtime {
     fn mark_session_dirty(&mut self, now: Instant) {
         let snapshot = self.session_snapshot();
         self.session_store.record(snapshot, now);
+    }
+
+    /// Commit every theme-dependent surface at one event-loop safe point. Until the resulting frame
+    /// presents, DWM retains the previous complete back buffer; the renderer never submits a frame
+    /// with only one side of this transaction applied.
+    fn apply_theme(&mut self, theme: Theme) -> Result<bool> {
+        match set_theme(theme) {
+            ThemeChange::LockedByEnvironment => {
+                eprintln!(
+                    "BT_THEME switch_ignored={theme:?} reason=BT_BG runtime_theme_locked=true"
+                );
+                Ok(false)
+            }
+            ThemeChange::Unchanged => Ok(false),
+            ThemeChange::Changed => {
+                self.selected_theme = theme;
+                install_theme_class_background(&self.window)?;
+                self.sync_math_layout_key();
+                self.refresh_chrome();
+                self.mark_session_dirty(Instant::now());
+                self.publish_frame(FrameTrigger {
+                    occurred_at: Instant::now(),
+                    source: FrameSource::Expose,
+                })?;
+                Ok(true)
+            }
+        }
     }
 
     /// The dev-only preview toggle, and everything one costs: the tree changes,
@@ -3446,7 +3487,12 @@ impl Runtime {
                     self.commit_seat_geometry()?;
                 }
             }
-            seats::ChromeTarget::PaneHeader(_) | seats::ChromeTarget::Settings => {}
+            seats::ChromeTarget::PaneHeader(_) => {}
+            seats::ChromeTarget::Settings => {
+                if let Some(theme) = theme_requested_by_chrome(target, self.selected_theme) {
+                    self.apply_theme(theme)?;
+                }
+            }
             seats::ChromeTarget::Minimize => self.window.set_minimized(true),
             seats::ChromeTarget::Maximize => {
                 self.window.set_maximized(!self.window.is_maximized());
@@ -4694,6 +4740,24 @@ fn install_theme_class_background(window: &Window) -> Result<()> {
         .context("install theme-colored winit class background brush")
 }
 
+fn render_theme(theme: SessionThemeV1) -> Theme {
+    match theme {
+        SessionThemeV1::Dark => Theme::Dark,
+        SessionThemeV1::Light => Theme::Light,
+    }
+}
+
+fn session_theme(theme: Theme) -> SessionThemeV1 {
+    match theme {
+        Theme::Dark => SessionThemeV1::Dark,
+        Theme::Light => SessionThemeV1::Light,
+    }
+}
+
+fn theme_requested_by_chrome(target: seats::ChromeTarget, current: Theme) -> Option<Theme> {
+    matches!(target, seats::ChromeTarget::Settings).then(|| current.toggled())
+}
+
 fn window_hwnd(window: &Window) -> Result<std::num::NonZeroIsize> {
     let handle = window.window_handle().context("get Win32 window handle")?;
     let RawWindowHandle::Win32(handle) = handle.as_raw() else {
@@ -4949,6 +5013,22 @@ mod tests {
             open_hyperlink_on_release: false,
             local_image_activation: LocalImageActivation::None,
         })
+    }
+
+    #[test]
+    fn settings_gear_requests_the_opposite_runtime_theme() {
+        assert_eq!(
+            theme_requested_by_chrome(seats::ChromeTarget::Settings, Theme::Dark),
+            Some(Theme::Light)
+        );
+        assert_eq!(
+            theme_requested_by_chrome(seats::ChromeTarget::Settings, Theme::Light),
+            Some(Theme::Dark)
+        );
+        assert_eq!(
+            theme_requested_by_chrome(seats::ChromeTarget::Minimize, Theme::Dark),
+            None
+        );
     }
 
     #[test]

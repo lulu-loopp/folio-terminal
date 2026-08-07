@@ -146,7 +146,9 @@ mod windows_impl {
         custom_frame_hit_test, logical_px_for_dpi,
     };
 
-    static WINDOW_CLASS_BACKGROUND: OnceLock<Result<(), String>> = OnceLock::new();
+    /// GDI brush currently owned by this process and installed on winit's shared window class.
+    /// The class itself outlives individual windows; theme switches replace this handle in place.
+    static WINDOW_CLASS_BACKGROUND: OnceLock<Mutex<Option<isize>>> = OnceLock::new();
     const CF_UNICODETEXT: u32 = 13;
     const CLIPBOARD_OPEN_RETRY_DELAYS: [std::time::Duration; 4] = [
         std::time::Duration::from_millis(5),
@@ -897,20 +899,16 @@ mod windows_impl {
     }
 
     pub fn install_window_class_background(hwnd: NonZeroIsize, rgb: [u8; 3]) -> Result<(), String> {
-        WINDOW_CLASS_BACKGROUND
-            .get_or_init(|| install_window_class_background_once(hwnd, rgb))
-            .clone()
-    }
-
-    fn install_window_class_background_once(
-        hwnd: NonZeroIsize,
-        [r, g, b]: [u8; 3],
-    ) -> Result<(), String> {
+        let [r, g, b] = rgb;
         let color = COLORREF(u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16));
+        let mut installed = WINDOW_CLASS_BACKGROUND
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| "window class background brush lock poisoned".to_owned())?;
         // SAFETY: `hwnd` originates from winit's live Win32WindowHandle on the event-loop thread.
-        // CreateSolidBrush returns an independent GDI brush. Once installed, the brush must remain
-        // alive as long as winit's shared class; winit never unregisters that process class, so the
-        // successful path intentionally transfers it to process lifetime. On failure we delete it.
+        // CreateSolidBrush returns an independent GDI brush. SetClassLongPtrW atomically replaces
+        // the class brush; only after that succeeds do we delete the previous brush that *we* own.
+        // The original winit brush returned on the first call is not ours and is never deleted here.
         unsafe {
             let brush = CreateSolidBrush(color);
             if brush.is_invalid() {
@@ -930,6 +928,10 @@ mod windows_impl {
                     "SetClassLongPtrW(GCLP_HBRBACKGROUND) failed: {}",
                     error.0
                 ));
+            }
+            let old_owned = installed.replace(brush.0 as isize);
+            if let Some(old_owned) = old_owned {
+                let _ = DeleteObject(HGDIOBJ(old_owned as *mut c_void));
             }
         }
         Ok(())

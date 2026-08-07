@@ -26,18 +26,24 @@ use serde_json::Value;
 
 /// One migration step: transforms a JSON value at schema_version `N` (the
 /// key it is registered under) into schema_version `N+1`. Structural only —
-/// see this module's doc comment, rule 3. Currently both `settings.json` and
-/// `session.json` are schema_version 1 with no prior version to migrate
-/// from, so [`SETTINGS_MIGRATIONS`]/[`SESSION_MIGRATIONS`] are empty; this
-/// is the scaffold a `schema_version` bump plugs a real step into.
+/// see this module's doc comment, rule 3. `settings.json` is still v1;
+/// `session.json` uses this scaffold for its registered v1-to-v2 theme migration.
 pub type MigrationStep = fn(Value) -> Value;
 
 /// Migration table for `settings.json`. Empty: v1 is the only version that
 /// has ever existed.
 pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
-/// Migration table for `session.json`. Empty: v1 is the only version that
-/// has ever existed.
-pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+/// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
+/// to the historical dark default.
+pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[(1, migrate_session_v1_to_v2)];
+
+fn migrate_session_v1_to_v2(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(2));
+        object.insert("theme".to_owned(), Value::from("dark"));
+    }
+    value
+}
 
 /// Why a read fell back to defaults — surfaced so the caller can build the
 /// "显式告警,绝不假装成功" (§5.3/§5.4) message. Never constructed for the
@@ -221,9 +227,8 @@ mod tests {
         assert_eq!(err, 1);
     }
 
-    /// Proves the scaffold mechanism itself (not any real BetterTerminal
-    /// migration, since none exists yet at v1) using a synthetic two-step
-    /// chain: registering steps 1->2 and 2->3 must apply both in order.
+    /// Proves the scaffold can apply more than the one production step by using a synthetic
+    /// two-step chain: registering steps 1->2 and 2->3 must apply both in order.
     #[test]
     fn scaffold_applies_multiple_registered_steps_in_order() {
         fn v1_to_v2(v: Value) -> Value {
@@ -243,6 +248,19 @@ mod tests {
         assert_eq!(migrated["schema_version"], json!(3));
         assert_eq!(migrated["added_in_v2"], json!("present"));
         assert_eq!(migrated["added_in_v3"], json!(true));
+    }
+
+    #[test]
+    fn real_session_v1_to_v2_migration_adds_the_dark_default() {
+        let migrated = migrate_value(
+            json!({"schema_version": 1, "window": {}}),
+            1,
+            2,
+            SESSION_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(2));
+        assert_eq!(migrated["theme"], json!("dark"));
     }
 
     #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]

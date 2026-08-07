@@ -39,17 +39,17 @@ use theme::{
     FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX,
 };
 pub use theme::{
-    ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, LIGHT_CHROME,
+    ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, LIGHT_BACKGROUND_RGB, LIGHT_CHROME,
     PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
     PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
     SEAT_DIVIDER_VISUAL_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
-    SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
-    WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
+    SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX, Theme,
+    ThemeChange, WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
     WINDOW_CAPTION_GLYPH_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
     WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
     WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
     WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette,
-    foreground_rgb, theme_revision,
+    current_theme, foreground_rgb, set_theme, theme_revision,
 };
 use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
 
@@ -911,6 +911,7 @@ struct ComposedRowKey {
     cells: Vec<CapturedCell>,
     metrics: RowMetricsKey,
     font_revision: u64,
+    theme_revision: u64,
     status_overlay: Option<String>,
 }
 
@@ -918,6 +919,7 @@ impl Hash for ComposedRowKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.metrics.hash(state);
         self.font_revision.hash(state);
+        self.theme_revision.hash(state);
         self.status_overlay.hash(state);
         self.cells.len().hash(state);
         for cell in &self.cells {
@@ -1937,6 +1939,7 @@ impl HeadlessRenderProbe {
             &mut self.status_overlay,
             &mut self.composed_row_cache,
             self.font_revision,
+            theme_revision(),
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.narrow_shaping_cache,
@@ -2918,6 +2921,7 @@ impl Renderer {
             &mut self.status_overlay,
             &mut self.composed_row_cache,
             self.font_revision,
+            theme_revision(),
             &mut self.font_system,
             &mut self.swash_cache,
             &mut self.narrow_shaping_cache,
@@ -3823,6 +3827,7 @@ fn prepare_text_rows(
     status_overlay: &mut Option<Arc<ComposedRow>>,
     composed_row_cache: &mut ComposedRowCache,
     font_revision: u64,
+    theme_revision: u64,
     font_system: &mut FontSystem,
     swash_cache: &mut SwashCache,
     narrow_shaping_cache: &mut NarrowShapingCache,
@@ -3844,6 +3849,7 @@ fn prepare_text_rows(
             cells: source_cells.to_vec(),
             metrics: metrics.into(),
             font_revision,
+            theme_revision,
             status_overlay: None,
         };
         if let Some(row) = composed_row_cache.get(&key) {
@@ -3879,6 +3885,7 @@ fn prepare_text_rows(
             cells: cells.clone(),
             metrics: metrics.into(),
             font_revision,
+            theme_revision,
             status_overlay: Some(status.to_owned()),
         };
         if let Some(row) = composed_row_cache.get(&key) {
@@ -6738,6 +6745,7 @@ mod tests {
             &mut status_overlay,
             &mut row_cache,
             1,
+            1,
             &mut font_system,
             &mut swash_cache,
             &mut narrow_cache,
@@ -6755,6 +6763,7 @@ mod tests {
             &mut text_rows,
             &mut status_overlay,
             &mut row_cache,
+            1,
             1,
             &mut font_system,
             &mut swash_cache,
@@ -6794,6 +6803,7 @@ mod tests {
             &mut text_rows,
             &mut status_overlay,
             &mut row_cache,
+            1,
             1,
             &mut font_system,
             &mut swash_cache,
@@ -7456,6 +7466,7 @@ mod tests {
             &mut legacy_status,
             &mut row_cache,
             1,
+            1,
             &mut font_system,
             &mut swash_cache,
             &mut narrow_cache,
@@ -7470,6 +7481,7 @@ mod tests {
             &mut overscan_rows,
             &mut overscan_status,
             &mut row_cache,
+            1,
             1,
             &mut font_system,
             &mut swash_cache,
@@ -7870,6 +7882,7 @@ mod tests {
             &mut status_overlay,
             &mut row_cache,
             1,
+            1,
             &mut font_system,
             &mut swash_cache,
             &mut narrow_cache,
@@ -7887,6 +7900,7 @@ mod tests {
             &mut text_rows,
             &mut status_overlay,
             &mut row_cache,
+            1,
             1,
             &mut font_system,
             &mut swash_cache,
@@ -7913,6 +7927,7 @@ mod tests {
             &mut text_rows,
             &mut status_overlay,
             &mut row_cache,
+            1,
             1,
             &mut font_system,
             &mut swash_cache,
@@ -7949,6 +7964,7 @@ mod tests {
             cells: vec![base.clone()],
             metrics,
             font_revision: 7,
+            theme_revision: 11,
             status_overlay: None,
         };
         let changed_cell_key = |cell| ComposedRowKey {
@@ -8001,12 +8017,17 @@ mod tests {
             font_revision: 8,
             ..key.clone()
         };
+        let rethemed = ComposedRowKey {
+            theme_revision: 12,
+            ..key.clone()
+        };
         let status = ComposedRowKey {
             status_overlay: Some("status".to_owned()),
             ..key.clone()
         };
         assert_ne!(key, scaled);
         assert_ne!(key, revised);
+        assert_ne!(key, rethemed);
         assert_ne!(key, status);
     }
 

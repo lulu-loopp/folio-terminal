@@ -1,4 +1,4 @@
-//! Schema v1 persistence for `settings.json`/`session.json`, per
+//! Versioned persistence for `settings.json`/`session.json`, based on
 //! `docs/M2-persistence-schema-v1.md` (the authority for every field, file,
 //! and failure path here — this crate does not reinterpret it) and, for the
 //! restart-time consumers of `session.json`'s `term`/`files` leaves,
@@ -48,8 +48,8 @@ pub use migrate::{
 };
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
-    DegradationReport, RecentEntryV1, RecentSeedV1, SESSION_SCHEMA_VERSION, SessionV1, TabV1,
-    WindowBoundsV1, WindowStateV1,
+    DegradationReport, RecentEntryV1, RecentSeedV1, SESSION_SCHEMA_VERSION, SessionThemeV1,
+    SessionV1, TabV1, WindowBoundsV1, WindowStateV1,
 };
 pub use settings::{SETTINGS_SCHEMA_VERSION, SettingsV1, ThemeModeV1};
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};

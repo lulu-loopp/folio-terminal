@@ -1847,8 +1847,9 @@ impl DualPlaneSession {
 
     pub fn set_layout_key(&mut self, layout_key: LayoutKey) {
         if layout_key != self.layout_key {
+            let theme_changed = layout_key.theme_rev != self.layout_key.theme_rev;
             self.layout_key = layout_key;
-            self.invalidate_layout();
+            self.invalidate_layout(theme_changed);
         }
     }
 
@@ -7626,11 +7627,16 @@ impl DualPlaneSession {
         }
     }
 
-    fn invalidate_layout(&mut self) {
+    fn invalidate_layout(&mut self, theme_changed: bool) {
         self.pending_live_handoffs.clear();
         let detection_options = self.detection_options();
         for record in self.decorations.values_mut() {
             record.layout_changed(self.layout_key);
+            // Stale pixels are useful while geometry changes, but a theme change alters their ink.
+            // Showing them over the new background would create a mixed-theme frame.
+            if theme_changed {
+                record.stale_artifact = None;
+            }
         }
         let mut live_relayouts = Vec::new();
         for record in self.live_decorations.values_mut() {
@@ -7638,11 +7644,15 @@ impl DualPlaneSession {
                 continue;
             }
             let rendered_layout = record.rendered_layout;
-            if let Some(artifact) = record.artifact.take() {
+            if !theme_changed && let Some(artifact) = record.artifact.take() {
                 record.stale_artifact = Some(StaleArtifact {
                     artifact,
                     rendered_layout,
                 });
+            }
+            if theme_changed {
+                record.artifact = None;
+                record.stale_artifact = None;
             }
             record.layout = self.layout_key;
             record.generation = self.grid_generation;
@@ -7672,11 +7682,15 @@ impl DualPlaneSession {
                 continue;
             }
             let rendered_layout = record.rendered_layout;
-            if let Some(artifact) = record.artifact.take() {
+            if !theme_changed && let Some(artifact) = record.artifact.take() {
                 record.stale_artifact = Some(StaleArtifact {
                     artifact,
                     rendered_layout,
                 });
+            }
+            if theme_changed {
+                record.artifact = None;
+                record.stale_artifact = None;
             }
             record.layout = self.layout_key;
             record.generation = self.grid_generation;
@@ -10616,7 +10630,7 @@ mod tests {
     }
 
     #[test]
-    fn theme_revision_rerenders_math_under_a_distinct_texture_key() {
+    fn theme_revision_drops_old_pixels_and_rerenders_under_a_distinct_texture_key() {
         let mut session = DualPlaneSession::new(nz(16), nz(2));
         session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
         let mut first_task = session.take_worker_task().unwrap();
@@ -10644,7 +10658,7 @@ mod tests {
             session
                 .decorations
                 .values()
-                .all(|record| record.stale_artifact.is_some())
+                .all(|record| record.stale_artifact.is_none())
         );
         let mut themed_task = session.take_worker_task().unwrap();
         assert_eq!(themed_task.versions.layout.theme_rev, 2);
