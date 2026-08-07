@@ -109,6 +109,10 @@ mod windows_impl {
             COLORREF, GetLastError, GlobalFree, HANDLE, HGLOBAL, HWND, LPARAM, LRESULT, POINT,
             RECT, SetLastError, WIN32_ERROR, WPARAM,
         },
+        Graphics::Dwm::{
+            DWM_WINDOW_CORNER_PREFERENCE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+            DwmSetWindowAttribute,
+        },
         Graphics::Gdi::{
             CreateSolidBrush, DeleteObject, GetMonitorInfoW, HGDIOBJ, MONITOR_DEFAULTTONEAREST,
             MONITORINFO, MonitorFromWindow,
@@ -204,6 +208,20 @@ mod windows_impl {
                 };
                 return Err(format!("SetWindowPos(SWP_FRAMECHANGED) failed: {error}"));
             }
+            // Claiming the caption does not surrender the Windows 11 rounded
+            // corners every ordinary window wears; state the preference
+            // explicitly so DWM keeps clipping the frame like the system
+            // default. Best-effort: Windows 10 has no such attribute and is
+            // square everywhere, which is its default too.
+            let preference = DWMWCP_ROUND;
+            let _ = unsafe {
+                DwmSetWindowAttribute(
+                    hwnd,
+                    DWMWA_WINDOW_CORNER_PREFERENCE,
+                    &preference as *const DWM_WINDOW_CORNER_PREFERENCE as *const c_void,
+                    std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
+                )
+            };
             Ok(Self { hwnd })
         }
     }

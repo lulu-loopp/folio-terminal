@@ -3285,10 +3285,34 @@ impl Runtime {
             return Ok(());
         }
         self.seat_pointer.hover = hover;
+        self.apply_pointer_cursor();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// The pointer wears the shape of what it is over: a resize arrow along a
+    /// divider's axis (kept for the whole drag, even when the pointer slips off
+    /// the band), the ordinary arrow everywhere else.
+    fn apply_pointer_cursor(&mut self) {
+        let divider_axis = self.divider_drag.as_ref().map(|drag| drag.dir).or_else(|| {
+            match self.seat_pointer.hover {
+                Some(seats::ChromeTarget::Divider(split)) => self
+                    .seats
+                    .split_slots(&self.seat_layout)
+                    .into_iter()
+                    .find(|slot| slot.id == split)
+                    .map(|slot| slot.dir),
+                _ => None,
+            }
+        });
+        let cursor = match divider_axis {
+            Some(bt_layout::Axis::Row) => winit::window::CursorIcon::EwResize,
+            Some(bt_layout::Axis::Col) => winit::window::CursorIcon::NsResize,
+            None => winit::window::CursorIcon::Default,
+        };
+        self.window.set_cursor(cursor);
     }
 
     /// Put the frame already on screen back in the slot so a pure chrome change
@@ -3326,6 +3350,7 @@ impl Runtime {
         if state == ElementState::Released {
             if self.divider_drag.take().is_some() {
                 self.seat_pointer.dragging = None;
+                self.apply_pointer_cursor();
                 if self.refresh_chrome() {
                     self.present_chrome_change()?;
                 }
@@ -3389,6 +3414,7 @@ impl Runtime {
                     dir: slot.dir,
                 });
                 self.seat_pointer.dragging = Some(split);
+                self.apply_pointer_cursor();
                 if self.refresh_chrome() {
                     self.present_chrome_change()?;
                 }
