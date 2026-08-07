@@ -393,12 +393,12 @@ fn reused_projection_refreshes_layout_before_framing_a_width_resize() {
 }
 
 #[test]
-fn g1_vendor_tail_owns_nonblank_shrink_rows_until_grow_restores_them() {
+fn g1_resize_staging_exposes_nonblank_shrink_rows_until_grow_restores_them() {
     let mut session = DualPlaneSession::new(nz32(8), nz32(4));
     session.feed(b"r1\r\nr2\r\nr3\r\nr4").unwrap();
     session.resize(nz32(8), nz32(2)).unwrap();
     assert!(history_text(&session).is_empty());
-    assert!(staged_text(&session).is_empty());
+    assert_eq!(staged_text(&session), ["r1", "r2"]);
     assert_eq!(session.terminal().resize_transaction_history_size(), 2);
     assert_eq!(session.terminal().visible_text(), vec!["r3", "r4"]);
 
@@ -419,7 +419,7 @@ fn g1_vendor_tail_harvests_once_at_transaction_finish() {
     session
         .resize_at(nz32(8), nz32(2), start + Duration::from_millis(10))
         .unwrap();
-    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.transcript().staging_len(), 2);
     assert_eq!(session.terminal().resize_transaction_history_size(), 2);
 
     session
@@ -432,6 +432,96 @@ fn g1_vendor_tail_harvests_once_at_transaction_finish() {
 
     session.resize(nz32(8), nz32(4)).unwrap();
     assert_eq!(session.terminal().visible_text(), vec!["r4", "new", "", ""]);
+}
+
+#[test]
+fn g1_width_reflow_keeps_the_displaced_banner_reachable_through_history() {
+    const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal> ";
+
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(80), nz32(2));
+    session
+        .feed_at(format!("{WARNING}\r\n{PROMPT}").as_bytes(), start)
+        .unwrap();
+    let mut projection = session.new_projection(session.layout_key());
+    let _ = session.viewport_frame(&mut projection).unwrap();
+
+    session
+        .resize_at(nz32(47), nz32(2), start + Duration::from_millis(10))
+        .unwrap();
+
+    assert_eq!(logical_content(&session), [WARNING, PROMPT.trim_end()]);
+    let staged_banner_head = staged_text(&session).join("");
+    assert!(
+        !staged_banner_head.is_empty() && WARNING.starts_with(&staged_banner_head),
+        "the row displaced above the live grid must be owned by transcript staging: {staged_banner_head:?}"
+    );
+
+    session.refresh_projection(&mut projection);
+    let _ = session.viewport_frame(&mut projection).unwrap();
+    projection.scroll_to_top();
+    session.refresh_projection(&mut projection);
+    let narrow_review = session.viewport_frame(&mut projection).unwrap();
+    let narrow_review_text = (0..narrow_review.drawable_rows())
+        .map(|row| frame_row_text(&narrow_review, row))
+        .collect::<String>();
+    assert!(
+        narrow_review_text.contains("Did not find path entry"),
+        "scrolling to the ceiling must reveal the displaced banner head: {narrow_review_text:?}"
+    );
+
+    finish_resize_transaction(&mut session, start + Duration::from_millis(210));
+    assert_eq!(logical_content(&session), [WARNING, PROMPT.trim_end()]);
+
+    session
+        .resize_at(nz32(80), nz32(2), start + Duration::from_millis(1_000))
+        .unwrap();
+    finish_resize_transaction(&mut session, start + Duration::from_millis(1_200));
+    assert_eq!(logical_content(&session), [WARNING, PROMPT.trim_end()]);
+}
+
+#[test]
+fn g1_width_reflow_uses_history_even_when_the_wide_screen_had_blank_rows() {
+    const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal> ";
+
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(80), nz32(4));
+    session
+        .feed_at(format!("{WARNING}\r\n{PROMPT}").as_bytes(), start)
+        .unwrap();
+    assert_eq!(
+        session.terminal().visible_text(),
+        [WARNING, PROMPT.trim_end(), "", ""]
+    );
+
+    session
+        .resize_at(nz32(16), nz32(4), start + Duration::from_millis(10))
+        .unwrap();
+    assert_eq!(logical_content(&session), [WARNING, PROMPT.trim_end()]);
+    assert!(session.transcript().staging_len() >= 3);
+
+    let mut projection = session.new_projection(session.layout_key());
+    let _ = session.viewport_frame(&mut projection).unwrap();
+    projection.scroll_to_top();
+    session.refresh_projection(&mut projection);
+    let review = session.viewport_frame(&mut projection).unwrap();
+    assert!(
+        (0..review.drawable_rows())
+            .map(|row| frame_row_text(&review, row))
+            .collect::<String>()
+            .contains("Did not find path entry")
+    );
+
+    session
+        .resize_at(nz32(80), nz32(4), start + Duration::from_millis(20))
+        .unwrap();
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(
+        session.terminal().visible_text(),
+        [WARNING, PROMPT.trim_end(), "", ""]
+    );
 }
 
 #[test]
@@ -1303,7 +1393,7 @@ fn g1_vendor_resize_tail_reflows_with_the_primary_while_it_is_parked() {
     let mut session = DualPlaneSession::new(nz32(8), nz32(4));
     session.feed(b"r1\r\nr2\r\nr3\r\nr4").unwrap();
     session.resize(nz32(8), nz32(2)).unwrap();
-    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.transcript().staging_len(), 2);
     assert_eq!(session.terminal().resize_transaction_history_size(), 2);
 
     session.feed(b"\x1b[?1049h").unwrap();

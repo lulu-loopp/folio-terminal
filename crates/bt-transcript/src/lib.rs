@@ -362,6 +362,10 @@ pub struct TranscriptStore {
     source_generation: SourceGeneration,
     staging_rows: usize,
     staging: VecDeque<FreezeCandidate>,
+    /// Resize-owned rows temporarily transferred out of vendor history between actor operations.
+    /// They are ordinary staging-plane sources for projection, but are not freeze candidates: the
+    /// next resize/output operation returns the whole batch to vendor reflow first.
+    resize_staging: Vec<StagedRow>,
     frozen: VecDeque<FrozenLine>,
     tombstones: Vec<TranscriptId>,
     pending_evictions: Vec<TranscriptId>,
@@ -387,6 +391,7 @@ impl TranscriptStore {
             source_generation: SourceGeneration(1),
             staging_rows: 0,
             staging: VecDeque::new(),
+            resize_staging: Vec::new(),
             frozen: VecDeque::new(),
             tombstones: Vec::new(),
             pending_evictions: Vec::new(),
@@ -394,7 +399,7 @@ impl TranscriptStore {
     }
 
     pub fn staging_len(&self) -> usize {
-        self.staging_rows
+        self.staging_rows + self.resize_staging.len()
     }
     pub fn frozen(&self) -> &VecDeque<FrozenLine> {
         &self.frozen
@@ -405,6 +410,46 @@ impl TranscriptStore {
         self.staging
             .iter()
             .flat_map(|candidate| candidate.rows.iter())
+            .chain(self.resize_staging.iter())
+    }
+
+    pub fn resize_staging_len(&self) -> usize {
+        self.resize_staging.len()
+    }
+
+    /// Admit one vendor history snapshot into the existing staging plane without guessing which
+    /// physical row closes a logical line. The batch is reversible as a whole until the resize
+    /// transaction reaches its final harvest.
+    pub fn stage_resize_rows(&mut self, rows: Vec<CapturedRow>) -> Vec<StagingId> {
+        debug_assert!(self.resize_staging.is_empty());
+        let mut ids = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id = StagingId(self.next_staging);
+            self.next_staging += 1;
+            ids.push(id);
+            self.resize_staging.push(StagedRow { id, row });
+        }
+        ids
+    }
+
+    /// Return the reversible resize batch to its vendor escrow before native reflow continues.
+    pub fn take_resize_staging(&mut self) -> Vec<StagedRow> {
+        std::mem::take(&mut self.resize_staging)
+    }
+
+    pub fn resize_staged_rows(&self) -> &[StagedRow] {
+        &self.resize_staging
+    }
+
+    /// Commit the final reversible resize batch into the normal freeze-candidate pipeline without
+    /// changing its staging identities. Viewport anchors can therefore resolve through the same
+    /// staging-to-history relocation as ordinary scroll-out instead of vanishing at quiescence.
+    pub fn commit_resize_staging(&mut self) -> Vec<CaptureResult> {
+        let staged = std::mem::take(&mut self.resize_staging);
+        staged
+            .into_iter()
+            .map(|row| self.capture_staged(row))
+            .collect()
     }
     pub fn tombstones(&self) -> &[TranscriptId] {
         &self.tombstones
@@ -420,8 +465,12 @@ impl TranscriptStore {
     pub fn capture(&mut self, row: CapturedRow) -> CaptureResult {
         let id = StagingId(self.next_staging);
         self.next_staging += 1;
-        let completes_candidate = !row.continues;
-        let staged = StagedRow { id, row };
+        self.capture_staged(StagedRow { id, row })
+    }
+
+    fn capture_staged(&mut self, staged: StagedRow) -> CaptureResult {
+        let id = staged.id;
+        let completes_candidate = !staged.row.continues;
 
         if let Some(candidate) = self
             .staging
@@ -545,6 +594,7 @@ impl TranscriptStore {
             .collect::<Vec<_>>();
         self.staging.clear();
         self.staging_rows = 0;
+        self.resize_staging.clear();
         self.tombstones.extend(removed.iter().copied());
         self.source_generation.0 += 1;
         // Staging IDs are not tombstones. The caller must explicitly relocate their anchors by
@@ -558,6 +608,7 @@ impl TranscriptStore {
     pub fn invalidate_staging(&mut self) {
         self.staging.clear();
         self.staging_rows = 0;
+        self.resize_staging.clear();
         self.source_generation.0 += 1;
     }
 
@@ -739,6 +790,43 @@ mod tests {
 
         store.capture(CapturedRow::plain("again", true));
         assert!(store.finalize_all_candidates()[0].line.wrap_split);
+    }
+
+    #[test]
+    fn resize_staging_is_projectable_but_stays_reversible_as_one_batch() {
+        let mut store = TranscriptStore::new(nz(8));
+        let ids = store.stage_resize_rows(vec![
+            CapturedRow::plain("closed", false),
+            CapturedRow::plain("wrapped", true),
+        ]);
+
+        assert_eq!(store.staging_len(), 2);
+        assert_eq!(
+            store.staged_rows().map(|row| row.id).collect::<Vec<_>>(),
+            ids
+        );
+        assert!(store.frozen().is_empty());
+
+        let returned = store.take_resize_staging();
+        assert_eq!(returned.len(), 2);
+        assert_eq!(store.staging_len(), 0);
+        assert!(store.frozen().is_empty());
+    }
+
+    #[test]
+    fn final_resize_commit_preserves_staging_ids_for_anchor_relocation() {
+        let mut store = TranscriptStore::new(nz(8));
+        let ids = store.stage_resize_rows(vec![
+            CapturedRow::plain("closed", false),
+            CapturedRow::plain("wrapped", true),
+        ]);
+
+        let committed = store.commit_resize_staging();
+        assert_eq!(committed.len(), 2);
+        assert_eq!(committed[0].finalized[0].mappings[0].staging_id, ids[0]);
+        assert!(committed[1].finalized.is_empty());
+        assert_eq!(store.staged_rows().next().map(|row| row.id), Some(ids[1]));
+        assert_eq!(store.unclosed_candidate_len(), 1);
     }
 
     #[test]

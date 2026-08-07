@@ -582,6 +582,21 @@ impl<T> Term<T> {
         rows
     }
 
+    /// Transfer the mutable resize tail to the external staging owner between actor operations.
+    ///
+    /// The rows remain escrowed here solely so `begin_resize_transaction` can return them to the
+    /// native grid before the next resize/output operation. While staged, native history is empty
+    /// and `resize_transaction` is false, so there is still exactly one presented mutable owner.
+    pub fn stage_resize_transaction(&mut self) -> Vec<Row<Cell>> {
+        if !self.resize_transaction {
+            return Vec::new();
+        }
+        self.resize_transaction = false;
+        let rows = self.primary_grid_mut().take_history(0);
+        self.resize_staging_candidate = rows.clone();
+        rows
+    }
+
     /// Match the native escrow to the staging rows retained by the external quota owner.
     pub fn retain_resize_staging_candidate_rows(&mut self, rows: usize) {
         let remove = self.resize_staging_candidate.len().saturating_sub(rows);

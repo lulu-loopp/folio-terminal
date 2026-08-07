@@ -1,5 +1,12 @@
 # BetterTerminal 技术方案 v3.7（M1.7 resize 单一所有权修订）
 
+> Resize-staging 可达性修订（2026-08-07）：vendor native history 仍负责每次原生 reflow，
+> 但不再在两次 actor 操作之间成为不可投影的私有尾部。每次 local resize / PTY feed / ConPTY
+> reconcile 完成后，history 整批原子转交 `TranscriptStore` 的 reversible resize staging，立即进入
+> `frozen + staging + live` 连续视口；下一次原生操作前整批交回 vendor escrow。转交期间 vendor
+> history 为空，vendor 只保留不可呈现的原样 escrow，因此没有并行 mutable owner、文本去重或
+> Frozen thaw。最终静默边界仍走一次正常 harvest/finalize，录制的 PTY 字节语义不变。
+
 > M1.8-r4（2026-07-18）活动逻辑行修订：harvest 批尾若仍以 `WRAPLINE` 因果连续到
 > live 第 0 行，则它不是可定稿历史，而是唯一的可变 staging candidate。下一次 resize 事务
 > 开始时，该 candidate 原样交还 vendor native history，由 vendor 将整条活动行与 live 共同
@@ -51,7 +58,7 @@
 ### 1.1 核心设计不变量
 
 1. **Canonical Transcript 是真相（对已冻结内容）**：冻结时构建规范转录（逻辑行文本 + soft-wrap 层次 + 样式/超链接 span + generation）。富内容是转录区间上的可撤销**装饰**。活动网格内容的真相是 grid 本身——两者由统一 `ContentAnchor` 桥接（§3.2）。
-2. **双平面 + 单向冻结 + 可变尾部单一所有者**：稳态 alacritty scrollback=**0**，正常上滚由转录 staging/冻结历史拥有；resize 事务开始时，普通 normal staging 以 `wrap-split` 冻结，但上次 harvest 留下的唯一活动候选先交还 primary native history；此后直到事务结束，resize 驱逐与期间真实输出都只由 vendor scrollback 持有，转录中没有并行 snapshot/settlement 镜像。结束时 vendor history 按当前宽度一次性移交转录并立即恢复 scrollback=0；若批尾仍连续到 live 第 0 行，它保持 staging 而不定稿。Frozen 仍严格 Live→Frozen、无 thaw，且始终是已冻结历史的唯一所有者/配额权威。**不变量拆分(用户裁决 2026-07-19,经独立设计咨询)**:原「活动平面固定行高、只允许等高装饰(§4.3)」把**两条不同的不变量焊在了一起**,现正式拆开——**① 终端坐标不变量(不可动摇)**:ConPTY/vendor 永远持有固定 N×M 网格,应用按行列绝对重绘,富内容**绝不触发 PTY resize**、绝不改变逻辑行列语义;**② 投影布局不变量(可放宽)**:视口如何把逻辑行映射到像素是**我们的**事,因此 live 行**可以**像转录行一样拥有自由像素高度。放宽 ② 的护栏:公式撑高使总高超出窗口时**底部保底可见**(光标/输入/状态栏永不被顶出),溢出发生在**顶部**由滚动承接 + 网格外 `N rows above` 覆盖层承接；选择公式时不设固定额外行数预算，而是保留至少 `LIVE_MIN_VISIBLE_TEXT_ROWS=8` 行普通文本，超限稳定地优先保留靠近底部的新块。收益:live 与冻结**同一套 display 排版、同一张 alpha 紧盒栅格、1000‰ 不缩放**,滚出定稿复用同一 artifact 而非重排；冻结投影保持每侧 8px，live 每侧只用 cell height 的 12.5% 呼吸值。块可向上下真空白行合计借最多 2 行，先借后撑高，借用行进入内容/revision 依赖且不得与既有块行带重叠。**排版模式由定界符决定,绝不由生命周期决定**(`$$` 两侧皆 display;将来的 `$` 两侧皆 inline;math mode 进 render/cache key)。被否方案备查:向 ConPTY 少报行数(动态振荡)、冻结侧改适配(废掉转录自由高度这一最大结构优势且仍不满足直接渲染)、live 单行改 inline(非 LaTeX 语义,仅可作短期止痛)。
+2. **双平面 + 单向冻结 + 可变尾部单一所有者**：稳态 alacritty scrollback=**0**，正常上滚由转录 staging/冻结历史拥有；resize 事务开始时，普通 normal staging 以 `wrap-split` 冻结，但上次 harvest 留下的唯一活动候选先交还 primary native history。每次原生 resize/output 操作期间 vendor history 独占可变尾部；操作返回 actor 后，完整 history 原子转交 reversible resize staging，成为三层连续视口中可滚动的 staging 平面。下一次原生操作前 staging 整批交回 vendor 原样 escrow。任一时刻只有一个可呈现 mutable owner，Frozen 仍严格 Live→Frozen、无 thaw，且始终是已冻结历史的唯一所有者/配额权威。**不变量拆分(用户裁决 2026-07-19,经独立设计咨询)**:原「活动平面固定行高、只允许等高装饰(§4.3)」把**两条不同的不变量焊在了一起**,现正式拆开——**① 终端坐标不变量(不可动摇)**:ConPTY/vendor 永远持有固定 N×M 网格,应用按行列绝对重绘,富内容**绝不触发 PTY resize**、绝不改变逻辑行列语义;**② 投影布局不变量(可放宽)**:视口如何把逻辑行映射到像素是**我们的**事,因此 live 行**可以**像转录行一样拥有自由像素高度。放宽 ② 的护栏:公式撑高使总高超出窗口时**底部保底可见**(光标/输入/状态栏永不被顶出),溢出发生在**顶部**由滚动承接 + 网格外 `N rows above` 覆盖层承接；选择公式时不设固定额外行数预算，而是保留至少 `LIVE_MIN_VISIBLE_TEXT_ROWS=8` 行普通文本，超限稳定地优先保留靠近底部的新块。收益:live 与冻结**同一套 display 排版、同一张 alpha 紧盒栅格、1000‰ 不缩放**,滚出定稿复用同一 artifact 而非重排；冻结投影保持每侧 8px，live 每侧只用 cell height 的 12.5% 呼吸值。块可向上下真空白行合计借最多 2 行，先借后撑高，借用行进入内容/revision 依赖且不得与既有块行带重叠。**排版模式由定界符决定,绝不由生命周期决定**(`$$` 两侧皆 display;将来的 `$` 两侧皆 inline;math mode 进 render/cache key)。被否方案备查:向 ConPTY 少报行数(动态振荡)、冻结侧改适配(废掉转录自由高度这一最大结构优势且仍不满足直接渲染)、live 单行改 inline(非 LaTeX 语义,仅可作短期止痛)。
 3. **文档与投影分离**：`HistoryDocument`（转录+语义块+装饰意图，无布局）；每视口一份 `ViewportProjection`（布局、每视口高度树、滚动锚、选区、折叠）。
 4. **核心逻辑与 GUI 解耦**：纯 crate + 语料回放；核心只持 `ArtifactKey` 与测量值。
 5. **Damage 驱动调度，完整帧合成**：同 v3（present mode 探测、全事件源触发、`desired_maximum_frame_latency`）。
@@ -84,14 +91,16 @@
 
 稳态冻结路径不变：primary full-screen normal scroll 把物理行交给 bt-transcript 的 normal
 staging；soft-wrap 铭完整后定稿，4K staging 配额超限时最老候选以 `wrap-split` 强制定稿。
-改变的是 resize 期间的可变段归属：**同一可变物理行任何时刻只能有一个持久 owner**。
+改变的是 resize 期间的可变段归属：**同一可变物理行任何时刻只能有一个可呈现 owner**。
 
 **事务开始**：第一次实际 grid 尺寸变化清除 mutable selection；若存在上一 harvest 的唯一活动
 candidate，先从 staging 取回并恢复到 vendor history；其余 normal staging 以 `wrap-split` 冻结，
 随后打开 primary vendor grid 的原生 history（惰性增长；上限取原生
-`Line=i32` 可寻址上限）。从此 resize 驱逐和 full-screen output scroll 只留在 vendor history；
-adapter 的 removed-row 副本只是一次性的 anchor-rebase 事实，不写入 snapshot、settlement 或
-transcript。alt screen 活跃时 owner 仍是停放的 primary grid。
+`Line=i32` 可寻址上限）。每次原生操作内，resize 驱逐和 full-screen output scroll 只留在
+vendor history；操作结束即把完整批次移交 transcript resize staging，使它可由连续视口上滚。
+下一次操作前该批次整批交回 vendor escrow 后才允许 reflow。escrow 不参与 frame/selection/copy，
+resize staging 才是此时唯一可呈现 owner；不做内容相等匹配。alt screen 活跃时同样只投影停放的
+primary staging，alternate frame 不混入它。
 
 **窗口/ConPTY coalescing**：winit 0.30.13 只提供 `WindowEvent::Resized`，没有 Win32
 `WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE` 等价的公开事件。每个事件都立即 resize swapchain 与本地
@@ -126,8 +135,8 @@ scroll → 收割 → 滚轮上翻 → frame/selection/renderer 边界”。
 | 事件 | v3.7 动作 |
 |---|---|
 | 稳态 full-screen normal scroll | 捕获到 normal staging；逻辑行闭合定稿，未闭合片段保持可变；4K 超限 `wrap-split` |
-| resize 事务开始 | 上一批唯一活动 candidate 交还 vendor；其余 normal staging 冻结；vendor primary native history 成为完整可变尾部唯一 owner |
-| 事务中的 local resize | 只 resize surface/Term，vendor 原生 reflow history+live；不写转录 |
+| resize 事务开始 | 上一批唯一活动 candidate 交还 vendor；其余 normal staging 冻结；vendor primary native history 在原生操作期间接管可变尾部 |
+| 事务中的 local resize | resize surface/Term；操作结束把 native history 整批转入 reversible resize staging，立刻可上滚；下一操作前整批交回 vendor reflow |
 | `Resized` 静默 200ms | 只向 ConPTY 提交最后尺寸，并开始等待输出静默 |
 | 事务中的 full-screen output scroll | vendor history 保存真实终端事实；adapter event 只重定位 live anchor |
 | 最终请求及 PTY 输出静默 200ms | 一次收割 vendor history；批内按 WRAPLINE 重接；闭合批尾定稿，连续到 live 顶部的活动批尾保持 staging；恢复 vendor scrollback=0 |
@@ -153,7 +162,7 @@ enum ContentAnchor {
 - **命名空间与全序（v3.2 修订）**：锚点按 Screen 分命名空间——只有 **primary screen** 参与文档全序：`History（转录文档序）< Staging（StagingId 捕获序）< Live(primary)（row, col）`；alt screen 的 Live 锚是独立命名空间，**不与文档序可比**（选区/搜索不跨 primary/alt）。跨平面比较即按此序。staging 定稿时 Staging 锚随映射表迁移为 History 锚（与持久锚点原子迁移同一事务）。
 - **Affinity**：边界锚带 `Bias::Before | After`（行尾/块边界的粘性），选区端点、滚动锚均携带。
 - **原子迁移：两步事务（v3.3 统一）**：**捕获时** Term actor 在捕获事务内重写持久锚点 Live→Staging；**定稿时**在定稿事务内重写 Staging→History（携带 §3.1 的映射表）。持久锚点 = 选区端点、滚动锚、无障碍节点、书签。**运行中的 worker 任务不重写**——任务携带 generation，完成时校验不匹配即丢弃（唯一机制，无同步重写承诺）。
-- **resize 事务例外（v3.7）**：vendor-owned tail 没有并行的 `Staging` 表示。adapter 报出的物理移除只把受影响的 `Live` 锚重定位到当前 grid generation；事务结束收割时才创建新的 `StagingId`，随后沿正常定稿映射迁入 `History`。因此锚点迁移不会暗中构造第二份 mutable owner。
+- **resize 事务 staging（2026-08-07 修订）**：原生操作返回后，vendor-owned tail 整批取得临时 `StagingId` 并进入连续视口；下一原生操作前这些 id 随整批转交失效，vendor 才恢复 native history。最终 harvest 再沿正常定稿映射迁入 `History`。vendor escrow 从不参与投影，因此不会暗中构造第二份可呈现 mutable owner。
 - **删除降级规则**：锚点所在区间被删（ED3/淘汰）→ 迁至**文档序上最近的后继**锚位（`bias=Before`）；无后继 → live screen 原点 `(0,0, Before)`。选区两端同时被删 → 选区清空。
 - 转录规范化同 v3（trailing blank 截断、wide spacer、grapheme 边界表、OSC 8/shell mark 随冻结保留、逻辑行→物理片段层次）。
 

@@ -212,6 +212,7 @@ pub struct TerminalAdapter {
     cursor_row_positioned_explicitly: bool,
     osc1337_scanner: Osc1337Scanner,
     resize_canonical: Option<ResizeCanonical>,
+    staged_resize_history_size: usize,
     columns: NonZeroU32,
     rows: NonZeroU32,
     row_fingerprint_seed: u64,
@@ -333,6 +334,7 @@ impl TerminalAdapter {
             cursor_row_positioned_explicitly: false,
             osc1337_scanner: Osc1337Scanner::default(),
             resize_canonical: None,
+            staged_resize_history_size: 0,
             columns,
             rows,
             row_fingerprint_seed,
@@ -513,7 +515,16 @@ impl TerminalAdapter {
         }
 
         let restored = self.term.begin_resize_transaction();
+        self.staged_resize_history_size = 0;
         self.arm_resize_canonical();
+        restored
+    }
+
+    /// Return transcript-staged resize rows to the displayed vendor branch without disturbing the
+    /// canonical ConPTY branch maintained for the whole coalesced transaction.
+    pub fn resume_resize_transaction(&mut self) -> usize {
+        let restored = self.term.begin_resize_transaction();
+        self.staged_resize_history_size = 0;
         restored
     }
 
@@ -548,6 +559,7 @@ impl TerminalAdapter {
         // The normal final-size commit consumes the canonical branch first. This fallback only
         // covers callers which abort a transaction without committing a pseudoconsole resize.
         self.resize_canonical = None;
+        self.staged_resize_history_size = 0;
         self.term
             .finish_resize_transaction()
             .iter()
@@ -555,7 +567,25 @@ impl TerminalAdapter {
             .collect()
     }
 
+    /// Move the displayed branch's mutable history into transcript staging between actor calls.
+    /// The canonical branch is intentionally left open and receives the same PTY bytes separately.
+    pub fn stage_resize_transaction(&mut self) -> Vec<CapturedRow> {
+        let rows = self.term.stage_resize_transaction();
+        self.staged_resize_history_size = rows.len();
+        rows.iter().map(|row| to_captured_row(&row[..])).collect()
+    }
+
+    /// Close a transaction whose final vendor history is already owned by transcript resize
+    /// staging. Vendor keeps only the unfinished suffix needed for a future native grow.
+    pub fn finish_staged_resize_transaction(&mut self, unfinished_rows: usize) {
+        self.resize_canonical = None;
+        self.staged_resize_history_size = 0;
+        self.term
+            .retain_resize_staging_candidate_rows(unfinished_rows);
+    }
+
     pub fn clear_resize_transaction_history(&mut self) {
+        self.staged_resize_history_size = 0;
         self.term.clear_resize_transaction_history();
         if let Some(canonical) = self.resize_canonical.as_mut() {
             canonical.term.clear_resize_transaction_history();
@@ -563,7 +593,9 @@ impl TerminalAdapter {
     }
 
     pub fn resize_transaction_history_size(&self) -> usize {
-        self.term.resize_transaction_history_size()
+        self.term
+            .resize_transaction_history_size()
+            .max(self.staged_resize_history_size)
     }
 
     pub fn retain_resize_staging_candidate_rows(&mut self, rows: usize) {
@@ -1079,6 +1111,24 @@ mod tests {
         assert!(terminal.finish_resize_transaction().is_empty());
         assert_eq!(terminal.visible_text(), vec!["a", "b", "c", "d"]);
         assert_eq!(terminal.alacritty_history_size(), 0);
+    }
+
+    #[test]
+    fn resize_history_can_transfer_to_staging_and_return_before_reflow() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(4));
+        terminal.feed(b"r1\r\nr2\r\nr3\r\nr4");
+        terminal.begin_resize_transaction();
+        terminal.resize(nz(8), nz(2));
+
+        let staged = terminal.stage_resize_transaction();
+        assert_eq!(staged.len(), 2);
+        assert_eq!(terminal.alacritty_history_size(), 0);
+        assert_eq!(terminal.resize_transaction_history_size(), 2);
+
+        assert_eq!(terminal.resume_resize_transaction(), 2);
+        terminal.resize(nz(8), nz(4));
+        assert!(terminal.stage_resize_transaction().is_empty());
+        assert_eq!(terminal.visible_text(), ["r1", "r2", "r3", "r4"]);
     }
 
     #[test]

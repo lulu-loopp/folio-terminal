@@ -1652,6 +1652,9 @@ impl DualPlaneSession {
                 );
             }
         }
+        if self.resize_epoch.is_active() {
+            self.resume_resize_staging();
+        }
         if self.terminal.modes().alternate_screen && contains_clear_home_snapshot_boundary(bytes) {
             self.alternate_detection_context = DetectionContext::default();
         }
@@ -1702,6 +1705,9 @@ impl DualPlaneSession {
                 self.remember_visible_cursor_logical_line();
             }
         }
+        if self.resize_epoch.is_active() {
+            self.stage_resize_history();
+        }
         result
     }
 
@@ -1727,7 +1733,11 @@ impl DualPlaneSession {
         let plan = plan_resize(self.terminal.dimensions(), (columns, rows));
         if plan.begin_transaction {
             self.cursor_logical_line_memory = None;
-            self.begin_resize_transaction(observed_at)?;
+            if self.resize_epoch.is_active() {
+                self.resume_resize_staging();
+            } else {
+                self.begin_resize_transaction(observed_at)?;
+            }
             self.resize_epoch.changed(observed_at);
             self.grid_generation.0 += 1;
             self.trace_resize_event(
@@ -1769,7 +1779,12 @@ impl DualPlaneSession {
         ];
         let apply_result = self.apply_events(events, observed_at);
         self.alternate_repaint_in_progress = false;
-        apply_result?;
+        if let Err(error) = apply_result {
+            if plan.begin_transaction {
+                self.stage_resize_history();
+            }
+            return Err(error);
+        }
         if let Some(snapshot) = alternate_resize {
             self.finish_alternate_repaint(snapshot);
         }
@@ -1809,6 +1824,9 @@ impl DualPlaneSession {
             self.restore_offscreen_decorations();
         }
         self.remember_visible_cursor_logical_line();
+        if plan.begin_transaction {
+            self.stage_resize_history();
+        }
         Ok(())
     }
 
@@ -1839,6 +1857,9 @@ impl DualPlaneSession {
         if self.synchronized_update_deadline().is_none() {
             return Ok(false);
         }
+        if self.resize_epoch.is_active() {
+            self.resume_resize_staging();
+        }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         let primary_reprint_boundary = self.primary_repaint_in_progress;
         let events = self.terminal.finish_synchronized_update();
@@ -1851,6 +1872,9 @@ impl DualPlaneSession {
             self.primary_repaint_dirty = false;
             self.primary_reprint_history_floor = None;
             self.invalidate_all_live_decorations();
+            if self.resize_epoch.is_active() {
+                self.stage_resize_history();
+            }
             return Err(error);
         }
         self.observe_live_damage(damage, observed_at);
@@ -1868,6 +1892,9 @@ impl DualPlaneSession {
         self.primary_repaint_in_progress = false;
         self.primary_reprint_history_floor = None;
         self.remember_visible_cursor_logical_line();
+        if self.resize_epoch.is_active() {
+            self.stage_resize_history();
+        }
         Ok(true)
     }
 
@@ -1878,6 +1905,9 @@ impl DualPlaneSession {
         observed_at: Instant,
     ) -> bool {
         let reconciled = self.resize_epoch.is_active();
+        if reconciled {
+            self.resume_resize_staging();
+        }
         let primary_reconcile = reconciled
             .then(|| self.snapshot_primary_resize_transition())
             .flatten();
@@ -1929,6 +1959,9 @@ impl DualPlaneSession {
                 cursor_visible: cursor.visible,
             },
         );
+        if reconciled {
+            self.stage_resize_history();
+        }
         reconciled
     }
 
@@ -6084,6 +6117,38 @@ impl DualPlaneSession {
         Ok(())
     }
 
+    /// Return the currently projected resize staging batch to vendor escrow before another native
+    /// resize/output operation. Cells move as one batch; no row is frozen or content-matched.
+    fn resume_resize_staging(&mut self) {
+        let staged = self.transcript.take_resize_staging();
+        for row in &staged {
+            self.staging_sources.remove(&row.id);
+        }
+        if self
+            .active_staging_tail
+            .is_some_and(|id| staged.iter().any(|row| row.id == id))
+        {
+            self.active_staging_tail = None;
+        }
+        let restored = self.terminal.resume_resize_transaction();
+        debug_assert_eq!(
+            restored,
+            staged.len(),
+            "resize staging and vendor escrow must transfer the same physical rows"
+        );
+    }
+
+    /// Expose vendor-native resize history through the existing staging plane between actor calls.
+    /// The vendor retains only a dormant escrow used by `resume_resize_staging`; the transcript is
+    /// the sole presented owner, so viewport scroll, selection, and copy all see the same rows.
+    fn stage_resize_history(&mut self) {
+        let rows = self.terminal.stage_resize_transaction();
+        let ids = self.transcript.stage_resize_rows(rows);
+        for id in ids {
+            self.staging_sources.insert(id, SourceLifecycle::Live);
+        }
+    }
+
     fn trace_resize_event(&mut self, observed_at: Instant, kind: ResizeTraceKind) {
         let Some(started) = self.resize_trace_started else {
             return;
@@ -6873,24 +6938,21 @@ impl DualPlaneSession {
     }
 
     fn harvest_resize_transaction(&mut self, observed_at: Instant) -> Result<(), SessionError> {
-        let rows = self.terminal.finish_resize_transaction();
+        let rows = self.transcript.resize_staged_rows().to_vec();
         self.trace_resize_event(
             observed_at,
             ResizeTraceKind::Harvest {
                 origin: ResizeTraceRowOrigin::VendorHarvest,
-                widths: rows.iter().map(|row| row.cells.len()).collect(),
-                continues: rows.iter().map(|row| row.continues).collect(),
+                widths: rows.iter().map(|row| row.row.cells.len()).collect(),
+                continues: rows.iter().map(|row| row.row.continues).collect(),
             },
         );
-        for row in rows {
-            // Rows returned by one `finish_resize_transaction` are an ordered snapshot of one
-            // vendor-owned grid. Within that batch WRAPLINE is therefore a causal continuation
-            // fact, so the normal capture path may reconstruct its logical line without guessing.
+        for result in self.transcript.commit_resize_staging() {
+            // The committed resize-staging batch is the ordered final snapshot transferred from
+            // one vendor-owned grid. WRAPLINE is therefore a causal continuation fact, so the
+            // normal capture path may reconstruct its logical line without guessing.
             // A closed batch finalizes below. The sole trailing candidate which still wraps into
             // live row zero remains staging and is the only row set eligible for reverse harvest.
-            let result = self.transcript.capture(row);
-            self.staging_sources
-                .insert(result.staging_id, SourceLifecycle::Live);
             self.active_staging_tail = result.finalized.is_empty().then_some(result.staging_id);
             for finalized in result.finalized {
                 self.ingest_finalized(finalized)?;
@@ -6898,7 +6960,7 @@ impl DualPlaneSession {
         }
         let unclosed_candidate_rows = self.transcript.unclosed_candidate_len();
         self.terminal
-            .retain_resize_staging_candidate_rows(unclosed_candidate_rows);
+            .finish_staged_resize_transaction(unclosed_candidate_rows);
         if unclosed_candidate_rows == 0 {
             for finalized in self.transcript.finalize_all_candidates() {
                 self.ingest_finalized(finalized)?;
@@ -11352,11 +11414,20 @@ mod tests {
             session
                 .feed_at(&lines, t + Duration::from_millis(20))
                 .unwrap();
-            let _ = present(&mut session, &mut projection);
+            let restaged = present(&mut session, &mut projection);
             assert!(
-                projection.review_hold(),
-                "still held while the reprint stages"
+                !projection.review_hold(),
+                "projectable resize staging re-anchors without waiting for quiescence"
             );
+            assert_eq!(
+                projection.scroll_offset_subpixels(),
+                zoomed_offset_subpixels,
+                "the staged reprint restores the exact post-zoom displacement immediately",
+            );
+            assert!(matches!(
+                restaged.viewport_origin,
+                FrameViewportOrigin::Anchored(_)
+            ));
 
             // Quiescence closes the transaction: the offset re-anchors and the hold releases.
             assert!(
@@ -14920,10 +14991,10 @@ mod tests {
     }
 
     // Drive the real resize→reflow→reprint transaction: open it, send the final PTY resize, let
-    // Codex clear then reprint (both staged inside the vendor transaction), and quiesce it. Codex
-    // output holds the transaction open until 200 ms of silence, so history refills only at harvest
-    // — exactly where bt-app republishes. `finish_at` returns the instant past the quiescence
-    // deadline for the final harvest+publish.
+    // Codex clear then reprint (both staged inside the vendor transaction), and quiesce it. The
+    // empty clear window still holds the previous frame; once reprint bytes arrive, reversible
+    // resize staging is already projectable and restores the semantic review anchor without
+    // waiting for final harvest. `finish_at` is past the final harvest+publish deadline.
     fn run_reflow_reprint(
         session: &mut DualPlaneSession,
         projection: &mut ViewportProjection,
@@ -14949,10 +15020,11 @@ mod tests {
             .feed_at(reprint, start + Duration::from_millis(30))
             .unwrap();
         session.refresh_projection(projection);
-        session.viewport_frame(projection).unwrap();
+        let restaged = session.viewport_frame(projection).unwrap();
+        assert_eq!(restaged.scroll_offset_rows, 20);
         assert!(
-            projection.review_hold(),
-            "the hold persists while the reprint is still staged inside the transaction"
+            !projection.review_hold(),
+            "projectable resize staging hands the held frame directly to the restored anchor"
         );
         start + Duration::from_millis(280)
     }
@@ -14964,8 +15036,8 @@ mod tests {
 
         let finish_at = run_reflow_reprint(&mut session, &mut projection, &lines, start);
 
-        // The transaction quiesces: the staged reprint freezes into history, the displacement
-        // re-anchors, and the hold ends in the same frame — a direct hand-off, no bottom flash.
+        // The transaction quiesces: the already re-anchored staged reprint freezes into history
+        // without moving the reading position or re-engaging the hold.
         assert!(session.finish_resize_if_quiescent(finish_at).unwrap());
         session.refresh_projection(&mut projection);
         let restored = session.viewport_frame(&mut projection).unwrap();
@@ -14980,14 +15052,14 @@ mod tests {
     }
 
     #[test]
-    fn an_explicit_takeover_during_the_hold_releases_it_and_the_reprint_no_longer_yanks_the_view() {
+    fn an_explicit_takeover_after_resize_staging_restores_review_keeps_bottom() {
         let start = Instant::now();
         let (mut session, mut projection, lines) = scrolled_review_session(10);
 
         let finish_at = run_reflow_reprint(&mut session, &mut projection, &lines, start);
 
-        // The user takes over mid-hold: an explicit scroll — or a keystroke, which routes through
-        // scroll_to_bottom in bt-app — clears the preserved displacement immediately.
+        // The user takes over after the resize staging restored review: an explicit scroll — or a
+        // keystroke, which routes through scroll_to_bottom in bt-app — supersedes it immediately.
         projection.scroll_to_bottom();
         session.refresh_projection(&mut projection);
         let after = session.viewport_frame(&mut projection).unwrap();

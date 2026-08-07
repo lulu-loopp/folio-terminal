@@ -5134,7 +5134,7 @@ mod tests {
     }
 
     #[test]
-    fn a_resize_reflow_holds_the_presented_frame_until_the_reprint_re_anchors() {
+    fn a_resize_reflow_holds_until_projectable_staging_reanchors_the_reprint() {
         let start = Instant::now();
         let mut harness = PtyPresentationHarness::new(40, 10);
         let mut lines = Vec::new();
@@ -5193,31 +5193,38 @@ mod tests {
             "the screen still shows the reviewing frame, not the bottom"
         );
 
-        // The reprint refills history and the transaction quiesces: publication resumes at the
+        // The reprint enters projectable resize staging: publication resumes immediately at the
         // restored review position — a direct hand-off with no bottom frame ever presented.
         harness
             .session
             .feed_at(&lines, start + Duration::from_millis(30))
             .unwrap();
         assert!(
-            !harness.publish_pty_frame(),
-            "still held while the reprint is staged inside the transaction"
+            harness.publish_pty_frame(),
+            "resize staging releases the hold as soon as the reprint is reachable"
         );
+        harness.present_pending();
+        assert_eq!(
+            harness.last_presented.as_ref().unwrap().scroll_offset_rows,
+            20,
+            "presentation resumes exactly at the staged review displacement"
+        );
+
+        // Quiescence commits the same staging ids through normal history relocation and must not
+        // move the already-restored reading position.
         assert!(
             harness
                 .session
                 .finish_resize_if_quiescent(start + Duration::from_millis(280))
                 .unwrap()
         );
-        assert!(
-            harness.publish_pty_frame(),
-            "the hold releases once the transaction closes and the displacement re-anchors"
-        );
-        harness.present_pending();
+        if harness.publish_pty_frame() {
+            harness.present_pending();
+        }
         assert_eq!(
             harness.last_presented.as_ref().unwrap().scroll_offset_rows,
             20,
-            "presentation resumes exactly at the restored review displacement"
+            "final harvest preserves the already-restored review displacement"
         );
     }
 
