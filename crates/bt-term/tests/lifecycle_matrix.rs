@@ -977,6 +977,133 @@ fn s9_separate_resize_transactions_return_the_active_prompt_to_vendor_reflow() {
 }
 
 #[test]
+fn narrowing_an_idle_wrapped_prompt_keeps_the_cursor_after_its_trailing_space() {
+    const STARTUP: &[u8] = b"Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\
+\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\
+\x1b]7;file:///D:/Developer/BetterTerminal/dist\x07\
+\x1b]133;A\x07PS D:\\Developer\\BetterTerminal\\dist> \x1b]133;B\x07";
+
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(104), nz32(39));
+    session.feed_at(STARTUP, start).unwrap();
+    let _ = session.take_pty_writes();
+
+    let resized_at = start + Duration::from_millis(10);
+    session.resize_at(nz32(36), nz32(39), resized_at).unwrap();
+    session.mark_pty_resize_requested_at(nz32(36), nz32(39), resized_at);
+    session
+        .feed_at(b"\x1b[6n", resized_at + Duration::from_millis(200))
+        .unwrap();
+
+    assert_eq!(
+        session.take_pty_writes(),
+        vec![b"\x1b[4;9R".to_vec()],
+        "the CPR must name the insertion cell after `l\\dist> `"
+    );
+    assert_eq!(
+        session.terminal().cursor(),
+        bt_term::TerminalCursor {
+            row: 3,
+            column: 8,
+            visible: true,
+        }
+    );
+}
+
+#[test]
+fn repeated_idle_prompt_cpr_resize_dance_keeps_the_cursor_after_the_prompt() {
+    const STARTUP: &[u8] = b"Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n\
+\x1b[0m\x1b[0m(base) \x1b[0m\x1b[0m\
+\x1b]7;file:///D:/Developer/BetterTerminal/dist\x07\
+\x1b]133;A\x07PS D:\\Developer\\BetterTerminal\\dist> \x1b]133;B\x07";
+    const RESIZE_BURSTS: &[&[u32]] = &[
+        &[27],
+        &[41, 44],
+        &[39],
+        &[40],
+        &[41, 42],
+        &[48],
+        &[52],
+        &[51],
+        &[50],
+        &[48],
+        &[49],
+        &[33, 48],
+        &[49],
+        &[48],
+        &[47, 46],
+        &[44, 41],
+        &[44],
+        &[43],
+        &[42],
+        &[43],
+        &[42],
+        &[43],
+        &[42],
+        &[78],
+        &[36],
+        &[109, 38],
+        &[40],
+        &[36],
+    ];
+
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(104), nz32(39));
+    session.feed_at(STARTUP, start).unwrap();
+    let _ = session.take_pty_writes();
+
+    for (index, burst) in RESIZE_BURSTS.iter().enumerate() {
+        let burst_at = start + Duration::from_secs(index as u64 + 1);
+        for (offset, columns) in burst.iter().enumerate() {
+            let at = burst_at + Duration::from_millis(offset as u64 * 10);
+            session.resize_at(nz32(*columns), nz32(39), at).unwrap();
+            session.mark_pty_resize_requested_at(nz32(*columns), nz32(39), at);
+        }
+
+        let columns = *burst.last().unwrap();
+        let warning_rows = 49_u32.div_ceil(columns);
+        let (expected_row, expected_column) = if 44 % columns == 0 {
+            (warning_rows + 44 / columns - 1, columns - 1)
+        } else {
+            (warning_rows + 44 / columns, 44 % columns)
+        };
+        assert_eq!(
+            session.terminal().cursor(),
+            bt_term::TerminalCursor {
+                row: expected_row,
+                column: expected_column,
+                visible: true,
+            },
+            "cursor first drifted after resize burst {index} ending at {columns} columns"
+        );
+
+        let cpr_at = burst_at + Duration::from_millis(200);
+        session.feed_at(b"\x1b[6n", cpr_at).unwrap();
+        let mut replies = session.take_pty_writes();
+        assert_eq!(replies.len(), 1);
+        let mut cup = replies.pop().unwrap();
+        assert_eq!(cup.pop(), Some(b'R'));
+        cup.push(b'H');
+        session.feed_at(&cup, cpr_at).unwrap();
+        assert!(
+            session
+                .finish_resize_if_quiescent(cpr_at + Duration::from_millis(200))
+                .unwrap()
+        );
+    }
+
+    assert_eq!(
+        session.terminal().cursor(),
+        bt_term::TerminalCursor {
+            row: 3,
+            column: 8,
+            visible: true,
+        },
+        "at 36 columns the insertion cell follows the eight-cell `l\\dist> ` tail"
+    );
+}
+
+#[test]
 fn g1_modal_pixel_resize_timing_preserves_content_and_rectangular_scroll_frames() {
     let expected = [
         "resize-line-00",

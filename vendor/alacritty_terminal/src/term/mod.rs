@@ -412,6 +412,13 @@ pub struct Term<T> {
     /// Streaming UAX #29 state for DEC private mode 2027.
     grapheme: GraphemeState,
 
+    /// A pending-wrap cursor position just returned by CPR.
+    ///
+    /// Line editors commonly follow `CSI 6 n` by addressing the reported cell. CPR cannot encode
+    /// the virtual insertion position beyond the right margin, so an otherwise no-op CUP would
+    /// erase `input_needs_wrap` and make the next reflow lose one logical cursor column.
+    reported_pending_wrap: Option<(bool, Point)>,
+
     /// Scroll region.
     ///
     /// Range going from top to bottom of the terminal, indexed from the top of the viewport.
@@ -733,6 +740,7 @@ impl<T> Term<T> {
             title: Default::default(),
             mode: Default::default(),
             grapheme: Default::default(),
+            reported_pending_wrap: None,
         }
     }
 
@@ -982,6 +990,7 @@ impl<T> Term<T> {
             debug!("Term::resize dimensions unchanged");
             return;
         }
+        self.reported_pending_wrap = None;
 
         debug!("New num_cols is {num_cols} and num_lines is {num_lines}");
 
@@ -1825,6 +1834,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// A character to be displayed.
     #[inline(never)]
     fn input(&mut self, c: char) {
+        self.reported_pending_wrap = None;
         let written_line = if !self.mode.contains(TermMode::GRAPHEME_CLUSTERING) {
             self.grapheme = GraphemeState::default();
             let mut encoded = [0; 4];
@@ -1882,7 +1892,11 @@ impl<T: EventListener> Handler for Term<T> {
         self.grid.cursor.point.line = cmp::max(cmp::min(line + y_offset, max_y), Line(0));
         self.grid.cursor.point.column = cmp::min(col, self.last_column());
         self.damage_cursor();
-        self.grid.cursor.input_needs_wrap = false;
+        let alternate = self.mode.contains(TermMode::ALT_SCREEN);
+        self.grid.cursor.input_needs_wrap = self
+            .reported_pending_wrap
+            .take()
+            .is_some_and(|reported| reported == (alternate, self.grid.cursor.point));
     }
 
     #[inline]
@@ -1947,6 +1961,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn move_forward(&mut self, cols: usize) {
         trace!("Moving forward: {cols}");
+        self.reported_pending_wrap = None;
         let last_column = cmp::min(self.grid.cursor.point.column + cols, self.last_column());
 
         let cursor_line = self.grid.cursor.point.line.0 as usize;
@@ -1960,6 +1975,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn move_backward(&mut self, cols: usize) {
         trace!("Moving backward: {cols}");
+        self.reported_pending_wrap = None;
         let column = self.grid.cursor.point.column.saturating_sub(cols);
 
         let cursor_line = self.grid.cursor.point.line.0 as usize;
@@ -2067,6 +2083,10 @@ impl<T: EventListener> Handler for Term<T> {
                 let pos = self.grid.cursor.point;
                 let text = format!("\x1b[{};{}R", pos.line + 1, pos.column + 1);
                 self.event_proxy.send_event(Event::PtyWrite(text));
+                self.reported_pending_wrap = self.grid.cursor.input_needs_wrap.then_some((
+                    self.mode.contains(TermMode::ALT_SCREEN),
+                    self.grid.cursor.point,
+                ));
             }
             _ => debug!("unknown device status query: {arg}"),
         };
@@ -2091,6 +2111,7 @@ impl<T: EventListener> Handler for Term<T> {
     /// Insert tab at cursor position.
     #[inline]
     fn put_tab(&mut self, mut count: u16) {
+        self.reported_pending_wrap = None;
         // A tab after the last column is the same as a linebreak.
         if self.grid.cursor.input_needs_wrap {
             self.wrapline();
@@ -2124,6 +2145,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn backspace(&mut self) {
         trace!("Backspace");
+        self.reported_pending_wrap = None;
 
         if self.grid.cursor.point.column > Column(0) {
             let line = self.grid.cursor.point.line.0 as usize;
@@ -2138,6 +2160,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn carriage_return(&mut self) {
         trace!("Carriage return");
+        self.reported_pending_wrap = None;
         let new_col = 0;
         let line = self.grid.cursor.point.line.0 as usize;
         self.damage
@@ -2150,6 +2173,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn linefeed(&mut self) {
         trace!("Linefeed");
+        self.reported_pending_wrap = None;
         let next = self.grid.cursor.point.line + 1;
         if next == self.scroll_region.end {
             let origin = self.scroll_region.start;
@@ -2299,6 +2323,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn move_backward_tabs(&mut self, count: u16) {
         trace!("Moving backward {count} tabs");
+        self.reported_pending_wrap = None;
 
         let old_col = self.grid.cursor.point.column.0;
         for _ in 0..count {
@@ -2325,6 +2350,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn move_forward_tabs(&mut self, count: u16) {
         trace!("Moving forward {count} tabs");
+        self.reported_pending_wrap = None;
 
         let num_cols = self.columns();
         let old_col = self.grid.cursor.point.column.0;
@@ -2360,6 +2386,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn restore_cursor_position(&mut self) {
         trace!("Restoring cursor position");
+        self.reported_pending_wrap = None;
 
         self.damage_cursor();
         self.grid.cursor = self.grid.saved_cursor.clone();
@@ -2606,6 +2633,7 @@ impl<T: EventListener> Handler for Term<T> {
         self.keyboard_mode_stack = Default::default();
         self.inactive_keyboard_mode_stack = Default::default();
         self.grapheme = GraphemeState::default();
+        self.reported_pending_wrap = None;
 
         // Preserve vi mode across resets.
         self.mode &= TermMode::VI;
@@ -2618,6 +2646,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn reverse_index(&mut self) {
         trace!("Reversing index");
+        self.reported_pending_wrap = None;
         // If cursor is at the top.
         if self.grid.cursor.point.line == self.scroll_region.start {
             self.scroll_down(1);
@@ -3352,6 +3381,59 @@ mod tests {
             .map(|column| term.grid[Line(0)][Column(column)].c)
             .collect::<String>();
         assert_eq!(first_row.trim_end(), prompt.trim_end());
+    }
+
+    #[test]
+    fn cpr_echo_preserves_the_pending_wrap_cursor_for_reflow() {
+        let config = Config {
+            scrolling_history: 0,
+            ..Config::default()
+        };
+        let mut term = Term::new(config, &TermSize::new(44, 6), VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        let prompt = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+        assert_eq!(prompt.len(), 44);
+
+        processor.advance(
+            &mut term,
+            b"Did not find path entry D:\\App\\Base\\anaconda3\\bin\r\n",
+        );
+        processor.advance(&mut term, prompt.as_bytes());
+        assert_eq!(term.grid.cursor.point, Point::new(Line(2), Column(43)));
+        assert!(term.grid.cursor.input_needs_wrap);
+
+        processor.advance(&mut term, b"\x1b[6n\x1b[3;44H");
+        assert!(
+            term.grid.cursor.input_needs_wrap,
+            "the reported cell is only CPR's visible projection of the pending-wrap insertion point"
+        );
+
+        term.begin_resize_transaction();
+        term.resize(TermSize::new(39, 6));
+        assert_eq!(term.grid.cursor.point.column, Column(5));
+    }
+
+    #[test]
+    fn ordinary_cup_still_clears_pending_wrap() {
+        let mut term = Term::new(Config::default(), &TermSize::new(44, 4), VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        let prompt = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+
+        processor.advance(&mut term, prompt.as_bytes());
+        assert!(term.grid.cursor.input_needs_wrap);
+        processor.advance(&mut term, b"\x1b[1;44H");
+        assert!(!term.grid.cursor.input_needs_wrap);
+    }
+
+    #[test]
+    fn cursor_motion_between_cpr_and_cup_cancels_the_pending_wrap_echo() {
+        let mut term = Term::new(Config::default(), &TermSize::new(44, 4), VoidListener);
+        let mut processor: ansi::Processor = ansi::Processor::new();
+        let prompt = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+
+        processor.advance(&mut term, prompt.as_bytes());
+        processor.advance(&mut term, b"\x1b[6n\r\x1b[1;44H");
+        assert!(!term.grid.cursor.input_needs_wrap);
     }
 
     #[test]
