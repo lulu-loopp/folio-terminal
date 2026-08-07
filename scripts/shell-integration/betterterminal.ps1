@@ -66,11 +66,11 @@ $Global:__BetterTerminalShellIntegration = @{
     }
 }
 
-# Private resize-repaint chord. ConPTY translates CSI 24;8~ into Ctrl+Alt+Shift+F12 on both
-# Windows PowerShell 5.1/PSReadLine 2.0.0 and pwsh/PSReadLine 2.4.5. Only 2.4.x is allowed to invoke
-# the repaint API: the real-ConPTY probe established that 2.0.0 implements InvokePrompt with ED 2,
-# which clears the visible viewport. Unsupported/unproven versions bind the same chord as a no-op
-# so BetterTerminal's injected sequence is consumed rather than leaking into the input buffer.
+# Private resize-anchor chord. ConPTY translates CSI 24;8~ into Ctrl+Alt+Shift+F12 on both Windows
+# PowerShell 5.1/PSReadLine 2.0.0 and pwsh/PSReadLine 2.4.5. Only 2.4.x has the private state shape
+# proven below. The real-ConPTY probe established that 2.0.0 implements InvokePrompt with ED 2,
+# which clears the visible viewport, so unsupported/unproven versions consume the same chord as a
+# no-op rather than leaking it into the input buffer.
 $psReadLineVersion = (Get-Module PSReadLine).Version
 if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
@@ -78,37 +78,154 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
         $line = $null
         $cursor = 0
         [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
-        if ($line.Length -eq 0) {
-            # InvokePrompt erases only `_initialY`, then prints the complete prompt again. After a
-            # width reflow `_initialY` can name the prompt's tail row, so every idle resize strands
-            # the old wrapped rows above it. With an empty buffer the physical cursor is exactly B:
-            # repair PSReadLine's cached input anchor to that authoritative point without emitting
-            # output. Reflection is deliberately version-gated with the handler; 2.4.x has no
-            # public re-anchor-only API. If its private shape ever changes, retain the proven
-            # InvokePrompt fallback rather than silently leaving history recall on a stale anchor.
-            try {
-                $type = [Microsoft.PowerShell.PSConsoleReadLine]
-                $static = [Reflection.BindingFlags]'Static,NonPublic'
-                $instance = [Reflection.BindingFlags]'Instance,NonPublic'
-                $singleton = $type.GetField('_singleton', $static).GetValue($null)
-                $type.GetField('_initialX', $instance).SetValue($singleton, [Console]::CursorLeft)
-                $type.GetField('_initialY', $instance).SetValue($singleton, [Console]::CursorTop)
-                # Match InvokePrompt's render-baseline reset as well as its coordinate reset. If
-                # `_previousRender` keeps the pre-resize dimensions, the next history key asks
-                # RecomputeInitialCoords to locate a cursor offset in an obsolete render and 2.4.5
-                # raises instead of recalling the line.
-                $previous = $type.GetField('_initialPrevRender', $static).GetValue($null)
-                $type.GetField('_previousRender', $instance).SetValue($singleton, $previous)
-                $previous.UpdateConsoleInfo(
-                    [Console]::BufferWidth,
-                    [Console]::BufferHeight,
-                    [Console]::CursorLeft,
-                    [Console]::CursorTop)
-                $previous.initialY = [Console]::CursorTop
-            } catch {
-                [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg)
+        # InvokePrompt erases only `_initialY`, then prints the complete prompt and input again.
+        # After ConPTY has already reflowed those cells correctly, that output can only duplicate
+        # them. Repair PSReadLine's cached B coordinate instead. With an empty buffer the physical
+        # cursor is B. With text, the cursor is D display cells after B; use PSReadLine's own cell
+        # width routine so CJK and the editor's ^X rendering of controls stay exactly in agreement.
+        # Reflection is deliberately version-gated with the handler. If the private shape changes,
+        # or the derived B coordinate cannot describe the physical cursor, retain InvokePrompt as
+        # the known fallback instead of installing a guessed anchor.
+        $savedInitialX = $null
+        $savedInitialY = $null
+        $savedPrevious = $null
+        $singleton = $null
+        $initialXField = $null
+        $initialYField = $null
+        $previousField = $null
+        try {
+            $type = [Microsoft.PowerShell.PSConsoleReadLine]
+            $static = [Reflection.BindingFlags]'Static,NonPublic'
+            $instance = [Reflection.BindingFlags]'Instance,NonPublic'
+            $singleton = $type.GetField('_singleton', $static).GetValue($null)
+            $initialXField = $type.GetField('_initialX', $instance)
+            $initialYField = $type.GetField('_initialY', $instance)
+            $previousField = $type.GetField('_previousRender', $instance)
+            $previous = $previousField.GetValue($singleton)
+            $savedInitialX = $initialXField.GetValue($singleton)
+            $savedInitialY = $initialYField.GetValue($singleton)
+            $savedPrevious = $previous
+            $width = [Console]::BufferWidth
+            $height = [Console]::BufferHeight
+            $physicalX = [Console]::CursorLeft
+            $physicalY = [Console]::CursorTop
+            if ($width -le 0 -or $height -le 0 -or
+                $physicalX -lt 0 -or $physicalX -ge $width -or
+                $physicalY -lt 0 -or $physicalY -ge $height -or
+                $cursor -lt 0 -or $cursor -gt $line.Length) {
+                throw 'Invalid console or PSReadLine cursor state.'
             }
-        } else {
+
+            if ($line.Length -eq 0) {
+                $anchor = $physicalY * $width + $physicalX
+            } else {
+                # Reflow preserves B's absolute cell order. The old render supplies its pre-resize
+                # absolute position, whose modulus gives the only possible new starting column;
+                # the current physical cursor then supplies the authoritative row.
+                $oldWidth = [int]$previous.bufferWidth
+                $oldX = [int]$initialXField.GetValue($singleton)
+                $oldY = [int]$initialYField.GetValue($singleton)
+                if ($oldWidth -le 0 -or $oldX -lt 0 -or $oldX -ge $oldWidth -or $oldY -lt 0) {
+                    throw 'Invalid previous PSReadLine anchor state.'
+                }
+                $anchorX = (($oldY * $oldWidth + $oldX) % $width + $width) % $width
+
+                $cellMethod = $type.GetMethod(
+                    'LengthInBufferCells',
+                    $static,
+                    $null,
+                    [type[]]@([char]),
+                    $null)
+                if ($null -eq $cellMethod) {
+                    throw 'PSReadLine LengthInBufferCells(char) was not found.'
+                }
+                $continuationCells = 0
+                foreach ($character in [Microsoft.PowerShell.PSConsoleReadLine]::GetOptions().ContinuationPrompt.ToCharArray()) {
+                    $continuationCells += [int]$cellMethod.Invoke($null, @($character))
+                }
+                if ($continuationCells -lt 0 -or $continuationCells -ge $width) {
+                    throw 'Invalid PSReadLine continuation prompt width.'
+                }
+
+                # This is PSReadLine 2.4.x ConvertOffsetToPoint's cell movement, separated from its
+                # stale cached origin. Newline begins a logical row; all other character widths
+                # come from PSReadLine itself rather than a duplicated Unicode width table.
+                $x = $anchorX
+                $rows = 0
+                for ($index = 0; $index -lt $cursor; $index++) {
+                    $character = $line[$index]
+                    if ($character -eq "`n") {
+                        $rows++
+                        $x = $continuationCells
+                        continue
+                    }
+                    $cells = [int]$cellMethod.Invoke($null, @($character))
+                    if ($cells -le 0 -or $cells -gt $width) {
+                        throw 'Invalid PSReadLine character cell width.'
+                    }
+                    $x += $cells
+                    if ($x -ge $width) {
+                        $x = if ($x -eq $width) { 0 } else { $cells }
+                        if ($x -ne 0 -or $index + 1 -ge $cursor -or $line[$index + 1] -ne "`n") {
+                            $rows++
+                        }
+                    }
+                }
+                # A wide character that cannot fit in the remaining cell is rendered wholly on
+                # the following row, and the insertion cursor before it moves there too.
+                if ($cursor -lt $line.Length -and $line[$cursor] -ne "`n") {
+                    $nextCells = [int]$cellMethod.Invoke($null, @($line[$cursor]))
+                    if ($nextCells -le 0 -or $nextCells -gt $width) {
+                        throw 'Invalid PSReadLine character cell width.'
+                    }
+                    if ($x + $nextCells -gt $width) {
+                        $x = 0
+                        $rows++
+                    }
+                }
+                # ConPTY reflow can retain a padding cell created when a wide character did not fit
+                # at the old right edge. That cell is real screen state but is not present in the
+                # text buffer, so the physical cursor column — not a second rendering prediction —
+                # is authoritative for the final partial row of D.
+                $displayCells = $rows * $width + $physicalX - $anchorX
+                $anchor = $physicalY * $width + $physicalX - $displayCells
+                if ($anchor -lt 0 -or $anchor % $width -ne $anchorX) {
+                    throw 'The derived PSReadLine anchor is invalid.'
+                }
+            }
+
+            if ($anchor -lt 0 -or $anchor -ge $width * $height) {
+                throw 'The derived PSReadLine anchor is outside the console buffer.'
+            }
+            $anchorX = $anchor % $width
+            $anchorY = [int][Math]::Floor($anchor / $width)
+            $initialXField.SetValue($singleton, $anchorX)
+            $initialYField.SetValue($singleton, $anchorY)
+
+            # Match InvokePrompt's render-baseline reset without its output. Keeping a pre-resize
+            # render makes the next edit ask RecomputeInitialCoords to interpret obsolete geometry.
+            $baseline = $type.GetField('_initialPrevRender', $static).GetValue($null)
+            $previousField.SetValue($singleton, $baseline)
+            $baseline.UpdateConsoleInfo($width, $height, $physicalX, $physicalY)
+            $baseline.initialY = $anchorY
+        } catch {
+            $reflectionError = $_
+            # InvokePrompt uses the old Y coordinate to erase the old prompt. If reflection failed
+            # after a field write, put the complete old cache back before taking that fallback.
+            try {
+                if ($null -ne $singleton -and $null -ne $savedPrevious) {
+                    $initialXField.SetValue($singleton, $savedInitialX)
+                    $initialYField.SetValue($singleton, $savedInitialY)
+                    $previousField.SetValue($singleton, $savedPrevious)
+                }
+            } catch {
+                # The private shape is already untrusted; InvokePrompt remains the only safe exit.
+            }
+            if ($env:BT_PSREADLINE_REANCHOR_PROBE -eq '1') {
+                [Console]::Write(
+                    ([string][char]27) + ']777;BT_PSREADLINE_REANCHOR_FALLBACK=' +
+                    $reflectionError.Exception.Message + [char]7)
+            }
             [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg)
         }
     }

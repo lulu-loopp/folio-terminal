@@ -54,8 +54,8 @@ pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap()
 /// Matches the serialized Term actor quantum from DESIGN.md §1.3.
 pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap();
 /// VT input translated by ConPTY to the shell integration's Ctrl+Alt+Shift+F12 resize-anchor chord.
-/// On PSReadLine 2.4.x the handler repairs an empty buffer without repainting and retains
-/// InvokePrompt for non-empty buffers; older/unproven versions consume the chord as a no-op.
+/// On PSReadLine 2.4.x the handler repairs the cached input anchor without repainting;
+/// older/unproven versions consume the chord as a no-op.
 pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
@@ -4183,17 +4183,32 @@ mod tests {
         );
     }
 
+    /// The user's exact non-empty gesture. The red arm reinstalls the retired unconditional
+    /// InvokePrompt branch; the green arm uses the shipped zero-repaint anchor repair. Every stop
+    /// is allowed through the app's real quiet gate, including a command that was already longer
+    /// than the initial pane. A final edit proves the repaired render baseline agrees with B.
     #[test]
-    #[ignore = "dev probe: live-resizes a non-empty wrapped PSReadLine buffer through InvokePrompt"]
-    fn nonempty_buffer_invoke_prompt_live_resize_retirement_probe() {
+    #[ignore = "dev probe: live-resizes non-empty PSReadLine buffers through real ConPTY"]
+    fn nonempty_buffer_committed_resize_chain_reanchor_pair_probe() {
         const PROMPT: &str = "BTINVOKE 012345678901234567890123456789012> ";
         const TYPED: &str =
             "Write-Output 012345678901234567890123456789012345678901234567890123456789";
+        const WIDTHS: [u16; 3] = [24, 100, 24];
         let startup = invoke_prompt_probe_startup(PROMPT);
         let expected = format!("{PROMPT}{TYPED}");
-        let mut every_version_clean = true;
-        for shell in ["pwsh.exe", "powershell.exe"] {
-            let mut oracle = AppResizeOracle::spawn(shell, &startup, 38, 16, false);
+        let mut outcomes = Vec::new();
+
+        for reanchor_only in [false, true] {
+            let arm_startup = if reanchor_only {
+                startup.clone()
+            } else {
+                format!(
+                    "{startup}; Set-PSReadLineKeyHandler -Chord Ctrl+Alt+Shift+F12 \
+                     -ScriptBlock {{ param($key, $arg) \
+                     [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg) }}"
+                )
+            };
+            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, 38, 24, false);
             oracle.invoke_prompt_after_resize = true;
             assert!(
                 oracle
@@ -4205,57 +4220,29 @@ mod tests {
             oracle.pump_until_quiet(Duration::from_secs(6));
             assert!(oracle.session.typed_shell_input_live());
             let version = psreadline_version(&oracle.raw_output);
-            let mut version_clean = true;
-            let mut version_anchors_correct = true;
+            assert_eq!(version, "2.4.5");
+            let mut maximum_prompt_copies = 1;
+            let mut clean_throughout = true;
 
-            for columns in [29_u16, 52, 29] {
+            for columns in WIDTHS {
                 let mark = oracle.raw_output.len();
                 let prior_writes = oracle.invoke_prompt_writes;
-                oracle.project_resize(columns, 16);
-                oracle.pump_for(RESIZE_REQUEST_QUIET + Duration::from_millis(100));
+                oracle.project_resize(columns, 24);
+                oracle.pump_for(RESIZE_REQUEST_QUIET * 2 + Duration::from_millis(100));
                 oracle.pump_for(Duration::from_millis(1_500));
                 oracle.pump_until_quiet(Duration::from_secs(6));
                 let emitted = &oracle.raw_output[mark..];
-                let marker = b"\x1b]133;B\x07";
-                let after_b = emitted
-                    .windows(marker.len())
-                    .rposition(|window| window == marker)
-                    .map_or(emitted, |position| &emitted[position + marker.len()..]);
-                let typed_at = after_b
-                    .windows(b"Write-Output".len())
-                    .position(|window| window == b"Write-Output")
-                    .unwrap_or(after_b.len());
-                let anchor_addresses = cursor_addresses(&after_b[..typed_at]);
-                let addresses = cursor_addresses(after_b);
                 let rows = oracle.session.terminal().visible_text();
                 let cursor = oracle.session.terminal().cursor();
                 let input = wrapped_input_line(&rows, cursor.row, PROMPT, columns);
                 let prompt_copies = rows.concat().match_indices("BTINVOKE ").count();
-                let expected_anchor =
-                    u16::try_from(PROMPT.len() % usize::from(columns)).unwrap() + 1;
-                // PSReadLine 2.4.5 explicitly CUPs to B before writing the buffer. Version 2.0.0
-                // clears and prints prompt + buffer as one stream, so no CUP before the first typed
-                // character is the equally direct proof that writing starts at B.
-                let anchor_correct = anchor_addresses
-                    .last()
-                    .is_none_or(|address| address.1 == expected_anchor);
                 let clean = input == expected && prompt_copies == 1;
-                version_clean &= clean;
-                version_anchors_correct &= anchor_correct;
-                if version == "2.0.0" {
-                    assert!(
-                        !emitted
-                            .windows(b"\x1b[2J".len())
-                            .any(|window| window == b"\x1b[2J"),
-                        "the version-gated no-op must keep InvokePrompt's ED 2 off the wire"
-                    );
-                }
+                maximum_prompt_copies = maximum_prompt_copies.max(prompt_copies);
+                clean_throughout &= clean;
                 eprintln!(
-                    "BT_CONPTY_NONEMPTY_INVOKE source={} shell={shell} psreadline={version} \
-                     columns={columns} writes={} anchor_addresses={anchor_addresses:?} \
-                     addresses={addresses:?} \
-                     expected_anchor={expected_anchor} anchor_correct={anchor_correct} \
-                     clean={clean} prompt_copies={prompt_copies} input={input:?} \
+                    "BT_CONPTY_NONEMPTY_CHAIN_STEP source={} psreadline={version} \
+                     reanchor_only={reanchor_only} columns={columns} writes={} \
+                     prompt_copies={prompt_copies} clean={clean} input={input:?} \
                      expected={expected:?} rows={:?} output={}",
                     conpty_source(),
                     oracle.invoke_prompt_writes,
@@ -4263,22 +4250,147 @@ mod tests {
                     escaped(emitted)
                 );
                 assert_eq!(oracle.invoke_prompt_writes, prior_writes + 1);
+                if reanchor_only {
+                    assert_eq!(prompt_copies, 1, "zero-output repair duplicated the prompt");
+                    assert_eq!(
+                        input, expected,
+                        "zero-output repair moved or copied the input"
+                    );
+                    assert!(
+                        !emitted
+                            .windows(b"\x1b]133;A\x07".len())
+                            .any(|window| window == b"\x1b]133;A\x07"),
+                        "the green handler must not invoke the prompt function"
+                    );
+                    assert!(
+                        !emitted
+                            .windows(b"BT_PSREADLINE_REANCHOR_FALLBACK".len())
+                            .any(|window| window == b"BT_PSREADLINE_REANCHOR_FALLBACK"),
+                        "the green handler unexpectedly used its reflection fallback"
+                    );
+                }
             }
-            every_version_clean &= version_clean;
+
+            let edit_mark = oracle.raw_output.len();
+            oracle.pty.write(b"Z").unwrap();
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            let rows = oracle.session.terminal().visible_text();
+            let cursor = oracle.session.terminal().cursor();
+            let input = wrapped_input_line(&rows, cursor.row, PROMPT, 24);
+            let expected_after_edit = format!("{expected}Z");
+            let prompt_copies = rows.concat().match_indices("BTINVOKE ").count();
+            let edit_clean = input == expected_after_edit && prompt_copies == 1;
+            clean_throughout &= edit_clean;
+            maximum_prompt_copies = maximum_prompt_copies.max(prompt_copies);
             eprintln!(
-                "BT_CONPTY_NONEMPTY_INVOKE_SUMMARY shell={shell} psreadline={version} \
-                 anchors_correct={version_anchors_correct} retirement_safe={version_clean}"
+                "BT_CONPTY_NONEMPTY_CHAIN_SUMMARY source={} psreadline={version} \
+                 reanchor_only={reanchor_only} writes={} maximum_prompt_copies={} \
+                 clean_throughout={clean_throughout} edit_clean={edit_clean} input={input:?} \
+                 expected={expected_after_edit:?} rows={:?} edit_output={}",
+                conpty_source(),
+                oracle.invoke_prompt_writes,
+                maximum_prompt_copies,
+                occupied_rows(&rows),
+                escaped(&oracle.raw_output[edit_mark..])
             );
-            if version == "2.4.5" {
+            if reanchor_only {
                 assert!(
-                    version_anchors_correct,
-                    "the enabled InvokePrompt branch must recompute every 2.4.x anchor"
+                    edit_clean,
+                    "the next character did not land at the repaired cursor"
                 );
             }
+            outcomes.push((
+                reanchor_only,
+                maximum_prompt_copies,
+                clean_throughout,
+                input,
+            ));
         }
+
+        let red = &outcomes[0];
+        let green = &outcomes[1];
+        assert!(!red.0 && green.0);
         assert!(
-            !every_version_clean,
-            "if this turns green on every supported version, the typed-input deferral can retire"
+            red.1 > 1,
+            "red InvokePrompt arm must reproduce prompt growth, got {:?}",
+            red
         );
+        assert!(!red.2, "red InvokePrompt arm unexpectedly stayed clean");
+        assert_eq!(green.1, 1, "green arm must retain one prompt");
+        assert!(green.2, "green arm must stay clean through the final edit");
+        assert_eq!(green.3, format!("{expected}Z"));
+    }
+
+    /// CJK uses PSReadLine's reflected cell-width routine, not Rust's terminal width or an
+    /// integration-local Unicode table. This arm crosses the same three committed geometries and
+    /// then edits once more, so a one-cell anchor error cannot hide at the final cursor.
+    #[test]
+    #[ignore = "dev probe: verifies CJK cell math through real PSReadLine and ConPTY"]
+    fn nonempty_cjk_buffer_committed_resize_chain_reanchor_probe() {
+        const PROMPT: &str = "BTCJK 012345678901234567890123456789012> ";
+        const TYPED: &str =
+            "Write-Output '中文宽字符锚点验证中文宽字符锚点验证01234567890123456789'";
+        const WIDTHS: [u16; 3] = [24, 100, 24];
+        let startup = invoke_prompt_probe_startup(PROMPT);
+        let expected = format!("{PROMPT}{TYPED}");
+        // The terminal text oracle represents a wide cell's continuation half as a blank. Compare
+        // the glyph stream without those placeholders; the probe input itself contains no
+        // semantically significant repeated whitespace, and prompt copy count is checked apart.
+        let glyphs = |text: &str| text.replace(' ', "");
+        let mut oracle = AppResizeOracle::spawn("pwsh.exe", &startup, 38, 24, false);
+        oracle.invoke_prompt_after_resize = true;
+        assert!(
+            oracle
+                .settle_at_prompt_matching(&|line| line == PROMPT[38..].trim_end())
+                .is_some()
+        );
+        oracle.pty.write(TYPED.as_bytes()).unwrap();
+        oracle.pump_for(Duration::from_millis(900));
+        oracle.pump_until_quiet(Duration::from_secs(6));
+
+        for columns in WIDTHS {
+            let mark = oracle.raw_output.len();
+            oracle.project_resize(columns, 24);
+            oracle.pump_for(RESIZE_REQUEST_QUIET * 2 + Duration::from_millis(100));
+            oracle.pump_for(Duration::from_millis(1_500));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            let rows = oracle.composed_rows();
+            let cursor = oracle.session.terminal().cursor();
+            let input = wrapped_input_line(&rows, cursor.row, PROMPT, columns);
+            let prompt_copies = rows.concat().match_indices("BTCJK ").count();
+            eprintln!(
+                "BT_CONPTY_NONEMPTY_CJK_STEP source={} psreadline={} columns={columns} \
+                 writes={} prompt_copies={prompt_copies} input={input:?} expected={expected:?} \
+                 rows={:?} output={}",
+                conpty_source(),
+                psreadline_version(&oracle.raw_output),
+                oracle.invoke_prompt_writes,
+                occupied_rows(&rows),
+                escaped(&oracle.raw_output[mark..])
+            );
+            assert_eq!(prompt_copies, 1);
+            assert_eq!(glyphs(&input), glyphs(&expected));
+        }
+
+        oracle.pty.write("界".as_bytes()).unwrap();
+        oracle.pump_for(Duration::from_millis(900));
+        oracle.pump_until_quiet(Duration::from_secs(6));
+        let rows = oracle.composed_rows();
+        let cursor = oracle.session.terminal().cursor();
+        let input = wrapped_input_line(&rows, cursor.row, PROMPT, 24);
+        let expected_after_edit = format!("{expected}界");
+        let prompt_copies = rows.concat().match_indices("BTCJK ").count();
+        eprintln!(
+            "BT_CONPTY_NONEMPTY_CJK_SUMMARY source={} psreadline={} writes={} \
+             prompt_copies={prompt_copies} input={input:?} expected={expected_after_edit:?} \
+             rows={:?}",
+            conpty_source(),
+            psreadline_version(&oracle.raw_output),
+            oracle.invoke_prompt_writes,
+            occupied_rows(&rows)
+        );
+        assert_eq!(prompt_copies, 1);
+        assert_eq!(glyphs(&input), glyphs(&expected_after_edit));
     }
 }
