@@ -64,6 +64,151 @@ $Global:__BetterTerminalShellIntegration = @{
         # cannot go stale.
         return 'file:///' + $builder.ToString().TrimStart('/')
     }
+    # A private PSReadLine key handler is still a dispatched editing command. Both supported
+    # versions terminate an active history walk after any command that leaves their history
+    # command counters unchanged. Capture the proven 2.4.5/2.0.0 state before the resize chord and
+    # restore it after the handler body. Advancing only the counters of an already-active history
+    # session is PSReadLine's own continuation protocol; it prevents InputLoop's post-dispatch
+    # cleanup from clearing `_savedCurrentLine`/`_hashedHistory` and resetting the index to the end.
+    HistoryNavigationCapture = {
+        try {
+            $type = [Microsoft.PowerShell.PSConsoleReadLine]
+            $static = [Reflection.BindingFlags]'Static,NonPublic'
+            $instance = [Reflection.BindingFlags]'Instance,NonPublic'
+            $singletonField = $type.GetField('_singleton', $static)
+            $fieldNames = @(
+                '_currentHistoryIndex',
+                '_getNextHistoryIndex',
+                '_recallHistoryCommandCount',
+                '_searchHistoryCommandCount',
+                '_anyHistoryCommandCount',
+                '_searchHistoryPrefix',
+                '_searchHistoryBackward',
+                '_previousHistoryItem',
+                '_savedCurrentLine',
+                '_hashedHistory'
+            )
+            if ($null -eq $singletonField) {
+                throw 'PSReadLine _singleton was not found.'
+            }
+            $singleton = $singletonField.GetValue($null)
+            $fields = @{}
+            $values = @{}
+            foreach ($name in $fieldNames) {
+                $field = $type.GetField($name, $instance)
+                if ($null -eq $field) {
+                    throw "PSReadLine $name was not found."
+                }
+                $fields[$name] = $field
+                $values[$name] = $field.GetValue($singleton)
+            }
+            return @{
+                Singleton = $singleton
+                Fields = $fields
+                Values = $values
+            }
+        } catch {
+            if ($env:BT_PSREADLINE_HISTORY_PROBE -eq '1') {
+                [Console]::Write(
+                    ([string][char]27) + ']777;BT_PSREADLINE_HISTORY_DEGRADED=capture:' +
+                    $_.Exception.Message + [char]7)
+            }
+            return $null
+        }
+    }
+    HistoryNavigationRestore = {
+        param($snapshot)
+        if ($null -eq $snapshot) {
+            return
+        }
+        if ($env:BT_PSREADLINE_HISTORY_TRANSPARENCY_RED_PROBE -eq '1') {
+            if ($env:BT_PSREADLINE_HISTORY_PROBE -eq '1') {
+                [Console]::Write(
+                    ([string][char]27) + ']777;BT_PSREADLINE_HISTORY=red-skipped' + [char]7)
+            }
+            return
+        }
+
+        $fields = $snapshot.Fields
+        $values = $snapshot.Values
+        $singleton = $snapshot.Singleton
+        try {
+            # `_savedCurrentLine` is readonly in both proven versions. Its object is mutated only by
+            # the post-dispatch cleanup we are preventing, so verify its identity instead of trying
+            # to write a readonly field through reflection.
+            if (-not [object]::ReferenceEquals(
+                $fields['_savedCurrentLine'].GetValue($singleton),
+                $values['_savedCurrentLine'])) {
+                throw 'PSReadLine _savedCurrentLine changed inside the resize handler.'
+            }
+            foreach ($name in @(
+                '_currentHistoryIndex',
+                '_getNextHistoryIndex',
+                '_searchHistoryPrefix',
+                '_searchHistoryBackward',
+                '_previousHistoryItem',
+                '_hashedHistory'
+            )) {
+                $fields[$name].SetValue($singleton, $values[$name])
+            }
+
+            $anyCount = [int]$values['_anyHistoryCommandCount']
+            $recallCount = [int]$values['_recallHistoryCommandCount']
+            $searchCount = [int]$values['_searchHistoryCommandCount']
+            if ($anyCount -gt 0) {
+                # InputLoop snapshots these counters before dispatch. A changed counter tells it the
+                # current key remains part of the live history operation. Do not start a history
+                # session at an ordinary empty/current line where all counters were zero.
+                $fields['_anyHistoryCommandCount'].SetValue($singleton, $anyCount + 1)
+                $fields['_recallHistoryCommandCount'].SetValue(
+                    $singleton,
+                    $(if ($recallCount -gt 0) { $recallCount + 1 } else { $recallCount }))
+                $fields['_searchHistoryCommandCount'].SetValue(
+                    $singleton,
+                    $(if ($searchCount -gt 0) { $searchCount + 1 } else { $searchCount }))
+                $mode = 'active'
+            } else {
+                $fields['_anyHistoryCommandCount'].SetValue($singleton, $anyCount)
+                $fields['_recallHistoryCommandCount'].SetValue($singleton, $recallCount)
+                $fields['_searchHistoryCommandCount'].SetValue($singleton, $searchCount)
+                $mode = 'inactive'
+            }
+            if ($env:BT_PSREADLINE_HISTORY_PROBE -eq '1') {
+                [Console]::Write(
+                    ([string][char]27) + ']777;BT_PSREADLINE_HISTORY=' + $mode +
+                    ',index=' + $values['_currentHistoryIndex'] +
+                    ',any=' + $anyCount + ',recall=' + $recallCount +
+                    ',search=' + $searchCount + [char]7)
+            }
+        } catch {
+            $restoreError = $_
+            # If the proven private shape ever changes mid-handler, roll every writable field back
+            # to its entry value and let PSReadLine take its normal post-dispatch path. That is the
+            # pre-fix behavior, rather than a half-restored navigation session.
+            try {
+                foreach ($name in @(
+                    '_currentHistoryIndex',
+                    '_getNextHistoryIndex',
+                    '_recallHistoryCommandCount',
+                    '_searchHistoryCommandCount',
+                    '_anyHistoryCommandCount',
+                    '_searchHistoryPrefix',
+                    '_searchHistoryBackward',
+                    '_previousHistoryItem',
+                    '_hashedHistory'
+                )) {
+                    $fields[$name].SetValue($singleton, $values[$name])
+                }
+            } catch {
+                # The shape is already untrusted; there is no safer private-state action left.
+            }
+            if ($env:BT_PSREADLINE_HISTORY_PROBE -eq '1') {
+                [Console]::Write(
+                    ([string][char]27) + ']777;BT_PSREADLINE_HISTORY_DEGRADED=restore:' +
+                    $restoreError.Exception.Message + [char]7)
+            }
+        }
+    }
 }
 
 # Private resize-anchor chord. ConPTY translates CSI 24;8~ into Ctrl+Alt+Shift+F12 on both Windows
@@ -75,6 +220,8 @@ $psReadLineVersion = (Get-Module PSReadLine).Version
 if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
         param($key, $arg)
+        $historyNavigation = & $Global:__BetterTerminalShellIntegration.HistoryNavigationCapture
+        try {
         $line = $null
         $cursor = 0
         [Microsoft.PowerShell.PSConsoleReadLine]::GetBufferState([ref]$line, [ref]$cursor)
@@ -121,6 +268,9 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
             $savedPreviousCursorLeft = $previous.cursorLeft
             $savedPreviousCursorTop = $previous.cursorTop
             $savedPreviousInitialY = $previous.initialY
+            if ($env:BT_PSREADLINE_REANCHOR_FORCE_FALLBACK_PROBE -eq '1') {
+                throw 'Dev probe forced the PSReadLine reanchor fallback.'
+            }
             $width = [Console]::BufferWidth
             $height = [Console]::BufferHeight
             $physicalX = [Console]::CursorLeft
@@ -350,14 +500,22 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
             }
             [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg)
         }
+        } finally {
+            & $Global:__BetterTerminalShellIntegration.HistoryNavigationRestore $historyNavigation
+        }
     }
 } else {
     Set-PSReadLineKeyHandler -Chord 'Ctrl+Alt+Shift+F12' -ScriptBlock {
         param($key, $arg)
+        $historyNavigation = & $Global:__BetterTerminalShellIntegration.HistoryNavigationCapture
+        try {
         # Dev-gated proof that this handler, rather than an unbound-key fallback, consumed the VT
         # input. OSC 777 is ignored by the terminal and the variable is absent in product sessions.
         if ($env:BT_PSREADLINE_NOOP_PROBE -eq '1') {
             [Console]::Write(([string][char]27) + ']777;BT_PSREADLINE_NOOP' + [char]7)
+        }
+        } finally {
+            & $Global:__BetterTerminalShellIntegration.HistoryNavigationRestore $historyNavigation
         }
     }
 }

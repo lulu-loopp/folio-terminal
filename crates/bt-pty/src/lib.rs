@@ -4217,6 +4217,128 @@ mod tests {
         );
     }
 
+    /// RED/GREEN HISTORY-TRANSPARENCY PROBE for the private resize-anchor chord. PSReadLine's
+    /// `InputLoop` treats a private script handler like every other editing command: unless its
+    /// history counters advance, post-dispatch cleanup clears the active walk and puts
+    /// `_currentHistoryIndex` back at the newest end. This drives that exact sequence through real
+    /// ConPTY on both private shapes installed on the development machine:
+    ///
+    /// * non-empty: Up recalls `echo`, the chord lands, and the next Up must continue to the older
+    ///   `Write-Output` entry (the red arm incorrectly recalls `echo` again);
+    /// * empty: the chord lands at an ordinary empty prompt, where it must not manufacture a
+    ///   history session, and a one-step Up must still recall the newest entry.
+    ///
+    /// Read the `BT_CONPTY_HISTORY_TRANSPARENCY` lines on stderr:
+    ///   `cargo test -p bt-pty psreadline_resize_chord_history_transparency -- --ignored --nocapture`
+    #[test]
+    #[ignore = "dev probe: drives real PSReadLine 2.4.5 and 2.0.0 history through ConPTY"]
+    fn psreadline_resize_chord_history_transparency_pair_probe() {
+        const PROMPT: &str = "BTHIST> ";
+        const OLDER: &str = "Write-Output BT_HISTORY_OLDER";
+        const NEWEST: &str = "echo BT_HISTORY_NEWEST";
+        const SEEDED: &[u8] = b"BT_HISTORY_TRANSPARENCY_SEEDED";
+        const HISTORY_MARKER: &[u8] = b"BT_PSREADLINE_HISTORY=";
+        let mut outcomes = Vec::new();
+
+        for shell in ["pwsh.exe", "powershell.exe"] {
+            let fallback_arms: &[bool] = if shell == "pwsh.exe" {
+                &[false, true]
+            } else {
+                &[false]
+            };
+            for &force_fallback in fallback_arms {
+                for buffer_nonempty in [true, false] {
+                    for red in [true, false] {
+                        let arm = if red {
+                            "$env:BT_PSREADLINE_HISTORY_TRANSPARENCY_RED_PROBE = '1'; "
+                        } else {
+                            ""
+                        };
+                        let fallback = if force_fallback {
+                            "$env:BT_PSREADLINE_REANCHOR_PROBE = '1'; \
+                         $env:BT_PSREADLINE_REANCHOR_FORCE_FALLBACK_PROBE = '1'; "
+                        } else {
+                            ""
+                        };
+                        let startup = format!(
+                            "$env:BT_PSREADLINE_HISTORY_PROBE = '1'; {arm}{fallback}{}; \
+                         Set-PSReadLineKeyHandler -Chord Ctrl+g -ScriptBlock {{ \
+                         [Microsoft.PowerShell.PSConsoleReadLine]::ClearHistory(); \
+                         [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory('{OLDER}'); \
+                         [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory('{NEWEST}'); \
+                         [Console]::Write(([string][char]27) + \
+                         ']777;BT_HISTORY_TRANSPARENCY_SEEDED' + [char]7) }}",
+                            invoke_prompt_probe_startup(PROMPT)
+                        );
+                        let mut oracle =
+                            InteractiveOracle::spawn_shell_with(shell, &startup, 100, 12);
+                        oracle.wait_for_output_since(0, b"BT_PSRL_VERSION=");
+                        oracle.wait_for_current_line(PROMPT.trim_end());
+
+                        let seed_mark = oracle.raw_output.len();
+                        oracle.session.write(b"\x07").unwrap();
+                        oracle.wait_for_output_since(seed_mark, SEEDED);
+                        oracle.pump_until_quiet(Duration::from_secs(6));
+
+                        if buffer_nonempty {
+                            oracle.session.write(b"\x1b[A").unwrap();
+                            oracle.wait_for_current_line(&format!("{PROMPT}{NEWEST}"));
+                            oracle.pump_until_quiet(Duration::from_secs(6));
+                        }
+
+                        let chord_mark = oracle.raw_output.len();
+                        oracle
+                            .session
+                            .write(PSREADLINE_INVOKE_PROMPT_INPUT)
+                            .unwrap();
+                        oracle.wait_for_output_since(chord_mark, HISTORY_MARKER);
+                        oracle.pump_until_quiet(Duration::from_secs(6));
+
+                        oracle.session.write(b"\x1b[A").unwrap();
+                        oracle.pump_for(Duration::from_millis(500));
+                        oracle.pump_until_quiet(Duration::from_secs(6));
+                        let actual = oracle.current_line();
+                        let expected = if buffer_nonempty && !red {
+                            format!("{PROMPT}{OLDER}")
+                        } else {
+                            format!("{PROMPT}{NEWEST}")
+                        };
+                        let version = psreadline_version(&oracle.raw_output);
+                        let chord_output = escaped(&oracle.raw_output[chord_mark..]);
+                        eprintln!(
+                            "BT_CONPTY_HISTORY_TRANSPARENCY source={} shell={shell} \
+                         psreadline={version} red={red} force_fallback={force_fallback} \
+                         buffer_nonempty={buffer_nonempty} \
+                         actual={actual:?} expected={expected:?} chord_output={chord_output}",
+                            conpty_source()
+                        );
+                        assert_eq!(actual, expected);
+                        if force_fallback {
+                            assert!(
+                                chord_output.contains("BT_PSREADLINE_REANCHOR_FALLBACK="),
+                                "the forced fallback arm did not enter InvokePrompt: {chord_output}"
+                            );
+                        }
+                        outcomes.push((
+                            shell,
+                            force_fallback,
+                            buffer_nonempty,
+                            red,
+                            version,
+                            actual,
+                        ));
+                    }
+                }
+            }
+        }
+
+        assert_eq!(
+            outcomes.len(),
+            12,
+            "every repair/fallback/no-op, buffer, and red-green arm must run"
+        );
+    }
+
     /// The user's exact non-empty gesture. The red arm reinstalls the retired unconditional
     /// InvokePrompt branch; the green arm uses the shipped zero-repaint anchor repair. Every stop
     /// is allowed through the app's real quiet gate, including a command that was already longer
