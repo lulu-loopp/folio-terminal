@@ -60,6 +60,9 @@ const WIN32_DEFAULT_DPI: f64 = 96.0;
 const STARTUP_PTY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
 /// One 60 Hz frame: coalesce cursor-area churn without leaving the final position unsent.
 const IME_CURSOR_AREA_INTERVAL: Duration = Duration::from_millis(16);
+/// The mock-up's `.cursor` uses a 1.1 second step-end animation, so each visible/hidden phase is
+/// half of that cycle.
+const CURSOR_BLINK_PHASE: Duration = Duration::from_millis(550);
 /// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
 /// silence interval while the local surface and terminal grid continue to follow every event.
 const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
@@ -502,6 +505,7 @@ struct Runtime {
     preedit: Option<Preedit>,
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
+    cursor_blink: CursorBlink,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
     mouse_route: Option<MouseRoute>,
@@ -564,6 +568,11 @@ struct Runtime {
     /// Persisted user choice. Under `BT_BG` the process colors are locked but this choice is kept so
     /// a diagnostic launch cannot overwrite the user's real preference on clean exit.
     selected_theme: Theme,
+    /// The last aggregate minimum handed to winit. On Windows, winit 0.30 re-applies the current
+    /// inner size whenever this setter runs; repeating an unchanged minimum can therefore feed the
+    /// non-client adjustment back into the client size. The outer `Option` distinguishes "never
+    /// applied" from an applied `None` minimum.
+    window_min_inner_size: Option<Option<(i64, i64)>>,
 }
 
 fn active_item<T>(items: &[T], active: usize) -> &T {
@@ -572,6 +581,32 @@ fn active_item<T>(items: &[T], active: usize) -> &T {
 
 fn active_item_mut<T>(items: &mut [T], active: usize) -> &mut T {
     &mut items[active]
+}
+
+fn aggregate_window_minimum(
+    sizes: impl IntoIterator<Item = Option<(i64, i64)>>,
+) -> Option<(i64, i64)> {
+    sizes
+        .into_iter()
+        .try_fold((1_i64, 1_i64), |(width, height), size| {
+            let (next_width, next_height) = size?;
+            Some((width.max(next_width), height.max(next_height)))
+        })
+}
+
+fn window_minimum_changed(
+    applied: &mut Option<Option<(i64, i64)>>,
+    next: Option<(i64, i64)>,
+) -> bool {
+    if *applied == Some(next) {
+        return false;
+    }
+    *applied = Some(next);
+    true
+}
+
+fn earliest_deadline<const N: usize>(deadlines: [Option<Instant>; N]) -> Option<Instant> {
+    deadlines.into_iter().flatten().min()
 }
 
 impl Deref for Runtime {
@@ -1482,6 +1517,59 @@ impl ImeCursorThrottle {
     }
 }
 
+#[derive(Debug)]
+struct CursorBlink {
+    focused: bool,
+    visible: bool,
+    next_toggle: Option<Instant>,
+}
+
+impl CursorBlink {
+    fn new(now: Instant) -> Self {
+        Self {
+            focused: true,
+            visible: true,
+            next_toggle: Some(now + CURSOR_BLINK_PHASE),
+        }
+    }
+
+    fn visible(&self) -> bool {
+        self.visible
+    }
+
+    fn reset(&mut self, now: Instant) -> bool {
+        let changed = !self.visible;
+        self.visible = true;
+        self.next_toggle = self.focused.then_some(now + CURSOR_BLINK_PHASE);
+        changed
+    }
+
+    fn set_focused(&mut self, focused: bool, now: Instant) -> bool {
+        self.focused = focused;
+        self.reset(now)
+    }
+
+    fn advance(&mut self, now: Instant) -> bool {
+        let Some(mut deadline) = self.next_toggle else {
+            return false;
+        };
+        if now < deadline {
+            return false;
+        }
+        let before = self.visible;
+        while deadline <= now {
+            self.visible = !self.visible;
+            deadline += CURSOR_BLINK_PHASE;
+        }
+        self.next_toggle = Some(deadline);
+        self.visible != before
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        self.next_toggle
+    }
+}
+
 fn focus_leaf_index(seats: &seats::Seats) -> usize {
     seats
         .tree()
@@ -1793,6 +1881,7 @@ impl Runtime {
             preedit: None,
             ime_active: false,
             ime_cursor_throttle: ImeCursorThrottle::default(),
+            cursor_blink: CursorBlink::new(Instant::now()),
             ime_system_caret,
             pointer_position: None,
             mouse_route: None,
@@ -1819,6 +1908,7 @@ impl Runtime {
             work_area: WorkAreaHint::NeverKnown,
             session_store,
             selected_theme,
+            window_min_inner_size: None,
         };
         runtime.refresh_work_area();
         runtime.apply_window_min_inner_size();
@@ -1888,6 +1978,7 @@ impl Runtime {
             None,
         )?;
         self.tabs.push(tab);
+        self.apply_window_min_inner_size();
         self.activate_tab(self.tabs.len() - 1, true)
     }
 
@@ -1916,7 +2007,6 @@ impl Runtime {
             "resize activated tab to its seat layout",
         )?;
         self.sync_math_layout_key();
-        self.apply_window_min_inner_size();
         self.window.set_title(self.display_title());
         self.refresh_chrome();
         self.mark_session_dirty(Instant::now());
@@ -1945,6 +2035,7 @@ impl Runtime {
                         .context("shut down closed tab child process")?;
                 }
                 self.active_tab = active_tab;
+                self.apply_window_min_inner_size();
                 if was_active {
                     self.activate_tab(active_tab, true)?;
                 } else {
@@ -2144,16 +2235,26 @@ impl Runtime {
         self.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
     }
 
-    /// Hand the OS the minimum inner size the tree needs (§2.6.5, L12).
+    /// Hand the OS the largest minimum any tab tree needs (§2.6.5, L12).
+    ///
+    /// A native window belongs to every tab, not only the active one. Keeping one aggregate also
+    /// means activation cannot alternate the OS constraint between two trees. Most importantly,
+    /// an unchanged aggregate never reaches winit's Windows setter: winit 0.30 implements that
+    /// setter by requesting the current inner size again, and its non-client adjustment grows a
+    /// self-drawn-frame window when the call is repeated.
     fn apply_window_min_inner_size(&mut self) {
         let metrics = self.seat_metrics();
-        let minimum = self.seats.min_inner_size(&metrics, self.work_area);
-        self.window.set_min_inner_size(minimum.map(|size| {
-            LogicalSize::new(
-                size.width.floor_px().max(1) as f64,
-                size.height.floor_px().max(1) as f64,
-            )
+        let minimum = aggregate_window_minimum(self.tabs.iter().map(|tab| {
+            tab.seats
+                .min_inner_size(&metrics, self.work_area)
+                .map(|size| (size.width.floor_px().max(1), size.height.floor_px().max(1)))
         }));
+        if !window_minimum_changed(&mut self.window_min_inner_size, minimum) {
+            return;
+        }
+        self.window.set_min_inner_size(
+            minimum.map(|(width, height)| LogicalSize::new(width as f64, height as f64)),
+        );
     }
 
     /// The durable form of everything this window would want back after a
@@ -2770,7 +2871,7 @@ impl Runtime {
         Ok(())
     }
 
-    fn publish_pty_drain_frame(&mut self, now: Instant) -> Result<()> {
+    fn publish_pty_drain_frame(&mut self, now: Instant, force: bool) -> Result<()> {
         let keyboard_at = self.pending_keyboard_at;
         let published = self.publish_frame_inner(
             FrameTrigger {
@@ -2781,7 +2882,7 @@ impl Runtime {
                     FrameSource::PtyOutput
                 },
             },
-            true,
+            !force,
         )?;
         let sync_open = self.session.synchronized_update_deadline().is_some();
         if published || !sync_open {
@@ -2856,11 +2957,13 @@ impl Runtime {
             }
         }
         if active_changed {
+            let now = Instant::now();
+            let cursor_revealed = self.reset_cursor_blink(now);
             // The vendor parser withholds bytes inside an open DEC 2026 block, so projecting here
             // cannot expose its intermediate state. It can expose ordinary output before a
             // trailing BSU or a completed update before the next BSU; the unchanged-frame gate in
             // publish_frame cheaply suppresses drains containing only still-buffered sync bytes.
-            self.publish_pty_drain_frame(Instant::now())?;
+            self.publish_pty_drain_frame(now, cursor_revealed)?;
         }
         Ok(())
     }
@@ -2889,9 +2992,35 @@ impl Runtime {
             self.refresh_chrome();
         }
         if active_finished {
-            self.publish_pty_drain_frame(now)?;
+            self.publish_pty_drain_frame(now, false)?;
         }
         Ok(())
+    }
+
+    fn reset_cursor_blink(&mut self, now: Instant) -> bool {
+        let changed = self.cursor_blink.reset(now);
+        self.renderer
+            .set_cursor_blink_visible(self.cursor_blink.visible());
+        changed
+    }
+
+    fn set_cursor_focus(&mut self, focused: bool, now: Instant) {
+        self.cursor_blink.set_focused(focused, now);
+        self.renderer.set_window_focused(focused);
+        self.renderer
+            .set_cursor_blink_visible(self.cursor_blink.visible());
+    }
+
+    fn advance_cursor_blink_if_due(&mut self, now: Instant) -> Result<()> {
+        if !self.cursor_blink.advance(now) {
+            return Ok(());
+        }
+        self.renderer
+            .set_cursor_blink_visible(self.cursor_blink.visible());
+        self.publish_frame(FrameTrigger {
+            occurred_at: now,
+            source: FrameSource::Expose,
+        })
     }
 
     fn finish_resize_if_quiescent(&mut self, now: Instant) -> Result<()> {
@@ -4322,6 +4451,13 @@ impl Runtime {
         if event.state != ElementState::Pressed {
             return Ok(());
         }
+        let now = Instant::now();
+        if self.reset_cursor_blink(now) {
+            self.publish_frame(FrameTrigger {
+                occurred_at: now,
+                source: FrameSource::Keyboard,
+            })?;
+        }
         // Any keystroke dismisses the transient peek flyout (Esc included, per the peek verb
         // ruling) without consuming the key: typing means the user has moved on from hovering.
         self.dismiss_peek()?;
@@ -4463,6 +4599,9 @@ impl Runtime {
         // stays consistent for when the dialog closes.
         if self.settings_layout().is_some() && matches!(event, Ime::Preedit(..) | Ime::Commit(_)) {
             return Ok(());
+        }
+        if matches!(&event, Ime::Preedit(..) | Ime::Commit(_)) {
+            self.reset_cursor_blink(Instant::now());
         }
         match event {
             Ime::Enabled => {
@@ -4891,14 +5030,14 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 runtime.ime_active = false;
                 runtime.ime_cursor_throttle.reset();
                 runtime.ime_system_caret.destroy();
-                runtime.renderer.set_window_focused(false);
+                runtime.set_cursor_focus(false, Instant::now());
                 runtime.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Expose,
                 })
             }
             WindowEvent::Focused(true) => {
-                runtime.renderer.set_window_focused(true);
+                runtime.set_cursor_focus(true, Instant::now());
                 runtime.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Expose,
@@ -4925,6 +5064,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             return;
         }
         let now = Instant::now();
+        if let Err(error) = runtime.advance_cursor_blink_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.finish_synchronized_update_if_due(now) {
             self.fail(event_loop, error);
             return;
@@ -4977,9 +5120,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             .filter_map(|tab| tab.session.synchronized_update_deadline())
             .min();
         let live_stability_deadline = runtime.session.live_stability_deadline();
-        let wake_deadline = [
+        let wake_deadline = earliest_deadline([
             startup_deadline,
             runtime.ime_cursor_throttle.deadline(),
+            runtime.cursor_blink.deadline(),
             pty_resize_deadline,
             resize_finish_deadline,
             synchronized_update_deadline,
@@ -4992,10 +5136,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 .as_ref()
                 .and_then(|preview| preview.resize_scale_deadline),
             runtime.session_store.deadline(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
+        ]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
         if let Err(error) = runtime.reap_exited_tabs() {
@@ -5521,6 +5662,78 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use winit::keyboard::{Key, NamedKey};
+
+    #[test]
+    fn repeated_tab_switches_do_not_feed_window_chrome_back_into_inner_size() {
+        let first = Some((260, 160));
+        let second = Some((520, 240));
+        let aggregate = aggregate_window_minimum([first, second]);
+        assert_eq!(aggregate, Some((520, 240)));
+
+        let mut applied = None;
+        assert!(window_minimum_changed(&mut applied, aggregate));
+        let mut mock_inner_size = PhysicalSize::new(960, 600);
+        let stable_inner_size = mock_inner_size;
+
+        for switch in 0..32 {
+            let sizes = if switch % 2 == 0 {
+                [first, second]
+            } else {
+                [second, first]
+            };
+            if window_minimum_changed(&mut applied, aggregate_window_minimum(sizes)) {
+                // Model the winit 0.30 Windows behavior that exposed the regression: every setter
+                // call re-requests the current client size through non-client adjustment.
+                mock_inner_size.height += 40;
+            }
+            assert_eq!(
+                mock_inner_size, stable_inner_size,
+                "tab switch {switch} changed the window inner size"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_blink_resets_flips_and_stays_visible_while_unfocused() {
+        let start = Instant::now();
+        let mut blink = CursorBlink::new(start);
+        assert!(blink.visible());
+        assert_eq!(blink.deadline(), Some(start + CURSOR_BLINK_PHASE));
+
+        assert!(blink.advance(start + CURSOR_BLINK_PHASE));
+        assert!(!blink.visible(), "the first phase boundary hides the caret");
+        let input_at = start + CURSOR_BLINK_PHASE + Duration::from_millis(10);
+        assert!(blink.reset(input_at), "input reveals a hidden caret");
+        assert!(blink.visible());
+        assert_eq!(blink.deadline(), Some(input_at + CURSOR_BLINK_PHASE));
+
+        let unfocused_at = input_at + Duration::from_millis(20);
+        blink.set_focused(false, unfocused_at);
+        assert!(blink.visible(), "the unfocused outline is always visible");
+        assert_eq!(
+            blink.deadline(),
+            None,
+            "unfocused cursors do not wake the loop"
+        );
+        assert!(!blink.advance(unfocused_at + Duration::from_secs(60)));
+        assert!(blink.visible());
+
+        let refocused_at = unfocused_at + Duration::from_secs(61);
+        blink.set_focused(true, refocused_at);
+        assert!(blink.visible());
+        assert_eq!(blink.deadline(), Some(refocused_at + CURSOR_BLINK_PHASE));
+    }
+
+    #[test]
+    fn cursor_blink_deadline_is_registered_with_the_event_loop_wake_set() {
+        let start = Instant::now();
+        let blink = CursorBlink::new(start);
+        let later = start + Duration::from_secs(10);
+        assert_eq!(
+            earliest_deadline([Some(later), blink.deadline(), None]),
+            blink.deadline()
+        );
+    }
 
     #[test]
     fn tab_state_machine_creates_switches_and_closes_to_the_adjacent_tab() {

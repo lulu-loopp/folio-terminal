@@ -1625,6 +1625,7 @@ pub struct Renderer {
     wide_shaping_cache: WideShapingCache,
     glyph_degraded_frames: u64,
     window_focused: bool,
+    cursor_blink_visible: bool,
     peek_overlay: Option<PeekImageOverlay>,
     preview_image: Option<PreviewImage>,
     trace_perf: bool,
@@ -2357,6 +2358,7 @@ impl Renderer {
             wide_shaping_cache: WideShapingCache::with_perf_tracking(trace_perf),
             glyph_degraded_frames: 0,
             window_focused: true,
+            cursor_blink_visible: true,
             peek_overlay: None,
             preview_image: None,
             trace_perf,
@@ -2419,6 +2421,13 @@ impl Renderer {
     pub fn set_window_focused(&mut self, focused: bool) -> bool {
         let changed = self.window_focused != focused;
         self.window_focused = focused;
+        changed
+    }
+
+    /// Select the focused cursor's blink phase without affecting the unfocused outline.
+    pub fn set_cursor_blink_visible(&mut self, visible: bool) -> bool {
+        let changed = self.cursor_blink_visible != visible;
+        self.cursor_blink_visible = visible;
         changed
     }
 
@@ -3806,8 +3815,11 @@ impl Renderer {
                 ));
             }
         }
-        if frame.cursor.visible
-            && (frame.cursor.row as usize) < drawable_rows
+        if cursor_quad_visible(
+            frame.cursor.visible,
+            self.window_focused,
+            self.cursor_blink_visible,
+        ) && (frame.cursor.row as usize) < drawable_rows
             && frame.cursor.column < frame.columns.get()
         {
             rects.extend(
@@ -4667,6 +4679,14 @@ fn cursor_cell_span(frame: &ViewportFrame) -> (usize, usize) {
     } else {
         (column, 1)
     }
+}
+
+fn cursor_quad_visible(
+    terminal_cursor_visible: bool,
+    window_focused: bool,
+    blink_phase_visible: bool,
+) -> bool {
+    terminal_cursor_visible && (!window_focused || blink_phase_visible)
 }
 
 fn cursor_pixel_bounds(
@@ -8640,6 +8660,20 @@ mod tests {
         assert_eq!(outline[1], [4.0, 23.0, 12.0, 24.0]);
         assert_eq!(outline[2], [4.0, 5.0, 5.0, 23.0]);
         assert_eq!(outline[3], [11.0, 5.0, 12.0, 23.0]);
+    }
+
+    #[test]
+    fn hidden_blink_phase_omits_only_the_focused_cursor_quad() {
+        assert!(cursor_quad_visible(true, true, true));
+        assert!(
+            !cursor_quad_visible(true, true, false),
+            "a focused hidden phase must submit no cursor quad"
+        );
+        assert!(
+            cursor_quad_visible(true, false, false),
+            "the unfocused hollow cursor does not blink"
+        );
+        assert!(!cursor_quad_visible(false, false, true));
     }
 
     #[cfg(target_os = "windows")]

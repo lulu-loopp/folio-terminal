@@ -567,3 +567,8 @@ function Global:prompt {
     $state.CommandStarted = $true
     return $out
 }
+
+# pwsh reports its executable path as the initial console title on some hosts. Establish the
+# profile's stable default only after integration is installed; later OSC/title writes from child
+# programs remain authoritative. `[char]27` keeps this identical on PowerShell 5.1 and 7.
+[Console]::Write(([string][char]27) + ']0;PowerShell' + [char]7)
