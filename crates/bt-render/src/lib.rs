@@ -1,6 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
 mod procedural;
+mod rounded_rect;
 mod theme;
 
 use std::{
@@ -32,7 +33,11 @@ use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
-use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB};
+use rounded_rect::{rounded_rect_coverage, rounded_rect_halo_coverage};
+use theme::{
+    ANSI_16_RGB, CURSOR_WIDTH_CELL_RATIO, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB,
+    FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX,
+};
 pub use theme::{
     ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, LIGHT_CHROME,
     PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
@@ -46,9 +51,7 @@ pub use theme::{
     WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette,
     foreground_rgb, theme_revision,
 };
-use theme::{
-    DEFAULT_PEEK_BORDER_RGB, DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB,
-};
+use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
 
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
@@ -674,7 +677,9 @@ struct PeekBoxLayout {
 /// and the box that frames it are derived from these same two numbers, so the size the app
 /// resamples to and the size the box reserves can never disagree.
 fn peek_border_px(scale_factor: f32) -> f32 {
-    scale_factor.round().max(1.0)
+    (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale_factor)
+        .round()
+        .max(1.0)
 }
 
 fn peek_inset_px(scale_factor: f32) -> f32 {
@@ -778,6 +783,93 @@ fn peek_box_layout(
         interior,
         image,
     })
+}
+
+/// One flat fill of a floating window's chrome: a physical-pixel rectangle, the
+/// colour it is drawn in, and the alpha it is blended at — the shape's own
+/// antialiasing already folded into that alpha.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PeekBoxFill {
+    layer: PeekBoxLayer,
+    rect: [f32; 4],
+    color: [u8; 3],
+    alpha: f32,
+}
+
+/// The three planes a floating window is made of. They are named because two of
+/// them can share a colour — a shadow and a hairline are both black on the light
+/// palette — and "which plane put this pixel here" is then not a question the
+/// pixel can answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeekBoxLayer {
+    Lift,
+    Hairline,
+    Face,
+}
+
+/// The flyout's chrome, back to front: its lift, its hairline, its face.
+///
+/// A floating window in the mock-up is `--menu` behind a `--border` hairline,
+/// rounded by 10px, over `--shadow`. Three of those are colours and arrive as
+/// palette tokens; the fourth is a shape, built the way the tab's is in
+/// `marks.rs` — analytic coverage, never nested quads.
+///
+/// The hairline is not drawn as a ring. The whole box is filled in `--border` at
+/// the mock-up's own alpha and the face is laid over it one border-pixel in, so
+/// what survives is exactly the border-box a browser would leave: one blended
+/// pixel of `rgba(255,255,255,.094)` over whatever the terminal is showing behind
+/// it, antialiased on both of its edges rather than only the outer one.
+/// Compositing that hairline into an opaque colour the way the rest of the
+/// palette does is not available here — a flyout has no known surface under it.
+fn peek_box_fills(layout: &PeekBoxLayout, palette: ChromePalette, scale: f32) -> Vec<PeekBoxFill> {
+    let radius = FLOAT_WINDOW_RADIUS_LOGICAL_PX * scale;
+    let border = peek_border_px(scale);
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let paint = |layer: PeekBoxLayer,
+                 coverage: Vec<rounded_rect::CoverageRect>,
+                 color: [u8; 3],
+                 alpha: f32| {
+        coverage.into_iter().map(move |entry| PeekBoxFill {
+            layer,
+            rect: entry.rect,
+            color,
+            alpha: entry.coverage * alpha,
+        })
+    };
+    // The lift: two concentric rings around the box — never under it, because an
+    // outer shadow is clipped out of the border box it lifts — the wider and
+    // fainter one first, so the two compose into a falloff rather than a band.
+    let spread = FLOAT_WINDOW_SHADOW_LOGICAL_PX * scale;
+    let mut fills: Vec<PeekBoxFill> = [
+        (spread, palette.menu_shadow_outer_alpha),
+        (spread / 2.0, palette.menu_shadow_inner_alpha),
+    ]
+    .into_iter()
+    .flat_map(|(extent, shadow_alpha)| {
+        paint(
+            PeekBoxLayer::Lift,
+            rounded_rect_halo_coverage(layout.frame, radius, extent),
+            palette.menu_shadow,
+            alpha(shadow_alpha),
+        )
+    })
+    .collect();
+    fills.extend(paint(
+        PeekBoxLayer::Hairline,
+        rounded_rect_coverage(layout.frame, radius),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    ));
+    // The face's round is concentric with the box's: one border in on every side,
+    // so one border smaller in radius. Anything else and the hairline would
+    // thicken through the corner.
+    fills.extend(paint(
+        PeekBoxLayer::Face,
+        rounded_rect_coverage(layout.interior, radius - border),
+        palette.menu_surface,
+        1.0,
+    ));
+    fills
 }
 
 struct ComposedRow {
@@ -3007,22 +3099,7 @@ impl Renderer {
         }) else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
-        let rects = vec![
-            self.pixel_rect(
-                layout.frame[0],
-                layout.frame[1],
-                layout.frame[2],
-                layout.frame[3],
-                DEFAULT_PEEK_BORDER_RGB,
-            ),
-            self.pixel_rect(
-                layout.interior[0],
-                layout.interior[1],
-                layout.interior[2],
-                layout.interior[3],
-                DEFAULT_STATUS_BACKGROUND_RGB,
-            ),
-        ];
+        let rects = self.peek_box_rects(&layout);
         let fit = (layout.image[2] - layout.image[0]) / overlay.width_px as f32;
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
@@ -3053,6 +3130,35 @@ impl Renderer {
             });
         }
         (rects, draws, vertices)
+    }
+
+    /// The flyout's own chrome, bottom to top: its lift, its hairline, its face.
+    ///
+    /// A floating window in the mock-up is `--menu` behind a `--border` hairline,
+    /// rounded by `--floatr`, over `--shadow`. Three of those four are colours and
+    /// arrive as tokens; the fourth is a shape, and it is built the same way here
+    /// as the tab's is in `marks.rs` — analytic coverage rather than nested quads.
+    ///
+    /// The hairline is not drawn as a ring. The whole box is filled in `--border`
+    /// at its own alpha and the face is laid over it one pixel in, so what stays
+    /// visible is exactly the border-box the browser would leave: one blended
+    /// pixel of the mock-up's own `rgba(255,255,255,.094)` over whatever the
+    /// terminal is showing, with the round's antialiasing on both of its edges
+    /// instead of only the outer one.
+    fn peek_box_rects(&self, layout: &PeekBoxLayout) -> Vec<RectInstance> {
+        peek_box_fills(layout, chrome_palette(), self.metrics.scale_factor as f32)
+            .into_iter()
+            .map(|fill| {
+                self.pixel_rect_with_coverage(
+                    fill.rect[0],
+                    fill.rect[1],
+                    fill.rect[2],
+                    fill.rect[3],
+                    fill.color,
+                    fill.alpha,
+                )
+            })
+            .collect()
     }
 
     /// Upload and place every chrome mark, in whole-surface pixels.
@@ -4332,11 +4438,31 @@ fn cursor_pixel_bounds(
         frame_cell_bounds_px(metrics, frame, frame.cursor.row as usize, column);
     let right = left + span as f32 * metrics.cell_width_px;
     if focused {
-        return vec![[left, top, right, bottom]];
+        // The mock-up's caret is a bar half a cell wide, not a filled cell: it
+        // marks the insertion point and leaves the character it stands on
+        // readable. It is snapped to the physical grid and given whole pixels of
+        // width for the same reason the dotted underline is — a 3.5px bar landing
+        // between two columns is a 4px smear, and a caret is the one mark on
+        // screen the eye tracks while it moves.
+        //
+        // A wide character's cursor is *not* twice as wide: the bar sits at the
+        // start of the cell the next glyph will land in, and that is one place
+        // whatever occupies it now. `span` still decides *which* column that is,
+        // so a cursor on a wide char's trailing half draws at the char's own edge.
+        let width = (metrics.cell_width_px * CURSOR_WIDTH_CELL_RATIO)
+            .round()
+            .max(1.0);
+        let left = left.round();
+        return vec![[left, top, left + width, bottom]];
     }
 
     // Match Windows Terminal's focus cue: retain a visible one-device-pixel hollow caret while
     // allowing the cell contents to remain readable through its center.
+    //
+    // This one stays the whole cell's outline rather than becoming a hollow bar. The unfocused
+    // caret is a different statement from the focused one — "the cursor is here, but this window
+    // is not listening" — and a one-pixel outline of a four-pixel bar is a four-pixel bar: the
+    // cue would be gone. The shape carries the state precisely because it is not the bar.
     let stroke = 1.0_f32.min((right - left) / 2.0).min((bottom - top) / 2.0);
     vec![
         [left, top, right, top + stroke],
@@ -4377,7 +4503,55 @@ fn terminal_font_system() -> FontSystem {
         let _ = db.load_font_file(fonts.join(file));
     }
     db.set_monospace_family(PRIMARY_FONT_FAMILY);
+    load_chrome_sans_family(&mut db, &fonts);
     FontSystem::new_with_locale_and_db("en-US".to_owned(), db)
+}
+
+/// The window chrome's UI face, from the mock-up's own stack
+/// (`font-family: "Inter", "Segoe UI Variable Text", "Segoe UI"`).
+///
+/// Only the files are named here, not the families: a family name is a claim
+/// about what a file contains, and the one that matters — what `Family::SansSerif`
+/// must resolve to — is read back off the face that actually loaded. The first
+/// entry that this Windows ships wins, which is what a CSS stack means.
+///
+/// * `SegUIVar.ttf` is Windows 11's Segoe UI Variable. Its default instance is
+///   `wght 400, opsz 10.5`, and the optical-size axis is what names the family's
+///   members, so that default *is* the stack's "Segoe UI Variable Text" — the
+///   member the mock-up asks for. cosmic-text renders a variable font's default
+///   instance, so we get it without having to steer an axis we cannot address.
+/// * `segoeui.ttf` is the static Segoe UI every earlier Windows has.
+///
+/// Inter heads the mock-up's stack and is not on this list: Windows ships no such
+/// face, we bundle no assets for chrome, and finding a user-installed one would
+/// mean enumerating `Fonts/` at startup — the cost this whole loader exists to
+/// avoid. A machine with Inter installed therefore renders the second entry,
+/// which is what a browser would do if Inter were absent there too.
+const CHROME_SANS_FONT_FILES: [&str; 2] = ["SegUIVar.ttf", "segoeui.ttf"];
+
+/// Load the chrome's UI face and make it the answer to `Family::SansSerif`.
+///
+/// Without this the request lands wherever the database's first entry happens to
+/// be — for a terminal-only font list, an emoji face, which shapes the chrome's
+/// titles in Segoe UI Emoji's fallback outlines.
+#[cfg(target_os = "windows")]
+fn load_chrome_sans_family(db: &mut glyphon::fontdb::Database, fonts: &std::path::Path) {
+    for file in CHROME_SANS_FONT_FILES {
+        let first_new_face = db.len();
+        if db.load_font_file(fonts.join(file)).is_err() {
+            continue;
+        }
+        let Some(family) = db
+            .faces()
+            .nth(first_new_face)
+            .and_then(|face| face.families.first())
+            .map(|(family, _)| family.clone())
+        else {
+            continue;
+        };
+        db.set_sans_serif_family(family);
+        return;
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -5410,6 +5584,178 @@ mod tests {
         // Pointer near the right edge: the box clamps inside the padded pane.
         assert!(layout.frame[2] <= 992.0 + 1e-3);
         assert!(layout.frame[0] >= 8.0);
+    }
+
+    /// The alpha one plane of the flyout's chrome puts on one pixel. Draws within
+    /// a plane add, which is what makes "the lift is this strong here" a claim
+    /// about the screen rather than about one draw call.
+    fn peek_fill_alpha(fills: &[PeekBoxFill], layer: PeekBoxLayer, x: f32, y: f32) -> f32 {
+        fills
+            .iter()
+            .filter(|fill| fill.layer == layer)
+            .filter(|fill| {
+                fill.rect[0] <= x && x < fill.rect[2] && fill.rect[1] <= y && y < fill.rect[3]
+            })
+            .map(|fill| fill.alpha)
+            .sum()
+    }
+
+    /// PIN (float-window pass): the hover peek wears the mock-up's floating
+    /// window — a `--menu` face behind a `--border` hairline at the mock-up's own
+    /// alpha, a 10px round, and a lift under it — on both palettes and at every
+    /// DPI. Nothing of the flat Campbell-grey box it used to be survives.
+    #[test]
+    fn the_peek_flyout_wears_the_mock_ups_floating_window() {
+        for (theme, palette) in [("dark", DARK_CHROME), ("light", LIGHT_CHROME)] {
+            for dpi_milli in [1000_u32, 1250, 1500, 2000] {
+                let scale = dpi_milli as f32 / 1000.0;
+                let layout = peek_box_layout(
+                    1400.0 * scale,
+                    900.0 * scale,
+                    8.0 * scale,
+                    scale,
+                    (200.0 * scale) as u32,
+                    (140.0 * scale) as u32,
+                    300.0 * scale,
+                    200.0 * scale,
+                )
+                .expect("the peek box fits this window");
+                let fills = peek_box_fills(&layout, palette, scale);
+                let border_alpha = f32::from(palette.menu_border_alpha) / 255.0;
+                let [left, top, right, bottom] = layout.frame.map(f32::round);
+                let border = peek_border_px(scale);
+                let radius = FLOAT_WINDOW_RADIUS_LOGICAL_PX * scale;
+                let where_is = |x: f32, y: f32| format!("{theme} @{dpi_milli} at ({x}, {y})");
+
+                // Each plane is drawn in the token it belongs to.
+                for (layer, color) in [
+                    (PeekBoxLayer::Face, palette.menu_surface),
+                    (PeekBoxLayer::Hairline, palette.menu_border),
+                    (PeekBoxLayer::Lift, palette.menu_shadow),
+                ] {
+                    assert!(
+                        fills
+                            .iter()
+                            .filter(|fill| fill.layer == layer)
+                            .all(|fill| fill.color == color),
+                        "{layer:?} must be drawn in its own token ({theme} @{dpi_milli})"
+                    );
+                }
+                // The face fills the box, and does not reach out into the
+                // hairline's own pixel.
+                let centre = ((left + right) / 2.0, (top + bottom) / 2.0);
+                assert_eq!(
+                    peek_fill_alpha(&fills, PeekBoxLayer::Face, centre.0, centre.1),
+                    1.0,
+                    "the flyout's face must be opaque --menu: {}",
+                    where_is(centre.0, centre.1)
+                );
+                assert_eq!(
+                    peek_fill_alpha(&fills, PeekBoxLayer::Face, centre.0, top),
+                    0.0,
+                    "the face must start one border in: {}",
+                    where_is(centre.0, top)
+                );
+                assert_eq!(
+                    peek_fill_alpha(&fills, PeekBoxLayer::Face, centre.0, top + border),
+                    1.0,
+                    "and it must start *exactly* one border in: {}",
+                    where_is(centre.0, top + border)
+                );
+                // The hairline is one pixel of --border at its own alpha.
+                for (x, y) in [
+                    (centre.0, top),
+                    (centre.0, bottom - 1.0),
+                    (left, centre.1),
+                    (right - 1.0, centre.1),
+                ] {
+                    let seen = peek_fill_alpha(&fills, PeekBoxLayer::Hairline, x, y);
+                    assert!(
+                        (seen - border_alpha).abs() < 1e-6,
+                        "the hairline must be --border at its own alpha, saw {seen} \
+                         instead of {border_alpha}: {}",
+                        where_is(x, y)
+                    );
+                }
+                // Round, not square: the box's own corner pixel is empty, and the
+                // corner is antialiased rather than stepped — the same claim
+                // `marks.rs` pins for the tab.
+                for (x, y) in [
+                    (left, top),
+                    (right - 1.0, top),
+                    (left, bottom - 1.0),
+                    (right - 1.0, bottom - 1.0),
+                ] {
+                    assert_eq!(
+                        peek_fill_alpha(&fills, PeekBoxLayer::Hairline, x, y),
+                        0.0,
+                        "a floating window's corner is round: {}",
+                        where_is(x, y)
+                    );
+                }
+                let feathered = fills
+                    .iter()
+                    .filter(|fill| fill.layer == PeekBoxLayer::Hairline)
+                    .filter(|fill| fill.alpha > 0.0 && fill.alpha < border_alpha - 1e-6)
+                    .count();
+                assert!(
+                    feathered >= radius as usize,
+                    "an antialiased round spends at least one partial pixel per row, \
+                     saw {feathered} ({theme} @{dpi_milli})"
+                );
+                // The lift surrounds the box, reaches exactly its spread, and is
+                // never painted under the box it lifts — a shadow that shows
+                // through a .09-alpha hairline is a doubled hairline.
+                let spread = (FLOAT_WINDOW_SHADOW_LOGICAL_PX * scale).round();
+                assert!(
+                    peek_fill_alpha(&fills, PeekBoxLayer::Lift, centre.0, top - 1.0) > 0.0,
+                    "the flyout must sit above the terminal, not on it: {}",
+                    where_is(centre.0, top - 1.0)
+                );
+                assert_eq!(
+                    peek_fill_alpha(&fills, PeekBoxLayer::Lift, centre.0, top - spread - 1.0),
+                    0.0,
+                    "the lift must stop at its spread: {}",
+                    where_is(centre.0, top - spread - 1.0)
+                );
+                for (x, y) in [centre, (centre.0, top), (left, centre.1)] {
+                    assert_eq!(
+                        peek_fill_alpha(&fills, PeekBoxLayer::Lift, x, y),
+                        0.0,
+                        "the lift is clipped out of the box it lifts: {}",
+                        where_is(x, y)
+                    );
+                }
+                // It also falls off outwards instead of standing as one band.
+                let near = peek_fill_alpha(&fills, PeekBoxLayer::Lift, centre.0, top - 1.0);
+                let far = peek_fill_alpha(&fills, PeekBoxLayer::Lift, centre.0, top - spread);
+                assert!(
+                    near > far && far > 0.0,
+                    "the lift must fade outwards, saw {near} then {far} ({theme} @{dpi_milli})"
+                );
+                // The decomposition costs what an outline costs, not what a fill
+                // costs: whole runs merge, and only the rounds are spent per
+                // pixel. A flyout that started emitting one quad per pixel of its
+                // own area would be ~30 times this at 100% and would grow with the
+                // square of the DPI.
+                let perimeter = 2.0 * ((right - left) + (bottom - top));
+                assert!(
+                    (fills.len() as f32) < 2.0 * perimeter,
+                    "{} quads for a {}×{} flyout ({theme} @{dpi_milli}) — the runs \
+                     have stopped merging",
+                    fills.len(),
+                    right - left,
+                    bottom - top
+                );
+                // Red gate: the box this pass replaced was Campbell bright-black
+                // around the status bar's grey, with square corners.
+                assert!(
+                    !fills.iter().any(|fill| fill.color == [0x76, 0x76, 0x76]
+                        || fill.color == DEFAULT_STATUS_BACKGROUND_RGB),
+                    "the flyout must be built from --menu/--border, not the old flat box"
+                );
+            }
+        }
     }
 
     #[test]
@@ -6580,7 +6926,8 @@ mod tests {
         assert_eq!((ime.x, ime.y, ime.width, ime.height), (12, 40, 8, 18));
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[12.0, 40.0, 20.0, 58.0]]
+            vec![[12.0, 40.0, 16.0, 58.0]],
+            "the caret is half a cell wide and starts at the cell it is in"
         );
         assert_eq!(
             frame_cell_bounds_px(
@@ -7875,8 +8222,66 @@ mod tests {
         assert_eq!(run.line_y + wide.top_offset_px, metrics.ascii_baseline_px);
     }
 
+    /// PIN (visual pass): the default caret is a bar half a cell wide — the
+    /// mock-up's `.cursor { width: 7px }` against the 15px cell of its own 14px
+    /// font — at every DPI this product ships at, and it is that wide in whole
+    /// physical pixels.
+    ///
+    /// The metrics are measured, never invented: a real cell is 8.4 px wide at
+    /// 125% and 12.6 px at 187.5%, so a caret that skipped the rounding would land
+    /// between two columns, and one that skipped the ratio would still be the
+    /// filled cell this pass replaced. Height is untouched — the caret spans its
+    /// row exactly as the block did.
+    #[cfg(target_os = "windows")]
     #[test]
-    fn cursor_on_either_half_of_a_wide_cell_covers_both_cells() {
+    fn the_default_caret_is_a_half_cell_bar_at_every_dpi() {
+        let mut font_system = terminal_font_system();
+        for dpi_milli in [1000_u32, 1250, 1500, 2000] {
+            let scale = f64::from(dpi_milli) / 1000.0;
+            let metrics = CellMetrics::measure(&mut font_system, scale).unwrap();
+            let frame = ViewportFrame {
+                columns: NonZeroU32::new(1).unwrap(),
+                grid_rows: NonZeroU32::new(1).unwrap(),
+                rows: NonZeroU32::new(1).unwrap(),
+                presentation_offset_subpixels: 0,
+                cells: vec![CapturedCell::plain("x")],
+                cursor: bt_viewport::GridCursor {
+                    row: 0,
+                    column: 0,
+                    visible: true,
+                },
+                cell_anchors: test_cell_anchors(1),
+                row_map: test_row_map_for_metrics(1, metrics),
+                selection_spans: Vec::new(),
+                math_blocks: Vec::new(),
+                math_failures: Vec::new(),
+                status_text: None,
+                viewport_origin: FrameViewportOrigin::Bottom,
+                scroll_offset_rows: 0,
+                layout_key: bt_doc_layout_key(1),
+                view_generation: bt_doc::ViewGeneration(1),
+            };
+            let bounds = cursor_pixel_bounds(metrics, &frame, true);
+            assert_eq!(bounds.len(), 1, "the caret is one quad");
+            let [left, top, right, bottom] = bounds[0];
+            let cell = frame_cell_bounds_px(metrics, &frame, 0, 0);
+            assert_eq!(
+                right - left,
+                (metrics.cell_width_px * CURSOR_WIDTH_CELL_RATIO).round(),
+                "at {dpi_milli} milli-DPI the caret is not half of a {} px cell",
+                metrics.cell_width_px
+            );
+            assert!(
+                right - left >= 1.0 && right - left < metrics.cell_width_px,
+                "a bar, never the whole cell and never nothing, at {dpi_milli} milli-DPI"
+            );
+            assert_eq!(left, cell[0].round(), "the caret starts at its own cell");
+            assert_eq!([top, bottom], [cell[1], cell[3]], "the row's full height");
+        }
+    }
+
+    #[test]
+    fn cursor_on_either_half_of_a_wide_cell_anchors_to_the_lead_column() {
         let mut lead = CapturedCell::plain("中");
         lead.style.flags.insert(CellFlags::WIDE_CHAR);
         let mut spacer = CapturedCell::plain("");
@@ -7906,10 +8311,35 @@ mod tests {
         assert_eq!(cursor_cell_span(&frame), (0, 2));
         frame.cursor.column = 1;
         assert_eq!(cursor_cell_span(&frame), (0, 2));
+
+        // The bar is not stretched over a wide character — it marks where the
+        // next glyph starts, and that is one column edge whichever half of the
+        // character the grid reports the cursor in.
+        let metrics = CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 0.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        };
+        frame.row_map = test_row_map_for_metrics(1, metrics);
+        assert_eq!(
+            cursor_pixel_bounds(metrics, &frame, true),
+            vec![[4.0, 4.0, 8.0, 24.0]]
+        );
+        frame.cursor.column = 0;
+        assert_eq!(
+            cursor_pixel_bounds(metrics, &frame, true),
+            vec![[4.0, 4.0, 8.0, 24.0]]
+        );
     }
 
     #[test]
-    fn unfocused_cursor_is_a_visible_hollow_outline_and_focus_restores_the_block() {
+    fn unfocused_cursor_is_a_visible_hollow_outline_and_focus_restores_the_caret() {
         let metrics = CellMetrics {
             cell_width_px: 8.0,
             cell_height_px: 20.0,
@@ -7946,7 +8376,8 @@ mod tests {
 
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[4.0, 4.0, 12.0, 24.0]]
+            vec![[4.0, 4.0, 8.0, 24.0]],
+            "a focused caret is the bar, half of this 8px cell"
         );
         let outline = cursor_pixel_bounds(metrics, &frame, false);
         assert_eq!(outline.len(), 4);
@@ -8249,6 +8680,73 @@ mod tests {
                 .expect("the label has a run")
                 .line_y;
         baseline - cap_height_ratio * label.font_size_px / 2.0
+    }
+
+    /// PIN (chrome font pass): a chrome label is shaped in a real UI sans — the
+    /// mock-up's own stack — and never in the emoji face the request used to land
+    /// on, while a title that carries an emoji still reaches that face for the
+    /// emoji alone.
+    ///
+    /// Red gate: before this pass every glyph of "PowerShell" came back
+    /// `Segoe UI Emoji`, because `Family::SansSerif` had nothing else to resolve
+    /// to in a terminal-only font database. The first assertion is exactly that
+    /// bug, and the last one is the reason the fix cannot be "drop the emoji
+    /// faces": a session title may legitimately contain one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn chrome_labels_shape_in_a_ui_sans_and_still_reach_the_emoji_face() {
+        let mut font_system = terminal_font_system();
+        let label = ChromeLabel {
+            text: "✳ PowerShell".to_owned(),
+            rect: [0.0, 0.0, 400.0, 34.0],
+            font_size_px: WINDOW_TAB_FONT_LOGICAL_PX,
+            color: [255, 255, 255],
+            align_right: false,
+            align_center: false,
+        };
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7);
+        let run = layouts[0]
+            .buffer
+            .layout_runs()
+            .next()
+            .expect("the label shapes");
+        let families: Vec<(char, String)> = run
+            .glyphs
+            .iter()
+            .map(|glyph| {
+                (
+                    label.text[glyph.start..glyph.end]
+                        .chars()
+                        .next()
+                        .expect("a glyph covers at least one character"),
+                    glyph_family(&font_system, glyph),
+                )
+            })
+            .collect();
+        let letters: Vec<&(char, String)> = families
+            .iter()
+            .filter(|(character, _)| character.is_ascii_alphabetic())
+            .collect();
+        assert_eq!(letters.len(), "PowerShell".len(), "every letter shapes");
+        for (character, family) in &letters {
+            assert!(
+                !family.contains("Emoji"),
+                "'{character}' shaped in {family} — the chrome's sans is not an emoji face"
+            );
+            assert!(
+                family == "Segoe UI Variable" || family == "Segoe UI",
+                "'{character}' shaped in {family}, which is neither face \
+                 {CHROME_SANS_FONT_FILES:?} carries"
+            );
+        }
+        let (_, emoji_family) = families
+            .iter()
+            .find(|(character, _)| *character == '✳')
+            .expect("the emoji in a title still shapes");
+        assert!(
+            emoji_family.contains("Emoji") || emoji_family.contains("Symbol"),
+            "an emoji in a title must fall back to a face that has it, saw {emoji_family}"
+        );
     }
 
     /// PIN — the active tab's title sits on the same axis its mark does.

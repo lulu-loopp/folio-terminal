@@ -12,12 +12,20 @@ pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xe1, 0xe1, 0xe1];
 const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
 /// The mock-up's `--cursor` on dark.
 pub(crate) const DEFAULT_CURSOR_RGB: [u8; 3] = [0xd4, 0xd4, 0xd4];
+/// The default cursor's width, as a fraction of one cell.
+///
+/// `.cursor { width: 7px; height: 15px }` in a 14px-font mock-up: a bar half a
+/// cell wide, not the filled cell a VT's own default block would be. This is the
+/// *default* form only — a settings surface will one day offer block / bar / underline
+/// here, and a program that asks for a shape through DECSCUSR must be honoured over
+/// both. Nothing in this build parses DECSCUSR (`bt_viewport::GridCursor` carries
+/// row, column and visibility and no shape), so today there is exactly one form and
+/// this is it.
+pub const CURSOR_WIDTH_CELL_RATIO: f32 = 0.5;
 pub(crate) const DEFAULT_DIM_FOREGROUND_RGB: [u8; 3] = [0x88, 0x88, 0x88];
 /// Background-only selection treatment; foreground colors remain terminal-authored.
 pub(crate) const DEFAULT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0x26, 0x4f, 0x78];
 pub(crate) const DEFAULT_STATUS_BACKGROUND_RGB: [u8; 3] = [0x33, 0x33, 0x33];
-/// Campbell bright-black: a quiet neutral frame for the hover-peek flyout on the dark default.
-pub(crate) const DEFAULT_PEEK_BORDER_RGB: [u8; 3] = [0x76, 0x76, 0x76];
 
 // ---------------------------------------------------------------------------
 // Seat chrome — the styling pass (user-approved 2026-08-07).
@@ -87,6 +95,31 @@ pub struct ChromePalette {
     pub pane_title_focus: [u8; 3],
     /// The mock-up accent used by structural pane/tab marks.
     pub accent: [u8; 3],
+    /// A floating window's face — `--menu`, worn by `.float-win`, the term menu
+    /// and the hover-peek flyout. It is deliberately *not* `title_bar`: a window
+    /// that floats over content is a different plane from the chrome that frames
+    /// it, and the mock-up gives that plane its own variable.
+    pub menu_surface: [u8; 3],
+    /// A floating window's hairline — `--border`, kept as the mock-up's own
+    /// colour *and* alpha rather than pre-composited like every field above it.
+    ///
+    /// The rest of this palette may composite because each of its hairlines sits
+    /// on a surface we know. A flyout floats over whatever the terminal happens
+    /// to be showing, so there is no such surface, and the honest hairline is the
+    /// one the renderer blends at draw time.
+    pub menu_border: [u8; 3],
+    /// `--border`'s alpha, in 1/255ths: `.094` white on dark, `.088` black on light.
+    pub menu_border_alpha: u8,
+    /// The colour a floating window's shadow is cast in (`--shadow`: black at
+    /// both stops, on both themes).
+    pub menu_shadow: [u8; 3],
+    /// The inner of the two shadow rings, in 1/255ths — see
+    /// [`FLOAT_WINDOW_SHADOW_LOGICAL_PX`] for what these two rings can and cannot
+    /// stand in for.
+    pub menu_shadow_inner_alpha: u8,
+    /// The outer ring, roughly half the inner one, so the two compose into a
+    /// falloff instead of a band.
+    pub menu_shadow_outer_alpha: u8,
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
@@ -114,6 +147,12 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     pane_title: [0x75, 0x75, 0x75],
     pane_title_focus: [0xe1, 0xe1, 0xe1],
     accent: [0x82, 0x8f, 0xff],
+    menu_surface: [0x2a, 0x2a, 0x2a],
+    menu_border: [0xff, 0xff, 0xff],
+    menu_border_alpha: 24,
+    menu_shadow: [0x00, 0x00, 0x00],
+    menu_shadow_inner_alpha: 46,
+    menu_shadow_outer_alpha: 23,
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -140,6 +179,12 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     pane_title: [0xa5, 0xa4, 0xa1],
     pane_title_focus: [0x37, 0x35, 0x2f],
     accent: [0x5e, 0x6a, 0xd2],
+    menu_surface: [0xff, 0xff, 0xff],
+    menu_border: [0x00, 0x00, 0x00],
+    menu_border_alpha: 22,
+    menu_shadow: [0x00, 0x00, 0x00],
+    menu_shadow_inner_alpha: 18,
+    menu_shadow_outer_alpha: 9,
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -209,6 +254,23 @@ pub const SEAT_DIVIDER_VISUAL_LOGICAL_PX: f32 = 1.0;
 /// A divider's hit zone, in logical pixels — wider than its line, because a
 /// one-pixel target is not a target.
 pub const SEAT_DIVIDER_HIT_LOGICAL_PX: f32 = 6.0;
+/// A floating window's corner radius (`.float-win`, `#files-flyout`,
+/// `.term-menu`: `border-radius: 10px`). Shared by every window that floats over
+/// content, the hover-peek flyout included — they are one shape in the mock-up
+/// (§7.0: 小窗是一个形态), so they are one number here.
+pub const FLOAT_WINDOW_RADIUS_LOGICAL_PX: f32 = 10.0;
+/// Its hairline (`border: 1px solid var(--border)`).
+pub const FLOAT_WINDOW_BORDER_LOGICAL_PX: f32 = 1.0;
+/// How far a floating window's shadow reaches past its own edge.
+///
+/// The mock-up's `--shadow` is a pair of blurred, downward-offset drop shadows
+/// (`0 16px 48px`, `0 2px 8px`). This pipeline draws opaque-or-blended quads and
+/// has no blur, so what it can honestly offer is two concentric rings — the
+/// outer one this far out, the inner one half as far and about twice as strong —
+/// whose alphas compose into a short falloff. It is a *lift*, not the mock-up's
+/// shadow: no gaussian tail, and no downward offset, so it sits symmetrically
+/// around the box instead of pooling below it.
+pub const FLOAT_WINDOW_SHADOW_LOGICAL_PX: f32 = 3.0;
 /// Breathing room between a previewed image and its seat's edges, in logical
 /// pixels. Skipped entirely when the body is too small to afford it, because a
 /// margin that eats the picture serves nobody.
@@ -329,6 +391,58 @@ mod tests {
         assert_eq!(LIGHT_CHROME.caption_close_hover, [0xe5, 0x48, 0x4d]);
         assert_eq!(DARK_CHROME.active_tab, DEFAULT_BACKGROUND_RGB);
         assert_eq!(LIGHT_CHROME.active_tab, [0xff, 0xff, 0xff]);
+    }
+
+    /// PIN (visual pass): the three numbers the mock-up gives a floating window
+    /// and the caret, held here so overturning one is an edit to this block.
+    #[test]
+    fn float_window_and_cursor_tokens_are_the_mock_ups_own() {
+        // `.cursor { width: 7px }` against the 15px cell its 14px font sets.
+        assert_eq!(CURSOR_WIDTH_CELL_RATIO, 0.5);
+        // `border-radius: 10px`, `border: 1px solid var(--border)`.
+        assert_eq!(FLOAT_WINDOW_RADIUS_LOGICAL_PX, 10.0);
+        assert_eq!(FLOAT_WINDOW_BORDER_LOGICAL_PX, 1.0);
+        // Enough reach for two rings to fall off in, and not so much that a
+        // "lift" becomes a halo.
+        assert!((1.0..=6.0).contains(&FLOAT_WINDOW_SHADOW_LOGICAL_PX));
+        // `--menu` on each canvas, and `--border`'s own alpha: .094 white on
+        // dark, .088 black on light.
+        assert_eq!(DARK_CHROME.menu_surface, [0x2a, 0x2a, 0x2a]);
+        assert_eq!(LIGHT_CHROME.menu_surface, [0xff, 0xff, 0xff]);
+        assert_eq!(DARK_CHROME.menu_border, [0xff, 0xff, 0xff]);
+        assert_eq!(LIGHT_CHROME.menu_border, [0x00, 0x00, 0x00]);
+        // .094 × 255 = 23.97, .088 × 255 = 22.44.
+        assert_eq!(DARK_CHROME.menu_border_alpha, 24);
+        assert_eq!(LIGHT_CHROME.menu_border_alpha, 22);
+        // A floating window is its own plane, never the seat chrome's panel. (It
+        // *is* `--win` on light, where the mock-up gives `--menu` the same
+        // #FFFFFF — a white window on a white page separated by its shadow.)
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_ne!(palette.menu_surface, palette.title_bar);
+            // The lift is cast in black on both themes (`--shadow`), and fades.
+            assert_eq!(palette.menu_shadow, [0, 0, 0]);
+            assert!(palette.menu_shadow_inner_alpha > palette.menu_shadow_outer_alpha);
+            assert!(palette.menu_shadow_outer_alpha > 0);
+        }
+        // The dark canvas needs the heavier lift — `--shadow` is .5/.35 there
+        // against .13/.06 on light.
+        for (ring, dark, light) in [
+            (
+                "inner",
+                DARK_CHROME.menu_shadow_inner_alpha,
+                LIGHT_CHROME.menu_shadow_inner_alpha,
+            ),
+            (
+                "outer",
+                DARK_CHROME.menu_shadow_outer_alpha,
+                LIGHT_CHROME.menu_shadow_outer_alpha,
+            ),
+        ] {
+            assert!(
+                dark > light,
+                "the {ring} ring is {dark} on dark and {light} on light"
+            );
+        }
     }
 
     #[test]
