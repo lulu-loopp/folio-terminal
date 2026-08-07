@@ -7023,18 +7023,18 @@ mod tests {
         for invalid in ["123abc", "#123ab", "#123abcd", "#12xz89", "＃123abc"] {
             assert_eq!(theme::parse_background_rgb(invalid), None);
         }
-        assert_eq!(DEFAULT_BACKGROUND_RGB, [0x0c, 0x0c, 0x0c]);
+        assert_eq!(DEFAULT_BACKGROUND_RGB, [0x1b, 0x1b, 0x1b]);
         let expected_background = std::env::var("BT_BG")
             .ok()
             .and_then(|value| theme::parse_background_rgb(&value))
             .unwrap_or(DEFAULT_BACKGROUND_RGB);
         assert_eq!(default_background(), expected_background);
         assert_eq!(default_foreground(), foreground_rgb());
-        assert_eq!(DEFAULT_CURSOR_RGB, [0xff, 0xff, 0xff]);
+        assert_eq!(DEFAULT_CURSOR_RGB, [0xd4, 0xd4, 0xd4]);
         assert_eq!(
             terminal_color(TerminalColor::Named(18), true),
             DEFAULT_CURSOR_RGB,
-            "the cursor quad and cursor named color share Campbell white"
+            "the cursor quad and cursor named color share the mock-up cursor"
         );
         assert_eq!(
             ANSI_16_RGB,
@@ -7173,8 +7173,13 @@ mod tests {
     #[test]
     fn srgb_theme_colors_are_linearized_at_clear_and_rect_upload_boundaries() {
         let clear = theme_clear_color();
-        let expected = 0.003_676_507_324_047_436;
-        assert!((srgb_channel_to_linear(12) - expected).abs() < f64::EPSILON);
+        // The transfer function itself, pinned at one known point so the
+        // background can move without the linearization silently changing.
+        assert!(
+            (srgb_channel_to_linear(12) - 0.003_676_507_324_047_436).abs() < f64::EPSILON,
+            "the sRGB transfer function moved"
+        );
+        let expected = srgb_channel_to_linear(DEFAULT_BACKGROUND_RGB[0]);
         assert_eq!([clear.r, clear.g, clear.b], [expected; 3]);
         assert_eq!(clear.a, 1.0);
 
@@ -7185,7 +7190,7 @@ mod tests {
         );
         assert_ne!(
             rect[0],
-            12.0 / 255.0,
+            f32::from(DEFAULT_BACKGROUND_RGB[0]) / 255.0,
             "sRGB bytes must never be uploaded to an sRGB surface as linear channels"
         );
 

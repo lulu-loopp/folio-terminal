@@ -3,13 +3,15 @@
 
 use std::sync::OnceLock;
 
-/// Windows Terminal's Campbell defaults, from
-/// `microsoft/terminal/src/cascadia/TerminalSettingsModel/defaults.json`.
-pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [0x0c, 0x0c, 0x0c];
-pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xcc, 0xcc, 0xcc];
-const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x0c, 0x0c, 0x0c];
-/// Campbell's bright cursor treatment: use white rather than the pre-theme slate fill.
-pub(crate) const DEFAULT_CURSOR_RGB: [u8; 3] = [0xff, 0xff, 0xff];
+/// The product's terminal defaults, from `design/ui-mockup.html` (the approved
+/// styling): dark `--termbg #1B1B1B`, ink `rgba(255,255,255,.87)` composited
+/// over it, light ink `--ink #37352F`. The ANSI 16 remain Campbell — those are
+/// terminal-authored colors, not chrome.
+pub const DEFAULT_BACKGROUND_RGB: [u8; 3] = [0x1b, 0x1b, 0x1b];
+pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xe1, 0xe1, 0xe1];
+const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
+/// The mock-up's `--cursor` on dark.
+pub(crate) const DEFAULT_CURSOR_RGB: [u8; 3] = [0xd4, 0xd4, 0xd4];
 pub(crate) const DEFAULT_DIM_FOREGROUND_RGB: [u8; 3] = [0x88, 0x88, 0x88];
 /// Background-only selection treatment; foreground colors remain terminal-authored.
 pub(crate) const DEFAULT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0x26, 0x4f, 0x78];
@@ -65,35 +67,41 @@ pub struct ChromePalette {
     pub collapse_bar_hover: [u8; 3],
 }
 
-/// Chrome over a dark canvas.
+/// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
+/// alpha hairlines pre-composited over the surface each one actually sits on
+/// (our chrome quads are opaque): `--win #202020`, `--panel #252525`,
+/// `--ink/2/3` at .87/.55/.38 white, `--border` at .094 white,
+/// `--accent #828FFF`.
 pub const DARK_CHROME: ChromePalette = ChromePalette {
-    seat_body: [0x0c, 0x0c, 0x0c],
-    title_bar: [0x17, 0x17, 0x17],
-    title_bar_edge: [0x26, 0x26, 0x26],
-    title_text: [0xa0, 0xa0, 0xa0],
-    title_text_hover: [0xe6, 0xe6, 0xe6],
-    body_hint_text: [0x7d, 0x7d, 0x7d],
-    divider: [0x2e, 0x2e, 0x2e],
-    divider_hover: [0x6e, 0x6e, 0x6e],
-    divider_active: [0x3b, 0x78, 0xff],
-    collapse_bar: [0x1f, 0x1f, 0x1f],
-    collapse_bar_hover: [0x2e, 0x2e, 0x2e],
+    seat_body: [0x20, 0x20, 0x20],
+    title_bar: [0x25, 0x25, 0x25],
+    title_bar_edge: [0x3a, 0x3a, 0x3a],
+    title_text: [0x9d, 0x9d, 0x9d],
+    title_text_hover: [0xe3, 0xe3, 0xe3],
+    body_hint_text: [0x75, 0x75, 0x75],
+    divider: [0x35, 0x35, 0x35],
+    divider_hover: [0x51, 0x51, 0x51],
+    divider_active: [0x82, 0x8f, 0xff],
+    collapse_bar: [0x25, 0x25, 0x25],
+    collapse_bar_hover: [0x31, 0x31, 0x31],
 };
 
-/// Chrome over a light canvas. Structurally identical; the accent deepens for
-/// contrast against white, everything else is the ladder mirrored.
+/// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
+/// same way: `--win #FFFFFF`, `--panel #F7F7F5`, `--ink #37352F` at
+/// .65/.45 for the secondary steps, `--border` at .088 black,
+/// `--accent #5E6AD2`.
 pub const LIGHT_CHROME: ChromePalette = ChromePalette {
-    seat_body: [0xf5, 0xf5, 0xf5],
-    title_bar: [0xea, 0xea, 0xea],
-    title_bar_edge: [0xd8, 0xd8, 0xd8],
-    title_text: [0x5c, 0x5c, 0x5c],
-    title_text_hover: [0x1a, 0x1a, 0x1a],
-    body_hint_text: [0x8a, 0x8a, 0x8a],
-    divider: [0xd0, 0xd0, 0xd0],
-    divider_hover: [0x9a, 0x9a, 0x9a],
-    divider_active: [0x2a, 0x5f, 0xd6],
-    collapse_bar: [0xe2, 0xe2, 0xe2],
-    collapse_bar_hover: [0xd0, 0xd0, 0xd0],
+    seat_body: [0xff, 0xff, 0xff],
+    title_bar: [0xf7, 0xf7, 0xf5],
+    title_bar_edge: [0xe1, 0xe1, 0xdf],
+    title_text: [0x7a, 0x79, 0x74],
+    title_text_hover: [0x37, 0x35, 0x2f],
+    body_hint_text: [0xa5, 0xa4, 0xa1],
+    divider: [0xe9, 0xe9, 0xe9],
+    divider_hover: [0xc2, 0xc1, 0xbf],
+    divider_active: [0x5e, 0x6a, 0xd2],
+    collapse_bar: [0xf7, 0xf7, 0xf5],
+    collapse_bar_hover: [0xe9, 0xe9, 0xe8],
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -245,11 +253,17 @@ mod tests {
 
     #[test]
     fn foreground_and_revision_cover_dark_light_and_background_changes() {
-        assert_eq!(foreground_for_background([0x0c, 0x0c, 0x0c]), [0xcc; 3]);
-        assert_eq!(foreground_for_background([0xf5, 0xf5, 0xf5]), [0x0c; 3]);
-        let dark = theme_revision_for_colors([0x0c; 3], [0xcc; 3]);
-        let other_dark = theme_revision_for_colors([0x12, 0x12, 0x12], [0xcc; 3]);
-        let light = theme_revision_for_colors([0xf5; 3], [0x0c; 3]);
+        assert_eq!(
+            foreground_for_background([0x1b, 0x1b, 0x1b]),
+            [0xe1, 0xe1, 0xe1]
+        );
+        assert_eq!(
+            foreground_for_background([0xf5, 0xf5, 0xf5]),
+            [0x37, 0x35, 0x2f]
+        );
+        let dark = theme_revision_for_colors([0x1b; 3], [0xe1; 3]);
+        let other_dark = theme_revision_for_colors([0x12, 0x12, 0x12], [0xe1; 3]);
+        let light = theme_revision_for_colors([0xf5; 3], [0x37, 0x35, 0x2f]);
         assert_ne!(dark, other_dark);
         assert_ne!(dark, light);
     }
