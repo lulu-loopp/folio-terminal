@@ -43,9 +43,14 @@ pub struct ChromePalette {
     /// A non-terminal seat's body fill. Exactly `--termbg`, matching terminal.
     pub seat_body: [u8; 3],
     /// A seat title bar's fill: one quiet step off the canvas.
+    ///
+    /// There is deliberately no companion hairline. `.titlebar` in the mock-up
+    /// declares a background and nothing else — the step from `--panel` to
+    /// `--termbg` is the separation, and in the active tab's own span there must
+    /// be no step at all, because the tab *is* `--termbg`. A rule across the
+    /// bar's foot is exactly the line that severs the tab from the terminal it
+    /// is shaped to join.
     pub title_bar: [u8; 3],
-    /// The hairline between a title bar and the body it captions.
-    pub title_bar_edge: [u8; 3],
     /// Title text and the `×` at rest. Bars are wayfinding, not content, so
     /// this ink sits a step below the terminal's own.
     pub title_text: [u8; 3],
@@ -92,7 +97,6 @@ pub struct ChromePalette {
 pub const DARK_CHROME: ChromePalette = ChromePalette {
     seat_body: [0x1b, 0x1b, 0x1b],
     title_bar: [0x25, 0x25, 0x25],
-    title_bar_edge: [0x3a, 0x3a, 0x3a],
     title_text: [0x9d, 0x9d, 0x9d],
     title_text_hover: [0xe3, 0xe3, 0xe3],
     body_hint_text: [0x75, 0x75, 0x75],
@@ -119,7 +123,6 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
 pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     seat_body: [0xff, 0xff, 0xff],
     title_bar: [0xf7, 0xf7, 0xf5],
-    title_bar_edge: [0xe1, 0xe1, 0xdf],
     title_text: [0x7a, 0x79, 0x74],
     title_text_hover: [0x37, 0x35, 0x2f],
     body_hint_text: [0xa5, 0xa4, 0xa1],
@@ -154,22 +157,48 @@ fn chrome_palette_for_background(background: [u8; 3]) -> ChromePalette {
     }
 }
 
-/// A seat title bar's height, in logical pixels.
+/// A seat title bar's height, in logical pixels (`.panehead { height: 28px }`).
 pub const SEAT_TITLE_BAR_LOGICAL_PX: f32 = 28.0;
 /// The self-drawn window title bar (`--titleh`).
 pub const WINDOW_TITLE_BAR_LOGICAL_PX: f32 = 40.0;
-/// Every settings/min/max/close box in `.capbtn`.
+/// Every settings/min/max/close box in `.capbtn` (`width: 46px; height: 40px`).
 pub const WINDOW_CAPTION_BUTTON_LOGICAL_PX: f32 = 46.0;
-/// The active horizontal tab's height.
+/// `.capbtn svg { width: 10px; height: 10px }` — minimise, maximise, close.
+pub const WINDOW_CAPTION_GLYPH_LOGICAL_PX: f32 = 10.0;
+/// `.capbtn.gear svg { width: 14px; height: 14px }` — the settings gear alone
+/// is larger, because its silhouette is a ring of teeth rather than one stroke.
+pub const WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX: f32 = 14.0;
+/// The active horizontal tab's height (`.tab { height: 34px }`).
 pub const WINDOW_TAB_HEIGHT_LOGICAL_PX: f32 = 34.0;
-/// `--tabr`, shared by the active tab's two top corners.
+/// `--tabr`, shared by the active tab's two top corners *and* by the two
+/// outward skirt corners that join it to the content plane
+/// (`.tab.active::before/::after`).
 pub const WINDOW_TAB_RADIUS_LOGICAL_PX: f32 = 7.0;
 /// One tab's CSS cap; this slice draws exactly one current-session tab.
 pub const WINDOW_TAB_MAX_WIDTH_LOGICAL_PX: f32 = 200.0;
-/// A seat title's font size, in logical pixels.
-pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 13.0;
-/// The inset between a title bar's edge and its text, in logical pixels.
-pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 10.0;
+/// `.tab { padding: 0 6px 0 12px }` — the leading inset before the mark.
+pub const WINDOW_TAB_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
+/// `.tab { padding: 0 6px … }` — the trailing inset after the title.
+pub const WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX: f32 = 6.0;
+/// `.tab { gap: 8px }` — between the mark and the title.
+pub const WINDOW_TAB_GAP_LOGICAL_PX: f32 = 8.0;
+/// `.tab { font-size: 13px }`.
+pub const WINDOW_TAB_FONT_LOGICAL_PX: f32 = 13.0;
+/// `.ticon`/`.pmark` inside a tab: a 15px square profile mark.
+pub const WINDOW_TAB_MARK_LOGICAL_PX: f32 = 15.0;
+/// A seat title's font size (`.panehead { font-size: 11.5px }`).
+pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;
+/// The inset between a title bar's edge and its first item
+/// (`.panehead { padding: 0 6px 0 12px }`).
+pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 12.0;
+/// `.panehead { gap: 7px }` — between the mark and the title.
+pub const SEAT_TITLE_GAP_LOGICAL_PX: f32 = 7.0;
+/// A terminal pane head wears the session's profile mark, at `.pmark`'s 15px.
+pub const PANE_HEAD_PROFILE_MARK_LOGICAL_PX: f32 = 15.0;
+/// `.preview-head .files-ico { width: 14px; height: 14px; color: var(--accent) }`.
+pub const PANE_HEAD_FILE_MARK_LOGICAL_PX: f32 = 14.0;
+/// `.files-head .files-ico { width: 13px; height: 13px; color: var(--accent) }`.
+pub const PANE_HEAD_FOLDER_MARK_LOGICAL_PX: f32 = 13.0;
 /// The hairline under a title bar, in logical pixels.
 pub const SEAT_TITLE_EDGE_LOGICAL_PX: f32 = 1.0;
 /// A divider's drawn width, in logical pixels. `DIVIDER` in `bt-layout` is the

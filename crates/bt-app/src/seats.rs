@@ -25,12 +25,18 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeQuad, SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX,
-    SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
-    SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX,
-    chrome_palette,
+    ChromeLabel, ChromeQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX,
+    SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX,
+    SEAT_TITLE_PADDING_LOGICAL_PX, SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX,
+    WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
 };
+
+use crate::marks::{ChromeMark, ChromeSprite};
 
 /// §2.5 asks `bt-layout` to hold its own subpixel denominator and to pin it
 /// against `bt-doc`'s "on the seam that can legally see both crates". This is
@@ -572,7 +578,7 @@ pub fn build_chrome(
     layout: &SeatLayout,
     scale: f32,
     pointer: ChromePointer,
-) -> (Vec<ChromeQuad>, Vec<ChromeLabel>) {
+) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
     build_chrome_with_preview(seats, layout, scale, pointer, None, None)
 }
 
@@ -584,17 +590,25 @@ pub fn build_chrome_with_preview(
     pointer: ChromePointer,
     preview_title: Option<&str>,
     preview_message: Option<&str>,
-) -> (Vec<ChromeQuad>, Vec<ChromeLabel>) {
+) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
     let palette = chrome_palette();
     let mut quads = Vec::new();
     let mut labels = Vec::new();
+    let mut sprites = Vec::new();
     let surface_width = layout
         .rects
         .iter()
         .filter_map(|placement| placement.device_rect)
         .map(|rect| rect.right as f32)
         .fold(1.0, f32::max);
-    window_chrome(surface_width, scale, pointer.hover, &mut quads, &mut labels);
+    window_chrome(
+        surface_width,
+        scale,
+        pointer.hover,
+        &mut quads,
+        &mut labels,
+        &mut sprites,
+    );
     for placement in &layout.rects {
         let Some(device) = placement.device_rect else {
             continue;
@@ -645,16 +659,24 @@ pub fn build_chrome_with_preview(
                         color: palette.pane_head_edge,
                     });
                 }
+                // `.panehead { gap: 7px; padding: 0 6px 0 12px }` with the seat's
+                // own mark leading: a terminal wears its profile square, a
+                // preview the file mark, a files pane the folder — the marks the
+                // mock-up puts in exactly these three heads.
                 let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
-                let icon_size = 13.0 * scale;
-                let icon_left = rect[0] + pad;
-                labels.push(ChromeLabel {
-                    text: pane_icon(placement.kind).to_owned(),
-                    rect: [icon_left, rect[1], icon_left + icon_size, title_bottom],
-                    font_size_px: 10.0 * scale,
-                    color: palette.accent,
-                    align_right: false,
-                    align_center: true,
+                let (mark, mark_logical_px, mark_color) = pane_mark(placement.kind, palette);
+                let mark_size = (mark_logical_px * scale).round().max(1.0);
+                let mark_left = (rect[0] + pad).round();
+                let mark_top = (rect[1] + ((title_bottom - rect[1]) - mark_size) / 2.0).round();
+                sprites.push(ChromeSprite {
+                    mark,
+                    rect: [
+                        mark_left,
+                        mark_top,
+                        mark_left + mark_size,
+                        mark_top + mark_size,
+                    ],
+                    color: mark_color,
                 });
                 labels.push(ChromeLabel {
                     text: if placement.kind == SeatKind::Preview {
@@ -664,7 +686,7 @@ pub fn build_chrome_with_preview(
                     }
                     .to_owned(),
                     rect: [
-                        icon_left + icon_size + 7.0 * scale,
+                        mark_left + mark_size + SEAT_TITLE_GAP_LOGICAL_PX * scale,
                         rect[1],
                         rect[2] - pad,
                         title_bottom,
@@ -714,7 +736,7 @@ pub fn build_chrome_with_preview(
             color,
         });
     }
-    (quads, labels)
+    (quads, labels, sprites)
 }
 
 fn window_chrome(
@@ -723,67 +745,92 @@ fn window_chrome(
     hover: Option<ChromeTarget>,
     quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ChromeLabel>,
+    sprites: &mut Vec<ChromeSprite>,
 ) {
     let palette = chrome_palette();
-    let title = WINDOW_TITLE_BAR_LOGICAL_PX * scale;
-    let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
+    let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    // `.titlebar` in the mock-up carries a background and nothing else — no
+    // border, no rule, no hairline. What separates it from the content below is
+    // the tonal step from `--panel` to `--termbg`, and in the tab's own span
+    // there is deliberately no step at all: the tab *is* `--termbg`, so a line
+    // drawn across the bar's foot would be the one thing that severs the tab
+    // from the terminal it is shaped to join.
     quads.push(ChromeQuad {
         rect: [0.0, 0.0, width, title],
         color: palette.title_bar,
     });
-    quads.push(ChromeQuad {
-        rect: [0.0, (title - edge).max(0.0), width, title],
-        color: palette.title_bar_edge,
-    });
 
-    // `.window[data-tabs="horizontal"] .titlebar .drag` starts at `--tabr`;
-    // the one active tab is 34px tall, capped at 200px, and joins the content
-    // at the title bar's lower edge. Four nested rects are the raster equivalent
-    // of the specified 7px rounded top corners without inventing another radius.
-    let radius = WINDOW_TAB_RADIUS_LOGICAL_PX * scale;
+    // `.window[data-tabs="horizontal"] .titlebar .drag` starts at `--tabr`, so
+    // the first tab's skirt lands exactly on the window's left edge. The tab is
+    // 34px tall, capped at 200px wide, and its silhouette — both `--tabr` top
+    // corners and both outward skirt corners — is one rasterized path.
+    let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
+    let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+    let run_left = (width - 4.0 * button).max(0.0);
     let tab_left = radius;
-    let tab_right = (tab_left + WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale)
-        .min((width - 4.0 * WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale).max(tab_left));
-    let tab_top = title - WINDOW_TAB_HEIGHT_LOGICAL_PX * scale;
-    if tab_right > tab_left {
-        for inset in [radius, radius * 0.5, radius * 0.2, 0.0] {
-            let top = tab_top + if inset == 0.0 { radius } else { radius - inset };
-            quads.push(ChromeQuad {
-                rect: [tab_left + inset, top, tab_right - inset, title],
-                color: palette.active_tab,
-            });
-        }
-        let icon = 15.0 * scale;
-        let icon_left = tab_left + 12.0 * scale;
-        let icon_top = tab_top + (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale - icon) / 2.0;
-        quads.push(ChromeQuad {
-            rect: [icon_left, icon_top, icon_left + icon, icon_top + icon],
+    // The right skirt must stay clear of the caption run, so the cap is on the
+    // silhouette's outer edge rather than on the tab's own.
+    let tab_right = (tab_left + (WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale).round())
+        .min((run_left - radius).max(tab_left));
+    let tab_height = (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round();
+    let tab_top = title - tab_height;
+    if tab_right - tab_left >= 2.0 * radius {
+        sprites.push(ChromeSprite {
+            mark: ChromeMark::ActiveTab {
+                radius_px: radius as u32,
+            },
+            rect: [tab_left - radius, tab_top, tab_right + radius, title],
+            color: palette.active_tab,
+        });
+        let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+        let mark_left = (tab_left + WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round();
+        let mark_top = (tab_top + (tab_height - mark) / 2.0).round();
+        sprites.push(ChromeSprite {
+            mark: ChromeMark::ProfilePowerShell,
+            rect: [mark_left, mark_top, mark_left + mark, mark_top + mark],
             color: palette.accent,
         });
         labels.push(ChromeLabel {
             text: "PowerShell".to_owned(),
             rect: [
-                icon_left + icon + 8.0 * scale,
+                mark_left + mark + WINDOW_TAB_GAP_LOGICAL_PX * scale,
                 tab_top,
-                tab_right - 6.0 * scale,
+                tab_right - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
                 title,
             ],
-            font_size_px: 13.0 * scale,
-            color: palette.title_text_hover,
+            font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
+            // `.tab.active { color: var(--ink) }` — and the surface that ink
+            // sits on is the tab's own `--termbg`, not the panel beside it.
+            color: palette.pane_title_focus,
             align_right: false,
             align_center: false,
         });
     }
 
-    let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
-    let run_left = (width - 4.0 * button).max(0.0);
+    // `.capbtn`: a 46x40 box, a 10px glyph, and 14px for the gear alone.
     let buttons = [
-        (ChromeTarget::Settings, "\u{2699}\u{fe0e}", 14.0),
-        (ChromeTarget::Minimize, "\u{2212}", 10.0),
-        (ChromeTarget::Maximize, "\u{25a1}", 10.0),
-        (ChromeTarget::CloseWindow, "\u{00d7}", 10.0),
+        (
+            ChromeTarget::Settings,
+            ChromeMark::Gear,
+            WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
+        ),
+        (
+            ChromeTarget::Minimize,
+            ChromeMark::WindowMinimize,
+            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+        ),
+        (
+            ChromeTarget::Maximize,
+            ChromeMark::WindowMaximize,
+            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+        ),
+        (
+            ChromeTarget::CloseWindow,
+            ChromeMark::WindowClose,
+            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+        ),
     ];
-    for (index, (target, glyph, font_size)) in buttons.into_iter().enumerate() {
+    for (index, (target, mark, glyph_logical_px)) in buttons.into_iter().enumerate() {
         let left = run_left + index as f32 * button;
         let rect = [left, 0.0, (left + button).min(width), title];
         let hovered = hover == Some(target);
@@ -797,10 +844,12 @@ fn window_chrome(
                 },
             });
         }
-        labels.push(ChromeLabel {
-            text: glyph.to_owned(),
-            rect,
-            font_size_px: font_size * scale,
+        let glyph = (glyph_logical_px * scale).round().max(1.0);
+        let glyph_left = ((rect[0] + rect[2]) / 2.0 - glyph / 2.0).round();
+        let glyph_top = (title / 2.0 - glyph / 2.0).round();
+        sprites.push(ChromeSprite {
+            mark,
+            rect: [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
             color: if hovered && target == ChromeTarget::CloseWindow {
                 palette.caption_close_text
             } else if hovered {
@@ -808,8 +857,6 @@ fn window_chrome(
             } else {
                 palette.title_text
             },
-            align_right: false,
-            align_center: true,
         });
     }
 }
@@ -863,12 +910,41 @@ fn seat_title(kind: SeatKind) -> &'static str {
     }
 }
 
-fn pane_icon(kind: SeatKind) -> &'static str {
+/// The mark a pane head wears, its size in logical pixels, and the colour
+/// `currentColor` resolves to.
+///
+/// Three of the four are the mock-up's own pairings: `stateIcon` puts the
+/// session's profile mark on a terminal head at `.pmark`'s 15px,
+/// `.preview-head .files-ico` is `#i-file` at 14px in `--accent`, and
+/// `.files-head .files-ico` is `#i-folder` at 13px in `--accent`. A profile mark
+/// carries its own colours, so the colour handed to it is never used.
+///
+/// The fourth has no counterpart, because the mock-up has no notion of a leaf
+/// this build cannot name. It gets the generic pane outline in the same quiet
+/// ink a body notice uses — a placeholder is a statement about this build, not
+/// an invitation, and the accent is reserved for things that want you.
+fn pane_mark(kind: SeatKind, palette: bt_render::ChromePalette) -> (ChromeMark, f32, [u8; 3]) {
     match kind {
-        SeatKind::Terminal => "\u{25a0}",
-        SeatKind::Files => "\u{25a4}",
-        SeatKind::Preview => "\u{25c7}",
-        SeatKind::Placeholder => "?",
+        SeatKind::Terminal => (
+            ChromeMark::ProfilePowerShell,
+            PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
+            palette.accent,
+        ),
+        SeatKind::Files => (
+            ChromeMark::Folder,
+            PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+            palette.accent,
+        ),
+        SeatKind::Preview => (
+            ChromeMark::File,
+            PANE_HEAD_FILE_MARK_LOGICAL_PX,
+            palette.accent,
+        ),
+        SeatKind::Placeholder => (
+            ChromeMark::Panel,
+            PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+            palette.body_hint_text,
+        ),
     }
 }
 
@@ -1101,7 +1177,7 @@ mod tests {
         let seats = Seats::lone_terminal();
         let metrics = seat_metrics(1_000);
         let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
-        let (quads, labels) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
+        let (quads, labels, sprites) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
         let palette = chrome_palette();
         assert!(quads.iter().any(|quad| {
             quad.rect == [0.0, 0.0, 960.0, WINDOW_TITLE_BAR_LOGICAL_PX]
@@ -1109,11 +1185,183 @@ mod tests {
         }));
         assert!(labels.iter().any(|label| label.text == "PowerShell"));
         assert!(labels.iter().any(|label| label.text == "Terminal"));
-        for glyph in ["\u{2699}\u{fe0e}", "\u{2212}", "\u{25a1}", "\u{00d7}"] {
-            assert!(labels.iter().any(|label| label.text == glyph));
+        for mark in [
+            ChromeMark::Gear,
+            ChromeMark::WindowMinimize,
+            ChromeMark::WindowMaximize,
+            ChromeMark::WindowClose,
+        ] {
+            assert!(
+                sprites.iter().any(|sprite| sprite.mark == mark),
+                "{mark:?} must be a caption mark"
+            );
         }
-        assert!(labels.iter().any(|label| label.text == "\u{25a0}"));
+        assert_eq!(
+            sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+                .count(),
+            2,
+            "the profile mark is worn by both the tab and the terminal's own head"
+        );
         assert!(hit_chrome(&seats, &layout, 1.0, 480.0, 300.0).is_none());
+    }
+
+    /// PIN (visual fidelity pass): the caption glyphs are the mock-up's own
+    /// `<symbol>`s at the sizes `.capbtn svg` gives them — 14px for the gear,
+    /// 10px for the three window buttons — centred in their 46x40 box, and the
+    /// glyph under the pointer wears the hover ink while `.close-w:hover` wears
+    /// white.
+    ///
+    /// Red gate: the box is 46 wide and the glyph 10, so a sprite that had been
+    /// handed the whole button rectangle — the shape the previous text glyphs
+    /// were given — fails every size assertion here.
+    #[test]
+    fn caption_marks_are_mockup_symbols_at_mockup_sizes_centred_in_their_box() {
+        let seats = Seats::lone_terminal();
+        let palette = chrome_palette();
+        for dpi_milli in [1_000u32, 1_250, 1_500, 2_000] {
+            let scale = dpi_milli as f32 / 1_000.0;
+            let metrics = seat_metrics(dpi_milli);
+            let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+            let (_, _, sprites) = build_chrome(
+                &seats,
+                &layout,
+                scale,
+                ChromePointer {
+                    hover: Some(ChromeTarget::CloseWindow),
+                    dragging: None,
+                },
+            );
+            let expected = [
+                (ChromeMark::Gear, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX),
+                (ChromeMark::WindowMinimize, WINDOW_CAPTION_GLYPH_LOGICAL_PX),
+                (ChromeMark::WindowMaximize, WINDOW_CAPTION_GLYPH_LOGICAL_PX),
+                (ChromeMark::WindowClose, WINDOW_CAPTION_GLYPH_LOGICAL_PX),
+            ];
+            let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
+            let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            let run_left = 1600.0 - 4.0 * button;
+            for (index, (mark, logical_px)) in expected.into_iter().enumerate() {
+                let sprite = sprites
+                    .iter()
+                    .find(|sprite| sprite.mark == mark)
+                    .unwrap_or_else(|| panic!("{mark:?} missing at {dpi_milli} milli-DPI"));
+                let side = (logical_px * scale).round();
+                assert_eq!(
+                    sprite.rect[2] - sprite.rect[0],
+                    side,
+                    "{mark:?} width at {dpi_milli} milli-DPI"
+                );
+                assert_eq!(
+                    sprite.rect[3] - sprite.rect[1],
+                    side,
+                    "{mark:?} height at {dpi_milli} milli-DPI"
+                );
+                let box_centre = run_left + (index as f32 + 0.5) * button;
+                assert!(
+                    ((sprite.rect[0] + sprite.rect[2]) / 2.0 - box_centre).abs() <= 0.5,
+                    "{mark:?} must sit in the middle of its 46px box: sprite {:?} vs centre {box_centre} (run_left {run_left}, button {button})",
+                    sprite.rect
+                );
+                assert!(
+                    ((sprite.rect[1] + sprite.rect[3]) / 2.0 - title / 2.0).abs() <= 0.5,
+                    "{mark:?} must sit in the middle of the 40px bar"
+                );
+                assert_eq!(
+                    sprite.color,
+                    if mark == ChromeMark::WindowClose {
+                        palette.caption_close_text
+                    } else {
+                        palette.title_text
+                    },
+                    "{mark:?} ink at {dpi_milli} milli-DPI"
+                );
+            }
+        }
+    }
+
+    /// PIN (visual fidelity pass): the tab is a rounded silhouette, not a stack
+    /// of quads, and the title bar's foot carries nothing across it.
+    ///
+    /// Three claims, each of which the previous drawing broke:
+    ///
+    /// * the tab's fill is the same value as the pane head below it and as the
+    ///   terminal's own background, so tab and content are one surface;
+    /// * the silhouette starts at the window's own left edge (`x = 0`) and its
+    ///   lower edge is the title bar's lower edge, so nothing of it spills into
+    ///   the pane head row;
+    /// * no quad spans the surface at the bar's foot — the horizontal rule that
+    ///   used to cut the tab off from the terminal is gone.
+    #[test]
+    fn the_active_tab_joins_the_content_plane_and_the_bar_has_no_rule_across_it() {
+        let seats = Seats::lone_terminal();
+        let palette = chrome_palette();
+        for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000] {
+            let scale = dpi_milli as f32 / 1_000.0;
+            let width = 1600.0_f32;
+            let metrics = seat_metrics(dpi_milli);
+            let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+            let (quads, _, sprites) =
+                build_chrome(&seats, &layout, scale, ChromePointer::default());
+            let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+            let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round();
+
+            let tab = sprites
+                .iter()
+                .find(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. }))
+                .unwrap_or_else(|| panic!("no tab silhouette at {dpi_milli} milli-DPI"));
+            assert_eq!(
+                tab.mark,
+                ChromeMark::ActiveTab {
+                    radius_px: radius as u32
+                },
+                "the tab's corners are --tabr at {dpi_milli} milli-DPI"
+            );
+            assert_eq!(
+                tab.color, palette.active_tab,
+                "the active tab is filled with --termbg"
+            );
+            assert_eq!(
+                palette.active_tab, palette.pane_head,
+                "tab and pane head must be the same surface, or the join is a lie"
+            );
+            assert_eq!(
+                tab.rect[0], 0.0,
+                "the first tab's skirt lands on the window edge"
+            );
+            assert_eq!(
+                tab.rect[3], title,
+                "the tab stops at the bar's foot and never reaches into the pane head"
+            );
+            assert_eq!(
+                tab.rect[3] - tab.rect[1],
+                (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round(),
+                "the tab is 34px tall"
+            );
+
+            // The bar's foot: nothing may run across it.
+            for quad in &quads {
+                let spans_the_bar_foot = quad.rect[1] < title
+                    && quad.rect[3] >= title
+                    && quad.rect[0] <= 0.0
+                    && quad.rect[2] >= width;
+                if spans_the_bar_foot {
+                    assert_eq!(
+                        quad.color, palette.title_bar,
+                        "only the bar's own fill may reach its foot; found {:?}",
+                        quad.color
+                    );
+                }
+            }
+            assert!(
+                !quads.iter().any(|quad| {
+                    quad.rect[3] == title && quad.rect[3] - quad.rect[1] < 4.0 * scale
+                }),
+                "`.titlebar` has no border in the mock-up — no hairline of any \
+                 colour may sit at the bar's foot at {dpi_milli} milli-DPI"
+            );
+        }
     }
 
     /// Red gate: titlebar primitives, the one active tab, all four caption
@@ -1126,7 +1374,7 @@ mod tests {
         let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
         let palette = chrome_palette();
 
-        let (settings_quads, settings_labels) = build_chrome(
+        let (settings_quads, settings_labels, settings_sprites) = build_chrome(
             &seats,
             &layout,
             1.0,
@@ -1138,18 +1386,26 @@ mod tests {
         assert!(settings_quads.iter().any(|quad| {
             quad.rect == [776.0, 0.0, 822.0, 40.0] && quad.color == palette.caption_hover
         }));
-        assert!(settings_quads.iter().any(|quad| {
-            quad.color == palette.active_tab
-                && quad.rect[0] >= WINDOW_TAB_RADIUS_LOGICAL_PX
-                && quad.rect[3] == WINDOW_TITLE_BAR_LOGICAL_PX
+        assert!(settings_sprites.iter().any(|sprite| {
+            matches!(sprite.mark, ChromeMark::ActiveTab { .. })
+                && sprite.color == palette.active_tab
+                && sprite.rect[2] > WINDOW_TAB_RADIUS_LOGICAL_PX
+                && sprite.rect[3] == WINDOW_TITLE_BAR_LOGICAL_PX
         }));
+        assert!(
+            settings_sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::Gear
+                    && sprite.color == palette.title_text_hover),
+            "the gear under the pointer takes the hover ink"
+        );
         assert!(
             settings_labels
                 .iter()
                 .any(|label| label.text == "PowerShell")
         );
 
-        let (close_quads, close_labels) = build_chrome(
+        let (close_quads, _close_labels, close_sprites) = build_chrome(
             &seats,
             &layout,
             1.0,
@@ -1161,8 +1417,8 @@ mod tests {
         assert!(close_quads.iter().any(|quad| {
             quad.rect == [914.0, 0.0, 960.0, 40.0] && quad.color == palette.caption_close_hover
         }));
-        assert!(close_labels.iter().any(|label| {
-            label.text == "\u{00d7}" && label.color == palette.caption_close_text
+        assert!(close_sprites.iter().any(|sprite| {
+            sprite.mark == ChromeMark::WindowClose && sprite.color == palette.caption_close_text
         }));
     }
 
@@ -1201,13 +1457,32 @@ mod tests {
         let mut seats = Seats::lone_terminal();
         seats.toggle_preview(&metrics);
         let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
-        let (_, labels) = build_chrome_with_preview(
+        let (_, labels, sprites) = build_chrome_with_preview(
             &seats,
             &layout,
             1.0,
             ChromePointer::default(),
             Some("sunset.svg \u{2014} 800\u{d7}600"),
             Some("Loading sunset.svg\u{2026}"),
+        );
+        // PIN: the preview head wears `#i-file` at `.preview-head .files-ico`'s
+        // 14px in `--accent`, and the terminal beside it keeps its profile mark.
+        let palette_marks = chrome_palette();
+        assert!(
+            sprites.iter().any(|sprite| {
+                sprite.mark == ChromeMark::File
+                    && sprite.color == palette_marks.accent
+                    && sprite.rect[2] - sprite.rect[0] == PANE_HEAD_FILE_MARK_LOGICAL_PX
+            }),
+            "the preview head's mark is the accent file glyph at 14px"
+        );
+        assert!(
+            sprites.iter().any(|sprite| {
+                sprite.mark == ChromeMark::ProfilePowerShell
+                    && sprite.rect[2] - sprite.rect[0] == PANE_HEAD_PROFILE_MARK_LOGICAL_PX
+                    && sprite.rect[1] >= WINDOW_TITLE_BAR_LOGICAL_PX
+            }),
+            "the terminal head's mark is the profile square at 15px"
         );
         let notice = labels
             .iter()
@@ -1500,7 +1775,8 @@ mod tests {
             bt_layout::COLLAPSED_EXTENT
         );
 
-        let (quads, _labels) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
+        let (quads, _labels, _sprites) =
+            build_chrome(&seats, &layout, 1.0, ChromePointer::default());
         assert!(
             quads
                 .iter()

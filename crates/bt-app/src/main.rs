@@ -11,6 +11,7 @@ use std::{
 };
 
 mod input;
+mod marks;
 mod persist;
 mod seats;
 
@@ -464,6 +465,9 @@ struct Runtime {
     /// never be two geometries (D4).
     seat_layout: SeatLayout,
     seat_pointer: seats::ChromePointer,
+    /// Rasterized chrome marks, held across frames so a hover repaint costs a
+    /// hash lookup rather than eight SVG renders.
+    chrome_marks: marks::ChromeMarkRasters,
     divider_drag: Option<DividerDrag>,
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
@@ -1572,6 +1576,7 @@ impl Runtime {
             seats,
             seat_layout,
             seat_pointer: seats::ChromePointer::default(),
+            chrome_marks: marks::ChromeMarkRasters::default(),
             divider_drag: None,
             work_area: WorkAreaHint::NeverKnown,
             session_store,
@@ -1662,7 +1667,7 @@ impl Runtime {
                 .is_some()
                 .then(|| "Click a dotted path to preview it here".to_owned()),
         };
-        let (quads, labels) = seats::build_chrome_with_preview(
+        let (quads, labels, sprites) = seats::build_chrome_with_preview(
             &self.seats,
             &self.seat_layout,
             scale,
@@ -1670,7 +1675,8 @@ impl Runtime {
             preview_title.as_deref(),
             preview_message.as_deref(),
         );
-        self.renderer.set_chrome(quads, labels)
+        let icons = self.chrome_marks.resolve(&sprites);
+        self.renderer.set_chrome(quads, labels, icons)
     }
 
     /// Ask the OS for the work area of the display this window is on.

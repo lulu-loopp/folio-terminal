@@ -35,11 +35,16 @@ use wgpu::util::DeviceExt;
 use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB};
 pub use theme::{
     ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, LIGHT_CHROME,
-    PREVIEW_BODY_INSET_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_DIVIDER_VISUAL_LOGICAL_PX,
-    SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
-    SEAT_TITLE_PADDING_LOGICAL_PX, WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX,
-    background_rgb, chrome_palette, foreground_rgb, theme_revision,
+    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_DIVIDER_VISUAL_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
+    SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
+    WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
+    WINDOW_CAPTION_GLYPH_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
+    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette,
+    foreground_rgb, theme_revision,
 };
 use theme::{
     DEFAULT_PEEK_BORDER_RGB, DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB,
@@ -1478,6 +1483,7 @@ pub struct Renderer {
     seat: SeatViewport,
     chrome_quads: Vec<ChromeQuad>,
     chrome_labels: Vec<ChromeLabel>,
+    chrome_icons: Vec<ChromeIcon>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
@@ -1601,6 +1607,42 @@ pub struct ChromeLabel {
     /// states (an empty preview's hint, "Loading …", a failure notice) use this;
     /// vertical centring is what every label already gets.
     pub align_center: bool,
+}
+
+/// One chrome mark, already rasterized to the exact physical box it occupies.
+///
+/// The mock-up draws every mark in the chrome — the profile square on a tab, the
+/// file and folder marks on a pane head, the four caption glyphs, and the active
+/// tab's own rounded silhouette — as SVG. Nothing here re-draws them from
+/// primitives: the app rasterizes the mock-up's own `<symbol>` bodies at the
+/// physical size the box wants and hands over the pixels, so what lands on screen
+/// and what the design says are the same document, and the curves carry resvg's
+/// analytic antialiasing rather than a staircase of nested rectangles.
+///
+/// `key` is the content identity — mark, physical size, and resolved colour —
+/// and is what the shared GPU texture LRU is asked. Two icons with the same key
+/// are the same pixels, which is what makes equality cheap enough to run on
+/// every chrome rebuild.
+#[derive(Clone, Debug)]
+pub struct ChromeIcon {
+    pub key: String,
+    /// `[left, top, right, bottom]`, in physical pixels of the whole surface.
+    pub rect: [f32; 4],
+    pub rgba: Arc<[u8]>,
+    pub width_px: u32,
+    pub height_px: u32,
+}
+
+/// Identity is `key` plus placement. The bytes are a function of the key (that is
+/// what the key *is*), so comparing them would be paying megabytes per frame to
+/// re-learn something the string already said.
+impl PartialEq for ChromeIcon {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key
+            && self.rect == other.rect
+            && self.width_px == other.width_px
+            && self.height_px == other.height_px
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -2084,6 +2126,7 @@ impl Renderer {
             seat: SeatViewport::whole(swapchain_size.0, swapchain_size.1),
             chrome_quads: Vec::new(),
             chrome_labels: Vec::new(),
+            chrome_icons: Vec::new(),
             font_system,
             swash_cache,
             viewport,
@@ -2278,10 +2321,18 @@ impl Renderer {
 
     /// Replace the seat chrome drawn around the terminal. Returns whether the
     /// visible chrome changed, so the caller can skip a redundant redraw.
-    pub fn set_chrome(&mut self, quads: Vec<ChromeQuad>, labels: Vec<ChromeLabel>) -> bool {
-        let changed = self.chrome_quads != quads || self.chrome_labels != labels;
+    pub fn set_chrome(
+        &mut self,
+        quads: Vec<ChromeQuad>,
+        labels: Vec<ChromeLabel>,
+        icons: Vec<ChromeIcon>,
+    ) -> bool {
+        let changed = self.chrome_quads != quads
+            || self.chrome_labels != labels
+            || self.chrome_icons != icons;
         self.chrome_quads = quads;
         self.chrome_labels = labels;
+        self.chrome_icons = icons;
         changed
     }
 
@@ -2489,6 +2540,15 @@ impl Renderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
+        let (chrome_icon_draws, chrome_icon_vertices) = self.prepare_chrome_icon_draws();
+        let chrome_icon_buffer = (!chrome_icon_vertices.is_empty()).then(|| {
+            self.device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("chrome mark vertices"),
+                    contents: bytemuck::cast_slice(chrome_icon_vertices.as_slice()),
+                    usage: wgpu::BufferUsages::VERTEX,
+                })
+        });
         let chrome_layouts = shape_chrome_labels(&mut self.font_system, &self.chrome_labels);
         let chrome_prepared = !chrome_layouts.is_empty()
             && prepare_chrome_text_atlas(
@@ -2618,7 +2678,7 @@ impl Renderer {
             // Seat chrome last, with the pass restored to the whole window: it is
             // the one class of draw that legitimately owns the space between
             // seats. Skipped entirely when there is no chrome.
-            if chrome_rect_buffer.is_some() || chrome_prepared {
+            if chrome_rect_buffer.is_some() || chrome_icon_buffer.is_some() || chrome_prepared {
                 pass.set_viewport(
                     0.0,
                     0.0,
@@ -2632,6 +2692,21 @@ impl Renderer {
                     pass.set_pipeline(&self.rect_pipeline);
                     pass.set_vertex_buffer(0, buffer.slice(..));
                     pass.draw(0..6, 0..chrome_rects.len() as u32);
+                }
+                // Marks sit between the flat fills and the text: the active tab's
+                // own silhouette is a mark, and it has to land over the title
+                // bar's fill and under the tab's title.
+                if let Some(buffer) = chrome_icon_buffer.as_ref() {
+                    pass.set_pipeline(&self.math_pipeline);
+                    pass.set_vertex_buffer(0, buffer.slice(..));
+                    for draw in &chrome_icon_draws {
+                        if let Some(texture) = self.math_textures.get(&draw.key)
+                            && let Some(tile) = texture.tiles.get(draw.tile_index)
+                        {
+                            pass.set_bind_group(0, &tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                        }
+                    }
                 }
                 if chrome_prepared {
                     self.chrome_text_renderer
@@ -2966,6 +3041,70 @@ impl Renderer {
             });
         }
         (rects, draws, vertices)
+    }
+
+    /// Upload and place every chrome mark, in whole-surface pixels.
+    ///
+    /// The marks ride the same textured-quad path the math rasters and the
+    /// preview image already use — one texture pipeline, one LRU, one sampler.
+    /// They are keyed by their content identity, so a mark that survives a frame
+    /// costs a hash lookup, and one the budget evicted simply re-uploads on the
+    /// next frame from the bytes the app is still holding.
+    fn prepare_chrome_icon_draws(&mut self) -> (Vec<MathDraw>, Vec<MathVertex>) {
+        let icons = self.chrome_icons.clone();
+        let (surface_width, surface_height) = (self.config.width, self.config.height);
+        let mut draws = Vec::new();
+        let mut vertices = Vec::new();
+        for icon in &icons {
+            if self.math_textures.get(&icon.key).is_none()
+                && let Some(texture) =
+                    self.upload_rgba_tiles(&icon.rgba, icon.width_px, icon.height_px)
+            {
+                let (admitted, evictions) =
+                    self.math_textures
+                        .insert(icon.key.clone(), texture, icon.rgba.len());
+                self.math_texture_evictions = self.math_texture_evictions.saturating_add(evictions);
+                if !admitted {
+                    self.note_math_texture_refusal(&icon.key, icon.rgba.len());
+                }
+            }
+            let Some(tile_geometry) = self.math_textures.get(&icon.key).map(|texture| {
+                texture
+                    .tiles
+                    .iter()
+                    .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
+                    .collect::<Vec<_>>()
+            }) else {
+                continue;
+            };
+            let scale_x = (icon.rect[2] - icon.rect[0]) / icon.width_px.max(1) as f32;
+            let scale_y = (icon.rect[3] - icon.rect[1]) / icon.height_px.max(1) as f32;
+            for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
+                tile_geometry.into_iter().enumerate()
+            {
+                let left = icon.rect[0] + tile_x as f32 * scale_x;
+                let top = icon.rect[1] + tile_y as f32 * scale_y;
+                let first_vertex = vertices.len() as u32;
+                vertices.extend(math_quad_vertices(
+                    left,
+                    top,
+                    left + tile_width as f32 * scale_x,
+                    top + tile_height as f32 * scale_y,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1.0,
+                    surface_width,
+                    surface_height,
+                ));
+                draws.push(MathDraw {
+                    key: icon.key.clone(),
+                    tile_index,
+                    first_vertex,
+                });
+            }
+        }
+        (draws, vertices)
     }
 
     fn prepare_preview_draws(&mut self) -> (Option<SeatViewport>, Vec<MathDraw>, Vec<MathVertex>) {
