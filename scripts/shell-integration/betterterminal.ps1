@@ -100,6 +100,7 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
         $initialXField = $null
         $initialYField = $null
         $previousField = $null
+        $waitingField = $null
         try {
             $type = [Microsoft.PowerShell.PSConsoleReadLine]
             $static = [Reflection.BindingFlags]'Static,NonPublic'
@@ -108,7 +109,9 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
             $initialXField = $type.GetField('_initialX', $instance)
             $initialYField = $type.GetField('_initialY', $instance)
             $previousField = $type.GetField('_previousRender', $instance)
+            $waitingField = $type.GetField('_waitingToRender', $instance)
             $previous = $previousField.GetValue($singleton)
+            $waitingToRender = [bool]$waitingField.GetValue($singleton)
             $savedInitialX = $initialXField.GetValue($singleton)
             $savedInitialY = $initialYField.GetValue($singleton)
             $savedPrevious = $previous
@@ -131,17 +134,16 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
             if ($line.Length -eq 0) {
                 $anchor = $physicalY * $width + $physicalX
             } else {
-                # Reflow preserves B's absolute cell order. The old render supplies its pre-resize
-                # absolute position, whose modulus gives the only possible new starting column;
-                # the current physical cursor then supplies the authoritative row.
+                # B belongs to the input's logical line, not to the whole screen's rectangular cell
+                # array. A hard-terminated row before the prompt loses its right-hand padding when
+                # the pane widens, so its old whole-screen cell ordinal cannot be carried through a
+                # reflow. The simple single-line path below therefore solves B directly from D.
                 $oldWidth = [int]$previous.bufferWidth
                 $oldX = [int]$initialXField.GetValue($singleton)
                 $oldY = [int]$initialYField.GetValue($singleton)
                 if ($oldWidth -le 0 -or $oldX -lt 0 -or $oldX -ge $oldWidth -or $oldY -lt 0) {
                     throw 'Invalid previous PSReadLine anchor state.'
                 }
-                $anchorX = (($oldY * $oldWidth + $oldX) % $width + $width) % $width
-
                 $cellMethod = $type.GetMethod(
                     'LengthInBufferCells',
                     $static,
@@ -151,6 +153,59 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
                 if ($null -eq $cellMethod) {
                     throw 'PSReadLine LengthInBufferCells(char) was not found.'
                 }
+
+                # PSReadLine can defer rendering while keys are queued. In that window GetBufferState
+                # already exposes the new history entry, but the physical cursor and `_previousRender`
+                # still describe the old entry. Carry the painted B..D distance in that case; using
+                # the new buffer against the old cursor is what made InvokePrompt weld the recall to
+                # the preceding banner in anchor-glide-verify.vt.
+                $anchorSolved = $false
+                $linearCurrent = $physicalX -ne ($width - 1)
+                for ($index = 0; $linearCurrent -and $index -lt $cursor; $index++) {
+                    $character = $line[$index]
+                    $linearCurrent = $character -ne "`n" -and
+                        [int]$cellMethod.Invoke($null, @($character)) -eq 1
+                }
+                $logicalLineRepair =
+                    $env:BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE -ne '1'
+                $previousLinear = $logicalLineRepair -and $waitingToRender -and
+                    $previous.lines.Length -eq 1
+                if ($previousLinear) {
+                    $rendered = $previous.lines[0].Line
+                    for ($index = 0; $previousLinear -and $index -lt $rendered.Length; $index++) {
+                        $character = $rendered[$index]
+                        if ($character -eq [char]27 -and $index + 1 -lt $rendered.Length -and
+                            $rendered[$index + 1] -eq '[') {
+                            $index += 2
+                            while ($index -lt $rendered.Length -and $rendered[$index] -ne 'm') {
+                                $index++
+                            }
+                            continue
+                        }
+                        $previousLinear = [int]$cellMethod.Invoke($null, @($character)) -eq 1
+                    }
+                }
+                if ($previousLinear) {
+                    $paintedCursorCells =
+                        ($savedPreviousCursorTop - $oldY) * $oldWidth +
+                        $savedPreviousCursorLeft - $oldX
+                    if ($paintedCursorCells -lt 0) {
+                        throw 'The previous PSReadLine cursor precedes its input anchor.'
+                    }
+                    $anchor = $physicalY * $width + $physicalX - $paintedCursorCells
+                    $anchorSolved = $true
+                } elseif ($logicalLineRepair -and -not $waitingToRender -and $linearCurrent) {
+                    $anchorX = (($physicalX - $cursor) % $width + $width) % $width
+                    $cursorRows = [int][Math]::Floor(($anchorX + $cursor) / $width)
+                    $anchor = ($physicalY - $cursorRows) * $width + $anchorX
+                    $anchorSolved = $true
+                }
+
+                if (-not $anchorSolved) {
+                    # Complex/multiline and right-margin input retains the established
+                    # PSReadLine-width calculation, including its continuation-prompt and
+                    # wide-character padding rules.
+                    $anchorX = (($oldY * $oldWidth + $oldX) % $width + $width) % $width
                 $continuationCells = 0
                 foreach ($character in [Microsoft.PowerShell.PSConsoleReadLine]::GetOptions().ContinuationPrompt.ToCharArray()) {
                     $continuationCells += [int]$cellMethod.Invoke($null, @($character))
@@ -203,6 +258,7 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
                 $anchor = $physicalY * $width + $physicalX - $displayCells
                 if ($anchor -lt 0 -or $anchor % $width -ne $anchorX) {
                     throw 'The derived PSReadLine anchor is invalid.'
+                }
                 }
             }
 

@@ -568,6 +568,105 @@ fn g1_full_width_reflow_stages_only_the_rows_that_cannot_fit() {
     );
 }
 
+/// Regression recording distilled from `anchor-glide-verify.vt`: PowerShell starts wide, recalls a
+/// wrapping line at 49 columns, the pane narrows far enough for the sparse grid to grow downward,
+/// and then widens to 118 columns before PSReadLine repaints the recalled input.  Every byte below
+/// is emitted by the child in the recording; keyboard input and terminal replies are deliberately
+/// absent from a PTY-output capture.
+#[test]
+fn recalled_input_keeps_its_prompt_head_and_never_welds_to_the_banner_after_widen() {
+    const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
+    const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+    const RECALLED: &str =
+        "echo \"[Image: source: C:\\Windows\\Web\\Wallpaper\\Windows\\img0.jpg]\"";
+    const REPAINTED: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
+    const CAPTURED_CORRUPT_REPAINT: &[u8] = b"\x1b[?25l\x1b[1;65H\x1b[0m\x1b[93mWrite-Output\x1b[0m\x1b[39;49m \x1b[0m\x1b[37m(\x1b[0m\x1b[36m'BT_APP_'\x1b[0m\x1b[39;49m \x1b[0m\x1b[90m+\x1b[0m\x1b[39;49m \x1b[0m\x1b[36m'INPUT_OK'\x1b[0m\x1b[37m)\x1b[39;49m                  \x1b[2;1H           \x1b[0m\x1b[1;102H\x1b[?25h";
+    const REPAIRED_REPAINT: &[u8] = b"\x1b[?25l\x1b[2;45H\x1b[0m\x1b[93mWrite-Output\x1b[0m\x1b[39;49m \x1b[0m\x1b[37m(\x1b[0m\x1b[36m'BT_APP_'\x1b[0m\x1b[39;49m \x1b[0m\x1b[90m+\x1b[0m\x1b[39;49m \x1b[0m\x1b[36m'INPUT_OK'\x1b[0m\x1b[37m)\x1b[39;49m                            \x1b[0m\x1b[2;82H\x1b[?25h";
+
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(120), nz32(39));
+    session
+        .feed_at(format!("{WARNING}\r\n{PROMPT}").as_bytes(), start)
+        .unwrap();
+
+    let mut at = start;
+    for (columns, cursor) in [
+        (29, b"\x1b[4;16H".as_slice()),
+        (27, b"\x1b[4;18H"),
+        (28, b"\x1b[4;17H"),
+        (55, b""),
+        (27, b"\x1b[4;18H"),
+        (28, b""),
+        (27, b"\x1b[4;18H"),
+        (42, b"\x1b[4;3H"),
+        (49, b"\x1b[2;45H"),
+    ] {
+        at += Duration::from_millis(10);
+        session.resize_at(nz32(columns), nz32(39), at).unwrap();
+        session.mark_pty_resize_requested_at(nz32(columns), nz32(39), at);
+        if !cursor.is_empty() {
+            session.feed_at(cursor, at).unwrap();
+        }
+    }
+    session
+        .feed_at(
+            format!("\x1b[?25l\x1b[2;45H{RECALLED}\x1b[4;12H\x1b[?25h").as_bytes(),
+            at,
+        )
+        .unwrap();
+
+    for (columns, cursor) in [
+        (27, b"\x1b[7;2H".as_slice()),
+        (49, b""),
+        (27, b"\x1b[7;2H"),
+        (44, b""),
+        (56, b"\x1b[3;54H"),
+        (118, b""),
+    ] {
+        at += Duration::from_millis(10);
+        session.resize_at(nz32(columns), nz32(39), at).unwrap();
+        session.mark_pty_resize_requested_at(nz32(columns), nz32(39), at);
+        if !cursor.is_empty() {
+            session.feed_at(cursor, at).unwrap();
+        }
+    }
+    let before_repaint = session.terminal().visible_text();
+    let expected_input_line = format!("{PROMPT}{RECALLED}");
+    assert_eq!(
+        &before_repaint[..2],
+        [WARNING, expected_input_line.as_str()],
+        "the local grow/rejoin must restore both hard-line heads before the child repaints"
+    );
+
+    // Red check: the captured fallback bytes alone are sufficient to produce the field report.
+    // They are kept closed over the test instead of read from the mutable diagnostic recording.
+    let mut captured = DualPlaneSession::new(nz32(118), nz32(3));
+    captured
+        .feed_at(format!("{WARNING}\r\n{PROMPT}{RECALLED}").as_bytes(), start)
+        .unwrap();
+    captured.feed_at(CAPTURED_CORRUPT_REPAINT, start).unwrap();
+    let captured_rows = captured.terminal().visible_text();
+    assert!(captured_rows[0].contains("Write-Output"));
+    assert!(captured_rows[1].starts_with("           "));
+    assert!(captured_rows[1][11..].starts_with(&PROMPT[11..]));
+
+    session.feed_at(REPAIRED_REPAINT, at).unwrap();
+
+    let rows = session.terminal().visible_text();
+    assert_eq!(rows[0], WARNING, "the banner must remain its own hard line");
+    assert!(
+        rows[1].starts_with(PROMPT),
+        "the prompt head must survive the narrow/widen rejoin: {:?}",
+        &rows[..3]
+    );
+    assert!(
+        !rows[0].contains("Write-Output"),
+        "the recalled input must never weld to the banner: {:?}",
+        &rows[..3]
+    );
+    assert_eq!(rows[1], format!("{PROMPT}{REPAINTED}"));
+}
+
 #[test]
 fn resize_drag_200_frames_stays_within_the_sparse_and_full_budget() {
     const FRAMES: usize = 200;

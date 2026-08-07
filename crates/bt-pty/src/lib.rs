@@ -4386,7 +4386,13 @@ mod tests {
         let mut outcomes = Vec::new();
 
         for delayed in [false, true] {
-            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &startup, FINAL_COLUMNS, 20, false);
+            let arm_startup = if delayed {
+                startup.clone()
+            } else {
+                format!("$env:BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE = '1'; {startup}")
+            };
+            let mut oracle =
+                AppResizeOracle::spawn("pwsh.exe", &arm_startup, FINAL_COLUMNS, 20, false);
             oracle.invoke_prompt_after_resize = true;
             oracle.reanchor_after_resize_quiescence = delayed;
             assert!(oracle.settle_at_prompt(PROMPT));
