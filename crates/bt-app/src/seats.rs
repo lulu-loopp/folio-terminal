@@ -25,11 +25,11 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeQuad, SEAT_BODY_BACKGROUND_RGB, SEAT_COLLAPSE_BAR_HOVER_RGB,
-    SEAT_COLLAPSE_BAR_RGB, SEAT_DIVIDER_ACTIVE_RGB, SEAT_DIVIDER_HIT_LOGICAL_PX,
-    SEAT_DIVIDER_HOVER_RGB, SEAT_DIVIDER_RGB, SEAT_TITLE_BAR_BACKGROUND_RGB,
-    SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
-    SEAT_TITLE_TEXT_RGB, SeatViewport,
+    ChromeLabel, ChromeQuad, SEAT_BODY_BACKGROUND_RGB, SEAT_BODY_HINT_TEXT_RGB,
+    SEAT_COLLAPSE_BAR_HOVER_RGB, SEAT_COLLAPSE_BAR_RGB, SEAT_DIVIDER_ACTIVE_RGB,
+    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_DIVIDER_HOVER_RGB, SEAT_DIVIDER_RGB,
+    SEAT_TITLE_BAR_BACKGROUND_RGB, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
+    SEAT_TITLE_PADDING_LOGICAL_PX, SEAT_TITLE_TEXT_RGB, SeatViewport,
 };
 
 /// §2.5 asks `bt-layout` to hold its own subpixel denominator and to pin it
@@ -619,6 +619,7 @@ pub fn build_chrome_with_preview(
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                     color: SEAT_TITLE_TEXT_RGB,
                     align_right: false,
+                    align_center: false,
                 });
                 labels.push(ChromeLabel {
                     text: "\u{00d7}".to_owned(),
@@ -626,10 +627,14 @@ pub fn build_chrome_with_preview(
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                     color: SEAT_TITLE_TEXT_RGB,
                     align_right: true,
+                    align_center: false,
                 });
                 if placement.kind == SeatKind::Preview
                     && let Some(message) = preview_message
                 {
+                    // A state notice, not content: quiet ink, centred in the
+                    // body, so an empty pane reads as an invitation and a
+                    // failure reads as a note rather than a wall of alarm.
                     labels.push(ChromeLabel {
                         text: message.to_owned(),
                         rect: [
@@ -639,8 +644,9 @@ pub fn build_chrome_with_preview(
                             rect[3] - pad,
                         ],
                         font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-                        color: SEAT_TITLE_TEXT_RGB,
+                        color: SEAT_BODY_HINT_TEXT_RGB,
                         align_right: false,
+                        align_center: true,
                     });
                 }
             }
@@ -696,6 +702,7 @@ fn collapse_bar_contents(
             font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
             color: SEAT_TITLE_TEXT_RGB,
             align_right: false,
+            align_center: false,
         });
     }
 }
@@ -936,6 +943,45 @@ mod tests {
         );
         assert!(labels.is_empty());
         assert!(hit_chrome(&seats, &layout, 1.0, 480.0, 300.0).is_none());
+    }
+
+    /// PIN (styling pass): a preview state notice is a quiet centred note in the
+    /// body — dim ink, horizontally centred, below the title bar — while the
+    /// title keeps full-strength ink. The notice is the only centred label, so
+    /// the assertions cannot be satisfied by the title or the `x`.
+    #[test]
+    fn a_preview_state_notice_is_dim_and_centred_in_the_body() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let (_, labels) = build_chrome_with_preview(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer::default(),
+            Some("sunset.svg \u{2014} 800\u{d7}600"),
+            Some("Loading sunset.svg\u{2026}"),
+        );
+        let notice = labels
+            .iter()
+            .find(|label| label.align_center)
+            .expect("the state notice must exist and be the centred label");
+        assert_eq!(notice.text, "Loading sunset.svg\u{2026}");
+        assert_eq!(
+            notice.color, SEAT_BODY_HINT_TEXT_RGB,
+            "quiet ink, not title ink"
+        );
+        assert!(
+            notice.rect[1] >= SEAT_TITLE_BAR_LOGICAL_PX,
+            "the notice lives in the body, not the title bar"
+        );
+        let title = labels
+            .iter()
+            .find(|label| label.text.starts_with("sunset.svg"))
+            .expect("the title carries the file name and dimensions");
+        assert_eq!(title.color, SEAT_TITLE_TEXT_RGB);
+        assert!(!title.align_center);
     }
 
     /// Opening the preview narrows the terminal and closing it hands the pixels

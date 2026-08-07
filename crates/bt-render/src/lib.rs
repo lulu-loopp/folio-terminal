@@ -34,12 +34,12 @@ use wgpu::util::DeviceExt;
 
 use theme::{ANSI_16_RGB, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB};
 pub use theme::{
-    DEFAULT_BACKGROUND_RGB, SEAT_BODY_BACKGROUND_RGB, SEAT_COLLAPSE_BAR_HOVER_RGB,
-    SEAT_COLLAPSE_BAR_RGB, SEAT_DIVIDER_ACTIVE_RGB, SEAT_DIVIDER_HIT_LOGICAL_PX,
-    SEAT_DIVIDER_HOVER_RGB, SEAT_DIVIDER_RGB, SEAT_DIVIDER_VISUAL_LOGICAL_PX,
-    SEAT_TITLE_BAR_BACKGROUND_RGB, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
-    SEAT_TITLE_PADDING_LOGICAL_PX, SEAT_TITLE_TEXT_RGB, background_rgb, foreground_rgb,
-    theme_revision,
+    DEFAULT_BACKGROUND_RGB, PREVIEW_BODY_INSET_LOGICAL_PX, SEAT_BODY_BACKGROUND_RGB,
+    SEAT_BODY_HINT_TEXT_RGB, SEAT_COLLAPSE_BAR_HOVER_RGB, SEAT_COLLAPSE_BAR_RGB,
+    SEAT_DIVIDER_ACTIVE_RGB, SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_DIVIDER_HOVER_RGB, SEAT_DIVIDER_RGB,
+    SEAT_DIVIDER_VISUAL_LOGICAL_PX, SEAT_TITLE_BAR_BACKGROUND_RGB, SEAT_TITLE_BAR_LOGICAL_PX,
+    SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX, SEAT_TITLE_TEXT_RGB, background_rgb,
+    foreground_rgb, theme_revision,
 };
 use theme::{
     DEFAULT_PEEK_BORDER_RGB, DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB,
@@ -1597,6 +1597,10 @@ pub struct ChromeLabel {
     /// Right-align inside `rect` rather than left-align. The `x` affordance of a
     /// title bar is the only user of this today.
     pub align_right: bool,
+    /// Centre horizontally inside `rect`, overriding `align_right`. Seat body
+    /// states (an empty preview's hint, "Loading …", a failure notice) use this;
+    /// vertical centring is what every label already gets.
+    pub align_center: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -3727,7 +3731,9 @@ fn shape_chrome_labels(
                 .layout_runs()
                 .map(|run| run.line_w)
                 .fold(0.0_f32, f32::max);
-            let left = if label.align_right {
+            let left = if label.align_center {
+                (label.rect[0] + (width - text_width) / 2.0).max(label.rect[0])
+            } else if label.align_right {
                 (label.rect[2] - text_width).max(label.rect[0])
             } else {
                 label.rect[0]

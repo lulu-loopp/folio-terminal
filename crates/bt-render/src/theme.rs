@@ -36,6 +36,10 @@ pub const SEAT_BODY_BACKGROUND_RGB: [u8; 3] = [0x0c, 0x0c, 0x0c];
 pub const SEAT_TITLE_BAR_BACKGROUND_RGB: [u8; 3] = [0x1a, 0x1a, 0x1a];
 /// A seat title bar's ink, and the `x` glyph's.
 pub const SEAT_TITLE_TEXT_RGB: [u8; 3] = [0xcc, 0xcc, 0xcc];
+/// Quiet ink for seat body states (an empty pane's hint, "Loading …", a failure
+/// notice): the same dim the terminal uses for SGR 2, so "not content" reads the
+/// same way everywhere.
+pub const SEAT_BODY_HINT_TEXT_RGB: [u8; 3] = [0x88, 0x88, 0x88];
 /// A divider at rest: one logical pixel of quiet separation.
 pub const SEAT_DIVIDER_RGB: [u8; 3] = [0x33, 0x33, 0x33];
 /// A divider under the pointer — the same Campbell bright-black the peek frame
@@ -62,6 +66,10 @@ pub const SEAT_DIVIDER_VISUAL_LOGICAL_PX: f32 = 1.0;
 /// A divider's hit zone, in logical pixels — wider than its line, because a
 /// one-pixel target is not a target.
 pub const SEAT_DIVIDER_HIT_LOGICAL_PX: f32 = 6.0;
+/// Breathing room between a previewed image and its seat's edges, in logical
+/// pixels. Skipped entirely when the body is too small to afford it, because a
+/// margin that eats the picture serves nobody.
+pub const PREVIEW_BODY_INSET_LOGICAL_PX: f32 = 12.0;
 
 /// Process-wide background selected before the first window or renderer is created.
 ///

@@ -22,8 +22,8 @@ use bt_persist::{SESSION_SCHEMA_VERSION, SessionV1, TabV1, WindowBoundsV1, Windo
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
     FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit, MathHitTarget,
-    PeekImageOverlay, Preedit, PresentOutcome, PreviewImage, Renderer, SeatViewport,
-    background_rgb, compose_preedit, foreground_rgb, frame_content_digest,
+    PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay, Preedit, PresentOutcome, PreviewImage,
+    Renderer, SeatViewport, background_rgb, compose_preedit, foreground_rgb, frame_content_digest,
     frame_is_alternate_screen, preview_image_extent, theme_revision,
 };
 use bt_term::{
@@ -1089,6 +1089,9 @@ struct PreviewImageState {
     pending: Option<PeekThumbnailTarget>,
     raster: Option<PeekThumbnail>,
     failure: Option<String>,
+    /// The decode's native dimensions, once known — shown beside the file name so the title
+    /// answers "how big is this really" while the body shows the fitted version.
+    native: Option<(u32, u32)>,
     /// The shared resize quiet boundary. Geometry follows every pointer event, but the expensive
     /// exact-size resample is asked only after this instant lands without another resize.
     resize_scale_deadline: Option<Instant>,
@@ -1101,11 +1104,12 @@ impl PreviewImageState {
             pending: None,
             raster: None,
             failure: None,
+            native: None,
             resize_scale_deadline: None,
         }
     }
 
-    fn title(&self) -> String {
+    fn file_name(&self) -> String {
         self.path
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -1113,9 +1117,18 @@ impl PreviewImageState {
             .unwrap_or_else(|| self.path.to_string_lossy().into_owned())
     }
 
-    fn message(&self) -> Option<&str> {
-        self.failure.as_deref().or_else(|| {
-            (self.pending.is_some() || self.raster.is_none()).then_some("Loading image…")
+    fn title(&self) -> String {
+        let name = self.file_name();
+        match self.native {
+            Some((width, height)) => format!("{name} \u{2014} {width}\u{00d7}{height}"),
+            None => name,
+        }
+    }
+
+    fn message(&self) -> Option<String> {
+        self.failure.clone().or_else(|| {
+            (self.pending.is_some() || self.raster.is_none())
+                .then(|| format!("Loading {}\u{2026}", self.file_name()))
         })
     }
 
@@ -1635,17 +1648,22 @@ impl Runtime {
     fn refresh_chrome(&mut self) -> bool {
         let scale = self.renderer.metrics().scale_factor as f32;
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
-        let preview_message = self
-            .preview_image
-            .as_ref()
-            .and_then(PreviewImageState::message);
+        let preview_message = match self.preview_image.as_ref() {
+            Some(preview) => preview.message(),
+            // An open pane with nothing chosen invites rather than sits mute.
+            None => self
+                .seats
+                .preview()
+                .is_some()
+                .then(|| "Click an image path to preview it here".to_owned()),
+        };
         let (quads, labels) = seats::build_chrome_with_preview(
             &self.seats,
             &self.seat_layout,
             scale,
             self.seat_pointer,
             preview_title.as_deref(),
-            preview_message,
+            preview_message.as_deref(),
         );
         self.renderer.set_chrome(quads, labels)
     }
@@ -1829,6 +1847,11 @@ impl Runtime {
             }
             None => None,
         };
+        if let (Some(preview), Some((_, _, native_width, native_height))) =
+            (self.preview_image.as_mut(), decoded.as_ref())
+        {
+            preview.native = Some((*native_width, *native_height));
+        }
         let Some((content_key, rgba, native_width, native_height)) = decoded else {
             self.renderer.set_preview_image(None);
             if !self.math_worker_running {
@@ -1850,8 +1873,17 @@ impl Runtime {
             }
             return;
         };
+        // Breathing room: fit against an inset body so the picture never touches the seat's
+        // edges. A body too small to afford the margin gets the full rectangle instead — the
+        // margin exists to serve the picture, not to starve it.
+        let inset = (PREVIEW_BODY_INSET_LOGICAL_PX * scale).round().max(0.0) as u32;
+        let (fit_width, fit_height) = if body.width > inset * 4 && body.height > inset * 4 {
+            (body.width - 2 * inset, body.height - 2 * inset)
+        } else {
+            (body.width, body.height)
+        };
         let Some((display_width, display_height)) =
-            preview_image_extent(body.width, body.height, native_width, native_height)
+            preview_image_extent(fit_width, fit_height, native_width, native_height)
         else {
             if let Some(preview) = self.preview_image.as_mut() {
                 preview.failure = Some("Preview failed: preview seat is too small".to_owned());
@@ -5969,7 +6001,7 @@ mod tests {
         assert!(
             !preview.accept_scaled(bt_term::scale_inline_image(&scale_task("same-path", 160,)))
         );
-        assert_eq!(preview.message(), Some("Loading image…"));
+        assert_eq!(preview.message(), Some("Loading storm.png…".to_owned()));
 
         assert!(preview.accept_scaled(bt_term::scale_inline_image(
             &bt_term::InlineImageScaleTask {
