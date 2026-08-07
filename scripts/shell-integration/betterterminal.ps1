@@ -83,12 +83,19 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
         # them. Repair PSReadLine's cached B coordinate instead. With an empty buffer the physical
         # cursor is B. With text, the cursor is D display cells after B; use PSReadLine's own cell
         # width routine so CJK and the editor's ^X rendering of controls stay exactly in agreement.
+        # A non-empty buffer must also retain the render lines already on screen: an empty
+        # `_previousRender` makes the next history/edit diff forget which glyphs it must erase.
         # Reflection is deliberately version-gated with the handler. If the private shape changes,
         # or the derived B coordinate cannot describe the physical cursor, retain InvokePrompt as
         # the known fallback instead of installing a guessed anchor.
         $savedInitialX = $null
         $savedInitialY = $null
         $savedPrevious = $null
+        $savedPreviousBufferWidth = $null
+        $savedPreviousBufferHeight = $null
+        $savedPreviousCursorLeft = $null
+        $savedPreviousCursorTop = $null
+        $savedPreviousInitialY = $null
         $singleton = $null
         $initialXField = $null
         $initialYField = $null
@@ -105,6 +112,11 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
             $savedInitialX = $initialXField.GetValue($singleton)
             $savedInitialY = $initialYField.GetValue($singleton)
             $savedPrevious = $previous
+            $savedPreviousBufferWidth = $previous.bufferWidth
+            $savedPreviousBufferHeight = $previous.bufferHeight
+            $savedPreviousCursorLeft = $previous.cursorLeft
+            $savedPreviousCursorTop = $previous.cursorTop
+            $savedPreviousInitialY = $previous.initialY
             $width = [Console]::BufferWidth
             $height = [Console]::BufferHeight
             $physicalX = [Console]::CursorLeft
@@ -202,12 +214,26 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
             $initialXField.SetValue($singleton, $anchorX)
             $initialYField.SetValue($singleton, $anchorY)
 
-            # Match InvokePrompt's render-baseline reset without its output. Keeping a pre-resize
-            # render makes the next edit ask RecomputeInitialCoords to interpret obsolete geometry.
+            # Empty input really does have an empty render. For non-empty input, retain PSReadLine's
+            # existing lines: they are the exact glyphs ConPTY just reflowed and are therefore the
+            # right diff baseline, including wide-character edge padding. Only their console
+            # geometry is stale. Updating it prevents RecomputeInitialCoords from interpreting the
+            # old width on the next history/edit render, without emitting a byte here. The probe
+            # switch preserves the retired empty-baseline behavior as the real-ConPTY red arm.
             $baseline = $type.GetField('_initialPrevRender', $static).GetValue($null)
-            $previousField.SetValue($singleton, $baseline)
-            $baseline.UpdateConsoleInfo($width, $height, $physicalX, $physicalY)
-            $baseline.initialY = $anchorY
+            if ($line.Length -eq 0 -or
+                $env:BT_PSREADLINE_REANCHOR_EMPTY_BASELINE_PROBE -eq '1') {
+                $previousField.SetValue($singleton, $baseline)
+                $baseline.UpdateConsoleInfo($width, $height, $physicalX, $physicalY)
+                $baseline.initialY = $anchorY
+            } else {
+                if ([object]::ReferenceEquals($previous, $baseline) -or
+                    $null -eq $previous.lines -or $previous.lines.Length -eq 0) {
+                    throw 'The non-empty PSReadLine render data is invalid.'
+                }
+                $previous.UpdateConsoleInfo($width, $height, $physicalX, $physicalY)
+                $previous.initialY = $anchorY
+            }
         } catch {
             $reflectionError = $_
             # InvokePrompt uses the old Y coordinate to erase the old prompt. If reflection failed
@@ -216,6 +242,12 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
                 if ($null -ne $singleton -and $null -ne $savedPrevious) {
                     $initialXField.SetValue($singleton, $savedInitialX)
                     $initialYField.SetValue($singleton, $savedInitialY)
+                    $savedPrevious.UpdateConsoleInfo(
+                        $savedPreviousBufferWidth,
+                        $savedPreviousBufferHeight,
+                        $savedPreviousCursorLeft,
+                        $savedPreviousCursorTop)
+                    $savedPrevious.initialY = $savedPreviousInitialY
                     $previousField.SetValue($singleton, $savedPrevious)
                 }
             } catch {

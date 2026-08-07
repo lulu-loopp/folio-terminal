@@ -54,8 +54,8 @@ pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap()
 /// Matches the serialized Term actor quantum from DESIGN.md §1.3.
 pub const TERM_READ_QUANTUM: NonZeroUsize = NonZeroUsize::new(256 * 1024).unwrap();
 /// VT input translated by ConPTY to the shell integration's Ctrl+Alt+Shift+F12 resize-anchor chord.
-/// On PSReadLine 2.4.x the handler repairs the cached input anchor without repainting;
-/// older/unproven versions consume the chord as a no-op.
+/// On PSReadLine 2.4.x the handler repairs the cached input anchor and render geometry without
+/// repainting; older/unproven versions consume the chord as a no-op.
 pub const PSREADLINE_INVOKE_PROMPT_INPUT: &[u8] = b"\x1b[24;8~";
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
@@ -4320,6 +4320,124 @@ mod tests {
         assert_eq!(green.1, 1, "green arm must retain one prompt");
         assert!(green.2, "green arm must stay clean through the final edit");
         assert_eq!(green.3, format!("{expected}Z"));
+    }
+
+    /// Regression for `.tmp-repaint-capture/silent-reanchor-verify.vt`: after a committed resize,
+    /// Up replaces a non-empty line with a shorter, completely different history entry. The
+    /// retired arm leaves `_previousRender` at `_initialPrevRender`; the green arm retains its
+    /// screen-matching lines and repairs only the cached console geometry.
+    #[test]
+    #[ignore = "dev probe: verifies shorter history recall through real PSReadLine and ConPTY"]
+    fn nonempty_resize_shorter_history_recall_render_memory_pair_probe() {
+        const PROMPT: &str = "BTHISTORY 012345678901234567890123456789> ";
+        const HISTORY: &str = "Write-Output BT_SHORT";
+        const OLD_BUFFER: &str = "echo D:\\Developer\\BetterTerminal\\.tmp-repaint-capture\\BT_OLD_RESIDUE_MUST_DISAPPEAR";
+        // Keep the old width an exact multiple of the new one. That isolates render-memory loss:
+        // B retains the same column through ConPTY reflow, so the red residue cannot be blamed on
+        // the separate anchor-column calculation.
+        const INITIAL_COLUMNS: u16 = 104;
+        const RESIZED_COLUMNS: u16 = 52;
+        let startup = format!(
+            "{}; Set-PSReadLineKeyHandler -Chord Ctrl+g -ScriptBlock {{ \
+             [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory('{HISTORY}'); \
+             [Console]::Write(([string][char]27) + ']777;BT_HISTORY_SEEDED' + [char]7) }}",
+            invoke_prompt_probe_startup(PROMPT)
+        );
+        let expected = format!("{PROMPT}{HISTORY}");
+        let mut outcomes = Vec::new();
+
+        for retired_empty_baseline in [true, false] {
+            let arm_startup = if retired_empty_baseline {
+                format!("$env:BT_PSREADLINE_REANCHOR_EMPTY_BASELINE_PROBE = '1'; {startup}")
+            } else {
+                startup.clone()
+            };
+            let mut oracle =
+                AppResizeOracle::spawn("pwsh.exe", &arm_startup, INITIAL_COLUMNS, 20, false);
+            oracle.invoke_prompt_after_resize = true;
+            assert!(oracle.settle_at_prompt(PROMPT));
+            let seed_mark = oracle.raw_output.len();
+            oracle.pty.write(b"\x07").unwrap();
+            oracle.pump_for(Duration::from_millis(500));
+            assert!(
+                oracle.raw_output[seed_mark..]
+                    .windows(b"BT_HISTORY_SEEDED".len())
+                    .any(|window| window == b"BT_HISTORY_SEEDED"),
+                "the in-editor history seeding handler did not run"
+            );
+            oracle.pty.write(OLD_BUFFER.as_bytes()).unwrap();
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            assert!(oracle.session.typed_shell_input_live());
+
+            let resize_mark = oracle.raw_output.len();
+            oracle.project_resize(RESIZED_COLUMNS, 20);
+            oracle.pump_for(RESIZE_REQUEST_QUIET * 2 + Duration::from_millis(100));
+            oracle.pump_for(Duration::from_millis(1_500));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            let recall_mark = oracle.raw_output.len();
+            oracle.pty.write(b"\x1b[A").unwrap();
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+
+            let rows = oracle.session.terminal().visible_text();
+            let cursor = oracle.session.terminal().cursor();
+            let input = wrapped_input_line(&rows, cursor.row, PROMPT, RESIZED_COLUMNS);
+            let residue = rows.concat().contains("BT_OLD_RESIDUE_MUST_DISAPPEAR");
+            let opening = &PROMPT[..usize::from(RESIZED_COLUMNS).min(PROMPT.len())];
+            let prompt_row = (0..=cursor.row as usize)
+                .rev()
+                .find(|row| rows[*row].starts_with(opening));
+            let total_cells = PROMPT.len() + HISTORY.len();
+            let expected_cursor = prompt_row.map(|row| {
+                (
+                    row as u32 + (total_cells / usize::from(RESIZED_COLUMNS)) as u32,
+                    (total_cells % usize::from(RESIZED_COLUMNS)) as u32,
+                )
+            });
+            let cursor_correct = expected_cursor == Some((cursor.row, cursor.column));
+            let recall_output = &oracle.raw_output[recall_mark..];
+            eprintln!(
+                "BT_CONPTY_SHORTER_HISTORY_PAIR source={} psreadline={} \
+                 retired_empty_baseline={retired_empty_baseline} writes={} residue={residue} \
+                 cursor_correct={cursor_correct} cursor=({}, {}) expected_cursor={expected_cursor:?} \
+                 input={input:?} expected={expected:?} rows={:?} resize_output={} \
+                 recall_addresses={:?} recall_output={}",
+                conpty_source(),
+                psreadline_version(&oracle.raw_output),
+                oracle.invoke_prompt_writes,
+                cursor.row,
+                cursor.column,
+                occupied_rows(&rows),
+                escaped(&oracle.raw_output[resize_mark..recall_mark]),
+                redraw_addresses(recall_output),
+                escaped(recall_output)
+            );
+            outcomes.push((
+                retired_empty_baseline,
+                residue,
+                cursor_correct,
+                input,
+                (cursor.row, cursor.column),
+            ));
+        }
+
+        let red = &outcomes[0];
+        let green = &outcomes[1];
+        assert!(red.0 && !green.0);
+        assert!(
+            red.1 || red.3 != expected || !red.2,
+            "red arm must reproduce residue, an incomplete line, or a wrong cursor: {red:?}"
+        );
+        assert!(!green.1, "green arm left old-buffer glyphs: {green:?}");
+        assert_eq!(
+            green.3, expected,
+            "green arm did not recall one complete line"
+        );
+        assert!(
+            green.2,
+            "green arm left the cursor at the wrong cell: {green:?}"
+        );
     }
 
     /// CJK uses PSReadLine's reflected cell-width routine, not Rust's terminal width or an
