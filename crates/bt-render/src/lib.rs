@@ -34,7 +34,7 @@ use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
 use rounded_rect::{rounded_rect_coverage, rounded_rect_halo_coverage};
-use theme::{ANSI_16_RGB, CURSOR_WIDTH_CELL_RATIO, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB};
+use theme::{CURSOR_WIDTH_CELL_RATIO, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb};
 pub use theme::{
     ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, LIGHT_BACKGROUND_RGB,
@@ -5802,7 +5802,7 @@ fn terminal_color(color: TerminalColor, foreground: bool) -> [u8; 3] {
 
 fn indexed_color(index: u8) -> [u8; 3] {
     if index < 16 {
-        return ANSI_16_RGB[index as usize];
+        return ansi_16_rgb()[index as usize];
     }
     if index < 232 {
         let cube = index - 16;
@@ -7870,28 +7870,7 @@ mod tests {
             DEFAULT_CURSOR_RGB,
             "the cursor quad and cursor named color share the mock-up cursor"
         );
-        assert_eq!(
-            ANSI_16_RGB,
-            [
-                [0x0c, 0x0c, 0x0c],
-                [0xc5, 0x0f, 0x1f],
-                [0x13, 0xa1, 0x0e],
-                [0xc1, 0x9c, 0x00],
-                [0x00, 0x37, 0xda],
-                [0x88, 0x17, 0x98],
-                [0x3a, 0x96, 0xdd],
-                [0xcc, 0xcc, 0xcc],
-                [0x76, 0x76, 0x76],
-                [0xe7, 0x48, 0x56],
-                [0x16, 0xc6, 0x0c],
-                [0xf9, 0xf1, 0xa5],
-                [0x3b, 0x78, 0xff],
-                [0xb4, 0x00, 0x9e],
-                [0x61, 0xd6, 0xd6],
-                [0xf2, 0xf2, 0xf2],
-            ]
-        );
-        for (index, expected) in ANSI_16_RGB.into_iter().enumerate() {
+        for (index, expected) in ansi_16_rgb().iter().copied().enumerate() {
             assert_eq!(indexed_color(index as u8), expected);
         }
 
@@ -7907,12 +7886,12 @@ mod tests {
         );
         assert_eq!(
             terminal_color(TerminalColor::Named(0), true),
-            ANSI_16_RGB[0],
+            ansi_16_rgb()[0],
             "explicit ANSI black must resolve through palette slot 0"
         );
         assert_eq!(
             terminal_color(TerminalColor::Indexed(15), true),
-            ANSI_16_RGB[15],
+            ansi_16_rgb()[15],
             "indexed ANSI bright white must resolve through palette slot 15"
         );
     }
@@ -8287,6 +8266,107 @@ mod tests {
         assert_ne!(key, revised);
         assert_ne!(key, rethemed);
         assert_ne!(key, status);
+    }
+
+    #[test]
+    fn theme_switch_recomposes_an_ansi_colored_rendered_row() {
+        static THEME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        struct RestoreTheme(Theme);
+        impl Drop for RestoreTheme {
+            fn drop(&mut self) {
+                let _ = set_theme(self.0);
+            }
+        }
+
+        let _lock = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_theme = current_theme();
+        let _restore = RestoreTheme(original_theme);
+        assert_ne!(
+            set_theme(Theme::Dark),
+            ThemeChange::LockedByEnvironment,
+            "the runtime theme must be switchable for this renderer pin"
+        );
+
+        let mut yellow = CapturedCell::plain("Y");
+        yellow.style.foreground = TerminalColor::Named(3);
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(1).unwrap(),
+            grid_rows: NonZeroU32::new(1).unwrap(),
+            rows: NonZeroU32::new(1).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![yellow],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: false,
+            },
+            cell_anchors: test_cell_anchors(1),
+            row_map: test_row_map(1),
+            selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(1),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        let mut font_system = terminal_font_system();
+        let metrics = CellMetrics::measure(&mut font_system, 1.0).unwrap();
+        let mut swash_cache = SwashCache::new();
+        let mut narrow_cache = NarrowShapingCache::new();
+        let mut wide_cache = WideShapingCache::new();
+        let mut row_cache = ComposedRowCache::new();
+        let mut text_rows = Vec::new();
+        let mut status_overlay = None;
+
+        let dark = prepare_text_rows(
+            &frame,
+            metrics,
+            &mut text_rows,
+            &mut status_overlay,
+            &mut row_cache,
+            1,
+            theme_revision(),
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        assert_eq!(dark.rows_reshaped, 1);
+        assert_eq!(dark.row_cache.misses, 1);
+        assert_eq!(
+            text_rows[0].narrow_glyphs[0].color,
+            Color::rgb(0xc1, 0x9c, 0x00)
+        );
+        let dark_row = Arc::clone(&text_rows[0]);
+
+        assert_eq!(set_theme(Theme::Light), ThemeChange::Changed);
+        let light = prepare_text_rows(
+            &frame,
+            metrics,
+            &mut text_rows,
+            &mut status_overlay,
+            &mut row_cache,
+            1,
+            theme_revision(),
+            &mut font_system,
+            &mut swash_cache,
+            &mut narrow_cache,
+            &mut wide_cache,
+        )
+        .unwrap();
+        assert_eq!(light.rows_reshaped, 1);
+        assert_eq!(light.row_cache.misses, 1);
+        assert!(!Arc::ptr_eq(&text_rows[0], &dark_row));
+        assert_eq!(
+            text_rows[0].narrow_glyphs[0].color,
+            Color::rgb(0x94, 0x98, 0x00)
+        );
     }
 
     #[test]
