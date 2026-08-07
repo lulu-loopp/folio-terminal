@@ -1482,7 +1482,9 @@ impl DualPlaneSession {
                     byte_start,
                     byte_end: text.len(),
                     cell: index as u32,
-                    blank: cell.text.trim().is_empty(),
+                    // An explicit space is line text and can be the delimiter immediately before
+                    // a path on the continuation row. Only a cell with no glyph is wrap padding.
+                    blank: cell.text.is_empty(),
                 });
             }
             if row == last {
@@ -18103,6 +18105,46 @@ mod tests {
             underlined_columns(&frame, 1),
             ((5..5 + quoted).collect::<Vec<_>>(), Vec::new()),
             "and the identical reference in the output is marked identically",
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// REGRESSION (user repro 2026-08-07, `scale-lane-verify.vt`): a submitted command's
+    /// separating space can be the last cell of a soft-wrapped row, leaving the path itself at the
+    /// first cell of the continuation row. That space is text, not wide-glyph padding: dropping it
+    /// while WRAPLINE-merging changes `echo D:\...` into `echoD:\...`, so the detector rejects the
+    /// drive prefix for having a path-tail character immediately before it.
+    #[test]
+    fn a_submitted_command_path_starting_at_the_continuation_row_is_a_frame_reference() {
+        let (directory, path) = temporary_path_image_named("continuation.png");
+        let printed = path.display().to_string();
+        // `PS> echo ` is exactly nine cells: its real separating space fills the first row and the
+        // path begins at column zero of the WRAPLINE continuation.
+        let mut session = DualPlaneSession::new(nz(9), nz(24));
+        enable_path_detection(&mut session);
+        let started = Instant::now();
+        let stream = format!(
+            "\x1b]133;A\x07PS> \x1b]133;B\x07echo {printed}\x1b]133;C\x07\r\n\x1b]133;D;0\x07PS> "
+        );
+        session.feed_at(stream.as_bytes(), started).unwrap();
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let references = session.frame_image_references(&frame);
+        let reference = references
+            .iter()
+            .find(|reference| reference.path == path)
+            .expect("the submitted command path must survive WRAPLINE merging");
+        assert!(
+            !reference.cells.is_empty(),
+            "the reference must carry the frame cells spelling the path"
+        );
+        assert_eq!(
+            reference.cells.first().copied().map(|cell| cell % 9),
+            Some(0),
+            "the regression shape puts the path at the continuation row's first cell"
         );
 
         std::fs::remove_file(&path).unwrap();
