@@ -83,24 +83,120 @@ struct MathWorkerResult {
     completion: DecorationWorkerCompletion,
 }
 
-struct MathWorkerTask {
-    task: SessionDecorationTask,
-    foreground_rgb: [u8; 3],
-}
-
 enum MathWorkerRequest {
-    Decoration(MathWorkerTask),
+    Math {
+        task: Box<SessionMathTask>,
+        foreground_rgb: [u8; 3],
+    },
+    InlineImage(bt_term::InlineImageTask),
     /// Hover-peek decode: read and decode a local image off-thread without touching any
     /// decoration record. The completion routes only to the app-side peek cache, so the band
     /// creation gates (cursor line, semantic input region) are never bypassed.
     PeekImage {
         path: PathBuf,
     },
-    /// Resample a peeked decode into the flyout's display box. Same worker as every other
-    /// resample, and for the same reason: a wallpaper-sized Lanczos3 pass is tens of milliseconds
-    /// and the event thread must not spend them. The completion routes only to the peek slot.
-    PeekScale(bt_term::InlineImageScaleTask),
-    PreviewScale(bt_term::InlineImageScaleTask),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScalePurpose {
+    InlineImage(u64),
+    Peek,
+    Preview,
+}
+
+enum ScaleWorkerRequest {
+    InlineImage(bt_term::InlineImageScaleTask),
+    Peek(bt_term::InlineImageScaleTask),
+    Preview(bt_term::InlineImageScaleTask),
+}
+
+impl ScaleWorkerRequest {
+    fn purpose(&self) -> ScalePurpose {
+        match self {
+            Self::InlineImage(task) => ScalePurpose::InlineImage(task.occurrence_id),
+            Self::Peek(_) => ScalePurpose::Peek,
+            Self::Preview(_) => ScalePurpose::Preview,
+        }
+    }
+
+    fn task(&self) -> &bt_term::InlineImageScaleTask {
+        match self {
+            Self::InlineImage(task) | Self::Peek(task) | Self::Preview(task) => task,
+        }
+    }
+
+    fn same_target(&self, other: &Self) -> bool {
+        self.purpose() == other.purpose() && self.task().content_key == other.task().content_key
+    }
+
+    fn completion(self) -> DecorationWorkerCompletion {
+        match self {
+            Self::InlineImage(task) => DecorationWorkerCompletion::ScaleInlineImage {
+                scaled: bt_term::scale_inline_image(&task),
+            },
+            Self::Peek(task) => DecorationWorkerCompletion::PeekScaledImage {
+                scaled: bt_term::scale_inline_image(&task),
+            },
+            Self::Preview(task) => DecorationWorkerCompletion::PreviewScaledImage {
+                scaled: bt_term::scale_inline_image(&task),
+            },
+        }
+    }
+}
+
+#[derive(Default)]
+struct PendingScaleRequests {
+    requests: std::collections::VecDeque<ScaleWorkerRequest>,
+}
+
+impl PendingScaleRequests {
+    fn push_latest(&mut self, request: ScaleWorkerRequest) {
+        if let Some(index) = self
+            .requests
+            .iter()
+            .position(|queued| queued.same_target(&request))
+        {
+            self.requests.remove(index);
+        }
+        self.requests.push_back(request);
+    }
+
+    fn pop_front(&mut self) -> Option<ScaleWorkerRequest> {
+        self.requests.pop_front()
+    }
+
+    fn contains_target(&self, request: &ScaleWorkerRequest) -> bool {
+        self.requests
+            .iter()
+            .any(|queued| queued.same_target(request))
+    }
+
+    fn drain_channel(&mut self, receiver: &mpsc::Receiver<ScaleWorkerRequest>) {
+        while let Ok(request) = receiver.try_recv() {
+            self.push_latest(request);
+        }
+    }
+}
+
+/// Run the CPU-heavy resample lane. Before each Lanczos3 pass, absorb every request already in the
+/// channel and discard a dequeued question if a newer size for the same content/purpose exists.
+/// A request that arrives after the pass begins is a new question and will be serviced next.
+fn run_scale_worker(
+    receiver: mpsc::Receiver<ScaleWorkerRequest>,
+    mut execute: impl FnMut(ScaleWorkerRequest),
+) {
+    let mut pending = PendingScaleRequests::default();
+    while let Ok(request) = receiver.recv() {
+        pending.push_latest(request);
+        pending.drain_channel(&receiver);
+        while let Some(request) = pending.pop_front() {
+            pending.drain_channel(&receiver);
+            if pending.contains_target(&request) {
+                continue;
+            }
+            execute(request);
+        }
+    }
 }
 
 enum DecorationWorkerCompletion {
@@ -132,13 +228,31 @@ enum DecorationWorkerCompletion {
 
 struct MathWorker {
     tasks: mpsc::Sender<MathWorkerRequest>,
+    scale_tasks: mpsc::Sender<ScaleWorkerRequest>,
     results: mpsc::Receiver<MathWorkerResult>,
 }
 
 impl MathWorker {
     fn spawn(proxy: EventLoopProxy<AppEvent>) -> Result<Self> {
         let (task_tx, task_rx) = mpsc::channel::<MathWorkerRequest>();
+        let (scale_tx, scale_rx) = mpsc::channel::<ScaleWorkerRequest>();
         let (result_tx, result_rx) = mpsc::channel::<MathWorkerResult>();
+        let scale_result_tx = result_tx.clone();
+        let scale_proxy = proxy.clone();
+        thread::Builder::new()
+            .name("bt-image-scale-worker".to_owned())
+            .spawn(move || {
+                run_scale_worker(scale_rx, |request| {
+                    let completion = request.completion();
+                    if scale_result_tx
+                        .send(MathWorkerResult { completion })
+                        .is_ok()
+                    {
+                        let _ = scale_proxy.send_event(AppEvent::MathReady);
+                    }
+                });
+            })
+            .context("spawn image resampling worker")?;
         thread::Builder::new()
             .name("bt-math-worker".to_owned())
             .spawn(move || {
@@ -146,57 +260,37 @@ impl MathWorker {
                 let mut image_decoder = InlineImageDecoder::default();
                 while let Ok(work) = task_rx.recv() {
                     let completion = match work {
-                        MathWorkerRequest::Decoration(MathWorkerTask {
+                        MathWorkerRequest::Math {
                             task,
                             foreground_rgb,
-                        }) => match task {
-                            SessionDecorationTask::Math(task) => match *task {
-                                SessionMathTask::Frozen(mut task) => {
-                                    let result =
-                                        render_detection_task(&engine, &mut task, foreground_rgb);
-                                    DecorationWorkerCompletion::Math {
-                                        task: Box::new(SessionMathTask::Frozen(task)),
-                                        result,
-                                    }
+                        } => match *task {
+                            SessionMathTask::Frozen(mut task) => {
+                                let result =
+                                    render_detection_task(&engine, &mut task, foreground_rgb);
+                                DecorationWorkerCompletion::Math {
+                                    task: Box::new(SessionMathTask::Frozen(task)),
+                                    result,
                                 }
-                                SessionMathTask::Live(mut task) => {
-                                    let result = render_live_detection_task(
-                                        &engine,
-                                        &mut task,
-                                        foreground_rgb,
-                                    );
-                                    DecorationWorkerCompletion::Math {
-                                        task: Box::new(SessionMathTask::Live(task)),
-                                        result,
-                                    }
-                                }
-                            },
-                            SessionDecorationTask::InlineImage(task) => {
-                                let result = image_decoder.decode(task.clone());
-                                DecorationWorkerCompletion::InlineImage { task, result }
                             }
-                            SessionDecorationTask::ScaleInlineImage(task) => {
-                                DecorationWorkerCompletion::ScaleInlineImage {
-                                    scaled: bt_term::scale_inline_image(&task),
+                            SessionMathTask::Live(mut task) => {
+                                let result =
+                                    render_live_detection_task(&engine, &mut task, foreground_rgb);
+                                DecorationWorkerCompletion::Math {
+                                    task: Box::new(SessionMathTask::Live(task)),
+                                    result,
                                 }
                             }
                         },
+                        MathWorkerRequest::InlineImage(task) => {
+                            let result = image_decoder.decode(task.clone());
+                            DecorationWorkerCompletion::InlineImage { task, result }
+                        }
                         MathWorkerRequest::PeekImage { path } => {
                             let result = image_decoder.decode(bt_term::InlineImageTask {
                                 occurrence_id: 0,
                                 source: bt_term::InlineImageSource::LocalPath(path.clone()),
                             });
                             DecorationWorkerCompletion::PeekImage { path, result }
-                        }
-                        MathWorkerRequest::PeekScale(task) => {
-                            DecorationWorkerCompletion::PeekScaledImage {
-                                scaled: bt_term::scale_inline_image(&task),
-                            }
-                        }
-                        MathWorkerRequest::PreviewScale(task) => {
-                            DecorationWorkerCompletion::PreviewScaledImage {
-                                scaled: bt_term::scale_inline_image(&task),
-                            }
                         }
                     };
                     if result_tx.send(MathWorkerResult { completion }).is_err() {
@@ -208,6 +302,7 @@ impl MathWorker {
             .context("spawn math rendering worker")?;
         Ok(Self {
             tasks: task_tx,
+            scale_tasks: scale_tx,
             results: result_rx,
         })
     }
@@ -231,11 +326,33 @@ fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
     }
 }
 
+fn dispatch_decoration_task(
+    task: SessionDecorationTask,
+    tasks: &mpsc::Sender<MathWorkerRequest>,
+    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
+) -> bool {
+    match task {
+        SessionDecorationTask::Math(task) => tasks
+            .send(MathWorkerRequest::Math {
+                task,
+                foreground_rgb: foreground_rgb(),
+            })
+            .is_ok(),
+        SessionDecorationTask::InlineImage(task) => {
+            tasks.send(MathWorkerRequest::InlineImage(task)).is_ok()
+        }
+        SessionDecorationTask::ScaleInlineImage(task) => scale_tasks
+            .send(ScaleWorkerRequest::InlineImage(task))
+            .is_ok(),
+    }
+}
+
 /// Drain the real session queue into the renderer channel. A dead optional-decoration worker is
 /// a one-way feature downgrade, never a terminal/runtime error.
 fn dispatch_pending_math_tasks(
     session: &mut DualPlaneSession,
     tasks: &mpsc::Sender<MathWorkerRequest>,
+    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
@@ -243,13 +360,7 @@ fn dispatch_pending_math_tasks(
         return false;
     }
     while let Some(task) = session.take_decoration_worker_task() {
-        if tasks
-            .send(MathWorkerRequest::Decoration(MathWorkerTask {
-                task,
-                foreground_rgb: foreground_rgb(),
-            }))
-            .is_err()
-        {
+        if !dispatch_decoration_task(task, tasks, scale_tasks) {
             return disable_math_worker_state(running, notice_pending);
         }
     }
@@ -978,6 +1089,9 @@ struct PreviewImageState {
     pending: Option<PeekThumbnailTarget>,
     raster: Option<PeekThumbnail>,
     failure: Option<String>,
+    /// The shared resize quiet boundary. Geometry follows every pointer event, but the expensive
+    /// exact-size resample is asked only after this instant lands without another resize.
+    resize_scale_deadline: Option<Instant>,
 }
 
 impl PreviewImageState {
@@ -987,6 +1101,7 @@ impl PreviewImageState {
             pending: None,
             raster: None,
             failure: None,
+            resize_scale_deadline: None,
         }
     }
 
@@ -1002,6 +1117,39 @@ impl PreviewImageState {
         self.failure.as_deref().or_else(|| {
             (self.pending.is_some() || self.raster.is_none()).then_some("Loading image…")
         })
+    }
+
+    /// Accept only the answer to the newest size question. A superseded answer leaves `pending`
+    /// intact, so the chrome cannot briefly claim success and then remain stuck without a raster.
+    fn accept_scaled(&mut self, scaled: bt_term::ScaledInlineImage) -> bool {
+        let delivered: PeekThumbnailTarget = (
+            scaled.content_key.clone(),
+            scaled.width_px,
+            scaled.height_px,
+        );
+        if self.pending.as_ref() != Some(&delivered) {
+            return false;
+        }
+        self.pending = None;
+        self.raster = Some(PeekThumbnail::from_scaled(scaled));
+        self.failure = None;
+        true
+    }
+
+    fn defer_resize_scale(&mut self, observed_at: Instant) {
+        self.resize_scale_deadline = Some(observed_at + WINDOW_RESIZE_QUIET);
+    }
+
+    fn finish_resize_scale_if_quiet(&mut self, now: Instant) -> bool {
+        if self
+            .resize_scale_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.resize_scale_deadline = None;
+            true
+        } else {
+            false
+        }
     }
 }
 
@@ -1618,8 +1766,27 @@ impl Runtime {
         self.present_chrome_change()
     }
 
-    /// Refit the current image to the solver's latest preview body. Every decode and Lanczos3
-    /// resample stays on the existing decoration worker; this event-thread method only routes data.
+    fn defer_preview_resample(&mut self, observed_at: Instant) {
+        if let Some(preview) = self.preview_image.as_mut() {
+            preview.defer_resize_scale(observed_at);
+        }
+    }
+
+    fn finish_preview_resize_if_quiet(&mut self, now: Instant) -> Result<()> {
+        let due = self
+            .preview_image
+            .as_mut()
+            .is_some_and(|preview| preview.finish_resize_scale_if_quiet(now));
+        if due {
+            self.refresh_preview_for_layout();
+            self.refresh_chrome();
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Refit the current image to the solver's latest preview body. Decodes stay on the decoration
+    /// worker and Lanczos3 runs on its independent scale lane; this method only routes shared data.
     fn refresh_preview_for_layout(&mut self) {
         let Some(preview_seat) = self.seats.preview() else {
             self.renderer.set_preview_image(None);
@@ -1693,35 +1860,45 @@ impl Runtime {
             return;
         };
         let target = (content_key.clone(), display_width, display_height);
+        let exact_raster = self
+            .preview_image
+            .as_ref()
+            .and_then(|preview| preview.raster.as_ref())
+            .is_some_and(|raster| raster.matches(&target));
         if let Some(raster) = self
             .preview_image
             .as_ref()
             .and_then(|preview| preview.raster.as_ref())
-            && raster.matches(&target)
         {
+            // During a drag, keep the last texture on screen and let the sampler stretch it to the
+            // new fitted extent. It may be briefly soft, but the preview never vanishes; quiet-time
+            // delivery below replaces it with a one-to-one display raster.
             self.renderer.set_preview_image(Some(PreviewImage {
                 seat: body,
                 key: raster.key.clone(),
                 rgba: Arc::clone(&raster.rgba),
                 width_px: raster.width_px,
                 height_px: raster.height_px,
+                display_width_px: display_width,
+                display_height_px: display_height,
             }));
+        } else {
+            self.renderer.set_preview_image(None);
+        }
+        if exact_raster {
             return;
         }
-        self.renderer.set_preview_image(None);
-        if self
-            .preview_image
-            .as_ref()
-            .is_some_and(|preview| preview.pending.as_ref() == Some(&target))
-            || !self.math_worker_running
+        if self.preview_image.as_ref().is_some_and(|preview| {
+            preview.pending.as_ref() == Some(&target) || preview.resize_scale_deadline.is_some()
+        }) || !self.math_worker_running
         {
             return;
         }
         let task = peek_scale_task(&target, rgba, native_width, native_height);
         if self
             .math_worker
-            .tasks
-            .send(MathWorkerRequest::PreviewScale(task))
+            .scale_tasks
+            .send(ScaleWorkerRequest::Preview(task))
             .is_ok()
         {
             if let Some(preview) = self.preview_image.as_mut() {
@@ -1753,9 +1930,10 @@ impl Runtime {
         // already runs run here.
         self.peek_hover.clear();
         self.renderer.set_peek_overlay(None);
+        let now = Instant::now();
+        self.defer_preview_resample(now);
         let next_grid = self.resolve_seat_layout(render_physical);
         let solved_at = trace_started.map(|_| Instant::now());
-        let now = Instant::now();
         self.schedule_grid_change(
             next_grid,
             terminal_pty_physical(&self.renderer, render_physical),
@@ -1842,6 +2020,7 @@ impl Runtime {
         dispatch_pending_math_tasks(
             &mut self.session,
             &self.math_worker.tasks,
+            &self.math_worker.scale_tasks,
             &mut self.math_worker_running,
             &mut self.math_worker_notice_pending,
         );
@@ -1870,6 +2049,7 @@ impl Runtime {
             dispatch_pending_math_tasks(
                 &mut self.session,
                 &self.math_worker.tasks,
+                &self.math_worker.scale_tasks,
                 &mut self.math_worker_running,
                 &mut self.math_worker_notice_pending,
             );
@@ -1999,6 +2179,7 @@ impl Runtime {
         dispatch_pending_math_tasks(
             &mut self.session,
             &self.math_worker.tasks,
+            &self.math_worker.scale_tasks,
             &mut self.math_worker_running,
             &mut self.math_worker_notice_pending,
         );
@@ -2021,6 +2202,7 @@ impl Runtime {
             let disabled = dispatch_pending_math_tasks(
                 &mut self.session,
                 &self.math_worker.tasks,
+                &self.math_worker.scale_tasks,
                 &mut self.math_worker_running,
                 &mut self.math_worker_notice_pending,
             );
@@ -2496,8 +2678,8 @@ impl Runtime {
         }
         if self
             .math_worker
-            .tasks
-            .send(MathWorkerRequest::PeekScale(peek_scale_task(
+            .scale_tasks
+            .send(ScaleWorkerRequest::Peek(peek_scale_task(
                 &target,
                 native_rgba,
                 native_width_px,
@@ -2610,20 +2792,12 @@ impl Runtime {
     }
 
     fn complete_preview_scale(&mut self, scaled: bt_term::ScaledInlineImage) -> Result<()> {
-        let delivered: PeekThumbnailTarget = (
-            scaled.content_key.clone(),
-            scaled.width_px,
-            scaled.height_px,
-        );
         let Some(preview) = self.preview_image.as_mut() else {
             return Ok(());
         };
-        if preview.pending.as_ref() != Some(&delivered) {
+        if !preview.accept_scaled(scaled) {
             return Ok(());
         }
-        preview.pending = None;
-        preview.raster = Some(PeekThumbnail::from_scaled(scaled));
-        preview.failure = None;
         self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.present_chrome_change()
@@ -3673,6 +3847,7 @@ impl Runtime {
         if physical.width == 0 || physical.height == 0 {
             return Ok(());
         }
+        self.defer_preview_resample(Instant::now());
         // Both halves of a visible flyout belong to the viewport that produced them: the anchor is
         // a physical point on the old surface, and the raster was sized to the old pane. A resize
         // dissolves it exactly as a wheel notch does; the retained thumbnail is re-derived, and
@@ -3730,6 +3905,7 @@ impl Runtime {
     }
 
     fn scale_factor_changed(&mut self) -> Result<()> {
+        self.defer_preview_resample(Instant::now());
         self.reconcile_authoritative_dpi("scale-factor-changed")?;
         self.resize(self.window.inner_size())
     }
@@ -4075,6 +4251,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        if let Err(error) = runtime.finish_preview_resize_if_quiet(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.advance_live_math_if_due(now) {
             self.fail(event_loop, error);
             return;
@@ -4112,6 +4292,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
+            runtime
+                .preview_image
+                .as_ref()
+                .and_then(|preview| preview.resize_scale_deadline),
             runtime.session_store.deadline(),
         ]
         .into_iter()
@@ -5695,12 +5879,14 @@ mod tests {
         );
         let (tasks, receiver) = mpsc::channel();
         drop(receiver);
+        let (scale_tasks, _scale_receiver) = mpsc::channel();
         let mut running = true;
         let mut notice_pending = false;
 
         assert!(dispatch_pending_math_tasks(
             &mut session,
             &tasks,
+            &scale_tasks,
             &mut running,
             &mut notice_pending,
         ));
@@ -5724,6 +5910,7 @@ mod tests {
         assert!(!dispatch_pending_math_tasks(
             &mut session,
             &tasks,
+            &scale_tasks,
             &mut running,
             &mut notice_pending,
         ));
@@ -5731,6 +5918,119 @@ mod tests {
             !notice_pending,
             "the user-visible downgrade notice is one-shot"
         );
+    }
+
+    fn scale_task(content_key: &str, width: u32) -> bt_term::InlineImageScaleTask {
+        bt_term::InlineImageScaleTask {
+            occurrence_id: 0,
+            content_key: content_key.to_owned(),
+            rgba: Arc::from([0_u8, 0, 0, 255]),
+            width_px: 1,
+            height_px: 1,
+            display_width_px: width,
+            display_height_px: width,
+        }
+    }
+
+    /// RED: a divider storm used to put every intermediate Lanczos3 request on the one FIFO.
+    /// The worker must execute only the newest size for one content/purpose, while preserving a
+    /// different purpose as an independent question.
+    #[test]
+    fn scale_worker_drag_storm_discards_superseded_work_and_completes_the_latest() {
+        let (sender, receiver) = mpsc::channel();
+        for width in 1..=128 {
+            sender
+                .send(ScaleWorkerRequest::Preview(scale_task("same-path", width)))
+                .unwrap();
+        }
+        sender
+            .send(ScaleWorkerRequest::Peek(scale_task("same-path", 17)))
+            .unwrap();
+        drop(sender);
+
+        let mut executed = Vec::new();
+        run_scale_worker(receiver, |request| {
+            executed.push((request.purpose(), request.task().display_width_px));
+        });
+
+        assert_eq!(
+            executed,
+            vec![(ScalePurpose::Preview, 128), (ScalePurpose::Peek, 17)]
+        );
+    }
+
+    /// RED: an obsolete completion must not clear the newest pending target, and the newest
+    /// completion must retire "Loading image..." instead of leaving the preview stuck forever.
+    #[test]
+    fn preview_loading_survives_a_stale_scale_answer_then_clears_on_the_latest() {
+        let mut preview = PreviewImageState::new(PathBuf::from("storm.png"));
+        preview.pending = Some(("same-path".to_owned(), 320, 180));
+
+        assert!(
+            !preview.accept_scaled(bt_term::scale_inline_image(&scale_task("same-path", 160,)))
+        );
+        assert_eq!(preview.message(), Some("Loading image…"));
+
+        assert!(preview.accept_scaled(bt_term::scale_inline_image(
+            &bt_term::InlineImageScaleTask {
+                display_width_px: 320,
+                display_height_px: 180,
+                ..scale_task("same-path", 320)
+            },
+        )));
+        assert_eq!(preview.message(), None);
+    }
+
+    #[test]
+    fn preview_resize_storm_reuses_the_shared_quiet_boundary() {
+        let start = Instant::now();
+        let last = start + Duration::from_millis(90);
+        let mut preview = PreviewImageState::new(PathBuf::from("storm.png"));
+        preview.defer_resize_scale(start);
+        preview.defer_resize_scale(start + Duration::from_millis(40));
+        preview.defer_resize_scale(last);
+
+        assert!(
+            !preview.finish_resize_scale_if_quiet(
+                last + WINDOW_RESIZE_QUIET - Duration::from_millis(1)
+            )
+        );
+        assert!(preview.finish_resize_scale_if_quiet(last + WINDOW_RESIZE_QUIET));
+        assert_eq!(preview.resize_scale_deadline, None);
+        assert!(!preview.finish_resize_scale_if_quiet(last + WINDOW_RESIZE_QUIET));
+    }
+
+    /// A scale worker may spend arbitrarily long inside Lanczos3; validation still reaches the
+    /// independent decoration receiver instead of sitting behind that raster in one FIFO.
+    #[test]
+    fn local_path_validation_and_resampling_are_dispatched_to_independent_lanes() {
+        let (tasks, task_receiver) = mpsc::channel();
+        let (scale_tasks, scale_receiver) = mpsc::channel();
+        assert!(dispatch_decoration_task(
+            SessionDecorationTask::ScaleInlineImage(scale_task("same-path", 128)),
+            &tasks,
+            &scale_tasks,
+        ));
+        assert!(dispatch_decoration_task(
+            SessionDecorationTask::InlineImage(bt_term::InlineImageTask {
+                occurrence_id: 7,
+                source: bt_term::InlineImageSource::LocalPath(PathBuf::from("same-path.png")),
+            }),
+            &tasks,
+            &scale_tasks,
+        ));
+
+        assert!(matches!(
+            scale_receiver.try_recv(),
+            Ok(ScaleWorkerRequest::InlineImage(_))
+        ));
+        assert!(matches!(
+            task_receiver.try_recv(),
+            Ok(MathWorkerRequest::InlineImage(bt_term::InlineImageTask {
+                occurrence_id: 7,
+                ..
+            }))
+        ));
     }
 
     /// The caret rectangle leaves the frame in the terminal seat's coordinates

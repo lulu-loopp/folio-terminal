@@ -96,6 +96,7 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
         $savedPreviousCursorLeft = $null
         $savedPreviousCursorTop = $null
         $savedPreviousInitialY = $null
+        $repairMode = 'unknown'
         $singleton = $null
         $initialXField = $null
         $initialYField = $null
@@ -133,6 +134,7 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
 
             if ($line.Length -eq 0) {
                 $anchor = $physicalY * $width + $physicalX
+                $repairMode = 'empty'
             } else {
                 # B belongs to the input's logical line, not to the whole screen's rectangular cell
                 # array. A hard-terminated row before the prompt loses its right-hand padding when
@@ -168,8 +170,7 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
                 }
                 $logicalLineRepair =
                     $env:BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE -ne '1'
-                $previousLinear = $logicalLineRepair -and $waitingToRender -and
-                    $previous.lines.Length -eq 1
+                $previousLinear = $logicalLineRepair -and $previous.lines.Length -eq 1
                 if ($previousLinear) {
                     $rendered = $previous.lines[0].Line
                     for ($index = 0; $previousLinear -and $index -lt $rendered.Length; $index++) {
@@ -185,23 +186,50 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
                         $previousLinear = [int]$cellMethod.Invoke($null, @($character)) -eq 1
                     }
                 }
+                $paintedCursorCells = $null
                 if ($previousLinear) {
-                    $paintedCursorCells =
-                        ($savedPreviousCursorTop - $oldY) * $oldWidth +
+                    $paintedCursorCells = ($savedPreviousCursorTop - $oldY) * $oldWidth +
                         $savedPreviousCursorLeft - $oldX
                     if ($paintedCursorCells -lt 0) {
                         throw 'The previous PSReadLine cursor precedes its input anchor.'
                     }
+                }
+                # At an exact old-width boundary PSReadLine represents D as the next row, column 0.
+                # ConPTY can retain that wrap-pending cursor cell while widening the already-painted
+                # input to a different B. In line-anchor-verify.vt, 54 -> 56 left physical D at
+                # (12,1); `D - 64` guessed B=(10,49), four cells after the reflowed B=(10,45), and
+                # the next full repaint produced `echoecho`. The previous render still states both
+                # the real B column and its B..D row span, so carry those across this one ambiguous
+                # sentinel instead of treating physical D as a content-tail coordinate.
+                $exactRightEdgeWiden =
+                    $env:BT_PSREADLINE_REANCHOR_EXACT_EDGE_PROBE -ne '1' -and
+                    $previousLinear -and $width -gt $oldWidth -and
+                    $savedPreviousCursorLeft -eq 0 -and $physicalX -eq 0 -and
+                    $paintedCursorCells -gt 0 -and
+                    (($oldX + $paintedCursorCells) % $oldWidth) -eq 0
+                if ($exactRightEdgeWiden) {
+                    $paintedCursorRows = $savedPreviousCursorTop - $oldY
+                    $anchorY = $physicalY - $paintedCursorRows
+                    if ($anchorY -lt 0 -or $oldX -ge $width) {
+                        throw 'The exact-boundary PSReadLine anchor is invalid.'
+                    }
+                    $anchor = $anchorY * $width + $oldX
+                    $anchorSolved = $true
+                    $repairMode = 'exact-right-edge-widen'
+                } elseif ($previousLinear -and $waitingToRender) {
                     $anchor = $physicalY * $width + $physicalX - $paintedCursorCells
                     $anchorSolved = $true
+                    $repairMode = 'waiting-previous-render'
                 } elseif ($logicalLineRepair -and -not $waitingToRender -and $linearCurrent) {
                     $anchorX = (($physicalX - $cursor) % $width + $width) % $width
                     $cursorRows = [int][Math]::Floor(($anchorX + $cursor) / $width)
                     $anchor = ($physicalY - $cursorRows) * $width + $anchorX
                     $anchorSolved = $true
+                    $repairMode = 'current-linear'
                 }
 
                 if (-not $anchorSolved) {
+                    $repairMode = 'complex'
                     # Complex/multiline and right-margin input retains the established
                     # PSReadLine-width calculation, including its continuation-prompt and
                     # wide-character padding rules.
@@ -289,6 +317,12 @@ if ($psReadLineVersion.Major -eq 2 -and $psReadLineVersion.Minor -eq 4) {
                 }
                 $previous.UpdateConsoleInfo($width, $height, $physicalX, $physicalY)
                 $previous.initialY = $anchorY
+            }
+            if ($env:BT_PSREADLINE_REANCHOR_PROBE -eq '1') {
+                [Console]::Write(
+                    ([string][char]27) + ']777;BT_PSREADLINE_REANCHOR=' + $repairMode +
+                    ',waiting=' + $waitingToRender + ',width=' + $width +
+                    ',anchor=' + $anchorY + ':' + $anchorX + [char]7)
             }
         } catch {
             $reflectionError = $_

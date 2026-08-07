@@ -4356,6 +4356,107 @@ mod tests {
         assert_eq!(green.3, format!("{expected}Z"));
     }
 
+    /// Regression for `.tmp-repaint-capture/line-anchor-verify.vt`: prompt plus input is exactly
+    /// 108 cells at width 54, so D is the wrap-pending next-row column zero. Widening to 56 retains
+    /// that physical D even though the painted input's B stays at column 44. The retired arm trusts
+    /// `D - cursor`, installs B at column 48 and the later PSReadLine repaint leaves the old `echo`
+    /// in front of the new one. The shipped arm recognizes the exact-edge sentinel and carries B.
+    #[test]
+    #[ignore = "dev probe: reproduces exact-right-edge widening through real PSReadLine and ConPTY"]
+    fn exact_right_edge_widen_reanchor_pair_probe() {
+        const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+        const TYPED: &str = "echo D:\\Developer\\BetterTerminal\\.tmp-repaint-capture\\sunset.svg";
+        const INITIAL_COLUMNS: u16 = 54;
+        const WIDE_COLUMNS: u16 = 56;
+        assert_eq!(PROMPT.len(), 44);
+        assert_eq!(TYPED.len(), 64);
+        assert_eq!(
+            (PROMPT.len() + TYPED.len()) % usize::from(INITIAL_COLUMNS),
+            0
+        );
+        let expected = format!("{PROMPT}{TYPED}");
+        let startup = invoke_prompt_probe_startup(PROMPT);
+        let mut outcomes = Vec::new();
+
+        for retired_exact_edge in [true, false] {
+            let arm_startup = if retired_exact_edge {
+                format!(
+                    "$env:BT_PSREADLINE_REANCHOR_PROBE = '1'; \
+                     $env:BT_PSREADLINE_REANCHOR_EXACT_EDGE_PROBE = '1'; {startup}"
+                )
+            } else {
+                format!("$env:BT_PSREADLINE_REANCHOR_PROBE = '1'; {startup}")
+            };
+            let mut oracle =
+                AppResizeOracle::spawn("pwsh.exe", &arm_startup, INITIAL_COLUMNS, 20, false);
+            oracle.invoke_prompt_after_resize = true;
+            assert!(oracle.settle_at_prompt(PROMPT));
+            oracle.pty.write(TYPED.as_bytes()).unwrap();
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            assert_eq!(oracle.session.terminal().cursor().column, 0);
+
+            let mark = oracle.raw_output.len();
+            oracle.project_resize(WIDE_COLUMNS, 20);
+            oracle.pump_for(RESIZE_REQUEST_QUIET * 2 + Duration::from_millis(100));
+            oracle.pump_for(Duration::from_millis(1_700));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            // The recording's PSReadLine resize poll eventually issued the full repaint on its own.
+            // A final edit deterministically asks the same render cache for its next diff, exposing
+            // the installed B without relying on that private poll's wall-clock cadence.
+            oracle.pty.write(b"Z").unwrap();
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            let rows = oracle.composed_rows();
+            let cursor = oracle.session.terminal().cursor();
+            let input = wrapped_input_line(&rows, cursor.row, PROMPT, WIDE_COLUMNS);
+            let output = &oracle.raw_output[mark..];
+            let exact_mode = output
+                .windows(b"BT_PSREADLINE_REANCHOR=exact-right-edge-widen".len())
+                .any(|window| window == b"BT_PSREADLINE_REANCHOR=exact-right-edge-widen");
+            let expected_after_edit = format!("{expected}Z");
+            let spliced = rows.concat().contains("echoecho") || input != expected_after_edit;
+            eprintln!(
+                "BT_CONPTY_EXACT_EDGE_PAIR source={} psreadline={} retired_exact_edge={} \
+                 spliced={spliced} exact_mode={exact_mode} input={input:?} \
+                 expected={expected_after_edit:?} \
+                 cursor=({}, {}) rows={:?} output={}",
+                conpty_source(),
+                psreadline_version(&oracle.raw_output),
+                retired_exact_edge,
+                cursor.row,
+                cursor.column,
+                occupied_rows(&rows),
+                escaped(output)
+            );
+            outcomes.push((
+                retired_exact_edge,
+                spliced,
+                exact_mode,
+                input,
+                expected_after_edit,
+            ));
+        }
+
+        let red = &outcomes[0];
+        let green = &outcomes[1];
+        assert!(red.0 && !green.0);
+        assert!(
+            red.1,
+            "the retired physical-D arm must reproduce the splice: {red:?}"
+        );
+        assert!(!red.2);
+        assert!(
+            !green.1,
+            "the exact-edge guard left the line spliced: {green:?}"
+        );
+        assert!(
+            green.2,
+            "the dev marker must prove the exact-edge branch ran"
+        );
+        assert_eq!(green.3, green.4);
+    }
+
     /// Regression for `.tmp-repaint-capture/render-ledger-verify.vt`: the handler's Console cursor
     /// read emits `CSI 6 n` before the child cursor has settled after a committed resize. The
     /// immediate red arm receives a width-consistent but early CPR at every stop and installs those

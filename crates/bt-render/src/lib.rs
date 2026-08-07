@@ -626,8 +626,13 @@ pub struct PreviewImage {
     pub seat: SeatViewport,
     pub key: String,
     pub rgba: Arc<[u8]>,
+    /// Texture dimensions. During a live resize these remain the last clear raster.
     pub width_px: u32,
     pub height_px: u32,
+    /// Draw dimensions inside the latest seat. They may briefly differ from the texture dimensions
+    /// while a resize is in flight; the sampler provides the intentionally soft transition.
+    pub display_width_px: u32,
+    pub display_height_px: u32,
 }
 
 /// Fit an image inside a preview body while preserving aspect ratio and never enlarging it beyond
@@ -2217,6 +2222,8 @@ impl Renderer {
                     || current.key != next.key
                     || current.width_px != next.width_px
                     || current.height_px != next.height_px
+                    || current.display_width_px != next.display_width_px
+                    || current.display_height_px != next.display_height_px
             }
             _ => true,
         };
@@ -2982,21 +2989,23 @@ impl Renderer {
         }) else {
             return (Some(image.seat), Vec::new(), Vec::new());
         };
-        let left_inset = (image.seat.width.saturating_sub(image.width_px) / 2) as f32;
-        let top_inset = (image.seat.height.saturating_sub(image.height_px) / 2) as f32;
+        let left_inset = (image.seat.width.saturating_sub(image.display_width_px) / 2) as f32;
+        let top_inset = (image.seat.height.saturating_sub(image.display_height_px) / 2) as f32;
+        let scale_x = image.display_width_px as f32 / image.width_px as f32;
+        let scale_y = image.display_height_px as f32 / image.height_px as f32;
         let mut draws = Vec::new();
         let mut vertices = Vec::new();
         for (tile_index, (tile_x, tile_y, tile_width, tile_height)) in
             tile_geometry.into_iter().enumerate()
         {
-            let left = left_inset + tile_x as f32;
-            let top = top_inset + tile_y as f32;
+            let left = left_inset + tile_x as f32 * scale_x;
+            let top = top_inset + tile_y as f32 * scale_y;
             let first_vertex = vertices.len() as u32;
             vertices.extend(math_quad_vertices(
                 left,
                 top,
-                left + tile_width as f32,
-                top + tile_height as f32,
+                left + tile_width as f32 * scale_x,
+                top + tile_height as f32 * scale_y,
                 0.0,
                 0.0,
                 1.0,
