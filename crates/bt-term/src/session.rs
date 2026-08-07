@@ -837,106 +837,26 @@ struct SemanticInputRegion {
     witness: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct OrderedSemanticMatchScore {
-    matches: usize,
-    distance: u64,
-}
-
-impl OrderedSemanticMatchScore {
-    fn with_match(self, preferred_end: GridPoint, candidate_end: GridPoint) -> Self {
-        Self {
-            matches: self.matches.saturating_add(1),
-            distance: self.distance.saturating_add(
-                u64::from(preferred_end.row.abs_diff(candidate_end.row)).saturating_add(u64::from(
-                    preferred_end.column.abs_diff(candidate_end.column),
-                )),
-            ),
-        }
-    }
-
-    fn is_better_than(self, other: Self) -> bool {
-        self.matches > other.matches
-            || (self.matches == other.matches && self.distance < other.distance)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum OrderedSemanticMatchStep {
-    Start,
-    SkipRegion,
-    SkipCandidate,
-    Match,
-}
-
 /// Match repeated command witnesses as an ordered, one-to-one sequence. Each OSC 133 B..C region
 /// is an occurrence identity, not just a string: independently choosing the closest equal string
-/// lets several regions collapse onto one repeated command after reflow. Sequence alignment first
-/// maximizes the number of surviving identities, then minimizes movement from their prior ends.
+/// lets several regions collapse onto one repeated command after reflow.
+///
+/// Order proves identity only when it produces one bijection. If either side has an extra
+/// occurrence, there is more than one maximum ordered matching: a prior coordinate or distance can
+/// prefer one, but that preference is not content evidence. Decline the entire witness group in
+/// that case. Equal non-zero counts have exactly one order-preserving bijection.
 fn ordered_semantic_matches(
-    regions: &[(usize, GridPoint)],
+    regions: &[usize],
     candidates: &[(GridPoint, GridPoint)],
 ) -> Vec<(usize, GridPoint, GridPoint)> {
-    let columns = candidates.len().saturating_add(1);
-    let mut scores = vec![
-        OrderedSemanticMatchScore::default();
-        regions.len().saturating_add(1).saturating_mul(columns)
-    ];
-    let mut steps = vec![
-        OrderedSemanticMatchStep::Start;
-        regions.len().saturating_add(1).saturating_mul(columns)
-    ];
-    for region in 1..=regions.len() {
-        steps[region * columns] = OrderedSemanticMatchStep::SkipRegion;
+    if regions.is_empty() || regions.len() != candidates.len() {
+        return Vec::new();
     }
-    for step in steps
-        .iter_mut()
-        .take(candidates.len().saturating_add(1))
-        .skip(1)
-    {
-        *step = OrderedSemanticMatchStep::SkipCandidate;
-    }
-    for region in 1..=regions.len() {
-        for candidate in 1..=candidates.len() {
-            let index = region * columns + candidate;
-            let mut best = scores[(region - 1) * columns + candidate];
-            let mut step = OrderedSemanticMatchStep::SkipRegion;
-
-            let skip_candidate = scores[index - 1];
-            if skip_candidate.is_better_than(best) {
-                best = skip_candidate;
-                step = OrderedSemanticMatchStep::SkipCandidate;
-            }
-
-            let matched = scores[(region - 1) * columns + candidate - 1]
-                .with_match(regions[region - 1].1, candidates[candidate - 1].1);
-            if matched.is_better_than(best) || matched == best {
-                best = matched;
-                step = OrderedSemanticMatchStep::Match;
-            }
-            scores[index] = best;
-            steps[index] = step;
-        }
-    }
-
-    let mut matched = Vec::new();
-    let mut region = regions.len();
-    let mut candidate = candidates.len();
-    while region > 0 || candidate > 0 {
-        match steps[region * columns + candidate] {
-            OrderedSemanticMatchStep::Start => break,
-            OrderedSemanticMatchStep::SkipRegion => region -= 1,
-            OrderedSemanticMatchStep::SkipCandidate => candidate -= 1,
-            OrderedSemanticMatchStep::Match => {
-                let (start, end) = candidates[candidate - 1];
-                matched.push((regions[region - 1].0, start, end));
-                region -= 1;
-                candidate -= 1;
-            }
-        }
-    }
-    matched.reverse();
-    matched
+    regions
+        .iter()
+        .zip(candidates)
+        .map(|(region, (start, end))| (*region, *start, *end))
+        .collect()
 }
 
 impl CursorLineSuppression {
@@ -2668,7 +2588,7 @@ impl DualPlaneSession {
         if let Some(region) = self.semantic_input_regions.get_mut(region_index) {
             region.closed = true;
         }
-        self.refresh_semantic_region_witness(region_index);
+        self.refresh_semantic_region_witness(region_index, true);
     }
 
     fn semantic_input_end_point(
@@ -2889,28 +2809,36 @@ impl DualPlaneSession {
             })
     }
 
-    fn refresh_semantic_region_witness(&mut self, region_index: usize) {
+    fn refresh_semantic_region_witness(&mut self, region_index: usize, authoritative_close: bool) {
         let Some(region) = self.semantic_input_regions.get(region_index) else {
             return;
         };
+        if region.screen != self.live_screen {
+            return;
+        }
         let Ok(ContentAnchor::Live {
             screen: start_screen,
             point: start,
+            generation: start_generation,
             ..
         }) = self.document.anchor(region.start)
         else {
             return;
         };
+        if *start_screen != region.screen || *start_generation != self.grid_generation {
+            return;
+        }
         let end = if region.closed {
             let Ok(ContentAnchor::Live {
                 screen: end_screen,
                 point,
+                generation: end_generation,
                 ..
             }) = self.document.anchor(region.end)
             else {
                 return;
             };
-            if start_screen != end_screen {
+            if end_screen != start_screen || *end_generation != self.grid_generation {
                 return;
             }
             *point
@@ -2924,6 +2852,13 @@ impl DualPlaneSession {
         let Some(witness) = self.visible_text_between(*start, end) else {
             return;
         };
+        // `C` is the one authoritative event that may initialize a closed command witness. After
+        // that, coordinates are only a projection carried through reflow: they are permitted to
+        // attest to the same bytes, never to replace them with whatever a drifted span happens to
+        // cover. This makes a failed verification an honest no-op instead of compounded corruption.
+        if region.closed && !authoritative_close && region.witness != witness {
+            return;
+        }
         if let Some(region) = self.semantic_input_regions.get_mut(region_index) {
             region.witness = witness;
         }
@@ -2931,7 +2866,7 @@ impl DualPlaneSession {
 
     fn refresh_semantic_region_witnesses(&mut self) {
         for index in 0..self.semantic_input_regions.len() {
-            self.refresh_semantic_region_witness(index);
+            self.refresh_semantic_region_witness(index, false);
         }
     }
 
@@ -2994,7 +2929,7 @@ impl DualPlaneSession {
             Some(ShellIntegrationPhase::Input(index)) => Some(*index),
             _ => None,
         };
-        let mut regions_by_witness = BTreeMap::<String, Vec<(usize, GridPoint)>>::new();
+        let mut regions_by_witness = BTreeMap::<String, Vec<usize>>::new();
         for index in 0..self.semantic_input_regions.len() {
             let region = &self.semantic_input_regions[index];
             if region.screen != self.live_screen {
@@ -3025,9 +2960,7 @@ impl DualPlaneSession {
                     ..
                 }),
                 Ok(ContentAnchor::Live {
-                    screen: end_screen,
-                    point: old_end,
-                    ..
+                    screen: end_screen, ..
                 }),
             ) = (
                 self.document.anchor(region.start),
@@ -3041,15 +2974,10 @@ impl DualPlaneSession {
             if start_screen != end_screen || *start_screen != region.screen {
                 continue;
             }
-            let preferred_end = if !region.closed {
-                cursor_point
-            } else {
-                *old_end
-            };
             regions_by_witness
                 .entry(region.witness.clone())
                 .or_default()
-                .push((index, preferred_end));
+                .push(index);
         }
 
         let mut matches = Vec::new();
@@ -20089,6 +20017,161 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// PIN (#27): a degraded command witness is not an occurrence identity. When its surviving
+    /// suffix occurs once in the command echo and once in the command's output, either candidate is
+    /// consistent with the text. Re-anchoring must therefore decline the match instead of using
+    /// distance to guess that the output occurrence owns the region.
+    #[test]
+    fn osc133_ambiguous_output_witness_suffix_is_not_guessed() {
+        let command = (
+            GridPoint { row: 0, column: 9 },
+            GridPoint { row: 0, column: 21 },
+        );
+        let output = (
+            GridPoint { row: 1, column: 0 },
+            GridPoint { row: 1, column: 12 },
+        );
+
+        assert!(
+            ordered_semantic_matches(&[0], &[command, output]).is_empty(),
+            "the suffix has two valid owners; proximity to the output must not turn it into the command"
+        );
+    }
+
+    fn drift_closed_region_to_output(
+        session: &mut DualPlaneSession,
+        output_start: GridPoint,
+        output_end: GridPoint,
+    ) {
+        let region = &session.semantic_input_regions[0];
+        for (anchor, point) in [(region.start, output_start), (region.end, output_end)] {
+            session
+                .document
+                .replace_anchor(
+                    anchor,
+                    ContentAnchor::Live {
+                        screen: ScreenId::Primary,
+                        point,
+                        bias: Bias::Before,
+                        generation: session.grid_generation,
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    /// PIN (#27): a closed region's recorded witness came from the authoritative B..C boundary.
+    /// A carried coordinate can drift during reflow, but text read at that unverified coordinate is
+    /// not allowed to replace the recorded command. Five consecutive resizes used to compound that
+    /// one bad refresh until the region described the output row permanently.
+    #[test]
+    fn osc133_five_resizes_do_not_compound_a_drifted_closed_region_witness() {
+        const COMMAND: &str = "echo witness-tail";
+        const SUFFIX: &str = "witness-tail";
+        let mut session = DualPlaneSession::new(nz(80), nz(6));
+        let started = Instant::now();
+        session
+            .feed_at(
+                format!(
+                    "\x1b]133;A\x07PS> \x1b]133;B\x07{COMMAND}\x1b]133;C\x07\r\n{SUFFIX}\r\n\x1b]133;D;0\x07"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(session.semantic_input_regions[0].witness, COMMAND);
+
+        drift_closed_region_to_output(
+            &mut session,
+            GridPoint { row: 1, column: 0 },
+            GridPoint {
+                row: 1,
+                column: SUFFIX.len() as u32,
+            },
+        );
+        for (step, columns) in [79, 78, 77, 76, 75].into_iter().enumerate() {
+            session
+                .resize_at(
+                    nz(columns),
+                    nz(6),
+                    started + Duration::from_millis((step as u64 + 1) * 10),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(
+            session.semantic_input_regions[0].witness, COMMAND,
+            "a drifted live coordinate must not degrade the authoritative closed witness"
+        );
+        let ContentAnchor::Live { point, .. } = session
+            .document
+            .anchor(session.semantic_input_regions[0].start)
+            .unwrap()
+        else {
+            panic!("the compact fixture keeps the command region live")
+        };
+        assert_eq!(
+            point.row, 0,
+            "after five resizes the command region must still own the command row"
+        );
+    }
+
+    /// PIN (#27): formula bands consume the same semantic-region verdict as image paths. If a
+    /// degraded command witness is allowed to jump to an identical formula in output, the output is
+    /// suppressed and the command echo is decorated — exactly the inverse of the OSC 133 contract.
+    #[test]
+    fn osc133_formula_band_stays_on_output_when_output_contains_the_witness_suffix() {
+        const COMMAND: &str = "echo $$same$$";
+        const FORMULA: &str = "$$same$$";
+        let mut session = DualPlaneSession::new(nz(80), nz(6));
+        let started = Instant::now();
+        session
+            .feed_at(
+                format!(
+                    "\x1b]133;A\x07PS> \x1b]133;B\x07{COMMAND}\x1b]133;C\x07\r\n{FORMULA}\r\nbarrier\r\n\x1b]133;D;0\x07"
+                )
+                .as_bytes(),
+                started,
+            )
+            .unwrap();
+        drift_closed_region_to_output(
+            &mut session,
+            GridPoint { row: 1, column: 0 },
+            GridPoint {
+                row: 1,
+                column: FORMULA.len() as u32,
+            },
+        );
+        session
+            .resize_at(nz(79), nz(6), started + Duration::from_millis(10))
+            .unwrap();
+        session.mark_pty_resize_requested_at(nz(79), nz(6), started + Duration::from_millis(11));
+        assert!(
+            session
+                .finish_resize_if_quiescent(started + Duration::from_secs(2))
+                .unwrap()
+        );
+        session.advance_live_stability(started + Duration::from_secs(3));
+
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(32, 18)),
+            1,
+            "only the output formula may render"
+        );
+        assert!(
+            session
+                .live_decorations
+                .values()
+                .all(|record| record.start.row == 1),
+            "the formula band must belong to output, never the command echo: {:?}",
+            session
+                .live_decorations
+                .values()
+                .map(|record| record.start)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
