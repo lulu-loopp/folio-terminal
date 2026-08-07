@@ -594,14 +594,17 @@ impl<T> Term<T> {
     /// The rows remain escrowed here solely so `begin_resize_transaction` can return them to the
     /// native grid before the next resize/output operation. While staged, native history is empty
     /// and `resize_transaction` is false, so there is still exactly one presented mutable owner.
-    pub fn stage_resize_transaction(&mut self) -> Vec<Row<Cell>> {
+    pub fn stage_resize_transaction(&mut self) -> &[Row<Cell>] {
         if !self.resize_transaction {
-            return Vec::new();
+            return &[];
+        }
+        if self.primary_grid().history_size() == 0 {
+            return &[];
         }
         self.resize_transaction = false;
         let rows = self.primary_grid_mut().take_history(0);
-        self.resize_staging_candidate = rows.clone();
-        rows
+        self.resize_staging_candidate = rows;
+        &self.resize_staging_candidate
     }
 
     /// Match the native escrow to the staging rows retained by the external quota owner.
@@ -1002,6 +1005,12 @@ impl<T> Term<T> {
         self.vi_mode_cursor.point.line += delta;
 
         let is_alt = self.mode.contains(TermMode::ALT_SCREEN);
+        let cursor_bottom = self.grid.cursor.point.line.0 as usize + 1;
+        let sparse_primary_width_shrink = !is_alt
+            && self.resize_transaction
+            && num_cols < old_cols
+            && cursor_bottom < old_lines
+            && (cursor_bottom..old_lines).all(|line| self.grid[Line(line as i32)].is_clear());
 
         if !is_alt && num_lines < old_lines {
             // Mirror `Grid::shrink_lines`: only rows above the cursor are removed. During a resize
@@ -1029,6 +1038,16 @@ impl<T> Term<T> {
 
         self.grid.resize(!is_alt, num_lines, num_cols);
         self.inactive_grid.resize(is_alt, num_lines, num_cols);
+
+        if sparse_primary_width_shrink {
+            // ConPTY keeps the viewport origin fixed while a sparse primary screen reflows: new
+            // wraps consume the blank tail and move the cursor down. The grid's native column
+            // shrink is bottom-anchored, so first it may put those wraps in transaction history.
+            // Re-evaluate height immediately at the final local width. `shrink_lines` only scrolls
+            // when the reflowed cursor/content really exceeds the viewport, which preserves the
+            // established history/staging path for full screens while sparse screens grow down.
+            self.reconcile_resize_transaction_to_viewport();
+        }
 
         // Invalidate selection and tabs only when necessary.
         if old_cols != num_cols {
@@ -3362,7 +3381,9 @@ mod tests {
 
         assert_eq!(term.begin_resize_transaction(), 0);
         term.resize(TermSize::new(10, 3));
-        assert_eq!(term.reconcile_resize_transaction_to_viewport(), (3, 1));
+        // Local shrink already consumed the two blank-tail rows by growing downward. The one row
+        // which genuinely does not fit remains in history and the commit reconcile is idempotent.
+        assert_eq!(term.reconcile_resize_transaction_to_viewport(), (1, 1));
         let harvested = term.finish_resize_transaction();
         assert_eq!(harvested.len(), 1);
         assert!(row_continues(&harvested[0]));

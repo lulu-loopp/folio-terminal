@@ -570,18 +570,28 @@ impl TerminalAdapter {
     /// Move the displayed branch's mutable history into transcript staging between actor calls.
     /// The canonical branch is intentionally left open and receives the same PTY bytes separately.
     pub fn stage_resize_transaction(&mut self) -> Vec<CapturedRow> {
-        let rows = self.term.stage_resize_transaction();
+        let rows = self
+            .term
+            .stage_resize_transaction()
+            .iter()
+            .map(|row| to_captured_row(&row[..]))
+            .collect::<Vec<_>>();
         self.staged_resize_history_size = rows.len();
-        rows.iter().map(|row| to_captured_row(&row[..])).collect()
+        rows
     }
 
     /// Close a transaction whose final vendor history is already owned by transcript resize
     /// staging. Vendor keeps only the unfinished suffix needed for a future native grow.
     pub fn finish_staged_resize_transaction(&mut self, unfinished_rows: usize) {
         self.resize_canonical = None;
+        let history_was_staged = self.staged_resize_history_size != 0;
         self.staged_resize_history_size = 0;
-        self.term
-            .retain_resize_staging_candidate_rows(unfinished_rows);
+        if history_was_staged {
+            self.term
+                .retain_resize_staging_candidate_rows(unfinished_rows);
+        } else {
+            debug_assert!(self.term.finish_resize_transaction().is_empty());
+        }
     }
 
     pub fn clear_resize_transaction_history(&mut self) {
@@ -1132,7 +1142,7 @@ mod tests {
     }
 
     #[test]
-    fn r2_extreme_local_path_reconciles_to_the_coalesced_conpty_viewport() {
+    fn r2_extreme_local_path_stays_at_the_coalesced_conpty_viewport() {
         const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
         const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal> ";
         let input = format!("{WARNING}\r\n{PROMPT}");
@@ -1141,33 +1151,19 @@ mod tests {
         direct.feed(input.as_bytes());
         direct.begin_resize_transaction();
         direct.resize(nz(30), nz(9));
-        assert_eq!(direct.reconcile_resize_transaction_to_viewport(), (2, 0));
+        assert_eq!(direct.reconcile_resize_transaction_to_viewport(), (0, 0));
         let direct_rows = direct.visible_text();
         let direct_cursor = direct.cursor();
         assert_eq!((direct_cursor.row, direct_cursor.column), (3, 9));
 
-        let mut unreconciled = TerminalAdapter::new(nz(104), nz(26));
-        unreconciled.feed(input.as_bytes());
-        unreconciled.begin_resize_transaction();
-        apply_r2_extreme_resize_trace(&mut unreconciled);
-        assert_eq!(unreconciled.resize_transaction_history_size(), 2);
-        let harvested = unreconciled.finish_resize_transaction();
-        let harvested_text = harvested
-            .iter()
-            .map(|row| {
-                row.cells
-                    .iter()
-                    .filter(|cell| !cell.wide_spacer)
-                    .map(|cell| cell.text.as_str())
-                    .collect::<String>()
-                    .trim_end()
-                    .to_owned()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            harvested_text,
-            ["Did not find path entry D:\\App", "\\Base\\anaconda3\\bin",]
-        );
+        let mut projected = TerminalAdapter::new(nz(104), nz(26));
+        projected.feed(input.as_bytes());
+        projected.begin_resize_transaction();
+        apply_r2_extreme_resize_trace(&mut projected);
+        assert_eq!(projected.resize_transaction_history_size(), 0);
+        assert_eq!(projected.visible_text(), direct_rows);
+        assert_eq!(projected.cursor(), direct_cursor);
+        assert!(projected.finish_resize_transaction().is_empty());
 
         let mut reconciled = TerminalAdapter::new(nz(104), nz(26));
         reconciled.feed(input.as_bytes());
@@ -1175,7 +1171,7 @@ mod tests {
         apply_r2_extreme_resize_trace(&mut reconciled);
         assert_eq!(
             reconciled.reconcile_resize_transaction_to_viewport(),
-            (2, 0)
+            (0, 0)
         );
         assert_eq!(reconciled.visible_text(), direct_rows);
         assert_eq!(reconciled.cursor(), direct_cursor);

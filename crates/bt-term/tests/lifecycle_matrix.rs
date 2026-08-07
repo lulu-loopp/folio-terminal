@@ -482,7 +482,51 @@ fn g1_width_reflow_keeps_the_displaced_banner_reachable_through_history() {
 }
 
 #[test]
-fn g1_width_reflow_uses_history_even_when_the_wide_screen_had_blank_rows() {
+fn g1_sparse_width_reflow_grows_down_into_blank_rows() {
+    const LINE: &str = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw";
+    const PROMPT: &str = "BTP> ";
+
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz32(104), nz32(8));
+    session
+        .feed_at(format!("{LINE}\r\n{PROMPT}").as_bytes(), start)
+        .unwrap();
+    assert_eq!(
+        session.terminal().visible_text(),
+        [LINE, PROMPT.trim_end(), "", "", "", "", "", ""]
+    );
+
+    session
+        .resize_at(nz32(46), nz32(8), start + Duration::from_millis(10))
+        .unwrap();
+
+    assert_eq!(session.transcript().staging_len(), 0);
+    assert_eq!(session.terminal().resize_transaction_history_size(), 0);
+    assert_eq!(
+        session.terminal().visible_text(),
+        [
+            &LINE[..46],
+            &LINE[46..],
+            PROMPT.trim_end(),
+            "",
+            "",
+            "",
+            "",
+            "",
+        ]
+    );
+    assert_eq!(
+        session.terminal().cursor(),
+        bt_term::TerminalCursor {
+            row: 2,
+            column: PROMPT.len() as u32,
+            visible: true,
+        }
+    );
+}
+
+#[test]
+fn g1_full_width_reflow_stages_only_the_rows_that_cannot_fit() {
     const WARNING: &str = "Did not find path entry D:\\App\\Base\\anaconda3\\bin";
     const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal> ";
 
@@ -521,6 +565,60 @@ fn g1_width_reflow_uses_history_even_when_the_wide_screen_had_blank_rows() {
     assert_eq!(
         session.terminal().visible_text(),
         [WARNING, PROMPT.trim_end(), "", ""]
+    );
+}
+
+#[test]
+fn resize_drag_200_frames_stays_within_the_sparse_and_full_budget() {
+    const FRAMES: usize = 200;
+    const SPARSE_BUDGET: Duration = Duration::from_millis(75);
+    const FULL_BUDGET: Duration = Duration::from_millis(50);
+    const TOTAL_BUDGET: Duration = Duration::from_millis(120);
+
+    let mut sparse = DualPlaneSession::new(nz32(104), nz32(26));
+    sparse
+        .feed(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvw\r\nBTP> ")
+        .unwrap();
+    let sparse_started = Instant::now();
+    for frame in 0..FRAMES {
+        let columns = if frame % 2 == 0 { 46 } else { 104 };
+        sparse.resize(nz32(columns), nz32(26)).unwrap();
+        std::hint::black_box(sparse.transcript().staging_len());
+    }
+    let sparse_elapsed = sparse_started.elapsed();
+
+    let mut full = DualPlaneSession::new(nz32(80), nz32(24));
+    let full_input = (0..24)
+        .map(|row| format!("F{row:02}-{}", "X".repeat(75)))
+        .collect::<Vec<_>>()
+        .join("\r\n");
+    full.feed(full_input.as_bytes()).unwrap();
+    let full_started = Instant::now();
+    for frame in 0..FRAMES {
+        let columns = if frame % 2 == 0 { 20 } else { 80 };
+        full.resize(nz32(columns), nz32(24)).unwrap();
+        std::hint::black_box(full.transcript().staging_len());
+    }
+    let full_elapsed = full_started.elapsed();
+
+    eprintln!(
+        "BT_RESIZE_BENCH frames={FRAMES} sparse_us={} full_us={} total_us={}",
+        sparse_elapsed.as_micros(),
+        full_elapsed.as_micros(),
+        (sparse_elapsed + full_elapsed).as_micros(),
+    );
+    assert!(
+        sparse_elapsed <= SPARSE_BUDGET,
+        "sparse 200-frame resize exceeded {SPARSE_BUDGET:?}: {sparse_elapsed:?}"
+    );
+    assert!(
+        full_elapsed <= FULL_BUDGET,
+        "full 200-frame resize exceeded {FULL_BUDGET:?}: {full_elapsed:?}"
+    );
+    assert!(
+        sparse_elapsed + full_elapsed <= TOTAL_BUDGET,
+        "combined 400-arm-frame resize exceeded {TOTAL_BUDGET:?}: {:?}",
+        sparse_elapsed + full_elapsed
     );
 }
 
@@ -747,7 +845,11 @@ fn replay_r2_extreme_shrink_grow_and_recall(start: Instant) -> Vec<bt_term::Resi
             )
             .unwrap();
     }
-    assert_eq!(session.terminal().resize_transaction_history_size(), 2);
+    assert_eq!(
+        session.terminal().resize_transaction_history_size(),
+        0,
+        "the final 30x9 viewport can hold both logical lines, so the local branch already grows down"
+    );
 
     session.mark_pty_resize_requested_at(nz32(30), nz32(9), start + Duration::from_millis(220));
     assert_eq!(session.terminal().resize_transaction_history_size(), 0);
@@ -795,7 +897,7 @@ fn m1_8_r2_extreme_shrink_grow_and_csi_a_replay_has_no_frozen_live_seam() {
     assert!(first.iter().any(|event| matches!(
         event.kind,
         bt_term::ResizeTraceKind::VendorReconcile {
-            history_before: 2,
+            history_before: 0,
             history_after: 0,
             cursor_row: 3,
             cursor_column: 9,

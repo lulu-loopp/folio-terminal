@@ -2934,6 +2934,14 @@ impl DualPlaneSession {
     }
 
     fn reanchor_semantic_input_regions_after_resize(&mut self) {
+        if !self
+            .semantic_input_regions
+            .iter()
+            .any(|region| region.screen == self.live_screen)
+        {
+            return;
+        }
+
         let mut logical_text = String::new();
         let mut segments = Vec::new();
         for row in 0..self.live_rows.len() as u32 {

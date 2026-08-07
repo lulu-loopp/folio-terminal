@@ -1741,6 +1741,7 @@ impl Runtime {
     /// debounce — it answers every frame, and someone else decides when the
     /// child hears about it.
     fn commit_seat_geometry(&mut self) -> Result<()> {
+        let trace_started = self.trace_perf.then(Instant::now);
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
         if render_physical.width == 0 || render_physical.height == 0 {
             return Ok(());
@@ -1753,6 +1754,7 @@ impl Runtime {
         self.peek_hover.clear();
         self.renderer.set_peek_overlay(None);
         let next_grid = self.resolve_seat_layout(render_physical);
+        let solved_at = trace_started.map(|_| Instant::now());
         let now = Instant::now();
         self.schedule_grid_change(
             next_grid,
@@ -1760,6 +1762,7 @@ impl Runtime {
             now,
             "resize terminal actor for a seat layout change",
         )?;
+        let resized_at = trace_started.map(|_| Instant::now());
         self.sync_math_layout_key();
         // The grid actually in force, which under the typed-input gate is still the old one. The
         // present gate admits the grid the frame will really carry, never the one merely solved.
@@ -1769,7 +1772,34 @@ impl Runtime {
             occurred_at: now,
             source: FrameSource::Resize,
         })?;
-        self.redraw()
+        let published_at = trace_started.map(|_| Instant::now());
+        let synchronous_present = self.divider_drag.is_none();
+        // Pointer motion must stay ahead of the swapchain. `publish_frame` already requested a
+        // redraw and `LatestFrameSlot` keeps the newest geometry, so presenting synchronously here
+        // would make every divider event wait on GPU acquire/vsync before Windows can deliver the
+        // next event. Non-drag seat edits still present immediately; a live drag is frame-paced by
+        // RedrawRequested and may coalesce only superseded intermediate positions.
+        if synchronous_present {
+            self.redraw()?;
+        }
+        if let (Some(started), Some(solved), Some(resized), Some(published)) =
+            (trace_started, solved_at, resized_at, published_at)
+        {
+            eprintln!(
+                "BT_PERF_TRACE resize_frame solve_us={} actor_us={} publish_us={} redraw_us={} total_us={} queued={} columns={} rows={}",
+                solved.saturating_duration_since(started).as_micros(),
+                resized.saturating_duration_since(solved).as_micros(),
+                published.saturating_duration_since(resized).as_micros(),
+                Instant::now()
+                    .saturating_duration_since(published)
+                    .as_micros(),
+                started.elapsed().as_micros(),
+                u8::from(!synchronous_present),
+                next_grid.columns,
+                next_grid.rows,
+            );
+        }
+        Ok(())
     }
 
     /// The pointer, expressed in the terminal seat's own coordinates, or `None`
