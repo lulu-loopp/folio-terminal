@@ -309,6 +309,12 @@ struct Runtime {
     /// other, so switching routes cannot dump parked residue as a sudden jump.
     local_wheel_subpixel_remainder: f64,
     pending_pty_resize: Option<PendingPtyResize>,
+    /// One private PSReadLine anchor repair owed by the current resize transaction. ConPTY cursor
+    /// reads are a terminal round trip (`CSI 6 n` -> CPR), so writing the chord beside
+    /// `PtySession::resize` can make the handler sample a cursor the child has not settled yet.
+    /// A boolean is intentional: every commit in one drag replaces the same debt, and only the
+    /// final transaction quiescence may pay it.
+    pending_psreadline_resize_reanchor: bool,
     pending_resize_present: Option<GridSize>,
     hyperlink_hover: HyperlinkHover,
     /// Every image reference the frame currently on screen draws, as the cells that draw it — the
@@ -580,6 +586,19 @@ const fn typed_input_resize_deferral_active(
 /// than a best-effort guess about which shell might be present.
 fn psreadline_resize_repaint_input(shell_input_region_open: bool) -> Option<&'static [u8]> {
     shell_input_region_open.then_some(PSREADLINE_INVOKE_PROMPT_INPUT)
+}
+
+fn replace_psreadline_resize_reanchor_debt(pending: &mut bool, shell_input_region_open: bool) {
+    *pending = psreadline_resize_repaint_input(shell_input_region_open).is_some();
+}
+
+fn take_psreadline_resize_reanchor_input(
+    pending: &mut bool,
+    shell_input_region_open: bool,
+) -> Option<&'static [u8]> {
+    std::mem::take(pending)
+        .then(|| psreadline_resize_repaint_input(shell_input_region_open))
+        .flatten()
 }
 
 #[derive(Clone)]
@@ -1305,6 +1324,7 @@ impl Runtime {
             notch_wheel_remainder: 0.0,
             local_wheel_subpixel_remainder: 0.0,
             pending_pty_resize: None,
+            pending_psreadline_resize_reanchor: false,
             pending_resize_present: None,
             hyperlink_hover: HyperlinkHover::default(),
             frame_image_references: FrameImageReferences::default(),
@@ -1895,6 +1915,18 @@ impl Runtime {
             .finish_resize_if_quiescent(now)
             .context("finish ConPTY resize transaction")?
         {
+            // `[Console]::CursorLeft/Top` in the PSReadLine handler makes ConPTY ask the terminal
+            // `CSI 6 n`. Pay the coalesced repair only after the final resize request *and* every
+            // child byte it caused have been quiet. A new geometry event re-opens the transaction,
+            // so a divider storm cannot install an intermediate commit's still-moving cursor.
+            if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
+                &mut self.pending_psreadline_resize_reanchor,
+                self.session.shell_input_region_open(),
+            ) && let Some(pty) = self.pty.as_mut()
+            {
+                pty.write(reanchor_input)
+                    .context("request PSReadLine anchor repair after resize quiescence")?;
+            }
             self.publish_frame(FrameTrigger {
                 occurred_at: now,
                 source: FrameSource::Expose,
@@ -1982,17 +2014,18 @@ impl Runtime {
         // the same PSReadLine anchor and needs the same post-resize repair. Its 2.4.x handler is
         // output-free for an empty buffer; using InvokePrompt there abandons old wrapped rows on
         // every committed divider stop (the real-ConPTY chain probe pins that distinction).
-        let repaint_input = psreadline_resize_repaint_input(self.session.shell_input_region_open());
+        let shell_input_region_open = self.session.shell_input_region_open();
         if let Some(pty) = self.pty.as_mut() {
             pty.resize(pty_size(pending.grid, pending.physical))
                 .context("commit coalesced final ConPTY resize")?;
-            // The private chord is one shot per resize commit, after that commit succeeds. With no
-            // open integration-owned input region this branch writes exactly zero bytes.
-            if let Some(repaint_input) = repaint_input {
-                pty.write(repaint_input)
-                    .context("request PSReadLine anchor repair after ConPTY resize")?;
-            }
         }
+        // Replace, rather than accumulate, the current transaction's repair debt. The send happens
+        // in `finish_resize_if_quiescent`, after ConPTY output has also been silent; a closed input
+        // region records no debt and therefore still writes exactly zero private bytes.
+        replace_psreadline_resize_reanchor_debt(
+            &mut self.pending_psreadline_resize_reanchor,
+            shell_input_region_open,
+        );
         self.conpty_grid = pending.grid;
         // The quiet boundary is also where a resize *ends*, so it is the
         // meaningful change §5.1 asks the session write to be debounced behind.
@@ -5532,6 +5565,38 @@ mod tests {
             psreadline_resize_repaint_input(false),
             None,
             "a session without an open OSC 133 input region injects zero bytes"
+        );
+    }
+
+    #[test]
+    fn resize_storm_reanchor_debt_is_replaced_and_paid_once() {
+        let mut pending = false;
+        for _ in 0..3 {
+            replace_psreadline_resize_reanchor_debt(&mut pending, true);
+        }
+        assert_eq!(
+            take_psreadline_resize_reanchor_input(&mut pending, true),
+            Some(PSREADLINE_INVOKE_PROMPT_INPUT),
+            "three commits in one open-input transaction coalesce to one chord"
+        );
+        assert_eq!(
+            take_psreadline_resize_reanchor_input(&mut pending, true),
+            None,
+            "the repair debt is one shot"
+        );
+
+        replace_psreadline_resize_reanchor_debt(&mut pending, true);
+        replace_psreadline_resize_reanchor_debt(&mut pending, false);
+        assert_eq!(
+            take_psreadline_resize_reanchor_input(&mut pending, true),
+            None,
+            "a later closed-region commit replaces stale open-prompt debt"
+        );
+        replace_psreadline_resize_reanchor_debt(&mut pending, true);
+        assert_eq!(
+            take_psreadline_resize_reanchor_input(&mut pending, false),
+            None,
+            "a prompt that closes before quiescence receives no stale chord"
         );
     }
 

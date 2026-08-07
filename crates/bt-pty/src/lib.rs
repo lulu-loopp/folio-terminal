@@ -2483,6 +2483,7 @@ mod tests {
         pty: PtySession,
         session: DualPlaneSession,
         raw_output: Vec<u8>,
+        cpr_log: Vec<AppCprExchange>,
         pending: Option<(u16, u16, Instant)>,
         commits: Vec<(u16, u16)>,
         /// The typed-input ConPTY resize gate (user ruling 2026-08-04). `false` is the loop exactly
@@ -2498,6 +2499,10 @@ mod tests {
         /// Product channel under test: after a successful ConPTY resize, send the shipped private
         /// chord only while the live OSC 133 input region is open.
         invoke_prompt_after_resize: bool,
+        /// Green timing: coalesce that chord until the resize transaction closes after child-output
+        /// silence. `false` preserves the shipped immediate-after-commit path as a real red arm.
+        reanchor_after_resize_quiescence: bool,
+        pending_reanchor: bool,
         invoke_prompt_writes: usize,
         /// What our own grid holds, and what the child was last told. They are the same number at
         /// rest; the gate's whole contract is that they stay the same number across a deferral too.
@@ -2517,12 +2522,15 @@ mod tests {
                 pty,
                 session: DualPlaneSession::new(nz32(columns), nz32(rows)),
                 raw_output: Vec::new(),
+                cpr_log: Vec::new(),
                 pending: None,
                 commits: Vec::new(),
                 typed_input_gate: false,
                 blank_since: None,
                 confirm_blank_gate: true,
                 invoke_prompt_after_resize: false,
+                reanchor_after_resize_quiescence: true,
+                pending_reanchor: false,
                 invoke_prompt_writes: 0,
                 grid: (columns, rows),
                 conpty: (columns, rows),
@@ -2556,10 +2564,23 @@ mod tests {
                 self.session.feed_at(&bytes, now).unwrap();
             }
             for reply in self.session.take_pty_writes() {
+                if reply.starts_with(b"\x1b[") && reply.ends_with(b"R") {
+                    self.cpr_log.push(AppCprExchange {
+                        reply: escaped(&reply),
+                        local_columns: self.grid.0,
+                        conpty_columns: self.conpty.0,
+                        cursor: self.session.terminal().cursor(),
+                    });
+                }
                 self.pty.write(&reply).unwrap();
             }
             self.flush_pending_resize(now);
-            self.session.finish_resize_if_quiescent(now).unwrap();
+            if self.session.finish_resize_if_quiescent(now).unwrap() && self.pending_reanchor {
+                if self.session.shell_input_region_open() {
+                    self.write_invoke_prompt();
+                }
+                self.pending_reanchor = false;
+            }
             had_output
         }
 
@@ -2598,8 +2619,13 @@ mod tests {
             }
             self.pty.resize(size(columns, rows)).unwrap();
             self.conpty = (columns, rows);
-            if self.invoke_prompt_after_resize && self.session.shell_input_region_open() {
-                self.write_invoke_prompt();
+            if self.invoke_prompt_after_resize {
+                let reanchor_owed = self.session.shell_input_region_open();
+                if self.reanchor_after_resize_quiescence {
+                    self.pending_reanchor = reanchor_owed;
+                } else if reanchor_owed {
+                    self.write_invoke_prompt();
+                }
             }
             self.session
                 .mark_pty_resize_requested_at(nz32(columns), nz32(rows), now);
@@ -2738,6 +2764,14 @@ mod tests {
             }
             None
         }
+    }
+
+    #[derive(Debug)]
+    struct AppCprExchange {
+        reply: String,
+        local_columns: u16,
+        conpty_columns: u16,
+        cursor: TerminalCursor,
     }
 
     /// One shape of drag, described by what the *pointer* did rather than by what it should produce.
@@ -4320,6 +4354,170 @@ mod tests {
         assert_eq!(green.1, 1, "green arm must retain one prompt");
         assert!(green.2, "green arm must stay clean through the final edit");
         assert_eq!(green.3, format!("{expected}Z"));
+    }
+
+    /// Regression for `.tmp-repaint-capture/render-ledger-verify.vt`: the handler's Console cursor
+    /// read emits `CSI 6 n` before the child cursor has settled after a committed resize. The
+    /// immediate red arm receives a width-consistent but early CPR at every stop and installs those
+    /// intermediate positions into PSReadLine. The green arm retains one repair debt through the
+    /// storm and sends it only when the final resize transaction has been quiet after child output.
+    #[test]
+    #[ignore = "dev probe: races real PSReadLine cursor reads against chained ConPTY resizes"]
+    fn reanchor_cursor_cpr_resize_storm_pair_probe() {
+        const PROMPT: &str = "(base) PS D:\\Developer\\BetterTerminal\\dist> ";
+        const FIRST_HISTORY: &str = "Write-Output ('BT_APP_' + 'INPUT_OK')";
+        const SECOND_HISTORY: &str = "echo \"[Image: x]\"";
+        const FINAL_COLUMNS: u16 = 54;
+        let first_history_literal = FIRST_HISTORY.replace('\'', "''");
+        let startup = format!(
+            "$env:BT_PSREADLINE_REANCHOR_PROBE = '1'; {}; \
+             Set-PSReadLineKeyHandler -Chord Ctrl+g -ScriptBlock {{ \
+             if ($global:BT_STORM_HISTORY_STAGE -eq 1) {{ \
+             [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory('{SECOND_HISTORY}') \
+             }} else {{ \
+             [Microsoft.PowerShell.PSConsoleReadLine]::AddToHistory('{first_history_literal}'); \
+             $global:BT_STORM_HISTORY_STAGE = 1 \
+             }}; \
+             [Console]::Write(([string][char]27) + ']777;BT_STORM_HISTORY_SEEDED' + [char]7) }}",
+            invoke_prompt_probe_startup(PROMPT)
+        );
+        let first_expected = format!("{PROMPT}{FIRST_HISTORY}");
+        let second_expected = format!("{PROMPT}{SECOND_HISTORY}");
+        let mut outcomes = Vec::new();
+
+        for delayed in [false, true] {
+            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &startup, FINAL_COLUMNS, 20, false);
+            oracle.invoke_prompt_after_resize = true;
+            oracle.reanchor_after_resize_quiescence = delayed;
+            assert!(oracle.settle_at_prompt(PROMPT));
+
+            oracle.pty.write(b"\x07").unwrap();
+            oracle.pump_for(Duration::from_millis(500));
+            oracle.pty.write(b"\x1b[A").unwrap();
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+            let rows = oracle.session.terminal().visible_text();
+            let cursor = oracle.session.terminal().cursor();
+            assert_eq!(
+                wrapped_input_line(&rows, cursor.row, PROMPT, FINAL_COLUMNS),
+                first_expected
+            );
+            // Put the shorter entry at the top without changing the currently displayed first
+            // recall. The repair chord itself is a non-history key and PSReadLine resets its
+            // history-navigation index, so the final Up deterministically selects this entry.
+            oracle.pty.write(b"\x07").unwrap();
+            oracle.pump_for(Duration::from_millis(500));
+
+            let resize_mark = oracle.raw_output.len();
+            oracle.cpr_log.clear();
+            // Each burst is dense projection with no output pump. Stop long enough to commit its
+            // final width; the red arm then gets only its immediate handler exchange before the
+            // pointer resumes, never the editor's later resize poll/redraw.
+            for widths in [
+                &[48u16, 40, 33, 27][..],
+                &[35u16, 44, 58, 70][..],
+                &[66u16, 62, 58, FINAL_COLUMNS][..],
+            ] {
+                for columns in widths {
+                    oracle.project_resize(*columns, 20);
+                }
+                oracle.pump_until_committed(Duration::from_secs(3));
+                // Let this commit's immediate handler complete its DSR/CPR at the committed grid,
+                // but resume well before PSReadLine's later resize poll/redraw. This is the capture's
+                // three `6n -> CUP` exchanges without the stronger wrong-local-grid fallback case.
+                oracle.pump_for(Duration::from_millis(100));
+            }
+            oracle.pump_for(Duration::from_millis(1_500));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+
+            let recall_mark = oracle.raw_output.len();
+            oracle.pty.write(b"\x1b[A").unwrap();
+            oracle.pump_for(Duration::from_millis(900));
+            oracle.pump_until_quiet(Duration::from_secs(6));
+
+            let rows = oracle.session.terminal().visible_text();
+            let cursor = oracle.session.terminal().cursor();
+            let input = wrapped_input_line(&rows, cursor.row, PROMPT, FINAL_COLUMNS);
+            let joined = rows.concat();
+            let residue = joined.contains("Write-Output (")
+                || joined.contains("BT_APP_")
+                || joined.contains("INPUT_OK");
+            let prompt_row = (0..=cursor.row as usize)
+                .rev()
+                .find(|row| rows[*row].starts_with(PROMPT.trim_end()));
+            let total_cells = PROMPT.len() + SECOND_HISTORY.len();
+            let expected_cursor = prompt_row.map(|row| {
+                (
+                    row as u32 + (total_cells / usize::from(FINAL_COLUMNS)) as u32,
+                    (total_cells % usize::from(FINAL_COLUMNS)) as u32,
+                )
+            });
+            let cursor_correct = expected_cursor == Some((cursor.row, cursor.column));
+            eprintln!(
+                "BT_CONPTY_REANCHOR_CPR_STORM source={} psreadline={} delayed={delayed} \
+                 commits={:?} writes={} residue={residue} cursor_correct={cursor_correct} \
+                 cursor=({}, {}) expected_cursor={expected_cursor:?} input={input:?} \
+                 expected={second_expected:?} cprs={:?} rows={:?} resize_output={} \
+                 recall_output={}",
+                conpty_source(),
+                psreadline_version(&oracle.raw_output),
+                oracle.commits,
+                oracle.invoke_prompt_writes,
+                cursor.row,
+                cursor.column,
+                oracle.cpr_log,
+                occupied_rows(&rows),
+                escaped(&oracle.raw_output[resize_mark..recall_mark]),
+                escaped(&oracle.raw_output[recall_mark..])
+            );
+            outcomes.push((
+                delayed,
+                oracle.invoke_prompt_writes,
+                residue,
+                cursor_correct,
+                input,
+                oracle
+                    .cpr_log
+                    .iter()
+                    .map(|exchange| {
+                        (
+                            exchange.reply.clone(),
+                            exchange.local_columns,
+                            exchange.conpty_columns,
+                            exchange.cursor.row,
+                            exchange.cursor.column,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            ));
+        }
+
+        let red = &outcomes[0];
+        let green = &outcomes[1];
+        assert!(!red.0 && green.0);
+        assert_eq!(red.1, 3, "the red arm injects beside every commit");
+        assert!(
+            red.2 || !red.3 || red.4 != second_expected,
+            "the red arm must reproduce residue, offset drawing, or a wrong cursor: {red:?}"
+        );
+        assert!(
+            red.5.iter().all(|(_, local, conpty, _, _)| local == conpty),
+            "the red arm must prove that width-consistent early CPRs are still unsafe: {red:?}"
+        );
+        assert_eq!(green.1, 1, "the storm must coalesce to one repair");
+        assert!(
+            !green.2,
+            "the delayed arm left old-history residue: {green:?}"
+        );
+        assert!(green.3, "the delayed arm left a cursor offset: {green:?}");
+        assert_eq!(green.4, second_expected);
+        assert!(
+            green
+                .5
+                .iter()
+                .all(|(_, local, conpty, _, _)| local == conpty),
+            "the delayed arm answered CPR from an unsettled grid: {green:?}"
+        );
     }
 
     /// Regression for `.tmp-repaint-capture/silent-reanchor-verify.vt`: after a committed resize,
