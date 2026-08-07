@@ -48,6 +48,8 @@ use winit::{
 
 const INITIAL_WIDTH: f64 = 960.0;
 const INITIAL_HEIGHT: f64 = 600.0;
+const DEFAULT_PROFILE_TITLE: &str = "PowerShell";
+#[cfg(test)]
 const WINDOW_TITLE: &str = "BetterTerminal M0-beta";
 const WIN32_DEFAULT_DPI: f64 = 96.0;
 const STARTUP_PTY_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
@@ -1384,7 +1386,7 @@ impl Runtime {
         let session_store = persist::SessionStore::open();
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
-            .with_title(WINDOW_TITLE)
+            .with_title(DEFAULT_PROFILE_TITLE)
             .with_inner_size(
                 restored
                     .map(|(_, size)| size)
@@ -1583,6 +1585,7 @@ impl Runtime {
         };
         runtime.refresh_work_area();
         runtime.apply_window_min_inner_size();
+        runtime.window.set_title(runtime.display_title());
         runtime.refresh_chrome();
         if trace_startup {
             let renderer_phases = runtime.renderer.init_timings();
@@ -1657,6 +1660,7 @@ impl Runtime {
     /// whether anything visible changed.
     fn refresh_chrome(&mut self) -> bool {
         let scale = self.renderer.metrics().scale_factor as f32;
+        let tab_title = self.session.window_title().map(str::to_owned);
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
         let preview_message = match self.preview_image.as_ref() {
             Some(preview) => preview.message(),
@@ -1672,6 +1676,7 @@ impl Runtime {
             &self.seat_layout,
             scale,
             self.seat_pointer,
+            tab_title.as_deref(),
             preview_title.as_deref(),
             preview_message.as_deref(),
         );
@@ -2331,6 +2336,7 @@ impl Runtime {
         if self.pty.is_none() {
             return Ok(());
         }
+        let title_before = self.session.window_title().map(str::to_owned);
         let mut changed = false;
         loop {
             let bytes = self
@@ -2354,6 +2360,10 @@ impl Runtime {
             }
             changed = true;
         }
+        if self.session.window_title() != title_before.as_deref() {
+            self.window.set_title(self.display_title());
+            self.refresh_chrome();
+        }
         if changed {
             // The vendor parser withholds bytes inside an open DEC 2026 block, so projecting here
             // cannot expose its intermediate state. It can expose ordinary output before a
@@ -2369,12 +2379,19 @@ impl Runtime {
             .session
             .synchronized_update_deadline()
             .is_some_and(|deadline| deadline <= now);
-        if due
-            && self
+        if due {
+            let title_before = self.session.window_title().map(str::to_owned);
+            let finished = self
                 .session
                 .finish_synchronized_update(now)
-                .context("finish timed-out DEC 2026 synchronized update")?
-        {
+                .context("finish timed-out DEC 2026 synchronized update")?;
+            if self.session.window_title() != title_before.as_deref() {
+                self.window.set_title(self.display_title());
+                self.refresh_chrome();
+            }
+            if !finished {
+                return Ok(());
+            }
             self.publish_pty_drain_frame(now)?;
         }
         Ok(())
@@ -4025,7 +4042,6 @@ impl Runtime {
             self.renderer.presentation_geometry(),
             physical,
         );
-        self.refresh_startup_trace_title(snapshot.authoritative_scale);
         if scale_factors_match(
             self.renderer.metrics().scale_factor,
             snapshot.authoritative_scale,
@@ -4057,15 +4073,8 @@ impl Runtime {
         Ok(true)
     }
 
-    fn refresh_startup_trace_title(&self, scale_factor: f64) {
-        if !self.trace_startup {
-            return;
-        }
-        let title = match (self.background_visible, self.first_text_visible) {
-            (Some(background), Some(text)) => startup_trace_title(background, text, scale_factor),
-            _ => startup_scale_title(scale_factor),
-        };
-        self.window.set_title(&title);
+    fn display_title(&self) -> &str {
+        display_title(self.session.window_title())
     }
 
     fn sync_math_layout_key(&mut self) {
@@ -4150,9 +4159,6 @@ impl Runtime {
                             "BT_STARTUP first_text_present={}ms",
                             text_visible.as_millis()
                         );
-                        if self.background_visible.is_some() {
-                            self.refresh_startup_trace_title(self.renderer.metrics().scale_factor);
-                        }
                     }
                 }
                 self.last_presented_frame = Some(frame);
@@ -4535,10 +4541,16 @@ fn startup_poll_delay(first_text_presented: bool) -> Option<std::time::Duration>
     (!first_text_presented).then_some(STARTUP_PTY_POLL_INTERVAL)
 }
 
+fn display_title(session_title: Option<&str>) -> &str {
+    session_title.unwrap_or(DEFAULT_PROFILE_TITLE)
+}
+
+#[cfg(test)]
 fn startup_scale_title(scale_factor: f64) -> String {
     format!("{WINDOW_TITLE} · {}x", display_scale_factor(scale_factor))
 }
 
+#[cfg(test)]
 fn startup_trace_title(
     background_visible: Duration,
     first_text_visible: Duration,
@@ -6208,6 +6220,12 @@ mod tests {
             ),
             "BetterTerminal M0-beta — bg 682ms · text 1089ms · 1.25x"
         );
+    }
+
+    #[test]
+    fn os_window_title_uses_session_text_or_the_profile_fallback() {
+        assert_eq!(display_title(Some("Claude ✳ 任务")), "Claude ✳ 任务");
+        assert_eq!(display_title(None), "PowerShell");
     }
 
     #[test]

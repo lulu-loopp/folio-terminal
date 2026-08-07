@@ -141,6 +141,13 @@ pub enum AdapterEvent {
     WorkingDirectory {
         uri: String,
     },
+    /// The child changed the session's window title through OSC 0/2. Window titles are UI state,
+    /// not grid or transcript state, and apply across primary/alternate screen switches.
+    Title {
+        title: String,
+    },
+    /// The child restored the terminal's default window title.
+    ResetTitle,
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -160,15 +167,28 @@ pub enum TerminalDamage {
 pub(crate) struct CaptureListener {
     transcript_events: Arc<Mutex<Vec<TranscriptEvent>>>,
     pty_writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    adapter_events: Arc<Mutex<Vec<AdapterEvent>>>,
 }
 
 impl EventListener for CaptureListener {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event {
-            self.pty_writes
+        match event {
+            Event::PtyWrite(text) => self
+                .pty_writes
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(text.into_bytes());
+                .push(text.into_bytes()),
+            Event::Title(title) => self
+                .adapter_events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(AdapterEvent::Title { title }),
+            Event::ResetTitle => self
+                .adapter_events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(AdapterEvent::ResetTitle),
+            _ => {}
         }
     }
 }
@@ -194,6 +214,11 @@ fn discard_listener_output(listener: &CaptureListener) {
     lock_events(listener).clear();
     listener
         .pty_writes
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clear();
+    listener
+        .adapter_events
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clear();
@@ -356,6 +381,7 @@ impl TerminalAdapter {
                 InlineImageStreamAction::Bytes(bytes) => {
                     self.advance_terminal_bytes(&bytes);
                     events.extend(self.drain_transcript_events());
+                    events.extend(self.drain_adapter_events());
                     events.extend(self.drain_grid_write_events());
                 }
                 InlineImageStreamAction::Image(encoded) => {
@@ -498,7 +524,9 @@ impl TerminalAdapter {
         }
         self.parser_sync_active = false;
         self.parser_tail.clear();
-        self.drain_transcript_events()
+        let mut events = self.drain_transcript_events();
+        events.extend(self.drain_adapter_events());
+        events
     }
 
     pub fn resize(&mut self, columns: NonZeroU32, rows: NonZeroU32) -> Vec<AdapterEvent> {
@@ -750,6 +778,16 @@ impl TerminalAdapter {
             &mut *self
                 .listener
                 .pty_writes
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        )
+    }
+
+    fn drain_adapter_events(&self) -> Vec<AdapterEvent> {
+        std::mem::take(
+            &mut *self
+                .listener
+                .adapter_events
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
         )
@@ -1469,6 +1507,27 @@ mod tests {
         let mut terminal = TerminalAdapter::new(nz(4), nz(3));
         assert!(terminal.feed(b"\x1bc").contains(&AdapterEvent::Reset));
         assert!(terminal.feed(b"\x1b[?3h").contains(&AdapterEvent::Deccolm));
+    }
+
+    #[test]
+    fn osc_title_events_are_ui_facts_without_grid_writes() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        assert_eq!(
+            terminal.feed("\x1b]0;Claude ✳ 任务\x07".as_bytes()),
+            vec![AdapterEvent::Title {
+                title: "Claude ✳ 任务".to_owned(),
+            }]
+        );
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        assert_eq!(
+            terminal.feed(b"\x1b[22;0t\x1b]2;temporary\x07\x1b[23;0t"),
+            vec![
+                AdapterEvent::Title {
+                    title: "temporary".to_owned(),
+                },
+                AdapterEvent::ResetTitle,
+            ]
+        );
     }
 
     #[test]

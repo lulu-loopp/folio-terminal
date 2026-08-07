@@ -141,6 +141,10 @@ pub enum LifecycleDirective {
     WorkingDirectory {
         uri: String,
     },
+    SetWindowTitle {
+        title: String,
+    },
+    ResetWindowTitle,
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -201,6 +205,8 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
             marker,
         },
         AdapterEvent::WorkingDirectory { uri } => LifecycleDirective::WorkingDirectory { uri },
+        AdapterEvent::Title { title } => LifecycleDirective::SetWindowTitle { title },
+        AdapterEvent::ResetTitle => LifecycleDirective::ResetWindowTitle,
         AdapterEvent::GridWrites { screen, rows } => {
             LifecycleDirective::GridWrites { screen, rows }
         }

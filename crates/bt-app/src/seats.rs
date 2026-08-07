@@ -579,7 +579,7 @@ pub fn build_chrome(
     scale: f32,
     pointer: ChromePointer,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
-    build_chrome_with_preview(seats, layout, scale, pointer, None, None)
+    build_chrome_with_preview(seats, layout, scale, pointer, None, None, None)
 }
 
 /// Build chrome while supplying the preview seat's content title and optional body placeholder.
@@ -588,6 +588,7 @@ pub fn build_chrome_with_preview(
     layout: &SeatLayout,
     scale: f32,
     pointer: ChromePointer,
+    tab_title: Option<&str>,
     preview_title: Option<&str>,
     preview_message: Option<&str>,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
@@ -605,6 +606,7 @@ pub fn build_chrome_with_preview(
         surface_width,
         scale,
         pointer.hover,
+        tab_title,
         &mut quads,
         &mut labels,
         &mut sprites,
@@ -743,6 +745,7 @@ fn window_chrome(
     width: f32,
     scale: f32,
     hover: Option<ChromeTarget>,
+    tab_title: Option<&str>,
     quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ChromeLabel>,
     sprites: &mut Vec<ChromeSprite>,
@@ -791,7 +794,7 @@ fn window_chrome(
             color: palette.accent,
         });
         labels.push(ChromeLabel {
-            text: "PowerShell".to_owned(),
+            text: tab_title.unwrap_or("PowerShell").to_owned(),
             rect: [
                 mark_left + mark + WINDOW_TAB_GAP_LOGICAL_PX * scale,
                 tab_top,
@@ -1462,6 +1465,7 @@ mod tests {
             &layout,
             1.0,
             ChromePointer::default(),
+            None,
             Some("sunset.svg \u{2014} 800\u{d7}600"),
             Some("Loading sunset.svg\u{2026}"),
         );
@@ -1840,6 +1844,7 @@ mod tests {
             ChromePointer::default(),
             None,
             None,
+            None,
         );
         (labels, sprites)
     }
@@ -1880,6 +1885,35 @@ mod tests {
                 title.rect
             );
         }
+    }
+
+    #[test]
+    fn tab_title_uses_session_text_or_the_profile_fallback() {
+        let metrics = seat_metrics(1_000);
+        let seats = Seats::lone_terminal();
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+
+        let (_, titled, _) = build_chrome_with_preview(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer::default(),
+            Some("Claude ✳ 任务"),
+            None,
+            None,
+        );
+        assert!(titled.iter().any(|label| label.text == "Claude ✳ 任务"));
+
+        let (_, fallback, _) = build_chrome_with_preview(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer::default(),
+            None,
+            None,
+            None,
+        );
+        assert!(fallback.iter().any(|label| label.text == "PowerShell"));
     }
 
     /// PIN — a pane head's mark and its title hang off one axis, the same way

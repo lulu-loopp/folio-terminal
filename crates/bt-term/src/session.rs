@@ -717,6 +717,9 @@ pub struct DualPlaneSession {
     /// shell process, so the alternate-screen TUI the shell launched inherits the shell's last
     /// report, and a screen switch neither carries nor clears it.
     working_directory: Option<PathBuf>,
+    /// OSC 0/2 window title for this session. It deliberately has no `ScreenId`: xterm window
+    /// titles are shared by the primary and alternate grids. `None` selects the profile fallback.
+    window_title: Option<String>,
     semantic_input_regions: Vec<SemanticInputRegion>,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
@@ -964,6 +967,7 @@ impl DualPlaneSession {
             cursor_logical_line_memory: None,
             shell_phases: BTreeMap::new(),
             working_directory: None,
+            window_title: None,
             semantic_input_regions: Vec::new(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
@@ -1007,6 +1011,11 @@ impl DualPlaneSession {
 
     pub fn application_cursor_mode(&self) -> bool {
         self.terminal.application_cursor_mode()
+    }
+
+    /// The child-provided OSC 0/2 title, or `None` when the profile title should be shown.
+    pub fn window_title(&self) -> Option<&str> {
+        self.window_title.as_deref()
     }
 
     pub fn bracketed_paste_mode(&self) -> bool {
@@ -6346,6 +6355,12 @@ impl DualPlaneSession {
                 }
                 LifecycleDirective::WorkingDirectory { uri } => {
                     self.set_reported_working_directory(&uri);
+                }
+                LifecycleDirective::SetWindowTitle { title } => {
+                    self.window_title = (!title.is_empty()).then_some(title);
+                }
+                LifecycleDirective::ResetWindowTitle => {
+                    self.window_title = None;
                 }
                 LifecycleDirective::GridWrites { screen, rows } => {
                     let screen = match screen {
@@ -20440,5 +20455,53 @@ mod tests {
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn osc_window_title_is_session_state_and_empty_or_reset_falls_back() {
+        let mut session = DualPlaneSession::new(nz(20), nz(4));
+        let frame_bytes_before = session.terminal().visible_text();
+
+        session.feed("\x1b]0;Claude ✳ 任务\x07".as_bytes()).unwrap();
+        assert_eq!(session.window_title(), Some("Claude ✳ 任务"));
+
+        session.feed(b"\x1b]0;\x07").unwrap();
+        assert_eq!(
+            session.window_title(),
+            None,
+            "an empty title uses the profile fallback"
+        );
+
+        // In a fresh session save the default title (None), set a title, then restore it.
+        // Alacritty reports the restoration as ResetTitle, which must have the same fallback
+        // semantics as an empty OSC.
+        let mut reset_session = DualPlaneSession::new(nz(20), nz(4));
+        reset_session
+            .feed(b"\x1b[22;0t\x1b]2;temporary\x07\x1b[23;0t")
+            .unwrap();
+        assert_eq!(
+            reset_session.window_title(),
+            None,
+            "ResetTitle uses the profile fallback"
+        );
+        assert_eq!(
+            session.terminal().visible_text(),
+            frame_bytes_before,
+            "title state must not alter the existing terminal-frame bytes"
+        );
+    }
+
+    #[test]
+    fn alternate_screen_shares_the_session_window_title() {
+        let mut session = DualPlaneSession::new(nz(20), nz(4));
+        session.feed(b"\x1b]0;primary\x07").unwrap();
+        session.feed(b"\x1b[?1049h").unwrap();
+        assert_eq!(session.window_title(), Some("primary"));
+
+        session
+            .feed("\x1b]2;alternate 标题\x07".as_bytes())
+            .unwrap();
+        session.feed(b"\x1b[?1049l").unwrap();
+        assert_eq!(session.window_title(), Some("alternate 标题"));
     }
 }
