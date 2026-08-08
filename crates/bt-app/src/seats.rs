@@ -1286,171 +1286,188 @@ fn window_chrome(
     // needs pulling in — the left edge of the strip is the surface's own, so a
     // glyph that runs off it is clipped by the framebuffer for free.
     let clip_label = |rect: [f32; 4]| [rect[0], rect[1], rect[2].min(viewport[1]), rect[3]];
-    for (index, (tab, content)) in geometry.tabs.iter().zip(tabs).enumerate() {
-        let [tab_left, tab_top, tab_right, tab_bottom] = tab.body;
-        let active = index == active_tab;
-        // `.tab:hover` is one hover: a pointer on the `×` is still a pointer on
-        // the tab, so the body lights up and the title steps to `--ink` for both.
-        let tab_hovered =
-            hover == Some(ChromeTarget::Tab(index)) || hover == Some(ChromeTarget::TabClose(index));
-        let skirted = [tab_left - radius, tab_top, tab_right + radius, tab_bottom];
-        if active && tab_right - tab_left >= 2.0 * radius && within_strip(viewport, skirted) {
-            sprites.push(ChromeSprite {
-                mark: ChromeMark::ActiveTab {
-                    radius_px: radius as u32,
-                },
-                rect: skirted,
-                color: palette.active_tab,
-            });
-        } else if tab_hovered && within_strip(viewport, tab.body) {
-            sprites.push(ChromeSprite {
-                mark: ChromeMark::TabBody {
-                    radius_px: radius as u32,
-                },
-                rect: tab.body,
-                color: palette.caption_hover,
-            });
-        }
-        let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
-        let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
-        // `.tab.squeezed { justify-content: center; padding: 0 4px }` — the mark
-        // and whatever else survived are centred as one group, not indented.
-        let mark_left = if tab.tier == TabWidthTier::Squeezed {
-            let trailing = tab
-                .close
-                .map_or(0.0, |close| content_gap + close[2] - close[0]);
-            (tab_left + (tab_right - tab_left - mark - trailing) / 2.0)
-                .max(tab_left + WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX * scale)
-                .round()
-        } else {
-            (tab_left + WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round()
-        };
-        let mark_top = (tab_top + (tab_bottom - tab_top - mark) / 2.0).round();
-        // The tab row's trailing boundary: the `×` and the tab's own 8px gap
-        // before it, or the trailing padding when there is no `×` to clear.
-        let trailing = tab.close.map_or(
-            tab_right - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
-            |close| close[0] - content_gap,
-        );
-        // `.panecount` is `flex: none` and stands between the title and the `×`,
-        // so it takes its width off the trailing end and the title — `flex: 1`,
-        // `min-width: 0` — keeps whatever is left.
-        let badge = tab_badge_rect(tab, content.pane_count, content.badge_text_width, scale);
-        // What the title may not run past.
-        let content_right = badge.map_or(trailing, |badge| badge[0] - content_gap);
-        let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
-        if mark_left + mark <= tab.close.map_or(tab_right, |close| close[0]) {
-            if within_strip(viewport, mark_rect) {
+    // `.tab.active { z-index: 1 }` (mock-up line 216) — the active tab stands
+    // above its neighbours, corners and all. A painter's-algorithm list has no
+    // z-index, so the strip is laid down in two passes: every other tab first,
+    // the active one last.
+    //
+    // What rides on this is the join. The active tab's two concave corners
+    // (`::before`/`::after`, one `--tabr` box outside each edge) overhang its
+    // neighbours, and they are what curves the tab into the content plane. A
+    // neighbour painted afterwards fills its whole box — and a box has square
+    // corners — so its `--hover` fill squared the arc off and the tab met the
+    // terminal at a notch. The mock-up records the same bug in its own medium at
+    // lines 178-180, where DOM order plays the part paint order plays here.
+    for painting_the_active_tab in [false, true] {
+        for (index, (tab, content)) in geometry.tabs.iter().zip(tabs).enumerate() {
+            let active = index == active_tab;
+            if active != painting_the_active_tab {
+                continue;
+            }
+            let [tab_left, tab_top, tab_right, tab_bottom] = tab.body;
+            // `.tab:hover` is one hover: a pointer on the `×` is still a pointer on
+            // the tab, so the body lights up and the title steps to `--ink` for both.
+            let tab_hovered = hover == Some(ChromeTarget::Tab(index))
+                || hover == Some(ChromeTarget::TabClose(index));
+            let skirted = [tab_left - radius, tab_top, tab_right + radius, tab_bottom];
+            if active && tab_right - tab_left >= 2.0 * radius && within_strip(viewport, skirted) {
                 sprites.push(ChromeSprite {
-                    mark: ChromeMark::ProfilePowerShell,
-                    rect: mark_rect,
-                    color: palette.accent,
+                    mark: ChromeMark::ActiveTab {
+                        radius_px: radius as u32,
+                    },
+                    rect: skirted,
+                    color: palette.active_tab,
+                });
+            } else if tab_hovered && within_strip(viewport, tab.body) {
+                sprites.push(ChromeSprite {
+                    mark: ChromeMark::TabBody {
+                        radius_px: radius as u32,
+                    },
+                    rect: tab.body,
+                    color: palette.caption_hover,
                 });
             }
-            let label_left = mark_left + mark + content_gap;
-            // `.tab.squeezed .ttitle { display: none }`: below 90px the tab is
-            // its mark, and nothing is gained by clipping a word to two letters.
-            if tab.tier != TabWidthTier::Squeezed
-                && label_left < content_right
-                && label_left < viewport[1]
+            let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+            let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
+            // `.tab.squeezed { justify-content: center; padding: 0 4px }` — the mark
+            // and whatever else survived are centred as one group, not indented.
+            let mark_left = if tab.tier == TabWidthTier::Squeezed {
+                let trailing = tab
+                    .close
+                    .map_or(0.0, |close| content_gap + close[2] - close[0]);
+                (tab_left + (tab_right - tab_left - mark - trailing) / 2.0)
+                    .max(tab_left + WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX * scale)
+                    .round()
+            } else {
+                (tab_left + WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round()
+            };
+            let mark_top = (tab_top + (tab_bottom - tab_top - mark) / 2.0).round();
+            // The tab row's trailing boundary: the `×` and the tab's own 8px gap
+            // before it, or the trailing padding when there is no `×` to clear.
+            let trailing = tab.close.map_or(
+                tab_right - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
+                |close| close[0] - content_gap,
+            );
+            // `.panecount` is `flex: none` and stands between the title and the `×`,
+            // so it takes its width off the trailing end and the title — `flex: 1`,
+            // `min-width: 0` — keeps whatever is left.
+            let badge = tab_badge_rect(tab, content.pane_count, content.badge_text_width, scale);
+            // What the title may not run past.
+            let content_right = badge.map_or(trailing, |badge| badge[0] - content_gap);
+            let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
+            if mark_left + mark <= tab.close.map_or(tab_right, |close| close[0]) {
+                if within_strip(viewport, mark_rect) {
+                    sprites.push(ChromeSprite {
+                        mark: ChromeMark::ProfilePowerShell,
+                        rect: mark_rect,
+                        color: palette.accent,
+                    });
+                }
+                let label_left = mark_left + mark + content_gap;
+                // `.tab.squeezed .ttitle { display: none }`: below 90px the tab is
+                // its mark, and nothing is gained by clipping a word to two letters.
+                if tab.tier != TabWidthTier::Squeezed
+                    && label_left < content_right
+                    && label_left < viewport[1]
+                {
+                    labels.push(ChromeLabel {
+                        text: content.title.clone(),
+                        rect: clip_label([label_left, tab_top, content_right, tab_bottom]),
+                        font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
+                        color: if active || tab_hovered {
+                            palette.pane_title_focus
+                        } else {
+                            palette.title_text
+                        },
+                        align_right: false,
+                        align_center: false,
+                        letter_spacing_em: 0.0,
+                    });
+                }
+            }
+            // `.panecount` — the count, its pill, and nothing when there is one pane.
+            if let Some(badge) = badge
+                && within_strip(viewport, badge)
             {
-                labels.push(ChromeLabel {
-                    text: content.title.clone(),
-                    rect: clip_label([label_left, tab_top, content_right, tab_bottom]),
-                    font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
-                    color: if active || tab_hovered {
-                        palette.pane_title_focus
+                sprites.push(ChromeSprite {
+                    mark: ChromeMark::ControlPill {
+                        radius_px: (WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX * scale)
+                            .round()
+                            .max(1.0) as u32,
+                    },
+                    rect: pixel_snapped(badge),
+                    // `background: var(--active)` on every tab — the same fill the
+                    // `×`'s pill wears, over whichever of the three surfaces this tab
+                    // is showing.
+                    color: if active {
+                        palette.tab_close_pill_on_content
+                    } else if tab_hovered {
+                        palette.tab_close_pill_on_hovered_tab
                     } else {
-                        palette.title_text
+                        palette.tab_badge_on_resting_tab
+                    },
+                });
+                labels.push(ChromeLabel {
+                    text: content.pane_count.to_string(),
+                    // `justify-content: center` — the number is centred in its pill,
+                    // which is what makes `min-width` a floor and not an indent.
+                    rect: badge,
+                    font_size_px: WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale,
+                    // `--ink2`, rising to `--ink` on the active tab and deliberately
+                    // never to the accent (mock-up line 297).
+                    color: if active {
+                        palette.tab_badge_text_on_active_tab
+                    } else if tab_hovered {
+                        palette.tab_badge_text_on_hovered_tab
+                    } else {
+                        palette.tab_badge_text_on_resting_tab
                     },
                     align_right: false,
-                    align_center: false,
+                    align_center: true,
                     letter_spacing_em: 0.0,
                 });
             }
-        }
-        // `.panecount` — the count, its pill, and nothing when there is one pane.
-        if let Some(badge) = badge
-            && within_strip(viewport, badge)
-        {
+            let Some(close) = tab.close else {
+                continue;
+            };
+            let close_hovered = hover == Some(ChromeTarget::TabClose(index));
+            if close_hovered && within_strip(viewport, close) {
+                // `.tab .close:hover { background: var(--active) }` — 4px of round,
+                // over whichever of the two surfaces this tab is showing: `--termbg`
+                // when it is the active one, its own `--hover` fill when it is not.
+                sprites.push(ChromeSprite {
+                    mark: ChromeMark::ControlPill {
+                        radius_px: (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale)
+                            .round()
+                            .max(1.0) as u32,
+                    },
+                    rect: pixel_snapped(close),
+                    color: if active {
+                        palette.tab_close_pill_on_content
+                    } else {
+                        palette.tab_close_pill_on_hovered_tab
+                    },
+                });
+            }
+            let glyph = (WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+            let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
+            let glyph_top = ((close[1] + close[3] - glyph) / 2.0).round();
+            let glyph_rect = [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph];
+            if !within_strip(viewport, glyph_rect) {
+                continue;
+            }
             sprites.push(ChromeSprite {
-                mark: ChromeMark::ControlPill {
-                    radius_px: (WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX * scale)
-                        .round()
-                        .max(1.0) as u32,
-                },
-                rect: pixel_snapped(badge),
-                // `background: var(--active)` on every tab — the same fill the
-                // `×`'s pill wears, over whichever of the three surfaces this tab
-                // is showing.
-                color: if active {
-                    palette.tab_close_pill_on_content
-                } else if tab_hovered {
-                    palette.tab_close_pill_on_hovered_tab
+                mark: ChromeMark::TabClose,
+                rect: glyph_rect,
+                color: if close_hovered {
+                    palette.title_text_hover
                 } else {
-                    palette.tab_badge_on_resting_tab
-                },
-            });
-            labels.push(ChromeLabel {
-                text: content.pane_count.to_string(),
-                // `justify-content: center` — the number is centred in its pill,
-                // which is what makes `min-width` a floor and not an indent.
-                rect: badge,
-                font_size_px: WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale,
-                // `--ink2`, rising to `--ink` on the active tab and deliberately
-                // never to the accent (mock-up line 297).
-                color: if active {
-                    palette.tab_badge_text_on_active_tab
-                } else if tab_hovered {
-                    palette.tab_badge_text_on_hovered_tab
-                } else {
-                    palette.tab_badge_text_on_resting_tab
-                },
-                align_right: false,
-                align_center: true,
-                letter_spacing_em: 0.0,
-            });
-        }
-        let Some(close) = tab.close else {
-            continue;
-        };
-        let close_hovered = hover == Some(ChromeTarget::TabClose(index));
-        if close_hovered && within_strip(viewport, close) {
-            // `.tab .close:hover { background: var(--active) }` — 4px of round,
-            // over whichever of the two surfaces this tab is showing: `--termbg`
-            // when it is the active one, its own `--hover` fill when it is not.
-            sprites.push(ChromeSprite {
-                mark: ChromeMark::ControlPill {
-                    radius_px: (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale)
-                        .round()
-                        .max(1.0) as u32,
-                },
-                rect: pixel_snapped(close),
-                color: if active {
-                    palette.tab_close_pill_on_content
-                } else {
-                    palette.tab_close_pill_on_hovered_tab
+                    // `.tab .close { color: var(--ink3) }` — a step below the caption
+                    // run's own ink, because closing a tab is not what the strip is for.
+                    palette.title_text_muted
                 },
             });
         }
-        let glyph = (WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
-        let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
-        let glyph_top = ((close[1] + close[3] - glyph) / 2.0).round();
-        let glyph_rect = [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph];
-        if !within_strip(viewport, glyph_rect) {
-            continue;
-        }
-        sprites.push(ChromeSprite {
-            mark: ChromeMark::TabClose,
-            rect: glyph_rect,
-            color: if close_hovered {
-                palette.title_text_hover
-            } else {
-                // `.tab .close { color: var(--ink3) }` — a step below the caption
-                // run's own ink, because closing a tab is not what the strip is for.
-                palette.title_text_muted
-            },
-        });
     }
 
     // `.newtab` and the `.chevbtn` beside it: one family, one box, one hover.
@@ -2890,6 +2907,153 @@ mod tests {
                 .iter()
                 .any(|sprite| sprite.mark == ChromeMark::Plus)
         );
+    }
+
+    /// Do two boxes share any area at all — the question that decides whether a
+    /// claim about paint order is about anything.
+    fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+        a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+    }
+
+    /// PIN (tab-strip layering) — `.tab.active { z-index: 1 }` (mock-up line
+    /// 216) together with the concave-corner pair on lines 220-229, and the
+    /// mock-up's own note above them: *"The active tab paints above its
+    /// neighbours, so its concave corners simply cover their hover fill. The
+    /// earlier problem was the opposite: neighbours come later in the DOM, so
+    /// their fill was painting over the corner and slicing it."*
+    ///
+    /// The active tab's two skirt corners overhang its neighbours by `--tabr`,
+    /// and what makes them read as a *join* with the content plane rather than a
+    /// notch is that they land over whatever the neighbour laid down there. A
+    /// neighbour under the pointer fills its whole box with `--hover`; when that
+    /// fill arrives after the silhouette, the square corner of a rectangle eats
+    /// the arc and the active tab stops meeting the terminal below it.
+    ///
+    /// Chrome sprites are painted in vector order — `bt-render` issues one draw
+    /// per icon, in order, with no sort and no depth buffer — so "over" is
+    /// literally "later in `sprites`".
+    ///
+    /// Red gate: each ordering claim is bracketed by an overlap check, so it is
+    /// only ever made about a corner the neighbour genuinely collides with;
+    /// against a builder that emits tabs strictly left to right, the *right*
+    /// hand neighbour's fill is pushed after the silhouette and this fails.
+    #[test]
+    fn the_active_tab_s_concave_corners_paint_over_a_neighbour_s_hover_fill() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let titles = strip_titles(3);
+            let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 3, 1, 0.0);
+            let body = geometry.tabs[1].body;
+            // The two 7x7 boxes the `::before`/`::after` pair occupies: one
+            // `--tabr` outside each edge of the active tab, sitting on its foot.
+            for (neighbour, side, corner) in [
+                (
+                    0_usize,
+                    "left",
+                    [body[0] - radius, body[3] - radius, body[0], body[3]],
+                ),
+                (
+                    2_usize,
+                    "right",
+                    [body[2], body[3] - radius, body[2] + radius, body[3]],
+                ),
+            ] {
+                let (_, _, sprites) =
+                    strip_chrome(scale, &titles, 1, Some(ChromeTarget::Tab(neighbour)), false);
+                let silhouette = sprites
+                    .iter()
+                    .position(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. }))
+                    .unwrap_or_else(|| panic!("scale {scale}: no active silhouette"));
+                let fill = sprites
+                    .iter()
+                    .position(|sprite| matches!(sprite.mark, ChromeMark::TabBody { .. }))
+                    .unwrap_or_else(|| {
+                        panic!("scale {scale}: the {side} neighbour paints no hover fill")
+                    });
+                assert_eq!(
+                    sprites[fill].rect, geometry.tabs[neighbour].body,
+                    "scale {scale}: the fill under test is the {side} neighbour's own box"
+                );
+                assert_eq!(
+                    sprites[fill].color, palette.caption_hover,
+                    "scale {scale}: and it is `--hover`"
+                );
+
+                // The claim below is only worth making where the two collide.
+                assert!(
+                    overlaps(sprites[fill].rect, corner),
+                    "scale {scale}: the {side} neighbour's hover fill must reach into the \
+                     active tab's concave corner, or this test pins nothing"
+                );
+                assert!(
+                    sprites[silhouette].rect[0] <= corner[0]
+                        && sprites[silhouette].rect[2] >= corner[2]
+                        && sprites[silhouette].rect[3] == corner[3],
+                    "scale {scale}: the silhouette's skirt is what carries the {side} corner"
+                );
+                assert!(
+                    silhouette > fill,
+                    "scale {scale}: `.tab.active {{ z-index: 1 }}` — the active tab's {side} \
+                     concave corner must paint AFTER the neighbour's `--hover` fill, or the \
+                     rectangle squares off the arc that joins the tab to the content plane \
+                     (silhouette at sprite {silhouette}, fill at sprite {fill})"
+                );
+            }
+        }
+    }
+
+    /// PIN — the layering rule is local to the join. A tab that is not beside
+    /// the active one shares no pixel with its skirt, so hovering it must leave
+    /// the strip exactly as it was: the same `--hover` fill, in its own box, at
+    /// `--tabr`, and no collision with the silhouette for paint order to settle.
+    ///
+    /// The active tab here is the first one, whose left skirt lands on the
+    /// window edge (the mock-up's A3 join) — so this also holds that edge whole
+    /// while the corner rule is being taught.
+    #[test]
+    fn hovering_a_tab_away_from_the_active_one_leaves_the_skirts_alone() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let titles = strip_titles(4);
+            let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 4, 0, 0.0);
+            let (_, _, sprites) =
+                strip_chrome(scale, &titles, 0, Some(ChromeTarget::Tab(2)), false);
+            let silhouette = sprites
+                .iter()
+                .find(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. }))
+                .unwrap_or_else(|| panic!("scale {scale}: no active silhouette"));
+            let fill = sprites
+                .iter()
+                .find(|sprite| matches!(sprite.mark, ChromeMark::TabBody { .. }))
+                .unwrap_or_else(|| panic!("scale {scale}: the hovered tab paints no fill"));
+
+            assert_eq!(
+                fill.mark,
+                ChromeMark::TabBody {
+                    radius_px: radius as u32
+                },
+                "scale {scale}: an unrelated hover is still `border-radius: 7px 7px 0 0`"
+            );
+            assert_eq!(
+                fill.rect, geometry.tabs[2].body,
+                "scale {scale}: and still exactly its own box"
+            );
+            assert_eq!(
+                fill.color, palette.caption_hover,
+                "scale {scale}: and still `--hover`"
+            );
+            assert_eq!(
+                silhouette.rect[0], 0.0,
+                "scale {scale}: the first tab's skirt still lands on the window edge"
+            );
+            assert!(
+                !overlaps(fill.rect, silhouette.rect),
+                "scale {scale}: a tab two places along touches no skirt, so there is \
+                 nothing here for paint order to decide"
+            );
+        }
     }
 
     /// PIN (`+` fidelity) — the new-tab button has **no fill at rest** and a
