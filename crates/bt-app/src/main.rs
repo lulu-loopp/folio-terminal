@@ -15,7 +15,9 @@ mod input;
 mod marks;
 mod persist;
 mod profiles;
+mod restore;
 mod seats;
+mod seed;
 mod settings;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -23,8 +25,8 @@ use bt_doc::{Bias, LayoutKey};
 use bt_layout::{Axis, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
-    SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionThemeV1, SessionV1, TabV1, ThemeModeV1,
-    WindowBoundsV1, WindowStateV1,
+    LayoutNodeV1, LeafNodeV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionThemeV1,
+    SessionV1, TabV1, TermLeafV1, ThemeModeV1, WindowBoundsV1, WindowStateV1,
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
@@ -32,10 +34,11 @@ use bt_render::{
     LatestFrameSlot, MathHit, MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay,
     Preedit, PresentOutcome, PreviewImage, Renderer, SeatViewport, Theme, ThemeChange,
     WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
-    WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_RING_INDETERMINATE_TURNS,
-    WINDOW_TAB_RING_SPIN_PERIOD_MS, WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb,
-    compose_preedit, current_cursor_style, foreground_rgb, frame_content_digest,
-    frame_is_alternate_screen, preview_image_extent, set_cursor_style, set_theme, theme_revision,
+    WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_REVEAL_MS,
+    WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
+    WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, compose_preedit, current_cursor_style,
+    foreground_rgb, frame_content_digest, frame_is_alternate_screen, preview_image_extent,
+    set_cursor_style, set_theme, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
@@ -469,6 +472,17 @@ struct TabState {
     id: TabId,
     pty: Option<PtySession>,
     session: DualPlaneSession,
+    /// Which of [`profiles::PROFILES`] started this tab — the stable half of its
+    /// seed, kept so a closed tab can be reopened as the same *kind* of shell
+    /// rather than whatever the default happens to be that day.
+    profile: usize,
+    /// "Bring this one back next time."
+    ///
+    /// It is an answer, not a decoration, and that is why launch does not ask
+    /// about a pinned tab: you already told it (mock-up 7426-7431). Three things
+    /// follow from the flag and the mock-up insists on all three — the tab leads
+    /// the strip, it has no `×`, and only then does it wear a solid pin.
+    pinned: bool,
     /// The name the user typed for this tab, overriding every layer under it.
     ///
     /// "`name` is an OVERRIDE, not a field, and that single fact designs the
@@ -497,6 +511,12 @@ struct TabState {
     /// The sweep the ring is displaying, which is also what a state change
     /// arriving without a percentage keeps.
     ring_sweep: Option<u16>,
+    /// The pin's hover reveal. A pinned tab holds it open at 1.0; an unpinned
+    /// one opens it while the pointer is on the tab and closes it after.
+    pin_reveal: RevealTween,
+    /// The reveal the strip was last told to draw, quantised — the pin's half of
+    /// the frame debt.
+    last_drawn_pin_reveal: Option<u8>,
     /// The mark state the strip was last told to draw for this tab.
     ///
     /// The scheduler's own record, and the whole of how it notices that a
@@ -638,6 +658,28 @@ struct Runtime {
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
     session_store: persist::SessionStore,
+    /// The one store that pin, Recent and undo-close all draw from — kept beside
+    /// the tabs rather than inside the session file's mirror so the three doors
+    /// read live state, not the last thing that happened to be flushed.
+    recent: seed::SeedVault,
+    /// Tabs from the last session that were **not** pinned, waiting on the
+    /// restore prompt's question. Empty once it has been answered.
+    ///
+    /// It has to outlive the prompt because closing the window with the question
+    /// still open must put these back where they came from (§7.1.4: "restore 提示
+    /// 未答复时再关窗：未答复计划并回 lastSession，不得丢失") — an unanswered
+    /// question is not a "no".
+    pending_restore: Vec<TabV1>,
+    /// Whether the "Reopen your other tabs?" question is on screen.
+    restore_prompt: restore::RestorePrompt,
+    /// The stand-in shell launch opened because nothing was pinned — "a stand-in
+    /// for an answer we do not have yet" (mock-up 7464).
+    ///
+    /// It is removed if the restore prompt is accepted while it is still
+    /// untouched (§7.1.4: "restore 接受后占位（未被使用时）移除"). The moment you
+    /// type into it, it stops being scaffolding and becomes a tab you are using,
+    /// so the first keystroke forgets it here and it is never taken away.
+    placeholder_tab: Option<TabId>,
     /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
     /// colors are locked but this mode is still kept across a diagnostic launch.
     theme_mode: ThemeModeV1,
@@ -695,6 +737,40 @@ impl TabState {
             self.session.window_title(),
             self.session.working_directory(),
         )
+    }
+
+    /// What survives this tab being closed.
+    ///
+    /// One computation, because there are three doors and they must not disagree
+    /// about what a tab *is*: the vault, the session file and the restore prompt
+    /// all read this. The `cwd` is the shell's own last OSC 7 report and nothing
+    /// else — not a guess, not a filesystem probe. A shell that never reported
+    /// one seeds an empty place, and reviving that starts where a fresh tab
+    /// would, which is the honest answer to "where was it?" when nobody said.
+    ///
+    /// The program's title is deliberately *not* in here (mock-up 4009-4010):
+    /// it left with the program. Your name for the tab did not.
+    fn term_leaf(&self) -> TermLeafV1 {
+        TermLeafV1 {
+            profile_id: profiles::PROFILES[self.profile].id.to_owned(),
+            cwd: self
+                .session
+                .working_directory()
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            manual_name: self.manual_name.clone(),
+        }
+    }
+
+    /// The same three facts in the vault's spelling. A tab always seeds as a
+    /// terminal; the `Files` shape exists for panes the vault also has to hold.
+    fn seed(&self) -> seed::Seed {
+        let leaf = self.term_leaf();
+        seed::Seed::Term {
+            profile_id: leaf.profile_id,
+            cwd: leaf.cwd,
+            manual_name: leaf.manual_name,
+        }
     }
 }
 
@@ -2078,7 +2154,70 @@ impl SweepTween {
     }
 }
 
+/// The pin's zero-width expansion: `width 0 -> 17px` and `margin-left -8 -> 0`
+/// as one continuous layout change (mock-up 334-349).
+///
+/// It is a *reveal*, not a fade, and the difference is the whole reason the
+/// mock-up animates width at all: the hidden control takes no room, so the badge
+/// beside it docks against the `×` with no dead gap, and hovering widens the
+/// control in while the badge slides aside. A fade would have to reserve the
+/// room permanently and every unhovered tab would carry a hole.
+#[derive(Clone, Copy, Debug, Default)]
+struct RevealTween {
+    from: f32,
+    to: f32,
+    started: Option<Instant>,
+}
+
+impl RevealTween {
+    /// Aim at `target`, keeping whatever the current position is as the new
+    /// start so a reversal mid-flight turns around from where it actually is
+    /// rather than snapping to an end it never reached.
+    fn retarget(&mut self, target: f32, now: Instant, motion: Motion) {
+        if self.to == target {
+            return;
+        }
+        let (current, _) = self.sample(now, motion);
+        *self = Self {
+            from: current,
+            to: target,
+            // `prefers-reduced-motion` kills this transition outright (mock-up
+            // 359-361), so under Reduced the control is simply *there* or not.
+            // Unlike the progress arc, whose motion carries a reading, this one
+            // carries nothing but polish.
+            started: (motion == Motion::Full).then_some(now),
+        };
+    }
+
+    /// Where the reveal is now, and whether it is still moving.
+    fn sample(self, now: Instant, motion: Motion) -> (f32, bool) {
+        let Some(started) = self.started.filter(|_| motion == Motion::Full) else {
+            return (self.to, false);
+        };
+        let duration = Duration::from_millis(WINDOW_TAB_PIN_REVEAL_MS);
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= duration {
+            return (self.to, false);
+        }
+        let progress = elapsed.as_secs_f32() / duration.as_secs_f32();
+        let eased = cubic_bezier(progress, EASE);
+        (self.from + (self.to - self.from) * eased, true)
+    }
+}
+
 impl TabState {
+    /// The reveal as the strip would draw it: quantised to the 1/255 the
+    /// sprite's opacity resolves to, which is the finest difference that can
+    /// reach the screen.
+    fn drawn_pin_reveal(&self, now: Instant, motion: Motion) -> u8 {
+        let (reveal, _) = self.pin_reveal.sample(now, motion);
+        (reveal.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
+    fn pin_is_animating(&self, now: Instant, motion: Motion) -> bool {
+        self.pin_reveal.sample(now, motion).1
+    }
+
     /// The facts this tab's session is reporting right now.
     fn session_facts(&self, tab_is_active: bool) -> SessionFacts {
         SessionFacts {
@@ -2300,6 +2439,151 @@ fn tab_close_action(tab_count: usize, active_tab: usize, closing: usize) -> TabC
     TabCloseAction::Keep { active_tab }
 }
 
+/// How launch divides the last session: what opens now, and what it has to ask
+/// about.
+///
+/// "Launch asks about exactly one thing, and it is not the pinned tabs.
+/// **Pinning IS the answer**" (mock-up 7426-7431). §8.0 at the UI layer: do not
+/// ask what you already know; ask only what you do not.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct LaunchPlan {
+    /// Revived before the window is usable, in this order.
+    open: Vec<TabV1>,
+    /// The restore prompt's question. Empty means no prompt at all.
+    ask: Vec<TabV1>,
+    /// Which entry of `open` was the tab you were last on, when that tab is one
+    /// of the ones coming back now. `None` leaves the choice to the first tab —
+    /// restoring must not steal the seat from a pinned tab that is already up.
+    active_open: Option<usize>,
+    /// Whether the window needs a placeholder shell because nothing was pinned.
+    /// §7.1.4: "无 pinned 可恢复时以默认 profile 的占位 shell 起步, restore 接受后
+    /// 占位（未被使用时）移除".
+    placeholder: bool,
+}
+
+fn plan_launch(saved: &[TabV1], active: usize) -> LaunchPlan {
+    let mut open = Vec::new();
+    let mut ask = Vec::new();
+    let mut active_open = None;
+    for (index, tab) in saved.iter().enumerate() {
+        if tab.pinned {
+            if index == active {
+                active_open = Some(open.len());
+            }
+            open.push(tab.clone());
+        } else {
+            ask.push(tab.clone());
+        }
+    }
+    // The one-tab boundary, ruled here rather than left to the prompt: when
+    // nothing was pinned and exactly one tab was open, "Reopen your **other**
+    // tabs?" has no other tabs to name, and declining would hand back a fresh
+    // shell in the wrong folder — a strictly worse version of the same single
+    // tab. There is no question to ask, so we do not ask one.
+    if open.is_empty() && ask.len() == 1 {
+        return LaunchPlan {
+            open: ask,
+            ask: Vec::new(),
+            active_open: Some(0),
+            placeholder: false,
+        };
+    }
+    LaunchPlan {
+        placeholder: open.is_empty(),
+        open,
+        ask,
+        active_open,
+    }
+}
+
+/// The seed a persisted tab comes back as: its tree, the three facts it was
+/// started from, and the folder to stand its new shell in.
+///
+/// One function, because a pinned tab at launch, a Restore, a Recent row and
+/// Ctrl+Shift+T must all produce the *same* tab from the same bytes — "if this
+/// had its own revive path the three would drift, and the one that drifts is
+/// always the one you use least" (mock-up 7347-7350).
+fn revive_plan(tab: &TabV1) -> (seats::Seats, TabSeed, Option<PathBuf>) {
+    let mut seats =
+        seats::Seats::from_persisted(&tab.root).unwrap_or_else(seats::Seats::lone_terminal);
+    seats.restore_focus_token(&tab.focused_leaf);
+    let leaf = first_term_leaf(&tab.root);
+    let seed = TabSeed {
+        profile: leaf
+            .map(|leaf| profiles::index_of_id(&leaf.profile_id))
+            .unwrap_or(profiles::DEFAULT_PROFILE),
+        manual_name: leaf.and_then(|leaf| leaf.manual_name.clone()),
+        pinned: tab.pinned,
+    };
+    // An empty `cwd` is a shell that never reported one, not a path to the root
+    // of the drive — hand over nothing and let the new shell start where a fresh
+    // one would. Whether the folder still exists is a filesystem question, and
+    // the answer to a missing one is the same as the answer to none: HOME.
+    let cwd = leaf
+        .map(|leaf| leaf.cwd.as_str())
+        .filter(|cwd| !cwd.is_empty())
+        .map(PathBuf::from)
+        .filter(|cwd| cwd.is_dir());
+    (seats, seed, cwd)
+}
+
+/// How many panes a persisted tab held — the number its badge would show.
+fn persisted_pane_count(node: &LayoutNodeV1) -> usize {
+    match node {
+        LayoutNodeV1::Leaf(_) => 1,
+        LayoutNodeV1::Split(split) => split.children.iter().map(|c| persisted_pane_count(c)).sum(),
+    }
+}
+
+/// The first terminal leaf of a persisted tree, in the order the tree is drawn.
+/// A tab's identity is the terminal it holds; a files-only tab has none, and
+/// seeds as a default shell rather than refusing to come back at all.
+fn first_term_leaf(node: &LayoutNodeV1) -> Option<&TermLeafV1> {
+    match node {
+        LayoutNodeV1::Leaf(LeafNodeV1::Term(leaf)) => Some(leaf),
+        LayoutNodeV1::Leaf(_) => None,
+        LayoutNodeV1::Split(split) => split
+            .children
+            .iter()
+            .find_map(|child| first_term_leaf(child)),
+    }
+}
+
+/// What a tab is *started from* — the three facts a [`seed::Seed`] carries, plus
+/// whether the tab arrives already pinned.
+///
+/// Every door into the tab machinery goes through this: a fresh `+`, a profile
+/// row, a Recent entry, an undo-close and a pinned tab revived at launch all
+/// hand over the same shape. That is the whole point of "one vault, three doors"
+/// expressed in the type system — a door that could not say where its tab stood
+/// would be a door that opened somewhere else.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct TabSeed {
+    /// Index into [`profiles::PROFILES`].
+    profile: usize,
+    /// The user's name for the tab, if it had one. It survives a close because
+    /// it is the one layer of the name nobody else can regenerate.
+    manual_name: Option<String>,
+    pinned: bool,
+}
+
+impl TabSeed {
+    /// A tab the user is starting now: the profile they picked, no name yet, and
+    /// not pinned — pinning is a promise about *next* launch and nobody has made
+    /// it yet.
+    fn of_profile(profile: usize) -> Self {
+        Self {
+            profile,
+            ..Self::default()
+        }
+    }
+}
+
+// Eight, and every one of them is a different question the answer to which
+// cannot be derived from the others: identity, shape, the two rendering
+// facts, the wake channel, the probe bytes, the place, and the seed. Bundling
+// them into a struct would move the argument list rather than shorten it.
+#[allow(clippy::too_many_arguments)]
 fn create_tab_state(
     id: TabId,
     seats: seats::Seats,
@@ -2308,6 +2592,7 @@ fn create_tab_state(
     wake: OutputWake,
     probe_input: Option<&[u8]>,
     working_directory: Option<PathBuf>,
+    seed: TabSeed,
 ) -> Result<(TabState, String)> {
     let (seat_layout, terminal_seat) = solve_seats(&seats, renderer, render_physical);
     let grid = renderer
@@ -2367,7 +2652,9 @@ fn create_tab_state(
             id,
             pty,
             session,
-            manual_name: None,
+            profile: seed.profile,
+            pinned: seed.pinned,
+            manual_name: seed.manual_name,
             shell_fallback_notice,
             projection,
             grid,
@@ -2376,6 +2663,14 @@ fn create_tab_state(
             pending_pty_resize: None,
             pending_psreadline_resize_reanchor: false,
             last_seen_revision: 0,
+            // A tab that arrives pinned wears its pin from the first frame; it
+            // is a fact about the tab, not an offer that has to be hovered out.
+            pin_reveal: RevealTween {
+                from: f32::from(u8::from(seed.pinned)),
+                to: f32::from(u8::from(seed.pinned)),
+                started: None,
+            },
+            last_drawn_pin_reveal: None,
             ring_tween: None,
             ring_sweep: None,
             last_drawn_mark: None,
@@ -2516,25 +2811,22 @@ impl Runtime {
             let _ = pty_proxy.send_event(AppEvent::PtyOutput);
         });
         let phase_started = Instant::now();
-        let restored_roots: Vec<_> =
-            if probe_input.is_some() || session_store.loaded().tabs.is_empty() {
-                vec![seats::Seats::lone_terminal()]
-            } else {
-                session_store
-                    .loaded()
-                    .tabs
-                    .iter()
-                    .map(|tab| {
-                        let mut seats = seats::Seats::from_persisted(&tab.root)
-                            .unwrap_or_else(seats::Seats::lone_terminal);
-                        seats.restore_focus_token(&tab.focused_leaf);
-                        seats
-                    })
-                    .collect()
-            };
+        // Pinned tabs are an answer already given, so they simply open; the rest
+        // become a question the prompt will ask over a window that already works.
+        let plan = if probe_input.is_some() {
+            LaunchPlan::default()
+        } else {
+            let loaded = session_store.loaded();
+            plan_launch(&loaded.tabs, loaded.active_tab as usize)
+        };
+        let restored_roots: Vec<_> = if plan.open.is_empty() {
+            vec![(seats::Seats::lone_terminal(), TabSeed::default(), None)]
+        } else {
+            plan.open.iter().map(revive_plan).collect()
+        };
         let mut tabs = Vec::with_capacity(restored_roots.len());
         let mut conpty_sources = Vec::with_capacity(restored_roots.len());
-        for (index, seats) in restored_roots.into_iter().enumerate() {
+        for (index, (seats, seed, working_directory)) in restored_roots.into_iter().enumerate() {
             let (tab, conpty_source) = create_tab_state(
                 TabId(index as u64 + 1),
                 seats,
@@ -2546,19 +2838,24 @@ impl Runtime {
                 } else {
                     None
                 },
-                // A restored tab has no tab to inherit from: the session it is
-                // being rebuilt from is the authority on where it stood, and
-                // carrying that through is the restore ticket's business.
-                None,
+                // A revived tab stands where its seed says, not where some other
+                // tab happens to be — that address IS what a seed is for.
+                working_directory,
+                seed,
             )?;
             tabs.push(tab);
             conpty_sources.push(conpty_source);
         }
-        let active_tab = if probe_input.is_some() {
-            0
-        } else {
-            (session_store.loaded().active_tab as usize).min(tabs.len() - 1)
-        };
+        // The tab you were on comes back on top, if it was one of the ones that
+        // came back. A placeholder shell is index 0 either way.
+        let active_tab = plan.active_open.unwrap_or(0).min(tabs.len() - 1);
+        let recent = seed::SeedVault::from_persisted(&session_store.loaded().recent);
+        let pending_restore = plan.ask.clone();
+        let has_question = !pending_restore.is_empty();
+        // Only a shell we opened *because we had no answer* is scaffolding. A
+        // lone restored tab is a tab, and must never be swept away by a later
+        // Restore.
+        let placeholder_tab = plan.placeholder.then(|| tabs[0].id);
         let (_, terminal_seat) = solve_seats(&tabs[active_tab].seats, &renderer, render_physical);
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
@@ -2628,6 +2925,20 @@ impl Runtime {
             divider_drag: None,
             work_area: WorkAreaHint::NeverKnown,
             session_store,
+            recent,
+            pending_restore,
+            // "It opens BEFORE it asks — like a browser, which lands you on
+            // your pages and puts 'restore?' on top of a window that already
+            // works" (mock-up 7435-7439). The window is built by the time this
+            // runs, so the question arrives over something usable.
+            restore_prompt: {
+                let mut prompt = restore::RestorePrompt::default();
+                if has_question {
+                    prompt.open();
+                }
+                prompt
+            },
+            placeholder_tab,
             theme_mode,
             window_min_inner_size: None,
         };
@@ -2719,6 +3030,7 @@ impl Runtime {
             wake,
             None,
             inherited,
+            TabSeed::of_profile(profile),
         )?;
         self.tabs.push(tab);
         self.apply_window_min_inner_size();
@@ -2794,6 +3106,153 @@ impl Runtime {
         })
     }
 
+    /// Pin or unpin, and put the strip back in order.
+    ///
+    /// Everything that changes a pin comes through here, so the "pinned lead"
+    /// invariant has one enforcer instead of one per caller (mock-up 4066-4073).
+    /// The active tab is followed by identity across the reorder: it is stored as
+    /// a position, and a position means a different tab after a sort.
+    fn toggle_pin(&mut self, index: usize) -> Result<()> {
+        if index >= self.tabs.len() {
+            return Ok(());
+        }
+        self.tabs[index].pinned = !self.tabs[index].pinned;
+        let active = self.tabs[self.active_tab].id;
+        seed::normalize_pins(&mut self.tabs, |tab| tab.pinned);
+        self.active_tab = self
+            .tabs
+            .iter()
+            .position(|tab| tab.id == active)
+            .unwrap_or(self.active_tab.min(self.tabs.len() - 1));
+        self.reveal_tab(self.active_tab);
+        self.refresh_chrome();
+        self.mark_session_dirty(Instant::now());
+        self.present_chrome_change()
+    }
+
+    /// Open a Recent entry as a new tab — the door Recent and Ctrl+Shift+T share.
+    ///
+    /// Index 0 is "the one I just closed", which is the whole of what undo-close
+    /// is: not a separate store, just the front of this one.
+    fn reopen_recent(&mut self, index: usize) -> Result<()> {
+        let Some(seed) = self.recent.take(index) else {
+            return Ok(());
+        };
+        let seed::Seed::Term {
+            profile_id,
+            cwd,
+            manual_name,
+        } = seed
+        else {
+            // A files place has no shell to start; the pane that would host it
+            // is T5's, and until then such an entry cannot be written either.
+            return Ok(());
+        };
+        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        let proxy = self.event_proxy.clone();
+        let wake: OutputWake = Arc::new(move || {
+            let _ = proxy.send_event(AppEvent::PtyOutput);
+        });
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+        let working_directory = Some(PathBuf::from(&cwd)).filter(|cwd| cwd.is_dir());
+        let (tab, _) = create_tab_state(
+            id,
+            seats::Seats::lone_terminal(),
+            &self.renderer,
+            render_physical,
+            wake,
+            None,
+            working_directory,
+            TabSeed {
+                profile: profiles::index_of_id(&profile_id),
+                manual_name,
+                // A reopened tab is not pinned: it is coming back because you
+                // asked for it now, which is not the same as promising to bring
+                // it back every time.
+                pinned: false,
+            },
+        )?;
+        // Appended, which keeps the pinned run intact without a re-sort: a new
+        // unpinned tab belongs at the end by construction.
+        self.tabs.push(tab);
+        self.apply_window_min_inner_size();
+        self.activate_tab(self.tabs.len() - 1, true)
+    }
+
+    /// Answer the restore prompt.
+    ///
+    /// Restoring **appends** — the pinned tabs are already standing and are not
+    /// up for discussion (mock-up 7492-7496). Declining keeps whatever you are
+    /// looking at, which is why the button says "No thanks" rather than "Start
+    /// fresh": fresh is already on the screen.
+    ///
+    /// Declining is not discarding. The tabs you did not take back go into the
+    /// vault, so the door you did not walk through is still there — Ctrl+Shift+T
+    /// and the Recent list can both still reach them. Nothing a user had open is
+    /// ever dropped on the floor by a single click.
+    fn answer_restore(&mut self, restore: bool) -> Result<()> {
+        let pending = std::mem::take(&mut self.pending_restore);
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if !restore {
+            let now = SystemTime::now();
+            for tab in &pending {
+                if let Some(leaf) = first_term_leaf(&tab.root) {
+                    self.recent.record(
+                        seed::Seed::Term {
+                            profile_id: leaf.profile_id.clone(),
+                            cwd: leaf.cwd.clone(),
+                            manual_name: leaf.manual_name.clone(),
+                        },
+                        now,
+                    );
+                }
+            }
+            self.mark_session_dirty(Instant::now());
+            return Ok(());
+        }
+        let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
+        // The placeholder existed only because we had no answer; now we do. It
+        // goes only if it is untouched — a shell you have already typed into is
+        // yours, not scaffolding.
+        let placeholder = self.placeholder_tab.take();
+        let first_revived = self.tabs.len();
+        for tab in &pending {
+            let (seats, seed, working_directory) = revive_plan(tab);
+            let proxy = self.event_proxy.clone();
+            let wake: OutputWake = Arc::new(move || {
+                let _ = proxy.send_event(AppEvent::PtyOutput);
+            });
+            let id = TabId(self.next_tab_id);
+            self.next_tab_id += 1;
+            let (revived, _) = create_tab_state(
+                id,
+                seats,
+                &self.renderer,
+                render_physical,
+                wake,
+                None,
+                working_directory,
+                seed,
+            )?;
+            self.tabs.push(revived);
+        }
+        if let Some(placeholder) = placeholder
+            && self.tabs.len() > 1
+            && let Some(index) = self.tabs.iter().position(|tab| tab.id == placeholder)
+        {
+            let mut removed = self.tabs.remove(index);
+            if let Some(pty) = removed.pty.as_mut() {
+                pty.shutdown().context("shut down the placeholder shell")?;
+            }
+        }
+        self.apply_window_min_inner_size();
+        let landing = first_revived.saturating_sub(usize::from(placeholder.is_some()));
+        self.activate_tab(landing.min(self.tabs.len() - 1), true)
+    }
+
     fn close_tab(&mut self, index: usize) -> Result<()> {
         if index >= self.tabs.len() {
             return Ok(());
@@ -2807,6 +3266,11 @@ impl Runtime {
             }
             TabCloseAction::Keep { active_tab } => {
                 let was_active = index == self.active_tab;
+                // The one regular write path into the vault: closing is what
+                // fills Recent (mock-up 3929). It happens before the tab is
+                // taken apart, because the seed is read off the live session.
+                self.recent
+                    .record(self.tabs[index].seed(), SystemTime::now());
                 let mut removed = self.tabs.remove(index);
                 if let Some(pty) = removed.pty.as_mut() {
                     pty.shutdown()
@@ -2874,13 +3338,17 @@ impl Runtime {
                     tab.display_title(),
                     pane_count,
                     tab.mark_state(index == self.active_tab, now, self.motion, &palette),
+                    seats::TabTrailer {
+                        pinned: tab.pinned,
+                        reveal: tab.pin_reveal.sample(now, self.motion).0,
+                    },
                 )
             })
             .collect::<Vec<_>>();
         let badge_font_px = bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale;
         let tabs = tabs
             .into_iter()
-            .map(|(title, pane_count, mark)| seats::TabContent {
+            .map(|(title, pane_count, mark, trailer)| seats::TabContent {
                 badge_text_width: if pane_count > 1 {
                     self.renderer
                         .measure_chrome_text(&pane_count.to_string(), badge_font_px)
@@ -2890,6 +3358,7 @@ impl Runtime {
                 title,
                 pane_count,
                 mark,
+                trailer,
             })
             .collect::<Vec<_>>();
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
@@ -2935,12 +3404,84 @@ impl Runtime {
         let anchor = seats::tab_strip_geometry(
             width as f32,
             scale,
-            self.tabs.len(),
+            &self.tab_trailers(Instant::now()),
             self.active_tab,
             self.tab_scroll,
         )
         .new_tab_menu;
-        Some(profiles::layout(anchor, width as f32, scale))
+        Some(profiles::layout(
+            anchor,
+            width as f32,
+            scale,
+            self.recent.entries(),
+        ))
+    }
+
+    /// The restore prompt's placement, or `None` when it is not asking.
+    ///
+    /// Every string it draws has to be measured with the real font before the
+    /// box that holds them can be sized, which is why the content is built here,
+    /// where the renderer is, and handed to a module that knows only numbers.
+    fn restore_layout(&mut self) -> Option<restore::RestoreLayout> {
+        if !self.restore_prompt.is_open() || self.pending_restore.is_empty() {
+            return None;
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        let rows = self
+            .pending_restore
+            .iter()
+            .map(|tab| {
+                let seed = first_term_leaf(&tab.root).map_or(
+                    seed::Seed::Files {
+                        root: String::new(),
+                    },
+                    |leaf| seed::Seed::Term {
+                        profile_id: leaf.profile_id.clone(),
+                        cwd: leaf.cwd.clone(),
+                        manual_name: leaf.manual_name.clone(),
+                    },
+                );
+                let mut row =
+                    restore::RestoreRow::from_seed(&seed, persisted_pane_count(&tab.root));
+                row.label_text_width = measure(&row.label, restore::ROW_FONT_LOGICAL_PX * scale);
+                row.cwd_text_width = measure(&row.cwd, restore::ROW_CWD_FONT_LOGICAL_PX * scale);
+                row.badge_text_width = row.badge_text().map_or(0.0, |text| {
+                    measure(&text, bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale)
+                });
+                row
+            })
+            .collect();
+        let content = restore::RestoreContent {
+            rows,
+            sub_lines: restore::wrap(
+                restore::SUB_TEXT,
+                restore::content_width(width, scale),
+                |text| measure(text, restore::SUB_FONT_LOGICAL_PX * scale),
+            ),
+            decline_text_width: measure(
+                restore::DECLINE_TEXT,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+            restore_text_width: measure(
+                restore::RESTORE_TEXT,
+                restore::BUTTON_FONT_LOGICAL_PX * scale,
+            ),
+        };
+        Some(restore::layout(&content, width, height, scale))
+    }
+
+    /// Answer the prompt and put it away.
+    fn answer_restore_prompt(&mut self, answer: restore::RestoreAnswer) -> Result<()> {
+        self.restore_prompt.close();
+        self.answer_restore(answer == restore::RestoreAnswer::Restore)?;
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// The settings dialog's placement in the window as it is now, or `None`
@@ -2972,8 +3513,18 @@ impl Runtime {
     fn refresh_overlay(&mut self) -> bool {
         let layers = if let Some(layout) = self.settings_layout() {
             settings::build(&layout, self.settings.hover(), self.theme_mode)
+        } else if let Some(layout) = self.restore_layout() {
+            // Above the strip but under no scrim: the prompt floats over a
+            // window that already works, which is the whole reason it is
+            // allowed to exist (mock-up 2219-2221).
+            restore::build(&layout, self.restore_prompt.hover())
         } else if let Some(layout) = self.profile_menu_layout() {
-            profiles::build(&layout, self.profile_menu.hover())
+            profiles::build(
+                &layout,
+                self.profile_menu.hover(),
+                self.recent.entries(),
+                SystemTime::now(),
+            )
         } else {
             Vec::new()
         };
@@ -3149,14 +3700,28 @@ impl Runtime {
             .tabs
             .iter()
             .map(|tab| TabV1 {
-                root: tab.seats.to_persisted(),
-                pinned: false,
+                root: tab.seats.to_persisted(&tab.term_leaf()),
+                pinned: tab.pinned,
                 // Positional rather than a stable id: the in-order index is a function of the
                 // same tree shape the file carries, so it cannot point outside that tree.
                 focused_leaf: format!("leaf-{}", focus_leaf_index(&tab.seats)),
             })
             .collect();
         session.active_tab = self.active_tab as u32;
+        // A question that was never answered is not a "no". Tabs still waiting on
+        // the restore prompt go back to the file exactly as they came out of it,
+        // so closing the window mid-question asks again next time rather than
+        // deciding on the user's behalf (§7.1.4: "未答复计划并回 lastSession,
+        // 不得丢失"). They are appended unpinned, which is what they were.
+        session
+            .tabs
+            .extend(self.pending_restore.iter().map(|tab| TabV1 {
+                pinned: false,
+                ..tab.clone()
+            }));
+        // The vault is app state while the window is up and file state the moment
+        // it is not; this is the one place the two meet.
+        session.recent = self.recent.to_persisted();
         session
     }
 
@@ -3949,6 +4514,7 @@ impl Runtime {
         }
         let motion = self.motion;
         let palette = bt_render::chrome_palette();
+        let hovered = self.hovered_tab();
         let mut owes_frame = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             // A new progress reading starts the arc easing toward it. This runs
@@ -3956,6 +4522,23 @@ impl Runtime {
             // keep reporting, and its tab is exactly the one the user cannot
             // otherwise see.
             tab.sync_ring(now);
+            // A pinned tab holds its pin open; an unpinned one offers it only
+            // while you are on the tab (mock-up 324, 347-349).
+            tab.pin_reveal.retarget(
+                f32::from(u8::from(tab.pinned || hovered == Some(index))),
+                now,
+                motion,
+            );
+            // The reveal has to be *compared*, not merely sampled: `tab_owes_frame`
+            // asks what would be drawn against what was drawn, and a width that
+            // nothing compares would animate without ever scheduling a present.
+            // Quantised to the 1/255 the sprite's own opacity resolves to, so a
+            // tween settling in the last thousandth does not owe a frame forever.
+            let drawn = tab.drawn_pin_reveal(now, motion);
+            if tab.last_drawn_pin_reveal != Some(drawn) {
+                tab.last_drawn_pin_reveal = Some(drawn);
+                owes_frame = true;
+            }
             let showing = tab.mark_state(index == active, now, motion, &palette);
             if tab_owes_frame(tab.last_drawn_mark, showing) {
                 tab.last_drawn_mark = Some(showing);
@@ -3990,8 +4573,39 @@ impl Runtime {
         let motion = self.motion;
         self.tabs
             .iter()
-            .any(|tab| tab.mark_is_animating(now, motion))
+            .any(|tab| tab.mark_is_animating(now, motion) || tab.pin_is_animating(now, motion))
             .then(|| now + STRIP_ANIMATION_FRAME)
+    }
+
+    /// What every tab hangs off its trailing end, in strip order.
+    ///
+    /// The clock is read once, here, so the whole strip lays out against a single
+    /// instant — sampling per tab would let two tabs in the same frame disagree
+    /// about what time it is, and a reveal is a function of time.
+    fn tab_trailers(&self, now: Instant) -> Vec<seats::TabTrailer> {
+        let motion = self.motion;
+        self.tabs
+            .iter()
+            .map(|tab| seats::TabTrailer {
+                pinned: tab.pinned,
+                reveal: tab.pin_reveal.sample(now, motion).0,
+            })
+            .collect()
+    }
+
+    /// Which tab the pointer is on. Every trailing control belongs to its tab,
+    /// so hovering the `×` or the pin is still hovering the tab — the mock-up's
+    /// `.tab:hover .pin` is a descendant rule and holds the pin open while the
+    /// pointer is anywhere inside.
+    fn hovered_tab(&self) -> Option<usize> {
+        match self.seat_pointer.hover {
+            Some(
+                seats::ChromeTarget::Tab(index)
+                | seats::ChromeTarget::TabClose(index)
+                | seats::ChromeTarget::TabPin(index),
+            ) => Some(index),
+            _ => None,
+        }
     }
 
     fn finish_resize_if_quiescent(&mut self, now: Instant) -> Result<()> {
@@ -4625,6 +5239,11 @@ impl Runtime {
         kind: UserInputKind,
     ) -> Result<()> {
         let view_changed = kind.returns_view_to_live() && self.return_to_live_for_input();
+        // Typing into the stand-in shell is what makes it yours. From here on a
+        // Restore appends beside it instead of clearing it away underneath you.
+        if self.placeholder_tab == Some(self.tabs[self.active_tab].id) {
+            self.placeholder_tab = None;
+        }
         self.pending_keyboard_at = Some(Instant::now());
         if let Some(pty) = self.pty.as_mut() {
             pty.write(bytes).with_context(|| context)?;
@@ -4791,6 +5410,21 @@ impl Runtime {
             }
             return Ok(());
         }
+        // The prompt is not modal either. Over its own box the buttons light up;
+        // everywhere else the window carries on, because the terminal behind it
+        // is still yours to use while the question stands.
+        if let Some(layout) = self.restore_layout() {
+            let over = restore::hit(&layout, position.x, position.y);
+            if over.is_some() {
+                if self.restore_prompt.set_hover(over) && self.refresh_overlay() {
+                    self.present_chrome_change()?;
+                }
+                return Ok(());
+            }
+            if self.restore_prompt.set_hover(None) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+        }
         // The picker is not modal, so it takes the pointer only where it is: over
         // its own box the rows answer, and everywhere else the window carries on.
         if let Some(layout) = self.profile_menu_layout() {
@@ -4930,7 +5564,7 @@ impl Runtime {
         seats::hit_tab_chrome(
             width,
             scale,
-            self.tabs.len(),
+            &self.tab_trailers(Instant::now()),
             self.active_tab,
             self.tab_scroll,
             position.x,
@@ -5093,6 +5727,9 @@ impl Runtime {
             seats::ChromeTarget::PaneHeader(_) => {}
             seats::ChromeTarget::Tab(index) => self.activate_tab(index, false)?,
             seats::ChromeTarget::TabClose(index) => self.close_tab(index)?,
+            // F61 — the pin stands in the `×`'s slot, so unpinning is exactly
+            // where you already are.
+            seats::ChromeTarget::TabPin(index) => self.toggle_pin(index)?,
             seats::ChromeTarget::NewTab => self.new_tab()?,
             seats::ChromeTarget::NewTabMenu => self.toggle_profile_menu()?,
             seats::ChromeTarget::Settings => self.toggle_settings_panel()?,
@@ -5117,6 +5754,20 @@ impl Runtime {
         if let (Some(layout), Some(position)) = (self.settings_layout(), self.pointer_position) {
             return self.settings_mouse_input(&layout, state, button, position);
         }
+        // The prompt takes the press only where it is drawn — it is a prompt over
+        // a working app, not a gate in front of one, so a press anywhere else is
+        // still the press it always was and reaches the terminal underneath.
+        if let (Some(position), Some(layout)) = (self.pointer_position, self.restore_layout())
+            && let Some(target) = restore::hit(&layout, position.x, position.y)
+        {
+            if state == ElementState::Pressed
+                && button == MouseButton::Left
+                && let Some(answer) = restore::answer(target)
+            {
+                self.answer_restore_prompt(answer)?;
+            }
+            return Ok(());
+        }
         // The picker takes the press only where it is drawn. A press on a row
         // starts that profile's tab; a press on the menu's own padding is the
         // menu's and does nothing; a press anywhere else puts it away and then
@@ -5127,8 +5778,18 @@ impl Runtime {
                 Some(row) => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         self.close_profile_menu()?;
-                        if let Some(index) = row {
-                            self.new_tab_with_profile(index)?;
+                        // The row says which door it is. An untagged index here
+                        // would have started PowerShell every time somebody
+                        // clicked a Recent entry — the same row number means two
+                        // different things in two different sections.
+                        match row {
+                            Some(profiles::MenuRow::Profile(index)) => {
+                                self.new_tab_with_profile(index)?;
+                            }
+                            Some(profiles::MenuRow::Recent(index)) => {
+                                self.reopen_recent(index)?;
+                            }
+                            None => {}
                         }
                     }
                     return Ok(());
@@ -5287,7 +5948,7 @@ impl Runtime {
         let geometry = seats::tab_strip_geometry(
             width,
             scale,
-            self.tabs.len(),
+            &self.tab_trailers(Instant::now()),
             self.active_tab,
             self.tab_scroll,
         );
@@ -5619,6 +6280,41 @@ impl Runtime {
         if is_preview_toggle_shortcut(&event.logical_key, self.modifiers) {
             if !event.repeat {
                 self.toggle_preview_seat()?;
+            }
+            return Ok(());
+        }
+        // The prompt answers Enter with the button it opened focused, and Esc
+        // with nothing at all: an unanswered question folds back into
+        // `lastSession` (§7.1.4), so Esc must dismiss the *prompt* without
+        // deciding for the user. It sits above the PTY encoder so neither key
+        // reaches the child while the question is up.
+        if self.restore_prompt.is_open() && !self.pending_restore.is_empty() {
+            match &event.logical_key {
+                Key::Named(NamedKey::Enter) => {
+                    if !event.repeat {
+                        self.answer_restore_prompt(restore::FOCUSED_ANSWER)?;
+                    }
+                    return Ok(());
+                }
+                Key::Named(NamedKey::Escape) if self.restore_prompt.consumes_escape() => {
+                    if !event.repeat {
+                        self.restore_prompt.close();
+                        if self.refresh_chrome() {
+                            self.present_chrome_change()?;
+                        }
+                    }
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+        // Undo close. It sits above the PTY encoder for the same reason the line
+        // above does — the chord is ours, so the child never sees it — and it is
+        // below the settings guard, which swallows every key while the dialog is
+        // up (mock-up 7374-7376 tests the same two conditions).
+        if is_reopen_closed_tab_shortcut(&event.logical_key, self.modifiers) {
+            if !event.repeat {
+                self.reopen_recent(0)?;
             }
             return Ok(());
         }
@@ -6716,6 +7412,17 @@ fn is_preview_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("p"))
 }
 
+/// Undo close — "that one, now", and the door with the real traffic (N143).
+///
+/// The exact-equality test on the modifiers is the same discipline the preview
+/// toggle uses and for the same reason: a bare `Ctrl+T` is a real control byte
+/// and must keep reaching the child. Ctrl+**Shift**+T is not, which is why the
+/// whole ecosystem could agree on it.
+fn is_reopen_closed_tab_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
+    modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("t"))
+}
+
 /// Solve the tree against the current surface, and pick out the terminal seat.
 ///
 /// The whole §4.1 conversion lives here and nowhere else: physical pixels in,
@@ -6878,6 +7585,180 @@ mod tests {
     use super::*;
     use bt_render::{DARK_CHROME, LIGHT_CHROME};
     use std::time::Duration;
+
+    // ── T3: one vault, three doors ──
+
+    fn saved_tab(profile_id: &str, cwd: &str, name: Option<&str>, pinned: bool) -> TabV1 {
+        TabV1 {
+            root: LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                profile_id: profile_id.to_owned(),
+                cwd: cwd.to_owned(),
+                manual_name: name.map(str::to_owned),
+            })),
+            pinned,
+            focused_leaf: "leaf-0".to_owned(),
+        }
+    }
+
+    /// PIN — mock-up 7426-7431: "Launch asks about exactly one thing, and it is
+    /// not the pinned tabs. **Pinning IS the answer**."
+    ///
+    /// Red gate: `Runtime::create` used to rebuild *every* persisted tab
+    /// unconditionally, which is both halves of this wrong at once — it asked
+    /// nothing, and it restored what the user may well have meant to close.
+    #[test]
+    fn launch_opens_what_you_pinned_and_asks_only_about_the_rest() {
+        let saved = [
+            saved_tab("pwsh", "C:\\a", None, false),
+            saved_tab("pwsh", "C:\\b", None, true),
+            saved_tab("pwsh", "C:\\c", None, false),
+        ];
+        let plan = plan_launch(&saved, 0);
+
+        assert_eq!(plan.open, vec![saved[1].clone()], "the pinned one, alone");
+        assert_eq!(
+            plan.ask,
+            vec![saved[0].clone(), saved[2].clone()],
+            "the question is the tabs you did not pin, in their own order"
+        );
+        assert!(
+            !plan.placeholder,
+            "a pinned tab is already a window worth showing"
+        );
+        assert_eq!(
+            plan.active_open, None,
+            "the tab you were on was not pinned, so it is not one of these"
+        );
+    }
+
+    /// The seat you were in comes back with you — but only if it was pinned.
+    #[test]
+    fn the_tab_you_were_on_keeps_its_seat_when_it_is_one_of_the_pinned() {
+        let saved = [
+            saved_tab("pwsh", "C:\\a", None, false),
+            saved_tab("pwsh", "C:\\b", None, true),
+            saved_tab("pwsh", "C:\\c", None, true),
+        ];
+        // index 2 of the saved list is the second *pinned* tab.
+        assert_eq!(plan_launch(&saved, 2).active_open, Some(1));
+        assert_eq!(plan_launch(&saved, 1).active_open, Some(0));
+    }
+
+    /// The boundary ruled in this ticket: "Reopen your **other** tabs?" needs
+    /// other tabs. With one unpinned tab and nothing pinned there is no question
+    /// — and declining would have handed back a fresh shell in the wrong folder,
+    /// which is strictly worse than the tab it replaced.
+    #[test]
+    fn a_lone_unpinned_tab_is_restored_rather_than_asked_about() {
+        let saved = [saved_tab("pwsh", "C:\\only", None, false)];
+        let plan = plan_launch(&saved, 0);
+
+        assert_eq!(plan.open, saved.to_vec(), "it simply comes back");
+        assert!(plan.ask.is_empty(), "nothing to ask");
+        assert!(!plan.placeholder, "it is a real tab, not scaffolding");
+        assert_eq!(plan.active_open, Some(0));
+
+        // Two unpinned tabs *are* a question, and then a stand-in shell carries
+        // the window until it is answered.
+        let two = [
+            saved_tab("pwsh", "C:\\a", None, false),
+            saved_tab("pwsh", "C:\\b", None, false),
+        ];
+        let plan = plan_launch(&two, 0);
+        assert!(plan.open.is_empty());
+        assert_eq!(plan.ask.len(), 2);
+        assert!(
+            plan.placeholder,
+            "nothing was pinned, so nothing is standing"
+        );
+    }
+
+    #[test]
+    fn a_first_launch_with_nothing_saved_asks_nothing_and_stands_something_up() {
+        let plan = plan_launch(&[], 0);
+        assert!(plan.open.is_empty());
+        assert!(plan.ask.is_empty(), "no prompt on a first run");
+        assert!(plan.placeholder);
+    }
+
+    /// A tab's identity is the terminal it holds, wherever that sits in the tree.
+    #[test]
+    fn a_seed_is_read_from_the_first_terminal_in_the_tree() {
+        let split = LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+            dir: bt_persist::SplitDirV1::Row,
+            ratio: 500_000,
+            children: [
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
+                    bt_persist::FilesLeafV1 {
+                        root: "C:\\repo".to_owned(),
+                        open: Vec::new(),
+                        sel: None,
+                        width: 240,
+                    },
+                ))),
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                    profile_id: "pwsh".to_owned(),
+                    cwd: "C:\\repo\\src".to_owned(),
+                    manual_name: Some("build".to_owned()),
+                }))),
+            ],
+        });
+        let leaf = first_term_leaf(&split).expect("a files pane is not the tab's identity");
+        assert_eq!(leaf.cwd, "C:\\repo\\src");
+        assert_eq!(leaf.manual_name.as_deref(), Some("build"));
+
+        // A files-only tree has no terminal to speak for it.
+        assert!(
+            first_term_leaf(&LayoutNodeV1::Leaf(LeafNodeV1::Unknown)).is_none(),
+            "an unknown leaf is not a terminal"
+        );
+    }
+
+    /// §5.4 逐叶降级, "未知 profile→默认": a profile this build does not have
+    /// costs you the shell choice, never the tab.
+    #[test]
+    fn a_seed_naming_a_profile_we_do_not_have_still_comes_back() {
+        let (_, seed, _) = revive_plan(&saved_tab("wsl-ubuntu", "C:\\a", Some("notes"), true));
+        assert_eq!(seed.profile, profiles::DEFAULT_PROFILE);
+        assert_eq!(
+            seed.manual_name.as_deref(),
+            Some("notes"),
+            "your name stays"
+        );
+        assert!(seed.pinned, "and so does the promise");
+    }
+
+    /// N143. Exact-equality on the modifiers, for the same reason the preview
+    /// toggle uses it: a bare `Ctrl+T` is a real control byte and has to keep
+    /// reaching the child.
+    #[test]
+    fn undo_close_answers_to_ctrl_shift_t_and_to_nothing_looser() {
+        let lower = Key::Character("t".into());
+        let upper = Key::Character("T".into());
+        let chord = ModifiersState::CONTROL | ModifiersState::SHIFT;
+
+        assert!(is_reopen_closed_tab_shortcut(&lower, chord));
+        assert!(
+            is_reopen_closed_tab_shortcut(&upper, chord),
+            "Shift is in the chord, so the character arrives capitalised"
+        );
+        assert!(
+            !is_reopen_closed_tab_shortcut(&lower, ModifiersState::CONTROL),
+            "bare Ctrl+T is the child's"
+        );
+        assert!(!is_reopen_closed_tab_shortcut(
+            &lower,
+            ModifiersState::empty()
+        ));
+        assert!(
+            !is_reopen_closed_tab_shortcut(&lower, chord | ModifiersState::ALT),
+            "a longer chord is a different chord"
+        );
+        assert!(!is_reopen_closed_tab_shortcut(
+            &Key::Character("p".into()),
+            chord
+        ));
+    }
 
     // ── T2: the tab strip's state channels ──
 

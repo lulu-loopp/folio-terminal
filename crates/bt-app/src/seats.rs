@@ -509,6 +509,11 @@ pub enum ChromeTarget {
     CloseWindow,
     Tab(usize),
     TabClose(usize),
+    /// The pin, which stands in the `×`'s own slot: an unpinned tab's while the
+    /// pointer is on it, a pinned tab's always. Never both at once — a pinned
+    /// tab has no `×` at all, and that it cannot be shut by a stray click is the
+    /// feature rather than a side effect (mock-up 4059-4065).
+    TabPin(usize),
     NewTab,
     /// `.newtab.chevbtn.nt-chev` — the profile picker that shares the `+`'s box
     /// and stands immediately beside it.
@@ -531,13 +536,62 @@ pub enum TabWidthTier {
     Squeezed,
 }
 
+/// The pin's box — `.tab .pin { width: 17px; height: 17px; border-radius: 4px }`
+/// (mock-up 319-320). Written as the `×`'s own box rather than as a second 17,
+/// because "same box as `.close` because it stands in the same slot" (line 314)
+/// is the rule; two copies of the number could drift apart while every test that
+/// only checked the number still passed.
+const WINDOW_TAB_PIN_BOX_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_BOX_LOGICAL_PX;
+const WINDOW_TAB_PIN_RADIUS_LOGICAL_PX: f32 = WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX;
+/// `.pinsvg { width: 13px; height: 13px }` (mock-up 365) — deliberately *not*
+/// the `×` mark's 8px, and the mock-up says why at 362-364: "the pin carries a
+/// state and a glyph that has to survive a 45° turn, and both cost silhouette.
+/// It is not the close button's twin and sizing it like one made it read as
+/// lint."
+const WINDOW_TAB_PIN_GLYPH_LOGICAL_PX: f32 = 13.0;
+/// `.tab .pin + .close { margin-left: -4px }` (mock-up 329-333), and the same
+/// -4px again on a lone `.pin.on` (353-357): "the trailing controls cluster
+/// tighter than the tab's 8px gap — that gap is right between the title and the
+/// controls, too airy between the controls themselves".
+const WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX: f32 = 4.0;
+
+/// What one tab hangs off its trailing end, and how far into the reveal it is.
+///
+/// `reveal` is `.tab:hover .pin`'s expansion, `0.0 ..= 1.0`: the mock-up animates
+/// `width: 0 -> 17px` and `margin-left: -8px -> 0` together over .16s (lines
+/// 338-349), so a half-open pin is a real frame that has to lay out. It arrives
+/// as an *input* because the clock belongs to the caller — this module stays a
+/// pure function of the numbers it is handed.
+///
+/// A pinned tab ignores `reveal` entirely: `.pin.on` stands at full width whether
+/// or not the pointer is anywhere near it, because it is not an offer that comes
+/// and goes but a fact about the tab.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TabTrailer {
+    pub pinned: bool,
+    pub reveal: f32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TabGeometry {
     pub body: [f32; 4],
     /// The `×`'s box — `None` exactly when the mock-up's width tiers take the
     /// affordance away, which is also exactly when a press there must fall
-    /// through to the tab instead of closing it.
+    /// through to the tab instead of closing it; and `None` on every pinned tab
+    /// at every width, because `tabTrailer` (mock-up 4204-4207) writes no
+    /// `.close` element for one at all.
     pub close: Option<[f32; 4]>,
+    /// The pin's box — the same 17px box as the `×` because it stands in the
+    /// same slot. `None` whenever nothing is drawn there: the two narrow tiers
+    /// take the pin away outright (`.tab.tight .pin { display: none }`), and an
+    /// unpinned tab at rest has one of literally zero width.
+    pub pin: Option<[f32; 4]>,
+    /// The trailer this geometry was built from, clamped.
+    ///
+    /// Kept because the trailing boundary cannot be read off the rectangles
+    /// alone: the pin's `margin-left` runs from -8px to 0 as it opens, and a
+    /// margin leaves no box behind to measure.
+    pub trailer: TabTrailer,
     pub tier: TabWidthTier,
 }
 
@@ -581,13 +635,19 @@ pub struct TabStripGeometry {
 /// `active_tab` is a geometry input and not merely a paint one, because the
 /// mock-up's width tiers keep the active tab's `×` and take everyone else's:
 /// `.tab.tight:not(.active) .close { display: none }`.
+///
+/// `trailers` is one entry per tab and is therefore also the tab count: what a
+/// tab hangs off its trailing end changes that tab's own furniture and nothing
+/// else in the strip, but it changes it per tab, so a bare count could no longer
+/// answer the question (pinned in `a_trailer_moves_nothing_outside_its_own_tab`).
 pub fn tab_strip_geometry(
     width: f32,
     scale: f32,
-    tab_count: usize,
+    trailers: &[TabTrailer],
     active_tab: usize,
     scroll: f32,
 ) -> TabStripGeometry {
+    let tab_count = trailers.len();
     let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let caption = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
@@ -624,44 +684,99 @@ pub fn tab_strip_geometry(
     let tab_top = title - tab_height;
     let close_box = (WINDOW_TAB_CLOSE_BOX_LOGICAL_PX * scale).round();
     let close_pad = WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale;
+    let pin_box = (WINDOW_TAB_PIN_BOX_LOGICAL_PX * scale).round();
+    let tighten = WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
     let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
     let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
-    let tabs = (0..tab_count)
-        .map(|index| {
+    let tabs = trailers
+        .iter()
+        .enumerate()
+        .map(|(index, trailer)| {
+            // Clamped here rather than trusted, for the same reason `scroll` is:
+            // no caller can hand this module an animation that has overshot.
+            let trailer = TabTrailer {
+                pinned: trailer.pinned,
+                reveal: trailer.reveal.clamp(0.0, 1.0),
+            };
             let left = origin + index as f32 * (tab_width + gap);
             let right = left + tab_width;
             let active = index == active_tab;
             let close_top = tab_top + (tab_height - close_box) / 2.0;
-            let close = match tier {
-                // `.tab.tight:not(.active) .close` and its `.squeezed` twin.
-                TabWidthTier::Tight | TabWidthTier::Squeezed if !active => None,
-                // A squeezed tab centres what is left of it: the mark, the tab's
-                // own 8px gap, and the `×` the active tab keeps.
-                TabWidthTier::Squeezed => {
-                    let content = mark + content_gap + close_box;
-                    let close_left = (left + (tab_width - content) / 2.0 + mark + content_gap)
-                        .max(left)
-                        .round();
+            let close = if trailer.pinned {
+                // `tabTrailer` (mock-up 4204-4207) writes *either* a `.pin.on`
+                // *or* a `.pin` + `.close` pair: a pinned tab has no `×` in the
+                // DOM at all, at any width. This outranks the width tiers, which
+                // only ever take affordances away.
+                None
+            } else {
+                match tier {
+                    // `.tab.tight:not(.active) .close` and its `.squeezed` twin.
+                    TabWidthTier::Tight | TabWidthTier::Squeezed if !active => None,
+                    // A squeezed tab centres what is left of it: the mark, the
+                    // tab's own 8px gap, and the `×` the active tab keeps.
+                    TabWidthTier::Squeezed => {
+                        let content = mark + content_gap + close_box;
+                        let close_left = (left + (tab_width - content) / 2.0 + mark + content_gap)
+                            .max(left)
+                            .round();
+                        Some([
+                            close_left,
+                            close_top,
+                            (close_left + close_box).min(right),
+                            close_top + close_box,
+                        ])
+                    }
+                    _ => {
+                        let close_right = (right - close_pad).max(left);
+                        Some([
+                            (close_right - close_box).max(left),
+                            close_top,
+                            close_right,
+                            close_top + close_box,
+                        ])
+                    }
+                }
+            };
+            let pin = match tier {
+                // `.tab.tight .pin` and `.tab.squeezed .pin { display: none }`
+                // (mock-up 197, 201). Unlike the `×`'s rule this one carries no
+                // `:not(.active)`: at these widths the pin retreats to give the
+                // title its room, and even a pinned active tab's `.pin.on` goes
+                // with it — summoning the hover controls here "crushed the title
+                // to 0px and left an icon soup".
+                TabWidthTier::Tight | TabWidthTier::Squeezed => None,
+                // Pinned: the pin *is* the trailer, and it stands exactly where
+                // the `×` would have — right edge on the tab's own trailing
+                // padding. Same place, so unpinning is where you already are.
+                TabWidthTier::Full if trailer.pinned => {
+                    let pin_right = (right - close_pad).max(left);
                     Some([
-                        close_left,
+                        (pin_right - pin_box).max(left),
                         close_top,
-                        (close_left + close_box).min(right),
-                        close_top + close_box,
+                        pin_right,
+                        close_top + pin_box,
                     ])
                 }
-                _ => {
-                    let close_right = (right - close_pad).max(left);
-                    Some([
-                        (close_right - close_box).max(left),
+                // Unpinned: the pin sits to the LEFT of the `×`, and the revealed
+                // cluster is tighter than the tab's own 8px gap by the -4px of
+                // `.pin + .close`. Its width is the reveal itself, so at rest it
+                // is a zero-width box — dropped below, and costing the title
+                // nothing at all.
+                TabWidthTier::Full => close.map(|close| {
+                    let pin_right = (close[0] - tighten).max(left);
+                    [
+                        (pin_right - pin_box * trailer.reveal).max(left),
                         close_top,
-                        close_right,
-                        close_top + close_box,
-                    ])
-                }
+                        pin_right,
+                        close_top + pin_box,
+                    ]
+                }),
             };
             TabGeometry {
                 body: [left, tab_top, right, title],
                 close: close.filter(|rect| rect[2] > rect[0]),
+                pin: pin.filter(|rect| rect[2] > rect[0]),
+                trailer,
                 tier,
             }
         })
@@ -717,6 +832,74 @@ fn within_strip(viewport: [f32; 2], rect: [f32; 4]) -> bool {
     rect[2] <= viewport[1]
 }
 
+/// The leftmost box of a tab's trailing cluster — the pin when one is drawn, the
+/// `×` otherwise, and `None` when the tab carries neither.
+///
+/// The pin is always left of the `×` when both exist, so `or` is an ordering
+/// claim and not a preference.
+fn tab_trailer_box(tab: &TabGeometry) -> Option<[f32; 4]> {
+    tab.pin.or(tab.close)
+}
+
+/// The tab row's trailing boundary: the left edge of the trailing cluster,
+/// *including* the flex gap standing before it. The badge docks its right edge
+/// here and the title stops one badge further back, and both ask this one
+/// function — they are the exact pair the mock-up's own -4px note is about
+/// (lines 353-357), so they must not be able to drift.
+///
+/// The flex arithmetic, spelled out because the rectangles alone do not show it.
+/// `.tab` is a flex row with `gap: 8px`; the pin and the `×` are `flex: none` and
+/// last in it, so the pair packs against the content box's right edge while the
+/// title (`flex: 1; min-width: 0`) eats every remaining pixel. Walking leftwards
+/// from the tab's right edge, with `p` for the 6px trailing padding:
+///
+/// ```text
+/// pinned — the trailer is the pin alone (mock-up 4204-4205):
+///   pin.right = tab_right - p          pin.left = pin.right - 17
+///   boundary  = pin.left - (8 - 4)     `.tab .pin.on { margin-left: -4px }`
+///             = tab_right - 27
+///
+/// unpinned, at rest (reveal 0): `.pin` is still in the flow — width 0, and
+/// `margin-left: -8px` "cancel[s] this item's share of the flex gap" (line 339),
+/// so it costs the row nothing. But it is still a sibling, so `.pin + .close`'s
+/// own -4px survives:
+///   close.right = tab_right - p        close.left = tab_right - 23
+///   boundary    = close.left - (8 - 4) = tab_right - 27   ← the same column
+///
+/// unpinned, revealed by `r`: width is 17r and margin-left is -8(1 - r), so the
+/// pin's whole contribution to the row is 8 + (8r - 8) + 17r = 25r:
+///   pin.right = close.left - 4         pin.left = pin.right - 17r
+///   boundary  = pin.left - 8r          = tab_right - 27 - 25r
+///
+/// tight / squeezed: `display: none` takes `.pin` out of the flow entirely, and
+/// takes `.pin + .close`'s -4px with it — there is no such sibling pair left:
+///   boundary = close.left - 8, or tab_right - p when there is no `×` either
+/// ```
+///
+/// That the pinned row and the resting unpinned row land on the *same* column is
+/// the whole point of the -4px on `.pin.on`, and the mock-up records the bug it
+/// was written for: "the two counts sat 4px apart".
+fn tab_trailing_edge(tab: &TabGeometry, scale: f32) -> f32 {
+    let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
+    let tightened = gap - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
+    match (tab.pin, tab.close) {
+        // Pinned: `.pin.on` alone, carrying the -4px that lines it up with the
+        // row below it.
+        (Some(pin), None) => pin[0] - tightened,
+        // Unpinned and open: the gap before the pin has opened by exactly the
+        // reveal, because that is how far its -8px margin has run back to 0.
+        (Some(pin), Some(_)) => pin[0] - gap * tab.trailer.reveal,
+        // Unpinned and shut: a zero-width `.pin` still standing between the
+        // badge and the `×`, which is what leaves the -4px behind.
+        (None, Some(close)) if tab.tier == TabWidthTier::Full => close[0] - tightened,
+        // Narrow tiers: no `.pin` in the flow, so the tab's own 8px gap is all
+        // that stands before the `×`.
+        (None, Some(close)) => close[0] - gap,
+        // Nothing trails at all: the row ends on the tab's own padding.
+        (None, None) => tab.body[2] - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
+    }
+}
+
 /// The `.panecount` pill's box on a tab, or `None` when the tab shows none.
 ///
 /// Two conditions take it away, and they are different facts. `paneCount > 1`
@@ -737,11 +920,7 @@ pub fn tab_badge_rect(
     if pane_count <= 1 || tab.tier == TabWidthTier::Squeezed {
         return None;
     }
-    let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
-    let trailing = tab.close.map_or(
-        tab.body[2] - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
-        |close| close[0] - content_gap,
-    );
+    let trailing = tab_trailing_edge(tab, scale);
     let badge_width = (badge_text_width + 2.0 * WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX * scale)
         .max(WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX * scale)
         .round();
@@ -749,6 +928,30 @@ pub fn tab_badge_rect(
     let left = (trailing - badge_width).round();
     let top = (tab.body[1] + (tab.body[3] - tab.body[1] - badge_height) / 2.0).round();
     Some([left, top, left + badge_width, top + badge_height])
+}
+
+/// The strip's geometry when the caller has no trailers to hand and no use for
+/// them: every tab resting and unpinned.
+///
+/// A trailer changes its own tab's furniture and nothing else — the run is shared
+/// out equally whatever each tab hangs off its end — so the three questions that
+/// are about the *run* rather than about one tab's controls are answered without
+/// making every caller carry a list it would only fill with defaults. Pinned in
+/// `a_trailer_moves_nothing_outside_its_own_tab`.
+fn tab_strip_bodies(
+    width: f32,
+    scale: f32,
+    tab_count: usize,
+    active_tab: usize,
+    scroll: f32,
+) -> TabStripGeometry {
+    tab_strip_geometry(
+        width,
+        scale,
+        &vec![TabTrailer::default(); tab_count],
+        active_tab,
+        scroll,
+    )
 }
 
 /// The scroll offset that brings tab `index` wholly inside the strip, moving as
@@ -768,7 +971,7 @@ pub fn tab_scroll_to_reveal(
     scroll: f32,
     index: usize,
 ) -> f32 {
-    let geometry = tab_strip_geometry(width, scale, tab_count, active_tab, scroll);
+    let geometry = tab_strip_bodies(width, scale, tab_count, active_tab, scroll);
     let Some(tab) = geometry.tabs.get(index) else {
         return scroll.clamp(0.0, geometry.max_scroll);
     };
@@ -811,7 +1014,7 @@ pub fn tab_strip_right_px(width: f32, scale: f32, tab_count: usize) -> i32 {
     // Neither the tiers nor the scroll offset move this answer: the tiers change
     // nothing outside a tab's own body, and a strip either scrolls or it does
     // not, whatever it currently shows.
-    let geometry = tab_strip_geometry(width, scale, tab_count, 0, 0.0);
+    let geometry = tab_strip_bodies(width, scale, tab_count, 0, 0.0);
     if geometry.max_scroll > 0.0 {
         geometry.viewport[1].ceil() as i32
     } else {
@@ -822,14 +1025,14 @@ pub fn tab_strip_right_px(width: f32, scale: f32, tab_count: usize) -> i32 {
 pub fn hit_tab_chrome(
     width: f32,
     scale: f32,
-    tab_count: usize,
+    trailers: &[TabTrailer],
     active_tab: usize,
     scroll: f32,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    let geometry = tab_strip_geometry(width, scale, tab_count, active_tab, scroll);
+    let geometry = tab_strip_geometry(width, scale, trailers, active_tab, scroll);
     // What is cropped away is not there to be clicked. Without this the run's
     // scrolled-out tail would still answer the pointer, under the caption
     // buttons drawn on top of it.
@@ -837,6 +1040,14 @@ pub fn hit_tab_chrome(
         return None;
     }
     for (index, tab) in geometry.tabs.iter().enumerate() {
+        // Smallest target first, so the specific affordance wins over the
+        // surface it lives on. The pin and the `×` never overlap — the pin's
+        // right edge is 4px short of the `×`'s left — so the order *between* the
+        // two is a statement of intent rather than a tie-break; what matters is
+        // that the tab body, which contains both, is asked last.
+        if tab.pin.is_some_and(|pin| contains(pin, x, y)) {
+            return Some(ChromeTarget::TabPin(index));
+        }
         if tab.close.is_some_and(|close| contains(close, x, y)) {
             return Some(ChromeTarget::TabClose(index));
         }
@@ -858,7 +1069,7 @@ pub fn hit_tab_chrome(
 #[must_use]
 pub fn tab_strip_contains(width: f32, scale: f32, tab_count: usize, x: f64, y: f64) -> bool {
     let (x, y) = (x as f32, y as f32);
-    let geometry = tab_strip_geometry(width, scale, tab_count, 0, 0.0);
+    let geometry = tab_strip_bodies(width, scale, tab_count, 0, 0.0);
     let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
     x >= geometry.viewport[0] && x < geometry.viewport[1] && y >= 0.0 && y < title
 }
@@ -1017,6 +1228,7 @@ pub fn build_chrome_with_preview(
         pane_count: seats.pane_count(),
         badge_text_width: 0.0,
         mark: TabMarkState::default(),
+        trailer: TabTrailer::default(),
     }];
     build_chrome_for_tabs(
         seats,
@@ -1051,6 +1263,10 @@ pub struct TabContent {
     pub badge_text_width: f32,
     /// What this tab's mark slot is saying about its sessions.
     pub mark: TabMarkState,
+    /// What hangs off this tab's trailing end: its pin state, and how far the
+    /// hover reveal has run. The caller owns both — one is a fact about the tab,
+    /// the other is the clock.
+    pub trailer: TabTrailer,
 }
 
 /// One tab's mark slot, resolved to pixels-worth of decisions.
@@ -1333,7 +1549,8 @@ fn window_chrome(
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * button).max(0.0);
-    let geometry = tab_strip_geometry(width, scale, tabs.len(), active_tab, tab_scroll);
+    let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
+    let geometry = tab_strip_geometry(width, scale, &trailers, active_tab, tab_scroll);
     let viewport = geometry.viewport;
     // `.tabs-inline` crops its content, and a label is the one chrome primitive
     // that can be cropped exactly: `ChromeLabel`'s rect is also its clip box, and
@@ -1360,10 +1577,12 @@ fn window_chrome(
                 continue;
             }
             let [tab_left, tab_top, tab_right, tab_bottom] = tab.body;
-            // `.tab:hover` is one hover: a pointer on the `×` is still a pointer on
-            // the tab, so the body lights up and the title steps to `--ink` for both.
+            // `.tab:hover` is one hover: a pointer on the `×` — or on the pin
+            // beside it — is still a pointer on the tab, so the body lights up
+            // and the title steps to `--ink` for all three.
             let tab_hovered = hover == Some(ChromeTarget::Tab(index))
-                || hover == Some(ChromeTarget::TabClose(index));
+                || hover == Some(ChromeTarget::TabClose(index))
+                || hover == Some(ChromeTarget::TabPin(index));
             let skirted = [tab_left - radius, tab_top, tab_right + radius, tab_bottom];
             if active && tab_right - tab_left >= 2.0 * radius && within_strip(viewport, skirted) {
                 sprites.push(ChromeSprite::new(
@@ -1387,9 +1606,8 @@ fn window_chrome(
             // `.tab.squeezed { justify-content: center; padding: 0 4px }` — the mark
             // and whatever else survived are centred as one group, not indented.
             let mark_left = if tab.tier == TabWidthTier::Squeezed {
-                let trailing = tab
-                    .close
-                    .map_or(0.0, |close| content_gap + close[2] - close[0]);
+                let trailing = tab_trailer_box(tab)
+                    .map_or(0.0, |trailer| content_gap + trailer[2] - trailer[0]);
                 (tab_left + (tab_right - tab_left - mark - trailing) / 2.0)
                     .max(tab_left + WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX * scale)
                     .round()
@@ -1397,12 +1615,10 @@ fn window_chrome(
                 (tab_left + WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round()
             };
             let mark_top = (tab_top + (tab_bottom - tab_top - mark) / 2.0).round();
-            // The tab row's trailing boundary: the `×` and the tab's own 8px gap
-            // before it, or the trailing padding when there is no `×` to clear.
-            let trailing = tab.close.map_or(
-                tab_right - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
-                |close| close[0] - content_gap,
-            );
+            // The tab row's trailing boundary — the pin, the `×`, or the trailing
+            // padding, whichever the cluster leads with. One function with
+            // `tab_badge_rect`, because the two measure the same edge.
+            let trailing = tab_trailing_edge(tab, scale);
             // `.panecount` is `flex: none` and stands between the title and the `×`,
             // so it takes its width off the trailing end and the title — `flex: 1`,
             // `min-width: 0` — keeps whatever is left.
@@ -1410,7 +1626,7 @@ fn window_chrome(
             // What the title may not run past.
             let content_right = badge.map_or(trailing, |badge| badge[0] - content_gap);
             let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
-            if mark_left + mark <= tab.close.map_or(tab_right, |close| close[0]) {
+            if mark_left + mark <= tab_trailer_box(tab).map_or(tab_right, |trailer| trailer[0]) {
                 if within_strip(viewport, mark_rect) {
                     // The mark slot is `.ticon-wrap` (mock-up line 238): a
                     // positioning origin whose contents are absolutely placed,
@@ -1574,6 +1790,72 @@ fn window_chrome(
                     // figures must not either.
                     tabular_numerals: true,
                 });
+            }
+            // ── the pin, in the `×`'s own slot ──
+            if let Some(pin) = tab.pin {
+                let pinned = tab.trailer.pinned;
+                let pin_hovered = hover == Some(ChromeTarget::TabPin(index));
+                // `transition: … opacity .12s ease` (mock-up 341) — an unpinned
+                // pin fades in as it widens. A pinned one never fades: it is a
+                // fact about the tab, not an offer that comes and goes.
+                let opacity = if pinned { 1.0 } else { tab.trailer.reveal };
+                if pin_hovered && within_strip(viewport, pin) {
+                    // `.tab .pin:hover { background: var(--active) }` — the `×`'s
+                    // own pill, because it is the `×`'s own slot: same box, same
+                    // 4px of round, same two pre-composited surfaces.
+                    let mut pill = ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (WINDOW_TAB_PIN_RADIUS_LOGICAL_PX * scale).round().max(1.0)
+                                as u32,
+                        },
+                        pixel_snapped(pin),
+                        if active {
+                            palette.tab_close_pill_on_content
+                        } else {
+                            palette.tab_close_pill_on_hovered_tab
+                        },
+                    );
+                    pill.opacity = opacity;
+                    sprites.push(pill);
+                }
+                let pin_glyph = (WINDOW_TAB_PIN_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+                let pin_glyph_left = ((pin[0] + pin[2] - pin_glyph) / 2.0).round();
+                let pin_glyph_top = ((pin[1] + pin[3] - pin_glyph) / 2.0).round();
+                let pin_glyph_rect = [
+                    pin_glyph_left,
+                    pin_glyph_top,
+                    pin_glyph_left + pin_glyph,
+                    pin_glyph_top + pin_glyph,
+                ];
+                // `.tab .pin { overflow: hidden }` while the box is opening. A
+                // chrome mark is rasterised into the box it fills and drawn with
+                // whole-texture UVs, so a half-open box cannot crop one — the
+                // same ruling `within_strip` records. What it can do is wait: the
+                // glyph arrives once the box can hold it, inside the fade that is
+                // already running, rather than spilling 12px over the title.
+                if pin[2] - pin[0] >= pin_glyph && within_strip(viewport, pin_glyph_rect) {
+                    let mut glyph = ChromeSprite::new(
+                        // Fluent 2's fill axis: regular is the action ("you could
+                        // pin this"), filled is the state ("it is pinned").
+                        ChromeMark::Pin { filled: pinned },
+                        pin_glyph_rect,
+                        if pinned || pin_hovered {
+                            // `.pin.on`, `.pin:hover` — `var(--ink)`, the same
+                            // full ink the `×` steps up to under the pointer.
+                            // "The state is darker than the action: one is a fact
+                            // about this tab, the other is an offer that only
+                            // exists while you are hovering it."
+                            palette.title_text_hover
+                        } else {
+                            // `.tab .pin { color: var(--ink3) }` — the resting
+                            // `×`'s own ink, because at rest they are the same
+                            // kind of offer.
+                            palette.title_text_muted
+                        },
+                    );
+                    glyph.opacity = opacity;
+                    sprites.push(glyph);
+                }
             }
             let Some(close) = tab.close else {
                 continue;
@@ -1863,9 +2145,17 @@ fn device_to_logical_signed(device_px: f64, scale_ppm: u32) -> i64 {
 // ---------------------------------------------------------------------------
 
 impl Seats {
-    /// The durable form of this tree.
-    pub fn to_persisted(&self) -> LayoutNodeV1 {
-        to_persisted(&self.tree)
+    /// The durable form of this tree, with `term` written into every terminal
+    /// leaf.
+    ///
+    /// The seed arrives from above rather than being read here because a seat
+    /// does not know it: `profile_id`, `cwd` and the manual name belong to the
+    /// *session* a tab holds, and this module owns rectangles, not sessions.
+    /// This window runs one shell per tab, so one seed describes every terminal
+    /// leaf in it; when panes get their own children, this parameter becomes the
+    /// per-leaf lookup and nothing else about the shape changes.
+    pub fn to_persisted(&self, term: &TermLeafV1) -> LayoutNodeV1 {
+        to_persisted(&self.tree, term)
     }
 
     /// Rebuild a tree from disk. Split ids are re-minted from the shape (§3.2:
@@ -1895,17 +2185,14 @@ impl Seats {
     }
 }
 
-fn to_persisted(node: &LayoutNode) -> LayoutNodeV1 {
+fn to_persisted(node: &LayoutNode, term: &TermLeafV1) -> LayoutNodeV1 {
     match node {
         LayoutNode::Seat(seat) => LayoutNodeV1::Leaf(match seat.kind {
-            // `profile_id` is v1's transitional "the shell this pane actually
-            // launched" (§3.3); `cwd` is left to the restart-shell contract's
-            // consumer, which is not this slice.
-            SeatKind::Terminal => LeafNodeV1::Term(TermLeafV1 {
-                profile_id: "pwsh.exe".to_owned(),
-                cwd: String::new(),
-                manual_name: None,
-            }),
+            // The seed proper — profile, place, your name for it — and the whole
+            // of what a closed tab can be rebuilt from. It used to be three
+            // placeholders written unconditionally, which meant every restored
+            // tab came back in the wrong folder under the wrong name.
+            SeatKind::Terminal => LeafNodeV1::Term(term.clone()),
             SeatKind::Files => LeafNodeV1::Files(bt_persist::FilesLeafV1 {
                 root: String::new(),
                 open: Vec::new(),
@@ -1932,7 +2219,10 @@ fn to_persisted(node: &LayoutNode) -> LayoutNodeV1 {
             // The `u32` ppm, written out and read back unchanged (§5 constraint
             // 1). A decimal string or a JSON float would not round-trip.
             ratio: ratio.ppm(),
-            children: [Box::new(to_persisted(a)), Box::new(to_persisted(b))],
+            children: [
+                Box::new(to_persisted(a, term)),
+                Box::new(to_persisted(b, term)),
+            ],
         }),
     }
 }
@@ -2546,7 +2836,11 @@ mod tests {
         let session = SessionV1 {
             schema_version: SESSION_SCHEMA_VERSION,
             tabs: vec![TabV1 {
-                root: seats.to_persisted(),
+                root: seats.to_persisted(&TermLeafV1 {
+                    profile_id: "pwsh".to_owned(),
+                    cwd: String::new(),
+                    manual_name: None,
+                }),
                 pinned: false,
                 focused_leaf: "leaf-0".to_owned(),
             }],
@@ -2905,7 +3199,7 @@ mod tests {
     #[test]
     fn multi_tab_strip_is_equal_width_and_exposes_plus_close_and_middle_click_targets() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 4, 2, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(4), 2, 0.0);
             assert_eq!(geometry.tabs.len(), 4);
             let widths = geometry
                 .tabs
@@ -2924,7 +3218,7 @@ mod tests {
                 hit_tab_chrome(
                     960.0 * scale,
                     scale,
-                    4,
+                    &resting(4),
                     2,
                     0.0,
                     f64::from((plus[0] + plus[2]) / 2.0),
@@ -2937,7 +3231,7 @@ mod tests {
                 hit_tab_chrome(
                     960.0 * scale,
                     scale,
-                    4,
+                    &resting(4),
                     2,
                     0.0,
                     f64::from((close[0] + close[2]) / 2.0),
@@ -2950,7 +3244,7 @@ mod tests {
                 hit_tab_chrome(
                     960.0 * scale,
                     scale,
-                    4,
+                    &resting(4),
                     2,
                     0.0,
                     f64::from(body[0] + 2.0 * scale),
@@ -2974,7 +3268,7 @@ mod tests {
             );
             assert_eq!(
                 one,
-                tab_strip_geometry(width, scale, 1, 0, 0.0).new_tab_menu[2].ceil() as i32,
+                tab_strip_geometry(width, scale, &resting(1), 0, 0.0).new_tab_menu[2].ceil() as i32,
                 "the published edge includes both end buttons at scale {scale}"
             );
         }
@@ -2995,6 +3289,7 @@ mod tests {
                 pane_count: 1,
                 badge_text_width: 0.0,
                 mark: TabMarkState::default(),
+                trailer: TabTrailer::default(),
             })
             .collect::<Vec<_>>();
         strip_chrome_of(scale, &tabs, active_tab, 0.0, hover, profile_menu_open)
@@ -3094,7 +3389,7 @@ mod tests {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let titles = strip_titles(3);
             let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 3, 1, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(3), 1, 0.0);
             let body = geometry.tabs[1].body;
             // The two 7x7 boxes the `::before`/`::after` pair occupies: one
             // `--tabr` outside each edge of the active tab, sitting on its foot.
@@ -3168,7 +3463,7 @@ mod tests {
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(4);
             let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 4, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(4), 0, 0.0);
             let (_, _, sprites) =
                 strip_chrome(scale, &titles, 0, Some(ChromeTarget::Tab(2)), false);
             let silhouette = sprites
@@ -3224,7 +3519,7 @@ mod tests {
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(1);
             let radius = (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round() as u32;
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 1, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(1), 0, 0.0);
             for (rest_hover, hovered_target, box_rect) in [
                 (None, ChromeTarget::NewTab, geometry.new_tab),
                 (None, ChromeTarget::NewTabMenu, geometry.new_tab_menu),
@@ -3278,7 +3573,7 @@ mod tests {
     fn the_strip_s_two_end_buttons_share_one_box_and_one_ink() {
         let palette = chrome_palette();
         for scale in [1.0_f32, 1.25, 2.0] {
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 1, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(1), 0, 0.0);
             let box_side = WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
             for rect in [geometry.new_tab, geometry.new_tab_menu] {
                 assert!((rect[2] - rect[0] - box_side).abs() < 0.01);
@@ -3364,7 +3659,7 @@ mod tests {
                 (9, TabWidthTier::Squeezed),
             ] {
                 let width = 960.0 * scale;
-                let geometry = tab_strip_geometry(width, scale, count, 0, 0.0);
+                let geometry = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
                 assert_eq!(
                     geometry.tabs[0].tier, tier,
                     "scale {scale}: {count} tabs must land in {tier:?}"
@@ -3385,7 +3680,7 @@ mod tests {
                         hit_tab_chrome(
                             width,
                             scale,
-                            count,
+                            &resting(count),
                             0,
                             0.0,
                             f64::from((close[0] + close[2]) / 2.0),
@@ -3401,7 +3696,7 @@ mod tests {
                         hit_tab_chrome(
                             width,
                             scale,
-                            count,
+                            &resting(count),
                             0,
                             0.0,
                             f64::from(trailing),
@@ -3421,7 +3716,7 @@ mod tests {
                 !labels.iter().any(|label| label.text == "tab 1"),
                 "scale {scale}: `.tab.squeezed .ttitle {{ display: none }}`"
             );
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 9, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(9), 0, 0.0);
             let body = geometry.tabs[1].body;
             let mark = sprites
                 .iter()
@@ -3466,7 +3761,7 @@ mod tests {
         let palette = chrome_palette();
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(2);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 2, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(2), 0, 0.0);
             let radius = (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale).round() as u32;
             for (index, expected) in [
                 (0, palette.tab_close_pill_on_content),
@@ -3525,24 +3820,39 @@ mod tests {
         }
     }
 
-    /// PIN — the title stops one 8px gap short of the `×` rather than running
-    /// under it. `.tab { gap: 8px }` sits between the title and the controls.
+    /// PIN — the title stops short of the trailing cluster rather than running
+    /// under it, and it stops by the cluster's *tightened* gap: `.tab { gap: 8px }`
+    /// stands between the title and the controls, and `.pin + .close`'s -4px
+    /// (mock-up 329-333) takes four of those eight back.
+    ///
+    /// Red gate: the assertion used to read the whole 8px, which was right only
+    /// while there was no `.pin` in the row. There is one now — zero-width and
+    /// invisible at rest, but a sibling of the `×`, so its -4px applies and the
+    /// title has four more pixels than this test used to allow it.
     #[test]
-    fn a_tab_title_clears_the_close_affordance_by_the_tab_s_own_gap() {
+    fn a_tab_title_clears_the_trailing_cluster_by_the_clusters_own_tighter_gap() {
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(2);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 2, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(2), 0, 0.0);
             let close = geometry.tabs[0].close.expect("a Full-tier tab has its ×");
+            let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
+            let tightened = gap - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
             let (_, labels, _) = strip_chrome(scale, &titles, 0, None, false);
             let title = labels
                 .iter()
                 .find(|label| label.text == "tab 0")
                 .expect("the active tab carries its name");
             assert!(
-                (title.rect[2] - (close[0] - WINDOW_TAB_GAP_LOGICAL_PX * scale)).abs() < 0.01,
+                (title.rect[2] - (close[0] - tightened)).abs() < 0.01,
                 "scale {scale}: title ends at {} but the × starts at {}",
                 title.rect[2],
                 close[0]
+            );
+            // And it really is a *tightening*: the title reaches further than the
+            // tab's own gap would have let it.
+            assert!(
+                title.rect[2] > close[0] - gap,
+                "scale {scale}: the cluster is tighter than the row's own gap"
             );
         }
     }
@@ -3587,7 +3897,7 @@ mod tests {
             let floor = WINDOW_TAB_MIN_WIDTH_LOGICAL_PX * scale;
             let mut ever_scrolled = false;
             for count in 1..=40 {
-                let geometry = tab_strip_geometry(width, scale, count, 0, 0.0);
+                let geometry = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
                 let tab_width = geometry.tabs[0].body[2] - geometry.tabs[0].body[0];
                 assert!(
                     tab_width >= floor - 0.01,
@@ -3614,8 +3924,11 @@ mod tests {
         // button furniture are taken. Fifteen tabs share that at 46.2px each and
         // still fit; the sixteenth puts every tab on the floor and starts the
         // scroller.
-        assert_eq!(tab_strip_geometry(960.0, 1.0, 15, 0, 0.0).max_scroll, 0.0);
-        assert!(tab_strip_geometry(960.0, 1.0, 16, 0, 0.0).max_scroll > 0.0);
+        assert_eq!(
+            tab_strip_geometry(960.0, 1.0, &resting(15), 0, 0.0).max_scroll,
+            0.0
+        );
+        assert!(tab_strip_geometry(960.0, 1.0, &resting(16), 0, 0.0).max_scroll > 0.0);
     }
 
     /// PIN — A7/A8: the strip is cropped to its viewport, and no caller can park
@@ -3623,20 +3936,20 @@ mod tests {
     #[test]
     fn a_scrolling_strip_is_cropped_and_never_parks_past_its_content() {
         let (scale, width, count) = (1.0_f32, 960.0_f32, 30);
-        let rest = tab_strip_geometry(width, scale, count, 0, 0.0);
+        let rest = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
         assert!(rest.max_scroll > 0.0);
         assert!(
             (rest.tabs[0].body[0] - (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round()).abs() < 0.01,
             "at rest the first tab still sits at its own inset"
         );
-        let end = tab_strip_geometry(width, scale, count, 0, rest.max_scroll);
+        let end = tab_strip_geometry(width, scale, &resting(count), 0, rest.max_scroll);
         assert_eq!(
-            tab_strip_geometry(width, scale, count, 0, rest.max_scroll * 4.0),
+            tab_strip_geometry(width, scale, &resting(count), 0, rest.max_scroll * 4.0),
             end,
             "a strip cannot be scrolled past its own content"
         );
         assert_eq!(
-            tab_strip_geometry(width, scale, count, 0, -500.0),
+            tab_strip_geometry(width, scale, &resting(count), 0, -500.0),
             rest,
             "nor before the start of it"
         );
@@ -3652,7 +3965,7 @@ mod tests {
             rest.viewport[1] + 40.0,
         ] {
             assert_eq!(
-                hit_tab_chrome(width, scale, count, 0, 0.0, f64::from(x), y),
+                hit_tab_chrome(width, scale, &resting(count), 0, 0.0, f64::from(x), y),
                 None,
                 "x={x} is past the strip's crop and belongs to the caption run"
             );
@@ -3666,14 +3979,14 @@ mod tests {
     #[test]
     fn a_scrolling_strip_leaves_no_window_drag_room_beside_it() {
         let (scale, width) = (1.0_f32, 960.0_f32);
-        let roomy = tab_strip_geometry(width, scale, 2, 0, 0.0);
+        let roomy = tab_strip_geometry(width, scale, &resting(2), 0, 0.0);
         assert_eq!(roomy.max_scroll, 0.0);
         assert_eq!(
             tab_strip_right_px(width, scale, 2),
             roomy.new_tab_menu[2].ceil() as i32,
             "with room to spare the app owns up to the `˅`, and the rest is drag"
         );
-        let full = tab_strip_geometry(width, scale, 30, 0, 0.0);
+        let full = tab_strip_geometry(width, scale, &resting(30), 0, 0.0);
         assert!(full.max_scroll > 0.0);
         assert_eq!(
             tab_strip_right_px(width, scale, 30),
@@ -3690,7 +4003,7 @@ mod tests {
         let skirt = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round();
         for index in [0, 1, 7, 15, count - 1] {
             let scrolled = tab_scroll_to_reveal(width, scale, count, index, 0.0, index);
-            let geometry = tab_strip_geometry(width, scale, count, index, scrolled);
+            let geometry = tab_strip_geometry(width, scale, &resting(count), index, scrolled);
             let body = geometry.tabs[index].body;
             assert!(
                 body[0] - skirt >= geometry.viewport[0] - 0.01
@@ -3725,6 +4038,7 @@ mod tests {
             pane_count,
             badge_text_width: 6.0,
             mark: TabMarkState::default(),
+            trailer: TabTrailer::default(),
         };
         let (_, lone_labels, lone_sprites) = strip_chrome_of(1.0, &[tab(1)], 0, 0.0, None, false);
         let (_, pair_labels, pair_sprites) = strip_chrome_of(1.0, &[tab(2)], 0, 0.0, None, false);
@@ -3756,7 +4070,7 @@ mod tests {
     #[test]
     fn the_badge_is_the_mockups_pill_and_stands_between_the_title_and_the_close() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 2, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(2), 0, 0.0);
             let tab = &geometry.tabs[0];
             let badge = tab_badge_rect(tab, 3, 0.0, scale).expect("three panes wear a badge");
             assert_eq!(
@@ -3776,9 +4090,12 @@ mod tests {
                 "padding: 0 4px is what a wider number grows by"
             );
             let close = tab.close.expect("a roomy active tab keeps its ×");
+            let tightened =
+                (WINDOW_TAB_GAP_LOGICAL_PX - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX) * scale;
             assert!(
-                (badge[2] - (close[0] - WINDOW_TAB_GAP_LOGICAL_PX * scale)).abs() < 0.51,
-                "the badge clears the row's own 8px gap before the ×"
+                (badge[2] - (close[0] - tightened)).abs() < 0.51,
+                "the badge docks by the × across the cluster's tightened gap — 8px \
+                 less the -4px `.pin + .close` takes back (mock-up 329-333)"
             );
             let axis = (tab.body[1] + tab.body[3]) / 2.0;
             assert!(
@@ -3787,7 +4104,7 @@ mod tests {
             );
         }
         // `.tab.squeezed .panecount { display: none }` (mock-up line 201).
-        let squeezed = tab_strip_geometry(960.0, 1.0, 30, 0, 0.0);
+        let squeezed = tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0);
         assert_eq!(squeezed.tabs[1].tier, TabWidthTier::Squeezed);
         assert!(
             tab_badge_rect(&squeezed.tabs[1], 3, 0.0, 1.0).is_none(),
@@ -3801,6 +4118,23 @@ mod tests {
             pane_count: 1,
             badge_text_width: 0.0,
             mark,
+            trailer: TabTrailer::default(),
+        }
+    }
+
+    /// `count` ordinary tabs: unpinned, with nothing revealed.
+    fn resting(count: usize) -> Vec<TabTrailer> {
+        vec![TabTrailer::default(); count]
+    }
+
+    /// One tab that carries nothing but the trailer under test.
+    fn pinnable_tab(trailer: TabTrailer) -> TabContent {
+        TabContent {
+            title: "tab".to_owned(),
+            pane_count: 1,
+            badge_text_width: 0.0,
+            mark: TabMarkState::default(),
+            trailer,
         }
     }
 
@@ -4022,7 +4356,7 @@ mod tests {
         // Enough tabs to drive the strip through all three tiers.
         for count in [2_usize, 8, 30] {
             let tabs: Vec<TabContent> = (0..count).map(|_| tab_with(mark)).collect();
-            let geometry = tab_strip_geometry(960.0, 1.0, count, 0, 0.0);
+            let geometry = tab_strip_geometry(960.0, 1.0, &resting(count), 0, 0.0);
             let tier = geometry.tabs[0].tier;
             let (_, _, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);
             assert!(
@@ -4036,7 +4370,7 @@ mod tests {
         }
         // And the narrowest tier really is reached, or the loop proved nothing.
         assert_eq!(
-            tab_strip_geometry(960.0, 1.0, 30, 0, 0.0).tabs[0].tier,
+            tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0).tabs[0].tier,
             TabWidthTier::Squeezed
         );
     }
@@ -4052,12 +4386,14 @@ mod tests {
                 pane_count: 2,
                 badge_text_width: 6.0,
                 mark: TabMarkState::default(),
+                trailer: TabTrailer::default(),
             },
             TabContent {
                 title: "b".to_owned(),
                 pane_count: 3,
                 badge_text_width: 6.0,
                 mark: TabMarkState::default(),
+                trailer: TabTrailer::default(),
             },
         ];
         let (_, labels, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);
@@ -4101,5 +4437,597 @@ mod tests {
             }),
             "mock-up line 297 rules the accent out here"
         );
+    }
+
+    /// The centre of a box, as a pointer would land on it.
+    fn centre(rect: [f32; 4]) -> (f64, f64) {
+        (
+            f64::from((rect[0] + rect[2]) / 2.0),
+            f64::from((rect[1] + rect[3]) / 2.0),
+        )
+    }
+
+    /// PIN — F48/F51: the pin stands in the slot the `×` gave up. The *same* box
+    /// — 17px square at 4px of round (mock-up 319-320) — with its right edge on
+    /// the tab's own 6px trailing padding, and no `×` anywhere on the tab.
+    ///
+    /// Both halves are the design (mock-up 4059-4065): the shared slot is what
+    /// puts unpinning where you already are, and the missing `×` is what stops a
+    /// stray click shutting a tab you promised to keep. "That protection IS the
+    /// feature, not a side effect."
+    ///
+    /// Red gate: drawing the pin *beside* a kept `×` — the obvious layout, and
+    /// the one that hands a pinned tab a one-click close.
+    #[test]
+    fn a_pinned_tab_wears_its_pin_in_the_slot_the_close_gave_up() {
+        // The alias, not a second 17: "same box as `.close` because it stands in
+        // the same slot" is the rule, and two literals could drift.
+        assert_eq!(
+            WINDOW_TAB_PIN_BOX_LOGICAL_PX,
+            WINDOW_TAB_CLOSE_BOX_LOGICAL_PX
+        );
+        assert_eq!(
+            WINDOW_TAB_PIN_RADIUS_LOGICAL_PX,
+            WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX
+        );
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let box_px = (WINDOW_TAB_PIN_BOX_LOGICAL_PX * scale).round();
+            let pinned = [
+                TabTrailer {
+                    pinned: true,
+                    reveal: 0.0,
+                },
+                TabTrailer::default(),
+            ];
+            let geometry = tab_strip_geometry(width, scale, &pinned, 0, 0.0);
+            let tab = geometry.tabs[0];
+            assert_eq!(
+                tab.close, None,
+                "scale {scale}: `tabTrailer` writes no `.close` for a pinned tab"
+            );
+            let pin = tab.pin.expect("a pinned tab wears its pin");
+            let close = tab_strip_geometry(width, scale, &resting(2), 0, 0.0).tabs[0]
+                .close
+                .expect("an unpinned Full-tier tab has its ×");
+            assert_eq!(
+                pin, close,
+                "scale {scale}: the pin stands in the ×'s slot, to the pixel"
+            );
+            assert_eq!(
+                [pin[2] - pin[0], pin[3] - pin[1]],
+                [box_px, box_px],
+                "scale {scale}: `.tab .pin {{ width: 17px; height: 17px }}`"
+            );
+            assert!(
+                (pin[2] - (tab.body[2] - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale)).abs() < 0.01,
+                "scale {scale}: its right edge is the tab's own trailing padding"
+            );
+            // `.pin.on` does not wait for a pointer: a fact about the tab is not
+            // an offer that appears on hover.
+            let hovered = tab_strip_geometry(
+                width,
+                scale,
+                &[
+                    TabTrailer {
+                        pinned: true,
+                        reveal: 1.0,
+                    },
+                    TabTrailer::default(),
+                ],
+                0,
+                0.0,
+            );
+            assert_eq!(
+                hovered.tabs[0].pin,
+                Some(pin),
+                "scale {scale}: a pinned tab ignores the reveal"
+            );
+        }
+    }
+
+    /// PIN — E42: the two narrow tiers take the pin from every tab, including a
+    /// pinned one and including the active one.
+    ///
+    /// `.tab.tight .pin` and `.tab.squeezed .pin { display: none }` (mock-up 197,
+    /// 201) carry no `:not(.active)` the way the `×`'s rules do, and that
+    /// asymmetry is deliberate: "summoning files+pin+close at this width crushed
+    /// the title to 0px and left an icon soup". At these widths the pin retreats
+    /// to give the title its room.
+    ///
+    /// Red gate: keeping `.pin.on` at tight because "a pinned tab must always say
+    /// so" — which is exactly the icon soup the mock-up measured, and it is not
+    /// even needed: pinned tabs also lead the strip and carry no `×`.
+    #[test]
+    fn the_narrow_tiers_take_the_pin_from_every_tab_including_a_pinned_active_one() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            // Three counts chosen to land one on each side of the two thresholds
+            // at this window width, then asserted to have done so.
+            for (count, tier) in [
+                (2, TabWidthTier::Full),
+                (6, TabWidthTier::Tight),
+                (9, TabWidthTier::Squeezed),
+            ] {
+                let trailers = vec![
+                    TabTrailer {
+                        pinned: true,
+                        reveal: 1.0,
+                    };
+                    count
+                ];
+                let geometry = tab_strip_geometry(width, scale, &trailers, 0, 0.0);
+                assert_eq!(
+                    geometry.tabs[0].tier, tier,
+                    "scale {scale}: {count} tabs must land in {tier:?}"
+                );
+                for (index, tab) in geometry.tabs.iter().enumerate() {
+                    assert_eq!(
+                        tab.pin.is_some(),
+                        tier == TabWidthTier::Full,
+                        "scale {scale}/{tier:?}: tab {index}'s pin survives exactly the Full tier"
+                    );
+                    assert_eq!(
+                        tab.close, None,
+                        "scale {scale}/{tier:?}: and a pinned tab never has a × to fall back on"
+                    );
+                }
+                // A tight tab that is *not* pinned still keeps the active tab's
+                // `×`: it is the pin's rule that is unqualified, not the `×`'s.
+                let ordinary = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
+                assert!(
+                    ordinary.tabs[0].close.is_some(),
+                    "scale {scale}/{tier:?}: `.tab.tight:not(.active) .close` spares the active tab"
+                );
+                assert!(
+                    ordinary.tabs[0].pin.is_none(),
+                    "scale {scale}/{tier:?}: an unrevealed pin is no box either"
+                );
+            }
+        }
+    }
+
+    /// PIN — F51: a press lands on the pin exactly where one is drawn, and
+    /// nowhere else. A pin that is not drawn is not pressable.
+    ///
+    /// The same claim the `×` makes in
+    /// `the_close_affordance_follows_the_mockup_s_measured_width_tiers`, and it
+    /// matters more here: the pin's resting box is *zero pixels wide*, so a hit
+    /// test written off the slot rather than off the box would toggle the pin of
+    /// every tab whose `×` you meant to press.
+    #[test]
+    fn a_press_lands_on_the_pin_only_where_one_is_drawn() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let pinned = [
+                TabTrailer {
+                    pinned: true,
+                    reveal: 0.0,
+                },
+                TabTrailer::default(),
+            ];
+            let slot = tab_strip_geometry(width, scale, &pinned, 0, 0.0).tabs[0]
+                .pin
+                .expect("a pinned tab wears its pin");
+            let (x, y) = centre(slot);
+            assert_eq!(
+                hit_tab_chrome(width, scale, &pinned, 0, 0.0, x, y),
+                Some(ChromeTarget::TabPin(0)),
+                "scale {scale}: the pinned tab's slot is the pin's"
+            );
+            assert_eq!(
+                hit_tab_chrome(width, scale, &resting(2), 0, 0.0, x, y),
+                Some(ChromeTarget::TabClose(0)),
+                "scale {scale}: and on an unpinned tab the same slot is still the ×'s"
+            );
+
+            // Where a revealed pin *would* stand on an unpinned tab, a resting
+            // strip has nothing at all, so the press is the tab's.
+            let revealed = [
+                TabTrailer {
+                    pinned: false,
+                    reveal: 1.0,
+                },
+                TabTrailer::default(),
+            ];
+            let open = tab_strip_geometry(width, scale, &revealed, 0, 0.0).tabs[0]
+                .pin
+                .expect("a full reveal opens the box");
+            let (open_x, open_y) = centre(open);
+            assert_eq!(
+                hit_tab_chrome(width, scale, &revealed, 0, 0.0, open_x, open_y),
+                Some(ChromeTarget::TabPin(0)),
+                "scale {scale}: the revealed pin answers the pointer"
+            );
+            assert_eq!(
+                hit_tab_chrome(width, scale, &resting(2), 0, 0.0, open_x, open_y),
+                Some(ChromeTarget::Tab(0)),
+                "scale {scale}: a pin that is not drawn is not pressable"
+            );
+            // And the two never trade places: the pin is left of the ×, always.
+            let close = tab_strip_geometry(width, scale, &revealed, 0, 0.0).tabs[0]
+                .close
+                .expect("an unpinned Full-tier tab keeps its ×");
+            assert!(open[2] <= close[0], "scale {scale}: pin, then ×");
+        }
+    }
+
+    /// PIN — F49: the resting pin costs the row nothing, and the -4px it leaves
+    /// behind lines the pinned row up with the unpinned one.
+    ///
+    /// The flex arithmetic is written out at [`tab_trailing_edge`]; this is its
+    /// measurement. `width: 0` with `margin-left: -8px` "cancel[s] this item's
+    /// share of the flex gap" (mock-up 339), so an invisible pin takes no room —
+    /// but it is still a sibling, so `.pin + .close`'s -4px applies, and the
+    /// badge docks 4px closer to the `×` than the row's own gap would put it. A
+    /// pinned tab's lone `.pin.on` carries the same -4px (353-357) so that the
+    /// two rows agree.
+    ///
+    /// Red gate: the mock-up's own — "the two counts sat 4px apart".
+    #[test]
+    fn a_resting_pin_costs_the_row_nothing_and_lines_the_two_rows_up() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
+            let tightened = gap - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
+            let rest = tab_strip_geometry(width, scale, &resting(2), 0, 0.0).tabs[0];
+            assert!(
+                rest.pin.is_none(),
+                "scale {scale}: a zero-width box is no box at all"
+            );
+            let close = rest.close.expect("an unpinned Full-tier tab has its ×");
+            let badge = tab_badge_rect(&rest, 3, 0.0, scale).expect("three panes wear a badge");
+            assert!(
+                (badge[2] - (close[0] - tightened)).abs() < 0.51,
+                "scale {scale}: the badge docks across the tightened gap, saw {} against {}",
+                badge[2],
+                close[0] - tightened
+            );
+            assert!(
+                badge[2] > close[0] - gap,
+                "scale {scale}: the resting pin's -8px cancels its own gap, so nothing \
+                 stands between the badge and the × but the cluster's own 4px"
+            );
+            let pinned = tab_strip_geometry(
+                width,
+                scale,
+                &[
+                    TabTrailer {
+                        pinned: true,
+                        reveal: 0.0,
+                    },
+                    TabTrailer::default(),
+                ],
+                0,
+                0.0,
+            )
+            .tabs[0];
+            assert_eq!(
+                tab_badge_rect(&pinned, 3, 0.0, scale),
+                Some(badge),
+                "scale {scale}: mock-up 353-357 — the two counts must not sit 4px apart"
+            );
+        }
+    }
+
+    /// PIN — F49: a full reveal opens exactly one 17px box, four pixels clear of
+    /// the `×`, and the row pays it 25px — the box itself plus the 8px gap its
+    /// `margin-left: -8px` had been cancelling.
+    ///
+    /// Red gate: reading the animation as `width: 0 -> 17` alone, which moves the
+    /// badge by 17 and leaves the pin and the badge touching. The mock-up animates
+    /// two properties (lines 347-348) and both are layout.
+    #[test]
+    fn a_revealed_pin_opens_one_box_and_the_row_pays_it_that_box_and_a_gap() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let box_px = (WINDOW_TAB_PIN_BOX_LOGICAL_PX * scale).round();
+            let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
+            let tighten = WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
+            let open_at = |reveal: f32| {
+                tab_strip_geometry(
+                    width,
+                    scale,
+                    &[
+                        TabTrailer {
+                            pinned: false,
+                            reveal,
+                        },
+                        TabTrailer::default(),
+                    ],
+                    0,
+                    0.0,
+                )
+                .tabs[0]
+            };
+            let open = open_at(1.0);
+            let pin = open.pin.expect("a full reveal opens the box");
+            let close = open.close.expect("an unpinned tab keeps its ×");
+            assert!(
+                (pin[2] - pin[0] - box_px).abs() < 0.01,
+                "scale {scale}: `.tab:hover .pin {{ width: 17px }}`, saw {}",
+                pin[2] - pin[0]
+            );
+            assert_eq!(
+                [pin[1], pin[3]],
+                [close[1], close[3]],
+                "scale {scale}: one box on one axis with the × beside it"
+            );
+            assert!(
+                (close[0] - pin[2] - tighten).abs() < 0.01,
+                "scale {scale}: `.pin + .close {{ margin-left: -4px }}` — 8 - 4 = 4px \
+                 between them, saw {}",
+                close[0] - pin[2]
+            );
+            // Half open is half a box, and the badge has moved half of the 25px.
+            let half = open_at(0.5).pin.expect("a half reveal is still a box");
+            assert!(
+                (half[2] - half[0] - box_px / 2.0).abs() < 0.01,
+                "scale {scale}: the width animates, it does not switch"
+            );
+            let badge_right = |tab: &TabGeometry| {
+                tab_badge_rect(tab, 3, 0.0, scale).expect("three panes wear a badge")[2]
+            };
+            let rest = tab_strip_geometry(width, scale, &resting(2), 0, 0.0).tabs[0];
+            let paid = badge_right(&rest) - badge_right(&open);
+            assert!(
+                (paid - (box_px + gap)).abs() < 1.01,
+                "scale {scale}: the reveal costs the row its box and the gap it had been \
+                 cancelling, saw {paid} against {}",
+                box_px + gap
+            );
+            let half_paid = badge_right(&rest) - badge_right(&open_at(0.5));
+            assert!(
+                (half_paid - (box_px + gap) / 2.0).abs() < 1.01,
+                "scale {scale}: and it is paid continuously, saw {half_paid}"
+            );
+        }
+    }
+
+    /// PIN — F52/F53: the drawn pin. A 13px glyph in the 17px box (mock-up 365),
+    /// filled for the state and outlined for the offer, and the state is the
+    /// darker of the two.
+    ///
+    /// The sizes are the mock-up's own argument, quoted at 362-364: "the pin
+    /// carries a state and a glyph that has to survive a 45° turn, and both cost
+    /// silhouette. It is not the close button's twin and sizing it like one made
+    /// it read as lint." So the assertion is not merely `== 13`; it is also
+    /// `!= the ×'s 8`.
+    #[test]
+    fn the_drawn_pin_is_thirteen_pixels_filled_for_a_state_and_outlined_for_an_offer() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let glyph = (WINDOW_TAB_PIN_GLYPH_LOGICAL_PX * scale).round();
+            assert_ne!(
+                glyph,
+                (WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX * scale).round(),
+                "scale {scale}: the pin is not the close button's twin"
+            );
+            let pin_sprite = |sprites: &[ChromeSprite], filled: bool| {
+                sprites
+                    .iter()
+                    .find(|sprite| sprite.mark == ChromeMark::Pin { filled })
+                    .copied()
+            };
+
+            // Pinned, untouched: filled, `--ink`, and never faded.
+            let tabs = [
+                pinnable_tab(TabTrailer {
+                    pinned: true,
+                    reveal: 0.0,
+                }),
+                pinnable_tab(TabTrailer::default()),
+            ];
+            let (_, _, sprites) = strip_chrome_of(scale, &tabs, 0, 0.0, None, false);
+            let state = pin_sprite(&sprites, true).expect("a pinned tab draws its pin");
+            assert_eq!(
+                [state.rect[2] - state.rect[0], state.rect[3] - state.rect[1]],
+                [glyph, glyph],
+                "scale {scale}: `.pinsvg {{ width: 13px; height: 13px }}`"
+            );
+            let box_rect = tab_strip_geometry(
+                960.0 * scale,
+                scale,
+                &[tabs[0].trailer, tabs[1].trailer],
+                0,
+                0.0,
+            )
+            .tabs[0]
+                .pin
+                .expect("the pinned tab has a box to centre it in");
+            assert!(
+                ((state.rect[0] + state.rect[2]) / 2.0 - (box_rect[0] + box_rect[2]) / 2.0).abs()
+                    <= 0.5,
+                "scale {scale}: `justify-content: center` inside the 17px box"
+            );
+            assert_eq!(
+                state.color, palette.title_text_hover,
+                "scale {scale}: `.tab .pin.on {{ color: var(--ink) }}`"
+            );
+            assert_eq!(
+                state.opacity, 1.0,
+                "scale {scale}: a fact about the tab does not fade in"
+            );
+            assert!(
+                pin_sprite(&sprites, false).is_none(),
+                "scale {scale}: an unrevealed neighbour draws no pin"
+            );
+
+            // Unpinned and untouched: no furniture at all.
+            let quiet = [pinnable_tab(TabTrailer::default())];
+            let (_, _, quiet_sprites) = strip_chrome_of(scale, &quiet, 0, 0.0, None, false);
+            assert!(
+                !quiet_sprites
+                    .iter()
+                    .any(|sprite| matches!(sprite.mark, ChromeMark::Pin { .. })),
+                "scale {scale}: a strip of ordinary tabs carries no extra furniture"
+            );
+
+            // Unpinned and revealed: outlined, `--ink3` — the resting ×'s own ink.
+            let offered = [pinnable_tab(TabTrailer {
+                pinned: false,
+                reveal: 1.0,
+            })];
+            let (_, _, offer_sprites) = strip_chrome_of(scale, &offered, 0, 0.0, None, false);
+            let offer = pin_sprite(&offer_sprites, false).expect("a revealed pin is drawn");
+            assert_eq!(
+                offer.color, palette.title_text_muted,
+                "scale {scale}: `.tab .pin {{ color: var(--ink3) }}`"
+            );
+            assert_ne!(
+                palette.title_text_muted, palette.title_text_hover,
+                "the state is darker than the action"
+            );
+        }
+    }
+
+    /// PIN — F52: the pin fades with its own reveal, and waits for a box that can
+    /// hold it.
+    ///
+    /// `transition: … opacity .12s ease` (mock-up 341) is the fade. The waiting is
+    /// this pipeline's answer to `overflow: hidden`: a chrome mark is rasterised
+    /// into the box it fills and drawn with whole-texture UVs, so a half-open box
+    /// cannot crop one — the same ruling [`within_strip`] records. A 13px glyph
+    /// centred in a 3px box would spill five pixels over the title on each side,
+    /// so it arrives once the box can hold it, inside the fade already running.
+    #[test]
+    fn a_pin_fades_with_its_reveal_and_waits_for_a_box_that_can_hold_it() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let drawn = |reveal: f32| {
+                let tabs = [pinnable_tab(TabTrailer {
+                    pinned: false,
+                    reveal,
+                })];
+                let (_, _, sprites) = strip_chrome_of(scale, &tabs, 0, 0.0, None, false);
+                sprites
+                    .iter()
+                    .find(|sprite| matches!(sprite.mark, ChromeMark::Pin { .. }))
+                    .copied()
+            };
+            assert!(
+                drawn(0.2).is_none(),
+                "scale {scale}: a sliver of a box holds no 13px glyph"
+            );
+            let nearly = drawn(0.9).expect("a nearly-open box holds it");
+            assert!(
+                (nearly.opacity - 0.9).abs() < 1e-6,
+                "scale {scale}: the fade is the reveal, saw {}",
+                nearly.opacity
+            );
+            assert_eq!(
+                drawn(1.0).expect("a full reveal is drawn").opacity,
+                1.0,
+                "scale {scale}: and it arrives whole"
+            );
+        }
+    }
+
+    /// PIN — F53: the pin answers the pointer exactly the way the `×` beside it
+    /// does — the same `--active` pill at the same 4px of round, over whichever
+    /// surface its tab is showing — and a pointer on it is still a pointer on the
+    /// tab, so the body lights up under it.
+    #[test]
+    fn the_pin_wears_the_close_buttons_own_hover_pill_and_lights_its_tab_with_it() {
+        let palette = chrome_palette();
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let radius = (WINDOW_TAB_PIN_RADIUS_LOGICAL_PX * scale).round() as u32;
+            let trailers = [
+                TabTrailer {
+                    pinned: true,
+                    reveal: 0.0,
+                },
+                TabTrailer {
+                    pinned: true,
+                    reveal: 0.0,
+                },
+            ];
+            let tabs = [pinnable_tab(trailers[0]), pinnable_tab(trailers[1])];
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &trailers, 0, 0.0);
+            for (index, expected) in [
+                (0, palette.tab_close_pill_on_content),
+                (1, palette.tab_close_pill_on_hovered_tab),
+            ] {
+                let pin = geometry.tabs[index]
+                    .pin
+                    .expect("a pinned tab wears its pin");
+                let (_, _, sprites) = strip_chrome_of(
+                    scale,
+                    &tabs,
+                    0,
+                    0.0,
+                    Some(ChromeTarget::TabPin(index)),
+                    false,
+                );
+                let pill = sprites
+                    .iter()
+                    .find(|sprite| sprite.rect == pixel_snapped(pin))
+                    .expect("the pin fills its box under the pointer");
+                assert_eq!(
+                    pill.mark,
+                    ChromeMark::ControlPill { radius_px: radius },
+                    "scale {scale}: `.tab .pin {{ border-radius: 4px }}`"
+                );
+                assert_eq!(
+                    pill.color, expected,
+                    "scale {scale}: tab {index}'s pill sits on the wrong surface"
+                );
+                let glyph = sprites
+                    .iter()
+                    .filter(|sprite| matches!(sprite.mark, ChromeMark::Pin { .. }))
+                    .find(|sprite| sprite.rect[0] >= pin[0] && sprite.rect[2] <= pin[2])
+                    .expect("and its glyph is inside it");
+                assert_eq!(
+                    glyph.color, palette.title_text_hover,
+                    "scale {scale}: `.tab .pin:hover {{ color: var(--ink) }}`"
+                );
+            }
+            let (_, _, sprites) =
+                strip_chrome_of(scale, &tabs, 0, 0.0, Some(ChromeTarget::TabPin(1)), false);
+            assert!(
+                sprites
+                    .iter()
+                    .any(|sprite| matches!(sprite.mark, ChromeMark::TabBody { .. })),
+                "scale {scale}: `.tab:hover` — the pin is inside the tab"
+            );
+        }
+    }
+
+    /// PIN — F48: a trailer moves nothing outside its own tab.
+    ///
+    /// Every tab takes the same share of the run whatever it hangs off its
+    /// trailing end, so the strip's bodies, its buttons, its viewport and its
+    /// scroll are all deaf to the pins. That is the licence [`tab_strip_bodies`]
+    /// runs on: the three questions that are about the *run* need no trailer list
+    /// at all, and would otherwise have made every caller of
+    /// `tab_strip_contains` invent one.
+    #[test]
+    fn a_trailer_moves_nothing_outside_its_own_tab() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            for count in [1_usize, 2, 6, 9, 30] {
+                let width = 960.0 * scale;
+                let mixed = (0..count)
+                    .map(|index| TabTrailer {
+                        pinned: index % 2 == 0,
+                        reveal: (index % 3) as f32 / 2.0,
+                    })
+                    .collect::<Vec<_>>();
+                let plain = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
+                let trailed = tab_strip_geometry(width, scale, &mixed, 0, 0.0);
+                assert_eq!(
+                    plain.new_tab, trailed.new_tab,
+                    "scale {scale}, {count} tabs"
+                );
+                assert_eq!(plain.new_tab_menu, trailed.new_tab_menu);
+                assert_eq!(plain.viewport, trailed.viewport);
+                assert_eq!(plain.max_scroll, trailed.max_scroll);
+                for (index, (plain, trailed)) in plain.tabs.iter().zip(&trailed.tabs).enumerate() {
+                    assert_eq!(
+                        plain.body, trailed.body,
+                        "scale {scale}, {count} tabs: tab {index}'s body moved"
+                    );
+                    assert_eq!(plain.tier, trailed.tier);
+                }
+            }
+        }
     }
 }

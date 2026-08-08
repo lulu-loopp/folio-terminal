@@ -638,6 +638,14 @@ pub const WINDOW_TAB_RING_SPIN_PERIOD_MS: u64 = 1_100;
 /// `.pring .arc { transition: stroke-dashoffset .3s ease }` (line 279) — a
 /// progress report jumps, and the arc that reports it must not.
 pub const WINDOW_TAB_RING_SWEEP_TRANSITION_MS: u64 = 300;
+/// `transition: width .16s ease, margin-left .16s ease` (line 341) — the pin's
+/// zero-width expansion. One continuous layout change, not a fade-in on top of a
+/// jump: the control widens *in* and the badge beside it slides aside.
+pub const WINDOW_TAB_PIN_REVEAL_MS: u64 = 160;
+/// `opacity .12s ease` from the same declaration — the ink arrives a touch
+/// ahead of the box finishing, which is what keeps the expansion from reading as
+/// an empty gap opening first.
+pub const WINDOW_TAB_PIN_FADE_MS: u64 = 120;
 /// `.ticon-wrap.dead .ticon { opacity: .35 }` (line 285).
 pub const WINDOW_TAB_DEAD_MARK_OPACITY: f32 = 0.35;
 

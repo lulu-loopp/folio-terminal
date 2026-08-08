@@ -17,14 +17,22 @@
 //!   through the same [`crate::settings::push_float_window`] — a popup drawn out
 //!   of opaque chrome quads would have to know what is under it, and nothing is
 //!   under a popup but whatever the terminal happens to be showing.
+//! * **It shows two lists, so a row is not a number.** Under the profiles sits
+//!   `Recently opened` (mock-up 7311-7320), and its rows index the seed vault
+//!   rather than [`PROFILES`]. Both [`hit`] and the hover therefore speak in
+//!   [`MenuRow`], because the one thing a bare index cannot say is which list it
+//!   came from — and the answer it gets wrong is silent.
+
+use std::time::SystemTime;
 
 use bt_render::{
-    ChromeLabel, ChromeLabelWeight, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX,
-    chrome_palette, rounded_overlay_fill,
+    ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
+    FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette, rounded_overlay_fill,
 };
 
 use crate::{
     marks::{ChromeMark, ChromeSprite, OverlayLayer},
+    seed::{RECENT_CAPACITY, RecentEntry, Seed, ago_label},
     settings::push_float_window,
 };
 
@@ -56,8 +64,74 @@ const ITEM_FONT_LOGICAL_PX: f32 = 13.0;
 const ITEM_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
 const ITEM_MARK_LOGICAL_PX: f32 = 15.0;
 /// `.default-hint { margin-left: auto; font-size: 11px; color: var(--ink3) }`.
+///
+/// Two annotations ride in this one slot: the profile list's `default`, and a
+/// recent row's `agoLabel` (mock-up 7319). They are the same declaration in the
+/// same place, so they are the same number here.
 const HINT_FONT_LOGICAL_PX: f32 = 11.0;
 const HINT_TEXT: &str = "default";
+
+// ── `.menu-sep` (mock-up line 996) ─────────────────────────────────────────
+/// `height: 1px`, taken to whole device pixels and never below one.
+///
+/// Rounded rather than left fractional, which is where the floating window's own
+/// border differs: a border is four edges around a rounded box that the coverage
+/// pass is already antialiasing, while this is a single horizontal line, and a
+/// horizontal line 1.25px tall is drawn as two rows of partial ink — a blurred
+/// grey band instead of a rule. The `max` keeps it from rounding away entirely
+/// at the scales where the ink is thinnest.
+const SEPARATOR_THICKNESS_LOGICAL_PX: f32 = 1.0;
+/// `margin: 5px 0`.
+const SEPARATOR_MARGIN_Y_LOGICAL_PX: f32 = 5.0;
+/// `background: var(--border-soft)` — `rgba(255,255,255,.06)` on dark,
+/// `rgba(0,0,0,.055)` on light (mock-up lines 20 and 50).
+///
+/// The ink is the one `ChromePalette::menu_border` already carries (both tokens
+/// are the theme's own black or white); only this softer alpha is missing from
+/// the palette, so the pair is stated here and chosen **off the ink the palette
+/// handed us** rather than off [`bt_render::current_theme`]. That is not a
+/// detour: the palette is picked by background luma and the theme by the user's
+/// setting, and under a `BT_BG` override those two answers differ — asking the
+/// palette keeps the hairline in the same theme as the surface under it.
+///
+/// Its proper home is a pre-composited `--border-soft` over `--menu` in
+/// [`ChromePalette`], which is a bt-render change this work item may not make.
+const SEPARATOR_ALPHA_ON_DARK: f32 = 0.06;
+/// The light theme's half of [`SEPARATOR_ALPHA_ON_DARK`].
+const SEPARATOR_ALPHA_ON_LIGHT: f32 = 0.055;
+
+// ── `.menu-label` (mock-up lines 997-1000) ─────────────────────────────────
+const SECTION_LABEL_FONT_LOGICAL_PX: f32 = 10.5;
+/// The 10.5px line box, measured in the mock-up's own renderer (Inter at
+/// `line-height: normal`) — 12.5px, the same ladder its 11px group label climbs
+/// at 13px and its 13px row at 15.5px.
+const SECTION_LABEL_LINE_LOGICAL_PX: f32 = 12.5;
+/// `letter-spacing: .05em` at `font-weight: 600` — the settings dialog's
+/// `.group-label` craft, which is the same heading in a different surface.
+const SECTION_LABEL_TRACKING_EM: f32 = 0.05;
+/// `padding: 3px 10px 5px` — top, both sides, bottom.
+const SECTION_LABEL_PADDING_TOP_LOGICAL_PX: f32 = 3.0;
+const SECTION_LABEL_PADDING_X_LOGICAL_PX: f32 = 10.0;
+const SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
+/// `Recently opened` under `text-transform: uppercase`.
+///
+/// The transform is a *rendering* of the heading, and this pipeline has no
+/// transform: a chrome label draws the string it is given. So the string it is
+/// given is the drawn one, and the mock-up's own casing lives in the doc line
+/// above rather than in a lowercase constant nothing would uppercase.
+const RECENT_SECTION_LABEL: &str = "RECENTLY OPENED";
+
+// ── `.recent-item` (mock-up lines 1001-1002) ───────────────────────────────
+/// `max-width: 260px`.
+///
+/// It is a real clamp on the row's box and it cannot bind today: the menu is
+/// [`MENU_MIN_WIDTH_LOGICAL_PX`] wide and nothing here measures text, so every
+/// row is already 170px of content. In the mock-up the menu is content-sized
+/// (`min-width: 180px` over `white-space: nowrap` rows) and this is what stops
+/// one long path from stretching the popup across the window — the day this
+/// module can measure a string, that growth and the ellipsis at mock-up 1002
+/// arrive together, and the clamp is already where it belongs.
+const RECENT_ITEM_MAX_WIDTH_LOGICAL_PX: f32 = 260.0;
 
 /// A profile the picker can start a tab from.
 ///
@@ -67,6 +141,16 @@ const HINT_TEXT: &str = "default";
 /// three would be three rows that cannot do what they say.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Profile {
+    /// The name a seed keeps this profile by — `docs/DESIGN.md` §7.1.4 requires a
+    /// "**稳定 profile_id**（不是标题、不是展示对象）".
+    ///
+    /// It is deliberately not [`Self::title`]: a title is a display object, and
+    /// display objects get renamed, localised and reworded. A seed keyed on one
+    /// would stop matching its own profile the day the strip's wording changed,
+    /// and the tab would come back as somebody else. It is not the executable
+    /// path either — that is what the shell *is*, not which profile chose it, and
+    /// two profiles can legitimately launch the same binary.
+    pub id: &'static str,
     pub title: &'static str,
     /// A profile's icon is its mark, not a letter that happens to be in its
     /// prompt — the mock-up says so in as many words at `const mark`.
@@ -74,12 +158,48 @@ pub struct Profile {
 }
 
 pub const PROFILES: [Profile; 1] = [Profile {
+    id: "pwsh",
     title: "PowerShell",
     mark: ChromeMark::ProfilePowerShell,
 }];
 
 /// The index a new tab is started from when nobody picks — `state.defaultProfile`.
 pub const DEFAULT_PROFILE: usize = 0;
+
+/// Which profile a seed's `profile_id` names, or [`DEFAULT_PROFILE`] when the
+/// file names one this build does not have.
+///
+/// Falling back rather than refusing is the schema's own rule — `§5.4` 逐叶降级,
+/// "未知 profile→默认": a profile that was removed (or that a newer build wrote)
+/// must cost you that tab's *shell choice*, never the tab. The place you were
+/// standing is the part worth keeping, and it survives this.
+#[must_use]
+pub fn index_of_id(id: &str) -> usize {
+    PROFILES
+        .iter()
+        .position(|profile| profile.id == id)
+        .unwrap_or(DEFAULT_PROFILE)
+}
+
+/// Which row of the menu, and **what kind of row** — the two lists the picker
+/// shows are indexed separately and a bare number cannot say which one it is
+/// counting.
+///
+/// The tag is load-bearing rather than tidy. The menu used to be [`PROFILES`]
+/// and nothing else, so a row index *was* a profile index and the two could be
+/// the same integer; the moment a Recent section sits under the profiles, that
+/// same integer names two different things, and the failure it produces is not
+/// a panic but a silent one — clicking `~/repo · 3m ago` launching a plain
+/// PowerShell in the wrong place, which looks like the menu working.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuRow {
+    /// An index into [`PROFILES`]: start a new tab from this profile.
+    Profile(usize),
+    /// An index into the vault slice the menu was laid out from: revive this
+    /// seed. It is the vault's own index, so [`crate::seed::SeedVault::take`]
+    /// consumes it directly.
+    Recent(usize),
+}
 
 /// Whether the picker is up, and which row the pointer is on.
 ///
@@ -89,7 +209,7 @@ pub const DEFAULT_PROFILE: usize = 0;
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ProfileMenu {
     open: bool,
-    hover: Option<usize>,
+    hover: Option<MenuRow>,
 }
 
 impl ProfileMenu {
@@ -115,14 +235,14 @@ impl ProfileMenu {
     }
 
     /// Returns whether the hover changed, so a caller can skip a repaint.
-    pub fn set_hover(&mut self, hover: Option<usize>) -> bool {
+    pub fn set_hover(&mut self, hover: Option<MenuRow>) -> bool {
         let hover = if self.open { hover } else { None };
         let changed = self.hover != hover;
         self.hover = hover;
         changed
     }
 
-    pub fn hover(self) -> Option<usize> {
+    pub fn hover(self) -> Option<MenuRow> {
         self.hover
     }
 }
@@ -136,55 +256,143 @@ pub struct ProfileMenuLayout {
     frame: [f32; 4],
     /// One row per entry of [`PROFILES`], top to bottom.
     items: Vec<[f32; 4]>,
+    /// `.menu-sep`'s 1px rule, or `None` when there is nothing to separate.
+    ///
+    /// The three Recent boxes are `Option`/empty together and never singly:
+    /// mock-up 7311 is one ternary over `state.recent.length`, and a heading
+    /// over an empty list is a promise the menu cannot keep.
+    separator: Option<[f32; 4]>,
+    /// `.menu-label`'s band, padding included.
+    section_label: Option<[f32; 4]>,
+    /// One row per vault entry the menu shows, newest first.
+    recent: Vec<[f32; 4]>,
+}
+
+/// What the menu shows of a vault: its first [`RECENT_CAPACITY`] entries.
+///
+/// The cap is the vault's own (`docs/DESIGN.md` §7.1.4, mock-up 4056) and not a
+/// second policy invented here — but it is applied here too, because a menu is
+/// a surface with a window edge under it and "however many the caller passed"
+/// is not a height. Both [`layout`] and [`build`] read the slice through this,
+/// so the rectangles and the rows drawn into them cannot disagree.
+fn menu_rows(recent: &[RecentEntry]) -> &[RecentEntry] {
+    &recent[..recent.len().min(RECENT_CAPACITY)]
 }
 
 /// The menu hung under `anchor` — the `˅`'s own box, in physical pixels — inside
-/// a surface this wide.
+/// a surface this wide, showing `recent` under the profiles.
+///
+/// No clock is read here and none is passed: how long ago a seed was closed is
+/// a fact about the moment it is *drawn*, so it belongs to [`build`], and a
+/// layout that took the time would change shape between two frames of one open
+/// menu.
 #[must_use]
-pub fn layout(anchor: [f32; 4], surface_width: f32, scale: f32) -> ProfileMenuLayout {
+pub fn layout(
+    anchor: [f32; 4],
+    surface_width: f32,
+    scale: f32,
+    recent: &[RecentEntry],
+) -> ProfileMenuLayout {
     let px = |value: f32| value * scale;
+    let recent = menu_rows(recent);
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
     let padding = px(MENU_PADDING_LOGICAL_PX);
     let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let separator_thickness = (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let separator_margin = px(SEPARATOR_MARGIN_Y_LOGICAL_PX).round();
+    // `margin: 5px 0` above and below the rule, and nothing to collapse against:
+    // a row carries no vertical margin of its own.
+    //
+    // Every term here is a whole number of device pixels, and that is what makes
+    // the section *additive*: the menu's height is the rounded sum, so a section
+    // measured in whole pixels adds exactly its own height to it rather than a
+    // pixel more or less depending on where the fraction under it happened to
+    // sit.
+    let separator_block = 2.0 * separator_margin + separator_thickness;
+    let section_block = px(SECTION_LABEL_PADDING_TOP_LOGICAL_PX
+        + SECTION_LABEL_LINE_LOGICAL_PX
+        + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
+    .round();
+    let recent_block = if recent.is_empty() {
+        0.0
+    } else {
+        separator_block + section_block + item_height * recent.len() as f32
+    };
+
     let width = px(MENU_MIN_WIDTH_LOGICAL_PX).round();
     let top = (anchor[3] + px(MENU_OFFSET_LOGICAL_PX)).round();
     let left = anchor[0]
         .min(surface_width - width - px(MENU_EDGE_MARGIN_LOGICAL_PX))
         .max(0.0)
         .round();
-    let height = (2.0 * (border + padding) + item_height * PROFILES.len() as f32).round();
+    let height =
+        (2.0 * (border + padding) + item_height * PROFILES.len() as f32 + recent_block).round();
     let frame = [left, top, left + width, top + height];
-    let items = (0..PROFILES.len())
-        .map(|index| {
-            let item_top = frame[1] + border + padding + item_height * index as f32;
-            [
-                frame[0] + border + padding,
-                item_top,
-                frame[2] - border - padding,
-                item_top + item_height,
-            ]
-        })
-        .collect();
+
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+    let mut items = Vec::with_capacity(PROFILES.len());
+    for _ in 0..PROFILES.len() {
+        items.push([content_left, cursor, content_right, cursor + item_height]);
+        cursor += item_height;
+    }
+    let (separator, section_label, recent_rows) = if recent.is_empty() {
+        (None, None, Vec::new())
+    } else {
+        let separator = [
+            content_left,
+            cursor + separator_margin,
+            content_right,
+            cursor + separator_margin + separator_thickness,
+        ];
+        cursor += separator_block;
+        let section_label = [content_left, cursor, content_right, cursor + section_block];
+        cursor += section_block;
+        // `.recent-item { max-width: 260px }` — see the constant: a clamp that
+        // cannot bind while the menu keeps its min-width, and the right place
+        // for it the day the menu is content-sized.
+        let recent_right = content_right.min(content_left + px(RECENT_ITEM_MAX_WIDTH_LOGICAL_PX));
+        let mut rows = Vec::with_capacity(recent.len());
+        for _ in recent {
+            rows.push([content_left, cursor, recent_right, cursor + item_height]);
+            cursor += item_height;
+        }
+        (Some(separator), Some(section_label), rows)
+    };
+
     ProfileMenuLayout {
         scale,
         frame,
         items,
+        separator,
+        section_label,
+        recent: recent_rows,
     }
 }
 
-/// What a point is over: a row, `Some(None)` for the menu's own body between and
-/// around its rows, and `None` for anywhere else in the window.
+/// What a point is over: a row and which list it belongs to, `Some(None)` for
+/// the menu's own body between and around its rows, and `None` for anywhere else
+/// in the window.
 ///
 /// The two negatives are different answers and the difference is the whole of
 /// what "popup" means here: a press on the body is the menu's and does nothing,
 /// a press outside it belongs to whatever is there and merely closes the menu on
 /// its way past.
+///
+/// The separator and the heading are body, not rows — they are the two things in
+/// the menu that name nothing you can open.
 #[must_use]
-pub fn hit(layout: &ProfileMenuLayout, x: f64, y: f64) -> Option<Option<usize>> {
+pub fn hit(layout: &ProfileMenuLayout, x: f64, y: f64) -> Option<Option<MenuRow>> {
     let (x, y) = (x as f32, y as f32);
     for (index, item) in layout.items.iter().enumerate() {
         if contains(*item, x, y) {
-            return Some(Some(index));
+            return Some(Some(MenuRow::Profile(index)));
+        }
+    }
+    for (index, row) in layout.recent.iter().enumerate() {
+        if contains(*row, x, y) {
+            return Some(Some(MenuRow::Recent(index)));
         }
     }
     contains(layout.frame, x, y).then_some(None)
@@ -202,7 +410,12 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 /// [`crate::settings::build`], where the picker is a second layer over the dialog
 /// it hangs off.
 #[must_use]
-pub fn build(layout: &ProfileMenuLayout, hover: Option<usize>) -> Vec<OverlayLayer> {
+pub fn build(
+    layout: &ProfileMenuLayout,
+    hover: Option<MenuRow>,
+    recent: &[RecentEntry],
+    now: SystemTime,
+) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
     let px = |value: f32| value * scale;
@@ -228,72 +441,72 @@ pub fn build(layout: &ProfileMenuLayout, hover: Option<usize>) -> Vec<OverlayLay
 
     for (index, item) in layout.items.iter().enumerate() {
         let profile = PROFILES[index];
-        let hovered = hover == Some(index);
-        if hovered {
-            quads.extend(rounded_overlay_fill(
-                *item,
-                px(ITEM_RADIUS_LOGICAL_PX),
-                palette.menu_item_hover,
-                1.0,
-            ));
-        }
-        // The 15px mark centred on its own 14px column, which is what a flex box
-        // does with a child one pixel wider than the box it is in.
-        let column_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
-        let column_right = column_left + px(ITEM_ICON_COLUMN_LOGICAL_PX);
-        let mark = px(ITEM_MARK_LOGICAL_PX).round();
-        let mark_left = ((column_left + column_right - mark) / 2.0).round();
-        let mark_top = ((item[1] + item[3] - mark) / 2.0).round();
-        sprites.push(ChromeSprite::new(
-            profile.mark,
-            [mark_left, mark_top, mark_left + mark, mark_top + mark],
-            palette.accent,
-        ));
-        labels.push(ChromeLabel {
-            text: profile.title.to_owned(),
-            rect: [
-                column_right + px(ITEM_GAP_LOGICAL_PX),
-                item[1],
-                item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
-                item[3],
-            ],
-            font_size_px: px(ITEM_FONT_LOGICAL_PX),
-            color: if hovered {
-                palette.menu_item_text_selected
-            } else {
-                palette.menu_item_text
+        push_row(
+            &Row {
+                rect: *item,
+                mark: profile.mark,
+                name: profile.title,
+                // `margin-left: auto` puts the hint hard against the row's
+                // trailing padding, and it names a fact about the profile rather
+                // than the row's state — so it does not answer to hover.
+                hint: (index == DEFAULT_PROFILE).then_some(HINT_TEXT.to_owned()),
+                hovered: hover == Some(MenuRow::Profile(index)),
             },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
+    }
+
+    if let Some(rule) = layout.separator {
+        quads.push(OverlayQuad {
+            rect: rule,
+            color: palette.menu_border,
+            alpha: separator_alpha(palette.menu_border),
+        });
+    }
+
+    if let Some(band) = layout.section_label {
+        labels.push(ChromeLabel {
+            text: RECENT_SECTION_LABEL.to_owned(),
+            // The band's content box: padding stripped, so the 12.5px line box
+            // is centred in exactly its own height and the 3px above it and 5px
+            // below it stay the stylesheet's rather than the renderer's.
+            rect: [
+                band[0] + px(SECTION_LABEL_PADDING_X_LOGICAL_PX),
+                band[1] + px(SECTION_LABEL_PADDING_TOP_LOGICAL_PX),
+                band[2] - px(SECTION_LABEL_PADDING_X_LOGICAL_PX),
+                band[3] - px(SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX),
+            ],
+            font_size_px: px(SECTION_LABEL_FONT_LOGICAL_PX),
+            // `--ink3` over `--menu` — the same ink the row hints wear, because
+            // it is the same declaration on the same surface.
+            color: palette.menu_item_hint_text,
             align_right: false,
             align_center: false,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
+            letter_spacing_em: SECTION_LABEL_TRACKING_EM,
+            weight: ChromeLabelWeight::SemiBold,
             tabular_numerals: false,
         });
-        // `margin-left: auto` puts the hint hard against the row's trailing
-        // padding, and it names a fact about the profile rather than the row's
-        // state — so it does not answer to hover.
-        if index == DEFAULT_PROFILE {
-            labels.push(ChromeLabel {
-                text: HINT_TEXT.to_owned(),
-                rect: [
-                    item[0],
-                    item[1],
-                    item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
-                    item[3],
-                ],
-                font_size_px: px(HINT_FONT_LOGICAL_PX),
-                // `--ink3` over `--menu`. It used to be `dialog_muted_text`,
-                // which is the same ink over `--win` — the settings dialog's
-                // surface, not this one. Identical in the light theme, six levels
-                // adrift in the dark.
-                color: palette.menu_item_hint_text,
-                align_right: true,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-            });
-        }
+    }
+
+    for (index, (row, entry)) in layout.recent.iter().zip(menu_rows(recent)).enumerate() {
+        push_row(
+            &Row {
+                rect: *row,
+                mark: recent_mark(&entry.seed),
+                name: recent_label(&entry.seed),
+                hint: Some(ago_label(entry.at, now)),
+                hovered: hover == Some(MenuRow::Recent(index)),
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
     }
 
     vec![OverlayLayer {
@@ -303,8 +516,165 @@ pub fn build(layout: &ProfileMenuLayout, hover: Option<usize>) -> Vec<OverlayLay
     }]
 }
 
+/// One `.profile-item`, whichever list it belongs to.
+///
+/// The two lists are the same row — mock-up 7317 is `class="profile-item
+/// recent-item"`, and `.recent-item` adds a width and nothing else. So they are
+/// drawn by one function rather than two that look alike, because the way two
+/// menu rows drift apart is that somebody fixes the ink on one of them.
+struct Row<'a> {
+    rect: [f32; 4],
+    mark: ChromeMark,
+    name: &'a str,
+    /// The `.default-hint` slot: `default` on the default profile, `3m ago` on
+    /// a recent row, nothing on the rest.
+    hint: Option<String>,
+    hovered: bool,
+}
+
+fn push_row(
+    row: &Row<'_>,
+    scale: f32,
+    palette: ChromePalette,
+    quads: &mut Vec<OverlayQuad>,
+    labels: &mut Vec<ChromeLabel>,
+    sprites: &mut Vec<ChromeSprite>,
+) {
+    let px = |value: f32| value * scale;
+    let item = row.rect;
+    if row.hovered {
+        quads.extend(rounded_overlay_fill(
+            item,
+            px(ITEM_RADIUS_LOGICAL_PX),
+            palette.menu_item_hover,
+            1.0,
+        ));
+    }
+    // The 15px mark centred on its own 14px column, which is what a flex box
+    // does with a child one pixel wider than the box it is in.
+    let column_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
+    let column_right = column_left + px(ITEM_ICON_COLUMN_LOGICAL_PX);
+    let mark = px(ITEM_MARK_LOGICAL_PX).round();
+    let mark_left = ((column_left + column_right - mark) / 2.0).round();
+    let mark_top = ((item[1] + item[3] - mark) / 2.0).round();
+    sprites.push(ChromeSprite::new(
+        row.mark,
+        [mark_left, mark_top, mark_left + mark, mark_top + mark],
+        palette.accent,
+    ));
+    labels.push(ChromeLabel {
+        text: row.name.to_owned(),
+        // The name's box ends at the row's trailing padding, and the row's own
+        // right edge is where `.recent-item`'s `max-width` already landed. A
+        // `ChromeLabel` clips per glyph and per pixel, so a name too long for
+        // that box is cropped exactly as CSS `overflow: hidden` crops it —
+        // mock-up 1002 asks for `text-overflow: ellipsis` instead, and the `…`
+        // needs a measured string this module is not given.
+        rect: [
+            column_right + px(ITEM_GAP_LOGICAL_PX),
+            item[1],
+            item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+            item[3],
+        ],
+        font_size_px: px(ITEM_FONT_LOGICAL_PX),
+        color: if row.hovered {
+            palette.menu_item_text_selected
+        } else {
+            palette.menu_item_text
+        },
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+    });
+    if let Some(hint) = &row.hint {
+        labels.push(ChromeLabel {
+            text: hint.clone(),
+            rect: [
+                item[0],
+                item[1],
+                item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+                item[3],
+            ],
+            font_size_px: px(HINT_FONT_LOGICAL_PX),
+            // `--ink3` over `--menu`. It used to be `dialog_muted_text`,
+            // which is the same ink over `--win` — the settings dialog's
+            // surface, not this one. Identical in the light theme, six levels
+            // adrift in the dark.
+            color: palette.menu_item_hint_text,
+            align_right: true,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+        });
+    }
+}
+
+/// `--border-soft`'s alpha for the theme whose `--border` is drawn in `ink`.
+///
+/// White is the dark theme's hairline and black is the light theme's — the
+/// palette's own convention, documented at `ChromePalette::menu_border`.
+fn separator_alpha(ink: [u8; 3]) -> f32 {
+    if ink == [0xff, 0xff, 0xff] {
+        SEPARATOR_ALPHA_ON_DARK
+    } else {
+        SEPARATOR_ALPHA_ON_LIGHT
+    }
+}
+
+/// The mark a recent row wears — mock-up 7314/7318.
+///
+/// A terminal seed wears **its own profile's** mark rather than a generic one:
+/// the row is offering to reopen that shell, and the picker's rows one section
+/// up are already teaching what the mark means. A files locus has no profile,
+/// so it wears the folder the pane is (`#i-folder` in `--accent`, mock-up 7314).
+fn recent_mark(seed: &Seed) -> ChromeMark {
+    match seed {
+        Seed::Term { profile_id, .. } => PROFILES[index_of_id(profile_id)].mark,
+        Seed::Files { .. } => ChromeMark::Folder,
+    }
+}
+
+/// What a recent row calls itself — mock-up 7318: `r.seed.name || cwdLeaf(r.seed)`.
+///
+/// Your own name for the tab wins, and the folder it stood in answers when you
+/// never gave it one. An empty manual name is not a name: `||` in the mock-up
+/// falls through an empty string, and a row captioned with nothing would be a
+/// row you cannot tell from the one above it.
+fn recent_label(seed: &Seed) -> &str {
+    match seed {
+        Seed::Term {
+            cwd, manual_name, ..
+        } => manual_name
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| cwd_leaf(cwd)),
+        // A files locus has no name of its own; the mock-up captions it with the
+        // same leaf rule applied to its root.
+        Seed::Files { root } => cwd_leaf(root),
+    }
+}
+
+/// The last segment of a path, drive-root aware: `C:\` is `C:` and not the empty
+/// string a naive split leaves behind the trailing separator.
+///
+/// **Duplicated** from `main.rs`'s `cwd_leaf`, deliberately and temporarily: that
+/// one is the tab-title layer's, it takes a `&Path`, and `main.rs` is a binary
+/// crate root that nothing can import from. The two must stay the same rule —
+/// a Recent row that names a folder differently from the tab it reopens is the
+/// same place under two names — so the day either moves, both move together.
+fn cwd_leaf(path: &str) -> &str {
+    let trimmed = path.trim_end_matches(['\\', '/']);
+    let leaf = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
+    if leaf.is_empty() { trimmed } else { leaf }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, UNIX_EPOCH};
+
     use super::*;
 
     /// The one layer a popup with nothing inside it draws.
@@ -316,9 +686,60 @@ mod tests {
     }
 
     /// The `˅`'s box in a 960x600 window at 1x, taken from the strip's own
-    /// geometry rather than restated here.
+    /// geometry rather than restated here — one ordinary unpinned tab.
     fn anchor(scale: f32) -> [f32; 4] {
-        crate::seats::tab_strip_geometry(960.0 * scale, scale, 1, 0, 0.0).new_tab_menu
+        let strip = [crate::seats::TabTrailer {
+            pinned: false,
+            reveal: 0.0,
+        }];
+        crate::seats::tab_strip_geometry(960.0 * scale, scale, &strip, 0, 0.0).new_tab_menu
+    }
+
+    /// A vault with nothing in it: the menu every test that predates Recent was
+    /// written against.
+    const NO_RECENT: &[RecentEntry] = &[];
+
+    fn at(secs: u64) -> SystemTime {
+        UNIX_EPOCH + Duration::from_secs(secs)
+    }
+
+    /// The moment the menu is drawn in these tests. A fixed one: the ago labels
+    /// are a function of two instants and neither of them is the wall clock.
+    fn now() -> SystemTime {
+        at(100_000)
+    }
+
+    fn term(cwd: &str, manual_name: Option<&str>, secs_ago: u64) -> RecentEntry {
+        RecentEntry {
+            seed: Seed::Term {
+                profile_id: PROFILES[DEFAULT_PROFILE].id.to_owned(),
+                cwd: cwd.to_owned(),
+                manual_name: manual_name.map(str::to_owned),
+            },
+            at: at(100_000 - secs_ago),
+        }
+    }
+
+    fn files(root: &str, secs_ago: u64) -> RecentEntry {
+        RecentEntry {
+            seed: Seed::Files {
+                root: root.to_owned(),
+            },
+            at: at(100_000 - secs_ago),
+        }
+    }
+
+    /// The height the Recent section adds at `scale`: `.menu-sep` with its two
+    /// margins, `.menu-label` with its padding, and one row per seed.
+    fn recent_block(scale: f32, rows: usize) -> f32 {
+        let separator = 2.0 * (SEPARATOR_MARGIN_Y_LOGICAL_PX * scale).round()
+            + (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+        let heading = ((SECTION_LABEL_PADDING_TOP_LOGICAL_PX
+            + SECTION_LABEL_LINE_LOGICAL_PX
+            + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
+            * scale)
+            .round();
+        separator + heading + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * rows as f32
     }
 
     /// PIN — the menu hangs 4px under the button that opened it, at the button's
@@ -327,7 +748,7 @@ mod tests {
     fn the_menu_hangs_under_its_button_at_the_mockup_s_own_width() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let button = anchor(scale);
-            let layout = layout(button, 960.0 * scale, scale);
+            let layout = layout(button, 960.0 * scale, scale, NO_RECENT);
             let frame = layout.frame;
             assert_eq!(
                 frame[1],
@@ -369,7 +790,7 @@ mod tests {
     fn the_menu_claims_its_own_box_and_nothing_else() {
         let scale = 1.0;
         let button = anchor(scale);
-        let layout = layout(button, 960.0, scale);
+        let layout = layout(button, 960.0, scale, NO_RECENT);
         let frame = layout.frame;
         let item = layout.items[0];
         assert_eq!(
@@ -378,7 +799,7 @@ mod tests {
                 f64::from((item[0] + item[2]) / 2.0),
                 f64::from((item[1] + item[3]) / 2.0)
             ),
-            Some(Some(0))
+            Some(Some(MenuRow::Profile(0)))
         );
         assert_eq!(
             hit(
@@ -407,7 +828,7 @@ mod tests {
     fn a_menu_opened_near_the_right_edge_stays_inside_the_window() {
         let scale = 1.0;
         let surface = 300.0;
-        let layout = layout([260.0, 9.0, 288.0, 37.0], surface, scale);
+        let layout = layout([260.0, 9.0, 288.0, 37.0], surface, scale, NO_RECENT);
         let frame = layout.frame;
         assert!(
             frame[2] <= surface - 8.0,
@@ -421,12 +842,20 @@ mod tests {
     #[test]
     fn hover_belongs_to_an_open_menu_only() {
         let mut menu = ProfileMenu::default();
-        assert!(!menu.set_hover(Some(0)), "a shut menu has no hovered row");
+        assert!(
+            !menu.set_hover(Some(MenuRow::Profile(0))),
+            "a shut menu has no hovered row"
+        );
         assert_eq!(menu.hover(), None);
         menu.toggle();
         assert!(menu.is_open());
-        assert!(menu.set_hover(Some(0)));
-        assert_eq!(menu.hover(), Some(0));
+        assert!(menu.set_hover(Some(MenuRow::Profile(0))));
+        assert_eq!(menu.hover(), Some(MenuRow::Profile(0)));
+        assert!(
+            menu.set_hover(Some(MenuRow::Recent(0))),
+            "row 0 of the other list is a different row"
+        );
+        assert_eq!(menu.hover(), Some(MenuRow::Recent(0)));
         assert!(menu.close());
         assert_eq!(menu.hover(), None);
         assert!(!menu.close(), "closing a shut menu consumes nothing");
@@ -437,10 +866,10 @@ mod tests {
     #[test]
     fn a_hovered_row_lights_up_and_every_row_wears_its_profile_s_mark() {
         let scale = 1.0;
-        let layout = layout(anchor(scale), 960.0, scale);
+        let layout = layout(anchor(scale), 960.0, scale, NO_RECENT);
         let palette = chrome_palette();
-        let rest = one_layer(build(&layout, None));
-        let hover = one_layer(build(&layout, Some(0)));
+        let rest = one_layer(build(&layout, None, NO_RECENT, now()));
+        let hover = one_layer(build(&layout, Some(MenuRow::Profile(0)), NO_RECENT, now()));
         let (rest_quads, rest_labels, sprites) = (rest.quads, rest.labels, rest.sprites);
         let (hover_quads, hover_labels) = (hover.quads, hover.labels);
         assert!(
@@ -499,8 +928,42 @@ mod tests {
         // inside the row's vertical padding.
         assert_eq!(ITEM_HEIGHT_LOGICAL_PX, 29.5);
 
+        // I92, the Recent section (mock-up lines 996-1002).
+        assert_eq!(SEPARATOR_THICKNESS_LOGICAL_PX, 1.0, ".menu-sep height 1px");
+        assert_eq!(SEPARATOR_MARGIN_Y_LOGICAL_PX, 5.0, ".menu-sep margin 5px 0");
+        assert_eq!(
+            SEPARATOR_ALPHA_ON_DARK, 0.06,
+            "--border-soft rgba(255,255,255,.06)"
+        );
+        assert_eq!(
+            SEPARATOR_ALPHA_ON_LIGHT, 0.055,
+            "--border-soft rgba(0,0,0,.055)"
+        );
+        assert_eq!(
+            SECTION_LABEL_FONT_LOGICAL_PX, 10.5,
+            ".menu-label font-size 10.5px"
+        );
+        assert_eq!(
+            SECTION_LABEL_TRACKING_EM, 0.05,
+            ".menu-label letter-spacing .05em"
+        );
+        // 3 + 12.5 + 5: the 10.5px line box the mock-up's own renderer produces,
+        // inside `padding: 3px 10px 5px`.
+        assert_eq!(SECTION_LABEL_PADDING_TOP_LOGICAL_PX, 3.0);
+        assert_eq!(SECTION_LABEL_PADDING_X_LOGICAL_PX, 10.0);
+        assert_eq!(SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX, 5.0);
+        assert_eq!(SECTION_LABEL_LINE_LOGICAL_PX, 12.5);
+        assert_eq!(
+            RECENT_ITEM_MAX_WIDTH_LOGICAL_PX, 260.0,
+            ".recent-item max-width 260px"
+        );
+        assert_eq!(
+            RECENT_SECTION_LABEL, "RECENTLY OPENED",
+            "`Recently opened` under `text-transform: uppercase`"
+        );
+
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-            let layout = layout(anchor(scale), 960.0 * scale, scale);
+            let layout = layout(anchor(scale), 960.0 * scale, scale, NO_RECENT);
             let item = layout.items[0];
             assert_eq!(
                 (item[3] - item[1]).round(),
@@ -529,9 +992,9 @@ mod tests {
     #[test]
     fn the_default_hint_is_inked_for_a_menu_and_not_for_a_dialog() {
         let scale = 1.0;
-        let layout = layout(anchor(scale), 960.0, scale);
+        let layout = layout(anchor(scale), 960.0, scale, NO_RECENT);
         let palette = chrome_palette();
-        let layers = build(&layout, None);
+        let layers = build(&layout, None, NO_RECENT, now());
         let labels: Vec<_> = layers.iter().flat_map(|layer| &layer.labels).collect();
         let sprites: Vec<_> = layers.iter().flat_map(|layer| &layer.sprites).collect();
         let hint = labels
@@ -572,5 +1035,384 @@ mod tests {
             column_left + ITEM_ICON_COLUMN_LOGICAL_PX * scale + ITEM_GAP_LOGICAL_PX * scale
         );
         assert_eq!(title.font_size_px, ITEM_FONT_LOGICAL_PX * scale);
+    }
+
+    /// PIN — I92, mock-up 7311: `state.recent.length ? … : ""`. An empty vault
+    /// adds no rule, no heading and no rows, and leaves the menu at exactly the
+    /// height it had before Recent existed.
+    ///
+    /// Red gate: a section that draws itself unconditionally — a hairline and a
+    /// heading reading "RECENTLY OPENED" over nothing at all, which is chrome
+    /// making a promise the menu cannot keep.
+    #[test]
+    fn an_empty_vault_adds_no_rule_no_heading_and_no_rows() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let layout = layout(anchor(scale), 960.0 * scale, scale, NO_RECENT);
+            let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+            assert_eq!(
+                layout.frame[3] - layout.frame[1],
+                (2.0 * (border + MENU_PADDING_LOGICAL_PX * scale)
+                    + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * PROFILES.len() as f32)
+                    .round(),
+                "scale {scale}: the profiles and the menu's own padding, and nothing else"
+            );
+            assert_eq!(layout.separator, None);
+            assert_eq!(layout.section_label, None);
+            assert!(layout.recent.is_empty());
+
+            let layer = one_layer(build(&layout, None, NO_RECENT, now()));
+            assert!(
+                !layer
+                    .labels
+                    .iter()
+                    .any(|label| label.text == RECENT_SECTION_LABEL),
+                "scale {scale}: no heading over an empty list"
+            );
+            assert_eq!(
+                layer.sprites.len(),
+                PROFILES.len(),
+                "scale {scale}: one mark per profile row and no more"
+            );
+        }
+    }
+
+    /// PIN — the Recent section is `.menu-sep` (1px between two 5px margins),
+    /// `.menu-label` (3 + the 10.5px line box + 5) and one 29.5px row per seed,
+    /// in that order, inside the menu's own padding.
+    #[test]
+    fn the_recent_section_is_a_rule_a_heading_and_one_row_for_each_seed() {
+        let vault = [term("C:\\repo", None, 0), files("D:\\notes", 600)];
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let empty = layout(anchor(scale), 960.0 * scale, scale, NO_RECENT);
+            let full = layout(anchor(scale), 960.0 * scale, scale, &vault);
+            assert_eq!(
+                (full.frame[3] - full.frame[1]) - (empty.frame[3] - empty.frame[1]),
+                recent_block(scale, vault.len()),
+                "scale {scale}: the section's own three blocks and nothing more"
+            );
+
+            let rule = full.separator.expect("a filled vault is separated");
+            let band = full.section_label.expect("and titled");
+            let last_profile = *full.items.last().expect("the profile list");
+            assert_eq!(
+                rule[1] - last_profile[3],
+                (SEPARATOR_MARGIN_Y_LOGICAL_PX * scale).round(),
+                "scale {scale}: `margin: 5px 0` above the rule"
+            );
+            assert_eq!(
+                rule[3] - rule[1],
+                (SEPARATOR_THICKNESS_LOGICAL_PX * scale).round().max(1.0),
+                "scale {scale}: a rule of whole pixels, never rounded away to nothing"
+            );
+            assert_eq!(
+                band[1] - rule[3],
+                (SEPARATOR_MARGIN_Y_LOGICAL_PX * scale).round(),
+                "scale {scale}: and 5px below it"
+            );
+            assert_eq!(
+                band[3] - band[1],
+                ((SECTION_LABEL_PADDING_TOP_LOGICAL_PX
+                    + SECTION_LABEL_LINE_LOGICAL_PX
+                    + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
+                    * scale)
+                    .round(),
+                "scale {scale}: `padding: 3px 10px 5px` around a 12.5px line box"
+            );
+            assert_eq!(rule[0], last_profile[0], "the rule spans the row's own box");
+            assert_eq!(rule[2], last_profile[2]);
+
+            assert_eq!(full.recent.len(), vault.len());
+            assert_eq!(
+                full.recent[0][1], band[3],
+                "the first row follows the heading"
+            );
+            for row in &full.recent {
+                assert_eq!(
+                    row[3] - row[1],
+                    (ITEM_HEIGHT_LOGICAL_PX * scale).round(),
+                    "scale {scale}: a recent row is a `.profile-item`"
+                );
+                assert_eq!(row[0], last_profile[0]);
+                assert!(
+                    row[2] - row[0] <= (RECENT_ITEM_MAX_WIDTH_LOGICAL_PX * scale).round(),
+                    "scale {scale}: `.recent-item {{ max-width: 260px }}`"
+                );
+            }
+        }
+    }
+
+    /// PIN — a press on a recent row is that recent row, by the vault's own
+    /// index, and never a profile.
+    ///
+    /// Red gate: the menu's rows used to be one untagged `usize` indexed
+    /// straight into [`PROFILES`]. With a Recent section under them that number
+    /// names two different things, and the bug it produces is silent — clicking
+    /// the third recent seed launches a bare PowerShell in the wrong folder and
+    /// looks, from the outside, exactly like the menu working.
+    #[test]
+    fn a_press_on_a_recent_row_is_that_seed_and_never_a_profile() {
+        let scale = 1.0;
+        let vault = [
+            term("C:\\a", None, 0),
+            term("C:\\b", None, 60),
+            files("C:\\c", 120),
+        ];
+        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let centre = |rect: [f32; 4]| {
+            (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            )
+        };
+        for index in 0..vault.len() {
+            let (x, y) = centre(layout.recent[index]);
+            assert_eq!(
+                hit(&layout, x, y),
+                Some(Some(MenuRow::Recent(index))),
+                "recent row {index} must answer with its own index in its own list"
+            );
+        }
+        let (x, y) = centre(layout.items[0]);
+        assert_eq!(hit(&layout, x, y), Some(Some(MenuRow::Profile(0))));
+
+        // The rule and the heading name nothing you can open, so they are the
+        // menu's body — a press there does nothing rather than something.
+        let rule = layout.separator.expect("separated");
+        let band = layout.section_label.expect("titled");
+        for rect in [rule, band] {
+            let (x, y) = centre(rect);
+            assert_eq!(hit(&layout, x, y), Some(None));
+        }
+    }
+
+    /// PIN — the menu shows at most the eight seeds the vault itself keeps
+    /// (`docs/DESIGN.md` §7.1.4, mock-up 4056), whatever it is handed.
+    ///
+    /// Red gate: a menu whose height is "however many the caller passed" is a
+    /// popup that grows off the bottom of the window, and every row past the
+    /// edge is a row you can neither see nor click.
+    #[test]
+    fn the_menu_draws_at_most_the_eight_seeds_the_vault_keeps() {
+        let scale = 1.0;
+        let vault: Vec<RecentEntry> = (0..12)
+            .map(|index| term(&format!("C:\\p{index}"), None, index * 60))
+            .collect();
+        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        assert_eq!(RECENT_CAPACITY, 8, "the vault's own cap, not a second one");
+        assert_eq!(layout.recent.len(), RECENT_CAPACITY);
+        assert_eq!(
+            layout.frame[3] - layout.frame[1],
+            (2.0 * ((FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0)
+                + MENU_PADDING_LOGICAL_PX * scale)
+                + (ITEM_HEIGHT_LOGICAL_PX * scale).round() * PROFILES.len() as f32
+                + recent_block(scale, RECENT_CAPACITY))
+            .round(),
+            "and the menu is only as tall as the rows it draws"
+        );
+
+        let layer = one_layer(build(&layout, None, &vault, now()));
+        assert!(
+            layer.labels.iter().any(|label| label.text == "p7"),
+            "the eighth seed is drawn"
+        );
+        assert!(
+            !layer.labels.iter().any(|label| label.text == "p8"),
+            "the ninth is not"
+        );
+        assert_eq!(
+            layer.sprites.len(),
+            PROFILES.len() + RECENT_CAPACITY,
+            "one mark per drawn row"
+        );
+    }
+
+    /// PIN — `.menu-label` is the settings dialog's group-heading craft on the
+    /// menu's own surface: 10.5px, `600`, `.05em` tracked, `--ink3` over
+    /// `--menu`, and drawn uppercase because `text-transform` has no renderer
+    /// here.
+    #[test]
+    fn the_recent_heading_is_uppercase_tracked_and_inked_for_a_menu() {
+        let scale = 1.0;
+        let vault = [term("C:\\repo", None, 0)];
+        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let palette = chrome_palette();
+        let layer = one_layer(build(&layout, None, &vault, now()));
+        let heading = layer
+            .labels
+            .iter()
+            .find(|label| label.text == RECENT_SECTION_LABEL)
+            .expect("the section is titled");
+        assert_eq!(heading.font_size_px, SECTION_LABEL_FONT_LOGICAL_PX * scale);
+        assert_eq!(heading.letter_spacing_em, SECTION_LABEL_TRACKING_EM);
+        assert_eq!(heading.weight, ChromeLabelWeight::SemiBold);
+        assert_eq!(
+            heading.color, palette.menu_item_hint_text,
+            "`--ink3` over `--menu`, not the dialog's same-named ink"
+        );
+        assert!(!heading.align_right && !heading.align_center);
+
+        let band = layout.section_label.expect("titled");
+        assert_eq!(
+            heading.rect[0],
+            band[0] + SECTION_LABEL_PADDING_X_LOGICAL_PX * scale,
+            "`padding: … 10px …`"
+        );
+        assert_eq!(
+            heading.rect[1],
+            band[1] + SECTION_LABEL_PADDING_TOP_LOGICAL_PX * scale,
+            "3px above"
+        );
+        assert_eq!(
+            heading.rect[3],
+            band[3] - SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX * scale,
+            "5px below, so the line box is centred in its own height"
+        );
+
+        // `--border-soft` is the same ink as the menu's own hairline at a
+        // lighter alpha, and the two themes declare that alpha separately.
+        let rule = layout.separator.expect("separated");
+        let hairline = layer
+            .quads
+            .iter()
+            .find(|quad| quad.rect == rule)
+            .expect("the rule is drawn");
+        assert_eq!(hairline.color, palette.menu_border);
+        assert_eq!(hairline.alpha, separator_alpha(palette.menu_border));
+        assert_eq!(separator_alpha([0xff, 0xff, 0xff]), SEPARATOR_ALPHA_ON_DARK);
+        assert_eq!(
+            separator_alpha([0x00, 0x00, 0x00]),
+            SEPARATOR_ALPHA_ON_LIGHT
+        );
+    }
+
+    /// PIN — mock-up 7318: a recent row is called by your own name for it, and
+    /// by the folder it stood in when you never gave it one. The leaf rule is
+    /// drive-root aware, so `C:\` is `C:` rather than the empty caption a naive
+    /// split leaves behind a trailing separator.
+    #[test]
+    fn a_recent_row_wears_your_name_for_it_or_the_folder_it_stood_in() {
+        assert_eq!(cwd_leaf("C:\\Users\\Weiyi\\repo"), "repo");
+        assert_eq!(cwd_leaf("C:\\Users\\Weiyi\\repo\\"), "repo");
+        assert_eq!(cwd_leaf("C:\\"), "C:", "a drive root names its drive");
+        assert_eq!(cwd_leaf("C:"), "C:");
+        assert_eq!(
+            cwd_leaf("/home/weiyi/src"),
+            "src",
+            "and forward slashes too"
+        );
+
+        let vault = [
+            term("C:\\Users\\Weiyi\\repo", Some("build"), 0),
+            term("C:\\Users\\Weiyi\\notes", None, 60),
+            // `||` in the mock-up falls through an empty string: a row captioned
+            // with nothing is a row you cannot tell from the one above it.
+            term("C:\\Users\\Weiyi\\empty", Some(""), 120),
+            files("D:\\Developer\\BetterTerminal\\", 180),
+        ];
+        let layout = layout(anchor(1.0), 960.0, 1.0, &vault);
+        let layer = one_layer(build(&layout, None, &vault, now()));
+        let drawn: Vec<&str> = layer
+            .labels
+            .iter()
+            .map(|label| label.text.as_str())
+            .collect();
+        for name in ["build", "notes", "empty", "BetterTerminal"] {
+            assert!(drawn.contains(&name), "{name} is missing from {drawn:?}");
+        }
+    }
+
+    /// PIN — mock-up 7314/7318: a terminal seed wears its own profile's mark,
+    /// a files locus wears `#i-folder`, and both are `--accent`. The ago label
+    /// rides in the `.default-hint` slot the `default` hint already owns.
+    #[test]
+    fn a_files_seed_wears_the_folder_and_a_terminal_seed_wears_its_profile_s_mark() {
+        let scale = 1.0;
+        let vault = [files("D:\\notes", 0), term("C:\\repo", None, 3 * 3600)];
+        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let palette = chrome_palette();
+        let layer = one_layer(build(&layout, None, &vault, now()));
+
+        let in_row = |row: [f32; 4], sprite: &ChromeSprite| {
+            sprite.rect[1] >= row[1] && sprite.rect[3] <= row[3]
+        };
+        let folder = layer
+            .sprites
+            .iter()
+            .find(|sprite| in_row(layout.recent[0], sprite))
+            .expect("the files row wears a mark");
+        assert_eq!(folder.mark, ChromeMark::Folder);
+        assert_eq!(folder.color, palette.accent);
+        let shell = layer
+            .sprites
+            .iter()
+            .find(|sprite| in_row(layout.recent[1], sprite))
+            .expect("the terminal row wears a mark");
+        assert_eq!(shell.mark, PROFILES[DEFAULT_PROFILE].mark);
+        assert_eq!(shell.color, palette.accent);
+        // An id this build does not have costs the row its shell choice, never
+        // its mark — `index_of_id` falls back rather than refusing.
+        assert_eq!(
+            recent_mark(&Seed::Term {
+                profile_id: "a-shell-from-a-newer-build".to_owned(),
+                cwd: "C:\\repo".to_owned(),
+                manual_name: None,
+            }),
+            PROFILES[DEFAULT_PROFILE].mark
+        );
+
+        let hint = layer
+            .labels
+            .iter()
+            .find(|label| label.text == "3h ago")
+            .expect("a recent row says how long ago");
+        assert_eq!(hint.font_size_px, HINT_FONT_LOGICAL_PX * scale);
+        assert_eq!(hint.color, palette.menu_item_hint_text);
+        assert!(hint.align_right, "`margin-left: auto`");
+        assert_eq!(
+            hint.rect[2],
+            layout.recent[1][2] - ITEM_PADDING_X_LOGICAL_PX * scale,
+            "against the row's own trailing padding"
+        );
+        assert!(
+            layer.labels.iter().any(|label| label.text == "just now"),
+            "and the newest one says so in the mock-up's own words"
+        );
+    }
+
+    /// PIN — hovering a recent row lights that row and only that row.
+    ///
+    /// Red gate: the untagged index again, this time in ink — `Some(0)` used to
+    /// mean "the first row", so pointing at the first recent seed lit the
+    /// PowerShell row at the top of the menu.
+    #[test]
+    fn hovering_a_recent_row_lights_it_and_leaves_the_profile_above_it_dark() {
+        let scale = 1.0;
+        let vault = [term("C:\\repo", Some("build"), 0)];
+        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let palette = chrome_palette();
+        let layer = one_layer(build(&layout, Some(MenuRow::Recent(0)), &vault, now()));
+        let row = layout.recent[0];
+        assert!(
+            layer
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.menu_item_hover
+                    && quad.rect[1] >= row[1]
+                    && quad.rect[3] <= row[3]),
+            "the hovered recent row wears `--hover` over `--menu`"
+        );
+        assert!(
+            layer.labels.iter().any(
+                |label| label.text == "build" && label.color == palette.menu_item_text_selected
+            ),
+            "and steps to `--ink`"
+        );
+        assert!(
+            layer
+                .labels
+                .iter()
+                .any(|label| label.text == "PowerShell" && label.color == palette.menu_item_text),
+            "while the profile row it is not stays `--ink2`"
+        );
     }
 }
