@@ -1,6 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "theme": "dark",
+  "cursor_style": "bar",
   "window": {
     "bounds": {
       "x": -100,

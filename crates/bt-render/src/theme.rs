@@ -19,18 +19,10 @@ pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xe1, 0xe1, 0xe1];
 const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
 /// The mock-up's `--cursor` on dark.
 pub(crate) const DEFAULT_CURSOR_RGB: [u8; 3] = [0xd4, 0xd4, 0xd4];
-/// The default cursor's width, as a fraction of one cell.
-///
-/// The default caret is a thin editor-style bar (user ruling 2026-08-07: the
-/// mock-up's half-cell landed "neither" — either thin or full, and their first
-/// complaint was width, so thin it is). Two logical pixels, scaled with DPI and
-/// never below one physical pixel. This is the *default* form only — a settings
-/// surface will one day offer block / bar / underline here, and a program that
-/// asks for a shape through DECSCUSR must be honoured over both. Nothing in
-/// this build parses DECSCUSR (`bt_viewport::GridCursor` carries row, column
-/// and visibility and no shape), so today there is exactly one form and this
-/// is it.
-pub const CURSOR_BAR_WIDTH_LOGICAL_PX: f32 = 2.0;
+/// Focused bar cursor width in logical pixels, DPI-rounded and never below one device pixel.
+pub const CURSOR_BAR_WIDTH_LOGICAL_PX: f32 = 1.0;
+/// Focused underline cursor height in logical pixels, DPI-rounded and never below one device pixel.
+pub const CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX: f32 = 2.0;
 pub(crate) const DEFAULT_DIM_FOREGROUND_RGB: [u8; 3] = [0x88, 0x88, 0x88];
 /// Background-only selection treatment; foreground colors remain terminal-authored.
 pub(crate) const DEFAULT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0x26, 0x4f, 0x78];
@@ -422,6 +414,87 @@ pub enum Theme {
     Light,
 }
 
+/// The focused terminal cursor shape selected for the process.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CursorStyle {
+    #[default]
+    Bar,
+    Block,
+    Underline,
+}
+
+impl CursorStyle {
+    const fn bits(self) -> u64 {
+        match self {
+            Self::Bar => 0,
+            Self::Block => 1,
+            Self::Underline => 2,
+        }
+    }
+
+    const fn from_bits(bits: u64) -> Self {
+        match bits & 0b11 {
+            1 => Self::Block,
+            2 => Self::Underline,
+            _ => Self::Bar,
+        }
+    }
+}
+
+// One acquire load is the complete cursor-style snapshot: bits 0..=1 are the style and 2..=63
+// are a monotonic revision. The revision makes concurrent writers observable without allowing a
+// reader to combine a style from one update with metadata from another.
+struct CursorStyleState {
+    packed: AtomicU64,
+}
+
+impl CursorStyleState {
+    const fn new() -> Self {
+        Self {
+            packed: AtomicU64::new(0),
+        }
+    }
+
+    fn load(&self) -> u64 {
+        self.packed.load(Ordering::Acquire)
+    }
+
+    fn set(&self, style: CursorStyle) -> bool {
+        let mut current = self.load();
+        loop {
+            if CursorStyle::from_bits(current) == style {
+                return false;
+            }
+            let revision = (current >> 2).saturating_add(1);
+            let next = (revision << 2) | style.bits();
+            match self.packed.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(observed) => current = observed,
+            }
+        }
+    }
+}
+
+fn process_cursor_style() -> &'static CursorStyleState {
+    static CURSOR_STYLE: CursorStyleState = CursorStyleState::new();
+    &CURSOR_STYLE
+}
+
+/// Set the process-wide focused cursor shape. Returns whether the shape changed.
+pub fn set_cursor_style(style: CursorStyle) -> bool {
+    process_cursor_style().set(style)
+}
+
+/// Read the process-wide focused cursor shape from one atomic snapshot.
+pub fn current_cursor_style() -> CursorStyle {
+    CursorStyle::from_bits(process_cursor_style().load())
+}
+
 impl Theme {
     #[must_use]
     pub const fn toggled(self) -> Self {
@@ -669,6 +742,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cursor_style_snapshot_survives_one_writer_for_200_frames() {
+        use std::sync::Arc;
+
+        let state = Arc::new(CursorStyleState::new());
+        let writer_state = Arc::clone(&state);
+        let writer = std::thread::spawn(move || {
+            for index in 0..200 {
+                let style =
+                    [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline][index % 3];
+                writer_state.set(style);
+            }
+        });
+        let mut previous_revision = 0;
+        for _frame in 0..200 {
+            let snapshot = state.load();
+            assert!(snapshot & 0b11 <= CursorStyle::Underline.bits());
+            let revision = snapshot >> 2;
+            assert!(revision >= previous_revision);
+            previous_revision = revision;
+        }
+        writer.join().unwrap();
+        assert!(state.load() >> 2 > 0);
+    }
+
+    #[test]
     fn ansi_palettes_pin_campbell_dark_and_light_yellows() {
         const CAMPBELL: [[u8; 3]; 16] = [
             [0x0c, 0x0c, 0x0c],
@@ -717,8 +815,8 @@ mod tests {
     /// and the caret, held here so overturning one is an edit to this block.
     #[test]
     fn float_window_and_cursor_tokens_are_the_mock_ups_own() {
-        // A thin editor bar (user ruling 2026-08-07), two logical pixels.
-        assert_eq!(CURSOR_BAR_WIDTH_LOGICAL_PX, 2.0);
+        assert_eq!(CURSOR_BAR_WIDTH_LOGICAL_PX, 1.0);
+        assert_eq!(CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, 2.0);
         // `border-radius: 10px`, `border: 1px solid var(--border)`.
         assert_eq!(FLOAT_WINDOW_RADIUS_LOGICAL_PX, 10.0);
         assert_eq!(FLOAT_WINDOW_BORDER_LOGICAL_PX, 1.0);

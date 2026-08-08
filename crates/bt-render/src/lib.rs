@@ -35,16 +35,18 @@ use wgpu::util::DeviceExt;
 
 use rounded_rect::{rounded_rect_coverage, rounded_rect_halo_coverage};
 use theme::{
-    CURSOR_BAR_WIDTH_LOGICAL_PX, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb,
+    CURSOR_BAR_WIDTH_LOGICAL_PX, CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_CURSOR_RGB,
+    DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb,
 };
 pub use theme::{
-    ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, FLOAT_WINDOW_BORDER_LOGICAL_PX,
-    FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, LIGHT_BACKGROUND_RGB,
-    LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, PREVIEW_BODY_INSET_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
-    SEAT_DIVIDER_VISUAL_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
-    SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX, Theme,
-    ThemeChange, WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
+    ChromePalette, CursorStyle, DARK_CHROME, DEFAULT_BACKGROUND_RGB,
+    FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX,
+    LIGHT_BACKGROUND_RGB, LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
+    PREVIEW_BODY_INSET_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_DIVIDER_VISUAL_LOGICAL_PX,
+    SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
+    SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX, Theme, ThemeChange,
+    WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
     WINDOW_CAPTION_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
     WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
     WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
@@ -56,8 +58,8 @@ pub use theme::{
     WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
     WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
     WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
-    WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette, current_theme, foreground_rgb,
-    set_theme, theme_revision,
+    WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette, current_cursor_style,
+    current_theme, foreground_rgb, set_cursor_style, set_theme, theme_revision,
 };
 use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
 
@@ -4705,31 +4707,16 @@ fn cursor_pixel_bounds(
         frame_cell_bounds_px(metrics, frame, frame.cursor.row as usize, column);
     let right = left + span as f32 * metrics.cell_width_px;
     if focused {
-        // A thin editor-style bar: it marks the insertion point and leaves the
-        // character it stands on readable. It is snapped to the physical grid
-        // and given whole pixels of width for the same reason the dotted
-        // underline is — a fractional bar landing between two columns is a
-        // smear, and a caret is the one mark on screen the eye tracks while it
-        // moves.
-        //
-        // A wide character's cursor is *not* twice as wide: the bar sits at the
-        // start of the cell the next glyph will land in, and that is one place
-        // whatever occupies it now. `span` still decides *which* column that is,
-        // so a cursor on a wide char's trailing half draws at the char's own edge.
-        let width = (CURSOR_BAR_WIDTH_LOGICAL_PX * metrics.scale_factor as f32)
-            .round()
-            .max(1.0);
-        let left = left.round();
-        return vec![[left, top, left + width, bottom]];
+        return focused_cursor_pixel_bounds(
+            metrics,
+            [left, top, right, bottom],
+            current_cursor_style(),
+        );
     }
 
     // Match Windows Terminal's focus cue: retain a visible one-device-pixel hollow caret while
     // allowing the cell contents to remain readable through its center.
-    //
-    // This one stays the whole cell's outline rather than becoming a hollow bar. The unfocused
-    // caret is a different statement from the focused one — "the cursor is here, but this window
-    // is not listening" — and a one-pixel outline of a four-pixel bar is a four-pixel bar: the
-    // cue would be gone. The shape carries the state precisely because it is not the bar.
+    // This stays the whole cell's outline for every selected focused shape.
     let stroke = 1.0_f32.min((right - left) / 2.0).min((bottom - top) / 2.0);
     vec![
         [left, top, right, top + stroke],
@@ -4737,6 +4724,30 @@ fn cursor_pixel_bounds(
         [left, top + stroke, left + stroke, bottom - stroke],
         [right - stroke, top + stroke, right, bottom - stroke],
     ]
+}
+
+fn focused_cursor_pixel_bounds(
+    metrics: CellMetrics,
+    [left, top, right, bottom]: [f32; 4],
+    style: CursorStyle,
+) -> Vec<[f32; 4]> {
+    match style {
+        CursorStyle::Bar => {
+            let width = (CURSOR_BAR_WIDTH_LOGICAL_PX * metrics.scale_factor as f32)
+                .round()
+                .max(1.0);
+            let left = left.round();
+            vec![[left, top, left + width, bottom]]
+        }
+        CursorStyle::Block => vec![[left, top, right, bottom]],
+        CursorStyle::Underline => {
+            let height = (CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX * metrics.scale_factor as f32)
+                .round()
+                .max(1.0)
+                .min(bottom - top);
+            vec![[left, bottom - height, right, bottom]]
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -7196,7 +7207,7 @@ mod tests {
         assert_eq!((ime.x, ime.y, ime.width, ime.height), (12, 40, 8, 18));
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[12.0, 40.0, 14.0, 58.0]],
+            vec![[12.0, 40.0, 13.0, 58.0]],
             "the caret is the thin bar and starts at the cell it is in"
         );
         assert_eq!(
@@ -8583,19 +8594,10 @@ mod tests {
         assert_eq!(run.line_y + wide.top_offset_px, metrics.ascii_baseline_px);
     }
 
-    /// PIN (visual pass): the default caret is a bar half a cell wide — the
-    /// mock-up's `.cursor { width: 7px }` against the 15px cell of its own 14px
-    /// font — at every DPI this product ships at, and it is that wide in whole
-    /// physical pixels.
-    ///
-    /// The metrics are measured, never invented: a real cell is 8.4 px wide at
-    /// 125% and 12.6 px at 187.5%, so a caret that skipped the rounding would land
-    /// between two columns, and one that skipped the ratio would still be the
-    /// filled cell this pass replaced. Height is untouched — the caret spans its
-    /// row exactly as the block did.
+    /// PIN: Bar, Block and Underline retain their ruled geometry at every supported DPI.
     #[cfg(target_os = "windows")]
     #[test]
-    fn the_default_caret_is_a_thin_bar_at_every_dpi() {
+    fn every_cursor_style_has_its_ruled_geometry_at_every_dpi() {
         let mut font_system = terminal_font_system();
         for dpi_milli in [1000_u32, 1250, 1500, 2000] {
             let scale = f64::from(dpi_milli) / 1000.0;
@@ -8622,10 +8624,10 @@ mod tests {
                 layout_key: bt_doc_layout_key(1),
                 view_generation: bt_doc::ViewGeneration(1),
             };
-            let bounds = cursor_pixel_bounds(metrics, &frame, true);
-            assert_eq!(bounds.len(), 1, "the caret is one quad");
-            let [left, top, right, bottom] = bounds[0];
             let cell = frame_cell_bounds_px(metrics, &frame, 0, 0);
+            let bar = focused_cursor_pixel_bounds(metrics, cell, CursorStyle::Bar);
+            assert_eq!(bar.len(), 1);
+            let [left, top, right, bottom] = bar[0];
             assert_eq!(
                 right - left,
                 (CURSOR_BAR_WIDTH_LOGICAL_PX * metrics.scale_factor as f32)
@@ -8639,6 +8641,24 @@ mod tests {
             );
             assert_eq!(left, cell[0].round(), "the caret starts at its own cell");
             assert_eq!([top, bottom], [cell[1], cell[3]], "the row's full height");
+
+            assert_eq!(
+                focused_cursor_pixel_bounds(metrics, cell, CursorStyle::Block),
+                vec![cell],
+                "at {dpi_milli} milli-DPI block is the whole cell"
+            );
+            let underline = focused_cursor_pixel_bounds(metrics, cell, CursorStyle::Underline);
+            assert_eq!(underline.len(), 1);
+            assert_eq!(underline[0][0], cell[0]);
+            assert_eq!(underline[0][2], cell[2]);
+            assert_eq!(underline[0][3], cell[3]);
+            assert_eq!(
+                underline[0][3] - underline[0][1],
+                (CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX * metrics.scale_factor as f32)
+                    .round()
+                    .max(1.0),
+                "at {dpi_milli} milli-DPI underline is two logical pixels high"
+            );
         }
     }
 
@@ -8691,12 +8711,12 @@ mod tests {
         frame.row_map = test_row_map_for_metrics(1, metrics);
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[4.0, 4.0, 6.0, 24.0]]
+            vec![[4.0, 4.0, 5.0, 24.0]]
         );
         frame.cursor.column = 0;
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[4.0, 4.0, 6.0, 24.0]]
+            vec![[4.0, 4.0, 5.0, 24.0]]
         );
     }
 
@@ -8738,8 +8758,8 @@ mod tests {
 
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[4.0, 4.0, 6.0, 24.0]],
-            "a focused caret is the bar, half of this 8px cell"
+            vec![[4.0, 4.0, 5.0, 24.0]],
+            "a focused caret is the one-logical-pixel bar"
         );
         let outline = cursor_pixel_bounds(metrics, &frame, false);
         assert_eq!(outline.len(), 4);

@@ -35,12 +35,21 @@ pub type MigrationStep = fn(Value) -> Value;
 pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.
-pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[(1, migrate_session_v1_to_v2)];
+pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] =
+    &[(1, migrate_session_v1_to_v2), (2, migrate_session_v2_to_v3)];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(2));
         object.insert("theme".to_owned(), Value::from("dark"));
+    }
+    value
+}
+
+fn migrate_session_v2_to_v3(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(3));
+        object.insert("cursor_style".to_owned(), Value::from("bar"));
     }
     value
 }
@@ -261,6 +270,20 @@ mod tests {
         .unwrap();
         assert_eq!(migrated["schema_version"], json!(2));
         assert_eq!(migrated["theme"], json!("dark"));
+    }
+
+    #[test]
+    fn real_session_v2_to_v3_migration_adds_the_bar_cursor_default() {
+        let migrated = migrate_value(
+            json!({"schema_version": 2, "theme": "light", "window": {}}),
+            2,
+            3,
+            SESSION_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(3));
+        assert_eq!(migrated["theme"], json!("light"));
+        assert_eq!(migrated["cursor_style"], json!("bar"));
     }
 
     #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]

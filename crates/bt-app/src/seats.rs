@@ -2273,7 +2273,7 @@ mod tests {
         seats.toggle_preview(&metrics);
         let (width, height) = (1_280u32, 800u32);
         let layout = solved(&seats, viewport_of(width, height, 1_000), &metrics);
-        let overlay = crate::settings::layout(width as f32, height as f32, 1.0, false)
+        let overlay = crate::settings::layout_for_menu(width as f32, height as f32, 1.0, None)
             .expect("this window hosts the dialog");
 
         let slot = seats

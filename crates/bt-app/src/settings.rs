@@ -25,7 +25,7 @@
 //! solver, and is never persisted (a dialog does not survive a restart).
 
 use bt_render::{
-    ChromeLabel, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX,
+    ChromeLabel, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX,
     FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, Theme, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
     chrome_palette, rounded_overlay_fill, rounded_overlay_halo,
 };
@@ -135,6 +135,8 @@ const TICK: &str = "\u{2713}";
 /// a two-value runtime switch with no follow-the-OS resolution behind it, and
 /// offering a third entry that resolves to nothing would be a control that lies.
 pub const THEME_OPTIONS: [Theme; 2] = [Theme::Light, Theme::Dark];
+pub const CURSOR_OPTIONS: [CursorStyle; 3] =
+    [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline];
 
 /// The label a theme wears in the picker, matching the mock-up's own casing.
 fn theme_label(theme: Theme) -> &'static str {
@@ -142,6 +144,20 @@ fn theme_label(theme: Theme) -> &'static str {
         Theme::Light => "Light",
         Theme::Dark => "Dark",
     }
+}
+
+fn cursor_label(style: CursorStyle) -> &'static str {
+    match style {
+        CursorStyle::Bar => "Bar",
+        CursorStyle::Block => "Block",
+        CursorStyle::Underline => "Underline",
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsMenu {
+    Theme,
+    Cursor,
 }
 
 /// Whether the dialog is up, and what is open inside it.
@@ -154,7 +170,7 @@ pub struct SettingsPanel {
     open: bool,
     /// The theme picker's own menu. Nested state, because Esc unwinds one layer
     /// per press (§7.1.5) and "the menu is open" is the top layer.
-    menu_open: bool,
+    menu: Option<SettingsMenu>,
     hover: Option<SettingsTarget>,
 }
 
@@ -163,22 +179,22 @@ impl SettingsPanel {
         self.open
     }
 
-    pub fn menu_is_open(self) -> bool {
-        self.menu_open
+    pub fn menu(self) -> Option<SettingsMenu> {
+        self.menu
     }
 
     /// The gear: open when shut, shut when open. Closing takes the menu with it.
     pub fn toggle(&mut self) {
         self.open = !self.open;
-        self.menu_open = false;
+        self.menu = None;
         self.hover = None;
     }
 
     /// Close the top-most open layer and report whether there was one — the Esc
     /// route of §7.1.5, which unwinds exactly one layer per press.
     pub fn close_one_layer(&mut self) -> bool {
-        if self.menu_open {
-            self.menu_open = false;
+        if self.menu.is_some() {
+            self.menu = None;
             self.hover = None;
             return true;
         }
@@ -193,12 +209,16 @@ impl SettingsPanel {
     /// Shut everything, whatever was open.
     pub fn close(&mut self) {
         self.open = false;
-        self.menu_open = false;
+        self.menu = None;
         self.hover = None;
     }
 
     pub fn set_menu_open(&mut self, open: bool) {
-        self.menu_open = open;
+        self.menu = open.then_some(SettingsMenu::Theme);
+    }
+
+    pub fn toggle_menu(&mut self, menu: SettingsMenu) {
+        self.menu = (self.menu != Some(menu)).then_some(menu);
     }
 
     /// Returns whether the hover changed, so a caller can skip a repaint.
@@ -229,6 +249,9 @@ pub enum SettingsTarget {
     /// The open menu's own body, between or around its items.
     ThemeMenu,
     ThemeOption(Theme),
+    CursorCombo,
+    CursorMenu,
+    CursorOption(CursorStyle),
 }
 
 /// Every rectangle the overlay draws and hit-tests, in physical pixels of the
@@ -248,10 +271,14 @@ pub struct SettingsLayout {
     row_title: [f32; 4],
     row_desc: [f32; 4],
     combo: [f32; 4],
+    cursor_row_title: [f32; 4],
+    cursor_row_desc: [f32; 4],
+    cursor_combo: [f32; 4],
     /// The open menu's border box and its items, top to bottom in
     /// [`THEME_OPTIONS`] order. Empty when the menu is shut.
     menu: Option<[f32; 4]>,
     items: Vec<[f32; 4]>,
+    menu_kind: Option<SettingsMenu>,
 }
 
 /// The theme a press on the overlay asks the process to switch to, if it asks
@@ -264,6 +291,14 @@ pub struct SettingsLayout {
 pub fn theme_requested(target: SettingsTarget) -> Option<Theme> {
     match target {
         SettingsTarget::ThemeOption(theme) => Some(theme),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn cursor_style_requested(target: SettingsTarget) -> Option<CursorStyle> {
+    match target {
+        SettingsTarget::CursorOption(style) => Some(style),
         _ => None,
     }
 }
@@ -291,11 +326,11 @@ fn clipped(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 /// nobody can use. The runtime treats it as "not open", so no input is trapped
 /// behind an invisible modal.
 #[must_use]
-pub fn layout(
+pub fn layout_for_menu(
     surface_width: f32,
     surface_height: f32,
     scale: f32,
-    menu_open: bool,
+    menu_kind: Option<SettingsMenu>,
 ) -> Option<SettingsLayout> {
     let px = |value: f32| value * scale;
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
@@ -315,7 +350,7 @@ pub fn layout(
         + px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX)
         + px(GROUP_LABEL_LINE_LOGICAL_PX)
         + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX)
-        + row_height
+        + 2.0 * row_height
         + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX);
     let header = px(HEADER_HEIGHT_LOGICAL_PX);
     let height = (2.0 * border + header + content_height)
@@ -395,8 +430,38 @@ pub fn layout(
         text_column_right,
         row_title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
     ];
-    let (menu, items) = if menu_open {
-        menu_layout(combo, surface_height, scale, border)
+    let cursor_row_content_top = row_content_top + row_height;
+    let cursor_combo_top = cursor_row_content_top + (row_content_height - combo_height) / 2.0;
+    let cursor_combo = [
+        row_right - combo_width,
+        cursor_combo_top,
+        row_right,
+        cursor_combo_top + combo_height,
+    ];
+    let cursor_text_column_right = cursor_combo[0] - px(ROW_GAP_LOGICAL_PX);
+    let cursor_row_title = [
+        row_left,
+        cursor_row_content_top,
+        cursor_text_column_right,
+        cursor_row_content_top + px(ROW_TITLE_LINE_LOGICAL_PX),
+    ];
+    let cursor_row_desc = [
+        row_left,
+        cursor_row_title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
+        cursor_text_column_right,
+        cursor_row_title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
+    ];
+    let active_combo = match menu_kind {
+        Some(SettingsMenu::Theme) => combo,
+        Some(SettingsMenu::Cursor) => cursor_combo,
+        None => combo,
+    };
+    let option_count = match menu_kind {
+        Some(SettingsMenu::Cursor) => CURSOR_OPTIONS.len(),
+        _ => THEME_OPTIONS.len(),
+    };
+    let (menu, items) = if menu_kind.is_some() {
+        menu_layout(active_combo, surface_height, scale, border, option_count)
     } else {
         (None, Vec::new())
     };
@@ -411,8 +476,12 @@ pub fn layout(
         row_title,
         row_desc,
         combo,
+        cursor_row_title,
+        cursor_row_desc,
+        cursor_combo,
         menu,
         items,
+        menu_kind,
     })
 }
 
@@ -430,12 +499,13 @@ fn menu_layout(
     surface_height: f32,
     scale: f32,
     border: f32,
+    option_count: usize,
 ) -> (Option<[f32; 4]>, Vec<[f32; 4]>) {
     let px = |value: f32| value * scale;
     let width = combo[2] - combo[0];
     let height = 2.0 * border
         + 2.0 * px(MENU_PADDING_LOGICAL_PX)
-        + THEME_OPTIONS.len() as f32 * px(ITEM_HEIGHT_LOGICAL_PX);
+        + option_count as f32 * px(ITEM_HEIGHT_LOGICAL_PX);
     let below = combo[3] + px(MENU_OFFSET_LOGICAL_PX);
     let top = if below + height > surface_height - px(MENU_CLEARANCE_LOGICAL_PX) {
         combo[1] - px(MENU_OFFSET_LOGICAL_PX) - height
@@ -446,7 +516,7 @@ fn menu_layout(
     let item_left = frame[0] + border + px(MENU_PADDING_LOGICAL_PX);
     let item_right = frame[2] - border - px(MENU_PADDING_LOGICAL_PX);
     let item_height = px(ITEM_HEIGHT_LOGICAL_PX);
-    let items = (0..THEME_OPTIONS.len())
+    let items = (0..option_count)
         .map(|index| {
             let item_top =
                 frame[1] + border + px(MENU_PADDING_LOGICAL_PX) + index as f32 * item_height;
@@ -467,11 +537,19 @@ pub fn hit(layout: &SettingsLayout, x: f64, y: f64) -> SettingsTarget {
     if let Some(menu) = layout.menu {
         for (index, item) in layout.items.iter().enumerate() {
             if contains(*item, x, y) {
-                return SettingsTarget::ThemeOption(THEME_OPTIONS[index]);
+                return match layout.menu_kind {
+                    Some(SettingsMenu::Cursor) => {
+                        SettingsTarget::CursorOption(CURSOR_OPTIONS[index])
+                    }
+                    _ => SettingsTarget::ThemeOption(THEME_OPTIONS[index]),
+                };
             }
         }
         if contains(menu, x, y) {
-            return SettingsTarget::ThemeMenu;
+            return match layout.menu_kind {
+                Some(SettingsMenu::Cursor) => SettingsTarget::CursorMenu,
+                _ => SettingsTarget::ThemeMenu,
+            };
         }
     }
     if contains(layout.close, x, y) {
@@ -479,6 +557,9 @@ pub fn hit(layout: &SettingsLayout, x: f64, y: f64) -> SettingsTarget {
     }
     if contains(layout.combo, x, y) {
         return SettingsTarget::ThemeCombo;
+    }
+    if contains(layout.cursor_combo, x, y) {
+        return SettingsTarget::CursorCombo;
     }
     if contains(layout.frame, x, y) {
         return SettingsTarget::Panel;
@@ -612,67 +693,52 @@ pub fn build(
             letter_spacing_em: 0.0,
         });
     }
-
-    // `.combo > button`: `background: none` at rest, so its face is the dialog's
-    // own; `border: 1px solid var(--border)` drawn as a border-box, the whole
-    // box in the hairline's colour with the face laid one border in.
-    if let Some(rect) = clipped(layout.combo, clip) {
-        let combo_hovered = hover == Some(SettingsTarget::ThemeCombo);
-        let radius = px(COMBO_RADIUS_LOGICAL_PX);
-        quads.extend(rounded_overlay_fill(
-            rect,
-            radius,
-            palette.menu_border,
-            alpha(palette.menu_border_alpha),
-        ));
-        quads.extend(rounded_overlay_fill(
-            [
-                rect[0] + border,
-                rect[1] + border,
-                rect[2] - border,
-                rect[3] - border,
-            ],
-            radius - border,
-            if combo_hovered {
-                palette.dialog_hover
-            } else {
-                palette.dialog_surface
-            },
-            1.0,
-        ));
-        // `justify-content: space-between` with a 10px gap: the value gets the
-        // room the chevron and that gap do not. A chrome label clips to its own
-        // rectangle, so this bound is what keeps a long value from running under
-        // the chevron rather than being cut off before it.
-        let chevron_column = px(COMBO_CHEVRON_FONT_LOGICAL_PX + COMBO_GAP_LOGICAL_PX);
+    if let Some(rect) = clipped(layout.cursor_row_title, clip) {
         labels.push(ChromeLabel {
-            text: theme_label(selected).to_owned(),
-            rect: [
-                rect[0] + border + px(COMBO_PADDING_LEFT_LOGICAL_PX),
-                rect[1],
-                rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX) - chevron_column,
-                rect[3],
-            ],
-            font_size_px: px(COMBO_FONT_LOGICAL_PX),
+            text: "Cursor".to_owned(),
+            rect,
+            font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
             color: palette.dialog_title_text,
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
         });
+    }
+    if let Some(rect) = clipped(layout.cursor_row_desc, clip) {
         labels.push(ChromeLabel {
-            text: COMBO_CHEVRON.to_owned(),
-            rect: [
-                rect[0],
-                rect[1],
-                rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX),
-                rect[3],
-            ],
-            font_size_px: px(COMBO_CHEVRON_FONT_LOGICAL_PX),
+            text: "Focused cursor shape".to_owned(),
+            rect,
+            font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
             color: palette.dialog_muted_text,
-            align_right: true,
+            align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
         });
+    }
+
+    if let Some(rect) = clipped(layout.combo, clip) {
+        push_combo(
+            &mut quads,
+            &mut labels,
+            rect,
+            hover == Some(SettingsTarget::ThemeCombo),
+            theme_label(selected),
+            scale,
+            border,
+            palette,
+        );
+    }
+    if let Some(rect) = clipped(layout.cursor_combo, clip) {
+        push_combo(
+            &mut quads,
+            &mut labels,
+            rect,
+            hover == Some(SettingsTarget::CursorCombo),
+            cursor_label(bt_render::current_cursor_style()),
+            scale,
+            border,
+            palette,
+        );
     }
 
     if let Some(menu) = layout.menu {
@@ -690,9 +756,25 @@ pub fn build(
             alpha(palette.menu_border_alpha),
         );
         for (index, item) in layout.items.iter().enumerate() {
-            let option = THEME_OPTIONS[index];
-            let is_selected = option == selected;
-            if hover == Some(SettingsTarget::ThemeOption(option)) {
+            let (label, is_selected, is_hovered) = match layout.menu_kind {
+                Some(SettingsMenu::Cursor) => {
+                    let option = CURSOR_OPTIONS[index];
+                    (
+                        cursor_label(option),
+                        option == bt_render::current_cursor_style(),
+                        hover == Some(SettingsTarget::CursorOption(option)),
+                    )
+                }
+                _ => {
+                    let option = THEME_OPTIONS[index];
+                    (
+                        theme_label(option),
+                        option == selected,
+                        hover == Some(SettingsTarget::ThemeOption(option)),
+                    )
+                }
+            };
+            if is_hovered {
                 quads.extend(rounded_overlay_fill(
                     *item,
                     px(ITEM_RADIUS_LOGICAL_PX),
@@ -714,7 +796,7 @@ pub fn build(
                 });
             }
             labels.push(ChromeLabel {
-                text: theme_label(option).to_owned(),
+                text: label.to_owned(),
                 rect: [
                     tick_right + px(ITEM_GAP_LOGICAL_PX),
                     item[1],
@@ -722,7 +804,7 @@ pub fn build(
                     item[3],
                 ],
                 font_size_px: px(COMBO_FONT_LOGICAL_PX),
-                color: if is_selected || hover == Some(SettingsTarget::ThemeOption(option)) {
+                color: if is_selected || is_hovered {
                     palette.menu_item_text_selected
                 } else {
                     palette.menu_item_text
@@ -735,6 +817,71 @@ pub fn build(
     }
 
     (quads, labels, sprites)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_combo(
+    quads: &mut Vec<OverlayQuad>,
+    labels: &mut Vec<ChromeLabel>,
+    rect: [f32; 4],
+    hovered: bool,
+    value: &str,
+    scale: f32,
+    border: f32,
+    palette: bt_render::ChromePalette,
+) {
+    let px = |logical: f32| logical * scale;
+    let radius = px(COMBO_RADIUS_LOGICAL_PX);
+    quads.extend(rounded_overlay_fill(
+        rect,
+        radius,
+        palette.menu_border,
+        f32::from(palette.menu_border_alpha) / 255.0,
+    ));
+    quads.extend(rounded_overlay_fill(
+        [
+            rect[0] + border,
+            rect[1] + border,
+            rect[2] - border,
+            rect[3] - border,
+        ],
+        radius - border,
+        if hovered {
+            palette.dialog_hover
+        } else {
+            palette.dialog_surface
+        },
+        1.0,
+    ));
+    let chevron_column = px(COMBO_CHEVRON_FONT_LOGICAL_PX + COMBO_GAP_LOGICAL_PX);
+    labels.push(ChromeLabel {
+        text: value.to_owned(),
+        rect: [
+            rect[0] + border + px(COMBO_PADDING_LEFT_LOGICAL_PX),
+            rect[1],
+            rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX) - chevron_column,
+            rect[3],
+        ],
+        font_size_px: px(COMBO_FONT_LOGICAL_PX),
+        color: palette.dialog_title_text,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+    });
+    labels.push(ChromeLabel {
+        text: COMBO_CHEVRON.to_owned(),
+        rect: [
+            rect[0],
+            rect[1],
+            rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX),
+            rect[3],
+        ],
+        font_size_px: px(COMBO_CHEVRON_FONT_LOGICAL_PX),
+        color: palette.dialog_muted_text,
+        align_right: true,
+        align_center: false,
+        letter_spacing_em: 0.0,
+    });
 }
 
 /// A surface that floats: its lift, its hairline, its face — the three planes
@@ -791,13 +938,23 @@ mod tests {
     const SURFACE: (f32, f32) = (1280.0, 800.0);
 
     fn open(scale: f32, menu_open: bool) -> SettingsLayout {
-        layout(
+        layout_for_menu(
             (SURFACE.0 * scale).round(),
             (SURFACE.1 * scale).round(),
             scale,
-            menu_open,
+            menu_open.then_some(SettingsMenu::Theme),
         )
         .expect("this window can host the dialog")
+    }
+
+    fn open_cursor(scale: f32) -> SettingsLayout {
+        layout_for_menu(
+            SURFACE.0 * scale,
+            SURFACE.1 * scale,
+            scale,
+            Some(SettingsMenu::Cursor),
+        )
+        .expect("the settings dialog fits")
     }
 
     fn centre(rect: [f32; 4]) -> (f64, f64) {
@@ -819,10 +976,10 @@ mod tests {
     /// `design/ui-mockup.html` puts it — `width: min(480px, 92%)`,
     /// `margin: 54px auto 0`, and a height its own content decides.
     ///
-    /// The 157 is not a guess: it is `1 + 56 + 99 + 1` — two hairlines, the
+    /// The 211 is not a guess: it is `1 + 56 + 153 + 1` — two hairlines, the
     /// header's `16 + 30 + 10`, and a content box of
     /// `2 + 10 + 13 + 2 + (11 + 32 + 11) + 18` — and the mock-up's own renderer
-    /// reports 157 for a dialog holding this one group and this one row.
+    /// reports 211 for a dialog holding this one group and these two rows.
     ///
     /// Red gate: every term is load-bearing. Drop the `auto` centring and `left`
     /// moves; drop the 54 and `top` moves; use the row's *border* box (55, which
@@ -837,10 +994,11 @@ mod tests {
             (SURFACE.0 - 480.0) / 2.0,
             "margin-left/right: auto"
         );
-        assert_eq!(height(placed.frame), 157.0, "content decides the height");
+        assert_eq!(height(placed.frame), 211.0, "content decides the height");
 
         // The 92% share takes over below 480/0.92 ~= 521.7 logical pixels.
-        let narrow = layout(480.0, 800.0, 1.0, false).expect("480 wide still hosts the dialog");
+        let narrow =
+            layout_for_menu(480.0, 800.0, 1.0, None).expect("480 wide still hosts the dialog");
         assert_eq!(
             width(narrow.frame),
             (480.0_f32 * DIALOG_WIDTH_RATIO).round(),
@@ -900,6 +1058,13 @@ mod tests {
             ROW_DESC_MARGIN_TOP_LOGICAL_PX,
             ".desc margin-top: 1px"
         );
+        assert_eq!(width(placed.cursor_combo), width(placed.combo));
+        assert_eq!(height(placed.cursor_combo), height(placed.combo));
+        assert_eq!(
+            placed.cursor_combo[1] - placed.combo[1],
+            54.0,
+            "Cursor is the next identical row under Theme"
+        );
     }
 
     /// PIN (DPI): the dialog is one design at every scale — nothing collapses,
@@ -919,7 +1084,7 @@ mod tests {
                 );
             };
             near(480.0 * scale, width(placed.frame), "the dialog's width");
-            near(157.0 * scale, height(placed.frame), "the dialog's height");
+            near(211.0 * scale, height(placed.frame), "the dialog's height");
             near(54.0 * scale, placed.frame[1], "the dialog's drop");
             near(30.0 * scale, width(placed.close), "the close button");
             near(30.0 * scale, height(placed.close), "the close button");
@@ -1069,6 +1234,43 @@ mod tests {
         }
     }
 
+    #[test]
+    fn each_cursor_picker_item_maps_to_its_corresponding_set_value() {
+        let placed = open_cursor(1.0);
+        assert_eq!(placed.items.len(), CURSOR_OPTIONS.len());
+        for (index, item) in placed.items.iter().enumerate() {
+            let (x, y) = centre(*item);
+            let target = hit(&placed, x, y);
+            assert_eq!(target, SettingsTarget::CursorOption(CURSOR_OPTIONS[index]));
+            assert_eq!(cursor_style_requested(target), Some(CURSOR_OPTIONS[index]));
+        }
+        for target in [
+            SettingsTarget::Scrim,
+            SettingsTarget::Panel,
+            SettingsTarget::Close,
+            SettingsTarget::ThemeCombo,
+            SettingsTarget::ThemeMenu,
+            SettingsTarget::CursorCombo,
+            SettingsTarget::CursorMenu,
+        ] {
+            assert_eq!(cursor_style_requested(target), None);
+        }
+    }
+
+    #[test]
+    fn cursor_combo_reuses_theme_combo_geometry_and_menu_craft() {
+        let placed = open_cursor(1.0);
+        assert_eq!(width(placed.cursor_combo), width(placed.combo));
+        assert_eq!(height(placed.cursor_combo), height(placed.combo));
+        let (x, y) = centre(placed.cursor_combo);
+        assert_eq!(hit(&placed, x, y), SettingsTarget::CursorCombo);
+        assert_eq!(placed.items.len(), 3);
+        let (_, labels, _) = build(&placed, None, Theme::Dark);
+        for label in ["Bar", "Block", "Underline"] {
+            assert!(labels.iter().any(|candidate| candidate.text == label));
+        }
+    }
+
     /// PIN: the picker's menu opens below its button, and flips above it when
     /// there is no room — measured against the window, which is what actually
     /// clips it (the mock-up's own rule, and its `.content` does not scroll).
@@ -1085,7 +1287,8 @@ mod tests {
         assert_eq!(width(menu), width(tall.combo), "min-width: 100%");
 
         // A window whose bottom is right under the combo leaves no room below.
-        let short = layout(1280.0, 200.0, 1.0, true).expect("200 tall still hosts the dialog");
+        let short = layout_for_menu(1280.0, 200.0, 1.0, Some(SettingsMenu::Theme))
+            .expect("200 tall still hosts the dialog");
         let menu = short.menu.expect("the menu is open");
         assert_eq!(
             short.combo[1] - menu[3],
@@ -1107,9 +1310,18 @@ mod tests {
     /// trapped behind a modal with nothing on it.
     #[test]
     fn a_window_too_small_to_host_the_dialog_says_so() {
-        assert!(layout(1280.0, 100.0, 1.0, false).is_none(), "too short");
-        assert!(layout(100.0, 800.0, 1.0, false).is_none(), "too narrow");
-        assert!(layout(1280.0, 800.0, 1.0, false).is_some(), "a real window");
+        assert!(
+            layout_for_menu(1280.0, 100.0, 1.0, None).is_none(),
+            "too short"
+        );
+        assert!(
+            layout_for_menu(100.0, 800.0, 1.0, None).is_none(),
+            "too narrow"
+        );
+        assert!(
+            layout_for_menu(1280.0, 800.0, 1.0, None).is_some(),
+            "a real window"
+        );
     }
 
     /// PIN (Esc): one layer per press — the open menu first, then the dialog,
@@ -1123,7 +1335,7 @@ mod tests {
         panel.set_menu_open(true);
         assert!(panel.close_one_layer());
         assert!(
-            panel.is_open() && !panel.menu_is_open(),
+            panel.is_open() && panel.menu().is_none(),
             "the menu went first"
         );
         assert!(panel.close_one_layer());
@@ -1140,9 +1352,9 @@ mod tests {
         assert!(panel.is_open());
         panel.set_menu_open(true);
         panel.toggle();
-        assert!(!panel.is_open() && !panel.menu_is_open());
+        assert!(!panel.is_open() && panel.menu().is_none());
         panel.toggle();
-        assert!(panel.is_open() && !panel.menu_is_open());
+        assert!(panel.is_open() && panel.menu().is_none());
         panel.close();
         assert!(!panel.is_open());
     }
@@ -1352,7 +1564,7 @@ mod tests {
     fn a_fresh_panel_is_shut() {
         let panel = SettingsPanel::default();
         assert!(!panel.is_open());
-        assert!(!panel.menu_is_open());
+        assert!(panel.menu().is_none());
         assert_eq!(panel.hover(), None);
     }
 }

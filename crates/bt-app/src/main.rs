@@ -23,15 +23,16 @@ use bt_doc::{Bias, LayoutKey};
 use bt_layout::{Axis, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
-    SESSION_SCHEMA_VERSION, SessionThemeV1, SessionV1, TabV1, WindowBoundsV1, WindowStateV1,
+    SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionThemeV1, SessionV1, TabV1, WindowBoundsV1,
+    WindowStateV1,
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
-    FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit, MathHitTarget,
-    PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay, Preedit, PresentOutcome, PreviewImage,
-    Renderer, SeatViewport, Theme, ThemeChange, background_rgb, compose_preedit, foreground_rgb,
-    frame_content_digest, frame_is_alternate_screen, preview_image_extent, set_theme,
-    theme_revision,
+    CursorStyle, FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit,
+    MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay, Preedit, PresentOutcome,
+    PreviewImage, Renderer, SeatViewport, Theme, ThemeChange, background_rgb, compose_preedit,
+    current_cursor_style, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
+    preview_image_extent, set_cursor_style, set_theme, theme_revision,
 };
 use bt_term::{
     DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, SessionDecorationTask,
@@ -1735,6 +1736,7 @@ impl Runtime {
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
         let selected_theme = render_theme(session_store.loaded().theme);
+        set_cursor_style(render_cursor_style(session_store.loaded().cursor_style));
         if set_theme(selected_theme) == ThemeChange::LockedByEnvironment {
             eprintln!(
                 "BT_THEME persisted_theme={selected_theme:?} ignored_for_runtime=true reason=BT_BG"
@@ -2164,11 +2166,11 @@ impl Runtime {
             return None;
         }
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        settings::layout(
+        settings::layout_for_menu(
             width as f32,
             height as f32,
             self.renderer.metrics().scale_factor as f32,
-            self.settings.menu_is_open(),
+            self.settings.menu(),
         )
     }
 
@@ -2249,8 +2251,7 @@ impl Runtime {
             settings::SettingsTarget::Scrim => self.settings.close(),
             settings::SettingsTarget::Close => self.settings.close(),
             settings::SettingsTarget::ThemeCombo => {
-                let open = self.settings.menu_is_open();
-                self.settings.set_menu_open(!open);
+                self.settings.toggle_menu(settings::SettingsMenu::Theme);
             }
             target @ settings::SettingsTarget::ThemeOption(_) => {
                 self.settings.set_menu_open(false);
@@ -2258,11 +2259,21 @@ impl Runtime {
                     self.apply_theme(theme)?;
                 }
             }
+            settings::SettingsTarget::CursorCombo => {
+                self.settings.toggle_menu(settings::SettingsMenu::Cursor);
+            }
+            target @ settings::SettingsTarget::CursorOption(_) => {
+                self.settings.set_menu_open(false);
+                if let Some(style) = settings::cursor_style_requested(target) {
+                    self.apply_cursor_style(style)?;
+                }
+            }
             // A press on the dialog's own body, or inside the open menu but on
             // none of its items, lands nowhere. It notably does *not* close: the
             // mock-up closes on the scrim and on the `×`, and nothing else.
             settings::SettingsTarget::Panel => {}
             settings::SettingsTarget::ThemeMenu => {}
+            settings::SettingsTarget::CursorMenu => {}
         }
         if let Some(position) = self.pointer_position {
             let hover = self
@@ -2335,6 +2346,7 @@ impl Runtime {
             .unwrap_or((session.window.bounds.x, session.window.bounds.y));
         session.schema_version = SESSION_SCHEMA_VERSION;
         session.theme = session_theme(self.selected_theme);
+        session.cursor_style = session_cursor_style(current_cursor_style());
         session.window = WindowStateV1 {
             bounds: WindowBoundsV1 {
                 x: (f64::from(position.0) / scale).round() as i32,
@@ -2392,6 +2404,18 @@ impl Runtime {
                 Ok(true)
             }
         }
+    }
+
+    fn apply_cursor_style(&mut self, style: CursorStyle) -> Result<bool> {
+        if !set_cursor_style(style) {
+            return Ok(false);
+        }
+        self.mark_session_dirty(Instant::now());
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
     }
 
     /// The dev-only preview toggle, and everything one costs: the tree changes,
@@ -5563,6 +5587,22 @@ fn session_theme(theme: Theme) -> SessionThemeV1 {
     match theme {
         Theme::Dark => SessionThemeV1::Dark,
         Theme::Light => SessionThemeV1::Light,
+    }
+}
+
+fn render_cursor_style(style: SessionCursorStyleV1) -> CursorStyle {
+    match style {
+        SessionCursorStyleV1::Bar => CursorStyle::Bar,
+        SessionCursorStyleV1::Block => CursorStyle::Block,
+        SessionCursorStyleV1::Underline => CursorStyle::Underline,
+    }
+}
+
+fn session_cursor_style(style: CursorStyle) -> SessionCursorStyleV1 {
+    match style {
+        CursorStyle::Bar => SessionCursorStyleV1::Bar,
+        CursorStyle::Block => SessionCursorStyleV1::Block,
+        CursorStyle::Underline => SessionCursorStyleV1::Underline,
     }
 }
 

@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::layout::LayoutNodeV1;
 
 /// Current `schema_version` for `session.json`.
-pub const SESSION_SCHEMA_VERSION: u32 = 2;
+pub const SESSION_SCHEMA_VERSION: u32 = 3;
 
 /// Runtime theme restored with the session. This deliberately has only the two themes the renderer
 /// can apply; `BT_BG` remains a process diagnostic override and is never persisted as a third mode.
@@ -17,6 +17,16 @@ pub enum SessionThemeV1 {
     Light,
 }
 
+/// Focused cursor shape restored with the session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionCursorStyleV1 {
+    #[default]
+    Bar,
+    Block,
+    Underline,
+}
+
 /// `session.json` v1 top-level structure — docs/M2-persistence-schema-v1.md §3.5.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionV1 {
@@ -25,6 +35,9 @@ pub struct SessionV1 {
     /// degrade to the product default rather than losing the entire session.
     #[serde(default)]
     pub theme: SessionThemeV1,
+    /// Added in schema v3; missing values degrade to the historical bar cursor.
+    #[serde(default)]
+    pub cursor_style: SessionCursorStyleV1,
     pub window: WindowStateV1,
     pub tabs: Vec<TabV1>,
     pub active_tab: u32,
@@ -36,6 +49,7 @@ impl Default for SessionV1 {
         Self {
             schema_version: SESSION_SCHEMA_VERSION,
             theme: SessionThemeV1::Dark,
+            cursor_style: SessionCursorStyleV1::Bar,
             window: WindowStateV1::default(),
             tabs: Vec::new(),
             active_tab: 0,
@@ -177,6 +191,7 @@ mod tests {
         let defaults = SessionV1::default();
         assert_eq!(defaults.schema_version, SESSION_SCHEMA_VERSION);
         assert_eq!(defaults.theme, SessionThemeV1::Dark);
+        assert_eq!(defaults.cursor_style, SessionCursorStyleV1::Bar);
         assert!(defaults.tabs.is_empty());
         assert!(defaults.recent.is_empty());
         assert_eq!(defaults.active_tab, 0);
