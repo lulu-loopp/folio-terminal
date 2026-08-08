@@ -220,20 +220,39 @@ impl ChromeSprite {
 /// pass, so a popup is only above a row it covers if the two are on different
 /// layers. Anything that must cover something else goes on a later layer; being
 /// pushed later into the same layer buys nothing across channels.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OverlayLayer {
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
     pub sprites: Vec<ChromeSprite>,
+    /// The layer's own `opacity` — see [`bt_render::OverlayLayer::opacity`]. It
+    /// rides through the rasterizer untouched: how faded a layer is has nothing
+    /// to do with which marks it names.
+    pub opacity: f32,
+}
+
+impl Default for OverlayLayer {
+    /// An empty layer at full strength — CSS's own initial `opacity: 1`, for the
+    /// reason spelled out on the renderer's twin.
+    fn default() -> Self {
+        Self {
+            quads: Vec::new(),
+            labels: Vec::new(),
+            sprites: Vec::new(),
+            opacity: 1.0,
+        }
+    }
 }
 
 impl OverlayLayer {
     /// Whether the layer draws nothing at all — an empty layer is not a layer,
     /// and handing one to the renderer would cost a text renderer and a pass
-    /// through three channels to draw nothing.
+    /// through three channels to draw nothing. A layer faded out of existence is
+    /// empty by the same argument.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.quads.is_empty() && self.labels.is_empty() && self.sprites.is_empty()
+        (self.quads.is_empty() && self.labels.is_empty() && self.sprites.is_empty())
+            || self.opacity <= 0.0
     }
 }
 
@@ -279,6 +298,7 @@ impl ChromeMarkRasters {
                 quads: layer.quads,
                 labels: layer.labels,
                 icons: self.icons_for(&layer.sprites, &mut kept),
+                opacity: layer.opacity,
             })
             .collect();
         self.rasters = kept;

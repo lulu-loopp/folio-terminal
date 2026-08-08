@@ -19,6 +19,7 @@ mod restore;
 mod seats;
 mod seed;
 mod settings;
+mod tooltip;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
@@ -644,6 +645,26 @@ struct Runtime {
     /// input router use comes from here, so the picture and the hit test can
     /// never be two geometries (D4).
     seat_pointer: seats::ChromePointer,
+    /// The one tooltip this window has (M136-M142). A singleton because a tip
+    /// answers "what is this?" about the thing under the pointer, and there is
+    /// one pointer.
+    tooltip: tooltip::TooltipHost,
+    /// Everything tippable, rebuilt beside the chrome it describes.
+    ///
+    /// Never cached across a rebuild: the mock-up rewrites `el.title` on every
+    /// paint (line 4331), and the reason is that every one of these strings is a
+    /// function of live state — a name that can be edited, a folder that can be
+    /// walked, a percentage that climbs. A tip that outlived its rebuild would be
+    /// a confident sentence about a tab that stopped being that tab.
+    tooltip_anchors: tooltip::TooltipAnchors,
+    /// The opacity the tip was last *painted* at, or `None` when none was.
+    ///
+    /// The strip's own frame-debt idea (`tab_owes_frame`) applied to the fade:
+    /// what is on screen, compared against what should be, rather than a flag
+    /// saying an animation is running. The difference shows at exactly one
+    /// instant and it is the one that matters — the frame the fade lands on,
+    /// which "is it still fading" answers `false` for and therefore never draws.
+    tooltip_drawn_opacity: Option<f32>,
     /// Rasterized chrome marks, held across frames so a hover repaint costs a
     /// hash lookup rather than eight SVG renders.
     chrome_marks: marks::ChromeMarkRasters,
@@ -783,6 +804,25 @@ impl TabState {
             self.session.window_title(),
             self.session.working_directory(),
         )
+    }
+
+    /// What this tab's tooltip says (M140).
+    ///
+    /// The *whole* path on the second line and not the leaf: the first line
+    /// already carries the leaf whenever the folder is what named the tab, and a
+    /// tip that repeated it would answer a question nobody has while leaving the
+    /// one they do have — *which* `app` is this? — unanswered.
+    fn tooltip_text(&self) -> String {
+        let (name, source) = resolve_title(
+            self.manual_name.as_deref(),
+            self.session.window_title(),
+            self.session.working_directory(),
+        );
+        let cwd = self
+            .session
+            .working_directory()
+            .map(|path| path.to_string_lossy().into_owned());
+        tooltip::tab_tip(&name, source, cwd.as_deref(), self.pinned)
     }
 
     /// What survives this tab being closed.
@@ -2337,7 +2377,7 @@ fn loudest_claim(claims: impl IntoIterator<Item = StatusClaim>) -> StatusClaim {
 ///
 /// CSS constrains both control points' `x` to `0..=1`, which makes x monotonic
 /// in t and the inversion single-rooted.
-fn cubic_bezier(x: f32, control: [f32; 4]) -> f32 {
+pub(crate) fn cubic_bezier(x: f32, control: [f32; 4]) -> f32 {
     let [x1, y1, x2, y2] = control;
     if x <= 0.0 {
         return 0.0;
@@ -2393,7 +2433,7 @@ fn cubic_bezier(x: f32, control: [f32; 4]) -> f32 {
 /// CSS `ease-in-out`, worn by `@keyframes breathe`.
 const EASE_IN_OUT: [f32; 4] = [0.42, 0.0, 0.58, 1.0];
 /// CSS `ease`, worn by the progress arc's `transition`.
-const EASE: [f32; 4] = [0.25, 0.1, 0.25, 1.0];
+pub(crate) const EASE: [f32; 4] = [0.25, 0.1, 0.25, 1.0];
 
 /// `.ticon.working { animation: breathe 1.7s ease-in-out infinite }`.
 ///
@@ -2427,7 +2467,7 @@ fn breathe_opacity(elapsed: Duration, motion: Motion) -> f32 {
 /// preference a browser reports as `prefers-reduced-motion` — the setting
 /// behind Settings → Accessibility → Visual effects → Animation effects.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum Motion {
+pub(crate) enum Motion {
     #[default]
     Full,
     Reduced,
@@ -3547,6 +3587,9 @@ impl Runtime {
             math_hover_clear_at: None,
             pending_math_context_anchor: None,
             seat_pointer: seats::ChromePointer::default(),
+            tooltip: tooltip::TooltipHost::default(),
+            tooltip_anchors: tooltip::TooltipAnchors::default(),
+            tooltip_drawn_opacity: None,
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
             profile_menu: profiles::ProfileMenu::default(),
@@ -4077,11 +4120,196 @@ impl Runtime {
         );
         let icons = self.chrome_marks.resolve(&sprites);
         let chrome_changed = self.renderer.set_chrome(quads, labels, icons);
+        // From the same geometry, on the same beat: what the strip draws is what
+        // can be tipped, and both are decided here or neither is.
+        self.rebuild_tooltip_anchors(scale, width as f32, now);
         // The overlay is rebuilt from the same choke point as the chrome under
         // it, so every path that already knew to repaint on a resize, a DPI
         // change or a theme switch carries the dialog with it for free.
         let overlay_changed = self.refresh_overlay();
         chrome_changed || overlay_changed
+    }
+
+    /// Rebuild the tooltip's anchor list from the geometry the strip is about to
+    /// be drawn with.
+    ///
+    /// Beside the chrome and from the same numbers, so an anchor cannot describe
+    /// a box the strip is not drawing. Order is innermost-first, which is how
+    /// [`tooltip::TooltipAnchors`] reproduces the mock-up's `closest()`: the pin
+    /// and the mark answer before the tab they sit on.
+    ///
+    /// Registration is also where every suppression lands, because "do not tip
+    /// this" and "this has nothing to say" are the same instruction to a host
+    /// that only ever sees a list (M141).
+    fn rebuild_tooltip_anchors(&mut self, scale: f32, width: f32, now: Instant) {
+        let mut anchors = tooltip::TooltipAnchors::default();
+        // A drag owns the pointer outright and everything else goes quiet for the
+        // length of the gesture — the same rule hover, the peek flyout and the
+        // terminal's own selection already live by. An empty list is how that is
+        // said here: there is nothing to be over.
+        if self.tab_drag.is_none() {
+            let geometry = seats::tab_strip_geometry(
+                width,
+                scale,
+                &self.tab_trailers(now),
+                self.active_tab,
+                self.tab_scroll,
+            );
+            // What is cropped away is not there to be tipped, exactly as it is
+            // not there to be clicked (`hit_tab_chrome`).
+            let visible =
+                |rect: [f32; 4]| rect[0] >= geometry.viewport[0] && rect[2] <= geometry.viewport[1];
+            let renaming = self.rename.as_ref().map(|editor| editor.tab);
+            for (index, slot) in geometry.tabs.iter().enumerate() {
+                let Some(tab) = self.tabs.get(index) else {
+                    continue;
+                };
+                // The editor IS the answer (mock-up 4193-4196): while you are
+                // typing a name, a box telling you what the name currently is
+                // would be covering the box you are typing it into.
+                if renaming == Some(tab.id) {
+                    continue;
+                }
+                if let Some(pin) = slot.pin.filter(|pin| visible(*pin)) {
+                    anchors.push(
+                        tooltip::TooltipAnchorId::TabPin(index),
+                        pin,
+                        if tab.pinned {
+                            // Solid pin = "it is pinned", and the tip names the
+                            // verb *and* the reason, because "Unpin" alone does
+                            // not explain why the `×` went away (mock-up 4204).
+                            "Unpin — a pinned tab closes only after unpinning"
+                        } else {
+                            "Pin"
+                        },
+                    );
+                }
+                let mark = seats::tab_mark_box(slot, scale);
+                if visible(mark) {
+                    let status = tab.session.status();
+                    anchors.push(
+                        tooltip::TooltipAnchorId::TabIcon(index),
+                        mark,
+                        tooltip::mark_tip(status.progress, status.working),
+                    );
+                }
+                if visible(slot.body) {
+                    anchors.push(
+                        tooltip::TooltipAnchorId::Tab(index),
+                        slot.body,
+                        tab.tooltip_text(),
+                    );
+                }
+                // The `×` is deliberately absent: `tabTrailer` writes no `title`
+                // on it (mock-up 4207), so a pointer there falls through to the
+                // tab — which is the tip you wanted anyway.
+            }
+            if visible(geometry.new_tab) {
+                anchors.push(
+                    tooltip::TooltipAnchorId::NewTab,
+                    geometry.new_tab,
+                    format!(
+                        "New tab ({})",
+                        profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                    ),
+                );
+            }
+            // I94: the chevron's own tip is silenced while its menu is up. You
+            // just clicked it and the answer is on screen, so the question is
+            // closed and the tip would be noise sitting on top of the answer.
+            if visible(geometry.new_tab_menu) && !self.profile_menu.is_open() {
+                anchors.push(
+                    tooltip::TooltipAnchorId::NewTabMenu,
+                    geometry.new_tab_menu,
+                    "Choose a profile",
+                );
+            }
+            for (target, rect) in seats::window_chrome_boxes(width, scale) {
+                let text = match target {
+                    // The gear, silenced while the dialog it opens is up — the
+                    // chevron's rule, for the same reason.
+                    seats::ChromeTarget::Settings if self.settings.is_open() => "",
+                    seats::ChromeTarget::Settings => "Settings",
+                    seats::ChromeTarget::Minimize => "Minimize",
+                    seats::ChromeTarget::Maximize => "Maximize",
+                    seats::ChromeTarget::CloseWindow => "Close",
+                    _ => "",
+                };
+                let Some(id) = tooltip_anchor_for(target) else {
+                    continue;
+                };
+                anchors.push(id, rect, text);
+            }
+        }
+        // A tip whose subject has left the strip has nothing left to say — and a
+        // tip still counting down toward a subject that left has nothing to
+        // arrive at. Retiring both here, against the list that was just built, is
+        // what keeps the host from owing a frame it could never pay.
+        self.tooltip.retain(|id| anchors.find(id).is_some());
+        self.tooltip_anchors = anchors;
+    }
+
+    /// Whether the tip on screen differs from the tip last painted — the strip's
+    /// own frame-debt question ([`tab_owes_frame`]), asked about the fade.
+    ///
+    /// This and not "is it still fading" is what schedules the *landing* frame:
+    /// the moment the fade ends there is one more frame owed, carrying the
+    /// opacity from wherever the last wake left it up to a solid 1.
+    fn tooltip_owes_frame(&self, now: Instant) -> bool {
+        self.tooltip_drawn_opacity != self.tooltip_opacity(now)
+    }
+
+    /// The opacity the tip should be painted at this instant, or `None` when
+    /// there is no tip.
+    fn tooltip_opacity(&self, now: Instant) -> Option<f32> {
+        self.tooltip
+            .active()
+            .map(|_| self.tooltip.opacity(now, self.motion))
+    }
+
+    /// When this window next has tooltip work: the settle deadline, or the next
+    /// frame of a fade that has not landed.
+    fn tooltip_deadline(&self, now: Instant) -> Option<Instant> {
+        if self.tooltip_owes_frame(now) {
+            return Some(now);
+        }
+        self.tooltip
+            .deadline(now, self.motion, STRIP_ANIMATION_FRAME)
+    }
+
+    /// Note what the pointer is over and repaint if the answer took a tip down.
+    fn note_tooltip(&mut self, anchor: Option<tooltip::TooltipAnchorId>) -> Result<()> {
+        if self.tooltip.observe(anchor, Instant::now()) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The anchor under the pointer right now, if any.
+    fn tooltip_anchor_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<tooltip::TooltipAnchorId> {
+        self.tooltip_anchors
+            .at(position.x as f32, position.y as f32)
+            .map(|anchor| anchor.id)
+    }
+
+    /// Show a settled tip, and keep paying the fade's frames until it lands.
+    fn advance_tooltip_if_due(&mut self, now: Instant) -> Result<()> {
+        let promoted = self.tooltip.activate_if_due(now);
+        if (promoted || self.tooltip_owes_frame(now)) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Take the tip down — any press, a lost window, a menu opening (M142, I94).
+    fn hide_tooltip(&mut self) -> Result<()> {
+        if self.tooltip.hide() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
     }
 
     /// Fit the open editor's draft into the box the strip has for it.
@@ -4301,7 +4529,7 @@ impl Runtime {
     /// every popup, so a modal that is up owns the layer outright, and the
     /// picker is closed the moment the dialog opens.
     fn refresh_overlay(&mut self) -> bool {
-        let layers = if let Some(layout) = self.settings_layout() {
+        let mut layers = if let Some(layout) = self.settings_layout() {
             settings::build(&layout, self.settings.hover(), self.theme_mode)
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the prompt floats over a
@@ -4318,8 +4546,56 @@ impl Runtime {
         } else {
             Vec::new()
         };
+        // Last, and therefore on top of every one of them: `z-index: 60` against
+        // the menu's `30` (mock-up 1207). A tip is the only surface in this
+        // window that is never covered, because it is the only one whose whole
+        // job is to explain what is under it.
+        layers.extend(self.tooltip_layer());
         let layers = self.settings_marks.resolve_overlay(layers);
         self.renderer.set_modal_overlay(layers)
+    }
+
+    /// The tip's own layer, or nothing when none is showing.
+    ///
+    /// The text is read out of this frame's anchors rather than remembered from
+    /// the frame the tip appeared on, so a tab renamed under an open tip says its
+    /// new name on the next frame — the mock-up rewrites `el.title` on every
+    /// paint for the same reason (line 4331).
+    fn tooltip_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        // Recorded at the end and only on the paths that actually paint, so the
+        // frame-debt comparison is against what is *on screen*. Recording the
+        // intent instead would let a tip that could not be laid out report itself
+        // as drawn, and the debt would be settled by a frame nobody ever saw.
+        self.tooltip_drawn_opacity = None;
+        let now = Instant::now();
+        let Some(opacity) = self.tooltip_opacity(now) else {
+            return Vec::new();
+        };
+        let Some(anchor) = self
+            .tooltip
+            .active()
+            .and_then(|id| self.tooltip_anchors.find(id))
+        else {
+            return Vec::new();
+        };
+        let (text, host) = (anchor.text.clone(), anchor.rect);
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let font_px = tooltip::TIP_FONT_LOGICAL_PX * scale;
+        // Only the font knows how wide a line is, so the measuring happens here,
+        // beside the renderer, exactly as the badge's and the editor's do.
+        let widths: Vec<f32> = text
+            .split('\n')
+            .map(|line| self.renderer.measure_chrome_text(line, font_px))
+            .collect();
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let Some(layout) =
+            tooltip::layout(&text, host, &widths, (width as f32, height as f32), scale)
+        else {
+            return Vec::new();
+        };
+        let palette = bt_render::chrome_palette();
+        self.tooltip_drawn_opacity = Some(opacity);
+        tooltip::build(&layout, &palette, scale, opacity)
     }
 
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
@@ -5258,6 +5534,12 @@ impl Runtime {
         // `Focused(false)` arrive here — so the strip's copy is recorded here
         // too rather than in a second listener that could fall out of step.
         self.window_focused = focused;
+        // M142: a window that has lost the keyboard has lost the pointer's
+        // attention too, and a tip left floating over a background window is a
+        // label on something you are no longer looking at.
+        if !focused {
+            self.tooltip.hide();
+        }
         self.cursor_blink.set_focused(focused, now);
         self.renderer.set_window_focused(focused);
         self.renderer
@@ -6277,6 +6559,10 @@ impl Runtime {
             return Ok(());
         }
         self.update_chrome_hover(position)?;
+        // Below every gesture that owns the pointer and beside the hover it
+        // follows: the anchors under a drag, a divider or an open picker were
+        // never reached, and each of those paths returned above having said so.
+        self.note_tooltip(self.tooltip_anchor_at(position))?;
         // Everything below reads the pointer through `terminal_pointer` — one
         // correction, in one place, applied to hover, peek, selection and
         // protocol forwarding alike. Outside the seat it answers `None`, which
@@ -7013,6 +7299,14 @@ impl Runtime {
     }
 
     fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
+        // M142, and ahead of everything: any press at all takes the tip down.
+        // Unconditional — not "a press that hits something", not "a left press" —
+        // because a tooltip answers "what is this?" and the act of pressing is
+        // you saying you already know. The mock-up's listener is the document's
+        // for the same reason.
+        if state == ElementState::Pressed {
+            self.hide_tooltip()?;
+        }
         // A modal means MODAL. Ahead of the chrome router, so the caption run —
         // the gear included — is behind the scrim like everything else, and no
         // press reaches a divider, a seat, the terminal's selection or a peek.
@@ -8257,6 +8551,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        if let Err(error) = runtime.advance_tooltip_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = match runtime.flush_pending_pty_resize(now) {
@@ -8298,6 +8596,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             resize_finish_deadline,
             synchronized_update_deadline,
             live_stability_deadline,
+            // The tip's 380ms while one is settling, and the fade's own frames
+            // until it lands. A window with no tip under the pointer reports
+            // nothing and costs no wake-ups at all.
+            runtime.tooltip_deadline(now),
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
@@ -8486,6 +8788,23 @@ fn cwd_leaf(directory: &Path) -> Option<String> {
     (!leaf.is_empty()).then(|| leaf.to_owned())
 }
 
+/// The tooltip anchor a window-chrome target answers to, for the four the
+/// caption run is made of.
+///
+/// A function rather than a `From`, because it is deliberately partial: most of
+/// [`seats::ChromeTarget`] names something a click does that nothing hovers for
+/// (a divider, a pane head), and the two enums are separate precisely so neither
+/// has to grow entries for the other's questions.
+fn tooltip_anchor_for(target: seats::ChromeTarget) -> Option<tooltip::TooltipAnchorId> {
+    match target {
+        seats::ChromeTarget::Settings => Some(tooltip::TooltipAnchorId::Settings),
+        seats::ChromeTarget::Minimize => Some(tooltip::TooltipAnchorId::Minimize),
+        seats::ChromeTarget::Maximize => Some(tooltip::TooltipAnchorId::Maximize),
+        seats::ChromeTarget::CloseWindow => Some(tooltip::TooltipAnchorId::CloseWindow),
+        _ => None,
+    }
+}
+
 /// A tab's name: 手动 > 程序标题 (OSC 2) > cwd (OSC 7) > the profile's own name.
 ///
 /// "Each layer is more specific than the one under it, and each is something
@@ -8503,14 +8822,43 @@ fn display_title(
     program_title: Option<&str>,
     working_directory: Option<&Path>,
 ) -> String {
+    resolve_title(manual_name, program_title, working_directory).0
+}
+
+/// The same walk, keeping the answer to "which layer won?" that
+/// [`display_title`] throws away.
+///
+/// One function with two readers rather than two functions agreeing: the tab's
+/// tooltip states the provenance out loud (M140, mock-up 4197-4199), and a
+/// second walk of the same stack would be a second set of precedence rules to
+/// keep in step — including the sanitiser's fall-through, which is exactly the
+/// subtlety a copy would lose. `None` is the fourth layer, which is nobody's
+/// claim: the profile's own name is what a tab is called when no one has said
+/// anything about it, and it has no provenance to report.
+fn resolve_title(
+    manual_name: Option<&str>,
+    program_title: Option<&str>,
+    working_directory: Option<&Path>,
+) -> (String, Option<tooltip::NameSource>) {
     let layer = |text: Option<String>| {
         text.map(|text| clean_title(&text))
             .filter(|text| !text.is_empty())
     };
-    layer(manual_name.map(str::to_owned))
-        .or_else(|| layer(program_title.map(str::to_owned)))
-        .or_else(|| layer(working_directory.and_then(cwd_leaf)))
-        .unwrap_or_else(|| DEFAULT_PROFILE_TITLE.to_owned())
+    let tagged = |text: Option<String>, source| layer(text).map(|text| (text, Some(source)));
+    tagged(manual_name.map(str::to_owned), tooltip::NameSource::Manual)
+        .or_else(|| {
+            tagged(
+                program_title.map(str::to_owned),
+                tooltip::NameSource::Program,
+            )
+        })
+        .or_else(|| {
+            tagged(
+                working_directory.and_then(cwd_leaf),
+                tooltip::NameSource::Cwd,
+            )
+        })
+        .unwrap_or_else(|| (DEFAULT_PROFILE_TITLE.to_owned(), None))
 }
 
 #[cfg(test)]
@@ -11776,6 +12124,83 @@ mod tests {
             "PowerShell",
             "and the profile catches what is left"
         );
+    }
+
+    /// M140: the tab's tip states which layer named it, and the answer comes
+    /// from the *same* walk that chose the name — including the sanitiser's
+    /// fall-through, which a second copy of the precedence rules would lose.
+    #[test]
+    fn the_tip_names_the_layer_that_actually_named_the_tab() {
+        let cwd = Path::new(r"D:\Developer\BetterTerminal");
+        assert_eq!(
+            resolve_title(Some("build"), Some("pwsh"), Some(cwd)).1,
+            Some(tooltip::NameSource::Manual)
+        );
+        assert_eq!(
+            resolve_title(None, Some("pwsh"), Some(cwd)).1,
+            Some(tooltip::NameSource::Program)
+        );
+        assert_eq!(
+            resolve_title(None, None, Some(cwd)).1,
+            Some(tooltip::NameSource::Cwd)
+        );
+        // The profile's own name is nobody's claim, so there is no provenance to
+        // report and the tip says only the name.
+        assert_eq!(resolve_title(None, None, None).1, None);
+        // A hostile layer that sanitises away does not get the credit for the
+        // layer beneath it: it said nothing, so it named nothing.
+        assert_eq!(
+            resolve_title(Some("\u{7}"), Some("pwsh"), Some(cwd)),
+            ("pwsh".to_owned(), Some(tooltip::NameSource::Program))
+        );
+    }
+
+    /// The whole second line, assembled — M140's format, F46's extra line, and
+    /// the full path rather than the leaf the first line already carries.
+    #[test]
+    fn a_tabs_tip_is_the_name_then_its_provenance_then_its_promise() {
+        let cwd = Path::new(r"D:\Developer\BetterTerminal");
+        let (name, source) = resolve_title(None, None, Some(cwd));
+        let path = cwd.to_string_lossy().into_owned();
+        assert_eq!(
+            tooltip::tab_tip(&name, source, Some(&path), false),
+            format!("BetterTerminal\nWorking folder · {path}")
+        );
+        assert_eq!(
+            tooltip::tab_tip(&name, source, Some(&path), true),
+            format!("BetterTerminal\nWorking folder · {path}\nPinned — restored next launch")
+        );
+        // The full path, not the leaf the first line already carries.
+        assert!(path.ends_with(r"Developer\BetterTerminal"));
+    }
+
+    /// I87: the `+` names the profile it would start, so the button says what it
+    /// will do rather than merely that it will do something.
+    #[test]
+    fn the_new_tab_button_names_the_profile_it_would_start() {
+        assert_eq!(
+            format!(
+                "New tab ({})",
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
+            "New tab (PowerShell)"
+        );
+    }
+
+    /// The caption run's four boxes map to four tooltip anchors and nothing else
+    /// does — a divider is a click target nobody hovers for an explanation.
+    #[test]
+    fn only_the_caption_run_carries_a_window_chrome_tooltip() {
+        assert_eq!(
+            tooltip_anchor_for(seats::ChromeTarget::Settings),
+            Some(tooltip::TooltipAnchorId::Settings)
+        );
+        assert_eq!(
+            tooltip_anchor_for(seats::ChromeTarget::CloseWindow),
+            Some(tooltip::TooltipAnchorId::CloseWindow)
+        );
+        assert_eq!(tooltip_anchor_for(seats::ChromeTarget::Tab(0)), None);
+        assert_eq!(tooltip_anchor_for(seats::ChromeTarget::TabClose(0)), None);
     }
 
     /// PIN — C25: `cwdLeaf` (mock-up line 2585) is a walk over the path's own

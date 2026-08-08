@@ -996,6 +996,22 @@ fn tab_mark_left(tab: &TabGeometry, scale: f32) -> f32 {
     }
 }
 
+/// The box a tab's mark occupies — its icon, or the progress ring that replaces
+/// it in the same slot.
+///
+/// Public for the reason [`tab_title_box`] is: something outside this module has
+/// to measure the same box the strip draws in. The tooltip host anchors on it,
+/// because D38's `NN%` belongs to the *ring* and not to the tab it sits on, and
+/// an anchor measured a second way would be a tip standing beside the thing it
+/// claims to describe.
+#[must_use]
+pub fn tab_mark_box(tab: &TabGeometry, scale: f32) -> [f32; 4] {
+    let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+    let left = tab_mark_left(tab, scale);
+    let top = (tab.body[1] + (tab.body[3] - tab.body[1] - mark) / 2.0).round();
+    [left, top, left + mark, top + mark]
+}
+
 /// The box a tab's title is laid out in and clipped to, or `None` when the tab
 /// is too narrow to hold one.
 ///
@@ -1335,22 +1351,57 @@ pub fn hit_chrome(
 /// `HTCAPTION`, not winit client input.
 pub fn hit_window_chrome(width: f32, scale: f32, x: f64, y: f64) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
+    window_chrome_boxes(width, scale)
+        .into_iter()
+        .find(|(_, rect)| contains(*rect, x, y))
+        .map(|(target, _)| target)
+}
+
+/// The four boxes of the caption run, in the order they stand: the gear, then
+/// minimize, maximize and close.
+///
+/// The gear is one of them despite the mock-up giving it its own element outside
+/// `.caption` (line 2243): it is the same 46px square in the same row, and the
+/// run's arithmetic is simplest when it counts four.
+///
+/// One function rather than two, because [`hit_window_chrome`] now reads its
+/// answer from here. A tooltip has to know where these buttons *are* and not
+/// merely what is under the pointer, and a second copy of `width - 4 * button`
+/// is exactly the kind of duplicate that stays right until someone adds a fifth
+/// button.
+#[must_use]
+pub fn window_chrome_boxes(width: f32, scale: f32) -> [(ChromeTarget, [f32; 4]); 4] {
     let title = WINDOW_TITLE_BAR_LOGICAL_PX * scale;
-    if y < 0.0 || y >= title || x < 0.0 || x >= width {
-        return None;
-    }
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * button).max(0.0);
-    if x < run_left {
-        return None;
-    }
-    let index = ((x - run_left) / button).floor() as u32;
-    match index {
-        0 => Some(ChromeTarget::Settings),
-        1 => Some(ChromeTarget::Minimize),
-        2 => Some(ChromeTarget::Maximize),
-        _ => Some(ChromeTarget::CloseWindow),
-    }
+    // The last button ends at the window's own edge rather than at
+    // `run_left + 4 * button`, so a fractional scale cannot leave a seam of
+    // unclaimed pixels in the corner where "close" is supposed to be.
+    let edge = |index: f32| {
+        if index == 4.0 {
+            width
+        } else {
+            run_left + index * button
+        }
+    };
+    [
+        ChromeTarget::Settings,
+        ChromeTarget::Minimize,
+        ChromeTarget::Maximize,
+        ChromeTarget::CloseWindow,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, target)| {
+        let index = index as f32;
+        (
+            target,
+            [edge(index).max(0.0), 0.0, edge(index + 1.0).max(0.0), title],
+        )
+    })
+    .collect::<Vec<_>>()
+    .try_into()
+    .expect("four targets make four boxes")
 }
 
 /// Whether this device point lands inside the terminal seat's own rectangle.
@@ -1940,8 +1991,8 @@ fn window_chrome(
             let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
             // `.tab.squeezed { justify-content: center; padding: 0 4px }` — the mark
             // and whatever else survived are centred as one group, not indented.
-            let mark_left = tab_mark_left(tab, scale);
-            let mark_top = (tab_top + (tab_bottom - tab_top - mark) / 2.0).round();
+            let mark_rect = tab_mark_box(tab, scale);
+            let [mark_left, ..] = mark_rect;
             // The tab row's trailing boundary — the pin, the `×`, or the trailing
             // padding, whichever the cluster leads with. One function with
             // `tab_badge_rect`, because the two measure the same edge.
@@ -1952,7 +2003,6 @@ fn window_chrome(
             let badge = tab_badge_rect(tab, content.pane_count, content.badge_text_width, scale);
             // What the title may not run past.
             let content_right = badge.map_or(trailing, |badge| badge[0] - content_gap);
-            let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
             if mark_left + mark <= tab_trailer_box(tab).map_or(tab_right, |trailer| trailer[0]) {
                 if within_strip(viewport, mark_rect) {
                     // The mark slot is `.ticon-wrap` (mock-up line 238): a
@@ -3611,6 +3661,119 @@ mod tests {
             None,
         );
         assert!(fallback.iter().any(|label| label.text == "PowerShell"));
+    }
+
+    /// The caption run's boxes and its hit test are one arithmetic, and this is
+    /// what says so: every box answers with its own target when asked at its
+    /// centre, and the run tiles the corner with no seam between the buttons.
+    ///
+    /// The tooltip anchors on these boxes; a second `width - 4 * button` would
+    /// stay right until the day it did not, and the symptom would be a tip
+    /// labelled "Maximize" standing under the close button.
+    #[test]
+    fn the_caption_boxes_are_the_boxes_the_caption_hit_test_answers_from() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let boxes = window_chrome_boxes(width, scale);
+            assert_eq!(
+                boxes.map(|(target, _)| target),
+                [
+                    ChromeTarget::Settings,
+                    ChromeTarget::Minimize,
+                    ChromeTarget::Maximize,
+                    ChromeTarget::CloseWindow,
+                ],
+                "the gear leads the run"
+            );
+            for (target, rect) in boxes {
+                assert_eq!(
+                    hit_window_chrome(
+                        width,
+                        scale,
+                        f64::from((rect[0] + rect[2]) / 2.0),
+                        f64::from((rect[1] + rect[3]) / 2.0),
+                    ),
+                    Some(target),
+                    "{target:?} at {scale}x"
+                );
+            }
+            // No seam: each box begins where the last one ended, and the run
+            // finishes hard against the window's own edge — the corner pixel
+            // belongs to `close` at every scale.
+            for pair in boxes.windows(2) {
+                assert!((pair[0].1[2] - pair[1].1[0]).abs() < 1e-4, "{pair:?}");
+            }
+            assert!((boxes[3].1[2] - width).abs() < 1e-4);
+            assert_eq!(
+                hit_window_chrome(width, scale, f64::from(width) - 0.5, 1.0),
+                Some(ChromeTarget::CloseWindow)
+            );
+            // And nothing to the left of the run is the run's.
+            assert_eq!(
+                hit_window_chrome(width, scale, f64::from(boxes[0].1[0]) - 1.0, 1.0),
+                None
+            );
+        }
+    }
+
+    /// The box the tooltip anchors its `NN%` on is the box the strip draws the
+    /// mark in — read off the sprite the strip actually emitted, not recomputed.
+    #[test]
+    fn the_mark_box_the_tooltip_anchors_on_is_the_box_the_strip_draws_in() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let dpi_milli = (scale * 1_000.0) as u32;
+            let metrics = seat_metrics(dpi_milli);
+            let seats = Seats::lone_terminal();
+            let layout = solved(
+                &seats,
+                viewport_of((960.0 * scale) as u32, (600.0 * scale) as u32, dpi_milli),
+                &metrics,
+            );
+            let tabs = plain_tabs(3);
+            let (_, _, sprites) = build_chrome_for_tabs(
+                &seats,
+                &layout,
+                scale,
+                ChromePointer {
+                    hover: None,
+                    dragging: None,
+                },
+                ChromeContent {
+                    tabs: &tabs,
+                    active_tab: 0,
+                    grabbed: None,
+                    tab_scroll: 0.0,
+                    preview_title: None,
+                    preview_message: None,
+                    profile_menu_open: false,
+                },
+            );
+            let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(3), 0, 0.0);
+            // Compared as sets, because the strip paints the quiet tabs first
+            // and the active one last (`.tab.active { z-index: 1 }`), so draw
+            // order is deliberately not strip order.
+            let mut anchored: Vec<[f32; 4]> = geometry
+                .tabs
+                .iter()
+                .map(|tab| tab_mark_box(tab, scale))
+                .collect();
+            let mut drawn: Vec<[f32; 4]> = sprites
+                .iter()
+                .filter(|sprite| matches!(sprite.mark, ChromeMark::ProfilePowerShell))
+                .map(|sprite| sprite.rect)
+                .collect();
+            let by_left =
+                |a: &[f32; 4], b: &[f32; 4]| a[0].partial_cmp(&b[0]).expect("finite lefts");
+            anchored.sort_by(by_left);
+            drawn.sort_by(by_left);
+            assert_eq!(anchored, drawn, "at {scale}x");
+            // And each is square and inside the tab it belongs to.
+            for (tab, mark) in geometry.tabs.iter().zip(&anchored) {
+                assert!((mark[2] - mark[0] - (mark[3] - mark[1])).abs() < 1e-4);
+                assert!(mark[0] >= tab.body[0]);
+                assert!(mark[2] <= tab.body[2]);
+            }
+        }
     }
 
     #[test]

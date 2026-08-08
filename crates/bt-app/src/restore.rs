@@ -825,6 +825,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
         quads,
         labels,
         sprites,
+        ..Default::default()
     }]
 }
 

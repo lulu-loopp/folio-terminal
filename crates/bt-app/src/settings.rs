@@ -843,6 +843,7 @@ pub fn build(
         quads,
         labels,
         sprites,
+        ..Default::default()
     };
     if popup.is_empty() {
         vec![content]

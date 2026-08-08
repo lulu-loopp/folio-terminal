@@ -1893,17 +1893,85 @@ pub struct OverlayQuad {
 /// so a popup on a layer of its own covers whatever the layers under it drew,
 /// whichever channel that content went down and however many rows are added to
 /// them later.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OverlayLayer {
     pub quads: Vec<OverlayQuad>,
     pub labels: Vec<ChromeLabel>,
     pub icons: Vec<ChromeIcon>,
+    /// The layer's own `opacity`, `0.0 ..= 1.0` — CSS `opacity` on the element
+    /// this layer *is*, which is why it lives here and not on each fill.
+    ///
+    /// A layer is already the mock-up's `z-index` in this pipeline's terms (see
+    /// above); `.tip { opacity: 0; transition: opacity .09s }` asks it to be the
+    /// mock-up's `opacity` too, and for the same reason. A fading popup is one
+    /// thing fading, not a fill and a hairline and a caption that each happen to
+    /// be fading at the same rate: the moment they are separate the caller has to
+    /// remember to fade all three, and the one it forgets is the one nobody looks
+    /// at until it is wrong.
+    ///
+    /// CSS composites the element into a group and fades the group once, which
+    /// this pipeline has no offscreen buffer to do; the fold is per primitive
+    /// instead. The two answers differ only where a layer overlaps itself — a
+    /// hairline showing faintly through the face laid over it — and only while
+    /// `opacity` is strictly between 0 and 1. At the `--border` alphas the
+    /// palette actually uses (.088/.094) the widest gap that opens is under 2.5%
+    /// of an already-invisible ink, and it closes as the fade lands.
+    pub opacity: f32,
+}
+
+impl Default for OverlayLayer {
+    /// An empty layer at full strength.
+    ///
+    /// Written out rather than derived for the reason `TabMarkState`'s is
+    /// (`seats.rs`): a derived default would give `opacity` 0.0, and every layer
+    /// built without naming it — which is every layer that existed before this
+    /// field did — would draw nothing at all. CSS's own initial value is `1`,
+    /// and "I did not say" has to keep meaning "fully there".
+    fn default() -> Self {
+        Self {
+            quads: Vec::new(),
+            labels: Vec::new(),
+            icons: Vec::new(),
+            opacity: 1.0,
+        }
+    }
 }
 
 impl OverlayLayer {
+    /// Whether the layer draws nothing at all — including a layer faded out of
+    /// existence, which costs a text renderer and a pass through three channels
+    /// to draw exactly nothing.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.quads.is_empty() && self.labels.is_empty() && self.icons.is_empty()
+        (self.quads.is_empty() && self.labels.is_empty() && self.icons.is_empty())
+            || self.opacity <= 0.0
+    }
+
+    /// This layer's fills with its own [`opacity`](Self::opacity) folded into
+    /// their alpha.
+    #[must_use]
+    pub fn faded_quads(&self) -> Vec<OverlayQuad> {
+        self.quads
+            .iter()
+            .map(|quad| OverlayQuad {
+                alpha: quad.alpha * self.opacity,
+                ..*quad
+            })
+            .collect()
+    }
+
+    /// This layer's marks with its own [`opacity`](Self::opacity) folded into
+    /// theirs. Both are uniform multipliers on a raster's alpha, so the fold is
+    /// the product and the mark's texture identity is untouched.
+    #[must_use]
+    pub fn faded_icons(&self) -> Vec<ChromeIcon> {
+        self.icons
+            .iter()
+            .map(|icon| ChromeIcon {
+                opacity: icon.opacity * self.opacity,
+                ..icon.clone()
+            })
+            .collect()
     }
 }
 
@@ -2928,6 +2996,7 @@ impl Renderer {
             &mut self.font_system,
             &self.chrome_labels,
             self.chrome_cap_height_ratio,
+            1.0,
         );
         let chrome_prepared = !chrome_layouts.is_empty()
             && prepare_chrome_text_atlas(
@@ -2954,7 +3023,7 @@ impl Renderer {
         let mut overlay_draws: Vec<PreparedOverlayLayer> = Vec::with_capacity(overlay_layers.len());
         for (index, layer) in overlay_layers.iter().enumerate() {
             let rects: Vec<RectInstance> = layer
-                .quads
+                .faded_quads()
                 .iter()
                 .map(|quad| {
                     surface_pixel_rect_with_alpha(
@@ -2974,7 +3043,7 @@ impl Renderer {
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             });
-            let (icon_draws, icon_vertices) = self.prepare_chrome_icon_draws(&layer.icons);
+            let (icon_draws, icon_vertices) = self.prepare_chrome_icon_draws(&layer.faded_icons());
             let icon_buffer = (!icon_vertices.is_empty()).then(|| {
                 self.device
                     .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -2987,6 +3056,7 @@ impl Renderer {
                 &mut self.font_system,
                 &layer.labels,
                 self.chrome_cap_height_ratio,
+                layer.opacity,
             );
             while self.overlay_text_renderers.len() <= index {
                 self.overlay_text_renderers.push(TextRenderer::new(
@@ -4437,10 +4507,19 @@ fn measure_chrome_text(font_system: &mut FontSystem, text: &str, font_size_px: f
 
 /// Shape every chrome label. The buffers are owned by the returned vector so
 /// they outlive the `prepare` that borrows them.
+/// Shape one batch of chrome text.
+///
+/// `alpha` is the batch's uniform opacity — the layer's own, for overlay text,
+/// and `1.0` for the seat chrome, which never fades. It rides here rather than on
+/// [`ChromeLabel`] because it is a property of the *group* a label was drawn in
+/// and not of the label: a caption does not decide how faded the popup carrying
+/// it is, and a per-label field would ask all thirty-odd construction sites to
+/// answer a question only their layer can.
 fn shape_chrome_labels(
     font_system: &mut FontSystem,
     labels: &[ChromeLabel],
     cap_height_ratio: f32,
+    alpha: f32,
 ) -> Vec<ChromeTextLayout> {
     labels
         .iter()
@@ -4500,6 +4579,7 @@ fn shape_chrome_labels(
                 .map(|run| run.line_y)
                 .expect("a non-empty chrome label shapes into at least one run");
             let [r, g, b] = label.color;
+            let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
             ChromeTextLayout {
                 buffer,
                 left,
@@ -4510,7 +4590,7 @@ fn shape_chrome_labels(
                     right: label.rect[2].ceil() as i32,
                     bottom: label.rect[3].ceil() as i32,
                 },
-                color: Color::rgb(r, g, b),
+                color: Color::rgba(r, g, b, a),
             }
         })
         .collect()
@@ -9439,8 +9519,12 @@ mod tests {
         cap_height_ratio: f32,
         label: &ChromeLabel,
     ) -> f32 {
-        let layouts =
-            shape_chrome_labels(font_system, std::slice::from_ref(label), cap_height_ratio);
+        let layouts = shape_chrome_labels(
+            font_system,
+            std::slice::from_ref(label),
+            cap_height_ratio,
+            1.0,
+        );
         let layout = layouts.first().expect("the label shapes");
         let baseline = layout.top
             + layout
@@ -9541,7 +9625,7 @@ mod tests {
             weight,
             tabular_numerals,
         };
-        let layouts = shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7);
+        let layouts = shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7, 1.0);
         layouts[0]
             .buffer
             .layout_runs()
@@ -9660,7 +9744,7 @@ mod tests {
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
         };
-        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7);
+        let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
         let run = layouts[0]
             .buffer
             .layout_runs()
@@ -9803,7 +9887,8 @@ mod tests {
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
             };
-            let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7);
+            let layouts =
+                shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
             let run = layouts
                 .first()
                 .and_then(|layout| layout.buffer.layout_runs().next())
@@ -9844,7 +9929,7 @@ mod tests {
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
             };
-            shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7)[0]
+            shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7, 1.0)[0]
                 .buffer
                 .layout_runs()
                 .map(|run| run.line_w)
@@ -9946,6 +10031,114 @@ mod tests {
         assert!(halo.iter().any(|quad| quad.rect[1] >= frame[3]), "below");
         assert!(halo.iter().any(|quad| quad.rect[2] <= frame[0]), "left");
         assert!(halo.iter().any(|quad| quad.rect[0] >= frame[2]), "right");
+    }
+
+    /// M136: `.tip { opacity: 0; transition: opacity .09s ease }` fades a *popup*,
+    /// not a fill — so the layer's opacity has to reach every channel the layer
+    /// draws in. A fold that reached the fills and forgot the marks would show as
+    /// a tooltip whose icon arrives before its box.
+    #[test]
+    fn a_layers_opacity_reaches_its_fills_and_its_marks_alike() {
+        let layer = OverlayLayer {
+            quads: vec![
+                OverlayQuad {
+                    rect: [0.0, 0.0, 10.0, 10.0],
+                    color: [1, 2, 3],
+                    alpha: 1.0,
+                },
+                // A corner's coverage is already an alpha. The fade multiplies it
+                // rather than replacing it, or every rounded corner would square
+                // off for the duration of the fade.
+                OverlayQuad {
+                    rect: [0.0, 0.0, 1.0, 1.0],
+                    color: [1, 2, 3],
+                    alpha: 0.5,
+                },
+            ],
+            labels: Vec::new(),
+            icons: vec![ChromeIcon {
+                key: "mark".to_owned(),
+                rect: [0.0, 0.0, 8.0, 8.0],
+                rgba: Arc::from(vec![0_u8; 4].into_boxed_slice()),
+                width_px: 1,
+                height_px: 1,
+                opacity: 0.5,
+            }],
+            opacity: 0.25,
+        };
+
+        let quads = layer.faded_quads();
+        assert!((quads[0].alpha - 0.25).abs() < 1e-6, "{:?}", quads[0].alpha);
+        assert!(
+            (quads[1].alpha - 0.125).abs() < 1e-6,
+            "{:?}",
+            quads[1].alpha
+        );
+        // Colour is untouched: fading is an alpha, and folding it into the ink
+        // would darken the tip toward black instead of dissolving it into
+        // whatever stands behind it.
+        assert_eq!(quads[0].color, [1, 2, 3]);
+
+        let icons = layer.faded_icons();
+        assert!(
+            (icons[0].opacity - 0.125).abs() < 1e-6,
+            "{:?}",
+            icons[0].opacity
+        );
+        // The raster's identity must not move with the fade, or a 90ms fade mints
+        // a fresh texture on every frame of itself.
+        assert_eq!(icons[0].key, "mark");
+    }
+
+    /// The same fold, for the one channel that cannot carry it on a struct field:
+    /// a glyph's colour is built in the shaper and nowhere else.
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn a_layers_opacity_reaches_its_letters() {
+        let mut font_system = terminal_font_system();
+        let label = ChromeLabel {
+            text: "Settings".to_owned(),
+            rect: [0.0, 0.0, 400.0, 20.0],
+            font_size_px: 11.0,
+            color: [10, 20, 30],
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+        };
+        let opaque =
+            shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0)[0].color;
+        let half =
+            shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 0.5)[0].color;
+        assert_eq!(opaque.as_rgba(), [10, 20, 30, 255]);
+        assert_eq!(half.as_rgba(), [10, 20, 30, 128]);
+    }
+
+    /// A layer nobody can see is not a layer: it would still cost a text renderer
+    /// and a pass through three channels to draw exactly nothing, every frame the
+    /// tooltip spends waiting for its delay to elapse.
+    #[test]
+    fn a_layer_faded_to_nothing_counts_as_empty() {
+        let solid = OverlayLayer {
+            quads: vec![OverlayQuad {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                color: [1, 2, 3],
+                alpha: 1.0,
+            }],
+            ..Default::default()
+        };
+        assert!(!solid.is_empty());
+        assert!(
+            OverlayLayer {
+                opacity: 0.0,
+                ..solid.clone()
+            }
+            .is_empty()
+        );
+        // And a layer that never mentioned opacity is fully there — CSS's own
+        // initial value, not a derived zero.
+        assert_eq!(OverlayLayer::default().opacity, 1.0);
     }
 
     #[test]

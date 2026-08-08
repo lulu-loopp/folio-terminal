@@ -513,6 +513,7 @@ pub fn build(
         quads,
         labels,
         sprites,
+        ..Default::default()
     }]
 }
 

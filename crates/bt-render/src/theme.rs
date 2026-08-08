@@ -284,6 +284,19 @@ pub struct ChromePalette {
     pub menu_popup_shadow_inner_alpha: u8,
     /// Half the inner one, same falloff rule as the float window's.
     pub menu_popup_shadow_outer_alpha: u8,
+    /// A tooltip's own lift (`.tip { box-shadow: 0 4px 14px rgba(0,0,0,.1) }`,
+    /// mock-up 1217), split into the same two rings.
+    ///
+    /// A third pair rather than a reuse of either above it, because the mock-up
+    /// writes a third declaration and — unlike the combo's — overrides it on dark
+    /// (`body.dark .tip { … rgba(0,0,0,.45) }`, line 1219). The gap is the whole
+    /// point: a tip is the smallest thing that floats, and on dark it is a small
+    /// pale box on a dark plane, which needs a far heavier lift to read as
+    /// floating than a large one does. Borrowing `--shadow`'s .18 would have left
+    /// it flat against the night.
+    pub tip_shadow_inner_alpha: u8,
+    /// Half the inner one, same falloff rule as every other floating surface's.
+    pub tip_shadow_outer_alpha: u8,
     /// A modal dialog's face — `--win`. Three surfaces have to be told apart here
     /// and the mock-up names all three: `--termbg` is what a terminal shows,
     /// `--menu` is what floats over it, and `--win` is the window's own plane,
@@ -427,6 +440,9 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     menu_shadow_outer_alpha: 23,
     menu_popup_shadow_inner_alpha: 46,
     menu_popup_shadow_outer_alpha: 23,
+    // `.45` black — the dark override at mock-up 1219.
+    tip_shadow_inner_alpha: 115,
+    tip_shadow_outer_alpha: 57,
     dialog_surface: [0x20, 0x20, 0x20],
     dialog_title_text: [0xe2, 0xe2, 0xe2],
     dialog_secondary_text: [0x9b, 0x9b, 0x9b],
@@ -494,6 +510,9 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     menu_shadow_outer_alpha: 9,
     menu_popup_shadow_inner_alpha: 46,
     menu_popup_shadow_outer_alpha: 23,
+    // `.1` black — the base declaration at mock-up 1217.
+    tip_shadow_inner_alpha: 26,
+    tip_shadow_outer_alpha: 13,
     dialog_surface: [0xff, 0xff, 0xff],
     dialog_title_text: [0x37, 0x35, 0x2f],
     dialog_secondary_text: [0x7d, 0x7c, 0x78],
