@@ -145,6 +145,8 @@ pub enum LifecycleDirective {
         title: String,
     },
     ResetWindowTitle,
+    Bell,
+    Progress(Option<crate::session::ProgressState>),
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -207,6 +209,8 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
         AdapterEvent::WorkingDirectory { uri } => LifecycleDirective::WorkingDirectory { uri },
         AdapterEvent::Title { title } => LifecycleDirective::SetWindowTitle { title },
         AdapterEvent::ResetTitle => LifecycleDirective::ResetWindowTitle,
+        AdapterEvent::Bell => LifecycleDirective::Bell,
+        AdapterEvent::Progress(progress) => LifecycleDirective::Progress(progress),
         AdapterEvent::GridWrites { screen, rows } => {
             LifecycleDirective::GridWrites { screen, rows }
         }

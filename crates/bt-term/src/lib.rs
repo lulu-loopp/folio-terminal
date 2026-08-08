@@ -40,7 +40,7 @@ pub use scheduling::{PARSE_QUANTUM, RESIZE_REQUEST_QUIET, WORKER_QUEUE_CAP};
 pub use session::{
     DualPlaneSession, FrameImageReference, HeldUnbackedRecord, InlineImageRecordView,
     LIVE_MATH_READABLE_SCALE_MILLI, LIVE_MATH_STABLE_INTERVAL, LIVE_MIN_VISIBLE_TEXT_ROWS,
-    MathLayoutOptions, ResizeTraceEvent, ResizeTraceKind, ResizeTraceRowOrigin,
+    MathLayoutOptions, ProgressState, ResizeTraceEvent, ResizeTraceKind, ResizeTraceRowOrigin,
     SPIKE_CELL_HEIGHT_SUBPIXELS, SessionDecorationTask, SessionError, SessionMathTask,
-    decoration_state_label, render_detection_task, render_live_detection_task,
+    SessionStatus, decoration_state_label, render_detection_task, render_live_detection_task,
 };

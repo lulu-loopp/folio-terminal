@@ -148,6 +148,8 @@ pub enum AdapterEvent {
     },
     /// The child restored the terminal's default window title.
     ResetTitle,
+    Bell,
+    Progress(Option<crate::session::ProgressState>),
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -234,6 +236,7 @@ pub struct TerminalAdapter {
     parser_tail: Vec<u8>,
     parser_sync_active: bool,
     parser_dcs_active: bool,
+    parser_sequence_open: bool,
     cursor_row_positioned_explicitly: bool,
     osc1337_scanner: Osc1337Scanner,
     resize_canonical: Option<ResizeCanonical>,
@@ -257,6 +260,7 @@ struct BoundaryPerformer {
     sync_end: bool,
     dcs_hook: bool,
     dcs_put: bool,
+    bell: bool,
     cursor_row_positioned_explicitly: Option<bool>,
 }
 
@@ -270,6 +274,7 @@ impl Perform for BoundaryPerformer {
 
     fn execute(&mut self, byte: u8) {
         self.complete = self.execute_at_ground || matches!(byte, 0x18 | 0x1a);
+        self.bell = self.execute_at_ground && byte == 0x07;
         if matches!(byte, b'\n' | b'\x0b' | b'\x0c' | b'\r') {
             self.cursor_row_positioned_explicitly = Some(false);
         }
@@ -356,6 +361,7 @@ impl TerminalAdapter {
             parser_tail: Vec::new(),
             parser_sync_active: false,
             parser_dcs_active: false,
+            parser_sequence_open: false,
             cursor_row_positioned_explicitly: false,
             osc1337_scanner: Osc1337Scanner::default(),
             resize_canonical: None,
@@ -423,6 +429,9 @@ impl TerminalAdapter {
                     events.push(AdapterEvent::WorkingDirectory {
                         uri: String::from_utf8(uri).unwrap_or_default(),
                     });
+                }
+                InlineImageStreamAction::Progress(progress) => {
+                    events.push(AdapterEvent::Progress(progress));
                 }
                 InlineImageStreamAction::TooLarge => {
                     self.write_inline_image_placeholder(b"[image:too-large]");
@@ -523,6 +532,7 @@ impl TerminalAdapter {
             discard_listener_output(&canonical.listener);
         }
         self.parser_sync_active = false;
+        self.parser_sequence_open = false;
         self.parser_tail.clear();
         let mut events = self.drain_transcript_events();
         events.extend(self.drain_adapter_events());
@@ -821,7 +831,7 @@ impl TerminalAdapter {
 
     fn observe_parser_boundary(&mut self, bytes: &[u8]) {
         for &byte in bytes {
-            let execute_at_ground = self.parser_tail.is_empty() && !self.parser_sync_active;
+            let execute_at_ground = !self.parser_sequence_open;
             self.parser_tail.push(byte);
             let mut performer = BoundaryPerformer {
                 execute_at_ground,
@@ -829,6 +839,18 @@ impl TerminalAdapter {
             };
             self.parser_boundary
                 .advance(&mut performer, std::slice::from_ref(&byte));
+            if performer.bell {
+                self.listener
+                    .adapter_events
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .push(AdapterEvent::Bell);
+            }
+            if performer.complete {
+                self.parser_sequence_open = byte == 0x1b;
+            } else if !self.parser_sequence_open {
+                self.parser_sequence_open = true;
+            }
             if let Some(explicit) = performer.cursor_row_positioned_explicitly {
                 self.cursor_row_positioned_explicitly = explicit;
             }

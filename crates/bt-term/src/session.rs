@@ -669,6 +669,25 @@ impl From<InvalidSourceTransition> for SessionError {
     }
 }
 
+/// Progress state reported by ConEmu's OSC 9;4 protocol.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProgressState {
+    Normal(u8),
+    Error(Option<u8>),
+    Indeterminate,
+    Paused(Option<u8>),
+}
+
+/// Pollable per-session facts used by application-level tab policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SessionStatus {
+    pub progress: Option<ProgressState>,
+    pub bell_latched: bool,
+    pub failure_exit_code: Option<i32>,
+    pub working: bool,
+    pub published_revision: u64,
+}
+
 /// Per-session actor core. It is the serialized owner required by DESIGN.md §1.3 and composes
 /// terminal facts with lifecycle, transcript, detection, scheduling, and viewport policy.
 pub struct DualPlaneSession {
@@ -720,6 +739,11 @@ pub struct DualPlaneSession {
     /// OSC 0/2 window title for this session. It deliberately has no `ScreenId`: xterm window
     /// titles are shared by the primary and alternate grids. `None` selects the profile fallback.
     window_title: Option<String>,
+    progress: Option<ProgressState>,
+    bell_latched: bool,
+    failure_exit_code: Option<i32>,
+    working: bool,
+    published_revision: u64,
     semantic_input_regions: Vec<SemanticInputRegion>,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
@@ -968,6 +992,11 @@ impl DualPlaneSession {
             shell_phases: BTreeMap::new(),
             working_directory: None,
             window_title: None,
+            progress: None,
+            bell_latched: false,
+            failure_exit_code: None,
+            working: false,
+            published_revision: 0,
             semantic_input_regions: Vec::new(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
@@ -1007,6 +1036,32 @@ impl DualPlaneSession {
 
     pub fn terminal(&self) -> &TerminalAdapter {
         &self.terminal
+    }
+
+    /// Take one coherent snapshot of the tab-facing facts owned by this session.
+    pub fn status(&self) -> SessionStatus {
+        SessionStatus {
+            progress: self.progress,
+            bell_latched: self.bell_latched,
+            failure_exit_code: self.failure_exit_code,
+            working: self.working,
+            published_revision: self.published_revision,
+        }
+    }
+
+    /// Monotonic count of frames acknowledged by `record_published_frame`.
+    pub fn published_revision(&self) -> u64 {
+        self.published_revision
+    }
+
+    fn advance_published_revision(&mut self) {
+        self.published_revision = self.published_revision.saturating_add(1);
+    }
+
+    /// Clear both attention latches without changing progress, execution, or publication state.
+    pub fn clear_attention(&mut self) {
+        self.bell_latched = false;
+        self.failure_exit_code = None;
     }
 
     pub fn application_cursor_mode(&self) -> bool {
@@ -2024,6 +2079,7 @@ impl DualPlaneSession {
     }
 
     pub fn record_published_frame(&mut self, frame: &ViewportFrame, observed_at: Instant) {
+        self.advance_published_revision();
         self.trace_resize_event(
             observed_at,
             ResizeTraceKind::FramePublished {
@@ -2597,13 +2653,20 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Input(region));
             }
             ShellIntegrationMarker::CommandExecuted => {
+                self.working = true;
+                self.failure_exit_code = None;
+                self.progress = None;
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
                     self.close_semantic_input_region(region, screen, point);
                 }
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Output);
             }
-            ShellIntegrationMarker::CommandFinished => {
+            ShellIntegrationMarker::CommandFinished { exit_code } => {
+                self.working = false;
+                if let Some(exit_code) = exit_code.filter(|code| *code != 0) {
+                    self.failure_exit_code = Some(exit_code);
+                }
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
                     self.close_semantic_input_region(region, screen, point);
                 }
@@ -6363,6 +6426,12 @@ impl DualPlaneSession {
                 LifecycleDirective::ResetWindowTitle => {
                     self.window_title = None;
                 }
+                LifecycleDirective::Bell => {
+                    self.bell_latched = true;
+                }
+                LifecycleDirective::Progress(progress) => {
+                    self.progress = progress;
+                }
                 LifecycleDirective::GridWrites { screen, rows } => {
                     let screen = match screen {
                         RemovalScreen::Primary => ScreenId::Primary,
@@ -10044,6 +10113,34 @@ fn selection_overlaps(
 
 fn trim_copy_line_end(text: &mut String) {
     text.truncate(text.trim_end_matches([' ', '\t']).len());
+}
+
+#[cfg(test)]
+mod publication_revision_tests {
+    use std::num::NonZeroU32;
+
+    use super::DualPlaneSession;
+
+    fn nz(value: u32) -> NonZeroU32 {
+        NonZeroU32::new(value).unwrap()
+    }
+
+    #[test]
+    fn published_revision_is_monotonic_at_the_frame_publication_boundary() {
+        let mut session = DualPlaneSession::new(nz(8), nz(2));
+        let initial = session.published_revision();
+
+        session.advance_published_revision();
+        let first = session.published_revision();
+        session.advance_published_revision();
+        let second = session.published_revision();
+
+        assert!(initial < first);
+        assert!(first < second);
+        session.published_revision = u64::MAX;
+        session.advance_published_revision();
+        assert_eq!(session.published_revision(), u64::MAX);
+    }
 }
 
 #[cfg(test)]

@@ -1004,6 +1004,7 @@ pub(crate) enum InlineImageStreamAction {
     Bytes(Vec<u8>),
     Image(Vec<u8>),
     ShellIntegration(ShellIntegrationMarker),
+    Progress(Option<crate::session::ProgressState>),
     /// One OSC 7 report: the `file://` URI bytes the shell named its working directory with. An
     /// empty payload is the report "I no longer have one to give", which is a fact of its own and
     /// therefore still an action.
@@ -1012,13 +1013,14 @@ pub(crate) enum InlineImageStreamAction {
 }
 
 /// FinalTerm Command Status markers used by PowerShell shell integration. Parameters after the
-/// command letter (for example the exit status on `D`) do not affect region ownership in v1.
+/// command letter do not affect region ownership; `D` retains a numeric exit status for session
+/// attention facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShellIntegrationMarker {
     PromptStart,
     CommandStart,
     CommandExecuted,
-    CommandFinished,
+    CommandFinished { exit_code: Option<i32> },
 }
 
 #[derive(Debug)]
@@ -1033,6 +1035,8 @@ enum StreamState {
     AfterShellIntegrationEscape { payload: Vec<u8>, oversized: bool },
     WorkingDirectory { payload: Vec<u8>, oversized: bool },
     AfterWorkingDirectoryEscape { payload: Vec<u8>, oversized: bool },
+    Progress { payload: Vec<u8>, oversized: bool },
+    AfterProgressEscape { payload: Vec<u8>, oversized: bool },
 }
 
 #[derive(Debug, Default)]
@@ -1091,9 +1095,10 @@ fn parse_inline_file_header(header: &[u8]) -> Option<bool> {
 /// Streaming OSC prefilter at the existing adapter parser seam.
 ///
 /// The OSC sequences BetterTerminal gives meaning to — `1337;File=` (inline image), `133;` (shell
-/// integration) and `7;` (working directory) — are swallowed by `vte::ansi::Performer` before they
+/// integration), `9;4;` (progress), and `7;` (working directory) — are swallowed by
+/// `vte::ansi::Performer` before they
 /// reach `alacritty_terminal::Term`, so they are recognized here instead. This is the whole of the
-/// vendor face for all three: nothing upstream is patched.
+/// vendor face for all four: nothing upstream is patched.
 ///
 /// Recognition is by exact prefix, and every byte of every other sequence stays on its unchanged
 /// path — a prefix that turns out not to match (`OSC 777`) is emitted whole the moment it is ruled
@@ -1148,6 +1153,7 @@ impl Osc1337Scanner {
                     let body = &held[2..];
                     if b"1337;".starts_with(body)
                         || b"133;".starts_with(body)
+                        || b"9;4;".starts_with(body)
                         || b"7;".starts_with(body)
                     {
                         if body == b"1337;" {
@@ -1162,6 +1168,12 @@ impl Osc1337Scanner {
                         } else if body == b"7;" {
                             flush_bytes(&mut actions, &mut ordinary);
                             StreamState::WorkingDirectory {
+                                payload: Vec::new(),
+                                oversized: false,
+                            }
+                        } else if body == b"9;4;" {
+                            flush_bytes(&mut actions, &mut ordinary);
+                            StreamState::Progress {
                                 payload: Vec::new(),
                                 oversized: false,
                             }
@@ -1304,6 +1316,42 @@ impl Osc1337Scanner {
                         StreamState::Ground
                     }
                 }
+                StreamState::Progress {
+                    mut payload,
+                    mut oversized,
+                } => match byte {
+                    0x07 => {
+                        finish_progress(&mut actions, &payload, oversized);
+                        StreamState::Ground
+                    }
+                    0x1b => StreamState::AfterProgressEscape { payload, oversized },
+                    0x18 | 0x1a => StreamState::Ground,
+                    0x00..=0x06 | 0x08..=0x17 | 0x19 | 0x1c..=0x1f => {
+                        StreamState::Progress { payload, oversized }
+                    }
+                    _ => {
+                        if payload.len() < 128 {
+                            payload.push(byte);
+                        } else {
+                            oversized = true;
+                        }
+                        StreamState::Progress { payload, oversized }
+                    }
+                },
+                StreamState::AfterProgressEscape { payload, oversized } => {
+                    if byte == b'\\' {
+                        finish_progress(&mut actions, &payload, oversized);
+                        StreamState::Ground
+                    } else if byte == b']' {
+                        StreamState::OscPrefix {
+                            held: vec![0x1b, b']'],
+                        }
+                    } else if byte == 0x1b {
+                        StreamState::AfterProgressEscape { payload, oversized }
+                    } else {
+                        StreamState::Ground
+                    }
+                }
             };
         }
         flush_bytes(&mut actions, &mut ordinary);
@@ -1347,10 +1395,53 @@ fn finish_shell_integration(
         b'A' => ShellIntegrationMarker::PromptStart,
         b'B' => ShellIntegrationMarker::CommandStart,
         b'C' => ShellIntegrationMarker::CommandExecuted,
-        b'D' => ShellIntegrationMarker::CommandFinished,
+        b'D' => ShellIntegrationMarker::CommandFinished {
+            exit_code: parameters
+                .strip_prefix(b";")
+                .filter(|value| !value.is_empty())
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .and_then(|value| value.parse().ok()),
+        },
         _ => return,
     };
     actions.push(InlineImageStreamAction::ShellIntegration(marker));
+}
+
+fn finish_progress(actions: &mut Vec<InlineImageStreamAction>, payload: &[u8], oversized: bool) {
+    if oversized {
+        return;
+    }
+    if let Some(progress) = parse_progress(payload) {
+        actions.push(InlineImageStreamAction::Progress(progress));
+    }
+}
+
+fn parse_progress(payload: &[u8]) -> Option<Option<crate::session::ProgressState>> {
+    let mut fields = payload.split(|byte| *byte == b';');
+    let status = std::str::from_utf8(fields.next()?)
+        .ok()?
+        .parse::<u8>()
+        .ok()?;
+    let percentage = match fields.next() {
+        Some(value) => Some(parse_progress_percentage(value)?),
+        None => None,
+    };
+    if fields.next().is_some() {
+        return None;
+    }
+    match status {
+        0 => Some(None),
+        1 => Some(Some(crate::session::ProgressState::Normal(percentage?))),
+        2 => Some(Some(crate::session::ProgressState::Error(percentage))),
+        3 => Some(Some(crate::session::ProgressState::Indeterminate)),
+        4 => Some(Some(crate::session::ProgressState::Paused(percentage))),
+        _ => None,
+    }
+}
+
+fn parse_progress_percentage(value: &[u8]) -> Option<u8> {
+    let value = std::str::from_utf8(value).ok()?.parse::<i64>().ok()?;
+    Some(value.clamp(0, 100) as u8)
 }
 
 fn finish_capture(
@@ -2305,7 +2396,11 @@ mod tests {
                 InlineImageStreamAction::Bytes(b"command".to_vec()),
                 InlineImageStreamAction::ShellIntegration(ShellIntegrationMarker::CommandExecuted),
                 InlineImageStreamAction::Bytes(b"output".to_vec()),
-                InlineImageStreamAction::ShellIntegration(ShellIntegrationMarker::CommandFinished),
+                InlineImageStreamAction::ShellIntegration(
+                    ShellIntegrationMarker::CommandFinished {
+                        exit_code: Some(17),
+                    },
+                ),
                 InlineImageStreamAction::Bytes(b"after".to_vec()),
             ]
         );
@@ -2340,7 +2435,9 @@ mod tests {
                         InlineImageStreamAction::Bytes(part) => bytes.extend(part),
                         InlineImageStreamAction::ShellIntegration(marker) => markers.push(marker),
                         InlineImageStreamAction::WorkingDirectory(uri) => directories.push(uri),
-                        InlineImageStreamAction::Image(_) | InlineImageStreamAction::TooLarge => {
+                        InlineImageStreamAction::Image(_)
+                        | InlineImageStreamAction::Progress(_)
+                        | InlineImageStreamAction::TooLarge => {
                             panic!("fixture contains no image")
                         }
                     }
