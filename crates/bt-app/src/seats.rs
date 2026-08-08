@@ -1508,6 +1508,7 @@ pub fn build_chrome_with_preview(
             preview_title,
             preview_message,
             profile_menu_open: false,
+            chevron_turn: 0.0,
         },
     )
 }
@@ -1653,6 +1654,20 @@ pub struct ChromeContent<'a> {
     /// down when it is folded away, up when it is already on screen — so the
     /// button has to be told, and the menu itself is drawn in the overlay layer.
     pub profile_menu_open: bool,
+    /// How far through its turn the chevron is: 0.0 resting, 1.0 fully over.
+    ///
+    /// Separate from [`Self::profile_menu_open`] because the two do not move
+    /// together and the mock-up does not ask them to. The menu is open or shut
+    /// the instant it is clicked, and so is the button's ink — `.newtab` has no
+    /// `transition` on `color` at all. Only `transform` has one, and for 140ms
+    /// after the click the arrow is still on its way to where the menu already
+    /// is. Deriving one from the other would either snap the arrow or stall the
+    /// menu.
+    ///
+    /// A sampled number and not a clock, like every other animated value that
+    /// reaches this module — see [`TabContent::offset`] and
+    /// [`TabContent::landing`]. Nothing in here knows what time it is.
+    pub chevron_turn: f32,
 }
 
 /// Build chrome for every runtime tab while the pane layer still follows the active tab's solve.
@@ -1671,6 +1686,7 @@ pub fn build_chrome_for_tabs(
         preview_title,
         preview_message,
         profile_menu_open,
+        chevron_turn,
     } = content;
     let palette = chrome_palette();
     let mut quads = Vec::new();
@@ -1692,6 +1708,7 @@ pub fn build_chrome_for_tabs(
             grabbed,
             scroll: tab_scroll,
             profile_menu_open,
+            chevron_turn,
         },
         (&mut quads, &mut labels, &mut sprites),
     );
@@ -1837,6 +1854,7 @@ struct TabStrip<'a> {
     grabbed: Option<usize>,
     scroll: f32,
     profile_menu_open: bool,
+    chevron_turn: f32,
 }
 
 fn window_chrome(
@@ -1856,6 +1874,7 @@ fn window_chrome(
         grabbed,
         scroll: tab_scroll,
         profile_menu_open,
+        chevron_turn,
     } = strip;
     let (quads, labels, sprites) = output;
     let palette = chrome_palette();
@@ -2415,11 +2434,14 @@ fn window_chrome(
         chevron_left + chevron_width,
         chevron_top + chevron_height,
     ];
+    // The rect is `.chevbtn svg`'s own 9×6 box and stays that whatever the
+    // arrow is doing: the turn is a `transform`, and a CSS transform does not
+    // touch layout. Room for the rotated glyph is taken by the rasterizer
+    // outside this box (`ChromeMark::raster_bleed`), which is why the button
+    // does not grow and the `+` beside it does not move.
     if within_strip(viewport, chevron_rect) {
         sprites.push(ChromeSprite::new(
-            ChromeMark::Chevron {
-                open: profile_menu_open,
-            },
+            ChromeMark::chevron(chevron_turn),
             chevron_rect,
             if menu_hovered || profile_menu_open {
                 palette.title_text_hover
@@ -3762,6 +3784,7 @@ mod tests {
                     preview_title: None,
                     preview_message: None,
                     profile_menu_open: false,
+                    chevron_turn: 0.0,
                 },
             );
             let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(3), 0, 0.0);
@@ -3895,7 +3918,11 @@ mod tests {
     }
 
     /// The strip at one scale, told exactly what each tab holds and how far it
-    /// is scrolled.
+    /// is scrolled, with the chevron settled wherever its menu is.
+    ///
+    /// Settled is the right default for every caller but the turn's own tests:
+    /// 140ms after the click the arrow has arrived, and a test that is not
+    /// about the transition is asking about a strip at rest.
     fn strip_chrome_of(
         scale: f32,
         tabs: &[TabContent],
@@ -3903,6 +3930,27 @@ mod tests {
         tab_scroll: f32,
         hover: Option<ChromeTarget>,
         profile_menu_open: bool,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        strip_chrome_of_turn(
+            scale,
+            tabs,
+            active_tab,
+            tab_scroll,
+            hover,
+            profile_menu_open,
+            f32::from(u8::from(profile_menu_open)),
+        )
+    }
+
+    /// The same, with the arrow caught partway through its turn.
+    fn strip_chrome_of_turn(
+        scale: f32,
+        tabs: &[TabContent],
+        active_tab: usize,
+        tab_scroll: f32,
+        hover: Option<ChromeTarget>,
+        profile_menu_open: bool,
+        chevron_turn: f32,
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
         // A 960x600 *logical* window, so the strip's own geometry can be
         // restated at the same width the builder will see.
@@ -3930,6 +3978,7 @@ mod tests {
                 preview_title: None,
                 preview_message: None,
                 profile_menu_open,
+                chevron_turn,
             },
         )
     }
@@ -4187,7 +4236,7 @@ mod tests {
 
             let titles = strip_titles(1);
             let (_, _, rest) = strip_chrome(scale, &titles, 0, None, false);
-            for mark in [ChromeMark::Plus, ChromeMark::Chevron { open: false }] {
+            for mark in [ChromeMark::Plus, ChromeMark::chevron(0.0)] {
                 let sprite = rest
                     .iter()
                     .find(|sprite| sprite.mark == mark)
@@ -4226,8 +4275,8 @@ mod tests {
             .iter()
             .find(|sprite| matches!(sprite.mark, ChromeMark::Chevron { .. }))
             .expect("and it is still there while the menu is up");
-        assert_eq!(shut_chevron.mark, ChromeMark::Chevron { open: false });
-        assert_eq!(open_chevron.mark, ChromeMark::Chevron { open: true });
+        assert_eq!(shut_chevron.mark, ChromeMark::chevron(0.0));
+        assert_eq!(open_chevron.mark, ChromeMark::chevron(1.0));
         assert_eq!(
             shut_chevron.rect, open_chevron.rect,
             "the button does not move when its menu opens"
@@ -4236,6 +4285,74 @@ mod tests {
             open_chevron.color,
             chrome_palette().title_text_hover,
             "a control with its menu open is not resting"
+        );
+    }
+
+    /// PIN — the 140ms between the two ends is drawn, and drawing it does not
+    /// disturb the strip.
+    ///
+    /// `.chevbtn svg { transition: transform 140ms cubic-bezier(.2,0,0,1) }`
+    /// (mock-up 415-418). The turn is a `transform`, and a CSS transform is not
+    /// layout: the button keeps its 9x6 box at every angle, the `+` beside it
+    /// does not shuffle, and the room the rotated arrow needs is taken by the
+    /// rasterizer outside that box rather than by the strip.
+    ///
+    /// The other half is that the arrow and its menu are on different clocks.
+    /// The list is up the instant the button is clicked and the ink follows it
+    /// at once — `.newtab` has no transition on `color` — while the arrow is
+    /// still on its way. A build that derived one from the other would have to
+    /// either snap the arrow or stall the menu.
+    #[test]
+    fn the_chevron_is_drawn_partway_through_its_turn() {
+        let titles = strip_titles(1);
+        let tabs = [TabContent {
+            title: titles[0].clone(),
+            pane_count: 1,
+            ..TabContent::default()
+        }];
+        let chevron_of = |turn: f32, open: bool| {
+            let (_, _, sprites) = strip_chrome_of_turn(1.0, &tabs, 0, 0.0, None, open, turn);
+            *sprites
+                .iter()
+                .find(|sprite| matches!(sprite.mark, ChromeMark::Chevron { .. }))
+                .expect("the strip carries a profile chevron")
+        };
+        let resting = chevron_of(0.0, false);
+        let mut seen = std::collections::HashSet::new();
+        for step in 0_u8..=20 {
+            let turn = f32::from(step) / 20.0;
+            let midway = chevron_of(turn, true);
+            assert_eq!(
+                midway.rect, resting.rect,
+                "the `.chevbtn` box is the same 9x6 at {turn} of the turn —                  a transform does not touch layout"
+            );
+            let ChromeMark::Chevron { turned_degrees } = midway.mark else {
+                panic!("the strip draws a chevron");
+            };
+            seen.insert(turned_degrees);
+        }
+        assert!(
+            seen.len() >= 12,
+            "twenty samples of the turn produced {} angles — the strip is not drawing              the transition, only its two ends",
+            seen.len()
+        );
+
+        // The ink is the menu's, and the angle is the arrow's own.
+        let palette = chrome_palette();
+        assert_eq!(
+            chevron_of(0.0, true).color,
+            palette.title_text_hover,
+            "the list is already up, whatever the arrow is still doing"
+        );
+        assert_eq!(
+            chevron_of(1.0, false).color,
+            palette.title_text_muted,
+            "and already down"
+        );
+        assert_eq!(
+            chevron_of(1.0, false).mark,
+            ChromeMark::chevron(1.0),
+            "an arrow that has not started back is still over"
         );
     }
 
@@ -6254,6 +6371,7 @@ mod tests {
                 preview_title: None,
                 preview_message: None,
                 profile_menu_open: false,
+                chevron_turn: 0.0,
             },
         )
     }
@@ -6381,6 +6499,7 @@ mod tests {
                     preview_title: None,
                     preview_message: None,
                     profile_menu_open: false,
+                    chevron_turn: 0.0,
                 },
             );
             let wash = sprites

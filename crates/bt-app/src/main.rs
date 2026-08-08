@@ -689,6 +689,24 @@ struct Runtime {
     /// the same reasons — and separate from it because the two are different
     /// kinds of surface: one is modal and one is a popup.
     profile_menu: profiles::ProfileMenu,
+    /// The picker's arrow on its way to matching it.
+    ///
+    /// Beside `profile_menu` rather than inside it because they are two
+    /// different facts on two different clocks: the menu is up or down the
+    /// instant it is clicked, and for 140ms after that the arrow is still
+    /// travelling. `ProfileMenu` answers hit-testing and layout, which cannot
+    /// be told a half-truth; this answers only what the button looks like.
+    chevron_turn: ChevronTurn,
+    /// The angle that arrow was last actually *drawn* at, in the mark's own
+    /// quantized degrees — the chevron's half of the `tab_owes_frame` ledger.
+    ///
+    /// Compared rather than sampled, for the reason the tab tweens are: a turn
+    /// still nominally running but landing on the same raster two frames in a
+    /// row has not moved, and a present that redraws the same pixels is a
+    /// present nobody asked for. `cubic-bezier(.2,0,0,1)` makes that the common
+    /// case rather than a corner one — its tail crawls the last few degrees
+    /// over a third of the duration.
+    last_drawn_chevron: Option<marks::ChromeMark>,
     /// How far the tab strip is scrolled, in physical pixels (A7/A8).
     ///
     /// App state and nothing else: a scroll offset is where you are looking, not
@@ -2340,7 +2358,13 @@ fn mark_opacity(working: bool, mark_is_replaced: bool, elapsed: Duration, motion
 /// there were: an animation that has moved has changed this struct, and one
 /// that has not moved has nothing to draw. Continuous wake-ups are the
 /// deadline's job, not this one's.
-fn tab_owes_frame(last_drawn: Option<seats::TabMarkState>, showing: seats::TabMarkState) -> bool {
+///
+/// Written over whatever the channel's drawn state happens to be, because the
+/// argument above is about the *shape* of the question and not about tabs: the
+/// profile chevron's turn asks it of a quantized angle, and asking it any other
+/// way would strand that arrow mid-turn for exactly the reason a mark was
+/// stranded mid-breath.
+fn tab_owes_frame<T: PartialEq>(last_drawn: Option<T>, showing: T) -> bool {
     last_drawn != Some(showing)
 }
 
@@ -2681,6 +2705,70 @@ impl RevealTween {
         }
         let progress = elapsed.as_secs_f32() / duration.as_secs_f32();
         let eased = cubic_bezier(progress, EASE);
+        (self.from + (self.to - self.from) * eased, true)
+    }
+}
+
+/// `.chevbtn svg { transition: transform 140ms cubic-bezier(.2,0,0,1) }` —
+/// the profile picker's arrow turning over (mock-up 415-420).
+const CHEVRON_TURN: Duration = Duration::from_millis(140);
+
+/// The `˅` beside the `+`, turning over to say where its list went.
+///
+/// It carries a fraction and not an angle: 0.0 is the resting arrow, 1.0 is
+/// `.chevbtn.open svg { transform: rotate(180deg) }`, and the degrees are the
+/// mark's business rather than this one's — which is also what keeps the
+/// quantization in one place, at [`marks::ChromeMark::chevron`].
+///
+/// The same shape as [`RevealTween`], and for the same reason: both are
+/// two-state controls that can be told to go back before they arrive, and both
+/// answer by turning around from where they *are*. The mock-up asks for a
+/// transition on a property, and a CSS transition interrupted mid-flight is
+/// restarted from the current computed value — the arrow never jumps to an end
+/// it did not reach, which is the whole difference between a turn and a swap.
+///
+/// (CSS also shortens such a reversal by its "reversing shortening factor",
+/// so a turn undone at 10% takes 10% of the time back. Not reproduced here,
+/// deliberately and consistently with `RevealTween` beside it: the curve's own
+/// long tail already makes the last degrees nearly free, and a fixed 140ms is
+/// the number the mock-up actually writes down.)
+#[derive(Clone, Copy, Debug, Default)]
+struct ChevronTurn {
+    from: f32,
+    to: f32,
+    started: Option<Instant>,
+}
+
+impl ChevronTurn {
+    /// Turn towards `open`, from wherever the arrow currently points.
+    fn retarget(&mut self, open: bool, now: Instant, motion: Motion) {
+        let target = f32::from(u8::from(open));
+        if self.to == target {
+            return;
+        }
+        let (current, _) = self.sample(now, motion);
+        *self = Self {
+            from: current,
+            to: target,
+            // `@media (prefers-reduced-motion: reduce) { .chevbtn svg {
+            // transition: none } }` (mock-up 420). `none` on a transition is
+            // not a shorter transition — it is the terminal value at once, and
+            // with no `started` that is exactly what `sample` reports.
+            started: (motion == Motion::Full).then_some(now),
+        };
+    }
+
+    /// How far through the turn the arrow is, and whether it is still turning.
+    fn sample(self, now: Instant, motion: Motion) -> (f32, bool) {
+        let Some(started) = self.started.filter(|_| motion == Motion::Full) else {
+            return (self.to, false);
+        };
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= CHEVRON_TURN {
+            return (self.to, false);
+        }
+        let progress = elapsed.as_secs_f32() / CHEVRON_TURN.as_secs_f32();
+        let eased = cubic_bezier(progress, GRAB_EASE);
         (self.from + (self.to - self.from) * eased, true)
     }
 }
@@ -3604,6 +3692,8 @@ impl Runtime {
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
             profile_menu: profiles::ProfileMenu::default(),
+            chevron_turn: ChevronTurn::default(),
+            last_drawn_chevron: None,
             tab_scroll: 0.0,
             tab_press: None,
             tab_drag: None,
@@ -4127,6 +4217,7 @@ impl Runtime {
                 preview_title: preview_title.as_deref(),
                 preview_message: preview_message.as_deref(),
                 profile_menu_open: self.profile_menu.is_open(),
+                chevron_turn: self.chevron_turn.sample(now, self.motion).0,
             },
         );
         let icons = self.chrome_marks.resolve(&sprites);
@@ -4788,6 +4879,7 @@ impl Runtime {
     /// The `˅`'s verb: show the profile list, or put away the one on screen.
     fn toggle_profile_menu(&mut self) -> Result<()> {
         self.profile_menu.toggle();
+        self.start_chevron_turn();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -4801,10 +4893,24 @@ impl Runtime {
         if !self.profile_menu.close() {
             return Ok(false);
         }
+        self.start_chevron_turn();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    /// Aim the arrow at wherever the list now is.
+    ///
+    /// Called from both verbs and reading the menu rather than being told which
+    /// way to go, so the two can never disagree: whatever put the list up or
+    /// down, the arrow's target is one lookup away from the truth. The
+    /// *repaint* is the caller's, which is why this only sets the target — a
+    /// turn that has begun is finished by `advance_strip_animation` off the
+    /// deadline `strip_animation_deadline` asks for.
+    fn start_chevron_turn(&mut self) {
+        self.chevron_turn
+            .retarget(self.profile_menu.is_open(), Instant::now(), self.motion);
     }
 
     /// The gear's verb: open the dialog, or shut the one that is open.
@@ -5815,6 +5921,17 @@ impl Runtime {
                 owes_frame = true;
             }
         }
+        // The `˅` is the strip's own and belongs to no tab, so it settles its
+        // debt outside the loop — but on exactly the same terms: the angle that
+        // would be *drawn*, which is the quantized one, against the angle that
+        // was. Comparing the raw fraction instead would owe a frame on every
+        // wake-up of the 140ms, including the long tail where the mark does not
+        // change at all.
+        let turning = marks::ChromeMark::chevron(self.chevron_turn.sample(now, motion).0);
+        if tab_owes_frame(self.last_drawn_chevron, turning) {
+            self.last_drawn_chevron = Some(turning);
+            owes_frame = true;
+        }
         if !owes_frame {
             return Ok(());
         }
@@ -5841,15 +5958,18 @@ impl Runtime {
     /// standing 60fps loop.
     fn strip_animation_deadline(&self, now: Instant) -> Option<Instant> {
         let motion = self.motion;
-        self.tabs
-            .iter()
-            .any(|tab| {
-                tab.mark_is_animating(now, motion)
-                    || tab.pin_is_animating(now, motion)
-                    || tab.flip.sample(now, motion).1
-                    || tab.landing.sample(now, motion).1
-            })
-            .then(|| now + STRIP_ANIMATION_FRAME)
+        let tabs_moving = self.tabs.iter().any(|tab| {
+            tab.mark_is_animating(now, motion)
+                || tab.pin_is_animating(now, motion)
+                || tab.flip.sample(now, motion).1
+                || tab.landing.sample(now, motion).1
+        });
+        // The `˅` belongs to the strip and not to any tab, so a window with the
+        // picker mid-turn and nothing else happening still has to be woken —
+        // and, once the arrow lands, must stop being woken. Under reduced
+        // motion this is never true: the turn has no frames to ask for.
+        let chevron_turning = self.chevron_turn.sample(now, motion).1;
+        (tabs_moving || chevron_turning).then(|| now + STRIP_ANIMATION_FRAME)
     }
 
     /// What every tab hangs off its trailing end, in strip order.
@@ -13959,6 +14079,237 @@ mod tests {
             landing.sample(now + Duration::from_millis(200), Motion::Full),
             (0.0, false)
         );
+    }
+
+    /// PIN — the profile picker's arrow turns over across 140ms on
+    /// `cubic-bezier(.2,0,0,1)`, and it is the turn that is drawn rather than
+    /// its two ends.
+    ///
+    /// `.chevbtn svg { transition: transform 140ms cubic-bezier(.2,0,0,1) }`
+    /// (mock-up 415-418). Both halves of that declaration are load-bearing and
+    /// both are pinned here against the ways they get quietly deleted: cut the
+    /// duration to nothing and the arrow arrives before the first sample, so
+    /// there is no midpoint left to read; swap the curve for `linear` and the
+    /// midpoint lands at half a turn instead of where this curve actually puts
+    /// it, which — because `.2,0,0,1` front-loads almost everything and then
+    /// crawls — is nearly nine tenths of the way over.
+    #[test]
+    fn the_profile_chevron_turns_over_across_a_hundred_and_forty_milliseconds() {
+        assert_eq!(
+            CHEVRON_TURN,
+            Duration::from_millis(140),
+            "`transition: transform 140ms` (mock-up 417)"
+        );
+        assert_eq!(
+            GRAB_EASE,
+            [0.2, 0.0, 0.0, 1.0],
+            "`cubic-bezier(.2,0,0,1)` (mock-up 417)"
+        );
+
+        let now = Instant::now();
+        let mut turn = ChevronTurn::default();
+        assert_eq!(
+            turn.sample(now, Motion::Full),
+            (0.0, false),
+            "an untouched picker's arrow points down and is not moving"
+        );
+
+        turn.retarget(true, now, Motion::Full);
+        assert_eq!(turn.sample(now, Motion::Full), (0.0, true));
+
+        // The middle of the transition is a real place, and it is where this
+        // curve puts it rather than where a straight line would.
+        let (halfway, moving) = turn.sample(now + Duration::from_millis(70), Motion::Full);
+        assert!(moving);
+        assert!(
+            halfway > 0.0 && halfway < 1.0,
+            "70ms into a 140ms turn the arrow is partway over, saw {halfway}"
+        );
+        let eased = cubic_bezier(0.5, GRAB_EASE);
+        assert!(
+            (halfway - eased).abs() < 1e-3,
+            "the turn is drawn on its own curve: expected {eased}, saw {halfway}"
+        );
+        assert!(
+            (halfway - 0.5).abs() > 0.2,
+            "halfway in time is not halfway over on this curve — saw {halfway}, \
+             which is what `linear` would have given"
+        );
+
+        // It only ever goes forwards, and it stops.
+        let mut last = 0.0;
+        for step in 0..=14 {
+            let (at, _) = turn.sample(now + Duration::from_millis(step * 10), Motion::Full);
+            assert!(at >= last, "the arrow does not turn back on its way over");
+            last = at;
+        }
+        assert!(
+            turn.sample(now + Duration::from_millis(139), Motion::Full)
+                .1
+        );
+        assert_eq!(
+            turn.sample(now + Duration::from_millis(140), Motion::Full),
+            (1.0, false),
+            "at 140ms the arrow has arrived and owes no more frames"
+        );
+        assert_eq!(
+            turn.sample(now + Duration::from_secs(9), Motion::Full),
+            (1.0, false)
+        );
+    }
+
+    /// PIN — a turn reversed mid-flight carries on from the angle the arrow is
+    /// actually at.
+    ///
+    /// This is what a CSS transition does to a property whose target changes
+    /// while it is running, and it is the whole difference between a control
+    /// that turns and one that flickers: clicking the picker twice quickly must
+    /// not snap the arrow to an end it never reached and then run back from
+    /// there. Red gate: the sample taken at the instant of the reversal is the
+    /// same number on both sides of it.
+    #[test]
+    fn the_chevron_reverses_from_where_the_arrow_actually_is() {
+        let now = Instant::now();
+        let mut turn = ChevronTurn::default();
+        turn.retarget(true, now, Motion::Full);
+
+        let reversed_at = now + Duration::from_millis(40);
+        let (mid, _) = turn.sample(reversed_at, Motion::Full);
+        assert!(mid > 0.0 && mid < 1.0, "caught mid-turn, saw {mid}");
+
+        turn.retarget(false, reversed_at, Motion::Full);
+        let (restarted, moving) = turn.sample(reversed_at, Motion::Full);
+        assert!(moving);
+        assert!(
+            (restarted - mid).abs() < 1e-6,
+            "the arrow jumped from {mid} to {restarted} when it was told to come back"
+        );
+
+        // And from there it goes the other way, all the way home.
+        let mut last = restarted;
+        for step in 1..=14 {
+            let (at, _) = turn.sample(reversed_at + Duration::from_millis(step * 10), Motion::Full);
+            assert!(
+                at <= last,
+                "the reversed turn went further over instead of coming back"
+            );
+            last = at;
+        }
+        assert_eq!(
+            turn.sample(reversed_at + CHEVRON_TURN, Motion::Full),
+            (0.0, false)
+        );
+
+        // Told again what it is already doing, it does not restart: a caller
+        // that re-reports the same state must not stretch the transition.
+        let mut steady = ChevronTurn::default();
+        steady.retarget(true, now, Motion::Full);
+        let at = now + Duration::from_millis(100);
+        let (before, _) = steady.sample(at, Motion::Full);
+        steady.retarget(true, at, Motion::Full);
+        assert_eq!(steady.sample(at, Motion::Full).0, before);
+        assert_eq!(
+            steady.sample(now + CHEVRON_TURN, Motion::Full),
+            (1.0, false)
+        );
+    }
+
+    /// PIN — `@media (prefers-reduced-motion: reduce) { .chevbtn svg {
+    /// transition: none } }` (mock-up 420).
+    ///
+    /// `none` is not a faster transition: there are no intermediate frames at
+    /// all, the arrow is simply already over, and — the half that actually
+    /// costs something — nothing asks to be woken up to draw the frames that do
+    /// not exist.
+    #[test]
+    fn reduced_motion_turns_the_chevron_over_with_no_frames_in_between() {
+        let now = Instant::now();
+        let mut turn = ChevronTurn::default();
+        turn.retarget(true, now, Motion::Reduced);
+        assert_eq!(
+            turn.sample(now, Motion::Reduced),
+            (1.0, false),
+            "under reduced motion the arrow is over the instant the list is up"
+        );
+        for step in 0..=14 {
+            assert_eq!(
+                turn.sample(now + Duration::from_millis(step * 10), Motion::Reduced),
+                (1.0, false),
+                "and there is never a frame of it on the way"
+            );
+        }
+        turn.retarget(false, now + Duration::from_millis(50), Motion::Reduced);
+        assert_eq!(
+            turn.sample(now + Duration::from_millis(50), Motion::Reduced),
+            (0.0, false)
+        );
+    }
+
+    /// PIN — the turn pays the strip's frame debt in the mark's own quantized
+    /// angles, so it draws every step it has and stops the moment it lands.
+    ///
+    /// Two failures this stands against, and they pull opposite ways. Compare
+    /// the raw fraction and every wake-up of the 140ms owes a present, including
+    /// the long tail where `.2,0,0,1` is crawling through less than a degree and
+    /// the rasterized arrow is byte-identical. Compare nothing at all and the
+    /// arrow strands on whatever frame the last present happened to catch —
+    /// which is the failure `tab_owes_frame` was written for, in its original
+    /// half-faded-icon form.
+    #[test]
+    fn the_chevron_s_frame_debt_is_paid_in_drawn_angles() {
+        let now = Instant::now();
+        let mut turn = ChevronTurn::default();
+        turn.retarget(true, now, Motion::Full);
+
+        // The strip wakes on its own beat; what it draws each time is the mark.
+        let mut last_drawn: Option<marks::ChromeMark> = None;
+        let mut presents = 0_u32;
+        let mut wakes = 0_u32;
+        let mut drawn = Vec::new();
+        let mut at = now;
+        loop {
+            let (fraction, moving) = turn.sample(at, Motion::Full);
+            let showing = marks::ChromeMark::chevron(fraction);
+            if tab_owes_frame(last_drawn, showing) {
+                last_drawn = Some(showing);
+                presents += 1;
+                drawn.push(showing);
+            }
+            wakes += 1;
+            if !moving {
+                break;
+            }
+            at += STRIP_ANIMATION_FRAME;
+        }
+
+        assert!(
+            wakes > presents,
+            "every single wake-up presented a frame ({presents} of {wakes}) — the debt \
+             is being measured on something finer than the arrow is drawn at"
+        );
+        assert!(
+            presents >= 5,
+            "only {presents} frames of the turn were ever drawn — that is a swap \
+             wearing an animation's clothes"
+        );
+        assert!(
+            presents <= u32::from(marks::CHEVRON_TURN_STEPS),
+            "a single turn asked for {presents} rasters, more than the quantum allows"
+        );
+        assert_eq!(
+            drawn.first().copied(),
+            Some(marks::ChromeMark::chevron(0.0)),
+            "the turn is drawn from the arrow's resting angle"
+        );
+        assert_eq!(
+            drawn.last().copied(),
+            Some(marks::ChromeMark::chevron(1.0)),
+            "and the frame it settles on is the terminal one — an arrow left at 175° is \
+             the stranded-mid-breath bug wearing a different mark"
+        );
+        for pair in drawn.windows(2) {
+            assert_ne!(pair[0], pair[1], "a present that redrew the same angle");
+        }
     }
 
     #[test]

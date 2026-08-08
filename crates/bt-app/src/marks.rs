@@ -39,11 +39,27 @@ pub enum ChromeMark {
     TabClose,
     /// `#i-plus` — the new-tab button.
     Plus,
-    /// `#i-chev` — the profile picker beside the `+`. The mock-up rotates the
-    /// one arrow rather than swapping glyphs (`.chevbtn.open svg { transform:
-    /// rotate(180deg) }`): it points down at a list that is folded away and up
-    /// at one that is already on screen, and the turn is the sentence.
-    Chevron { open: bool },
+    /// `#i-chev` — the profile picker beside the `+`, at some angle through its
+    /// turn.
+    ///
+    /// The mock-up rotates the one arrow rather than swapping glyphs, and it
+    /// rotates it *continuously*: `.chevbtn svg { transition: transform 140ms
+    /// cubic-bezier(.2,0,0,1) }` with `.chevbtn.open svg { transform:
+    /// rotate(180deg) }` (mock-up 415-420). There is one `#i-chev` in the
+    /// symbol sheet and there is no second one to swap to — the arrow points
+    /// down at a list that is folded away, up at one that is on screen, and the
+    /// *turn between them* is the sentence. Cutting that to two end frames
+    /// throws away the sentence and keeps the punctuation.
+    ///
+    /// `turned_degrees` is therefore an angle and not a state: 0 is the resting
+    /// arrow, 180 is the turned one, and every value between is a real frame of
+    /// the transition. It is whole degrees quantized to
+    /// [`CHEVRON_TURN_QUANTUM_DEGREES`] rather than a float because this is
+    /// half of the raster cache's key, which has to hash and compare exactly —
+    /// the same reason [`Self::ProgressRing`] counts milliturns. Build one
+    /// through [`ChromeMark::chevron`] rather than by hand, which is what
+    /// applies the quantization.
+    Chevron { turned_degrees: u16 },
     /// `#p-pwsh` — the PowerShell profile mark, which carries its own colours.
     /// The mock-up is explicit that a mark's colour is its own and the active
     /// tab does not recolour it (`.pmark`, and the comment above it).
@@ -147,8 +163,10 @@ impl ChromeMark {
             Self::WindowClose => "i-close",
             Self::TabClose => "tab-close",
             Self::Plus => "i-plus",
-            Self::Chevron { open: false } => "i-chev",
-            Self::Chevron { open: true } => "i-chev-open",
+            // One id for every angle: there is one arrow. What tells two frames
+            // of the turn apart is the angle, which `mark_key` adds — see
+            // `Self::ProgressRing`, whose id is likewise shared across sweeps.
+            Self::Chevron { .. } => "i-chev",
             Self::ProfilePowerShell => "p-pwsh",
             Self::File => "i-file",
             Self::Folder => "i-folder",
@@ -164,11 +182,94 @@ impl ChromeMark {
         }
     }
 
+    /// The chevron partway through its turn: `turn` is 0.0 at rest, 1.0 fully
+    /// over, and anything between is a frame of `.chevbtn svg`'s transition.
+    ///
+    /// The angle is quantized here, at the one door every chevron comes
+    /// through, because an angle is a cache key and a continuous one has no
+    /// bottom: a 140ms turn on a 60Hz screen is nine frames, on a 360Hz screen
+    /// fifty-four, and on the next screen more again. Quantizing bounds the
+    /// work at [`CHEVRON_TURN_STEPS`] rasters for a whole sweep no matter how
+    /// often it is sampled, and bounds it at the *same* number on every
+    /// machine — which is what makes the cost of this animation a fact about
+    /// the design rather than about the hardware it landed on.
+    ///
+    /// See [`CHEVRON_TURN_QUANTUM_DEGREES`] for why 5° is fine enough to be
+    /// invisible.
+    /// Written as "which step of the turn is this" rather than as "round this
+    /// angle", because the two are the same arithmetic and only the first one
+    /// cannot drift: the step count is the bound, so a bound stated anywhere
+    /// but here would be a claim about the code instead of the code itself.
+    #[must_use]
+    pub fn chevron(turn: f32) -> Self {
+        let steps = f32::from(CHEVRON_TURN_STEPS - 1);
+        let step = (turn.clamp(0.0, 1.0) * steps).round() as u16;
+        Self::Chevron {
+            turned_degrees: step * CHEVRON_TURN_QUANTUM_DEGREES,
+        }
+    }
+
     /// Whether `color` reaches this mark at all. A profile mark paints itself.
     fn takes_current_color(self) -> bool {
         self != Self::ProfilePowerShell
     }
+
+    /// How many whole pixels of room this mark needs *outside* the box the
+    /// layout gave it, as `(x, y)`.
+    ///
+    /// Every other mark in this module is drawn inside its own box, because
+    /// every other mark holds still. The chevron turns, and a 9×6 arrow stood
+    /// on end is 6×9: rasterized in its own box the middle of the turn would be
+    /// sliced off at the top and bottom, and the animation would be a glyph
+    /// growing stumps. So the *raster* gets a bigger box than the *layout* did,
+    /// and the extra is bled symmetrically so the mark's centre — the point it
+    /// turns about — does not move.
+    ///
+    /// Whole pixels, and symmetric, is what makes this free at the two ends of
+    /// the turn: a box grown by an integer on each side maps the glyph to
+    /// exactly the same surface pixels it landed on before, so the resting
+    /// arrow is not re-aligned by having been given room it does not use. See
+    /// [`chevron_raster`] for the arithmetic and
+    /// `the_turning_box_leaves_the_resting_arrow_exactly_where_it_was` for the
+    /// proof.
+    fn raster_bleed(self, width_px: u32, height_px: u32) -> (u32, u32) {
+        match self {
+            Self::Chevron { .. } => {
+                let geometry = chevron_raster(width_px, height_px);
+                (geometry.pad_x_px, geometry.pad_y_px)
+            }
+            _ => (0, 0),
+        }
+    }
+
+    /// The box the rasterizer draws into, which is the layout's box plus
+    /// [`Self::raster_bleed`] on each side.
+    fn raster_size(self, width_px: u32, height_px: u32) -> (u32, u32) {
+        let (pad_x, pad_y) = self.raster_bleed(width_px, height_px);
+        (width_px + 2 * pad_x, height_px + 2 * pad_y)
+    }
 }
+
+/// `.chevbtn svg`'s turn, in degrees, rounded to this before it becomes a
+/// cache key.
+///
+/// Five degrees is chosen against the one thing that can go wrong — the turn
+/// reading as a series of steps instead of a sweep — which is a question about
+/// how far the arrow's tip *moves* per step, not about the angle. The tip sits
+/// about 5.0 symbol units from the centre it turns about, so 5° carries it
+/// `5.0 * scale * 0.0873` physical pixels: 0.39px at 100%, 0.79px at 200%,
+/// 1.18px at 300%. Under a pixel and change, at 60-plus frames a second, over
+/// 140ms — the steps are below the grid the mark is drawn on.
+///
+/// It buys, in exchange, a hard ceiling: 37 distinct rasters for a whole sweep,
+/// and — because `cubic-bezier(.2,0,0,1)` spends its long decelerating tail
+/// crawling the last few degrees — a redraw that stops being asked for while
+/// the arrow is still nominally moving but no longer visibly so.
+pub const CHEVRON_TURN_QUANTUM_DEGREES: u16 = 5;
+
+/// How many distinct angles a whole turn can quantize to, both ends included —
+/// the upper bound on rasters one sweep can ask for.
+pub const CHEVRON_TURN_STEPS: u16 = 180 / CHEVRON_TURN_QUANTUM_DEGREES + 1;
 
 /// A mark, the physical box it fills, and the colour `currentColor` resolves to.
 ///
@@ -329,9 +430,17 @@ impl ChromeMarkRasters {
                     raster
                 }
             };
+            // A mark that needs room outside its own box is *drawn* over the
+            // grown box, or the extra pixels would be squeezed back into the
+            // layout's rectangle and the mark would come out scaled down. The
+            // bleed is whole pixels on each side, so this moves nothing: it
+            // states the same glyph over a wider window onto the same surface.
+            let (pad_x, pad_y) = sprite.mark.raster_bleed(width_px, height_px);
+            let [left, top, right, bottom] = sprite.rect;
+            let (pad_x, pad_y) = (pad_x as f32, pad_y as f32);
             icons.push(ChromeIcon {
                 key: key.clone(),
-                rect: sprite.rect,
+                rect: [left - pad_x, top - pad_y, right + pad_x, bottom + pad_y],
                 rgba: Arc::clone(&raster.rgba),
                 width_px: raster.width_px,
                 height_px: raster.height_px,
@@ -366,6 +475,11 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     } = sprite.mark
     {
         let _ = write!(key, ":a{start_milliturns}+{sweep_milliturns}w{stroke_px}");
+    }
+    // The angle is the only thing that tells one frame of the turn from
+    // another: one id, one box, one colour, and different pixels.
+    if let ChromeMark::Chevron { turned_degrees } = sprite.mark {
+        let _ = write!(key, ":d{turned_degrees}");
     }
     let _ = write!(key, ":{width_px}x{height_px}");
     if sprite.mark.takes_current_color() {
@@ -420,6 +534,9 @@ fn desaturate(rgba: &mut [u8]) {
 /// renderer's own transform rather than by pre-multiplied path data — which is
 /// what keeps one source of truth for the geometry across every DPI.
 fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<String> {
+    // For every mark but the turning chevron this is the box it was given; see
+    // [`ChromeMark::raster_bleed`] for the one that needs more.
+    let (raster_width_px, raster_height_px) = sprite.mark.raster_size(width_px, height_px);
     let (view_box, body) = match sprite.mark {
         ChromeMark::ActiveTab { radius_px } => {
             let path = active_tab_path(width_px, height_px, radius_px)?;
@@ -479,15 +596,33 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 sweep_milliturns,
             )?,
         ),
-        // One arrow that turns over: the `open` chevron is the resting one
-        // rotated about its own centre, exactly as `.chevbtn.open svg` is.
-        ChromeMark::Chevron { open: true } => (
-            SYMBOL_VIEW_BOX[symbol_index(sprite.mark)].to_owned(),
-            format!(
-                r#"<g transform="rotate(180 5 3)">{}</g>"#,
-                SYMBOL_BODY[symbol_index(sprite.mark)]
-            ),
-        ),
+        // One arrow, caught at an angle: `.chevbtn svg`'s transition, which
+        // turns the resting glyph about its own centre all the way to
+        // `rotate(180deg)` and every degree in between.
+        //
+        // Stated in pixels rather than left to the `viewBox` because the box is
+        // no longer the symbol's: the turn needs room outside it, and the
+        // padding has to land on the *outside* without disturbing where the
+        // glyph itself falls. So the document's own coordinates are the padded
+        // raster's pixels, and the transform reproduces, term for term, what
+        // `preserveAspectRatio="xMidYMid meet"` would have done with the
+        // unpadded box — the same uniform scale, the same centring inset — with
+        // the pad added on afterwards as whole pixels. `rotate` is applied
+        // first, in the symbol's own units, about the symbol's own centre.
+        ChromeMark::Chevron { turned_degrees } => {
+            let geometry = chevron_raster(width_px, height_px);
+            let [centre_x, centre_y] = CHEVRON_TURN_CENTRE_UNITS;
+            (
+                format!("0 0 {raster_width_px} {raster_height_px}"),
+                format!(
+                    r#"<g transform="translate({x} {y}) scale({scale}) rotate({turned_degrees} {centre_x} {centre_y})">{body}</g>"#,
+                    x = geometry.origin_x_px,
+                    y = geometry.origin_y_px,
+                    scale = geometry.scale,
+                    body = SYMBOL_BODY[symbol_index(sprite.mark)],
+                ),
+            )
+        }
         mark => (SYMBOL_VIEW_BOX[symbol_index(mark)].to_owned(), {
             SYMBOL_BODY[symbol_index(mark)].to_owned()
         }),
@@ -499,8 +634,73 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
         body
     };
     Some(format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width_px}" height="{height_px}" viewBox="{view_box}">{body}</svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{raster_width_px}" height="{raster_height_px}" viewBox="{view_box}">{body}</svg>"#
     ))
+}
+
+/// `#i-chev`'s own `viewBox`, as units, and the point `.chevbtn.open svg`
+/// turns about.
+///
+/// The centre is the box's middle, which is what CSS's own default
+/// `transform-origin: 50% 50%` names — the rotation the mock-up asks for is
+/// about the *element*, and the element is the symbol's box.
+const CHEVRON_VIEW_BOX_UNITS: [f64; 2] = [10.0, 6.0];
+const CHEVRON_TURN_CENTRE_UNITS: [f64; 2] = [
+    CHEVRON_VIEW_BOX_UNITS[0] / 2.0,
+    CHEVRON_VIEW_BOX_UNITS[1] / 2.0,
+];
+
+/// Where a chevron's symbol units land inside the padded raster, and how much
+/// padding that took.
+struct ChevronRaster {
+    pad_x_px: u32,
+    pad_y_px: u32,
+    /// The uniform scale from symbol units to physical pixels.
+    scale: f64,
+    /// Where the symbol's origin — the `viewBox`'s top-left, not the arrow —
+    /// lands in the padded raster.
+    origin_x_px: f64,
+    origin_y_px: f64,
+}
+
+/// The turning chevron's raster geometry for a glyph box of `width_px` by
+/// `height_px`.
+///
+/// Two halves, and the whole design is in keeping them apart.
+///
+/// The first half reproduces the placement the glyph already had. An SVG whose
+/// `viewBox` is the symbol's and whose box is the layout's is fitted under
+/// `preserveAspectRatio="xMidYMid meet"`: one uniform scale, the smaller of the
+/// two ratios, and whatever slack the other axis has left split evenly on
+/// either side. Written out, that is `scale` and the two insets below — the
+/// same numbers, so the same pixels.
+///
+/// The second half is the room the turn needs. Every angle of a rotation about
+/// the box's centre stays inside the circle that box is inscribed in, so the
+/// radius is the box's own half-diagonal — the bound is the *box's* corner
+/// reach, not the arrow's, which is what makes it hold for any artwork the
+/// symbol could carry rather than for this one path. The padding is then that
+/// radius less what the box already offers on each side, rounded **up to a
+/// whole pixel**: a fractional pad would slide the glyph off the pixel grid it
+/// was rasterized on and rewrite its antialiasing, which is precisely the
+/// "resting arrow is unchanged" promise this exists to keep. Symmetric, so the
+/// centre stays put; whole, so the sampling does.
+fn chevron_raster(width_px: u32, height_px: u32) -> ChevronRaster {
+    let [view_width, view_height] = CHEVRON_VIEW_BOX_UNITS;
+    let (box_width, box_height) = (f64::from(width_px), f64::from(height_px));
+    let scale = (box_width / view_width).min(box_height / view_height);
+    let inset_x = (box_width - view_width * scale) / 2.0;
+    let inset_y = (box_height - view_height * scale) / 2.0;
+    let radius = view_width.hypot(view_height) / 2.0 * scale;
+    let pad_x_px = (radius - box_width / 2.0).ceil().max(0.0) as u32;
+    let pad_y_px = (radius - box_height / 2.0).ceil().max(0.0) as u32;
+    ChevronRaster {
+        pad_x_px,
+        pad_y_px,
+        scale,
+        origin_x_px: f64::from(pad_x_px) + inset_x,
+        origin_y_px: f64::from(pad_y_px) + inset_y,
+    }
 }
 
 /// One arc of `.pring`, as the mock-up draws it: a stroked `<circle>` with a
@@ -1312,43 +1512,343 @@ mod tests {
         assert_ne!(icons[0].key, icons[1].key, "the radius is part of identity");
     }
 
-    /// PIN — the chevron is one arrow that turns over. The open glyph is the
-    /// resting one rotated 180° about its own centre, so the two are mirror
-    /// images across the symbol's mid-line rather than two drawings.
+    /// The ink a mark carries on one row of its raster.
+    fn row_ink(icon: &ChromeIcon, y: u32) -> u32 {
+        (0..icon.width_px)
+            .map(|x| u32::from(alpha_at(icon, x, y)))
+            .sum()
+    }
+
+    /// The tight box around a mark's ink — `[left, top, right, bottom]`,
+    /// inclusive — which is how wide and how tall the drawing actually is
+    /// rather than how big a box it was handed.
+    fn ink_box(icon: &ChromeIcon) -> [u32; 4] {
+        let mut bounds: Option<[u32; 4]> = None;
+        for y in 0..icon.height_px {
+            for x in 0..icon.width_px {
+                if alpha_at(icon, x, y) == 0 {
+                    continue;
+                }
+                bounds = Some(match bounds {
+                    None => [x, y, x, y],
+                    Some([left, top, right, bottom]) => {
+                        [left.min(x), top.min(y), right.max(x), bottom.max(y)]
+                    }
+                });
+            }
+        }
+        bounds.expect("the mark drew something")
+    }
+
+    fn ink_span(icon: &ChromeIcon) -> (u32, u32) {
+        let [left, top, right, bottom] = ink_box(icon);
+        (right - left + 1, bottom - top + 1)
+    }
+
+    /// A whole turn, sampled on the quantum's own grid so every frame is a
+    /// distinct angle and none is a rounding of its neighbour.
+    fn turn_sweep(ink: [u8; 3], width: f32, height: f32) -> Vec<ChromeIcon> {
+        let steps = i32::from(CHEVRON_TURN_STEPS) - 1;
+        let sprites: Vec<ChromeSprite> = (0..=steps)
+            .map(|step| {
+                let turn = step as f32 / steps as f32;
+                sprite(ChromeMark::chevron(turn), width, height, ink)
+            })
+            .collect();
+        ChromeMarkRasters::default().resolve(&sprites)
+    }
+
+    /// PIN — the chevron is ONE arrow that turns over, and it turns *through*
+    /// the angles between rather than jumping between two drawings.
+    ///
+    /// `.chevbtn svg { transition: transform 140ms cubic-bezier(.2,0,0,1) }`
+    /// with `.chevbtn.open svg { transform: rotate(180deg) }` (mock-up
+    /// 415-420). The symbol sheet holds one `#i-chev` and there is no second
+    /// one to swap to, so the mark is keyed by an *angle* and not by a state,
+    /// and every angle in between is a frame that really exists.
+    ///
+    /// Red gate: the assertions a swap cannot pass are the ones about the
+    /// middle. Two glyphs traded at the halfway point give a mark that is
+    /// always wider than it is tall and that has exactly two shapes; a real
+    /// rotation stands the arrow on end at 90°, where it is taller than it is
+    /// wide, and walks there in steps no bigger than a pixel or two. Delete the
+    /// rotation and keep the two end frames and the count of distinct shapes
+    /// falls from dozens to two.
     #[test]
     fn the_chevron_turns_over_instead_of_swapping_glyphs() {
         let ink = [0x9d, 0x9d, 0x9d];
-        let mut rasters = ChromeMarkRasters::default();
-        let icons = rasters.resolve(&[
-            sprite(ChromeMark::Chevron { open: false }, 18.0, 12.0, ink),
-            sprite(ChromeMark::Chevron { open: true }, 18.0, 12.0, ink),
-        ]);
-        let (down, up) = (&icons[0], &icons[1]);
+        // One glyph, one name for it: what tells two frames apart is the angle.
+        assert_eq!(ChromeMark::chevron(0.0).id(), ChromeMark::chevron(1.0).id());
+        assert_eq!(ChromeMark::chevron(0.0).id(), "i-chev");
+        assert_eq!(
+            ChromeMark::chevron(0.0),
+            ChromeMark::Chevron { turned_degrees: 0 },
+            "at rest the arrow is the symbol as drawn"
+        );
+        assert_eq!(
+            ChromeMark::chevron(1.0),
+            ChromeMark::Chevron {
+                turned_degrees: 180
+            },
+            "`.chevbtn.open svg {{ transform: rotate(180deg) }}`"
+        );
+
+        let icons = turn_sweep(ink, 18.0, 12.0);
+        let last = icons.len() - 1;
+        let (down, side, up) = (&icons[0], &icons[last / 2], &icons[last]);
         assert_ne!(down.key, up.key);
-        let ink_of = |icon: &ChromeIcon, y: u32| {
-            (0..icon.width_px)
-                .map(|x| u32::from(alpha_at(icon, x, y)))
-                .sum::<u32>()
-        };
+
         // A down chevron carries its two arms at the top and its point at the
-        // bottom; rotating it swaps which row is which.
+        // bottom; the turn swaps which row is which.
+        let inked_rows = |icon: &ChromeIcon| {
+            let [_, top, _, bottom] = ink_box(icon);
+            (top, bottom)
+        };
+        let (down_top, down_bottom) = inked_rows(down);
         assert!(
-            ink_of(down, 1) > ink_of(down, down.height_px - 2),
+            row_ink(down, down_top + 1) > row_ink(down, down_bottom - 1),
             "a resting chevron points down"
         );
+        let (up_top, up_bottom) = inked_rows(up);
         assert!(
-            ink_of(up, up.height_px - 2) > ink_of(up, 1),
-            "an open chevron points up"
+            row_ink(up, up_bottom - 1) > row_ink(up, up_top + 1),
+            "a fully turned chevron points up"
         );
+
+        // The two ends are the same glyph mirrored, because 180° about the
+        // box's centre *is* that mirror — and the raster's padding is
+        // symmetric, so the mirror is the raster's own mid-line.
         for y in 0..down.height_px {
             let mirrored = down.height_px - 1 - y;
-            let (a, b) = (ink_of(down, y), ink_of(up, mirrored));
+            let (a, b) = (row_ink(down, y), row_ink(up, mirrored));
             assert!(
                 a.abs_diff(b) * 20 <= a.max(b).max(1) * 3,
                 "row {y} of the turned arrow is not row {mirrored} of the resting one \
                  ({a} against {b}) — it is a second glyph, not the same one rotated"
             );
         }
+
+        // Halfway through, the arrow is standing on end. Nothing that swaps two
+        // 9x6 drawings ever produces this frame.
+        let (down_w, down_h) = ink_span(down);
+        let (side_w, side_h) = ink_span(side);
+        assert!(
+            down_w > down_h,
+            "the resting arrow lies across its box, saw {down_w}x{down_h}"
+        );
+        assert!(
+            side_h > side_w,
+            "at 90° the arrow stands on end, saw {side_w}x{side_h} — \
+             a mark that is still lying flat halfway through is a swap, not a turn"
+        );
+
+        // And it got there continuously. A swap has two drawings and one jump
+        // between them; a turn has a drawing per angle and no step worth
+        // seeing. Every frame of the sweep is its own pixels — not merely its
+        // own cache key, which a swap could fake by keying on an angle it then
+        // rounds to one of two glyphs.
+        let distinct: std::collections::HashSet<&[u8]> =
+            icons.iter().map(|icon| &*icon.rgba).collect();
+        assert_eq!(
+            distinct.len(),
+            icons.len(),
+            "{} of the turn's {} angles rasterized to pixels some other angle already had",
+            icons.len() - distinct.len(),
+            icons.len()
+        );
+        let spans: Vec<(u32, u32)> = icons.iter().map(ink_span).collect();
+        for pair in spans.windows(2) {
+            let [(_, before), (_, after)] = [pair[0], pair[1]];
+            assert!(
+                before.abs_diff(after) <= 3,
+                "the arrow's height jumped {before}px to {after}px between adjacent frames \
+                 of the turn — the transition has a step in it"
+            );
+        }
+    }
+
+    /// PIN — the turn needs room the layout never gave it, and taking that room
+    /// does not move the arrow.
+    ///
+    /// A 9x6 arrow at 90° is 6x9, so the raster box is grown past the CSS box
+    /// or the middle of the transition is drawn with its ends sliced off. The
+    /// price of growing it would be re-aligning the *resting* arrow, which is on
+    /// screen essentially always — so the growth is whole pixels, symmetric, and
+    /// this proves what that buys: the glyph lands on exactly the pixels it
+    /// landed on before the turn existed, byte for byte, and the wider raster is
+    /// drawn over a correspondingly wider rectangle so nothing is rescaled.
+    ///
+    /// The comparison is against a document built from the symbol sheet's own
+    /// `viewBox` and body — the form this mark had before it could turn — so
+    /// the claim is checked against the old rendering rather than against a
+    /// remembered number.
+    #[test]
+    fn the_turning_box_leaves_the_resting_arrow_exactly_where_it_was() {
+        assert_eq!(
+            SYMBOL_VIEW_BOX[symbol_index(ChromeMark::chevron(0.0))],
+            "0 0 10 6",
+            "the padding arithmetic is written against this box"
+        );
+        assert_eq!(CHEVRON_VIEW_BOX_UNITS, [10.0, 6.0]);
+
+        let ink = [0x9d, 0x9d, 0x9d];
+        for (glyph_width, glyph_height) in [(9u32, 6u32), (11, 8), (18, 12), (27, 18)] {
+            for (turn, rotation) in [(0.0_f32, ""), (1.0, r#" transform="rotate(180 5 3)""#)] {
+                let mark = ChromeMark::chevron(turn);
+                let mut rasters = ChromeMarkRasters::default();
+                let icons =
+                    rasters.resolve(&[sprite(mark, glyph_width as f32, glyph_height as f32, ink)]);
+                let icon = &icons[0];
+
+                // The mark as it was drawn before the turn: the symbol's own
+                // viewBox fitted to the layout's box, which is how every other
+                // mark in this module is still drawn.
+                let [r, g, b] = ink;
+                let body = SYMBOL_BODY[symbol_index(mark)]
+                    .replace("currentColor", &format!("#{r:02x}{g:02x}{b:02x}"));
+                let legacy = format!(
+                    r#"<svg xmlns="http://www.w3.org/2000/svg" width="{glyph_width}" height="{glyph_height}" viewBox="0 0 10 6"><g{rotation}>{body}</g></svg>"#
+                );
+                let legacy = bt_math::rasterize_svg_document(legacy.as_bytes())
+                    .expect("the symbol sheet's own form still rasterizes");
+
+                let pad_x = (icon.width_px - glyph_width) / 2;
+                let pad_y = (icon.height_px - glyph_height) / 2;
+                assert_eq!(
+                    (icon.width_px, icon.height_px),
+                    (glyph_width + 2 * pad_x, glyph_height + 2 * pad_y),
+                    "the raster grew by whole pixels on each side or the centre moved"
+                );
+                // Grown symmetrically about the same centre, and drawn over the
+                // matching rectangle: the glyph's place on the surface is the
+                // sprite's rect plus the same padding, so it has not moved.
+                assert_eq!(
+                    icon.rect,
+                    [
+                        -(pad_x as f32),
+                        -(pad_y as f32),
+                        glyph_width as f32 + pad_x as f32,
+                        glyph_height as f32 + pad_y as f32,
+                    ],
+                    "the padded raster must be drawn over the padded rectangle"
+                );
+
+                for y in 0..icon.height_px {
+                    for x in 0..icon.width_px {
+                        let inside = (pad_x..pad_x + glyph_width).contains(&x)
+                            && (pad_y..pad_y + glyph_height).contains(&y);
+                        let index = ((y * icon.width_px + x) * 4) as usize;
+                        let here = &icon.rgba[index..index + 4];
+                        if inside {
+                            let (lx, ly) = (x - pad_x, y - pad_y);
+                            let legacy_index = ((ly * glyph_width + lx) * 4) as usize;
+                            assert_eq!(
+                                here,
+                                &legacy.rgba[legacy_index..legacy_index + 4],
+                                "at {glyph_width}x{glyph_height}, turn {turn}: pixel ({lx}, {ly}) \
+                                 of the resting arrow changed when the box grew"
+                            );
+                        } else {
+                            assert_eq!(
+                                here[3], 0,
+                                "at {glyph_width}x{glyph_height}, turn {turn}: the padding \
+                                 carries ink, so the glyph is not where it was"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// PIN — the box is big enough for *every* angle, not just the two ends.
+    ///
+    /// Stated as ink conserved rather than as a margin measured, because that is
+    /// the actual failure: a box that fits the arrow lying down slices its ends
+    /// off when it stands up, and slicing shows up as ink that went missing. A
+    /// rotation moves ink, it never spends any.
+    #[test]
+    fn no_angle_of_the_turn_is_clipped_by_its_own_box() {
+        for (width, height) in [(9.0_f32, 6.0_f32), (14.0, 9.0), (18.0, 12.0), (27.0, 18.0)] {
+            let icons = turn_sweep([0xed, 0xed, 0xec], width, height);
+            let resting = ink_mass(&icons[0]);
+            for (step, icon) in icons.iter().enumerate() {
+                let mass = ink_mass(icon);
+                assert!(
+                    mass * 100 >= resting * 96 && mass * 96 <= resting * 100,
+                    "at {width}x{height}, {}° of the turn carries {mass} of ink against the \
+                     resting arrow's {resting} — the raster box is cutting the arrow off",
+                    step * usize::from(CHEVRON_TURN_QUANTUM_DEGREES)
+                );
+            }
+        }
+    }
+
+    /// PIN — the turn's angles are quantized, and the quantum is what bounds
+    /// the work.
+    ///
+    /// An angle is half a cache key, and a continuous one has no bottom: the
+    /// number of rasters a 140ms turn asks for would be however many times the
+    /// compositor happened to sample it, which is a fact about the monitor
+    /// rather than about the design. Quantizing fixes it at
+    /// [`CHEVRON_TURN_STEPS`] for a whole sweep on any machine — and the
+    /// resident cost stays at one raster, because the map is trimmed to the
+    /// frame that asked.
+    #[test]
+    fn the_turn_s_angles_quantize_so_the_raster_cache_cannot_run_away() {
+        assert_eq!(
+            180_u16 % CHEVRON_TURN_QUANTUM_DEGREES,
+            0,
+            "both ends are on grid"
+        );
+        assert_eq!(CHEVRON_TURN_STEPS, 37);
+
+        // However finely the turn is sampled, it lands on the grid and nowhere
+        // else — and it never leaves the two ends behind.
+        let mut seen = std::collections::HashSet::new();
+        for sample in 0..=4_000 {
+            let mark = ChromeMark::chevron(sample as f32 / 4_000.0);
+            let ChromeMark::Chevron { turned_degrees } = mark else {
+                panic!("`chevron` builds chevrons");
+            };
+            assert_eq!(turned_degrees % CHEVRON_TURN_QUANTUM_DEGREES, 0);
+            assert!(turned_degrees <= 180);
+            seen.insert(turned_degrees);
+        }
+        assert_eq!(
+            seen.len(),
+            usize::from(CHEVRON_TURN_STEPS),
+            "four thousand samples of one turn may cost at most {CHEVRON_TURN_STEPS} rasters"
+        );
+        // Out of range is clamped rather than wrapped: an arrow told to turn
+        // twice round is an arrow that is over, not one that is back.
+        assert_eq!(ChromeMark::chevron(-1.0), ChromeMark::chevron(0.0));
+        assert_eq!(ChromeMark::chevron(9.0), ChromeMark::chevron(1.0));
+
+        let ink = [0x9d, 0x9d, 0x9d];
+        let mut rasters = ChromeMarkRasters::default();
+        let quantum = f32::from(CHEVRON_TURN_QUANTUM_DEGREES) / 180.0;
+        let icons = rasters.resolve(&[
+            sprite(ChromeMark::chevron(quantum), 18.0, 12.0, ink),
+            // Close enough to be the same frame of the turn: one raster, shared.
+            sprite(ChromeMark::chevron(quantum * 1.02), 18.0, 12.0, ink),
+            sprite(ChromeMark::chevron(quantum * 2.0), 18.0, 12.0, ink),
+        ]);
+        assert_eq!(icons[0].key, icons[1].key);
+        assert!(
+            Arc::ptr_eq(&icons[0].rgba, &icons[1].rgba),
+            "two samples inside one quantum must not rasterize twice"
+        );
+        assert_ne!(
+            icons[0].key, icons[2].key,
+            "the angle is part of identity — two frames of the turn are not one raster"
+        );
+        assert_ne!(icons[0].rgba, icons[2].rgba);
+        assert_eq!(
+            rasters.rasters.len(),
+            2,
+            "and nothing beyond what this frame drew stays resident"
+        );
     }
 
     /// How wide a mark's ink is along the anti-diagonal scanline `x - y = k`:
