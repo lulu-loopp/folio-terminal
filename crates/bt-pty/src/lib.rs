@@ -521,7 +521,23 @@ impl PtySession {
     /// `BT_SHELL` exists to pick *which* PowerShell-family build runs, not to swap in an unrelated
     /// shell, so this is a single uniform rule rather than a per-source special case.
     pub fn spawn_default(size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        Self::spawn_default_with(size, wake, &SystemShellEnvironment)
+        Self::spawn_default_with(size, wake, None, &SystemShellEnvironment)
+    }
+
+    /// [`spawn_default`](Self::spawn_default), started in `working_directory`
+    /// instead of this process's own.
+    ///
+    /// `None` means "wherever the terminal itself is standing", which is what
+    /// every session did before there was anything else to inherit. The caller
+    /// that passes `Some` is the new-tab verb: a new shell opens where the one
+    /// you are looking at is standing, and the directory it hands over is the one
+    /// that shell reported over OSC 7 — a fact the shell stated, never a guess.
+    pub fn spawn_default_in(
+        size: PtySize,
+        wake: OutputWake,
+        working_directory: Option<PathBuf>,
+    ) -> Result<Self, PtyError> {
+        Self::spawn_default_with(size, wake, working_directory, &SystemShellEnvironment)
     }
 
     /// The testable core of `spawn_default`: shell resolution goes through the injected
@@ -530,9 +546,18 @@ impl PtySession {
     fn spawn_default_with(
         size: PtySize,
         wake: OutputWake,
+        working_directory: Option<PathBuf>,
         environment: &dyn ShellEnvironment,
     ) -> Result<Self, PtyError> {
-        let working_directory = std::env::current_dir().map_err(PtyError::Io)?;
+        // A directory that no longer exists would fail the spawn outright, and a
+        // tab that refuses to open because the last one was deleted out from
+        // under it is a worse answer than a tab that opens at home. This is the
+        // system boundary — the filesystem — so it is checked here and nowhere
+        // else.
+        let working_directory = match working_directory {
+            Some(directory) if directory.is_dir() => directory,
+            _ => std::env::current_dir().map_err(PtyError::Io)?,
+        };
         let resolved = resolve_default_shell(environment);
         let command = PtyCommand::interactive_shell(resolved.program.clone())
             .working_directory(working_directory.clone());
@@ -1446,7 +1471,7 @@ mod tests {
         // the "resolved by the OS at spawn time" half of the documented `BT_SHELL` semantics.
         let environment = shell::FakeShellEnvironment::new().with_var("BT_SHELL", "powershell.exe");
         let mut session =
-            PtySession::spawn_default_with(size(40, 8), no_wake(), &environment).unwrap();
+            PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
         assert!(session.take_shell_fallback_notice().is_none());
         assert!(session.child_id().is_some());
         session.shutdown().unwrap();
@@ -1457,7 +1482,7 @@ mod tests {
         let missing = nonexistent_program("bt-shell");
         let environment = shell::FakeShellEnvironment::new().with_var("BT_SHELL", &missing);
         let mut session =
-            PtySession::spawn_default_with(size(40, 8), no_wake(), &environment).unwrap();
+            PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
         let notice = session
             .take_shell_fallback_notice()
             .expect("a spawn failure on the resolved shell must leave a fallback notice");
@@ -1493,7 +1518,7 @@ mod tests {
         assert_eq!(resolved.program, pwsh_path.as_os_str());
 
         let mut session =
-            PtySession::spawn_default_with(size(40, 8), no_wake(), &environment).unwrap();
+            PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
         let notice = session
             .take_shell_fallback_notice()
             .expect("an unresolvable pwsh.exe path must still fall back and leave a notice");

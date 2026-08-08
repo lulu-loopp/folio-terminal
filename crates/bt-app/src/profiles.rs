@@ -280,7 +280,11 @@ pub fn build(layout: &ProfileMenuLayout, hover: Option<usize>) -> Vec<OverlayLay
                     item[3],
                 ],
                 font_size_px: px(HINT_FONT_LOGICAL_PX),
-                color: palette.dialog_muted_text,
+                // `--ink3` over `--menu`. It used to be `dialog_muted_text`,
+                // which is the same ink over `--win` — the settings dialog's
+                // surface, not this one. Identical in the light theme, six levels
+                // adrift in the dark.
+                color: palette.menu_item_hint_text,
                 align_right: true,
                 align_center: false,
                 letter_spacing_em: 0.0,
@@ -310,7 +314,7 @@ mod tests {
     /// The `˅`'s box in a 960x600 window at 1x, taken from the strip's own
     /// geometry rather than restated here.
     fn anchor(scale: f32) -> [f32; 4] {
-        crate::seats::tab_strip_geometry(960.0 * scale, scale, 1, 0).new_tab_menu
+        crate::seats::tab_strip_geometry(960.0 * scale, scale, 1, 0, 0.0).new_tab_menu
     }
 
     /// PIN — the menu hangs 4px under the button that opened it, at the button's
@@ -463,5 +467,104 @@ mod tests {
             rest_labels.iter().any(|label| label.text == HINT_TEXT),
             "the default profile says so"
         );
+    }
+
+    /// PIN — I89/I90/I93/I95: every measured value of `.profile-menu` and
+    /// `.profile-item` (mock-up lines 976-1002), nailed to the stylesheet.
+    ///
+    /// The surface, its rows and its ink are checked elsewhere in this module;
+    /// what this pins is the ruler — the numbers a redesign would have to change
+    /// deliberately rather than drift past.
+    #[test]
+    fn the_menu_measures_what_the_stylesheet_says_it_measures() {
+        assert_eq!(MENU_MIN_WIDTH_LOGICAL_PX, 180.0, "min-width: 180px");
+        assert_eq!(MENU_RADIUS_LOGICAL_PX, 8.0, "border-radius: 8px");
+        assert_eq!(MENU_PADDING_LOGICAL_PX, 4.0, "padding: 4px");
+        assert_eq!(MENU_OFFSET_LOGICAL_PX, 4.0, "top = anchor.bottom + 4");
+        assert_eq!(MENU_EDGE_MARGIN_LOGICAL_PX, 8.0, "win.width - mw - 8");
+        assert_eq!(ITEM_RADIUS_LOGICAL_PX, 5.0, ".profile-item radius 5px");
+        assert_eq!(ITEM_PADDING_X_LOGICAL_PX, 10.0, "padding: 7px 10px");
+        assert_eq!(ITEM_GAP_LOGICAL_PX, 10.0, "gap: 10px");
+        assert_eq!(ITEM_FONT_LOGICAL_PX, 13.0, "font-size: 13px");
+        assert_eq!(
+            ITEM_ICON_COLUMN_LOGICAL_PX, 14.0,
+            ".ticon {{ width: 14px }}"
+        );
+        assert_eq!(HINT_FONT_LOGICAL_PX, 11.0, ".default-hint font-size 11px");
+        // 7 + 15.5 + 7: the 13px line box the mock-up's own renderer produces,
+        // inside the row's vertical padding.
+        assert_eq!(ITEM_HEIGHT_LOGICAL_PX, 29.5);
+
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let layout = layout(anchor(scale), 960.0 * scale, scale);
+            let item = layout.items[0];
+            assert_eq!(
+                (item[3] - item[1]).round(),
+                (ITEM_HEIGHT_LOGICAL_PX * scale).round(),
+                "scale {scale}: a row is its own height"
+            );
+            // `padding: 4px` inside a 1px border: the row is inset from the
+            // menu's edge by both.
+            let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+            assert_eq!(
+                item[0] - layout.frame[0],
+                border + MENU_PADDING_LOGICAL_PX * scale,
+                "scale {scale}: the menu's own padding sits outside its rows"
+            );
+            assert_eq!(layout.frame[2] - item[2], item[0] - layout.frame[0]);
+        }
+    }
+
+    /// PIN — I93: the `default` hint is `--ink3` over `--menu`, and the mark
+    /// column is the mock-up's 14px with its 15px mark centred on it.
+    ///
+    /// Red gate: the hint used to wear `dialog_muted_text` — the same ink
+    /// composited over `--win`, the settings dialog's surface. The two agree in
+    /// the light theme and part by six levels in the dark, which is exactly the
+    /// kind of error that survives a light-theme review.
+    #[test]
+    fn the_default_hint_is_inked_for_a_menu_and_not_for_a_dialog() {
+        let scale = 1.0;
+        let layout = layout(anchor(scale), 960.0, scale);
+        let palette = chrome_palette();
+        let (_, labels, sprites) = build(&layout, None);
+        let hint = labels
+            .iter()
+            .find(|label| label.text == HINT_TEXT)
+            .expect("the default profile says so");
+        assert_eq!(hint.color, palette.menu_item_hint_text);
+        assert_eq!(hint.font_size_px, HINT_FONT_LOGICAL_PX * scale);
+        assert!(
+            hint.align_right,
+            "`margin-left: auto` puts it against the row's trailing padding"
+        );
+        assert_eq!(
+            hint.rect[2],
+            layout.items[0][2] - ITEM_PADDING_X_LOGICAL_PX * scale,
+            "and that padding is the row's own 10px"
+        );
+        // The 15px mark, centred on its 14px column — what a flex box does with
+        // a child one pixel wider than its box.
+        let mark = sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+            .expect("every row wears its profile's mark");
+        assert_eq!(mark.rect[2] - mark.rect[0], ITEM_MARK_LOGICAL_PX * scale);
+        let column_left = layout.items[0][0] + ITEM_PADDING_X_LOGICAL_PX * scale;
+        let column_mid = column_left + ITEM_ICON_COLUMN_LOGICAL_PX * scale / 2.0;
+        assert!(
+            ((mark.rect[0] + mark.rect[2]) / 2.0 - column_mid).abs() <= 0.5,
+            "the mark is centred on its column, not aligned to it"
+        );
+        // And the row's own label clears the column plus the row's 10px gap.
+        let title = labels
+            .iter()
+            .find(|label| label.text == "PowerShell")
+            .expect("the row is named");
+        assert_eq!(
+            title.rect[0],
+            column_left + ITEM_ICON_COLUMN_LOGICAL_PX * scale + ITEM_GAP_LOGICAL_PX * scale
+        );
+        assert_eq!(title.font_size_px, ITEM_FONT_LOGICAL_PX * scale);
     }
 }

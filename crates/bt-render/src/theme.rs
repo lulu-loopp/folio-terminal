@@ -187,6 +187,49 @@ pub struct ChromePalette {
     pub modal_scrim: [u8; 3],
     /// The scrim's alpha, in 1/255ths: `.35`.
     pub modal_scrim_alpha: u8,
+
+    // ── `.panecount`, the tab's pane-count badge (mock-up lines 292-304) ──
+    //
+    // The badge is `background: var(--active)` on every tab and takes its ink
+    // from the tab's state — `--ink2` at rest, `--ink` on the active tab. That
+    // is one declaration landing on three different surfaces, so it composites
+    // into three pairs rather than one translucent fill, for exactly the reason
+    // spelled out at `tab_close_pill_on_content`: this pipeline blends in linear
+    // light and a browser blends in sRGB, so handing the blender `--active`'s
+    // own .09 does not reproduce `--active`.
+    //
+    // Two of the three *fills* are already in this palette, because the `×`'s
+    // pill is the same `--active` over the same two surfaces: use
+    // `tab_close_pill_on_content` on the active tab and
+    // `tab_close_pill_on_hovered_tab` on a hovered one. Only the resting tab's
+    // fill is new — the `×` is never drawn there, so nothing had needed it.
+    /// `--active` over `--panel`: the badge on a tab that is neither the active
+    /// one nor under the pointer. The third surface the `×`'s pill never meets.
+    pub tab_badge_on_resting_tab: [u8; 3],
+    /// `.tab.active .panecount { color: var(--ink) }`, over the badge's own fill
+    /// on the active tab — which is `--active` over `--termbg`, not `--termbg`,
+    /// so this is a step off the tab title's own ink and not the same value.
+    ///
+    /// Deliberately **not** the accent: the mock-up's comment at line 297 rules
+    /// that filling this badge with the accent on the active tab made it say
+    /// "you are here" in the colour reserved for "that one wants you", in the
+    /// strip where unread dots live.
+    pub tab_badge_text_on_active_tab: [u8; 3],
+    /// `--ink2` over the badge's fill on a resting tab.
+    pub tab_badge_text_on_resting_tab: [u8; 3],
+    /// `--ink2` over the badge's fill on a hovered tab.
+    pub tab_badge_text_on_hovered_tab: [u8; 3],
+
+    /// `--ink3` over `--menu` — a menu row's trailing annotation, worn by the
+    /// profile picker's `default` hint (`.default-hint`, mock-up line 998).
+    ///
+    /// It exists because the nearest thing already in this palette,
+    /// `dialog_muted_text`, is the same ink over `--win`: right for the settings
+    /// dialog it is named for, and a surface too dark for a menu. The two agree
+    /// exactly in the light theme, where `--win` and `--menu` are both white,
+    /// and part by six levels in the dark one — which is precisely the kind of
+    /// error a shared name hides.
+    pub menu_item_hint_text: [u8; 3],
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
@@ -235,6 +278,15 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     menu_item_hover: [0x36, 0x36, 0x36],
     modal_scrim: [0x0f, 0x0f, 0x0f],
     modal_scrim_alpha: 89,
+    // `--active` (white .09) over `--panel` #252525: 37 + 218×.09 = 56.6.
+    tab_badge_on_resting_tab: [0x39, 0x39, 0x39],
+    // `--ink` (white .87) over that badge's fill on the active tab (47.5).
+    tab_badge_text_on_active_tab: [0xe4, 0xe4, 0xe4],
+    // `--ink2` (white .55) over 56.6, and over the hovered tab's 67.5.
+    tab_badge_text_on_resting_tab: [0xa6, 0xa6, 0xa6],
+    tab_badge_text_on_hovered_tab: [0xab, 0xab, 0xab],
+    // `--ink3` (white .38) over `--menu` #2A2A2A: 42 + 213×.38 = 122.9.
+    menu_item_hint_text: [0x7b, 0x7b, 0x7b],
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -282,6 +334,16 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     menu_item_hover: [0xf4, 0xf4, 0xf4],
     modal_scrim: [0x0f, 0x0f, 0x0f],
     modal_scrim_alpha: 89,
+    // `--active` (rgb(55,53,47) at .09) over `--panel` #F7F7F5.
+    tab_badge_on_resting_tab: [0xe6, 0xe6, 0xe3],
+    // `--ink` #37352F is opaque in this theme, so it lands unchanged.
+    tab_badge_text_on_active_tab: [0x37, 0x35, 0x2f],
+    // `--ink2` (the same ink at .65) over the resting and hovered fills.
+    tab_badge_text_on_resting_tab: [0x74, 0x73, 0x6e],
+    tab_badge_text_on_hovered_tab: [0x71, 0x6f, 0x6b],
+    // `--ink3` (the ink at .45) over `--menu` #FFFFFF — which in this theme is
+    // the same white as `--win`, so it agrees with `dialog_muted_text` exactly.
+    menu_item_hint_text: [0xa5, 0xa4, 0xa1],
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -318,6 +380,13 @@ pub const WINDOW_TAB_HEIGHT_LOGICAL_PX: f32 = 34.0;
 pub const WINDOW_TAB_RADIUS_LOGICAL_PX: f32 = 7.0;
 /// One tab's CSS cap (`design/ui-mockup.html` line 208).
 pub const WINDOW_TAB_MAX_WIDTH_LOGICAL_PX: f32 = 200.0;
+/// One tab's CSS floor (`.tab { min-width: 46px }`, `design/ui-mockup.html`
+/// line 208) — the point at which equal-share compression stops.
+///
+/// It is a floor and not a suggestion: the stylesheet's own comment at line 187
+/// rules that *past* this width the strip scrolls rather than compressing
+/// further, because the alternative is tabs spilling into the caption buttons.
+pub const WINDOW_TAB_MIN_WIDTH_LOGICAL_PX: f32 = 46.0;
 /// Equal spacing between horizontal tabs (`design/ui-mockup.html` line 183).
 pub const WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX: f32 = 1.0;
 /// `.tab { padding: 0 6px 0 12px }` — the leading inset before the mark.
@@ -335,6 +404,21 @@ pub const WINDOW_TAB_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
 pub const WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
 /// `.tab .close { border-radius: 4px }` — the pill under the pointer.
 pub const WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// The pane-count badge (`.panecount`, `design/ui-mockup.html` lines 292-304):
+/// a pill that states how many panes a tab holds.
+///
+/// `min-width: 15px; height: 15px; padding: 0 4px` — so it is a 15px square
+/// until the number needs more, and then it grows by its own padding. It is
+/// drawn only when the count is greater than one (`paneBadge`, line 4189), and
+/// it takes no space at all otherwise: "how many panes this tab holds — only
+/// shown once it holds more than one".
+pub const WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX: f32 = 15.0;
+pub const WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX: f32 = 15.0;
+pub const WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX: f32 = 4.0;
+/// `.panecount { border-radius: 4px }`.
+pub const WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// `.panecount { font-size: 10px }`.
+pub const WINDOW_TAB_BADGE_FONT_LOGICAL_PX: f32 = 10.0;
 /// The two width tiers a tab crosses as the strip fills, both of them *measured*
 /// in the mock-up (`updateTabSqueeze`) rather than counted:
 ///
