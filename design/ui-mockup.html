@@ -263,24 +263,41 @@
   .unreaddot.fail { background: var(--err); }
   .unreaddot.bell { background: var(--warn); }
   .unreaddot.await { background: var(--warn); animation: fcpulse .9s infinite; }
-  /* progress ring (OSC 9;4 in the native line): a channel of its own AROUND
-     the icon — coexists with breathing and with the dot */
+  /* progress ring (OSC 9;4 in the native line): a channel of its own that takes
+     THE MARK'S OWN SEAT — coexists with breathing and with the dot.
+
+     User ruling 2026-08-08, superseding the 25px ring that surrounded the mark
+     here: the ring REPLACES the icon for as long as a run is in flight, in the
+     icon's own 15px slot. Reasons, in the order they were argued: a 25px ring
+     around a 15px mark was the only thing in the strip drawing outside its own
+     slot, so it reached into the neighbouring tab on a squeezed strip and shoved
+     the unread dot off the corner it is positioned against; and Chrome has put a
+     downloading tab's progress in the favicon's seat for a decade without anyone
+     failing to read it. The slot is the identity, and while a command is running
+     the ring is what this tab honestly is. Nothing has to clear the mark's
+     corners any more, so the 12.5px argument above retires with the 25px box.
+
+     r=6.5 against the 2px stroke puts the ring's outer edge exactly on the 15px
+     box: 6.5 + 2/2 = 7.5. */
   .pring {
     position: absolute; left: 50%; top: 50%;
-    /* 25px: a 15px square mark's corner radius is ~10.6px from centre, so the
-       ring must clear 12.5px or it cuts through the corners (user test on the
-       square pwsh mark, 2026-07-18) */
-    width: 25px; height: 25px;
+    width: 15px; height: 15px;
     transform: translate(-50%, -50%) rotate(-90deg);
     pointer-events: none;
   }
+  /* Replacement, not superposition. The mark keeps its room — it is hidden, not
+     unmounted — so neither the tab's layout nor the dot anchored to this wrap
+     moves when a run starts or ends. */
+  .ticon-wrap:has(.pring) .ticon { visibility: hidden; }
   .pring circle { fill: none; stroke-width: 2; }
   .pring .track { stroke: var(--border); opacity: .7; }
   .pring .arc { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset .3s ease; }
   .pring.error .arc { stroke: var(--err); }
   .pring.paused .arc { stroke: var(--pause); }
   .pring.indeterminate { animation: pring-spin 1.1s linear infinite; }
-  .pring.indeterminate .arc { stroke-dasharray: 13 40.4; }
+  /* the same 24.3% of the circumference the r=8.5 ring carried (13 of 53.4),
+     re-struck against the 15px ring's 40.84 (ruling 2026-08-08) */
+  .pring.indeterminate .arc { stroke-dasharray: 9.94 30.9; }
   @keyframes pring-spin { to { transform: translate(-50%, -50%) rotate(270deg); } }
   .ticon-wrap.dead .ticon { opacity: .35; filter: grayscale(1); }
   @media (prefers-reduced-motion: reduce) {
@@ -4116,7 +4133,9 @@
       : cls.includes("fail") ? "Finished with errors"
       : cls.includes("bell") ? "Bell" : "Finished";
   }
-  const PRING_C = 53.4;   /* 2πr for r=8.5 */
+  const PRING_C = 40.84;   /* 2πr for r=6.5 — the ring wears the mark's own 15px
+                              slot rather than a 25px halo (ruling 2026-08-08,
+                              rationale on `.pring`) */
   function progressRingHtml(p) {
     if (!p) return "";
     const pct = Math.max(0, Math.min(100, Math.round(p.pct || 0)));
@@ -4124,10 +4143,10 @@
     const off = kind === "indeterminate" ? 0 : PRING_C * (1 - pct / 100);
     const tip = kind === "indeterminate" ? "Working…"
       : `${pct}%${kind === "error" ? " — error" : kind === "paused" ? " — paused" : ""}`;
-    return `<svg class="pring ${kind}" viewBox="0 0 20 20" role="img" aria-label="Progress ${tip}">
+    return `<svg class="pring ${kind}" viewBox="0 0 15 15" role="img" aria-label="Progress ${tip}">
       <title>${tip}</title>
-      <circle class="track" cx="10" cy="10" r="8.5"/>
-      <circle class="arc" cx="10" cy="10" r="8.5" stroke-dasharray="${PRING_C}" stroke-dashoffset="${off.toFixed(1)}"/></svg>`;
+      <circle class="track" cx="7.5" cy="7.5" r="6.5"/>
+      <circle class="arc" cx="7.5" cy="7.5" r="6.5" stroke-dasharray="${PRING_C}" stroke-dashoffset="${off.toFixed(1)}"/></svg>`;
   }
   function stateIcon(s, busy, unread) {
     return `<span class="ticon-wrap${s.dead ? " dead" : ""}" data-suid="${s.uid}">
@@ -5705,6 +5724,16 @@
         }
         const c = e.target.closest(".close");
         if (c) { closeTab(+c.dataset.close); e.stopPropagation(); return; }
+        /* MIDDLE-CLICK CLOSES THIS TAB (recorded 2026-08-08, kept by user
+           default). It is not wired in this prototype and it is not a fourth
+           way to close a tab so much as the one every tabbed application on
+           this platform already has; a hand that has used a browser will try
+           it, and finding nothing there reads as a broken tab rather than as a
+           gesture we declined. The pinned tab is no exception: it has no × to
+           press, and it does not get to be unclosable either — the pin is a
+           promise about the next launch, not a lock. The native build wires it
+           on `auxclick`/button 1, guarded by the same "last tab stays" rule the
+           × obeys (G66). */
         const p = e.target.closest(".pin");
         if (p) { togglePin(+p.dataset.pin); e.stopPropagation(); return; }
         const ve = e.target.closest(".vexp");
@@ -7122,7 +7151,18 @@
   });
 
   /* "never mind" — everything pointerup tears down, and NO commit. The drop
-     stays where it was; the tab settles back into its slot. */
+     stays where it was; the tab settles back into its slot.
+
+     Which slot, recorded 2026-08-08: this prototype settles the tab into
+     whichever slot the LIVE REORDER last put it in, so Esc undoes the drop but
+     keeps the reordering the drag performed on its way. The native build reads
+     the sentence above literally instead and slides the tab back to the slot the
+     drag BEGAN in, displaced neighbours travelling home with it. "NO commit" is
+     the argument: the reorder is as much a commit as the drop is, it was made by
+     the same gesture, and a cancel that keeps half of what it cancelled leaves
+     the user to undo the rest by hand. What Esc still does not undo is the
+     press-activation (J108) — the press chose this tab and a cancelled drag does
+     not unchoose it. */
   function cancelDrag() {
     if (!drag) return;
     const d = drag;

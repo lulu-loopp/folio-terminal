@@ -450,7 +450,11 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     active_tab: [0x1b, 0x1b, 0x1b],
     pane_head: [0x1b, 0x1b, 0x1b],
     pane_head_edge: [0x29, 0x29, 0x29],
-    pane_title: [0x75, 0x75, 0x75],
+    // `--ink3` over `--termbg #1B1B1B`, not over `--win #202020`: the pane head
+    // is the terminal surface (see `pane_head` above), and mixing this ink over
+    // the dialog's grey instead — which is where the `0x75` this replaced came
+    // from — makes an unfocused pane title three levels too pale.
+    pane_title: [0x72, 0x72, 0x72],
     pane_title_focus: [0xe1, 0xe1, 0xe1],
     accent: [0x82, 0x8f, 0xff],
     menu_surface: [0x2a, 0x2a, 0x2a],
@@ -658,12 +662,14 @@ pub const WINDOW_TAB_STATUS_DOT_LOGICAL_PX: f32 = 6.0;
 pub const WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX: f32 = -2.0;
 pub const WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX: f32 = -4.0;
 
-/// `.pring circle { stroke-width: 2 }` (line 277), read as logical pixels.
+/// `.pring circle { stroke-width: 2 }`, read as logical pixels.
 ///
-/// The mock-up's ring is a 25px box drawing a 20-unit `viewBox`, so its stroke
-/// lands at 2.5 physical units — but that scale existed only to clear the mark
-/// underneath. With the ring *replacing* the mark (user ruling), the stroke is
-/// taken at its declared weight.
+/// The stroke is taken at its declared weight. It used to need an argument:
+/// the mock-up drew a 25px box over a 20-unit `viewBox`, landing the stroke at
+/// 2.5 physical units, and that scale existed only to clear the mark
+/// underneath. The replacement ring was a deviation then; the mock-up has since
+/// been written back to it (ruling 2026-08-08), so the two now agree and the
+/// declared weight is simply the weight.
 pub const WINDOW_TAB_RING_STROKE_LOGICAL_PX: f32 = 2.0;
 /// The ring's path radius inside [`WINDOW_TAB_MARK_LOGICAL_PX`].
 ///
@@ -674,10 +680,14 @@ pub const WINDOW_TAB_RING_RADIUS_LOGICAL_PX: f32 =
     (WINDOW_TAB_MARK_LOGICAL_PX - WINDOW_TAB_RING_STROKE_LOGICAL_PX) / 2.0;
 /// The indeterminate arc's length as a fraction of one turn.
 ///
-/// `.pring.indeterminate .arc { stroke-dasharray: 13 40.4 }` (line 283) against
-/// the mock-up's own `PRING_C = 53.4` (line 4118). Kept as a ratio because the
-/// ring changed size: an absolute dash length is a different arc on a different
-/// circle, and the design means the arc.
+/// Struck as `13` units of a `PRING_C = 53.4` circumference when the ring was
+/// still the mock-up's r=8.5 halo, and kept as that exact ratio rather than as
+/// a length: an absolute dash is a different arc on a different circle, and the
+/// design means the arc. The mock-up now states the same fraction at the
+/// replacement ring's own size — `stroke-dasharray: 9.94 30.9` against
+/// `PRING_C = 40.84` for r=6.5 — which is this ratio to four decimals. The
+/// original spelling is kept here because it is the exact one; the test below
+/// asserts the two agree, so a future edit to either cannot drift alone.
 pub const WINDOW_TAB_RING_INDETERMINATE_TURNS: f32 = 13.0 / 53.4;
 
 /// `.ticon.working { animation: breathe 1.7s ease-in-out infinite }` (line 245).
@@ -1262,10 +1272,14 @@ mod tests {
     }
 
     /// PIN (T2 progress ring): the ring *replaces* the mark rather than
-    /// encircling it (user ruling, deviating from the mock-up's `.pring`), so
-    /// it inherits the mark's own 15px box and its radius is derived from that
-    /// box and the stroke — not carried over from the mock-up's 25px overlay,
-    /// whose only reason to be 25px was clearing the mark it sat on top of.
+    /// encircling it, so it inherits the mark's own 15px box and its radius is
+    /// derived from that box and the stroke — not carried over from the 25px
+    /// overlay the mock-up used to draw, whose only reason to be 25px was
+    /// clearing the mark it sat on top of.
+    ///
+    /// This began as a deviation from `.pring` under a user ruling; the mock-up
+    /// was written back to the replacement ring on 2026-08-08, so the box below
+    /// is now the design's own and no longer a departure from it.
     ///
     /// The stroke must lie *inside* the box: a stroke is centred on its path,
     /// so the outer edge is `radius + stroke/2` and that has to be exactly half
@@ -1286,17 +1300,24 @@ mod tests {
     /// PIN (T2 progress ring): the indeterminate arc's *length* is the mock-up's
     /// own, carried across the size change as the ratio it actually is.
     ///
-    /// `.pring.indeterminate .arc { stroke-dasharray: 13 40.4 }` (line 283) is
-    /// 13 units of a 53.4-unit circumference — the mock-up spells that
-    /// circumference out at `PRING_C` (line 4118, "2πr for r=8.5"). A dash
-    /// *length* in absolute units would shrink to a speck at our smaller
-    /// radius; the fraction of the circle is what the design actually means.
+    /// The arc was first struck as `stroke-dasharray: 13 40.4` against a
+    /// `PRING_C` of 53.4 ("2πr for r=8.5"). A dash *length* in absolute units
+    /// would have shrunk to a speck once the ring took the mark's smaller slot;
+    /// the fraction of the circle is what the design actually means, so that is
+    /// what this constant holds.
+    ///
+    /// The mock-up has since been written back to the replacement ring (ruling
+    /// 2026-08-08) and re-struck the dash at that size — `9.94 30.9` against
+    /// `PRING_C = 40.84` for r=6.5. The last two assertions are the seam
+    /// between the two documents: they check that the design's new spelling and
+    /// this constant describe the same arc, so an edit to either one alone
+    /// fails here rather than drifting quietly.
     #[test]
     fn the_indeterminate_arc_keeps_the_mock_ups_fraction_of_the_circle() {
         let mock_circumference = 2.0 * std::f32::consts::PI * 8.5;
         assert!(
             (mock_circumference - 53.4).abs() < 0.05,
-            "the mock-up's own PRING_C must be 2πr for r=8.5"
+            "the mock-up's original PRING_C must be 2πr for r=8.5"
         );
         assert!(
             (WINDOW_TAB_RING_INDETERMINATE_TURNS - 13.0 / 53.4).abs() < 1e-6,
@@ -1305,6 +1326,19 @@ mod tests {
         // Roughly a quarter turn: plainly an arc and plainly not a full ring,
         // which is the whole of what "indeterminate" has to say.
         assert!((0.2..0.3).contains(&WINDOW_TAB_RING_INDETERMINATE_TURNS));
+
+        // The mock-up's re-struck dash, against the circumference it now
+        // declares. Both are quoted as the design spells them, to two decimals,
+        // so this reads as the arithmetic check it is.
+        let restruck_circumference = 2.0 * std::f32::consts::PI * WINDOW_TAB_RING_RADIUS_LOGICAL_PX;
+        assert!(
+            (restruck_circumference - 40.84).abs() < 0.005,
+            "the mock-up's current PRING_C must be 2πr for this ring's radius"
+        );
+        assert!(
+            (9.94 / 40.84 - WINDOW_TAB_RING_INDETERMINATE_TURNS).abs() < 1e-4,
+            "the design's re-struck dash and this ratio must be one arc"
+        );
     }
 
     /// PIN (T2 tab status): the four "something happened" colours are the
@@ -1501,6 +1535,58 @@ mod tests {
                 "the {ring} ring is {dark} on dark and {light} on light"
             );
         }
+    }
+
+    /// PIN: the pane head's four tokens composite over `--termbg`, and nothing
+    /// else.
+    ///
+    /// `.panehead` (mock-up 1498-1506) sits on the terminal surface, not on
+    /// chrome — `pane_head` says so in its own value — so every ink and edge
+    /// that lands on it is mixed over `--termbg`: `#1B1B1B` on dark, `#FFFFFF`
+    /// on light. That single fact is the whole test, because the light canvas
+    /// hides its violation: there `--termbg`, `--win` and `--menu` are all
+    /// white, so an ink mixed over the wrong one of the three still comes out
+    /// right, and only the dark canvas can tell them apart.
+    ///
+    /// Red gate: `pane_title` carried `0x75` on dark, which is `--ink3` over
+    /// `--win #202020` — `dialog_muted_text`'s value, correct for the settings
+    /// dialog and three levels too pale for a terminal. It reached this field
+    /// by way of the light theme, where the two genuinely are one number, and
+    /// no test had ever asked the dark pair to differ. This is the error
+    /// `menu_item_hint_text` was split out to prevent, caught a second time in
+    /// a second family; the assertions below therefore pin each dark composite
+    /// to its arithmetic *and* assert that the two names part on dark.
+    #[test]
+    fn the_pane_heads_inks_are_mixed_over_the_terminal_and_not_over_chrome() {
+        // The surface, stated by the palette itself.
+        assert_eq!(DARK_CHROME.pane_head, [0x1b, 0x1b, 0x1b], "--termbg");
+        assert_eq!(LIGHT_CHROME.pane_head, [0xff, 0xff, 0xff]);
+
+        // --border-soft rgba(255,255,255,.06) over #1B1B1B:
+        //   27 + 228 * .06 = 40.68 -> 41 = 0x29.
+        assert_eq!(DARK_CHROME.pane_head_edge, [0x29, 0x29, 0x29]);
+        // --ink3 rgba(255,255,255,.38) over #1B1B1B:
+        //   27 + 228 * .38 = 113.64 -> 114 = 0x72.
+        assert_eq!(DARK_CHROME.pane_title, [0x72, 0x72, 0x72]);
+        // --ink rgba(255,255,255,.87) over #1B1B1B:
+        //   27 + 228 * .87 = 225.36 -> 225 = 0xe1.
+        assert_eq!(DARK_CHROME.pane_title_focus, [0xe1, 0xe1, 0xe1]);
+
+        // --ink3 rgba(55,53,47,.45) over #FFFFFF, channel by channel:
+        //   255 - 200 * .45 = 165 = 0xa5 / 255 - 202 * .45 = 164.1 -> 0xa4
+        //   / 255 - 208 * .45 = 161.4 -> 0xa1.
+        assert_eq!(LIGHT_CHROME.pane_title, [0xa5, 0xa4, 0xa1]);
+        // --ink is opaque on light, so the focused head is `--ink` itself.
+        assert_eq!(LIGHT_CHROME.pane_title_focus, [0x37, 0x35, 0x2f]);
+
+        // The two muted inks are one number on light and must not be on dark:
+        // white over white is white, and `--win` is a fifth of a shade lighter
+        // than `--termbg` everywhere else.
+        assert_eq!(LIGHT_CHROME.pane_title, LIGHT_CHROME.dialog_muted_text);
+        assert_ne!(
+            DARK_CHROME.pane_title, DARK_CHROME.dialog_muted_text,
+            "`--ink3` over `--termbg` and over `--win` are different greys"
+        );
     }
 
     /// PIN (settings dialog): every token the modal wears is the mock-up's own
