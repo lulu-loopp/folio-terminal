@@ -318,6 +318,27 @@ pub struct ChromePalette {
     pub menu_item_text_selected: [u8; 3],
     /// `--hover` over `--menu`: a combo item under the pointer.
     pub menu_item_hover: [u8; 3],
+    /// `--active` over `--menu`: the focused cell of a layout peek's schematic
+    /// (`.mini-leaf.focused { background: var(--active) }`, mock-up 1921).
+    ///
+    /// A fourth wash rather than a reuse of [`Self::menu_item_hover`], because
+    /// `--hover` and `--active` are two different tokens — `.055` against `.09`
+    /// (mock-up 24-25) — and the mock-up spends them on two different states.
+    /// Borrowing the hover would have drawn "this is the pane you are in" at the
+    /// weight of "the pointer happens to be here".
+    pub peek_leaf_focus_fill: [u8; 3],
+    /// `--ink3` over [`Self::peek_leaf_focus_fill`]: that cell's border
+    /// (`.mini-leaf.focused { border-color: var(--ink3) }`).
+    ///
+    /// Composited over the wash rather than over `--menu`, because that is what
+    /// it sits on — the leaf's background paints under its own border
+    /// (`background-clip: border-box`), so the hairline never touches the menu's
+    /// face. The difference is 12/255 on dark, which is most of a step in a
+    /// palette whose steps are this small.
+    pub peek_leaf_focus_edge: [u8; 3],
+    /// `--ink` over [`Self::peek_leaf_focus_fill`]: that cell's name
+    /// (`.mini-leaf.focused { color: var(--ink) }`).
+    pub peek_leaf_focus_text: [u8; 3],
     /// A modal scrim's colour (`.overlay { background: rgba(15,15,15,.35) }`).
     /// Blended at draw time over whatever the window happens to be showing, and
     /// the one palette entry the mock-up declares once for both themes: a scrim
@@ -451,6 +472,13 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     menu_item_text: [0x9f, 0x9f, 0x9f],
     menu_item_text_selected: [0xe3, 0xe3, 0xe3],
     menu_item_hover: [0x36, 0x36, 0x36],
+    // `--active` rgba(255,255,255,.09) over `--menu` #2A2A2A:
+    // 42 + 213×.09 = 61.17.
+    peek_leaf_focus_fill: [0x3d, 0x3d, 0x3d],
+    // `--ink3` rgba(255,255,255,.38) over that: 61 + 194×.38 = 134.72.
+    peek_leaf_focus_edge: [0x87, 0x87, 0x87],
+    // `--ink` rgba(255,255,255,.87) over that: 61 + 194×.87 = 229.78.
+    peek_leaf_focus_text: [0xe6, 0xe6, 0xe6],
     modal_scrim: [0x0f, 0x0f, 0x0f],
     modal_scrim_alpha: 89,
     // `--active` (white .09) over `--panel` #252525: 37 + 218×.09 = 56.6.
@@ -521,6 +549,14 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     menu_item_text: [0x7d, 0x7c, 0x78],
     menu_item_text_selected: [0x37, 0x35, 0x2f],
     menu_item_hover: [0xf4, 0xf4, 0xf4],
+    // `--active` rgba(55,53,47,.09) over `--menu` #FFFFFF:
+    // 255 − 200×.09 = 237, 255 − 202×.09 = 236.82, 255 − 208×.09 = 236.28.
+    peek_leaf_focus_fill: [0xed, 0xed, 0xec],
+    // `--ink3` rgba(55,53,47,.45) over that: 237 − 182×.45 = 155.1,
+    // 237 − 184×.45 = 154.2, 236 − 189×.45 = 150.95.
+    peek_leaf_focus_edge: [0x9b, 0x9a, 0x97],
+    // `--ink` #37352F is opaque on light: it composites to itself.
+    peek_leaf_focus_text: [0x37, 0x35, 0x2f],
     modal_scrim: [0x0f, 0x0f, 0x0f],
     modal_scrim_alpha: 89,
     // `--active` (rgb(55,53,47) at .09) over `--panel` #F7F7F5.

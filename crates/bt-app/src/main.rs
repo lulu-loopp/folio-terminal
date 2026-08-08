@@ -13,6 +13,7 @@ use std::{
 
 mod input;
 mod marks;
+mod peek_strip;
 mod persist;
 mod profiles;
 mod restore;
@@ -649,6 +650,15 @@ struct Runtime {
     /// answers "what is this?" about the thing under the pointer, and there is
     /// one pointer.
     tooltip: tooltip::TooltipHost,
+    /// The layout peek (T7) — the tip's near relative, and deliberately not the
+    /// same singleton.
+    ///
+    /// Two hosts because the two disagree about both things a hover popup is: a
+    /// 350ms clock against the tip's 380ms, and no fade at all against the tip's
+    /// 90ms. Folding them together would have left one host with two delays and
+    /// a conditional fade, and then §6's mutual exclusion — the reason they are
+    /// apart — would have had nothing to exclude. See [`peek_strip`].
+    layout_peek: peek_strip::PeekHost,
     /// Everything tippable, rebuilt beside the chrome it describes.
     ///
     /// Never cached across a rebuild: the mock-up rewrites `el.title` on every
@@ -3588,6 +3598,7 @@ impl Runtime {
             pending_math_context_anchor: None,
             seat_pointer: seats::ChromePointer::default(),
             tooltip: tooltip::TooltipHost::default(),
+            layout_peek: peek_strip::PeekHost::default(),
             tooltip_anchors: tooltip::TooltipAnchors::default(),
             tooltip_drawn_opacity: None,
             chrome_marks: marks::ChromeMarkRasters::default(),
@@ -4247,6 +4258,15 @@ impl Runtime {
         // what keeps the host from owing a frame it could never pay.
         self.tooltip.retain(|id| anchors.find(id).is_some());
         self.tooltip_anchors = anchors;
+        // The peek's subject is a tab rather than an anchor, so it is retired
+        // against the same predicate that armed it. Sampled into a slice first:
+        // the closure cannot read `self` while the host it is retiring is part
+        // of `self`.
+        let eligible: Vec<bool> = (0..self.tabs.len())
+            .map(|index| self.layout_peek_eligible(index))
+            .collect();
+        self.layout_peek
+            .retain(|index| eligible.get(index).copied().unwrap_or(false));
     }
 
     /// Whether the tip on screen differs from the tip last painted — the strip's
@@ -4310,6 +4330,167 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// Whether this tab has a layout worth showing, and whether now is a moment
+    /// to show it (L131).
+    ///
+    /// One predicate, read by both the arming path and the retiring one, because
+    /// the two asking different questions is exactly how a popup survives the
+    /// death of its own subject.
+    fn layout_peek_eligible(&self, tab: usize) -> bool {
+        let Some(state) = self.tabs.get(tab) else {
+            return false;
+        };
+        peek_strip::eligible(
+            state.seats.pane_count(),
+            tab == self.active_tab,
+            // A drag owns the pointer outright — the rule the tip, the hyperlink
+            // underline and the terminal's own selection already live by.
+            self.tab_drag.is_some(),
+            // The editor IS the answer, exactly as it is for the tip: a
+            // schematic laid over the box you are typing a name into covers the
+            // box you are typing it into.
+            self.rename
+                .as_ref()
+                .is_some_and(|editor| editor.tab == state.id),
+        )
+    }
+
+    /// The tab a peek would belong to, if the pointer is on one that qualifies.
+    ///
+    /// A tab's own controls count as the tab: `pointerenter`/`pointerleave` do
+    /// not fire for a child, so in the mock-up the pointer crossing onto the pin
+    /// never leaves the tab, and the schematic stays up.
+    fn layout_peek_target_at(&self, position: PhysicalPosition<f64>) -> Option<usize> {
+        let tab = match self.chrome_target_at(position)? {
+            seats::ChromeTarget::Tab(index)
+            | seats::ChromeTarget::TabPin(index)
+            | seats::ChromeTarget::TabClose(index) => index,
+            _ => return None,
+        };
+        self.layout_peek_eligible(tab).then_some(tab)
+    }
+
+    /// Track the tab under the pointer (L131, L135).
+    fn note_layout_peek(&mut self, tab: Option<usize>) -> Result<()> {
+        if self.layout_peek.observe(tab, Instant::now()) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Show a settled peek — and, on the same beat, silence the tip.
+    ///
+    /// §6's whole mechanism is this one line. The peek is due at 350ms and the
+    /// tip at 380ms, so promotion always happens first, and promotion is where
+    /// the tip stands down. It is *disarmed* rather than merely left undrawn:
+    /// a candidate held past its own deadline would report that deadline
+    /// forever, and a `WaitUntil` on an instant already in the past is a loop
+    /// that never sleeps.
+    fn advance_layout_peek_if_due(&mut self, now: Instant) -> Result<()> {
+        if !self.layout_peek.activate_if_due(now) {
+            return Ok(());
+        }
+        self.tooltip.hide();
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Take the peek down — any press, a lost window, a drag starting (L135).
+    fn hide_layout_peek(&mut self) -> Result<()> {
+        if self.layout_peek.hide() && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Whether a showing peek has already answered for this anchor.
+    ///
+    /// The other half of §6, and the half that handles the pointer *moving*
+    /// inside a tab whose peek is up: promotion silenced the tip once, and this
+    /// is what stops the next mouse-move from arming it again.
+    fn layout_peek_suppresses(&self, anchor: tooltip::TooltipAnchorId) -> bool {
+        peek_strip::suppresses(self.layout_peek.active(), anchor)
+    }
+
+    /// The peek's own layer, or nothing when none is showing.
+    ///
+    /// Everything is read out of *this* frame — the tree, the names, the focus,
+    /// the breath — for the tip's reason: a schematic that remembered the frame
+    /// it appeared on would keep showing a pane that has since closed.
+    fn layout_peek_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        let Some(index) = self.layout_peek.active() else {
+            return Vec::new();
+        };
+        let now = Instant::now();
+        let motion = self.motion;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let geometry = seats::tab_strip_geometry(
+            width as f32,
+            scale,
+            &self.tab_trailers(now),
+            self.active_tab,
+            self.tab_scroll,
+        );
+        let Some(host) = geometry.tabs.get(index).map(|slot| slot.body) else {
+            return Vec::new();
+        };
+        let Some(tab) = self.tabs.get(index) else {
+            return Vec::new();
+        };
+        // The breath belongs to the strip's clock, and it is sampled once here
+        // so the mark in the schematic and the mark on the tab are at the same
+        // point of the same 1.7s — two clocks would beat against each other.
+        let breath = mark_opacity(
+            tab.session.status().working,
+            false,
+            tab.animation_elapsed(now),
+            motion,
+        );
+        let focus = tab.seats.focus();
+        let preview_title = tab.preview_image.as_ref().map(PreviewImageState::title);
+        let leaves: Vec<peek_strip::PeekLeaf> = tab
+            .seats
+            .tree()
+            .seats_in_order()
+            .iter()
+            .map(|seat| peek_strip::PeekLeaf {
+                kind: seat.kind,
+                title: seats::seat_caption(seat.kind, preview_title.as_deref()).to_owned(),
+                focused: seat.id == focus,
+                // Only a terminal has a session that can be working in it.
+                mark_opacity: if seat.kind == bt_layout::SeatKind::Terminal {
+                    breath
+                } else {
+                    1.0
+                },
+            })
+            .collect();
+        let tree = tab.seats.tree().clone();
+
+        // Only the font knows how wide a name is, so the measuring happens here,
+        // beside the renderer, exactly as the tip's does.
+        let font_px = peek_strip::LIST_FONT_LOGICAL_PX * scale;
+        let widths: Vec<f32> = leaves
+            .iter()
+            .map(|leaf| self.renderer.measure_chrome_text(&leaf.title, font_px))
+            .collect();
+        let Some(layout) = peek_strip::layout(
+            &tree,
+            &leaves,
+            &widths,
+            host,
+            (width as f32, height as f32),
+            scale,
+        ) else {
+            return Vec::new();
+        };
+        let palette = bt_render::chrome_palette();
+        peek_strip::build(&layout, &leaves, &palette, scale)
     }
 
     /// Fit the open editor's draft into the box the strip has for it.
@@ -4550,6 +4731,12 @@ impl Runtime {
         // the menu's `30` (mock-up 1207). A tip is the only surface in this
         // window that is never covered, because it is the only one whose whole
         // job is to explain what is under it.
+        // The tip's own family, immediately under it. The order between these
+        // two is unobservable by construction — §6 keeps them from ever being on
+        // screen together — so it is fixed here for the reader's sake rather
+        // than for the compositor's, and the mock-up's own `z-index` agrees
+        // (`.layout-peek` 35, `.tip` 60).
+        layers.extend(self.layout_peek_layer());
         layers.extend(self.tooltip_layer());
         let layers = self.settings_marks.resolve_overlay(layers);
         self.renderer.set_modal_overlay(layers)
@@ -5539,6 +5726,7 @@ impl Runtime {
         // label on something you are no longer looking at.
         if !focused {
             self.tooltip.hide();
+            self.layout_peek.hide();
         }
         self.cursor_blink.set_focused(focused, now);
         self.renderer.set_window_focused(focused);
@@ -6562,7 +6750,13 @@ impl Runtime {
         // Below every gesture that owns the pointer and beside the hover it
         // follows: the anchors under a drag, a divider or an open picker were
         // never reached, and each of those paths returned above having said so.
-        self.note_tooltip(self.tooltip_anchor_at(position))?;
+        // The peek first, and the tip only where the peek is not already
+        // answering (§6). A tab that qualifies for neither is untouched by both.
+        self.note_layout_peek(self.layout_peek_target_at(position))?;
+        let anchor = self
+            .tooltip_anchor_at(position)
+            .filter(|anchor| !self.layout_peek_suppresses(*anchor));
+        self.note_tooltip(anchor)?;
         // Everything below reads the pointer through `terminal_pointer` — one
         // correction, in one place, applied to hover, peek, selection and
         // protocol forwarding alike. Outside the seat it answers `None`, which
@@ -6840,6 +7034,9 @@ impl Runtime {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == press.tab) else {
             return Ok(());
         };
+        // L135: a drag owns the pointer, and a schematic left hanging under a
+        // tab that is now moving would be describing where the tab used to be.
+        self.hide_layout_peek()?;
         self.activate_tab(index, false)?;
         // Re-read the strip: activating may have scrolled it to reveal the tab,
         // and a grip measured against the old scroll would be wrong by exactly
@@ -7306,6 +7503,9 @@ impl Runtime {
         // for the same reason.
         if state == ElementState::Pressed {
             self.hide_tooltip()?;
+            // L135 sends the peek the same way and for the same reason: it is a
+            // glance, and pressing is you saying you are done glancing.
+            self.hide_layout_peek()?;
         }
         // A modal means MODAL. Ahead of the chrome router, so the caption run —
         // the gear included — is behind the scrim like everything else, and no
@@ -8551,6 +8751,13 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        // Ahead of the tip's own promotion, so §6's ordering is structural and
+        // not merely a consequence of 350 being less than 380: on the frame both
+        // came due, the peek is already showing when the tip asks.
+        if let Err(error) = runtime.advance_layout_peek_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.advance_tooltip_if_due(now) {
             self.fail(event_loop, error);
             return;
@@ -8600,6 +8807,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             // until it lands. A window with no tip under the pointer reports
             // nothing and costs no wake-ups at all.
             runtime.tooltip_deadline(now),
+            // The peek's 350ms while one is settling, and nothing afterwards:
+            // it has no fade, so a schematic on screen is finished and asks for
+            // no frames at all.
+            runtime.layout_peek.deadline(),
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,

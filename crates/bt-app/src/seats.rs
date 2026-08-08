@@ -1768,12 +1768,7 @@ pub fn build_chrome_for_tabs(
                     mark_color,
                 ));
                 labels.push(ChromeLabel {
-                    text: if placement.kind == SeatKind::Preview {
-                        preview_title.unwrap_or_else(|| seat_title(placement.kind))
-                    } else {
-                        seat_title(placement.kind)
-                    }
-                    .to_owned(),
+                    text: seat_caption(placement.kind, preview_title).to_owned(),
                     rect: [
                         mark_left + mark_size + SEAT_TITLE_GAP_LOGICAL_PX * scale,
                         rect[1],
@@ -2531,6 +2526,24 @@ fn collapse_bar_contents(
     }
 }
 
+/// What a pane calls itself.
+///
+/// The one channel both the pane head and the layout peek read, so a schematic
+/// can never name a pane something other than what the pane's own caption says.
+/// Two call sites reading two expressions is how those two drift apart, and a
+/// peek that disagrees with the window behind it is worse than no peek.
+///
+/// Today only a preview carries a name of its own; the rest answer by kind,
+/// because a tab holds exactly one terminal and that terminal's name is the
+/// tab's. When terminals learn per-seat titles, this is the one place that has
+/// to hear about it.
+pub(crate) fn seat_caption(kind: SeatKind, preview_title: Option<&str>) -> &str {
+    match kind {
+        SeatKind::Preview => preview_title.unwrap_or_else(|| seat_title(kind)),
+        _ => seat_title(kind),
+    }
+}
+
 fn seat_title(kind: SeatKind) -> &'static str {
     match kind {
         SeatKind::Terminal => "Terminal",
@@ -2553,7 +2566,10 @@ fn seat_title(kind: SeatKind) -> &'static str {
 /// this build cannot name. It gets the generic pane outline in the same quiet
 /// ink a body notice uses — a placeholder is a statement about this build, not
 /// an invitation, and the accent is reserved for things that want you.
-fn pane_mark(kind: SeatKind, palette: bt_render::ChromePalette) -> (ChromeMark, f32, [u8; 3]) {
+pub(crate) fn pane_mark(
+    kind: SeatKind,
+    palette: bt_render::ChromePalette,
+) -> (ChromeMark, f32, [u8; 3]) {
     match kind {
         SeatKind::Terminal => (
             ChromeMark::ProfilePowerShell,
