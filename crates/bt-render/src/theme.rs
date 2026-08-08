@@ -355,6 +355,40 @@ pub struct ChromePalette {
     /// and part by six levels in the dark one — which is precisely the kind of
     /// error a shared name hides.
     pub menu_item_hint_text: [u8; 3],
+
+    // ── Status semantics (mock-up lines 28-35) ──
+    //
+    // The mock-up declares these in `:root` with a comment that rules them
+    // explicitly: "every 'something happened' colour goes through these four,
+    // never a literal". `body.dark` overrides `--accent` and leaves these
+    // alone, so three of the four are one set shared by both canvases and the
+    // fourth is [`Self::accent`]. They are opaque hex in the design, so unlike
+    // most of this palette there is nothing to pre-composite — they land as
+    // written.
+    /// `--err #c50f1f` — a session that finished with a failing exit code, worn
+    /// by the tab's dot and by a progress ring reporting `OSC 9;4` state 2.
+    pub status_err: [u8; 3],
+    /// `--warn #d9822b` — the bell, and (once the attention queue lands) an
+    /// agent blocked on you.
+    pub status_warn: [u8; 3],
+    /// `--pause #c19c00` — a progress ring reporting `OSC 9;4` state 4.
+    pub status_pause: [u8; 3],
+
+    // ── The progress ring's track (mock-up line 278) ──
+    //
+    // `.pring .track { stroke: var(--border); opacity: .7 }` — one declaration
+    // landing on the three surfaces a tab can wear, pre-composited into three
+    // entries for the reason spelled out at `tab_close_pill_on_content`.
+    //
+    // There is no fourth: a ring is only ever drawn in a tab's mark slot, and a
+    // tab is exactly one of active, hovered, or at rest.
+    /// `--border` at `.7` over the active tab, whose fill is `--termbg`.
+    pub ring_track_on_active_tab: [u8; 3],
+    /// The same over a resting tab, whose fill is `--panel`.
+    pub ring_track_on_resting_tab: [u8; 3],
+    /// The same over a hovered tab — `--hover` over `--panel`, which is the
+    /// value [`Self::caption_hover`] already carries.
+    pub ring_track_on_hovered_tab: [u8; 3],
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
@@ -412,6 +446,17 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     tab_badge_text_on_hovered_tab: [0xab, 0xab, 0xab],
     // `--ink3` (white .38) over `--menu` #2A2A2A: 42 + 213×.38 = 122.9.
     menu_item_hint_text: [0x7b, 0x7b, 0x7b],
+    // The mock-up's status semantics live in `:root` and `body.dark` overrides
+    // none of them, so the dark canvas wears the same three literals.
+    status_err: [0xc5, 0x0f, 0x1f],
+    status_warn: [0xd9, 0x82, 0x2b],
+    status_pause: [0xc1, 0x9c, 0x00],
+    // `--border` (white at .094) at `opacity: .7` — .0658 white — over
+    // `--termbg` #1B1B1B, `--panel` #252525, and `--hover`-over-`--panel`
+    // #313131 respectively.
+    ring_track_on_active_tab: [0x2a, 0x2a, 0x2a],
+    ring_track_on_resting_tab: [0x33, 0x33, 0x33],
+    ring_track_on_hovered_tab: [0x3f, 0x3f, 0x3f],
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -469,6 +514,16 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // `--ink3` (the ink at .45) over `--menu` #FFFFFF — which in this theme is
     // the same white as `--win`, so it agrees with `dialog_muted_text` exactly.
     menu_item_hint_text: [0xa5, 0xa4, 0xa1],
+    // Opaque in the mock-up's `:root`, and not overridden by either canvas.
+    status_err: [0xc5, 0x0f, 0x1f],
+    status_warn: [0xd9, 0x82, 0x2b],
+    status_pause: [0xc1, 0x9c, 0x00],
+    // `--border` (black at .088) at `opacity: .7` — .0616 black — over
+    // `--termbg` #FFFFFF, `--panel` #F7F7F5, and `--hover`-over-`--panel`
+    // #ECECEA respectively.
+    ring_track_on_active_tab: [0xef, 0xef, 0xef],
+    ring_track_on_resting_tab: [0xe8, 0xe8, 0xe6],
+    ring_track_on_hovered_tab: [0xdd, 0xdd, 0xdc],
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -524,6 +579,68 @@ pub const WINDOW_TAB_GAP_LOGICAL_PX: f32 = 8.0;
 pub const WINDOW_TAB_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.ticon`/`.pmark` inside a tab: a 15px square profile mark.
 pub const WINDOW_TAB_MARK_LOGICAL_PX: f32 = 15.0;
+// ── T2: the state channels that ride on a tab's mark slot ──
+//
+// The mock-up hangs three things off `.ticon-wrap` (line 238), a wrapper whose
+// entire job is to be a positioning origin: the mark itself, an absolutely
+// positioned dot at its corner, and an absolutely positioned progress ring.
+// Because the two additions are *absolute*, neither one takes part in the tab's
+// flex layout — adding or removing them moves nothing. That is a property the
+// design depends on, and every constant below is chosen to preserve it.
+
+/// `.unreaddot { width: 6px; height: 6px; border-radius: 50% }` (line 255).
+///
+/// `border-radius: 50%` on a square is a circle, so this doubles as the
+/// diameter: the dot's radius is half of it, and it is drawn as a pill whose
+/// round is its own half-width rather than as a separate circle primitive.
+pub const WINDOW_TAB_STATUS_DOT_LOGICAL_PX: f32 = 6.0;
+/// `.unreaddot { top: -2px; right: -4px }` — the dot's offsets from the mark
+/// slot's own top-right corner, in the sign CSS uses: negative is *outward*.
+///
+/// The dot deliberately overhangs the slot on both axes. It is a badge on the
+/// mark, not a thing beside it, and a badge that fits neatly inside its host
+/// reads as part of the artwork.
+pub const WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX: f32 = -2.0;
+pub const WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX: f32 = -4.0;
+
+/// `.pring circle { stroke-width: 2 }` (line 277), read as logical pixels.
+///
+/// The mock-up's ring is a 25px box drawing a 20-unit `viewBox`, so its stroke
+/// lands at 2.5 physical units — but that scale existed only to clear the mark
+/// underneath. With the ring *replacing* the mark (user ruling), the stroke is
+/// taken at its declared weight.
+pub const WINDOW_TAB_RING_STROKE_LOGICAL_PX: f32 = 2.0;
+/// The ring's path radius inside [`WINDOW_TAB_MARK_LOGICAL_PX`].
+///
+/// A stroke straddles its path, so the outer edge sits half a stroke beyond the
+/// radius; for the ring to fill the slot exactly and clip nowhere, the radius
+/// is the slot's half-width less half a stroke.
+pub const WINDOW_TAB_RING_RADIUS_LOGICAL_PX: f32 =
+    (WINDOW_TAB_MARK_LOGICAL_PX - WINDOW_TAB_RING_STROKE_LOGICAL_PX) / 2.0;
+/// The indeterminate arc's length as a fraction of one turn.
+///
+/// `.pring.indeterminate .arc { stroke-dasharray: 13 40.4 }` (line 283) against
+/// the mock-up's own `PRING_C = 53.4` (line 4118). Kept as a ratio because the
+/// ring changed size: an absolute dash length is a different arc on a different
+/// circle, and the design means the arc.
+pub const WINDOW_TAB_RING_INDETERMINATE_TURNS: f32 = 13.0 / 53.4;
+
+/// `.ticon.working { animation: breathe 1.7s ease-in-out infinite }` (line 245).
+pub const WINDOW_TAB_BREATHE_PERIOD_MS: u64 = 1_700;
+/// `@keyframes breathe { 0%, 100% { opacity: 1 } 50% { opacity: .28 } }`.
+pub const WINDOW_TAB_BREATHE_MIN_OPACITY: f32 = 0.28;
+/// `@media (prefers-reduced-motion: reduce) { .ticon.working { opacity: .6 } }`
+/// (lines 1925-1928) — with the animation off, "working" still has to be said,
+/// so the breath collapses to one held value rather than to nothing.
+pub const WINDOW_TAB_BREATHE_REDUCED_OPACITY: f32 = 0.6;
+/// `.pring.indeterminate { animation: pring-spin 1.1s linear infinite }` (282).
+pub const WINDOW_TAB_RING_SPIN_PERIOD_MS: u64 = 1_100;
+/// `.pring .arc { transition: stroke-dashoffset .3s ease }` (line 279) — a
+/// progress report jumps, and the arc that reports it must not.
+pub const WINDOW_TAB_RING_SWEEP_TRANSITION_MS: u64 = 300;
+/// `.ticon-wrap.dead .ticon { opacity: .35 }` (line 285).
+pub const WINDOW_TAB_DEAD_MARK_OPACITY: f32 = 0.35;
+
 /// The tab close affordance (`design/ui-mockup.html` lines 305-311).
 pub const WINDOW_TAB_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
 pub const WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
@@ -1079,6 +1196,141 @@ mod tests {
         assert_eq!(LIGHT_CHROME.caption_close_hover, [0xe5, 0x48, 0x4d]);
         assert_eq!(DARK_CHROME.active_tab, DEFAULT_BACKGROUND_RGB);
         assert_eq!(LIGHT_CHROME.active_tab, [0xff, 0xff, 0xff]);
+    }
+
+    /// PIN (T2 progress ring): the ring *replaces* the mark rather than
+    /// encircling it (user ruling, deviating from the mock-up's `.pring`), so
+    /// it inherits the mark's own 15px box and its radius is derived from that
+    /// box and the stroke — not carried over from the mock-up's 25px overlay,
+    /// whose only reason to be 25px was clearing the mark it sat on top of.
+    ///
+    /// The stroke must lie *inside* the box: a stroke is centred on its path,
+    /// so the outer edge is `radius + stroke/2` and that has to be exactly half
+    /// the box. Getting this wrong clips the ring against the slot, which is
+    /// the one failure a replacement ring cannot survive.
+    #[test]
+    fn the_progress_ring_fits_the_mark_slot_it_replaces() {
+        assert_eq!(WINDOW_TAB_RING_STROKE_LOGICAL_PX, 2.0);
+        assert_eq!(WINDOW_TAB_RING_RADIUS_LOGICAL_PX, 6.5);
+        let outer = WINDOW_TAB_RING_RADIUS_LOGICAL_PX + WINDOW_TAB_RING_STROKE_LOGICAL_PX / 2.0;
+        assert_eq!(
+            outer,
+            WINDOW_TAB_MARK_LOGICAL_PX / 2.0,
+            "the ring's outer edge is the slot's edge — no more, and no less"
+        );
+    }
+
+    /// PIN (T2 progress ring): the indeterminate arc's *length* is the mock-up's
+    /// own, carried across the size change as the ratio it actually is.
+    ///
+    /// `.pring.indeterminate .arc { stroke-dasharray: 13 40.4 }` (line 283) is
+    /// 13 units of a 53.4-unit circumference — the mock-up spells that
+    /// circumference out at `PRING_C` (line 4118, "2πr for r=8.5"). A dash
+    /// *length* in absolute units would shrink to a speck at our smaller
+    /// radius; the fraction of the circle is what the design actually means.
+    #[test]
+    fn the_indeterminate_arc_keeps_the_mock_ups_fraction_of_the_circle() {
+        let mock_circumference = 2.0 * std::f32::consts::PI * 8.5;
+        assert!(
+            (mock_circumference - 53.4).abs() < 0.05,
+            "the mock-up's own PRING_C must be 2πr for r=8.5"
+        );
+        assert!(
+            (WINDOW_TAB_RING_INDETERMINATE_TURNS - 13.0 / 53.4).abs() < 1e-6,
+            "13 of 53.4 units"
+        );
+        // Roughly a quarter turn: plainly an arc and plainly not a full ring,
+        // which is the whole of what "indeterminate" has to say.
+        assert!((0.2..0.3).contains(&WINDOW_TAB_RING_INDETERMINATE_TURNS));
+    }
+
+    /// PIN (T2 tab status): the four "something happened" colours are the
+    /// mock-up's own status semantics, declared once in its `:root` (lines
+    /// 30-35) and never overridden by `body.dark`. Both palettes therefore
+    /// carry the *same* three literals — a theme split here would be an
+    /// invention, not a reading, and this test is what forbids one.
+    #[test]
+    fn the_status_colours_are_one_set_shared_by_both_canvases() {
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_eq!(palette.status_err, [0xc5, 0x0f, 0x1f], "--err");
+            assert_eq!(palette.status_warn, [0xd9, 0x82, 0x2b], "--warn");
+            assert_eq!(palette.status_pause, [0xc1, 0x9c, 0x00], "--pause");
+        }
+        // The accent is the fourth claim ("finished, unread") and is the one
+        // that *does* vary by canvas, so the dot's four colours are never a
+        // single constant table.
+        assert_ne!(DARK_CHROME.accent, LIGHT_CHROME.accent);
+    }
+
+    /// PIN (T2 progress ring): the ring's track is `--border` at `opacity: .7`
+    /// (mock-up line 278), pre-composited over each of the three surfaces a tab
+    /// can wear — the same three the pane-count badge needs, and for the same
+    /// reason spelled out at `tab_close_pill_on_content`: this pipeline blends
+    /// in linear light and a browser blends in sRGB, so handing the blender
+    /// `--border`'s own alpha would not reproduce `--border`.
+    ///
+    /// The track must be plainly *there* and plainly quieter than the arc: on
+    /// each canvas it has to sit strictly between the tab it lies on and that
+    /// canvas's accent, which is what stops a "subtle" track from being
+    /// rounded away into the tab it is supposed to sit on.
+    #[test]
+    fn the_progress_track_is_the_border_at_seven_tenths_over_each_tab_surface() {
+        // .094 white × .7 = .0658 over #1B1B1B / #252525 / #313131.
+        assert_eq!(DARK_CHROME.ring_track_on_active_tab, [0x2a, 0x2a, 0x2a]);
+        assert_eq!(DARK_CHROME.ring_track_on_resting_tab, [0x33, 0x33, 0x33]);
+        assert_eq!(DARK_CHROME.ring_track_on_hovered_tab, [0x3f, 0x3f, 0x3f]);
+        // .088 black × .7 = .0616 over #FFFFFF / #F7F7F5 / #ECECEA.
+        assert_eq!(LIGHT_CHROME.ring_track_on_active_tab, [0xef, 0xef, 0xef]);
+        assert_eq!(LIGHT_CHROME.ring_track_on_resting_tab, [0xe8, 0xe8, 0xe6]);
+        assert_eq!(LIGHT_CHROME.ring_track_on_hovered_tab, [0xdd, 0xdd, 0xdc]);
+
+        for (palette, surfaces) in [
+            (
+                DARK_CHROME,
+                [
+                    (DARK_CHROME.active_tab, DARK_CHROME.ring_track_on_active_tab),
+                    (DARK_CHROME.title_bar, DARK_CHROME.ring_track_on_resting_tab),
+                    (
+                        DARK_CHROME.caption_hover,
+                        DARK_CHROME.ring_track_on_hovered_tab,
+                    ),
+                ],
+            ),
+            (
+                LIGHT_CHROME,
+                [
+                    (
+                        LIGHT_CHROME.active_tab,
+                        LIGHT_CHROME.ring_track_on_active_tab,
+                    ),
+                    (
+                        LIGHT_CHROME.title_bar,
+                        LIGHT_CHROME.ring_track_on_resting_tab,
+                    ),
+                    (
+                        LIGHT_CHROME.caption_hover,
+                        LIGHT_CHROME.ring_track_on_hovered_tab,
+                    ),
+                ],
+            ),
+        ] {
+            for (surface, track) in surfaces {
+                assert_ne!(track, surface, "a track that vanishes into its tab");
+                // Quieter than the arc it carries: the track never competes
+                // with the progress it is the backdrop for.
+                let distance = |a: [u8; 3], b: [u8; 3]| {
+                    a.iter()
+                        .zip(b)
+                        .map(|(x, y)| i32::from(*x) - i32::from(y))
+                        .map(|d| d * d)
+                        .sum::<i32>()
+                };
+                assert!(
+                    distance(track, surface) < distance(palette.accent, surface),
+                    "the track must sit nearer its tab than the arc does"
+                );
+            }
+        }
     }
 
     /// PIN: the unfocused caret is the focused caret's own ink, faded toward

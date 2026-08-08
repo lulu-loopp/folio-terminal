@@ -26,9 +26,9 @@
 
 use bt_persist::ThemeModeV1;
 use bt_render::{
-    ChromeLabel, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX,
-    FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, WINDOW_CAPTION_GLYPH_LOGICAL_PX, chrome_palette,
-    rounded_overlay_fill, rounded_overlay_halo,
+    ChromeLabel, ChromeLabelWeight, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX,
+    FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
+    WINDOW_CAPTION_GLYPH_LOGICAL_PX, chrome_palette, rounded_overlay_fill, rounded_overlay_halo,
 };
 
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
@@ -627,6 +627,8 @@ pub fn build(
         align_right: false,
         align_center: false,
         letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
     });
 
     let close_hovered = hover == Some(SettingsTarget::Close);
@@ -641,15 +643,15 @@ pub fn build(
     let glyph = px(WINDOW_CAPTION_GLYPH_LOGICAL_PX).round().max(1.0);
     let glyph_left = ((layout.close[0] + layout.close[2]) / 2.0 - glyph / 2.0).round();
     let glyph_top = ((layout.close[1] + layout.close[3]) / 2.0 - glyph / 2.0).round();
-    sprites.push(ChromeSprite {
-        mark: ChromeMark::WindowClose,
-        rect: [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
-        color: if close_hovered {
+    sprites.push(ChromeSprite::new(
+        ChromeMark::WindowClose,
+        [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+        if close_hovered {
             palette.dialog_title_text
         } else {
             palette.dialog_secondary_text
         },
-    });
+    ));
 
     // Everything below the header is clipped to the content box, which is what
     // `max-height` plus `overflow-y` leaves when the window is too short.
@@ -667,6 +669,8 @@ pub fn build(
             // A ratio, so it carries no `scale`: the shaper adds it to a glyph's
             // advance before the font size multiplies both.
             letter_spacing_em: GROUP_LABEL_TRACKING_EM,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
         });
     }
     if let Some(rect) = clipped(layout.row_title, clip) {
@@ -678,6 +682,8 @@ pub fn build(
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
         });
     }
     if let Some(rect) = clipped(layout.row_desc, clip) {
@@ -692,6 +698,8 @@ pub fn build(
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
         });
     }
     if let Some(rect) = clipped(layout.cursor_row_title, clip) {
@@ -703,6 +711,8 @@ pub fn build(
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
         });
     }
     if let Some(rect) = clipped(layout.cursor_row_desc, clip) {
@@ -714,6 +724,8 @@ pub fn build(
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
         });
     }
 
@@ -800,6 +812,8 @@ pub fn build(
                     align_right: false,
                     align_center: false,
                     letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
                 });
             }
             popup.labels.push(ChromeLabel {
@@ -819,6 +833,8 @@ pub fn build(
                 align_right: false,
                 align_center: false,
                 letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
             });
         }
     }
@@ -883,6 +899,8 @@ fn push_combo(
         align_right: false,
         align_center: false,
         letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
     });
     labels.push(ChromeLabel {
         text: COMBO_CHEVRON.to_owned(),
@@ -897,6 +915,8 @@ fn push_combo(
         align_right: true,
         align_center: false,
         letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
     });
 }
 

@@ -140,10 +140,11 @@ mod windows_impl {
                 GCLP_HBRBACKGROUND, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM,
                 HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
                 HTTOPLEFT, HTTOPRIGHT, IsZoomed, MF_STRING, NCCALCSIZE_PARAMS, PostMessageW,
-                SM_CXFRAME, SM_CXPADDEDBORDER, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
-                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
-                SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_NCCALCSIZE, WM_NCHITTEST,
+                SM_CXFRAME, SM_CXPADDEDBORDER, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
+                SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+                SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_NCCALCSIZE,
+                WM_NCHITTEST,
             },
         },
     };
@@ -481,6 +482,37 @@ mod windows_impl {
         } else {
             WheelScrollAmount::Lines(lines)
         })
+    }
+
+    /// Whether the system wants animation inside a window's client area.
+    ///
+    /// `SPI_GETCLIENTAREAANIMATION` is Windows' own name for the preference a
+    /// browser reports as `prefers-reduced-motion` — Settings → Accessibility →
+    /// Visual effects → Animation effects. It is the setting the mock-up's
+    /// `@media (prefers-reduced-motion: reduce)` blocks answer to, so reading it
+    /// here is what makes those rules real on this platform rather than a
+    /// stylesheet branch nothing ever takes.
+    ///
+    /// `TRUE` means animation is *wanted*, so the polarity is the opposite of
+    /// the CSS query's — the caller does that mapping, and pins it.
+    pub fn client_area_animation_enabled() -> Result<bool, String> {
+        // `BOOL` is a 32-bit int across the Win32 ABI, and this is the shape
+        // `SystemParametersInfoW` writes through the void pointer it is given.
+        let mut enabled = 0_i32;
+        // SAFETY: SPI_GETCLIENTAREAANIMATION writes one BOOL to the provided
+        // live stack pointer, exactly as SPI_GETWHEELSCROLLLINES writes one u32.
+        unsafe {
+            SystemParametersInfoW(
+                SPI_GETCLIENTAREAANIMATION,
+                0,
+                Some((&mut enabled as *mut i32).cast()),
+                Default::default(),
+            )
+        }
+        .map_err(|error| {
+            format!("SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION) failed: {error}")
+        })?;
+        Ok(enabled != 0)
     }
 
     fn retry_open_clipboard(
@@ -1042,9 +1074,10 @@ mod windows_impl {
 
 #[cfg(windows)]
 pub use windows_impl::{
-    CustomWindowFrame, ImeSystemCaret, MathContextMenu, clipboard_text, get_dpi_for_window,
-    get_window_rect, get_work_area, install_window_class_background, open_local_file,
-    request_window_close, set_clipboard_text, shell_execute, wheel_scroll_amount,
+    CustomWindowFrame, ImeSystemCaret, MathContextMenu, client_area_animation_enabled,
+    clipboard_text, get_dpi_for_window, get_window_rect, get_work_area,
+    install_window_class_background, open_local_file, request_window_close, set_clipboard_text,
+    shell_execute, wheel_scroll_amount,
 };
 
 #[cfg(test)]

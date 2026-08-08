@@ -19,8 +19,8 @@
 //!   under a popup but whatever the terminal happens to be showing.
 
 use bt_render::{
-    ChromeLabel, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, chrome_palette,
-    rounded_overlay_fill,
+    ChromeLabel, ChromeLabelWeight, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX,
+    chrome_palette, rounded_overlay_fill,
 };
 
 use crate::{
@@ -244,11 +244,11 @@ pub fn build(layout: &ProfileMenuLayout, hover: Option<usize>) -> Vec<OverlayLay
         let mark = px(ITEM_MARK_LOGICAL_PX).round();
         let mark_left = ((column_left + column_right - mark) / 2.0).round();
         let mark_top = ((item[1] + item[3] - mark) / 2.0).round();
-        sprites.push(ChromeSprite {
-            mark: profile.mark,
-            rect: [mark_left, mark_top, mark_left + mark, mark_top + mark],
-            color: palette.accent,
-        });
+        sprites.push(ChromeSprite::new(
+            profile.mark,
+            [mark_left, mark_top, mark_left + mark, mark_top + mark],
+            palette.accent,
+        ));
         labels.push(ChromeLabel {
             text: profile.title.to_owned(),
             rect: [
@@ -266,6 +266,8 @@ pub fn build(layout: &ProfileMenuLayout, hover: Option<usize>) -> Vec<OverlayLay
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
         });
         // `margin-left: auto` puts the hint hard against the row's trailing
         // padding, and it names a fact about the profile rather than the row's
@@ -288,6 +290,8 @@ pub fn build(layout: &ProfileMenuLayout, hover: Option<usize>) -> Vec<OverlayLay
                 align_right: true,
                 align_center: false,
                 letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
             });
         }
     }

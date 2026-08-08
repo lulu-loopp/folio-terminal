@@ -74,6 +74,27 @@ pub enum ChromeMark {
     /// pill over the surface it lands on, because this pipeline blends in linear
     /// light and the design's does not — see `ChromePalette::tab_close_pill_on_content`.
     ControlPill { radius_px: u32 },
+    /// One arc of the progress ring (`.pring`, mock-up lines 268-284).
+    ///
+    /// The mock-up's ring is a *pair* of concentric circles — a full-turn track
+    /// under a partial arc, in two different colours — and a sprite carries one
+    /// colour, so a ring on screen is two of these: a `sweep_milliturns: 1000`
+    /// track and the arc over it, sharing a box. That is not a workaround but
+    /// the better decomposition: every ring in the strip shares one cached track
+    /// raster no matter what its arc is doing, and the arc is the only thing
+    /// that has to be redrawn when the progress moves.
+    ///
+    /// Angles are thousandths of a turn clockwise from 12 o'clock. Turns rather
+    /// than degrees because every angle this mark is ever given starts life as a
+    /// fraction — a percentage, or a phase through a spin — and integers rather
+    /// than a float because this is half of the raster cache's key, which has to
+    /// hash and compare exactly.
+    ProgressRing {
+        start_milliturns: u16,
+        sweep_milliturns: u16,
+        /// `.pring circle { stroke-width: 2 }`, in physical pixels.
+        stroke_px: u32,
+    },
 }
 
 impl ChromeMark {
@@ -94,6 +115,7 @@ impl ChromeMark {
             Self::ActiveTab { .. } => "tab",
             Self::TabBody { .. } => "tab-body",
             Self::ControlPill { .. } => "control-pill",
+            Self::ProgressRing { .. } => "progress-ring",
         }
     }
 
@@ -114,6 +136,35 @@ pub struct ChromeSprite {
     /// `[left, top, right, bottom]`, in physical pixels of the whole surface.
     pub rect: [f32; 4],
     pub color: [u8; 3],
+    /// A uniform fade over the whole mark, `0.0 ..= 1.0`.
+    ///
+    /// The mock-up asks for this twice and both times the artwork is unchanged
+    /// and only its presence varies: `.ticon.working` breathes between 1 and
+    /// .28, and `.ticon-wrap.dead .ticon` holds .35. It therefore rides to the
+    /// renderer beside the pixels rather than into them — see
+    /// [`ChromeIcon::opacity`] for why that distinction is load-bearing.
+    pub opacity: f32,
+    /// `filter: grayscale(1)` — draw the mark with its hue removed.
+    ///
+    /// Unlike [`Self::opacity`] this *is* baked into the raster and keyed with
+    /// it, because it changes each pixel's colour rather than its coverage, and
+    /// because the mark it exists for is the profile mark, which carries
+    /// colours of its own that no palette entry can stand in for.
+    pub grayscale: bool,
+}
+
+impl ChromeSprite {
+    /// A mark at full strength in its own colours — what all but the tab's own
+    /// state channels want.
+    pub fn new(mark: ChromeMark, rect: [f32; 4], color: [u8; 3]) -> Self {
+        Self {
+            mark,
+            rect,
+            color,
+            opacity: 1.0,
+            grayscale: false,
+        }
+    }
 }
 
 /// One stacking layer of the modal overlay as a builder leaves it: its fills, its
@@ -219,6 +270,7 @@ impl ChromeMarkRasters {
                 rgba: Arc::clone(&raster.rgba),
                 width_px: raster.width_px,
                 height_px: raster.height_px,
+                opacity: sprite.opacity,
             });
             kept.insert(key, raster);
         }
@@ -235,9 +287,22 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     if let ChromeMark::ControlPill { radius_px } = sprite.mark {
         let _ = write!(key, ":r{radius_px}");
     }
+    if let ChromeMark::ProgressRing {
+        start_milliturns,
+        sweep_milliturns,
+        stroke_px,
+    } = sprite.mark
+    {
+        let _ = write!(key, ":a{start_milliturns}+{sweep_milliturns}w{stroke_px}");
+    }
     let _ = write!(key, ":{width_px}x{height_px}");
     if sprite.mark.takes_current_color() {
         let _ = write!(key, ":{r:02x}{g:02x}{b:02x}");
+    }
+    // Desaturation is in the pixels, so it has to be in the identity of the
+    // pixels. Opacity deliberately is not — it never touches the raster.
+    if sprite.grayscale {
+        key.push_str(":grey");
     }
     key
 }
@@ -245,11 +310,37 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
 fn rasterize(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<Raster> {
     let document = svg_document(sprite, width_px, height_px)?;
     let raster = bt_math::rasterize_svg_document(document.as_bytes()).ok()?;
+    let mut rgba = raster.rgba;
+    if sprite.grayscale {
+        desaturate(&mut rgba);
+    }
     Some(Raster {
-        rgba: Arc::from(raster.rgba),
+        rgba: Arc::from(rgba),
         width_px: raster.width_px,
         height_px: raster.height_px,
     })
+}
+
+/// `filter: grayscale(1)` over straight sRGB RGBA, in place.
+///
+/// The coefficients are the ones CSS names for this filter: the
+/// `feColorMatrix` `type="saturate" values="0"` matrix of the Filter Effects
+/// spec, which is Rec. 709 luma applied to the sRGB values as they are stored.
+/// A browser applies it in exactly that space, so converting to linear light
+/// first would be a *different* grey than the one the design asks for.
+///
+/// Alpha is untouched: desaturating changes what colour a pixel is, never
+/// whether it is there — the mark's silhouette and its antialiasing survive.
+fn desaturate(rgba: &mut [u8]) {
+    for pixel in rgba.chunks_exact_mut(4) {
+        let luma = 0.2126 * f32::from(pixel[0])
+            + 0.7152 * f32::from(pixel[1])
+            + 0.0722 * f32::from(pixel[2]);
+        let grey = luma.round().clamp(0.0, 255.0) as u8;
+        pixel[0] = grey;
+        pixel[1] = grey;
+        pixel[2] = grey;
+    }
 }
 
 /// A standalone document at exactly the physical size the box wants. The
@@ -279,6 +370,20 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 format!(r#"<path fill="currentColor" d="{path}"/>"#),
             )
         }
+        ChromeMark::ProgressRing {
+            start_milliturns,
+            sweep_milliturns,
+            stroke_px,
+        } => (
+            format!("0 0 {width_px} {height_px}"),
+            progress_ring_body(
+                width_px,
+                height_px,
+                stroke_px,
+                start_milliturns,
+                sweep_milliturns,
+            )?,
+        ),
         // One arrow that turns over: the `open` chevron is the resting one
         // rotated about its own centre, exactly as `.chevbtn.open svg` is.
         ChromeMark::Chevron { open: true } => (
@@ -303,6 +408,57 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
     ))
 }
 
+/// One arc of `.pring`, as the mock-up draws it: a stroked `<circle>` with a
+/// dash pattern selecting the live part of it.
+///
+/// Every decision here is quoted rather than invented:
+///
+/// * `fill: none; stroke-width: 2` and `stroke-linecap: round` are `.pring
+///   circle` and `.pring .arc` (mock-up lines 277-279).
+/// * the dash pattern is how the mock-up itself states an arc — `stroke-dasharray`
+///   against `PRING_C`, with `stroke-dashoffset` walking it (line 4118-4130) —
+///   rather than a hand-built elliptical-arc path, which would have to
+///   special-case the full turn that a dash pattern gets for free.
+/// * `rotate(-90 …)` is `.pring { transform: … rotate(-90deg) }` (line 273): an
+///   SVG circle's own path begins at 3 o'clock, and progress begins at 12.
+///
+/// The radius is the box's half-width less half the stroke, so the stroke —
+/// which straddles its path — lands exactly inside the box and clips nowhere.
+fn progress_ring_body(
+    width_px: u32,
+    height_px: u32,
+    stroke_px: u32,
+    start_milliturns: u16,
+    sweep_milliturns: u16,
+) -> Option<String> {
+    let side = width_px.min(height_px) as f32;
+    let stroke = stroke_px as f32;
+    let radius = (side - stroke) / 2.0;
+    // Below this the ring is not a ring: the hole has closed and what is left is
+    // a blob. A degenerate ring would be a second, unruled shape.
+    if stroke < 1.0 || radius <= stroke / 2.0 {
+        return None;
+    }
+    let sweep = f32::from(sweep_milliturns.min(1000)) / 1000.0;
+    if sweep <= 0.0 {
+        // Not an error: a determinate ring at 0% is a track and no arc, and the
+        // caller draws the track as its own sprite.
+        return Some(String::new());
+    }
+    let (centre_x, centre_y) = (width_px as f32 / 2.0, height_px as f32 / 2.0);
+    let circumference = std::f32::consts::TAU * radius;
+    let dash = circumference * sweep;
+    let start = circumference * f32::from(start_milliturns % 1000) / 1000.0;
+    // A round cap adds half a stroke beyond each end of the dash. On a full turn
+    // that overshoot would wrap the two caps past one another; on a partial arc
+    // it is the mock-up's own `stroke-linecap: round`.
+    let linecap = if sweep >= 1.0 { "butt" } else { "round" };
+    Some(format!(
+        r#"<circle cx="{centre_x}" cy="{centre_y}" r="{radius}" fill="none" stroke="currentColor" stroke-width="{stroke}" stroke-linecap="{linecap}" stroke-dasharray="{dash} {circumference}" stroke-dashoffset="{offset}" transform="rotate(-90 {centre_x} {centre_y})"/>"#,
+        offset = -start,
+    ))
+}
+
 fn symbol_index(mark: ChromeMark) -> usize {
     match mark {
         ChromeMark::Gear => 0,
@@ -321,6 +477,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ActiveTab { .. } => 8,
         ChromeMark::TabBody { .. } => 8,
         ChromeMark::ControlPill { .. } => 8,
+        ChromeMark::ProgressRing { .. } => 8,
     }
 }
 
@@ -457,11 +614,7 @@ mod tests {
     use super::*;
 
     fn sprite(mark: ChromeMark, width: f32, height: f32, color: [u8; 3]) -> ChromeSprite {
-        ChromeSprite {
-            mark,
-            rect: [0.0, 0.0, width, height],
-            color,
-        }
+        ChromeSprite::new(mark, [0.0, 0.0, width, height], color)
     }
 
     fn alpha_at(icon: &ChromeIcon, x: u32, y: u32) -> u8 {
@@ -471,6 +624,244 @@ mod tests {
     fn rgb_at(icon: &ChromeIcon, x: u32, y: u32) -> [u8; 3] {
         let base = ((y * icon.width_px + x) * 4) as usize;
         [icon.rgba[base], icon.rgba[base + 1], icon.rgba[base + 2]]
+    }
+
+    /// A point on the ring's own stroke centreline, `turns` clockwise from 12.
+    fn on_ring(icon: &ChromeIcon, turns: f32, stroke_px: f32) -> (u32, u32) {
+        let centre = icon.width_px as f32 / 2.0;
+        let radius = (icon.width_px as f32 - stroke_px) / 2.0;
+        let angle = turns * std::f32::consts::TAU;
+        (
+            (centre + radius * angle.sin()).round() as u32,
+            (centre - radius * angle.cos()).round() as u32,
+        )
+    }
+
+    fn ring(sweep_milliturns: u16, stroke_px: u32, side: f32) -> ChromeSprite {
+        sprite(
+            ChromeMark::ProgressRing {
+                start_milliturns: 0,
+                sweep_milliturns,
+                stroke_px,
+            },
+            side,
+            side,
+            [0x82, 0x8f, 0xff],
+        )
+    }
+
+    /// PIN (T2 progress ring): the arc starts at 12 o'clock and runs clockwise.
+    ///
+    /// The mock-up gets both for free — its `.pring` is `rotate(-90deg)` over an
+    /// SVG `<circle>`, whose path a browser walks clockwise from 3 o'clock — and
+    /// so the design never had to say either out loud. Generated geometry has
+    /// to, because every one of the ways to get this wrong (starting at 3
+    /// o'clock, running anticlockwise, or both) still draws a perfectly
+    /// plausible ring, and only a progress report that runs backwards tells you.
+    #[test]
+    fn the_progress_arc_starts_at_noon_and_sweeps_clockwise() {
+        let stroke = 4.0_f32;
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[ring(250, stroke as u32, 30.0)]);
+        let icon = &icons[0];
+        // A quarter turn covers noon through 3 o'clock and nothing else.
+        for turns in [0.02_f32, 0.10, 0.15, 0.23] {
+            let (x, y) = on_ring(icon, turns, stroke);
+            assert!(
+                alpha_at(icon, x, y) > 128,
+                "a quarter sweep must ink {turns} turns from noon, at ({x},{y})"
+            );
+        }
+        for turns in [0.35_f32, 0.5, 0.75, 0.95] {
+            let (x, y) = on_ring(icon, turns, stroke);
+            assert_eq!(
+                alpha_at(icon, x, y),
+                0,
+                "a quarter sweep must leave {turns} turns from noon bare, at ({x},{y})"
+            );
+        }
+    }
+
+    /// PIN (T2 progress ring): a longer sweep is always more ink.
+    ///
+    /// A ring that saturates — drawing the same arc for 40% as for 90% — is the
+    /// failure that looks perfect in a screenshot and is useless in motion.
+    #[test]
+    fn a_longer_sweep_is_always_more_ink() {
+        let mut inked = Vec::new();
+        for sweep in [0_u16, 125, 250, 500, 750, 1000] {
+            let mut rasters = ChromeMarkRasters::default();
+            let icons = rasters.resolve(&[ring(sweep, 4, 30.0)]);
+            inked.push(
+                icons
+                    .first()
+                    .map(|icon| {
+                        icon.rgba
+                            .chunks_exact(4)
+                            .map(|pixel| u32::from(pixel[3]))
+                            .sum::<u32>()
+                    })
+                    .unwrap_or_default(),
+            );
+        }
+        assert_eq!(inked[0], 0, "a zero sweep draws no arc at all");
+        for window in inked.windows(2) {
+            assert!(
+                window[1] > window[0],
+                "sweep coverage must be monotonic, got {inked:?}"
+            );
+        }
+    }
+
+    /// PIN (T2 progress ring): the ring fills the slot it replaces, clips
+    /// nowhere, and stays hollow.
+    ///
+    /// The ring takes the mark's own box (user ruling), so its stroke has to
+    /// live entirely inside it: a stroke straddles its path, and a radius
+    /// chosen as if it did not shaves the ring flat against all four edges.
+    #[test]
+    fn the_ring_fills_its_slot_without_clipping_and_stays_hollow() {
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[ring(1000, 4, 30.0)]);
+        let icon = &icons[0];
+        let centre = icon.width_px / 2;
+        // Noon, 3, 6 and 9 o'clock each reach the box's own edge.
+        assert!(
+            alpha_at(icon, centre, 0) > 0,
+            "the ring is clipped at the top"
+        );
+        assert!(
+            alpha_at(icon, centre, icon.height_px - 1) > 0,
+            "the ring is clipped at the bottom"
+        );
+        assert!(
+            alpha_at(icon, 0, centre) > 0,
+            "the ring is clipped at the left"
+        );
+        assert!(
+            alpha_at(icon, icon.width_px - 1, centre) > 0,
+            "the ring is clipped at the right"
+        );
+        assert_eq!(
+            alpha_at(icon, centre, centre),
+            0,
+            "the middle of a ring is a hole, not a fill"
+        );
+        assert_eq!(alpha_at(icon, 0, 0), 0, "a ring has no corners");
+    }
+
+    /// PIN (T2 unread dot): the dot is a circle, and the chrome already had a
+    /// primitive for it.
+    ///
+    /// `.unreaddot { width: 6px; height: 6px; border-radius: 50% }` is a square
+    /// with its round set to half its side, which is exactly what `ControlPill`
+    /// clamps to — so the dot needs no shape of its own, and giving it one
+    /// would be a second circle to keep in step with the first.
+    #[test]
+    fn the_unread_dot_is_a_control_pill_rounded_into_a_circle() {
+        let accent = [0x82, 0x8f, 0xff];
+        let side = 12.0_f32;
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[sprite(
+            ChromeMark::ControlPill {
+                radius_px: side as u32 / 2,
+            },
+            side,
+            side,
+            accent,
+        )]);
+        let icon = &icons[0];
+        let centre = icon.width_px / 2;
+        assert_eq!(alpha_at(icon, centre, centre), 255, "the dot is filled");
+        assert_eq!(
+            rgb_at(icon, centre, centre),
+            accent,
+            "the dot wears its claim"
+        );
+        for (x, y) in [(0, 0), (icon.width_px - 1, 0), (0, icon.height_px - 1)] {
+            assert_eq!(
+                alpha_at(icon, x, y),
+                0,
+                "a circle has no corner at ({x},{y})"
+            );
+        }
+        assert!(
+            alpha_at(icon, centre, 0) > 0,
+            "the dot must reach its own top"
+        );
+        assert!(
+            alpha_at(icon, 0, centre) > 0,
+            "the dot must reach its own left"
+        );
+    }
+
+    /// PIN (T2 dead marks): `filter: grayscale(1)` (mock-up line 285) is baked
+    /// into the raster, and it is part of the mark's content identity.
+    ///
+    /// It has to be baked, unlike opacity: desaturating changes which colour
+    /// each pixel is, and the mark this lands on is the profile mark, which
+    /// carries colours of its own that no palette entry can stand in for.
+    /// Because it changes the pixels it must also change the key — two rasters
+    /// that differ while sharing a key is the one cache bug that shows up as
+    /// the wrong picture.
+    #[test]
+    fn a_dead_mark_is_desaturated_in_the_raster_and_keyed_apart() {
+        let accent = [0x82, 0x8f, 0xff];
+        let live = sprite(ChromeMark::ProfilePowerShell, 30.0, 30.0, accent);
+        let mut dead = live;
+        dead.grayscale = true;
+        dead.rect = [40.0, 0.0, 70.0, 30.0];
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[live, dead]);
+        assert_eq!(
+            icons.len(),
+            2,
+            "two marks, not one shared by a colliding key"
+        );
+        assert_ne!(
+            icons[0].key, icons[1].key,
+            "a desaturated mark is different pixels and needs a different key"
+        );
+        // The PowerShell mark's panel is a saturated blue; dead, it must be grey.
+        let (x, y) = (icons[0].width_px / 5, icons[0].height_px / 2);
+        let [r, g, b] = rgb_at(&icons[0], x, y);
+        assert!(
+            u32::from(b) > u32::from(r) + 24,
+            "the living mark is blue ({r},{g},{b})"
+        );
+        let [r, g, b] = rgb_at(&icons[1], x, y);
+        let spread = u32::from(r.max(g).max(b)) - u32::from(r.min(g).min(b));
+        assert!(spread <= 2, "a dead mark keeps no hue, got ({r},{g},{b})");
+    }
+
+    /// PIN (T2 breathing): a sprite's opacity rides to the renderer on the icon
+    /// and never into the cache key.
+    ///
+    /// Two marks differing only in how faded they are must be the *same* raster,
+    /// or a 1.7s breath mints a fresh texture on every frame it is drawn. This
+    /// is the assertion that keeps the breath free.
+    #[test]
+    fn opacity_travels_on_the_icon_and_never_into_the_cache_key() {
+        let accent = [0x82, 0x8f, 0xff];
+        let full = sprite(ChromeMark::Folder, 26.0, 26.0, accent);
+        let mut faded = full;
+        faded.opacity = 0.28;
+        faded.rect = [40.0, 0.0, 66.0, 26.0];
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[full, faded]);
+        assert_eq!(icons[0].key, icons[1].key, "one mark, one raster");
+        assert!(
+            Arc::ptr_eq(&icons[0].rgba, &icons[1].rgba),
+            "the faded mark must reuse the pixels, not re-rasterize them"
+        );
+        assert_eq!(icons[0].opacity, 1.0);
+        assert_eq!(icons[1].opacity, 0.28);
+        // The raster itself is untouched by the fade — the alpha the renderer
+        // multiplies is still the mark's own coverage.
+        assert_eq!(
+            alpha_at(&icons[1], icons[1].width_px / 2, icons[1].height_px * 2 / 3),
+            255
+        );
     }
 
     /// PIN (visual fidelity pass): every mark the chrome wears is a real raster
@@ -586,11 +977,11 @@ mod tests {
             let height = (34.0 * scale).round() as u32;
             let width = (200.0 * scale).round() as u32 + 2 * radius;
             let mut rasters = ChromeMarkRasters::default();
-            let icons = rasters.resolve(&[ChromeSprite {
-                mark: ChromeMark::ActiveTab { radius_px: radius },
-                rect: [0.0, 0.0, width as f32, height as f32],
-                color: [0x1b, 0x1b, 0x1b],
-            }]);
+            let icons = rasters.resolve(&[ChromeSprite::new(
+                ChromeMark::ActiveTab { radius_px: radius },
+                [0.0, 0.0, width as f32, height as f32],
+                [0x1b, 0x1b, 0x1b],
+            )]);
             let tab = icons.first().expect("the tab silhouette must rasterize");
             let last_row = height - 1;
 
@@ -674,11 +1065,11 @@ mod tests {
     fn the_tab_corners_carry_partial_coverage_instead_of_a_staircase() {
         let radius = 14_u32;
         let mut rasters = ChromeMarkRasters::default();
-        let icons = rasters.resolve(&[ChromeSprite {
-            mark: ChromeMark::ActiveTab { radius_px: radius },
-            rect: [0.0, 0.0, 240.0, 68.0],
-            color: [0x1b, 0x1b, 0x1b],
-        }]);
+        let icons = rasters.resolve(&[ChromeSprite::new(
+            ChromeMark::ActiveTab { radius_px: radius },
+            [0.0, 0.0, 240.0, 68.0],
+            [0x1b, 0x1b, 0x1b],
+        )]);
         let tab = &icons[0];
         let partial = (0..radius * 2)
             .flat_map(|y| (0..radius * 2).map(move |x| (x, y)))

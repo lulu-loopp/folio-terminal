@@ -28,6 +28,7 @@ use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, PrepareError, Resolution, Shaping,
     Stretch, Style, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
     Wrap,
+    cosmic_text::{FeatureTag, FontFeatures},
 };
 use thiserror::Error;
 use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
@@ -53,16 +54,21 @@ pub use theme::{
     WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
     WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
     WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
-    WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX, WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
-    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_PADDING_LEFT_LOGICAL_PX,
-    WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_BREATHE_MIN_OPACITY,
+    WINDOW_TAB_BREATHE_PERIOD_MS, WINDOW_TAB_BREATHE_REDUCED_OPACITY,
+    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_DEAD_MARK_OPACITY, WINDOW_TAB_FONT_LOGICAL_PX,
+    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_INDETERMINATE_TURNS,
+    WINDOW_TAB_RING_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_SPIN_PERIOD_MS,
+    WINDOW_TAB_RING_STROKE_LOGICAL_PX, WINDOW_TAB_RING_SWEEP_TRANSITION_MS,
     WINDOW_TAB_SQUEEZED_LOGICAL_PX, WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX,
-    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette,
-    current_cursor_style, current_theme, foreground_rgb, set_cursor_style, set_theme,
-    theme_revision,
+    WINDOW_TAB_STATUS_DOT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX,
+    background_rgb, chrome_palette, current_cursor_style, current_theme, foreground_rgb,
+    set_cursor_style, set_theme, theme_revision,
 };
 use theme::{DEFAULT_STATUS_BACKGROUND_RGB, selection_background_rgb};
 
@@ -590,6 +596,13 @@ struct RectInstance {
 struct MathVertex {
     position: [f32; 2],
     uv: [f32; 2],
+    /// A uniform multiplier on the sampled alpha, `0.0 ..= 1.0`.
+    ///
+    /// Constant across a quad — it is one element's opacity, not a gradient —
+    /// but it lives on the vertex rather than in a uniform because these quads
+    /// are drawn from one buffer in one pass, and a uniform would mean either a
+    /// bind group per mark or a draw call per mark.
+    opacity: f32,
 }
 
 struct MathTextureTile {
@@ -1754,6 +1767,59 @@ pub struct ChromeLabel {
     /// user today: at 11px, uppercase and tracked is the whole difference
     /// between a heading and a small sentence.
     pub letter_spacing_em: f32,
+    /// How heavy the face is drawn — CSS `font-weight`.
+    ///
+    /// Chrome text is `--ink*` at one weight almost everywhere, which is why
+    /// this field did not exist until the pane-count badge needed it: the badge
+    /// is `font-weight: 600` (mock-up line 296) and drawing it at the regular
+    /// weight left a number too thin to read as a count against the tab title
+    /// beside it.
+    pub weight: ChromeLabelWeight,
+    /// `font-variant-numeric: tabular-nums` — draw figures on one fixed
+    /// advance instead of the face's proportional ones.
+    ///
+    /// Only text that *changes under a fixed layout* needs this. The pane-count
+    /// badge (mock-up line 302) is the one such label today: it is a number,
+    /// centred in a box, that counts up while the box stays put.
+    pub tabular_numerals: bool,
+}
+
+/// `font-variant-numeric: tabular-nums` — the `tnum` `OpenType` feature.
+///
+/// The chrome's face draws proportional figures by default, and by a wide
+/// margin: measured on Segoe UI Variable at the badge's own 10px, `1` advances
+/// 3.79 against `0`'s 5.39. A count that changes width as it counts is exactly
+/// the wobble the mock-up's declaration exists to stop.
+const TABULAR_FIGURES: FeatureTag = FeatureTag::new(b"tnum");
+
+/// The weights the chrome draws text at.
+///
+/// Two, because the mock-up asks for two: everything is the face's regular
+/// weight except `.panecount`, which is `600`. A general "any u16" field would
+/// be a wider promise than the design makes and than the loaded face can keep.
+///
+/// The chrome's face is Windows 11's Segoe UI Variable, a variable font whose
+/// default instance is `wght 400`; cosmic-text steers that axis from the shaping
+/// attributes, so `SemiBold` is the real 600 instance of the same face rather
+/// than a second file or a synthetic emboldening.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ChromeLabelWeight {
+    /// The face's own regular weight — `wght 400`, and what every label that
+    /// does not ask for otherwise gets.
+    #[default]
+    Regular,
+    /// `font-weight: 600`, worn by `.panecount`.
+    SemiBold,
+}
+
+impl ChromeLabelWeight {
+    /// The shaping weight this maps to.
+    fn shaping_weight(self) -> Weight {
+        match self {
+            Self::Regular => Weight::NORMAL,
+            Self::SemiBold => Weight::SEMIBOLD,
+        }
+    }
 }
 
 /// One chrome mark, already rasterized to the exact physical box it occupies.
@@ -1778,6 +1844,18 @@ pub struct ChromeIcon {
     pub rgba: Arc<[u8]>,
     pub width_px: u32,
     pub height_px: u32,
+    /// A uniform multiplier on the raster's own alpha, `0.0 ..= 1.0`.
+    ///
+    /// Deliberately *not* part of [`Self::key`]: opacity is the one property of
+    /// a mark that changes continuously, and folding it into the content
+    /// identity would mint a new texture on every frame of a breath. The key
+    /// stays "which mark, how big, what colour"; how faded it is this frame
+    /// rides on the quad.
+    ///
+    /// The mock-up needs exactly this twice — `.ticon.working`'s breath and
+    /// `.ticon-wrap.dead`'s .35 — and in both the artwork is unchanged and only
+    /// its presence varies.
+    pub opacity: f32,
 }
 
 /// One flat fill of the modal overlay, in physical pixels of the whole surface.
@@ -1884,6 +1962,12 @@ impl PartialEq for ChromeIcon {
             && self.rect == other.rect
             && self.width_px == other.width_px
             && self.height_px == other.height_px
+            // Opacity is *not* covered by the key — deliberately, so that a
+            // breathing mark reuses one raster — which means it is the one
+            // property of an icon that this comparison has to read for itself.
+            // Left out, every frame of a breath compares equal to the last and
+            // the chrome is never rebuilt.
+            && self.opacity == other.opacity
     }
 }
 
@@ -3336,6 +3420,7 @@ impl Renderer {
                     uv_bottom,
                     self.seat.width,
                     self.seat.height,
+                    1.0,
                 ));
                 draws.push(MathDraw {
                     key: key.clone(),
@@ -3437,6 +3522,7 @@ impl Renderer {
                 1.0,
                 self.seat.width,
                 self.seat.height,
+                1.0,
             ));
             draws.push(MathDraw {
                 key: overlay.key.clone(),
@@ -3537,6 +3623,7 @@ impl Renderer {
                     1.0,
                     surface_width,
                     surface_height,
+                    icon.opacity,
                 ));
                 draws.push(MathDraw {
                     key: icon.key.clone(),
@@ -3596,6 +3683,7 @@ impl Renderer {
                 1.0,
                 image.seat.width,
                 image.seat.height,
+                1.0,
             ));
             draws.push(MathDraw {
                 key: image.key.clone(),
@@ -4363,7 +4451,14 @@ fn shape_chrome_labels(
                 Buffer::new(font_system, Metrics::new(label.font_size_px, line_height));
             buffer.set_wrap(Wrap::None);
             buffer.set_size(Some(width), Some(line_height));
-            let mut attrs = Attrs::new().family(Family::SansSerif);
+            let mut attrs = Attrs::new()
+                .family(Family::SansSerif)
+                .weight(label.weight.shaping_weight());
+            if label.tabular_numerals {
+                let mut features = FontFeatures::new();
+                features.enable(TABULAR_FIGURES);
+                attrs = attrs.font_features(features);
+            }
             if label.letter_spacing_em != 0.0 {
                 attrs = attrs.letter_spacing(label.letter_spacing_em);
             }
@@ -5758,6 +5853,11 @@ fn create_math_pipeline(
                         offset: 8,
                         shader_location: 1,
                     },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32,
+                        offset: 16,
+                        shader_location: 2,
+                    },
                 ],
             })],
             compilation_options: Default::default(),
@@ -5796,35 +5896,23 @@ fn math_quad_vertices(
     uv_bottom: f32,
     viewport_width: u32,
     viewport_height: u32,
+    opacity: f32,
 ) -> [MathVertex; 6] {
     let width = viewport_width.max(1) as f32;
     let height = viewport_height.max(1) as f32;
     let position = |x: f32, y: f32| [x / width * 2.0 - 1.0, 1.0 - y / height * 2.0];
+    let corner = |x: f32, y: f32, u: f32, v: f32| MathVertex {
+        position: position(x, y),
+        uv: [u, v],
+        opacity,
+    };
     [
-        MathVertex {
-            position: position(left, top),
-            uv: [uv_left, uv_top],
-        },
-        MathVertex {
-            position: position(left, bottom),
-            uv: [uv_left, uv_bottom],
-        },
-        MathVertex {
-            position: position(right, bottom),
-            uv: [uv_right, uv_bottom],
-        },
-        MathVertex {
-            position: position(left, top),
-            uv: [uv_left, uv_top],
-        },
-        MathVertex {
-            position: position(right, bottom),
-            uv: [uv_right, uv_bottom],
-        },
-        MathVertex {
-            position: position(right, top),
-            uv: [uv_right, uv_top],
-        },
+        corner(left, top, uv_left, uv_top),
+        corner(left, bottom, uv_left, uv_bottom),
+        corner(right, bottom, uv_right, uv_bottom),
+        corner(left, top, uv_left, uv_top),
+        corner(right, bottom, uv_right, uv_bottom),
+        corner(right, top, uv_right, uv_top),
     ]
 }
 
@@ -9363,6 +9451,189 @@ mod tests {
         baseline - cap_height_ratio * label.font_size_px / 2.0
     }
 
+    /// PIN (T2 breathing): a mark that has only changed opacity is a *changed*
+    /// mark, and `set_chrome` must say so.
+    ///
+    /// Red gate, and a silent one. `ChromeIcon`'s equality deliberately ignores
+    /// the pixel bytes — two icons with the same key are the same raster, which
+    /// is what makes the comparison cheap enough to run every frame. Opacity
+    /// arrived on the same struct and would have inherited that exemption,
+    /// which is precisely wrong: the whole point of carrying the breath beside
+    /// the pixels instead of inside them is that the *pixels do not change*. An
+    /// equality that reads only the pixels' identity therefore reports every
+    /// frame of a breath as "nothing happened", and the icon never breathes.
+    #[test]
+    fn a_mark_that_only_changed_opacity_is_a_changed_mark() {
+        let icon = |opacity: f32| ChromeIcon {
+            key: "chrome-mark:i-folder:26x26:828fff".to_owned(),
+            rect: [0.0, 0.0, 26.0, 26.0],
+            rgba: Arc::from(vec![0_u8; 26 * 26 * 4]),
+            width_px: 26,
+            height_px: 26,
+            opacity,
+        };
+        assert_ne!(
+            icon(1.0),
+            icon(0.28),
+            "two opacities of one mark are two different pictures"
+        );
+        assert_eq!(icon(0.28), icon(0.28), "and the same one is still the same");
+        // The exemption that made this a trap is still in force: the bytes
+        // themselves are not compared, because the key already identifies them.
+        let mut recoloured = icon(1.0);
+        recoloured.rgba = Arc::from(vec![255_u8; 26 * 26 * 4]);
+        assert_eq!(
+            recoloured,
+            icon(1.0),
+            "one key is one raster — comparing the bytes would cost a frame"
+        );
+    }
+
+    /// PIN (T2 breathing / dead marks): a textured chrome quad carries a
+    /// uniform opacity, and it carries it on every vertex of both triangles.
+    ///
+    /// The mock-up dims a mark in two places — `.ticon.working` breathes
+    /// between 1 and .28 (line 246) and `.ticon-wrap.dead .ticon` holds .35
+    /// (line 285) — and both are the *same artwork at a different opacity*.
+    /// Baking that into the raster instead would re-rasterize the mark on
+    /// every frame of every breath and defeat the mark cache, which is keyed
+    /// on content; carrying it on the quad keeps one raster per mark forever.
+    ///
+    /// The per-vertex assertion is the one that matters: a quad is two
+    /// triangles sharing an edge, and an opacity written to only the first
+    /// three vertices interpolates across the seam and tears the mark in half
+    /// diagonally.
+    #[test]
+    fn a_textured_quad_carries_one_opacity_on_every_vertex() {
+        let vertices = math_quad_vertices(0.0, 0.0, 10.0, 10.0, 0.0, 0.0, 1.0, 1.0, 100, 100, 0.4);
+        assert_eq!(vertices.len(), 6, "two triangles");
+        for (index, vertex) in vertices.iter().enumerate() {
+            assert!(
+                (vertex.opacity - 0.4).abs() < f32::EPSILON,
+                "vertex {index} carries {} rather than the quad's own .4",
+                vertex.opacity
+            );
+        }
+        // Fully opaque is the ordinary case and must survive the trip
+        // untouched — a mark that is not dimmed is not "dimmed by 1.0", it is
+        // the raster's own alpha and nothing else.
+        let opaque = math_quad_vertices(0.0, 0.0, 10.0, 10.0, 0.0, 0.0, 1.0, 1.0, 100, 100, 1.0);
+        assert!(opaque.iter().all(|vertex| vertex.opacity == 1.0));
+    }
+
+    /// The advance of each glyph of `text`, shaped the way the chrome shapes it.
+    #[cfg(target_os = "windows")]
+    fn glyph_advances(
+        font_system: &mut FontSystem,
+        text: &str,
+        weight: ChromeLabelWeight,
+        tabular_numerals: bool,
+    ) -> Vec<f32> {
+        let label = ChromeLabel {
+            text: text.to_owned(),
+            rect: [0.0, 0.0, 400.0, 15.0],
+            font_size_px: WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+            color: [255, 255, 255],
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight,
+            tabular_numerals,
+        };
+        let layouts = shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7);
+        layouts[0]
+            .buffer
+            .layout_runs()
+            .next()
+            .expect("the label shapes")
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.w)
+            .collect()
+    }
+
+    /// The widest and narrowest figure advance differ by this much.
+    #[cfg(target_os = "windows")]
+    fn figure_advance_spread(
+        font_system: &mut FontSystem,
+        weight: ChromeLabelWeight,
+        tabular_numerals: bool,
+    ) -> f32 {
+        let advances = glyph_advances(font_system, "0123456789", weight, tabular_numerals);
+        assert_eq!(advances.len(), 10, "every digit shapes");
+        let widest = advances.iter().copied().fold(f32::MIN, f32::max);
+        let narrowest = advances.iter().copied().fold(f32::MAX, f32::min);
+        widest - narrowest
+    }
+
+    /// PIN (T2 badge weight): `.panecount { font-weight: 600 }` (mock-up line
+    /// 296) reaches the face and actually moves it.
+    ///
+    /// Red gate: the badge's digits were drawn at the face's regular weight,
+    /// visibly lighter than the mock-up's, because `ChromeLabel` had no way to
+    /// ask for anything else. The assertion that matters is not that the field
+    /// exists but that it *changes the shaped result* — the chrome's face is a
+    /// variable font whose default instance is `wght 400`, and a weight request
+    /// that the axis quietly ignored would leave the badge exactly as thin as
+    /// the bug it is fixing while every structural test still passed.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_badge_weight_reaches_the_variable_face_and_moves_its_axis() {
+        let mut font_system = terminal_font_system();
+        let regular = glyph_advances(&mut font_system, "88", ChromeLabelWeight::Regular, true);
+        let semibold = glyph_advances(&mut font_system, "88", ChromeLabelWeight::SemiBold, true);
+        assert_eq!(regular.len(), 2, "both digits shape");
+        assert_eq!(semibold.len(), 2);
+        // Heavier strokes need more room: if the `wght` axis moved, the advance
+        // moved with it. Equality here would mean the request was dropped.
+        assert!(
+            semibold.iter().sum::<f32>() > regular.iter().sum::<f32>(),
+            "semibold {semibold:?} must outrun regular {regular:?} —              an unmoved axis is a badge still drawn at 400"
+        );
+        // `Regular` is what a label that says nothing gets, so every call site
+        // that predates this field is untouched by it.
+        assert_eq!(ChromeLabelWeight::default(), ChromeLabelWeight::Regular);
+    }
+
+    /// PIN (T2 badge): `.panecount { font-variant-numeric: tabular-nums }`
+    /// (mock-up line 302) — the pane count must not wobble as it counts.
+    ///
+    /// The badge is a fixed box with a number centred in it, so a face whose
+    /// figures have their own widths shifts the glyphs every time the count
+    /// changes. This face's figures very much do: measured at the badge's own
+    /// 10px, `1` advances 3.79 against `0`'s 5.39, so the declaration is not
+    /// decoration and asking for `tnum` is not optional.
+    ///
+    /// Both halves are asserted, because either one alone can pass while the
+    /// badge still wobbles: that the feature is *needed* (off, the figures are
+    /// plainly proportional) and that it *works* (on, they are one advance).
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn tabular_figures_are_needed_by_this_face_and_delivered_by_the_feature() {
+        let mut font_system = terminal_font_system();
+        for weight in [ChromeLabelWeight::Regular, ChromeLabelWeight::SemiBold] {
+            let proportional = figure_advance_spread(&mut font_system, weight, false);
+            assert!(
+                proportional > 1.0,
+                "{weight:?}: figures spread {proportional}px without `tnum` —                  if this face ever ships tabular defaults, this pin is the                  place that says the feature request became redundant"
+            );
+            let tabular = figure_advance_spread(&mut font_system, weight, true);
+            // A quarter pixel at the badge's 10px. Segoe UI Variable's tabular
+            // figures are exact at `wght 400` and carry one interpolation
+            // artefact at 600 — `7` comes back 0.19px narrow — which is a
+            // twentieth of the wobble the feature just removed and lands well
+            // inside a pixel the badge is centred in.
+            assert!(
+                tabular < 0.25,
+                "{weight:?}: figures still spread {tabular}px with `tnum` on"
+            );
+            assert!(
+                tabular < proportional / 5.0,
+                "{weight:?}: `tnum` must actually reach this face"
+            );
+        }
+    }
+
     /// PIN (chrome font pass): a chrome label is shaped in a real UI sans — the
     /// mock-up's own stack — and never in the emoji face the request used to land
     /// on, while a title that carries an emoji still reaches that face for the
@@ -9385,6 +9656,8 @@ mod tests {
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
         };
         let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7);
         let run = layouts[0]
@@ -9458,6 +9731,8 @@ mod tests {
                 align_right: false,
                 align_center: false,
                 letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
             };
             let rect_centre = (label.rect[1] + label.rect[3]) / 2.0;
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
@@ -9487,6 +9762,8 @@ mod tests {
                 align_right: false,
                 align_center: false,
                 letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
             };
             let rect_centre = (label.rect[1] + label.rect[3]) / 2.0;
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
@@ -9522,6 +9799,8 @@ mod tests {
                 align_right: false,
                 align_center: false,
                 letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
             };
             let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7);
             let run = layouts
@@ -9561,6 +9840,8 @@ mod tests {
                 align_right: false,
                 align_center: false,
                 letter_spacing_em: spacing,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
             };
             shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7)[0]
                 .buffer

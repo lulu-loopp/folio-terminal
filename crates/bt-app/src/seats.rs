@@ -25,25 +25,27 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
-    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX,
-    SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX,
-    SEAT_TITLE_PADDING_LOGICAL_PX, SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX,
-    WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
-    WINDOW_NEW_TAB_BOX_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX,
-    WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX, WINDOW_NEW_TAB_GLYPH_LOGICAL_PX,
-    WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX,
-    WINDOW_NEW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
-    WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX, WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX, WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
-    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
-    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
-    WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
-    WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
+    ChromeLabel, ChromeLabelWeight, ChromeQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
+    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
+    SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
+    SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
+    WINDOW_CAPTION_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
+    WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
+    WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
+    WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
+    WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX, WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
+    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_PADDING_LEFT_LOGICAL_PX,
+    WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_RING_STROKE_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
+    WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX,
+    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
 };
 
 use crate::marks::{ChromeMark, ChromeSprite};
@@ -1014,6 +1016,7 @@ pub fn build_chrome_with_preview(
         title: tab_title.unwrap_or("PowerShell").to_owned(),
         pane_count: seats.pane_count(),
         badge_text_width: 0.0,
+        mark: TabMarkState::default(),
     }];
     build_chrome_for_tabs(
         seats,
@@ -1046,6 +1049,54 @@ pub struct TabContent {
     /// wide a number is, and the mock-up sizes the pill from exactly that
     /// (`max(min-width, text + padding)`).
     pub badge_text_width: f32,
+    /// What this tab's mark slot is saying about its sessions.
+    pub mark: TabMarkState,
+}
+
+/// One tab's mark slot, resolved to pixels-worth of decisions.
+///
+/// Deliberately free of any session type: `main.rs` reads the sessions and
+/// decides *what is true*, this says *what to draw*, and `seats.rs` says
+/// *where*. Keeping the three apart is what lets the strip's geometry be tested
+/// without a terminal and the state taxonomy be tested without a window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabMarkState {
+    /// The status dot's fill, or `None` when the tab has nothing to claim.
+    pub dot: Option<[u8; 3]>,
+    /// The progress ring that replaces the mark, or `None` to draw the mark.
+    pub ring: Option<TabRing>,
+    /// The mark's own opacity — the working breath, or a dead session's fade.
+    pub opacity: f32,
+    /// Whether the mark is drawn with its hue removed (a dead session).
+    pub grayscale: bool,
+}
+
+impl Default for TabMarkState {
+    /// A tab with nothing to report: its mark, at full strength, and no badge.
+    ///
+    /// Written out rather than derived, because a derived default would give
+    /// the mark an opacity of `0.0` — an invisible mark on every tab that had
+    /// not been told otherwise, which is the worst available reading of "this
+    /// tab has no state to report".
+    fn default() -> Self {
+        Self {
+            dot: None,
+            ring: None,
+            opacity: 1.0,
+            grayscale: false,
+        }
+    }
+}
+
+/// The live arc of one tab's progress ring.
+///
+/// Only the arc: the track is a property of the tab it lies on, so the strip
+/// picks that from the palette rather than being told it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabRing {
+    pub arc: [u8; 3],
+    pub start_milliturns: u16,
+    pub sweep_milliturns: u16,
 }
 
 pub struct ChromeContent<'a> {
@@ -1162,16 +1213,16 @@ pub fn build_chrome_for_tabs(
                 let mark_size = (mark_logical_px * scale).round().max(1.0);
                 let mark_left = (rect[0] + pad).round();
                 let mark_top = (rect[1] + ((title_bottom - rect[1]) - mark_size) / 2.0).round();
-                sprites.push(ChromeSprite {
+                sprites.push(ChromeSprite::new(
                     mark,
-                    rect: [
+                    [
                         mark_left,
                         mark_top,
                         mark_left + mark_size,
                         mark_top + mark_size,
                     ],
-                    color: mark_color,
-                });
+                    mark_color,
+                ));
                 labels.push(ChromeLabel {
                     text: if placement.kind == SeatKind::Preview {
                         preview_title.unwrap_or_else(|| seat_title(placement.kind))
@@ -1194,6 +1245,8 @@ pub fn build_chrome_for_tabs(
                     align_right: false,
                     align_center: false,
                     letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
                 });
                 if placement.kind == SeatKind::Preview
                     && let Some(message) = preview_message
@@ -1214,6 +1267,8 @@ pub fn build_chrome_for_tabs(
                         align_right: false,
                         align_center: true,
                         letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: false,
                     });
                 }
             }
@@ -1311,21 +1366,21 @@ fn window_chrome(
                 || hover == Some(ChromeTarget::TabClose(index));
             let skirted = [tab_left - radius, tab_top, tab_right + radius, tab_bottom];
             if active && tab_right - tab_left >= 2.0 * radius && within_strip(viewport, skirted) {
-                sprites.push(ChromeSprite {
-                    mark: ChromeMark::ActiveTab {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ActiveTab {
                         radius_px: radius as u32,
                     },
-                    rect: skirted,
-                    color: palette.active_tab,
-                });
+                    skirted,
+                    palette.active_tab,
+                ));
             } else if tab_hovered && within_strip(viewport, tab.body) {
-                sprites.push(ChromeSprite {
-                    mark: ChromeMark::TabBody {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::TabBody {
                         radius_px: radius as u32,
                     },
-                    rect: tab.body,
-                    color: palette.caption_hover,
-                });
+                    tab.body,
+                    palette.caption_hover,
+                ));
             }
             let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
             let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
@@ -1357,11 +1412,93 @@ fn window_chrome(
             let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
             if mark_left + mark <= tab.close.map_or(tab_right, |close| close[0]) {
                 if within_strip(viewport, mark_rect) {
-                    sprites.push(ChromeSprite {
-                        mark: ChromeMark::ProfilePowerShell,
-                        rect: mark_rect,
-                        color: palette.accent,
-                    });
+                    // The mark slot is `.ticon-wrap` (mock-up line 238): a
+                    // positioning origin whose contents are absolutely placed,
+                    // so nothing here can move the tab's layout by a pixel.
+                    // That is why the ring may replace the mark and the dot may
+                    // overhang it without either one touching the title.
+                    match content.mark.ring {
+                        // The ring *replaces* the mark in the same box (user
+                        // ruling, deviating from `.pring`, which overlays a
+                        // larger circle around it). Chrome's own loading
+                        // indicator does exactly this to a favicon: while there
+                        // is progress to report, the progress is what the slot
+                        // is for.
+                        Some(ring) => {
+                            let stroke =
+                                (WINDOW_TAB_RING_STROKE_LOGICAL_PX * scale).round().max(1.0) as u32;
+                            // The track first — a full turn under the arc, in
+                            // `--border` at .7 over whichever surface this tab
+                            // is wearing.
+                            sprites.push(ChromeSprite::new(
+                                ChromeMark::ProgressRing {
+                                    start_milliturns: 0,
+                                    sweep_milliturns: 1000,
+                                    stroke_px: stroke,
+                                },
+                                mark_rect,
+                                if active {
+                                    palette.ring_track_on_active_tab
+                                } else if tab_hovered {
+                                    palette.ring_track_on_hovered_tab
+                                } else {
+                                    palette.ring_track_on_resting_tab
+                                },
+                            ));
+                            sprites.push(ChromeSprite::new(
+                                ChromeMark::ProgressRing {
+                                    start_milliturns: ring.start_milliturns,
+                                    sweep_milliturns: ring.sweep_milliturns,
+                                    stroke_px: stroke,
+                                },
+                                mark_rect,
+                                ring.arc,
+                            ));
+                        }
+                        None => {
+                            let mut profile = ChromeSprite::new(
+                                ChromeMark::ProfilePowerShell,
+                                mark_rect,
+                                palette.accent,
+                            );
+                            // `.ticon.working`'s breath and `.ticon-wrap.dead`'s
+                            // fade both land here, on the mark alone — never on
+                            // the dot or the ring, which are other claims.
+                            profile.opacity = content.mark.opacity;
+                            profile.grayscale = content.mark.grayscale;
+                            sprites.push(profile);
+                        }
+                    }
+                }
+                // `.unreaddot { position: absolute; top: -2px; right: -4px }` —
+                // anchored to the slot's top-right and deliberately overhanging
+                // it on both axes, so it reads as a badge *on* the mark rather
+                // than as a thing standing beside it. It survives every squeeze
+                // tier for the same reason it takes no layout space: the
+                // stylesheet hides `.ttitle`, `.panecount`, `.pin` and the `×`
+                // as tabs narrow (lines 197-202) and never touches
+                // `.ticon-wrap`.
+                if let Some(dot_color) = content.mark.dot {
+                    let dot = (WINDOW_TAB_STATUS_DOT_LOGICAL_PX * scale).round().max(1.0);
+                    let dot_left =
+                        (mark_rect[2] - WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX * scale - dot)
+                            .round();
+                    let dot_top =
+                        (mark_rect[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
+                    let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
+                    if within_strip(viewport, dot_rect) {
+                        sprites.push(ChromeSprite::new(
+                            // `border-radius: 50%` on a square is a circle, and
+                            // `ControlPill` clamps its round to half the short
+                            // side — so the dot is the pill the chrome already
+                            // has, not a second circle to keep in step.
+                            ChromeMark::ControlPill {
+                                radius_px: (dot / 2.0).round().max(1.0) as u32,
+                            },
+                            dot_rect,
+                            dot_color,
+                        ));
+                    }
                 }
                 let label_left = mark_left + mark + content_gap;
                 // `.tab.squeezed .ttitle { display: none }`: below 90px the tab is
@@ -1382,6 +1519,8 @@ fn window_chrome(
                         align_right: false,
                         align_center: false,
                         letter_spacing_em: 0.0,
+                        weight: ChromeLabelWeight::Regular,
+                        tabular_numerals: false,
                     });
                 }
             }
@@ -1389,24 +1528,24 @@ fn window_chrome(
             if let Some(badge) = badge
                 && within_strip(viewport, badge)
             {
-                sprites.push(ChromeSprite {
-                    mark: ChromeMark::ControlPill {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
                         radius_px: (WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX * scale)
                             .round()
                             .max(1.0) as u32,
                     },
-                    rect: pixel_snapped(badge),
+                    pixel_snapped(badge),
                     // `background: var(--active)` on every tab — the same fill the
                     // `×`'s pill wears, over whichever of the three surfaces this tab
                     // is showing.
-                    color: if active {
+                    if active {
                         palette.tab_close_pill_on_content
                     } else if tab_hovered {
                         palette.tab_close_pill_on_hovered_tab
                     } else {
                         palette.tab_badge_on_resting_tab
                     },
-                });
+                ));
                 labels.push(ChromeLabel {
                     text: content.pane_count.to_string(),
                     // `justify-content: center` — the number is centred in its pill,
@@ -1425,6 +1564,15 @@ fn window_chrome(
                     align_right: false,
                     align_center: true,
                     letter_spacing_em: 0.0,
+                    // `.panecount { font-weight: 600 }` (mock-up line 296). The
+                    // badge is the one label in the chrome that is not prose:
+                    // at the regular weight a 10px digit inside a filled pill
+                    // read as a smudge rather than as a count.
+                    weight: ChromeLabelWeight::SemiBold,
+                    // `font-variant-numeric: tabular-nums` (line 302) — the
+                    // number is centred in a box that does not move, so its
+                    // figures must not either.
+                    tabular_numerals: true,
                 });
             }
             let Some(close) = tab.close else {
@@ -1435,19 +1583,19 @@ fn window_chrome(
                 // `.tab .close:hover { background: var(--active) }` — 4px of round,
                 // over whichever of the two surfaces this tab is showing: `--termbg`
                 // when it is the active one, its own `--hover` fill when it is not.
-                sprites.push(ChromeSprite {
-                    mark: ChromeMark::ControlPill {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
                         radius_px: (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale)
                             .round()
                             .max(1.0) as u32,
                     },
-                    rect: pixel_snapped(close),
-                    color: if active {
+                    pixel_snapped(close),
+                    if active {
                         palette.tab_close_pill_on_content
                     } else {
                         palette.tab_close_pill_on_hovered_tab
                     },
-                });
+                ));
             }
             let glyph = (WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
             let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
@@ -1456,17 +1604,17 @@ fn window_chrome(
             if !within_strip(viewport, glyph_rect) {
                 continue;
             }
-            sprites.push(ChromeSprite {
-                mark: ChromeMark::TabClose,
-                rect: glyph_rect,
-                color: if close_hovered {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::TabClose,
+                glyph_rect,
+                if close_hovered {
                     palette.title_text_hover
                 } else {
                     // `.tab .close { color: var(--ink3) }` — a step below the caption
                     // run's own ink, because closing a tab is not what the strip is for.
                     palette.title_text_muted
                 },
-            });
+            ));
         }
     }
 
@@ -1481,15 +1629,15 @@ fn window_chrome(
         (geometry.new_tab_menu, menu_hovered),
     ] {
         if hovered && within_strip(viewport, rect) {
-            sprites.push(ChromeSprite {
-                mark: ChromeMark::ControlPill {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
                     radius_px: pill_radius,
                 },
-                rect: pixel_snapped(rect),
+                pixel_snapped(rect),
                 // `--hover` over `--panel` and nothing else is ever under it, so
                 // this one the palette can and does pre-composite.
-                color: palette.caption_hover,
-            });
+                palette.caption_hover,
+            ));
         }
     }
     let plus = (WINDOW_NEW_TAB_GLYPH_LOGICAL_PX * scale).round().max(1.0);
@@ -1497,15 +1645,15 @@ fn window_chrome(
     let plus_top = ((geometry.new_tab[1] + geometry.new_tab[3] - plus) / 2.0).round();
     let plus_rect = [plus_left, plus_top, plus_left + plus, plus_top + plus];
     if within_strip(viewport, plus_rect) {
-        sprites.push(ChromeSprite {
-            mark: ChromeMark::Plus,
-            rect: plus_rect,
-            color: if new_hovered {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::Plus,
+            plus_rect,
+            if new_hovered {
                 palette.title_text_hover
             } else {
                 palette.title_text_muted
             },
-        });
+        ));
     }
     let chevron_width = (WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX * scale)
         .round()
@@ -1524,17 +1672,17 @@ fn window_chrome(
         chevron_top + chevron_height,
     ];
     if within_strip(viewport, chevron_rect) {
-        sprites.push(ChromeSprite {
-            mark: ChromeMark::Chevron {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::Chevron {
                 open: profile_menu_open,
             },
-            rect: chevron_rect,
-            color: if menu_hovered || profile_menu_open {
+            chevron_rect,
+            if menu_hovered || profile_menu_open {
                 palette.title_text_hover
             } else {
                 palette.title_text_muted
             },
-        });
+        ));
     }
 
     // `.capbtn`: a 46x40 box, a 10px glyph, and 14px for the gear alone.
@@ -1577,17 +1725,17 @@ fn window_chrome(
         let glyph = (glyph_logical_px * scale).round().max(1.0);
         let glyph_left = ((rect[0] + rect[2]) / 2.0 - glyph / 2.0).round();
         let glyph_top = (title / 2.0 - glyph / 2.0).round();
-        sprites.push(ChromeSprite {
+        sprites.push(ChromeSprite::new(
             mark,
-            rect: [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
-            color: if hovered && target == ChromeTarget::CloseWindow {
+            [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+            if hovered && target == ChromeTarget::CloseWindow {
                 palette.caption_close_text
             } else if hovered {
                 palette.title_text_hover
             } else {
                 palette.title_text
             },
-        });
+        ));
     }
 }
 
@@ -1628,6 +1776,8 @@ fn collapse_bar_contents(
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
         });
     }
 }
@@ -2844,6 +2994,7 @@ mod tests {
                 title: title.clone(),
                 pane_count: 1,
                 badge_text_width: 0.0,
+                mark: TabMarkState::default(),
             })
             .collect::<Vec<_>>();
         strip_chrome_of(scale, &tabs, active_tab, 0.0, hover, profile_menu_open)
@@ -3573,6 +3724,7 @@ mod tests {
             title: "tab".to_owned(),
             pane_count,
             badge_text_width: 6.0,
+            mark: TabMarkState::default(),
         };
         let (_, lone_labels, lone_sprites) = strip_chrome_of(1.0, &[tab(1)], 0, 0.0, None, false);
         let (_, pair_labels, pair_sprites) = strip_chrome_of(1.0, &[tab(2)], 0, 0.0, None, false);
@@ -3643,6 +3795,228 @@ mod tests {
         );
     }
 
+    fn tab_with(mark: TabMarkState) -> TabContent {
+        TabContent {
+            title: "session".to_owned(),
+            pane_count: 1,
+            badge_text_width: 0.0,
+            mark,
+        }
+    }
+
+    /// Every mark-slot sprite the strip drew for a single tab.
+    fn mark_slot_sprites(mark: TabMarkState, tier_width: f32) -> Vec<ChromeSprite> {
+        let tabs = [tab_with(mark)];
+        let (_, _, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);
+        let _ = tier_width;
+        sprites
+    }
+
+    /// PIN (T2 C22/D36): a progress ring *replaces* the mark in the same box,
+    /// and gives it back the moment the progress ends.
+    ///
+    /// The user's ruling, deviating from `.pring` — which overlays a 25px
+    /// circle *around* a 15px mark, a size the mock-up's own comment (line 270)
+    /// justifies purely by the need to clear that mark's corners. Replacing it
+    /// dissolves the constraint, and Chrome's own loading indicator does the
+    /// same thing to a favicon.
+    ///
+    /// Both halves are asserted because either alone is a bug that ships: a
+    /// ring that never appears, or one that never leaves.
+    #[test]
+    fn a_progress_ring_replaces_the_mark_and_then_returns_it() {
+        let resting = mark_slot_sprites(TabMarkState::default(), 960.0);
+        let profile = |sprites: &[ChromeSprite]| {
+            sprites
+                .iter()
+                .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+                .map(|sprite| sprite.rect)
+        };
+        let slot = profile(&resting).expect("a resting tab draws its profile mark");
+
+        let ringed = mark_slot_sprites(
+            TabMarkState {
+                ring: Some(TabRing {
+                    arc: [1, 2, 3],
+                    start_milliturns: 0,
+                    sweep_milliturns: 400,
+                }),
+                ..TabMarkState::default()
+            },
+            960.0,
+        );
+        assert!(
+            profile(&ringed).is_none(),
+            "the ring replaces the mark rather than sitting over it"
+        );
+        let rings: Vec<&ChromeSprite> = ringed
+            .iter()
+            .filter(|sprite| matches!(sprite.mark, ChromeMark::ProgressRing { .. }))
+            .collect();
+        assert_eq!(rings.len(), 2, "a ring is its track and its arc");
+        for ring in &rings {
+            assert_eq!(
+                ring.rect, slot,
+                "the ring must occupy exactly the mark's own box — zero layout shift"
+            );
+        }
+        // Track first, arc over it, and the arc is the one carrying the state's
+        // colour. Drawn the other way round the track would erase the arc.
+        assert!(
+            matches!(
+                rings[0].mark,
+                ChromeMark::ProgressRing {
+                    sweep_milliturns: 1000,
+                    ..
+                }
+            ),
+            "the track is a full turn and is drawn first"
+        );
+        assert_eq!(
+            rings[1].color,
+            [1, 2, 3],
+            "the arc wears the state's colour"
+        );
+        assert_ne!(
+            rings[0].color, rings[1].color,
+            "a track the colour of its arc is not a track"
+        );
+    }
+
+    /// PIN (T2 D32/D33): the dot hangs off the mark slot's top-right corner and
+    /// overhangs it on both axes, exactly as `.unreaddot` is placed.
+    ///
+    /// `position: absolute; top: -2px; right: -4px` (mock-up line 254). The
+    /// negative offsets are the design: a badge that fits neatly inside its
+    /// host reads as part of the artwork rather than as something added to it.
+    #[test]
+    fn the_status_dot_hangs_off_the_marks_top_right_corner() {
+        let sprites = mark_slot_sprites(
+            TabMarkState {
+                dot: Some([9, 9, 9]),
+                ..TabMarkState::default()
+            },
+            960.0,
+        );
+        let slot = sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+            .expect("the mark is still there — a dot does not replace it")
+            .rect;
+        let dot = sprites
+            .iter()
+            .find(|sprite| sprite.color == [9, 9, 9])
+            .expect("the dot is drawn");
+        let side = dot.rect[2] - dot.rect[0];
+        assert!(
+            (side - WINDOW_TAB_STATUS_DOT_LOGICAL_PX).abs() <= 1.0,
+            "the dot is 6px square, got {side}"
+        );
+        assert!(
+            (dot.rect[3] - dot.rect[1] - side).abs() <= 1.0,
+            "and square, so `border-radius: 50%` is a circle"
+        );
+        // Outward on both axes: past the slot's right edge and above its top.
+        assert!(
+            dot.rect[2] > slot[2],
+            "`right: -4px` puts the dot past the mark's right edge"
+        );
+        assert!(
+            dot.rect[1] < slot[1],
+            "`top: -2px` lifts it above the mark's top edge"
+        );
+        // And it is the circle primitive, not a square.
+        assert!(matches!(
+            dot.mark,
+            ChromeMark::ControlPill { radius_px } if radius_px * 2 >= side as u32
+        ));
+    }
+
+    /// PIN (T2): a silent tab draws no dot at all.
+    ///
+    /// The mock-up keeps `.unreaddot` in the DOM and toggles a class, for a
+    /// reason it records at line 249 — but what reaches the screen is still
+    /// nothing. A dot always drawn in some quiet colour would be a permanent
+    /// smudge on every tab.
+    #[test]
+    fn a_tab_with_nothing_to_say_draws_no_dot() {
+        let sprites = mark_slot_sprites(TabMarkState::default(), 960.0);
+        let dots = sprites
+            .iter()
+            .filter(|sprite| matches!(sprite.mark, ChromeMark::ControlPill { .. }))
+            .count();
+        assert_eq!(dots, 0, "a resting single-pane tab draws no pill at all");
+    }
+
+    /// PIN (T2): the mark's opacity reaches the sprite, and lands on the mark
+    /// alone.
+    ///
+    /// The breath is `.ticon.working` — the icon, not the wrapper — so it must
+    /// never touch the dot beside it. Fading the two together would make
+    /// "running" and "finished, unread" pulse as one thing, which is exactly
+    /// the collapse the mock-up's own comment at line 247 forbids.
+    #[test]
+    fn the_breath_fades_the_mark_and_leaves_the_dot_alone() {
+        let sprites = mark_slot_sprites(
+            TabMarkState {
+                dot: Some([9, 9, 9]),
+                opacity: 0.28,
+                ..TabMarkState::default()
+            },
+            960.0,
+        );
+        let mark = sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+            .expect("the mark is drawn");
+        assert!((mark.opacity - 0.28).abs() < 1e-6, "the mark breathes");
+        let dot = sprites
+            .iter()
+            .find(|sprite| sprite.color == [9, 9, 9])
+            .expect("the dot is drawn");
+        assert_eq!(dot.opacity, 1.0, "the dot does not breathe with the mark");
+    }
+
+    /// PIN (T2): the dot and the ring survive every squeeze tier.
+    ///
+    /// The stylesheet narrows a tab by hiding `.ttitle`, `.panecount`, `.pin`
+    /// and the `×` (lines 197-202) and never once touches `.ticon-wrap`. That
+    /// is the design's priority order made explicit: at 46px a tab is its mark,
+    /// and what the mark is *saying* is the last thing that may go — a tab too
+    /// narrow to name is exactly the tab whose dot you need.
+    #[test]
+    fn the_dot_and_ring_survive_every_squeeze_tier() {
+        let mark = TabMarkState {
+            dot: Some([9, 9, 9]),
+            ring: Some(TabRing {
+                arc: [1, 2, 3],
+                start_milliturns: 0,
+                sweep_milliturns: 400,
+            }),
+            ..TabMarkState::default()
+        };
+        // Enough tabs to drive the strip through all three tiers.
+        for count in [2_usize, 8, 30] {
+            let tabs: Vec<TabContent> = (0..count).map(|_| tab_with(mark)).collect();
+            let geometry = tab_strip_geometry(960.0, 1.0, count, 0, 0.0);
+            let tier = geometry.tabs[0].tier;
+            let (_, _, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);
+            assert!(
+                sprites.iter().any(|sprite| sprite.color == [9, 9, 9]),
+                "{tier:?}: the dot must survive the squeeze"
+            );
+            assert!(
+                sprites.iter().any(|sprite| sprite.color == [1, 2, 3]),
+                "{tier:?}: the ring must survive the squeeze"
+            );
+        }
+        // And the narrowest tier really is reached, or the loop proved nothing.
+        assert_eq!(
+            tab_strip_geometry(960.0, 1.0, 30, 0, 0.0).tabs[0].tier,
+            TabWidthTier::Squeezed
+        );
+    }
+
     /// PIN — C27-C29: the badge wears `--active` over whichever of the three
     /// surfaces its tab is showing, and its ink is never the accent.
     #[test]
@@ -3653,11 +4027,13 @@ mod tests {
                 title: "a".to_owned(),
                 pane_count: 2,
                 badge_text_width: 6.0,
+                mark: TabMarkState::default(),
             },
             TabContent {
                 title: "b".to_owned(),
                 pane_count: 3,
                 badge_text_width: 6.0,
+                mark: TabMarkState::default(),
             },
         ];
         let (_, labels, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);

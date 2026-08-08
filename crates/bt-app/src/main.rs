@@ -28,16 +28,19 @@ use bt_persist::{
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
-    CursorStyle, FrameSource, FrameTrigger, GridSize, ImeCursorArea, LatestFrameSlot, MathHit,
-    MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay, Preedit, PresentOutcome,
-    PreviewImage, Renderer, SeatViewport, Theme, ThemeChange, background_rgb, compose_preedit,
-    current_cursor_style, foreground_rgb, frame_content_digest, frame_is_alternate_screen,
-    preview_image_extent, set_cursor_style, set_theme, theme_revision,
+    ChromePalette, CursorStyle, FrameSource, FrameTrigger, GridSize, ImeCursorArea,
+    LatestFrameSlot, MathHit, MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay,
+    Preedit, PresentOutcome, PreviewImage, Renderer, SeatViewport, Theme, ThemeChange,
+    WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
+    WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_RING_INDETERMINATE_TURNS,
+    WINDOW_TAB_RING_SPIN_PERIOD_MS, WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb,
+    compose_preedit, current_cursor_style, foreground_rgb, frame_content_digest,
+    frame_is_alternate_screen, preview_image_extent, set_cursor_style, set_theme, theme_revision,
 };
 use bt_term::{
-    DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, SessionDecorationTask,
-    SessionMathTask, TerminalModes, normalized_local_image_path_key, render_detection_task,
-    render_live_detection_task,
+    DualPlaneSession, InlineImageDecoder, MathLayoutOptions, MouseTracking, ProgressState,
+    SessionDecorationTask, SessionMathTask, SessionStatus, TerminalModes,
+    normalized_local_image_path_key, render_detection_task, render_live_detection_task,
 };
 use bt_transcript::DEFAULT_STAGING_QUOTA;
 use bt_viewport::{
@@ -65,6 +68,17 @@ const IME_CURSOR_AREA_INTERVAL: Duration = Duration::from_millis(16);
 /// The mock-up's `.cursor` uses a 1.1 second step-end animation, so each visible/hidden phase is
 /// half of that cycle.
 const CURSOR_BLINK_PHASE: Duration = Duration::from_millis(550);
+/// How often a live tab-strip animation asks to be redrawn.
+///
+/// 60Hz, and only ever while something is actually moving — a breath, a
+/// spinning indeterminate arc, or an arc easing to a new reading. The strip
+/// reports no deadline at all otherwise, so this is the *rate* of an animation
+/// and never a standing poll.
+///
+/// The budget it has to fit in is small and known: an animating ring costs one
+/// rasterize of a 15px SVG per frame, measured at 16.5µs on this workspace's
+/// own rasterizer — a tenth of a percent of a frame, per ring.
+const STRIP_ANIMATION_FRAME: Duration = Duration::from_millis(16);
 /// Winit 0.30 has no enter/exit-size-move event; the final ConPTY size is committed after this
 /// silence interval while the local surface and terminal grid continue to follow every event.
 const WINDOW_RESIZE_QUIET: Duration = bt_term::RESIZE_REQUEST_QUIET;
@@ -475,6 +489,22 @@ struct TabState {
     seats: seats::Seats,
     seat_layout: SeatLayout,
     preview_image: Option<PreviewImageState>,
+    /// The revision this tab's session had reached the last time the user was
+    /// looking at it — the whole of what "unread" is measured against.
+    last_seen_revision: u64,
+    /// The arc's easing toward the reading it is now showing, if it is moving.
+    ring_tween: Option<SweepTween>,
+    /// The sweep the ring is displaying, which is also what a state change
+    /// arriving without a percentage keeps.
+    ring_sweep: Option<u16>,
+    /// When this tab's mark-slot animations started counting.
+    ///
+    /// Per tab rather than per window, which is what CSS does: an animation
+    /// begins when its element does, so two tabs opened a second apart breathe
+    /// a second out of step. A single window-wide clock would have every tab
+    /// pulsing in lockstep, which reads as one mechanism rather than as several
+    /// sessions each doing their own work.
+    animation_epoch: Instant,
 }
 
 struct Runtime {
@@ -517,6 +547,19 @@ struct Runtime {
     ime_active: bool,
     ime_cursor_throttle: ImeCursorThrottle,
     cursor_blink: CursorBlink,
+    /// Whether the window holds focus.
+    ///
+    /// A window nobody is looking at consumes nothing: this is the second half
+    /// of [`attention_is_consumed`], and the reason a bell that rings while the
+    /// user is away in another application is still waiting when they return.
+    window_focused: bool,
+    /// Whether this system wants animation at all, read once at start-up.
+    ///
+    /// Once, because it is an accessibility preference rather than a live
+    /// signal: Windows broadcasts `WM_SETTINGCHANGE` when it moves, and until
+    /// this window listens for that, re-reading it every frame would buy a
+    /// system call per frame and no extra correctness.
+    motion: Motion,
     ime_system_caret: bt_platform::ImeSystemCaret,
     pointer_position: Option<PhysicalPosition<f64>>,
     mouse_route: Option<MouseRoute>,
@@ -1557,6 +1600,574 @@ impl ImeCursorThrottle {
     }
 }
 
+// ── T2: what a tab's mark slot says about its session ──
+//
+// The mock-up hangs four separate channels off one 15px slot (`.ticon-wrap`,
+// line 238) and is emphatic that they are separate: breathing says *running*,
+// the dot says *finished, and how*, the ring says *how far*, and the dead state
+// says *gone*. They coexist because each speaks in its own medium — motion,
+// a badge, an arc, a fade — and the whole design falls apart the moment two of
+// them are collapsed into one colour.
+//
+// Everything in this section is a pure function of a `SessionStatus` snapshot
+// and a clock. Nothing here draws, and nothing here reads a session: `seats.rs`
+// turns these answers into rectangles, and `Runtime` supplies the facts.
+
+/// One claim a session can make on the user's attention, quietest first.
+///
+/// The order is the whole point, and it is the mock-up's own: `tabDotClass`
+/// (lines 1932-1939) tests `await`, then `fail`, then `bell`, then plain
+/// unread, and returns at the first hit. Deriving `Ord` over the variants in
+/// ascending loudness turns that ladder into `max`, which is what makes a tab's
+/// claim the loudest of its members' rather than a hand-rolled cascade that has
+/// to be kept in step with the per-session one.
+///
+/// **The slot above [`Self::Failed`] belongs to `await`** — "an agent is blocked
+/// on YOU", the mock-up's loudest claim (line 262). It is deliberately absent
+/// here rather than stubbed: no session in this build can report it, and an
+/// unreachable variant is a promise the code cannot keep. When the attention
+/// queue lands it goes at the end of this enum, wears `--warn` with
+/// `fcpulse .9s`, and every consumer below keeps working unchanged.
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
+enum StatusClaim {
+    /// Nothing to say — no dot is drawn at all.
+    #[default]
+    Silent,
+    /// Finished, and the tab has not been looked at since (`--accent`).
+    Unread,
+    /// The bell rang (`--warn`).
+    Bell,
+    /// Finished with a failing exit code (`--err`).
+    Failed,
+}
+
+impl StatusClaim {
+    /// The dot's fill, or `None` when there is no dot to draw.
+    ///
+    /// `.unreaddot` is `--accent`, `.fail` is `--err` and `.bell` is `--warn`
+    /// (mock-up lines 253-264). All three are opaque and land on the mark, not
+    /// on the tab, so none of them needs the palette's compositing treatment.
+    fn dot_color(self, palette: &ChromePalette) -> Option<[u8; 3]> {
+        match self {
+            Self::Silent => None,
+            Self::Unread => Some(palette.accent),
+            Self::Bell => Some(palette.status_warn),
+            Self::Failed => Some(palette.status_err),
+        }
+    }
+}
+
+/// One session's state as the tab strip needs to read it.
+#[derive(Clone, Copy, Debug)]
+struct SessionFacts {
+    status: SessionStatus,
+    /// The revision this session had reached the last time the user was
+    /// actually looking at it.
+    last_seen_revision: u64,
+    /// Whether the tab holding this session is the one on screen.
+    tab_is_active: bool,
+}
+
+impl SessionFacts {
+    /// Whether the session has published anything the user has not seen.
+    ///
+    /// The active tab's own session can never be unread: the user is looking at
+    /// it, so "published" and "seen" are the same event. That is not an
+    /// optimisation but the definition — without it the tab you are staring at
+    /// wears a dot telling you to look at it.
+    fn has_unseen_output(self) -> bool {
+        !self.tab_is_active && self.status.published_revision > self.last_seen_revision
+    }
+
+    /// What this session is claiming right now.
+    ///
+    /// Transcribed from `stateDotClass` (mock-up lines 1922-1926), including
+    /// the two suppressions that make the taxonomy work:
+    ///
+    /// * **work in flight outranks a finished claim.** A session that is
+    ///   running, or that has a progress report on the wire, has not finished,
+    ///   so it cannot claim "finished" in either flavour. The mock-up's comment
+    ///   at line 1920 is a user ruling in its own right: "an active download is
+    ///   still WORK IN FLIGHT: no finished-unread claim until the progress
+    ///   ends". The breathing icon and the ring are already saying what is
+    ///   happening; a dot would be a third voice on the same fact.
+    /// * **a failure is a *kind* of unread.** `fail` is `unread && lastExit ===
+    ///   "err"`, not a claim of its own, so looking at the tab retires the red
+    ///   dot exactly as it retires the plain one. A failure you have already
+    ///   read about is not news.
+    ///
+    /// The bell is the exception to both: it is latched by the session and
+    /// survives whatever else is happening, because a bell is a thing that
+    /// *rang*, not a state the session is in.
+    fn claim(self) -> StatusClaim {
+        let work_in_flight = self.status.working || self.status.progress.is_some();
+        let unread = !work_in_flight && self.has_unseen_output();
+        if unread && self.status.failure_exit_code.is_some() {
+            StatusClaim::Failed
+        } else if self.status.bell_latched {
+            StatusClaim::Bell
+        } else if unread {
+            StatusClaim::Unread
+        } else {
+            StatusClaim::Silent
+        }
+    }
+}
+
+/// How much of a session the user has seen, one frame on.
+///
+/// Watching a tab *is* seeing it, so the tab on screen carries its ledger
+/// forward with every frame it publishes and can never accumulate a backlog.
+/// Every other tab's ledger stands still, and the gap that opens between it and
+/// the session's own revision is exactly what "unread" measures.
+///
+/// This is a rule rather than a line inside the event loop because getting it
+/// wrong is invisible until the user switches tabs: leave it out and suppress
+/// the dot on the active tab instead, and everything looks right until the
+/// moment they leave, when the tab they were reading lights up behind them.
+fn seen_revision(previous_seen: u64, published: u64, tab_is_active: bool) -> u64 {
+    if tab_is_active {
+        published
+    } else {
+        previous_seen
+    }
+}
+
+/// Whether a tab's latched attention has already been spent by being looked at.
+///
+/// Watching is consuming (user ruling). A terminal you are sitting in front of
+/// does not need a badge telling you to look at it — it has already said
+/// everything the badge would repeat, and louder. So the bell and the failure
+/// latch retire the moment they arrive on the tab that is both on screen *and*
+/// in the focused window, exactly as [`seen_revision`] retires new output for
+/// the same tab and for the same reason.
+///
+/// Both halves of the condition carry weight, and the second is the one worth
+/// stating out loud: a window in the background is a window nobody is reading.
+/// Clearing on "active tab" alone would silently eat every bell that rang while
+/// the user was away in another application — which is the one moment a bell is
+/// actually doing its job.
+fn attention_is_consumed(tab_is_active: bool, window_is_focused: bool) -> bool {
+    tab_is_active && window_is_focused
+}
+
+/// The claim a tab wears: the loudest of the claims its sessions make.
+///
+/// The mock-up's rule, from a user correction it records at line 1930: "a tab
+/// must never say less than its panes do". A tab is a lid over sessions the
+/// user cannot see, so anything it hides has to surface here or it is lost.
+fn loudest_claim(claims: impl IntoIterator<Item = StatusClaim>) -> StatusClaim {
+    claims.into_iter().max().unwrap_or_default()
+}
+
+/// A CSS `cubic-bezier(x1, y1, x2, y2)` timing function, evaluated at `x`.
+///
+/// A CSS timing function is a Bézier whose x axis is *time*, so reading one
+/// means inverting x to the curve parameter before evaluating y. There is no
+/// closed form for the inversion, so this is Newton's method with a bisection
+/// fallback — what a browser does, and what makes this the real curve rather
+/// than a smoothstep that merely resembles it.
+///
+/// The two curves the tab strip needs are the two CSS keywords the mock-up
+/// names: [`EASE_IN_OUT`] for the breath and [`EASE`] for the arc's transition.
+/// They are genuinely different shapes — `ease` is asymmetric, leaving quickly
+/// and arriving slowly — so they are two sets of control points through one
+/// solver rather than one curve standing in for both.
+///
+/// CSS constrains both control points' `x` to `0..=1`, which makes x monotonic
+/// in t and the inversion single-rooted.
+fn cubic_bezier(x: f32, control: [f32; 4]) -> f32 {
+    let [x1, y1, x2, y2] = control;
+    if x <= 0.0 {
+        return 0.0;
+    }
+    if x >= 1.0 {
+        return 1.0;
+    }
+    // B(t) for a unit cubic Bézier whose first and last points are 0 and 1.
+    let axis = |t: f32, a: f32, b: f32| {
+        let u = 1.0 - t;
+        3.0 * u * u * t * a + 3.0 * u * t * t * b + t * t * t
+    };
+    let slope = |t: f32, a: f32, b: f32| {
+        let u = 1.0 - t;
+        3.0 * u * u * a + 6.0 * u * t * (b - a) + 3.0 * t * t * (1.0 - b)
+    };
+    let mut t = x;
+    let mut solved = None;
+    for _ in 0..8 {
+        let error = axis(t, x1, x2) - x;
+        if error.abs() < 1e-6 {
+            solved = Some(t);
+            break;
+        }
+        let derivative = slope(t, x1, x2);
+        // A flat tangent would throw Newton off the interval entirely; hand
+        // those cases to the bisection rather than clamping to a wrong root.
+        if derivative.abs() < 1e-6 || !(0.0..=1.0).contains(&t) {
+            break;
+        }
+        t -= error / derivative;
+    }
+    let t = solved.unwrap_or_else(|| {
+        let (mut low, mut high) = (0.0_f32, 1.0_f32);
+        let mut t = x;
+        for _ in 0..40 {
+            let value = axis(t, x1, x2);
+            if (value - x).abs() < 1e-6 {
+                break;
+            }
+            if value < x {
+                low = t;
+            } else {
+                high = t;
+            }
+            t = (low + high) / 2.0;
+        }
+        t
+    });
+    axis(t, y1, y2)
+}
+
+/// CSS `ease-in-out`, worn by `@keyframes breathe`.
+const EASE_IN_OUT: [f32; 4] = [0.42, 0.0, 0.58, 1.0];
+/// CSS `ease`, worn by the progress arc's `transition`.
+const EASE: [f32; 4] = [0.25, 0.1, 0.25, 1.0];
+
+/// `.ticon.working { animation: breathe 1.7s ease-in-out infinite }`.
+///
+/// `@keyframes breathe { 0%, 100% { opacity: 1 } 50% { opacity: .28 } }` — one
+/// keyframe pair, so the cycle is two eased halves: down over the first half,
+/// back up over the second. Easing each half separately is what CSS does and is
+/// why the curve is smooth at the trough and *cornered* at the top: at 0% the
+/// animation restarts, and `ease-in-out` starts flat, so the breath rests at
+/// full opacity for an instant every cycle.
+///
+/// With animations turned off the breath collapses to one held value rather
+/// than to nothing (mock-up line 1927): the session is still working, and that
+/// still has to be visible.
+fn breathe_opacity(elapsed: Duration, motion: Motion) -> f32 {
+    if motion == Motion::Reduced {
+        return WINDOW_TAB_BREATHE_REDUCED_OPACITY;
+    }
+    let period = WINDOW_TAB_BREATHE_PERIOD_MS as f32;
+    let phase = (elapsed.as_secs_f32() * 1000.0).rem_euclid(period) / period;
+    let (from, to, half) = if phase < 0.5 {
+        (1.0, WINDOW_TAB_BREATHE_MIN_OPACITY, phase * 2.0)
+    } else {
+        (WINDOW_TAB_BREATHE_MIN_OPACITY, 1.0, (phase - 0.5) * 2.0)
+    };
+    from + (to - from) * cubic_bezier(half, EASE_IN_OUT)
+}
+
+/// Whether the system wants animation at all.
+///
+/// Windows states this as `SPI_GETCLIENTAREAANIMATION`, which is the same
+/// preference a browser reports as `prefers-reduced-motion` — the setting
+/// behind Settings → Accessibility → Visual effects → Animation effects.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum Motion {
+    #[default]
+    Full,
+    Reduced,
+}
+
+impl Motion {
+    /// Map `SPI_GETCLIENTAREAANIMATION` — and a failure to read it — to a
+    /// preference.
+    ///
+    /// `Some(true)` is "animation is wanted"; `Some(false)` is the
+    /// accessibility setting turned on, which is what CSS calls `reduce`. The
+    /// inversion between the two spellings is the whole reason this mapping is
+    /// named and pinned rather than written inline at the call site.
+    fn from_client_area_animation(enabled: Option<bool>) -> Self {
+        match enabled {
+            Some(false) => Self::Reduced,
+            // A read that failed says nothing about what the user wants, and
+            // the preference is opt-in, so the default stands.
+            Some(true) | None => Self::Full,
+        }
+    }
+}
+
+/// Ask the system whether it wants animation, once.
+///
+/// The polarity is the trap and the reason this is its own function with its
+/// own pin: `SPI_GETCLIENTAREAANIMATION` is `TRUE` when animation is *wanted*,
+/// while `prefers-reduced-motion: reduce` matches when it is *not*. Reading the
+/// Win32 answer straight into a "reduced" flag inverts the accessibility
+/// setting — the one bug in this area that harms exactly the users it was meant
+/// to serve, and that no visual review would catch on a machine with the
+/// default setting.
+///
+/// A system that cannot answer gets the default, which is animation: the
+/// preference is opt-in, and a failed read is not a request for less motion.
+fn read_motion_preference() -> Motion {
+    Motion::from_client_area_animation(bt_platform::client_area_animation_enabled().ok())
+}
+
+/// `.pring.indeterminate { animation: pring-spin 1.1s linear infinite }`.
+///
+/// A fixed arc (`stroke-dasharray: 13 40.4`, line 283) carried around the ring
+/// at a constant rate, which is what "indeterminate" means: the shape says how
+/// much is done — nothing knowable — and the motion says it is still going.
+///
+/// Stopped, it holds at 12 o'clock rather than vanishing (line 287 turns the
+/// animation off and leaves the arc): a ring with no arc at all is a ring
+/// reporting 0%, which is a different and false claim.
+fn indeterminate_start_milliturns(elapsed: Duration, motion: Motion) -> u16 {
+    if motion == Motion::Reduced {
+        return 0;
+    }
+    let period = WINDOW_TAB_RING_SPIN_PERIOD_MS as f32;
+    let phase = (elapsed.as_secs_f32() * 1000.0).rem_euclid(period) / period;
+    (phase * 1000.0).round().rem_euclid(1000.0) as u16
+}
+
+/// How far round the ring a progress report reaches, in thousandths of a turn.
+fn sweep_milliturns(percent: u8) -> u16 {
+    u16::from(percent.min(100)) * 10
+}
+
+/// The arc a [`ProgressState`] asks for: its colour, and how much of the ring
+/// it covers.
+///
+/// `last_sweep` carries the ring's current reading, and it is what answers the
+/// two states that can arrive *without* a percentage. `OSC 9;4` states 2 and 4
+/// mark a run as failed or paused; the percentage is optional because the state
+/// is a change to a run already in progress, and the number that was already on
+/// the wire still stands. Keeping it is therefore the protocol's own reading —
+/// and a great deal better than the alternatives, which are to invent a number
+/// or to collapse the arc to nothing and report a failure as 0%.
+///
+/// Only when a run has *never* reported a percentage does the ring fall back to
+/// a full turn, because at that point there is no reading to keep and a bare
+/// track would say "tracking something" while showing nothing at all.
+fn ring_arc(
+    state: ProgressState,
+    last_sweep: Option<u16>,
+    elapsed: Duration,
+    motion: Motion,
+    palette: &ChromePalette,
+) -> RingArc {
+    let held = || last_sweep.unwrap_or(1000);
+    match state {
+        ProgressState::Normal(percent) => RingArc {
+            color: palette.accent,
+            start_milliturns: 0,
+            sweep_milliturns: sweep_milliturns(percent),
+            animating: false,
+        },
+        ProgressState::Error(percent) => RingArc {
+            color: palette.status_err,
+            start_milliturns: 0,
+            sweep_milliturns: percent.map_or_else(held, sweep_milliturns),
+            animating: false,
+        },
+        ProgressState::Paused(percent) => RingArc {
+            color: palette.status_pause,
+            start_milliturns: 0,
+            sweep_milliturns: percent.map_or_else(held, sweep_milliturns),
+            animating: false,
+        },
+        ProgressState::Indeterminate => RingArc {
+            color: palette.accent,
+            start_milliturns: indeterminate_start_milliturns(elapsed, motion),
+            sweep_milliturns: (WINDOW_TAB_RING_INDETERMINATE_TURNS * 1000.0).round() as u16,
+            animating: motion == Motion::Full,
+        },
+    }
+}
+
+/// One ring's live arc.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RingArc {
+    color: [u8; 3],
+    start_milliturns: u16,
+    sweep_milliturns: u16,
+    /// Whether this arc moves on its own and therefore owes the next frame.
+    animating: bool,
+}
+
+/// A ring's sweep easing toward a new reading.
+///
+/// `.pring .arc { transition: stroke-dashoffset .3s ease }` (line 279). A
+/// progress report arrives in steps — 0, then 12, then 30 — and without this
+/// the ring snaps between them; the design's answer is that the *number* jumps
+/// and the arc does not.
+///
+/// Deliberately not disabled under reduced motion: the mock-up's own
+/// `prefers-reduced-motion` block (lines 286-289) turns off the spin and the
+/// pulse and leaves this transition alone. A 300ms ease is the arc arriving at
+/// a value, not something travelling across the screen.
+#[derive(Clone, Copy, Debug)]
+struct SweepTween {
+    from: u16,
+    to: u16,
+    started: Instant,
+}
+
+impl SweepTween {
+    /// Where the arc is now, and whether it is still moving.
+    fn sample(self, now: Instant) -> (u16, bool) {
+        let duration = Duration::from_millis(WINDOW_TAB_RING_SWEEP_TRANSITION_MS);
+        let elapsed = now.saturating_duration_since(self.started);
+        if elapsed >= duration {
+            return (self.to, false);
+        }
+        let progress = elapsed.as_secs_f32() / duration.as_secs_f32();
+        let eased = cubic_bezier(progress, EASE);
+        let from = f32::from(self.from);
+        let to = f32::from(self.to);
+        ((from + (to - from) * eased).round() as u16, true)
+    }
+}
+
+impl TabState {
+    /// The facts this tab's session is reporting right now.
+    fn session_facts(&self, tab_is_active: bool) -> SessionFacts {
+        SessionFacts {
+            status: self.session.status(),
+            last_seen_revision: self.last_seen_revision,
+            tab_is_active,
+        }
+    }
+
+    /// Mark this tab as read, and retire the attention it had latched.
+    ///
+    /// Called when the tab becomes the one on screen. Looking at a tab is the
+    /// event that answers every claim it was making: the output is now seen, the
+    /// bell has been heard, and the failure has been read about. `bt-term` owns
+    /// the two latches and exposes exactly one way to drop them, which is what
+    /// keeps "the user looked" a single decision rather than three.
+    fn mark_seen(&mut self) {
+        self.last_seen_revision = self.session.published_revision();
+        self.session.clear_attention();
+    }
+
+    /// Advance this tab's ring toward whatever its session is now reporting,
+    /// and answer with what the strip should draw in its mark slot.
+    ///
+    /// The tween lives here rather than in the drawing code because it is
+    /// *memory*: where the arc was when the reading changed. A pure function of
+    /// the current status could only ever snap.
+    fn mark_state(
+        &self,
+        tab_is_active: bool,
+        now: Instant,
+        motion: Motion,
+        palette: &ChromePalette,
+    ) -> seats::TabMarkState {
+        let facts = self.session_facts(tab_is_active);
+        let claim = loudest_claim([facts.claim()]);
+        let ring = facts.status.progress.map(|state| {
+            let arc = ring_arc(
+                state,
+                self.ring_sweep,
+                self.animation_elapsed(now),
+                motion,
+                palette,
+            );
+            let sweep = match self.ring_tween {
+                // A determinate arc eases; an indeterminate one is already
+                // moving under its own animation and must not be eased on top
+                // of it, or the spin would drag against the tween.
+                Some(tween) if !arc.animating => tween.sample(now).0,
+                _ => arc.sweep_milliturns,
+            };
+            seats::TabRing {
+                arc: arc.color,
+                start_milliturns: arc.start_milliturns,
+                sweep_milliturns: sweep,
+            }
+        });
+        seats::TabMarkState {
+            dot: claim.dot_color(palette),
+            ring,
+            // The breath is on the mark, and only when there is a mark to
+            // breathe: a ring has replaced it, and the ring reports the same
+            // "still going" in its own medium.
+            opacity: if ring.is_some() {
+                1.0
+            } else if facts.status.working {
+                breathe_opacity(self.animation_elapsed(now), motion)
+            } else {
+                1.0
+            },
+            // Prepared and unwired: nothing in this build can report a session
+            // that has died while its tab lives on — see `reap_exited_tabs`,
+            // which closes the tab the moment the PTY exits.
+            grayscale: false,
+        }
+    }
+
+    /// How long this tab's animations have been running.
+    fn animation_elapsed(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.animation_epoch)
+    }
+
+    /// Whether anything in this tab's mark slot is moving under its own steam,
+    /// and therefore owes the next frame.
+    fn mark_is_animating(&self, now: Instant, motion: Motion) -> bool {
+        if motion == Motion::Reduced {
+            // Everything that moves has been stood down; only the tween
+            // survives, and the mock-up's reduced-motion block leaves it alone.
+            return self.ring_tween.is_some_and(|tween| tween.sample(now).1);
+        }
+        let status = self.session.status();
+        status.working
+            || matches!(status.progress, Some(ProgressState::Indeterminate))
+            || self.ring_tween.is_some_and(|tween| tween.sample(now).1)
+    }
+
+    /// Notice a new progress reading and start the arc easing toward it.
+    ///
+    /// Returns whether anything changed, so the caller can tell a frame that is
+    /// owed from one that is not.
+    fn sync_ring(&mut self, now: Instant) -> bool {
+        let Some(state) = self.session.status().progress else {
+            // The run ended: the mark comes back and the ring's memory goes
+            // with it, so the next run starts from nothing rather than from
+            // wherever the last one stopped.
+            let had = self.ring_sweep.is_some() || self.ring_tween.is_some();
+            self.ring_sweep = None;
+            self.ring_tween = None;
+            return had;
+        };
+        let target = match state {
+            ProgressState::Normal(percent) => Some(sweep_milliturns(percent)),
+            ProgressState::Error(percent) | ProgressState::Paused(percent) => {
+                percent.map(sweep_milliturns)
+            }
+            // An indeterminate arc has no reading to ease toward — its length
+            // is fixed and its motion is the spin.
+            ProgressState::Indeterminate => None,
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        let showing = match self.ring_tween {
+            Some(tween) => tween.sample(now).0,
+            None => self.ring_sweep.unwrap_or(0),
+        };
+        if self.ring_sweep == Some(target) && self.ring_tween.is_none() {
+            return false;
+        }
+        if showing == target {
+            self.ring_sweep = Some(target);
+            self.ring_tween = None;
+            return false;
+        }
+        self.ring_sweep = Some(target);
+        self.ring_tween = Some(SweepTween {
+            from: showing,
+            to: target,
+            started: now,
+        });
+        true
+    }
+}
+
 #[derive(Debug)]
 struct CursorBlink {
     focused: bool,
@@ -1715,6 +2326,10 @@ fn create_tab_state(
             pending_keyboard_at: None,
             pending_pty_resize: None,
             pending_psreadline_resize_reanchor: false,
+            last_seen_revision: 0,
+            ring_tween: None,
+            ring_sweep: None,
+            animation_epoch: Instant::now(),
             pending_resize_present: None,
             seats,
             seat_layout,
@@ -1931,6 +2546,11 @@ impl Runtime {
             ime_active: false,
             ime_cursor_throttle: ImeCursorThrottle::default(),
             cursor_blink: CursorBlink::new(Instant::now()),
+            motion: read_motion_preference(),
+            // A window is focused when it opens, and `CursorBlink` starts from
+            // the same assumption — the two must agree or the strip and the
+            // caret would disagree about whether anyone is home.
+            window_focused: true,
             ime_system_caret,
             pointer_position: None,
             mouse_route: None,
@@ -2083,6 +2703,14 @@ impl Runtime {
             return Ok(());
         }
         self.active_tab = index;
+        // Looking at a tab is what answers every claim it was making, so the
+        // dot goes out here — the unread mark, the bell and the failure all at
+        // once, because "the user has now seen this tab" is one event and not
+        // three. Ordered with the assignment above, not with the drawing below:
+        // the strip is rebuilt from this state at the end of this function, and
+        // a tab that became active while still counting as unread would flash
+        // its own dot on the way in.
+        self.tabs[index].mark_seen();
         // Ordered after the assignment on purpose: the tab being revealed is the
         // active one, and an active tab is measured with the skirt only an active
         // tab has.
@@ -2184,18 +2812,25 @@ impl Runtime {
         // The badge's box is a function of the number in it, and only the font
         // knows how wide a number is — so the measuring happens here, where the
         // renderer is, and the strip is handed the answer rather than a font.
+        let now = Instant::now();
+        let palette = bt_render::chrome_palette();
         let tabs = self
             .tabs
             .iter()
-            .map(|tab| {
+            .enumerate()
+            .map(|(index, tab)| {
                 let pane_count = tab.seats.pane_count();
-                (tab.display_title(), pane_count)
+                (
+                    tab.display_title(),
+                    pane_count,
+                    tab.mark_state(index == self.active_tab, now, self.motion, &palette),
+                )
             })
             .collect::<Vec<_>>();
         let badge_font_px = bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale;
         let tabs = tabs
             .into_iter()
-            .map(|(title, pane_count)| seats::TabContent {
+            .map(|(title, pane_count, mark)| seats::TabContent {
                 badge_text_width: if pane_count > 1 {
                     self.renderer
                         .measure_chrome_text(&pane_count.to_string(), badge_font_px)
@@ -2204,6 +2839,7 @@ impl Runtime {
                 },
                 title,
                 pane_count,
+                mark,
             })
             .collect::<Vec<_>>();
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
@@ -3213,6 +3849,10 @@ impl Runtime {
     }
 
     fn set_cursor_focus(&mut self, focused: bool, now: Instant) {
+        // The one place window focus changes hands — both `Focused(true)` and
+        // `Focused(false)` arrive here — so the strip's copy is recorded here
+        // too rather than in a second listener that could fall out of step.
+        self.window_focused = focused;
         self.cursor_blink.set_focused(focused, now);
         self.renderer.set_window_focused(focused);
         self.renderer
@@ -3229,6 +3869,77 @@ impl Runtime {
             occurred_at: now,
             source: FrameSource::Expose,
         })
+    }
+
+    /// Redraw the tab strip if anything in a mark slot has moved.
+    ///
+    /// Modelled on [`Self::advance_cursor_blink_if_due`] and for the same
+    /// reason: the strip is rebuilt only when a channel has actually changed,
+    /// so a window with nothing running costs nothing at all. What decides
+    /// "changed" here is the animation itself — a breath and a spin move on
+    /// every frame they are alive, and neither moves at all once its session
+    /// stops working.
+    fn advance_strip_animation(&mut self, now: Instant) -> Result<()> {
+        let active = self.active_tab;
+        let window_is_focused = self.window_focused;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let tab_is_active = index == active;
+            tab.last_seen_revision = seen_revision(
+                tab.last_seen_revision,
+                tab.session.published_revision(),
+                tab_is_active,
+            );
+            // Watching is consuming: a latch that arrives on the tab the user
+            // is already reading has been answered by the reading. Both latches
+            // go together because `bt-term` retires them together, and because
+            // "the user has seen this" is one fact and not two.
+            if attention_is_consumed(tab_is_active, window_is_focused) {
+                tab.session.clear_attention();
+            }
+        }
+        let mut owes_frame = false;
+        for tab in &mut self.tabs {
+            // A new progress reading starts the arc easing toward it. This runs
+            // for every tab, active or not: a background download's ring has to
+            // keep reporting, and its tab is exactly the one the user cannot
+            // otherwise see.
+            owes_frame |= tab.sync_ring(now);
+        }
+        let motion = self.motion;
+        owes_frame |= self
+            .tabs
+            .iter()
+            .any(|tab| tab.mark_is_animating(now, motion));
+        if !owes_frame {
+            return Ok(());
+        }
+        // The strip decides for itself whether anything visibly moved. An
+        // animation that is running but landed on the same pixels this frame —
+        // a tween rounding to the same thousandth, a breath at the flat top of
+        // its curve — still owes the *next* frame, which the deadline below
+        // provides, but it does not owe a present now.
+        if !self.refresh_chrome() {
+            return Ok(());
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: now,
+            source: FrameSource::Expose,
+        })
+    }
+
+    /// When the tab strip next needs waking, or `None` when nothing is moving.
+    ///
+    /// `None` is the important half: it is what lets `about_to_wait` fall back
+    /// to `ControlFlow::Wait` and the process go genuinely idle. A strip with
+    /// no working session, no indeterminate ring and no tween in flight asks
+    /// for no wake-ups at all, which is why this is a deadline rather than a
+    /// standing 60fps loop.
+    fn strip_animation_deadline(&self, now: Instant) -> Option<Instant> {
+        let motion = self.motion;
+        self.tabs
+            .iter()
+            .any(|tab| tab.mark_is_animating(now, motion))
+            .then(|| now + STRIP_ANIMATION_FRAME)
     }
 
     fn finish_resize_if_quiescent(&mut self, now: Instant) -> Result<()> {
@@ -5407,6 +6118,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        if let Err(error) = runtime.advance_strip_animation(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         if let Err(error) = runtime.finish_synchronized_update_if_due(now) {
             self.fail(event_loop, error);
             return;
@@ -5463,6 +6178,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             startup_deadline,
             runtime.ime_cursor_throttle.deadline(),
             runtime.cursor_blink.deadline(),
+            runtime.strip_animation_deadline(now),
             pty_resize_deadline,
             resize_finish_deadline,
             synchronized_update_deadline,
@@ -6108,7 +6824,620 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_render::{DARK_CHROME, LIGHT_CHROME};
     use std::time::Duration;
+
+    // ── T2: the tab strip's state channels ──
+
+    fn facts(status: SessionStatus, last_seen_revision: u64, tab_is_active: bool) -> SessionFacts {
+        SessionFacts {
+            status,
+            last_seen_revision,
+            tab_is_active,
+        }
+    }
+
+    /// A session that has published `revision` frames and is otherwise quiet.
+    fn quiet(revision: u64) -> SessionStatus {
+        SessionStatus {
+            progress: None,
+            bell_latched: false,
+            failure_exit_code: None,
+            working: false,
+            published_revision: revision,
+        }
+    }
+
+    /// PIN (T2 J97): the tab on screen keeps its ledger current, so leaving it
+    /// does not retroactively invent unread output.
+    ///
+    /// Red gate, and the subtlest bug in this whole片. Suppressing the dot on
+    /// the active tab is only half the rule — it hides the claim without
+    /// answering it. If the ledger itself stops advancing while the tab is
+    /// watched, then every frame the user sat and read piles up behind it, and
+    /// the moment they switch away the tab they *just left* lights up claiming
+    /// to hold output they had been staring at. Watching is seeing, and this is
+    /// where that gets written down.
+    #[test]
+    fn the_watched_tab_keeps_its_ledger_current() {
+        // Watched: the ledger tracks publication as it happens.
+        assert_eq!(seen_revision(3, 90, true), 90);
+        // Unwatched: it holds still, which is what makes new output count.
+        assert_eq!(seen_revision(3, 90, false), 3);
+
+        // The whole sequence the bug lives in: open a tab, read a while, leave.
+        let mut seen = seen_revision(0, 0, true);
+        for published in 1..=40 {
+            seen = seen_revision(seen, published, true);
+        }
+        let facts = SessionFacts {
+            status: quiet(40),
+            last_seen_revision: seen,
+            tab_is_active: false,
+        };
+        assert!(
+            !facts.has_unseen_output(),
+            "a tab just switched away from holds nothing unread"
+        );
+        // And the very next thing it publishes does count.
+        let facts = SessionFacts {
+            status: quiet(41),
+            last_seen_revision: seen,
+            tab_is_active: false,
+        };
+        assert!(
+            facts.has_unseen_output(),
+            "output after the switch is unread"
+        );
+    }
+
+    /// A session whose bell has rung and whose last command failed — the two
+    /// latches [`DualPlaneSession::clear_attention`] retires together.
+    fn latched(revision: u64) -> SessionStatus {
+        SessionStatus {
+            bell_latched: true,
+            failure_exit_code: Some(1),
+            ..quiet(revision)
+        }
+    }
+
+    /// Apply the ledger's attention rule the way the runtime's own loop does,
+    /// and report what the tab ends up claiming.
+    ///
+    /// The clearing is `clear_attention`'s two field writes, which is all the
+    /// runtime does with the answer — so this exercises the real decision
+    /// rather than a second copy of it.
+    fn claim_after_a_look(
+        mut status: SessionStatus,
+        tab_is_active: bool,
+        window_is_focused: bool,
+    ) -> StatusClaim {
+        if attention_is_consumed(tab_is_active, window_is_focused) {
+            status.bell_latched = false;
+            status.failure_exit_code = None;
+        }
+        SessionFacts {
+            status,
+            // Behind by a mile, so nothing here is hidden by the ledger being
+            // up to date: whatever survives is the attention rule's own doing.
+            last_seen_revision: 0,
+            tab_is_active,
+        }
+        .claim()
+    }
+
+    /// PIN (T2, user ruling — "watching is consuming"): a latch that arrives on
+    /// the tab the user is already reading is spent on arrival.
+    ///
+    /// The bell is the case that matters, because it is the one claim the
+    /// work-in-flight rule never suppresses: without this it would sit on the
+    /// focused tab indefinitely, since nothing else in the taxonomy retires a
+    /// latch except switching away and back. A terminal you are looking at does
+    /// not need a dot repeating what it just showed you.
+    #[test]
+    fn a_latch_arriving_on_the_watched_tab_is_spent_on_arrival() {
+        assert!(attention_is_consumed(true, true));
+        assert_eq!(
+            claim_after_a_look(latched(50), true, true),
+            StatusClaim::Silent,
+            "the tab in front of the user wears no dot"
+        );
+        // Both latches go, not just the loud one — a failure read on screen is
+        // as read as a bell heard on screen.
+        let mut failed_only = quiet(50);
+        failed_only.failure_exit_code = Some(1);
+        assert_eq!(
+            claim_after_a_look(failed_only, true, true),
+            StatusClaim::Silent
+        );
+    }
+
+    /// PIN (T2, user ruling): an unfocused window consumes nothing.
+    ///
+    /// This is the half that makes the rule safe. The active tab is still the
+    /// active tab when the user alt-tabs away, so clearing on "active" alone
+    /// would eat every bell that rang while they were gone — which is precisely
+    /// the moment a bell is doing its job. Nobody is reading a background
+    /// window, so nothing in it is read.
+    #[test]
+    fn a_bell_that_rings_while_the_user_is_away_is_still_waiting() {
+        assert!(!attention_is_consumed(true, false));
+        // Both latches survive, but only the bell can *show* on the tab that is
+        // on screen: a failure is a kind of unread, and unread is suppressed on
+        // the active tab whatever the window is doing. So the bell is not
+        // merely the loudest surviving claim here — it is the only one this
+        // ruling can be about, which is why the ruling is about the bell.
+        let mut bell_only = quiet(50);
+        bell_only.bell_latched = true;
+        for status in [latched(50), bell_only] {
+            assert_eq!(
+                claim_after_a_look(status, true, false),
+                StatusClaim::Bell,
+                "an unfocused window keeps its bell"
+            );
+        }
+        // And a bell on the *active* tab really can show a dot at all — the
+        // active-tab suppression covers unread and failure, never the bell.
+        assert_eq!(
+            SessionFacts {
+                status: bell_only,
+                last_seen_revision: 50,
+                tab_is_active: true,
+            }
+            .claim(),
+            StatusClaim::Bell
+        );
+    }
+
+    /// PIN (T2, user ruling): a tab nobody is looking at is unchanged — its
+    /// latches wait for the activation that answers them.
+    ///
+    /// The whole point of the taxonomy is the tabs you *cannot* see, so the
+    /// rule above must not reach them under any combination of focus. Only
+    /// `TabState::mark_seen`, on activation, retires these.
+    #[test]
+    fn an_inactive_tabs_latches_wait_for_the_activation_that_answers_them() {
+        for window_is_focused in [true, false] {
+            assert!(
+                !attention_is_consumed(false, window_is_focused),
+                "focus alone consumes nothing on a tab that is not on screen"
+            );
+            assert_eq!(
+                claim_after_a_look(latched(50), false, window_is_focused),
+                StatusClaim::Failed,
+                "an unwatched tab keeps its claim whatever the window is doing"
+            );
+        }
+        // The full truth table, so the rule cannot drift into a one-sided test:
+        // it is an `and`, and each half is load-bearing on its own.
+        assert!(attention_is_consumed(true, true));
+        assert!(!attention_is_consumed(true, false));
+        assert!(!attention_is_consumed(false, true));
+        assert!(!attention_is_consumed(false, false));
+    }
+
+    /// PIN (T2 D41): the accessibility preference is read in the right
+    /// direction.
+    ///
+    /// Win32 and CSS spell this setting with opposite polarity —
+    /// `SPI_GETCLIENTAREAANIMATION` is `TRUE` when animation is *wanted*, while
+    /// `prefers-reduced-motion: reduce` matches when it is *not* — and the
+    /// inversion is invisible on any machine left at the default. Getting it
+    /// backwards would force animation on exactly the users who asked for none
+    /// and strip it from everyone else, and no screenshot review would catch
+    /// it. So the mapping is a named function with a test rather than a `!` at
+    /// a call site.
+    #[test]
+    fn the_reduced_motion_preference_is_read_in_the_right_direction() {
+        assert_eq!(
+            Motion::from_client_area_animation(Some(true)),
+            Motion::Full,
+            "TRUE means the system wants animation"
+        );
+        assert_eq!(
+            Motion::from_client_area_animation(Some(false)),
+            Motion::Reduced,
+            "FALSE is the accessibility setting turned on"
+        );
+        assert_eq!(
+            Motion::from_client_area_animation(None),
+            Motion::Full,
+            "a failed read is not a request for less motion"
+        );
+        // The default a `Motion` takes when nothing has asked is the same one a
+        // failed read gets, so the two cannot drift apart.
+        assert_eq!(Motion::default(), Motion::Full);
+    }
+
+    /// PIN (T2 D34): a tab wears the loudest claim any of its sessions makes,
+    /// and the ladder is `fail > bell > unread`.
+    ///
+    /// Red gate, and the mock-up records it as a user correction (line 1930):
+    /// "panes wore dots while the tab wore none". A tab is a lid over sessions
+    /// the user cannot see, so a claim it fails to pass up is a claim that is
+    /// simply lost.
+    #[test]
+    fn a_tab_wears_the_loudest_claim_of_its_sessions() {
+        use StatusClaim::{Bell, Failed, Silent, Unread};
+        assert_eq!(loudest_claim([Silent, Unread, Bell]), Bell);
+        assert_eq!(loudest_claim([Unread, Failed, Bell]), Failed);
+        assert_eq!(loudest_claim([Silent, Unread]), Unread);
+        assert_eq!(loudest_claim([Silent, Silent]), Silent);
+        // A tab with no sessions at all claims nothing rather than panicking.
+        assert_eq!(loudest_claim([]), Silent);
+        // The ladder itself, stated once so the `max` above cannot silently
+        // reorder: every louder claim outranks every quieter one.
+        assert!(Silent < Unread && Unread < Bell && Bell < Failed);
+        // And a tab never says *less* than any one of its members.
+        for members in [
+            vec![Silent, Failed],
+            vec![Bell, Unread, Silent],
+            vec![Unread],
+        ] {
+            let tab = loudest_claim(members.iter().copied());
+            for member in members {
+                assert!(tab >= member, "a tab must never say less than its panes");
+            }
+        }
+    }
+
+    /// PIN (T2 D35): work in flight suppresses every "finished" claim.
+    ///
+    /// The mock-up's own comment is a user ruling (line 1920): "an active
+    /// download is still WORK IN FLIGHT: no finished-unread claim until the
+    /// progress ends". The ring and the breathing icon are already reporting
+    /// what is happening, and a dot beside them would be a third voice on one
+    /// fact — and a wrong one, since nothing has finished.
+    #[test]
+    fn a_session_still_working_makes_no_finished_claim() {
+        let unseen = quiet(9);
+        // Quiet and unseen: the plain unread claim.
+        assert_eq!(facts(unseen, 4, false).claim(), StatusClaim::Unread);
+
+        // The same session, still running.
+        let mut working = unseen;
+        working.working = true;
+        assert_eq!(facts(working, 4, false).claim(), StatusClaim::Silent);
+
+        // The same session, reporting progress — suppressed in every flavour,
+        // because every one of them means a run that has not ended.
+        for state in [
+            ProgressState::Normal(40),
+            ProgressState::Indeterminate,
+            ProgressState::Paused(Some(40)),
+            ProgressState::Error(Some(40)),
+        ] {
+            let mut in_flight = unseen;
+            in_flight.progress = Some(state);
+            assert_eq!(
+                facts(in_flight, 4, false).claim(),
+                StatusClaim::Silent,
+                "{state:?} is work in flight, not a finished claim"
+            );
+        }
+
+        // A failure is suppressed by the same rule, for the same reason.
+        let mut failing = unseen;
+        failing.failure_exit_code = Some(1);
+        assert_eq!(facts(failing, 4, false).claim(), StatusClaim::Failed);
+        failing.progress = Some(ProgressState::Normal(10));
+        assert_eq!(facts(failing, 4, false).claim(), StatusClaim::Silent);
+    }
+
+    /// PIN (T2): the bell is latched, so it survives what suppresses the rest.
+    ///
+    /// A bell is a thing that *rang* — a past event, not a state — so a session
+    /// that is busy again has still rung, and the claim stands until the user
+    /// looks. This is the one claim the work-in-flight rule does not touch.
+    #[test]
+    fn the_bell_outlives_the_work_that_followed_it() {
+        let mut ringing = quiet(9);
+        ringing.bell_latched = true;
+        ringing.working = true;
+        ringing.progress = Some(ProgressState::Indeterminate);
+        assert_eq!(facts(ringing, 9, false).claim(), StatusClaim::Bell);
+        // Even with nothing unread — the bell is not an unread claim.
+        assert_eq!(facts(ringing, 99, false).claim(), StatusClaim::Bell);
+    }
+
+    /// PIN (T2 J97): unread is "published since you last looked", and the tab
+    /// you are looking at is never unread.
+    ///
+    /// Red gate: without the active-tab clause the tab under the user's eyes
+    /// wears a dot asking them to look at it, because its session publishes a
+    /// frame on every keystroke.
+    #[test]
+    fn unread_is_publication_since_the_last_look_and_never_on_the_active_tab() {
+        // Behind an inactive tab, new frames are unread.
+        assert!(facts(quiet(7), 3, false).has_unseen_output());
+        // Caught up: nothing new.
+        assert!(!facts(quiet(7), 7, false).has_unseen_output());
+        // The active tab is being watched, so publishing *is* seeing.
+        assert!(!facts(quiet(7), 3, true).has_unseen_output());
+        assert_eq!(facts(quiet(7), 0, true).claim(), StatusClaim::Silent);
+        // A failure on the active tab makes no dot either — the same clause
+        // covers it, because a failure is a kind of unread.
+        let mut failed = quiet(7);
+        failed.failure_exit_code = Some(2);
+        assert_eq!(facts(failed, 0, true).claim(), StatusClaim::Silent);
+        assert_eq!(facts(failed, 0, false).claim(), StatusClaim::Failed);
+    }
+
+    /// PIN (T2 D31): the breath is the mock-up's keyframes on the mock-up's
+    /// curve — full at the ends, `.28` at the middle, and eased between.
+    ///
+    /// The shape matters as much as the endpoints: a linear ramp between the
+    /// same two values is a flicker, and `ease-in-out` is what makes it read as
+    /// breathing. So the curve is checked for its defining property — that it
+    /// travels *slowly at the turns and quickly in between* — rather than only
+    /// at the keyframes, where a linear ramp would agree exactly.
+    #[test]
+    fn the_working_breath_runs_the_mock_ups_keyframes_on_its_own_curve() {
+        let period = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS);
+        let at = |fraction: f32| breathe_opacity(period.mul_f32(fraction), Motion::Full);
+
+        assert!((at(0.0) - 1.0).abs() < 1e-3, "the breath starts full");
+        assert!(
+            (at(0.5) - WINDOW_TAB_BREATHE_MIN_OPACITY).abs() < 1e-3,
+            "the trough is the keyframe's own .28"
+        );
+        assert!((at(1.0) - 1.0).abs() < 1e-3, "and it returns to full");
+        // Cyclic: the second breath is the first one.
+        assert!((at(0.25) - at(1.25)).abs() < 1e-3);
+
+        // Never outside the keyframes it interpolates.
+        for step in 0..=100 {
+            let value = at(step as f32 / 100.0);
+            assert!(
+                (WINDOW_TAB_BREATHE_MIN_OPACITY..=1.0).contains(&value),
+                "the breath left its keyframes at {step}%: {value}"
+            );
+        }
+
+        // `ease-in-out` is flat at both ends of each half and steepest in the
+        // middle of it. Over the first half-breath, the middle fifth must cover
+        // more ground than the opening fifth — which is exactly what a linear
+        // ramp (equal everywhere) fails.
+        let opening = at(0.0) - at(0.1);
+        let middle = at(0.2) - at(0.3);
+        assert!(
+            middle > opening * 2.0,
+            "the breath must ease: opening {opening}, middle {middle}"
+        );
+    }
+
+    /// PIN (T2 D41): with animations off the breath holds one value instead of
+    /// stopping at whatever opacity it happened to be passing through.
+    ///
+    /// The mock-up spells the replacement out (line 1927): `.ticon.working {
+    /// opacity: .6 }`. "Working" still has to be legible when nothing may move,
+    /// so the answer is a held value, not a still frame and not full opacity.
+    #[test]
+    fn reduced_motion_holds_the_breath_at_one_value() {
+        for fraction in [0.0_f32, 0.25, 0.5, 0.75, 1.0, 3.7] {
+            let held = breathe_opacity(
+                Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS).mul_f32(fraction),
+                Motion::Reduced,
+            );
+            assert!((held - WINDOW_TAB_BREATHE_REDUCED_OPACITY).abs() < 1e-6);
+        }
+        // And it is genuinely quieter than a mark that is not working at all,
+        // which is what makes it still say something.
+        const { assert!(WINDOW_TAB_BREATHE_REDUCED_OPACITY < 1.0) };
+    }
+
+    /// PIN (T2 D41): the indeterminate arc turns once per its own period, and
+    /// stands still — rather than vanishing — when animation is off.
+    #[test]
+    fn the_indeterminate_arc_turns_once_a_period_and_holds_still_when_asked() {
+        let period = Duration::from_millis(WINDOW_TAB_RING_SPIN_PERIOD_MS);
+        assert_eq!(
+            indeterminate_start_milliturns(Duration::ZERO, Motion::Full),
+            0
+        );
+        assert_eq!(
+            indeterminate_start_milliturns(period.mul_f32(0.25), Motion::Full),
+            250
+        );
+        assert_eq!(
+            indeterminate_start_milliturns(period.mul_f32(0.5), Motion::Full),
+            500
+        );
+        // A whole turn returns to the start rather than running off the end.
+        assert_eq!(indeterminate_start_milliturns(period, Motion::Full), 0);
+        assert_eq!(
+            indeterminate_start_milliturns(period.mul_f32(7.25), Motion::Full),
+            250
+        );
+        // Stopped, it holds at noon — and it is still an arc. A ring with no
+        // arc at all would be reporting 0%, which is a different claim.
+        for fraction in [0.0_f32, 0.3, 0.75, 9.1] {
+            assert_eq!(
+                indeterminate_start_milliturns(period.mul_f32(fraction), Motion::Reduced),
+                0
+            );
+        }
+    }
+
+    /// PIN (T2): every `OSC 9;4` state maps to the arc the mock-up gives it.
+    ///
+    /// The two states that may arrive *without* a percentage are the reason
+    /// this takes a `last_sweep`: states 2 and 4 change a run that is already
+    /// under way, so the reading already on the wire still stands, and keeping
+    /// it is the protocol's own answer rather than an invented number.
+    #[test]
+    fn each_progress_state_paints_its_own_arc() {
+        let palette = LIGHT_CHROME;
+        let arc = |state, last| ring_arc(state, last, Duration::ZERO, Motion::Full, &palette);
+
+        let normal = arc(ProgressState::Normal(40), None);
+        assert_eq!(normal.color, palette.accent);
+        assert_eq!(normal.sweep_milliturns, 400);
+        assert!(
+            !normal.animating,
+            "a determinate arc does not move by itself"
+        );
+
+        // Percent is a fraction of the whole turn, at both ends of its range.
+        assert_eq!(arc(ProgressState::Normal(0), None).sweep_milliturns, 0);
+        assert_eq!(arc(ProgressState::Normal(100), None).sweep_milliturns, 1000);
+        // And a report beyond 100 is clamped rather than wrapped — an arc that
+        // wrapped would report 130% as 30%.
+        assert_eq!(arc(ProgressState::Normal(255), None).sweep_milliturns, 1000);
+
+        // Only the arc's colour changes; the ring is not redrawn as something
+        // else (mock-up lines 280-281 recolour `.arc` and nothing more).
+        let failed = arc(ProgressState::Error(Some(40)), None);
+        assert_eq!(failed.color, palette.status_err);
+        assert_eq!(failed.sweep_milliturns, 400);
+        let paused = arc(ProgressState::Paused(Some(40)), None);
+        assert_eq!(paused.color, palette.status_pause);
+        assert_eq!(paused.sweep_milliturns, 400);
+
+        // A state change with no percentage keeps the reading already showing.
+        assert_eq!(
+            arc(ProgressState::Error(None), Some(400)).sweep_milliturns,
+            400
+        );
+        assert_eq!(
+            arc(ProgressState::Paused(None), Some(730)).sweep_milliturns,
+            730
+        );
+        // With no reading ever taken, a full ring — so a failure is visible
+        // rather than reported as a bare track.
+        assert_eq!(arc(ProgressState::Error(None), None).sweep_milliturns, 1000);
+
+        let spinning = arc(ProgressState::Indeterminate, None);
+        assert_eq!(spinning.color, palette.accent);
+        assert_eq!(spinning.sweep_milliturns, 243, "13 of the mock-up's 53.4");
+        assert!(
+            spinning.animating,
+            "an indeterminate arc owes the next frame"
+        );
+        // Stopped, it is the same arc and no longer owes a frame.
+        let still = ring_arc(
+            ProgressState::Indeterminate,
+            None,
+            Duration::ZERO,
+            Motion::Reduced,
+            &palette,
+        );
+        assert_eq!(still.sweep_milliturns, spinning.sweep_milliturns);
+        assert!(!still.animating);
+    }
+
+    /// PIN (T2): the arc eases to a new reading instead of snapping to it, and
+    /// stops owing frames the moment it arrives.
+    ///
+    /// `.pring .arc { transition: stroke-dashoffset .3s ease }` (line 279).
+    /// The "stops owing frames" half is what keeps an idle window idle: a tween
+    /// that never reports itself finished is a 60fps loop that never ends.
+    #[test]
+    fn the_arc_eases_to_a_new_reading_and_then_stands_down() {
+        let started = Instant::now();
+        let tween = SweepTween {
+            from: 200,
+            to: 700,
+            started,
+        };
+        let duration = Duration::from_millis(WINDOW_TAB_RING_SWEEP_TRANSITION_MS);
+
+        let (at_start, moving) = tween.sample(started);
+        assert_eq!(at_start, 200, "it begins where the arc already was");
+        assert!(moving);
+
+        let (midway, moving) = tween.sample(started + duration / 2);
+        assert!(moving);
+        assert!(
+            (200..=700).contains(&midway),
+            "the tween left its endpoints: {midway}"
+        );
+
+        let (arrived, moving) = tween.sample(started + duration);
+        assert_eq!(arrived, 700, "it arrives exactly, not nearly");
+        assert!(!moving, "an arrived tween owes no further frames");
+        let (still_there, moving) = tween.sample(started + duration * 4);
+        assert_eq!(still_there, 700);
+        assert!(!moving);
+
+        // `ease` leaves quickly and arrives slowly, so by the halfway point it
+        // is already past halfway. A linear ramp would sit exactly on 450.
+        assert!(
+            midway > 450,
+            "the arc must use CSS `ease`, which front-loads its travel: {midway}"
+        );
+    }
+
+    /// PIN (T2): the two CSS timing functions are solved, not approximated.
+    ///
+    /// Both are checked against their defining points — the endpoints every
+    /// curve shares, and the midpoint value that tells them apart. `ease` and
+    /// `ease-in-out` are symmetric only in the second case, and a solver that
+    /// silently returned one for the other would pass every endpoint test.
+    #[test]
+    fn the_css_timing_curves_are_the_real_beziers() {
+        for curve in [EASE, EASE_IN_OUT] {
+            assert_eq!(cubic_bezier(0.0, curve), 0.0);
+            assert_eq!(cubic_bezier(1.0, curve), 1.0);
+            // Out of range in either direction is clamped, not extrapolated.
+            assert_eq!(cubic_bezier(-1.0, curve), 0.0);
+            assert_eq!(cubic_bezier(2.0, curve), 1.0);
+            // Monotonic: time only moves forward, so the curve must too.
+            let mut previous = 0.0_f32;
+            for step in 0..=200 {
+                let value = cubic_bezier(step as f32 / 200.0, curve);
+                assert!(value >= previous - 1e-4, "{curve:?} went backwards");
+                previous = value;
+            }
+        }
+        // `ease-in-out` is symmetric about its centre and therefore passes
+        // through exactly .5 at half time.
+        assert!((cubic_bezier(0.5, EASE_IN_OUT) - 0.5).abs() < 1e-3);
+        // `ease` is not symmetric: it is already well past half by half time,
+        // which is the whole difference between the two and the reason both
+        // exist rather than one standing in for the other.
+        assert!(cubic_bezier(0.5, EASE) > 0.75);
+    }
+
+    /// PIN (T2 D32/D33): each claim wears the mock-up's own colour, and a
+    /// silent session draws no dot at all.
+    ///
+    /// Presence-versus-absence is the point: the mock-up keeps `.unreaddot` in
+    /// the DOM always and shows it by class (its comment at line 249 records
+    /// why), but what lands on screen is still nothing when there is nothing to
+    /// say. A dot drawn in the tab's own colour would be a smudge, not a state.
+    #[test]
+    fn each_claim_wears_its_own_colour_and_silence_draws_nothing() {
+        for palette in [LIGHT_CHROME, DARK_CHROME] {
+            assert_eq!(StatusClaim::Silent.dot_color(&palette), None);
+            assert_eq!(
+                StatusClaim::Unread.dot_color(&palette),
+                Some(palette.accent)
+            );
+            assert_eq!(
+                StatusClaim::Bell.dot_color(&palette),
+                Some(palette.status_warn)
+            );
+            assert_eq!(
+                StatusClaim::Failed.dot_color(&palette),
+                Some(palette.status_err)
+            );
+            // The three speaking claims are three different colours — a
+            // taxonomy that collapses is not a taxonomy.
+            let colors =
+                [StatusClaim::Unread, StatusClaim::Bell, StatusClaim::Failed].map(|claim| {
+                    claim
+                        .dot_color(&palette)
+                        .expect("a speaking claim has a colour")
+                });
+            for (index, color) in colors.iter().enumerate() {
+                for other in &colors[index + 1..] {
+                    assert_ne!(color, other, "two claims cannot share one colour");
+                }
+            }
+        }
+    }
+
     use winit::keyboard::{Key, NamedKey};
 
     #[test]
