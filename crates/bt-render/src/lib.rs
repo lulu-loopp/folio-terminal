@@ -34,7 +34,9 @@ use unicode_properties::emoji::{EmojiStatus, UnicodeEmoji};
 use wgpu::util::DeviceExt;
 
 use rounded_rect::{rounded_rect_coverage, rounded_rect_halo_coverage};
-use theme::{CURSOR_WIDTH_CELL_RATIO, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb};
+use theme::{
+    CURSOR_BAR_WIDTH_LOGICAL_PX, DEFAULT_CURSOR_RGB, DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb,
+};
 pub use theme::{
     ChromePalette, DARK_CHROME, DEFAULT_BACKGROUND_RGB, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, LIGHT_BACKGROUND_RGB,
@@ -4703,18 +4705,18 @@ fn cursor_pixel_bounds(
         frame_cell_bounds_px(metrics, frame, frame.cursor.row as usize, column);
     let right = left + span as f32 * metrics.cell_width_px;
     if focused {
-        // The mock-up's caret is a bar half a cell wide, not a filled cell: it
-        // marks the insertion point and leaves the character it stands on
-        // readable. It is snapped to the physical grid and given whole pixels of
-        // width for the same reason the dotted underline is — a 3.5px bar landing
-        // between two columns is a 4px smear, and a caret is the one mark on
-        // screen the eye tracks while it moves.
+        // A thin editor-style bar: it marks the insertion point and leaves the
+        // character it stands on readable. It is snapped to the physical grid
+        // and given whole pixels of width for the same reason the dotted
+        // underline is — a fractional bar landing between two columns is a
+        // smear, and a caret is the one mark on screen the eye tracks while it
+        // moves.
         //
         // A wide character's cursor is *not* twice as wide: the bar sits at the
         // start of the cell the next glyph will land in, and that is one place
         // whatever occupies it now. `span` still decides *which* column that is,
         // so a cursor on a wide char's trailing half draws at the char's own edge.
-        let width = (metrics.cell_width_px * CURSOR_WIDTH_CELL_RATIO)
+        let width = (CURSOR_BAR_WIDTH_LOGICAL_PX * metrics.scale_factor as f32)
             .round()
             .max(1.0);
         let left = left.round();
@@ -7194,8 +7196,8 @@ mod tests {
         assert_eq!((ime.x, ime.y, ime.width, ime.height), (12, 40, 8, 18));
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[12.0, 40.0, 16.0, 58.0]],
-            "the caret is half a cell wide and starts at the cell it is in"
+            vec![[12.0, 40.0, 14.0, 58.0]],
+            "the caret is the thin bar and starts at the cell it is in"
         );
         assert_eq!(
             frame_cell_bounds_px(
@@ -8593,7 +8595,7 @@ mod tests {
     /// row exactly as the block did.
     #[cfg(target_os = "windows")]
     #[test]
-    fn the_default_caret_is_a_half_cell_bar_at_every_dpi() {
+    fn the_default_caret_is_a_thin_bar_at_every_dpi() {
         let mut font_system = terminal_font_system();
         for dpi_milli in [1000_u32, 1250, 1500, 2000] {
             let scale = f64::from(dpi_milli) / 1000.0;
@@ -8626,13 +8628,14 @@ mod tests {
             let cell = frame_cell_bounds_px(metrics, &frame, 0, 0);
             assert_eq!(
                 right - left,
-                (metrics.cell_width_px * CURSOR_WIDTH_CELL_RATIO).round(),
-                "at {dpi_milli} milli-DPI the caret is not half of a {} px cell",
-                metrics.cell_width_px
+                (CURSOR_BAR_WIDTH_LOGICAL_PX * metrics.scale_factor as f32)
+                    .round()
+                    .max(1.0),
+                "at {dpi_milli} milli-DPI the caret is not the thin bar",
             );
             assert!(
-                right - left >= 1.0 && right - left < metrics.cell_width_px,
-                "a bar, never the whole cell and never nothing, at {dpi_milli} milli-DPI"
+                right - left >= 1.0 && right - left < metrics.cell_width_px / 2.0,
+                "thin, never half the cell and never nothing, at {dpi_milli} milli-DPI"
             );
             assert_eq!(left, cell[0].round(), "the caret starts at its own cell");
             assert_eq!([top, bottom], [cell[1], cell[3]], "the row's full height");
@@ -8688,12 +8691,12 @@ mod tests {
         frame.row_map = test_row_map_for_metrics(1, metrics);
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[4.0, 4.0, 8.0, 24.0]]
+            vec![[4.0, 4.0, 6.0, 24.0]]
         );
         frame.cursor.column = 0;
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[4.0, 4.0, 8.0, 24.0]]
+            vec![[4.0, 4.0, 6.0, 24.0]]
         );
     }
 
@@ -8735,7 +8738,7 @@ mod tests {
 
         assert_eq!(
             cursor_pixel_bounds(metrics, &frame, true),
-            vec![[4.0, 4.0, 8.0, 24.0]],
+            vec![[4.0, 4.0, 6.0, 24.0]],
             "a focused caret is the bar, half of this 8px cell"
         );
         let outline = cursor_pixel_bounds(metrics, &frame, false);

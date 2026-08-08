@@ -21,14 +21,16 @@ const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
 pub(crate) const DEFAULT_CURSOR_RGB: [u8; 3] = [0xd4, 0xd4, 0xd4];
 /// The default cursor's width, as a fraction of one cell.
 ///
-/// `.cursor { width: 7px; height: 15px }` in a 14px-font mock-up: a bar half a
-/// cell wide, not the filled cell a VT's own default block would be. This is the
-/// *default* form only — a settings surface will one day offer block / bar / underline
-/// here, and a program that asks for a shape through DECSCUSR must be honoured over
-/// both. Nothing in this build parses DECSCUSR (`bt_viewport::GridCursor` carries
-/// row, column and visibility and no shape), so today there is exactly one form and
-/// this is it.
-pub const CURSOR_WIDTH_CELL_RATIO: f32 = 0.5;
+/// The default caret is a thin editor-style bar (user ruling 2026-08-07: the
+/// mock-up's half-cell landed "neither" — either thin or full, and their first
+/// complaint was width, so thin it is). Two logical pixels, scaled with DPI and
+/// never below one physical pixel. This is the *default* form only — a settings
+/// surface will one day offer block / bar / underline here, and a program that
+/// asks for a shape through DECSCUSR must be honoured over both. Nothing in
+/// this build parses DECSCUSR (`bt_viewport::GridCursor` carries row, column
+/// and visibility and no shape), so today there is exactly one form and this
+/// is it.
+pub const CURSOR_BAR_WIDTH_LOGICAL_PX: f32 = 2.0;
 pub(crate) const DEFAULT_DIM_FOREGROUND_RGB: [u8; 3] = [0x88, 0x88, 0x88];
 /// Background-only selection treatment; foreground colors remain terminal-authored.
 pub(crate) const DEFAULT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0x26, 0x4f, 0x78];
@@ -715,8 +717,8 @@ mod tests {
     /// and the caret, held here so overturning one is an edit to this block.
     #[test]
     fn float_window_and_cursor_tokens_are_the_mock_ups_own() {
-        // `.cursor { width: 7px }` against the 15px cell its 14px font sets.
-        assert_eq!(CURSOR_WIDTH_CELL_RATIO, 0.5);
+        // A thin editor bar (user ruling 2026-08-07), two logical pixels.
+        assert_eq!(CURSOR_BAR_WIDTH_LOGICAL_PX, 2.0);
         // `border-radius: 10px`, `border: 1px solid var(--border)`.
         assert_eq!(FLOAT_WINDOW_RADIUS_LOGICAL_PX, 10.0);
         assert_eq!(FLOAT_WINDOW_BORDER_LOGICAL_PX, 1.0);
