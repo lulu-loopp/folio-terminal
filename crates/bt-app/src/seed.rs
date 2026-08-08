@@ -66,6 +66,32 @@ impl Seed {
             Self::Files { root } => format!("|{root}|"),
         }
     }
+
+    /// Whether this is a thing that can carry a name the user typed — the guard
+    /// `startRename` opens with (mock-up 5858-5859: `const s =
+    /// tabIdentSession(w); if (!s) return;   /* a files-only tab has no session
+    /// to name */`).
+    ///
+    /// The manual name is a slot on the *terminal* seed and on nothing else: a
+    /// files place is identified by its root, which is a fact about the disk
+    /// rather than something anyone chose. So a tab whose identity leaf is a
+    /// files pane has no field for the editor to write to, and the editor must
+    /// decline to open rather than open onto nothing.
+    ///
+    /// **Today this never answers `false` for a real tab.** Every tab in this
+    /// build holds a terminal (`TabState::seed` constructs `Term`
+    /// unconditionally), so the guard is satisfied by construction and this is
+    /// the stub the ticket asks for: the *shape* of the mock-up's condition,
+    /// carrying the one case that will exist once T5 gives a tab a files-only
+    /// identity leaf. It is a real function and not a comment because the day
+    /// that case arrives, the caller must already be asking.
+    #[must_use]
+    pub fn can_be_named(&self) -> bool {
+        match self {
+            Self::Term { .. } => true,
+            Self::Files { .. } => false,
+        }
+    }
 }
 
 impl From<&Seed> for RecentSeedV1 {
@@ -377,6 +403,29 @@ mod tests {
     #[test]
     fn the_vault_measures_what_the_spec_says_it_measures() {
         assert_eq!(RECENT_CAPACITY, 8, "state.recent.slice(0, 8)");
+    }
+
+    /// J104 (mock-up 5854-5859) — the stub the ticket asks for.
+    ///
+    /// `startRename` refuses to open on a tab with no session to name. The
+    /// condition is real and is written down here; what makes this a *stub* is
+    /// that nothing in this build can currently fail it, because every tab seeds
+    /// as a `Term` (`TabState::seed`). The `Files` half is the case T5 will
+    /// create, and it is asserted now so the guard is not invented later by
+    /// somebody who has forgotten why it exists.
+    #[test]
+    fn only_a_thing_with_a_session_can_be_given_a_name() {
+        assert!(
+            term("C:\\notes", None).can_be_named(),
+            "a terminal has a manual-name slot, so the editor may open on it"
+        );
+        assert!(
+            !Seed::Files {
+                root: "C:\\docs".to_owned()
+            }
+            .can_be_named(),
+            "a files place is identified by its root — there is nothing to type into"
+        );
     }
 
     /// The key is the spec's three slots, pipe-joined, with `None` as empty —

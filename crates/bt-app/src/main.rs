@@ -650,6 +650,28 @@ struct Runtime {
     /// now, so a resize or a closed tab cannot leave the strip parked past its
     /// own end.
     tab_scroll: f32,
+    /// The left press being held on a tab, and what it still owes it (J105).
+    ///
+    /// One at a time, because a mouse has one left button. It survives the
+    /// activation it pays for — a press that has already switched the view is
+    /// still a press, and T5's drag needs to find it there.
+    tab_press: Option<TabPress>,
+    /// The strip's double-click history (J99).
+    tab_clicks: TabClicks,
+    /// The open tab-name editor, or `None` when nobody is renaming anything.
+    ///
+    /// On the runtime rather than on the tab, because it is a *window*-level
+    /// stance and not a property of a session: it is `InputOwner::Rename`
+    /// (`docs/DESIGN.md` §7.1.5), there is exactly one keyboard, and two tabs
+    /// being renamed at once is not a state this window can be in.
+    rename: Option<TabRename>,
+    /// The rename caret's own blink, on the same beat as the terminal's.
+    ///
+    /// Its own instance rather than a share: typing a name must reveal the name
+    /// caret, and the two carets answer to different keystrokes. The *phase* is
+    /// shared, because there is one `CURSOR_BLINK_PHASE` in this window and a
+    /// second beat would read as a second application.
+    rename_blink: CursorBlink,
     /// The overlay's own mark rasters. A second cache rather than a share,
     /// because `ChromeMarkRasters::resolve` keeps exactly what the call asked
     /// for: one cache serving two lists would evict each on the other's turn.
@@ -1151,6 +1173,390 @@ impl ClickTracker {
         self.last_cell = Some((row, column));
         self.count
     }
+}
+
+/// How long a press on a tab holds its activation back (mock-up 5756-5762).
+///
+/// "Edge parity with a grace period (user rulings 2026-07-18, two passes): a
+/// left PRESS chooses the tab, but the switch lands ~180ms later — a quick
+/// drag-out to split never flashes the pressed tab's content over the layout you
+/// are aiming at."
+const TAB_PRESS_ACTIVATION_GRACE: Duration = Duration::from_millis(180);
+
+/// How far the pointer may travel before a press stops being a press
+/// (`startDrag`'s own `Math.hypot(...) < 6`, mock-up 6727).
+///
+/// Logical pixels, because it is a distance the *hand* travels: the same gesture
+/// on a 200% display covers twice the physical pixels and is still the same
+/// gesture.
+const TAB_DRAG_THRESHOLD_LOGICAL_PX: f64 = 6.0;
+
+/// What a press on a tab still owes it.
+///
+/// The press-activation contract is a promise with three possible states, and
+/// naming them is the whole of what makes T5 able to hang J106/J108 on this: a
+/// drag that starts has to be able to ask "was the switch already paid?" and a
+/// drag that is cancelled has to be able to pay it late.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabPressPromise {
+    /// Chosen but not yet shown: the grace period is still running and the
+    /// pointer has not travelled.
+    Pending,
+    /// The pointer left the press's own neighbourhood before the grace period
+    /// ran out, so the delayed activation was abandoned — this is the instant
+    /// the mock-up calls `drag.started`, and T5's drag begins exactly here.
+    /// Nothing has been shown, which is the point: "a quick drag-out to split
+    /// never flashes the pressed tab's content".
+    Slipped,
+    /// The switch has landed. `drag.pressActivated` in the mock-up.
+    Paid,
+}
+
+/// A left press being held on a tab.
+///
+/// Keyed on [`TabId`] rather than on a strip index, because a press outlives
+/// reorders: pinning a tab from a menu, or a background tab closing, renumbers
+/// the strip under a finger that has not moved.
+#[derive(Clone, Copy, Debug)]
+struct TabPress {
+    tab: TabId,
+    /// Where the press landed, in physical pixels.
+    origin: PhysicalPosition<f64>,
+    /// When the delayed activation is due.
+    deadline: Instant,
+    promise: TabPressPromise,
+}
+
+impl TabPress {
+    /// A press that owes the tab an activation.
+    fn armed(tab: TabId, origin: PhysicalPosition<f64>, now: Instant) -> Self {
+        Self {
+            tab,
+            origin,
+            deadline: now + TAB_PRESS_ACTIVATION_GRACE,
+            promise: TabPressPromise::Pending,
+        }
+    }
+
+    /// A press onto the tab that is *already* showing, which owes it nothing.
+    ///
+    /// The mock-up arms no timer here at all (`wsId !== state.active`, 5755),
+    /// and the reason is not efficiency: an activation that has nothing to
+    /// change must not be able to *become* one later, because by then the
+    /// active tab may be somebody else.
+    fn settled(tab: TabId, origin: PhysicalPosition<f64>, now: Instant) -> Self {
+        Self {
+            promise: TabPressPromise::Paid,
+            ..Self::armed(tab, origin, now)
+        }
+    }
+
+    /// Tell the press where the pointer is now. Returns whether this is the
+    /// move that abandoned the delayed activation.
+    ///
+    /// Only a `Pending` press can slip. A promise already paid stays paid —
+    /// travelling after the switch has landed is a drag of a tab you are looking
+    /// at, and taking the view back would be a second, unasked-for switch.
+    fn travelled(&mut self, position: PhysicalPosition<f64>, scale: f64) -> bool {
+        if self.promise != TabPressPromise::Pending {
+            return false;
+        }
+        let threshold = TAB_DRAG_THRESHOLD_LOGICAL_PX * scale;
+        if (position.x - self.origin.x).hypot(position.y - self.origin.y) < threshold {
+            return false;
+        }
+        self.promise = TabPressPromise::Slipped;
+        true
+    }
+
+    /// Whether the grace period has run out on a press that is still owed.
+    /// Returns true exactly once — the caller activates, and the promise is paid.
+    fn matured(&mut self, now: Instant) -> bool {
+        if self.promise != TabPressPromise::Pending || now < self.deadline {
+            return false;
+        }
+        self.promise = TabPressPromise::Paid;
+        true
+    }
+
+    /// Whether letting go here pays the promise, given the tab the pointer is
+    /// over as it lifts.
+    ///
+    /// **Ruling** (the mock-up states this only through browser mechanics).
+    /// Release activates exactly when the pointer lifts on the tab it pressed —
+    /// which is the DOM `click` contract the mock-up's `selectTab` handler
+    /// (5735) actually runs on: `click` fires on the nearest common ancestor of
+    /// the press and the release, so a release on the same tab is a click on
+    /// that tab and a release anywhere else is not. Stated in geometry rather
+    /// than in drag state, it needs no drag machinery to be true, and it says
+    /// both of the things the ticket asks for at once: a quick click is a click
+    /// (J105), and letting go somewhere else leaves the promise unpaid for T5's
+    /// drop to answer (J108).
+    fn released_over(&mut self, tab: Option<TabId>) -> bool {
+        if self.promise == TabPressPromise::Paid || tab != Some(self.tab) {
+            return false;
+        }
+        self.promise = TabPressPromise::Paid;
+        true
+    }
+
+    /// When the event loop must wake to pay this promise, if it still owes one.
+    fn wake_deadline(&self) -> Option<Instant> {
+        (self.promise == TabPressPromise::Pending).then_some(self.deadline)
+    }
+}
+
+/// What a press on a tab turned out to be.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TabClick {
+    Single,
+    Double,
+}
+
+/// The strip's own click counter — [`ClickTracker`] for tabs.
+///
+/// It counts to two and no further: the tab strip has one multi-click verb and
+/// the terminal's word/line/paragraph ladder has no counterpart here.
+///
+/// Identity is the tab, not a pixel neighbourhood, and that is the faithful
+/// reading rather than a shortcut: `dblclick` fires on the element both clicks
+/// share, so "the same tab" *is* the browser's own slop test. It also survives
+/// the one thing a pixel test would get wrong — a strip that scrolled between
+/// the two clicks, where the same tab is at a different address.
+#[derive(Default)]
+struct TabClicks {
+    last: Option<(TabId, Instant)>,
+}
+
+impl TabClicks {
+    fn register(&mut self, tab: TabId, now: Instant) -> TabClick {
+        let paired = self.last.is_some_and(|(last_tab, last_at)| {
+            last_tab == tab && now.saturating_duration_since(last_at) <= MULTI_CLICK_INTERVAL
+        });
+        // A double click consumes its own history. Without this a third press
+        // inside the window would pair with the second and open the editor a
+        // second time; the browser resets the same way (`detail` restarts).
+        self.last = (!paired).then_some((tab, now));
+        if paired {
+            TabClick::Double
+        } else {
+            TabClick::Single
+        }
+    }
+
+    /// Forget the last click. Anything that is not a plain press on a tab body
+    /// breaks the chain — the `×`, the pin, a middle click, a press on another
+    /// piece of chrome — because none of them is the first half of a double
+    /// click on a tab (J99: "a double click on `.close` is two button presses").
+    fn interrupt(&mut self) {
+        self.last = None;
+    }
+}
+
+/// What a key did to the tab-name editor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RenameVerdict {
+    /// The editor took the key and is still open.
+    Held,
+    /// Enter: write the draft through (mock-up 5895).
+    Commit,
+    /// Escape: leave the name as it was (mock-up 5896).
+    Cancel,
+}
+
+/// The tab-name editor — the tab itself, in edit mode.
+///
+/// "The whole editor falls out of one fact: `name` is an override. So the box
+/// starts holding YOUR name only — never the auto one — and the placeholder
+/// shows what is underneath" (mock-up 5840-5845). Both halves of that are here:
+/// [`Self::open`] seeds from the manual name alone, and an empty draft commits
+/// as `None` rather than as `""`.
+///
+/// Keyed on [`TabId`] for the same reason [`TabPress`] is: the editor must not
+/// follow a strip position across a reorder.
+///
+/// The caret is a byte offset and every edit moves it on a `char` boundary. That
+/// is the minimum a name field needs and is deliberately not grapheme-aware:
+/// splitting a combining sequence is the one thing this loses, and buying the
+/// segmentation for a forty-character label is not a trade this slice makes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TabRename {
+    tab: TabId,
+    text: String,
+    /// The caret, as a byte offset into `text`.
+    caret: usize,
+    /// Whether the whole draft is selected — the one selection this editor has
+    /// (`input.select()`, mock-up 5870). It is a flag rather than an anchor
+    /// because there is no gesture in this slice that can make any *other*
+    /// selection: the mock-up's own editor gets exactly this one, at open, and
+    /// the first thing you type replaces it.
+    select_all: bool,
+    /// The first character actually drawn, as a byte offset — how a box narrower
+    /// than its text keeps the caret in sight. Owned by the editor and moved by
+    /// the renderer's measurements, because only the font knows when the caret
+    /// has walked off the end.
+    first_visible: usize,
+}
+
+impl TabRename {
+    /// Open on a tab, seeded from its manual name.
+    ///
+    /// "初值 = 现有 `name`（只放你的名字）" — the auto name is never put in the
+    /// box, it is put *behind* it as the placeholder, which is what tells you
+    /// what clearing the box will get you.
+    fn open(tab: TabId, manual_name: Option<&str>) -> Self {
+        let text = manual_name.unwrap_or_default().to_owned();
+        Self {
+            tab,
+            // `input.focus(); input.select()` (5869-5870): the caret sits at the
+            // end of the selection, which is the end of the text.
+            caret: text.len(),
+            select_all: !text.is_empty(),
+            first_visible: 0,
+            text,
+        }
+    }
+
+    /// Drop the selection, collapsing to `caret`, and report whether there was
+    /// one. Every editing and navigation verb starts here.
+    fn collapse(&mut self) -> bool {
+        std::mem::take(&mut self.select_all)
+    }
+
+    /// Replace the selection (or insert at the caret) with `text`.
+    ///
+    /// The one door for typed characters, for an IME commit and for anything
+    /// else that arrives as text, so "typing over a fresh selection replaces it"
+    /// is true once rather than once per source.
+    fn insert(&mut self, text: &str) {
+        if self.collapse() {
+            self.text.clear();
+            self.caret = 0;
+        }
+        // Control characters never reach a tab name. `clean_title` strips them
+        // on the way out too, but letting one *into* the draft would put a caret
+        // on the far side of something that draws as nothing.
+        let text = text
+            .chars()
+            .filter(|character| !matches!(character, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
+            .collect::<String>();
+        if text.is_empty() {
+            return;
+        }
+        self.text.insert_str(self.caret, &text);
+        self.caret += text.len();
+        self.first_visible = self.first_visible.min(self.caret);
+    }
+
+    /// Backspace: the selection if there is one, else the character before the
+    /// caret.
+    fn backspace(&mut self) {
+        if self.collapse() {
+            self.text.clear();
+            self.caret = 0;
+        } else if let Some((start, _)) = self.text[..self.caret].char_indices().next_back() {
+            self.text.replace_range(start..self.caret, "");
+            self.caret = start;
+        }
+        self.clamp_scroll();
+    }
+
+    /// Delete: the selection if there is one, else the character after the
+    /// caret.
+    fn delete(&mut self) {
+        if self.collapse() {
+            self.text.clear();
+            self.caret = 0;
+        } else if let Some(character) = self.text[self.caret..].chars().next() {
+            let end = self.caret + character.len_utf8();
+            self.text.replace_range(self.caret..end, "");
+        }
+        self.clamp_scroll();
+    }
+
+    /// ← : to the start of the selection if there is one, else back one
+    /// character. Collapsing to the *near* edge is what every text field does
+    /// and is why an accidental select-all is not destructive.
+    fn move_left(&mut self) {
+        if self.collapse() {
+            self.caret = 0;
+        } else if let Some((start, _)) = self.text[..self.caret].char_indices().next_back() {
+            self.caret = start;
+        }
+        self.clamp_scroll();
+    }
+
+    /// → : to the end of the selection if there is one, else on one character.
+    fn move_right(&mut self) {
+        if self.collapse() {
+            self.caret = self.text.len();
+        } else if let Some(character) = self.text[self.caret..].chars().next() {
+            self.caret += character.len_utf8();
+        }
+    }
+
+    fn move_home(&mut self) {
+        self.collapse();
+        self.caret = 0;
+        self.first_visible = 0;
+    }
+
+    fn move_end(&mut self) {
+        self.collapse();
+        self.caret = self.text.len();
+    }
+
+    /// Keep the drawn window from starting after the caret, which is the one
+    /// way an edit alone (rather than a measurement) can invalidate it.
+    fn clamp_scroll(&mut self) {
+        self.first_visible = self.first_visible.min(self.caret).min(self.text.len());
+        while self.first_visible > 0 && !self.text.is_char_boundary(self.first_visible) {
+            self.first_visible -= 1;
+        }
+    }
+
+    /// What committing this draft writes into `manual_name`.
+    ///
+    /// "空串 = 撤销 override" — `s.name = v || null` (mock-up 5883). The
+    /// sanitiser runs first and can *produce* the empty string from a draft that
+    /// was only spaces, and that is the same answer: a name of nothing is not a
+    /// name, it is the absence of one, and the placeholder already showed you
+    /// what you would land on.
+    fn committed_name(&self) -> Option<String> {
+        let value = clean_title(&self.text);
+        (!value.is_empty()).then_some(value)
+    }
+}
+
+/// Route one key press to the open tab-name editor (mock-up 5893-5897).
+///
+/// Every key returns a verdict, and there is deliberately no "not mine" arm:
+/// while the editor is open it owns the keyboard entire (J103, and
+/// `docs/DESIGN.md` §7.1.5's `InputOwner = Rename`). A key it has no verb for is
+/// swallowed rather than passed down, because the thing underneath is a terminal
+/// and the alternative is typing your tab's name into a shell.
+fn rename_key(editor: &mut TabRename, key: &Key, modifiers: ModifiersState) -> RenameVerdict {
+    // A chord is not text. Ctrl/Alt-modified keys are swallowed unhandled: this
+    // editor has no clipboard and no word verbs, and letting the chord through
+    // to the terminal is exactly what §7.1.5 forbids.
+    let chorded = modifiers.control_key() || modifiers.alt_key() || modifiers.super_key();
+    match key {
+        Key::Named(NamedKey::Enter) => return RenameVerdict::Commit,
+        Key::Named(NamedKey::Escape) => return RenameVerdict::Cancel,
+        _ if chorded => {}
+        Key::Named(NamedKey::Backspace) => editor.backspace(),
+        Key::Named(NamedKey::Delete) => editor.delete(),
+        Key::Named(NamedKey::ArrowLeft) => editor.move_left(),
+        Key::Named(NamedKey::ArrowRight) => editor.move_right(),
+        Key::Named(NamedKey::Home) => editor.move_home(),
+        Key::Named(NamedKey::End) => editor.move_end(),
+        // `Space` is the one printable character winit reports as a named key,
+        // so it needs the same door the characters use rather than a verb.
+        Key::Named(NamedKey::Space) => editor.insert(" "),
+        Key::Character(text) => editor.insert(text),
+        _ => {}
+    }
+    RenameVerdict::Held
 }
 
 #[derive(Default)]
@@ -2921,6 +3327,10 @@ impl Runtime {
             settings: settings::SettingsPanel::default(),
             profile_menu: profiles::ProfileMenu::default(),
             tab_scroll: 0.0,
+            tab_press: None,
+            tab_clicks: TabClicks::default(),
+            rename: None,
+            rename_blink: CursorBlink::new(Instant::now()),
             settings_marks: marks::ChromeMarkRasters::default(),
             divider_drag: None,
             work_area: WorkAreaHint::NeverKnown,
@@ -3257,6 +3667,24 @@ impl Runtime {
         if index >= self.tabs.len() {
             return Ok(());
         }
+        // A tab that is going away takes its editor and its press with it. The
+        // name is committed first rather than dropped, because closing is a blur
+        // like any other and the seed the vault is about to record reads
+        // `manual_name` — "输入到一半关掉,新名字进 Recent" is the same promise
+        // §7.1.4 makes about closing the window.
+        if self
+            .rename
+            .as_ref()
+            .is_some_and(|editor| self.tabs.get(index).is_some_and(|tab| tab.id == editor.tab))
+        {
+            self.finish_rename(true)?;
+        }
+        if self
+            .tab_press
+            .is_some_and(|press| self.tabs.get(index).is_some_and(|tab| tab.id == press.tab))
+        {
+            self.tab_press = None;
+        }
         match tab_close_action(self.tabs.len(), self.active_tab, index) {
             TabCloseAction::CloseWindow => {
                 let hwnd = window_hwnd(&self.window)?;
@@ -3328,6 +3756,7 @@ impl Runtime {
         // renderer is, and the strip is handed the answer rather than a font.
         let now = Instant::now();
         let palette = bt_render::chrome_palette();
+        let renaming = self.rename.as_ref().map(|editor| editor.tab);
         let tabs = self
             .tabs
             .iter()
@@ -3342,25 +3771,46 @@ impl Runtime {
                         pinned: tab.pinned,
                         reveal: tab.pin_reveal.sample(now, self.motion).0,
                     },
+                    // The layer under the override, which is exactly what the
+                    // editor's placeholder shows: `autoName(s)` is `displayName`
+                    // with the manual name taken out (mock-up 2605-2606).
+                    (renaming == Some(tab.id)).then(|| {
+                        display_title(
+                            None,
+                            tab.session.window_title(),
+                            tab.session.working_directory(),
+                        )
+                    }),
                 )
             })
             .collect::<Vec<_>>();
         let badge_font_px = bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale;
-        let tabs = tabs
+        let mut tabs = tabs
             .into_iter()
-            .map(|(title, pane_count, mark, trailer)| seats::TabContent {
-                badge_text_width: if pane_count > 1 {
-                    self.renderer
-                        .measure_chrome_text(&pane_count.to_string(), badge_font_px)
-                } else {
-                    0.0
+            .map(
+                |(title, pane_count, mark, trailer, placeholder)| seats::TabContent {
+                    badge_text_width: if pane_count > 1 {
+                        self.renderer
+                            .measure_chrome_text(&pane_count.to_string(), badge_font_px)
+                    } else {
+                        0.0
+                    },
+                    // Filled in below, once the strip's own geometry has said how
+                    // much room the box has: the editor scrolls to keep its caret
+                    // in sight, and "in sight" is a width this loop has not
+                    // computed yet.
+                    edit: placeholder.map(|placeholder| seats::TabEdit {
+                        placeholder,
+                        ..seats::TabEdit::default()
+                    }),
+                    title,
+                    pane_count,
+                    mark,
+                    trailer,
                 },
-                title,
-                pane_count,
-                mark,
-                trailer,
-            })
+            )
             .collect::<Vec<_>>();
+        self.measure_open_rename(&mut tabs, scale, width as f32);
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
         let preview_message = match self.preview_image.as_ref() {
             Some(preview) => preview.message(),
@@ -3392,6 +3842,106 @@ impl Runtime {
         // change or a theme switch carries the dialog with it for free.
         let overlay_changed = self.refresh_overlay();
         chrome_changed || overlay_changed
+    }
+
+    /// Fit the open editor's draft into the box the strip has for it.
+    ///
+    /// The last step of building the strip rather than part of the loop above,
+    /// because it is the one piece of tab content that depends on the strip's
+    /// own geometry: the draft scrolls to keep its caret in sight, and "in
+    /// sight" is a width that only exists once every tab has been given its
+    /// share of the run. The measuring is here, beside the renderer, for exactly
+    /// the reason the badge's is — only the font knows how wide a word is.
+    fn measure_open_rename(&mut self, tabs: &mut [seats::TabContent], scale: f32, width: f32) {
+        let Some(tab_id) = self.rename.as_ref().map(|editor| editor.tab) else {
+            return;
+        };
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
+        let geometry =
+            seats::tab_strip_geometry(width, scale, &trailers, self.active_tab, self.tab_scroll);
+        let (Some(geometry_tab), Some(content)) = (geometry.tabs.get(index), tabs.get_mut(index))
+        else {
+            return;
+        };
+        let Some(title_box) = seats::tab_title_box(
+            geometry_tab,
+            content.pane_count,
+            content.badge_text_width,
+            scale,
+        ) else {
+            // A squeezed tab draws no title, so there is no box to be the editor
+            // and nothing to show. The draft is not lost — it is still in
+            // `self.rename`, and widening the window brings it back mid-word.
+            content.edit = None;
+            return;
+        };
+        let box_width = title_box[2] - title_box[0];
+        let font_px = bt_render::WINDOW_TAB_FONT_LOGICAL_PX * scale;
+        let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+        // Disjoint fields, split by hand: the editor owns where its window
+        // starts and the renderer owns how wide a string is, and this is the one
+        // place the two have to meet.
+        let renderer = &mut self.renderer;
+        let Some(editor) = self.rename.as_mut() else {
+            return;
+        };
+        let mut measure = |text: &str| {
+            if text.is_empty() {
+                0.0
+            } else {
+                renderer.measure_chrome_text(text, font_px)
+            }
+        };
+        editor.clamp_scroll();
+        // Walk the window's start forward until the caret is inside the box. The
+        // caret's own width is held back, because a caret drawn hard against the
+        // right edge is a caret half outside it.
+        while editor.first_visible < editor.caret
+            && measure(&editor.text[editor.first_visible..editor.caret]) > box_width - caret_width
+        {
+            editor.first_visible += 1;
+            while !editor.text.is_char_boundary(editor.first_visible) {
+                editor.first_visible += 1;
+            }
+        }
+        // And give the slack back when the text shrinks under it, so deleting
+        // from the end reveals the head again instead of leaving the box parked
+        // where the longest draft left it. Pulling back only while the *whole*
+        // tail still fits cannot undo the loop above: a tail that fits contains
+        // a caret that fits.
+        while editor.first_visible > 0 {
+            let mut candidate = editor.first_visible - 1;
+            while !editor.text.is_char_boundary(candidate) {
+                candidate -= 1;
+            }
+            if measure(&editor.text[candidate..]) > box_width {
+                break;
+            }
+            editor.first_visible = candidate;
+        }
+        let visible = &editor.text[editor.first_visible..];
+        let caret_px = measure(&editor.text[editor.first_visible..editor.caret]);
+        let selection_px = if editor.select_all {
+            measure(visible).min(box_width)
+        } else {
+            0.0
+        };
+        content.edit = Some(seats::TabEdit {
+            text: visible.to_owned(),
+            placeholder: content
+                .edit
+                .take()
+                .map(|edit| edit.placeholder)
+                .unwrap_or_default(),
+            caret_px,
+            selection_px,
+            caret_lit: self.rename_blink.visible(),
+        });
     }
 
     /// Where the profile picker hangs right now, or `None` when it is shut.
@@ -5443,6 +5993,14 @@ impl Runtime {
         if self.drive_divider_drag(position)? {
             return Ok(());
         }
+        // A press that has travelled past the drag threshold stops owing its tab
+        // an activation (J105). Nothing else happens here yet — the drag this is
+        // the start of is T5's — but the *withdrawal* is this slice's, because
+        // it is what keeps a quick drag-out from flashing the pressed tab's
+        // content on its way past.
+        if let Some(press) = self.tab_press.as_mut() {
+            press.travelled(position, self.renderer.metrics().scale_factor);
+        }
         self.update_chrome_hover(position)?;
         // Everything below reads the pointer through `terminal_pointer` — one
         // correction, in one place, applied to hover, peek, selection and
@@ -5644,6 +6202,142 @@ impl Runtime {
         Ok(())
     }
 
+    /// A left press on a tab's body (J105, and the first half of J99).
+    ///
+    /// It arms the promise and nothing else — no view changes here, which is the
+    /// whole mechanism. The second press of a double click arms nothing either:
+    /// the first one already put the view on this tab, so there is nothing left
+    /// for it to owe.
+    fn press_tab(&mut self, index: usize, position: PhysicalPosition<f64>) -> Result<()> {
+        let now = Instant::now();
+        let tab = self.tabs[index].id;
+        // Deliberately *not* counted here. A click is complete when the button
+        // comes back up, which is why `dblclick` is a release-time event;
+        // counting the press as well would pair each click with itself and turn
+        // the very first one into a double.
+        self.tab_press = Some(if index == self.active_tab {
+            TabPress::settled(tab, position, now)
+        } else {
+            TabPress::armed(tab, position, now)
+        });
+        Ok(())
+    }
+
+    /// The left button coming back up over `target`.
+    fn release_tab_press(
+        &mut self,
+        mut press: TabPress,
+        target: Option<seats::ChromeTarget>,
+    ) -> Result<()> {
+        let over = match target {
+            Some(seats::ChromeTarget::Tab(index)) => self.tabs.get(index).map(|tab| tab.id),
+            _ => None,
+        };
+        if press.released_over(over) {
+            self.activate_tab(self.tab_index(press.tab), false)?;
+        }
+        // The editor opens on the *second* release, which is where `dblclick`
+        // fires: down, up, click, down, up, click, and only then `dblclick`
+        // (mock-up 5737). The first click has already activated the tab by the
+        // time this runs a second time, which is why the editor never has to
+        // activate anything itself.
+        let Some(clicked) = over.filter(|tab| *tab == press.tab) else {
+            // Down here and up there is not a click on either, and it is not the
+            // first half of one either.
+            self.tab_clicks.interrupt();
+            return Ok(());
+        };
+        if self.tab_clicks.register(clicked, Instant::now()) == TabClick::Double {
+            self.open_rename(clicked)?;
+        }
+        Ok(())
+    }
+
+    /// Where a tab is now, by identity.
+    fn tab_index(&self, tab: TabId) -> usize {
+        self.tabs
+            .iter()
+            .position(|candidate| candidate.id == tab)
+            .unwrap_or(self.active_tab)
+    }
+
+    /// Open the tab-name editor (J99-J101, mock-up 5854-5870).
+    fn open_rename(&mut self, tab: TabId) -> Result<()> {
+        let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
+            return Ok(());
+        };
+        // Mock-up 5858-5859: a tab with no session to name does not open an
+        // editor. Every tab in this build has one, so this is the stub J104 asks
+        // for — the guard exists and is asked, and T5's files-only tab will be
+        // the first thing it turns away.
+        if !self.tabs[index].seed().can_be_named() {
+            return Ok(());
+        }
+        self.rename = Some(TabRename::open(
+            tab,
+            self.tabs[index].manual_name.as_deref(),
+        ));
+        // A caret that arrives mid-blink arrives invisible half the time.
+        self.rename_blink.reset(Instant::now());
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// Close the editor, writing the draft through or throwing it away.
+    ///
+    /// "Escape restores and leaves; Enter and blur commit. Two paths, not
+    /// three" (mock-up 5847-5849). Doing nothing when no editor is open is the
+    /// point rather than an oversight: this is called from every blur-shaped
+    /// event in the window, and most of the time there is nothing to blur.
+    fn finish_rename(&mut self, commit: bool) -> Result<()> {
+        let Some(editor) = self.rename.take() else {
+            return Ok(());
+        };
+        if commit && let Some(index) = self.tabs.iter().position(|tab| tab.id == editor.tab) {
+            let name = editor.committed_name();
+            if self.tabs[index].manual_name != name {
+                self.tabs[index].manual_name = name;
+                // The seed reads `manual_name` (`TabState::term_leaf`), so the
+                // vault, the session file and the restore prompt all pick the
+                // new name up from here without a second write — and the OS
+                // window title is the active tab's own.
+                if index == self.active_tab {
+                    self.window.set_title(&self.display_title());
+                }
+                self.mark_session_dirty(Instant::now());
+            }
+        }
+        // Unconditional, exactly as the mock-up's `finish` is (5885-5889): the
+        // commonest exit is opening the editor, changing your mind and clicking
+        // away, where the state is byte-identical to before and only the drawing
+        // is wrong.
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// Route an event-loop tick to the press promise and the rename caret.
+    fn advance_tab_press_if_due(&mut self, now: Instant) -> Result<()> {
+        let matured = self
+            .tab_press
+            .as_mut()
+            .is_some_and(|press| press.matured(now));
+        if !matured {
+            return Ok(());
+        }
+        let tab = self.tab_press.expect("a press that matured is a press").tab;
+        self.activate_tab(self.tab_index(tab), false)
+    }
+
+    fn advance_rename_blink_if_due(&mut self, now: Instant) -> Result<()> {
+        if self.rename.is_none() || !self.rename_blink.advance(now) {
+            return Ok(());
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// Route a press onto seat chrome. Returns whether the button was consumed.
     fn chrome_mouse_input(
         &mut self,
@@ -5655,6 +6349,8 @@ impl Runtime {
             if state == ElementState::Pressed
                 && let Some(seats::ChromeTarget::Tab(index)) = self.chrome_target_at(position)
             {
+                // Closing a tab with the wheel is not the first half of anything.
+                self.tab_clicks.interrupt();
                 self.close_tab(index)?;
                 return Ok(true);
             }
@@ -5678,14 +6374,49 @@ impl Runtime {
                 self.mark_session_dirty(Instant::now());
                 return Ok(true);
             }
-            return Ok(self.chrome_target_at(position).is_some());
+            let target = self.chrome_target_at(position);
+            if let Some(press) = self.tab_press.take() {
+                self.release_tab_press(press, target)?;
+                return Ok(true);
+            }
+            return Ok(target.is_some());
         }
-        let Some(target) = self.chrome_target_at(position) else {
+        let target = self.chrome_target_at(position);
+        // Blur commits, and blur is every press that is not inside the editor
+        // (J102; mock-up 5898 `input.addEventListener("blur", () => finish(true))`,
+        // which the browser fires on `pointerdown`, before the press does
+        // anything else — so this guard stands above the whole router for the
+        // same reason).
+        //
+        // **Ruling.** The editor's own extent is the *whole tab body*, not a
+        // sub-box inside it. The mock-up stops propagation on the `<input>`
+        // (5899) and the input is only part of the tab; but its central claim is
+        // that "the editor is the tab" (376-378), and honouring that means the
+        // tab's padding and its mark belong to the editor too. The alternative
+        // is a strip of pixels inside the tab you are typing in where a click
+        // silently commits, which is the kind of edge nobody discovers on
+        // purpose. The `×` and the pin stay buttons — they are the two things in
+        // the tab that were never the title.
+        if self.rename.is_some() {
+            let editing = self
+                .rename
+                .as_ref()
+                .and_then(|editor| self.tabs.iter().position(|tab| tab.id == editor.tab));
+            if target == editing.map(seats::ChromeTarget::Tab) {
+                // "编辑器内的按下/双击不触发拖拽或再次进入编辑" (J103): the press
+                // is consumed whole — no promise armed, no click recorded.
+                self.tab_clicks.interrupt();
+                return Ok(true);
+            }
+            self.finish_rename(true)?;
+        }
+        let Some(target) = target else {
             // Not on chrome, but possibly not on the terminal either — a press
             // in a preview's body belongs to that seat and must not reach the
             // grid underneath it. With a lone leaf there is no other seat for a
             // press to belong to, so nothing is claimed and every existing path
             // sees the button exactly as before.
+            self.tab_clicks.interrupt();
             return Ok(!self.seats.is_lone_terminal()
                 && !seats::terminal_contains(
                     &self.seat_layout,
@@ -5725,12 +6456,24 @@ impl Runtime {
                 }
             }
             seats::ChromeTarget::PaneHeader(_) => {}
-            seats::ChromeTarget::Tab(index) => self.activate_tab(index, false)?,
-            seats::ChromeTarget::TabClose(index) => self.close_tab(index)?,
+            seats::ChromeTarget::Tab(index) => self.press_tab(index, position)?,
+            // J99: "`.close`/`.pin` 上的双击不算(那是两次按钮点击)". Neither
+            // records a click, so neither can be half of a rename — and both
+            // break a chain that was already running.
+            seats::ChromeTarget::TabClose(index) => {
+                self.tab_clicks.interrupt();
+                self.close_tab(index)?;
+            }
             // F61 — the pin stands in the `×`'s slot, so unpinning is exactly
             // where you already are.
-            seats::ChromeTarget::TabPin(index) => self.toggle_pin(index)?,
-            seats::ChromeTarget::NewTab => self.new_tab()?,
+            seats::ChromeTarget::TabPin(index) => {
+                self.tab_clicks.interrupt();
+                self.toggle_pin(index)?;
+            }
+            seats::ChromeTarget::NewTab => {
+                self.tab_clicks.interrupt();
+                self.new_tab()?;
+            }
             seats::ChromeTarget::NewTabMenu => self.toggle_profile_menu()?,
             seats::ChromeTarget::Settings => self.toggle_settings_panel()?,
             seats::ChromeTarget::Minimize => self.window.set_minimized(true),
@@ -6240,6 +6983,32 @@ impl Runtime {
             }
             return Ok(());
         }
+        // The tab-name editor owns the keyboard while it is open (J103;
+        // `docs/DESIGN.md` §7.1.5 `InputOwner = Rename`). It sits directly under
+        // the modal for the same reason the modal sits where it does — the thing
+        // underneath is a terminal, and every key that escapes this branch is a
+        // key typed into a shell the user is not looking at. Escape is consumed
+        // here rather than falling through to §7.1.5's PTY pass-through, which
+        // is exactly what that layering says: Esc reaches the child only when
+        // the owner is the terminal.
+        if self.rename.is_some() {
+            let mut editor = self.rename.take().expect("the editor is open");
+            let verdict = rename_key(&mut editor, &event.logical_key, self.modifiers);
+            self.rename = Some(editor);
+            match verdict {
+                RenameVerdict::Commit => self.finish_rename(true)?,
+                RenameVerdict::Cancel => self.finish_rename(false)?,
+                RenameVerdict::Held => {
+                    // Typing reveals the caret, exactly as it does in the
+                    // terminal — a caret that blinks out from under the letter
+                    // you just typed reads as a dropped keystroke.
+                    self.rename_blink.reset(now);
+                    self.refresh_chrome();
+                    self.present_chrome_change()?;
+                }
+            }
+            return Ok(());
+        }
         // A popup is not a modal, so it owns exactly one key: the one that puts
         // it away. Everything else is still the terminal's.
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
@@ -6400,6 +7169,29 @@ impl Runtime {
         // stays consistent for when the dialog closes.
         if self.settings_layout().is_some() && matches!(event, Ime::Preedit(..) | Ime::Commit(_)) {
             return Ok(());
+        }
+        // The name editor takes composed text through the same door typed
+        // characters use, so "typing over the opening selection replaces it" is
+        // one rule rather than one rule per input method.
+        //
+        // The pre-edit itself is deliberately *not* drawn in the tab: the
+        // ticket scopes the editor to the composition's committed text ("含 IME
+        // 组合的落字"), and the candidate window is placed from the terminal's
+        // caret, which is not where these letters are going. What must not
+        // happen is the pre-edit reaching the terminal underneath, and it does
+        // not — the branch returns before `self.preedit` is touched.
+        if self.rename.is_some() {
+            if let Ime::Commit(text) = &event {
+                let mut editor = self.rename.take().expect("the editor is open");
+                editor.insert(text);
+                self.rename = Some(editor);
+                self.rename_blink.reset(Instant::now());
+                self.refresh_chrome();
+                self.present_chrome_change()?;
+            }
+            if matches!(event, Ime::Preedit(..) | Ime::Commit(_)) {
+                return Ok(());
+            }
         }
         if matches!(&event, Ime::Preedit(..) | Ime::Commit(_)) {
             self.reset_cursor_blink(Instant::now());
@@ -6701,6 +7493,10 @@ impl Runtime {
     }
 
     fn shutdown(&mut self) -> Result<()> {
+        // §7.1.4: "未提交的重命名在序列化前提交（blur 语义,输入到一半关窗不丢
+        // 新名字）". Before the snapshot below, not after — the name has to be on
+        // the tab by the time the tab is written down.
+        self.finish_rename(true)?;
         // The clean-exit path (§5.5): flush whatever the debounce still owes,
         // then drop this run's sentinel. Its absence next time is the whole
         // signal that this run reached here at all, so it must be removed
@@ -6823,15 +7619,25 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             WindowEvent::ThemeChanged(theme) => runtime.os_theme_changed(theme).map(|_| ()),
             WindowEvent::RedrawRequested => runtime.redraw(),
             WindowEvent::Focused(false) => {
+                // Losing the window is a blur, and blur commits (J102). The
+                // mock-up's editor is a real focusable element and gets this
+                // from the DOM; here it has to be said. A press that was still
+                // being held goes with it — the button-up will arrive to a
+                // window that is no longer listening.
+                let committed = runtime.finish_rename(true);
+                runtime.tab_press = None;
+                runtime.tab_clicks.interrupt();
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                 // Commit during this transition, and the product decision is to accept it.
                 runtime.ime_active = false;
                 runtime.ime_cursor_throttle.reset();
                 runtime.ime_system_caret.destroy();
                 runtime.set_cursor_focus(false, Instant::now());
-                runtime.publish_frame(FrameTrigger {
-                    occurred_at: Instant::now(),
-                    source: FrameSource::Expose,
+                committed.and_then(|()| {
+                    runtime.publish_frame(FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    })
                 })
             }
             WindowEvent::Focused(true) => {
@@ -6863,6 +7669,17 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         }
         let now = Instant::now();
         if let Err(error) = runtime.advance_cursor_blink_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        if let Err(error) = runtime.advance_rename_blink_if_due(now) {
+            self.fail(event_loop, error);
+            return;
+        }
+        // Ahead of the strip's own animation tick: paying the press's promise
+        // activates a tab, and the strip that is redrawn afterwards should be
+        // the one the switch produced.
+        if let Err(error) = runtime.advance_tab_press_if_due(now) {
             self.fail(event_loop, error);
             return;
         }
@@ -6926,6 +7743,16 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             startup_deadline,
             runtime.ime_cursor_throttle.deadline(),
             runtime.cursor_blink.deadline(),
+            // The press's own 180ms, and only while it still owes one — a press
+            // that has been paid or has slipped reports nothing, so a held
+            // button costs no wake-ups at all.
+            runtime.tab_press.as_ref().and_then(TabPress::wake_deadline),
+            // The rename caret blinks only while there is a rename.
+            runtime
+                .rename
+                .is_some()
+                .then(|| runtime.rename_blink.deadline())
+                .flatten(),
             runtime.strip_animation_deadline(now),
             pty_resize_deadline,
             resize_finish_deadline,
@@ -7585,6 +8412,366 @@ mod tests {
     use super::*;
     use bt_render::{DARK_CHROME, LIGHT_CHROME};
     use std::time::Duration;
+
+    // ── T4: the press promise (J105) and the tab-name editor (J99-J104) ──
+
+    const A: TabId = TabId(1);
+    const B: TabId = TabId(2);
+
+    fn at(x: f64, y: f64) -> PhysicalPosition<f64> {
+        PhysicalPosition::new(x, y)
+    }
+
+    /// J105 (mock-up 5743-5765) — a press chooses a tab; the switch lands 180ms
+    /// later.
+    ///
+    /// Red gate: `chrome_mouse_input` activated on the press itself
+    /// (`ChromeTarget::Tab(index) => self.activate_tab(index, false)`), so there
+    /// was no interval in which the tab was chosen but not yet shown — which is
+    /// the entire mechanism. The three assertions are the three instants: at the
+    /// press, one tick short of the deadline, and at it.
+    #[test]
+    fn a_press_chooses_a_tab_and_the_view_follows_a_hundred_and_eighty_milliseconds_later() {
+        let now = Instant::now();
+        let mut press = TabPress::armed(A, at(100.0, 20.0), now);
+
+        assert_eq!(press.promise, TabPressPromise::Pending, "chosen, not shown");
+        assert!(
+            !press.matured(now + Duration::from_millis(179)),
+            "179ms is still inside the grace period"
+        );
+        assert!(
+            press.matured(now + TAB_PRESS_ACTIVATION_GRACE),
+            "at 180ms the press has waited long enough to be believed"
+        );
+        assert_eq!(press.promise, TabPressPromise::Paid);
+        assert!(
+            !press.matured(now + Duration::from_secs(1)),
+            "and it is paid once, not once per wake-up"
+        );
+    }
+
+    /// J105's other half — "松开时不足 180ms → 立即激活(点击就是点击)".
+    ///
+    /// The release pays on the tab it pressed and nowhere else, which is the
+    /// mock-up's `click` handler (5735) stated in geometry: `click` fires on the
+    /// element the press and the release share.
+    #[test]
+    fn letting_go_on_the_tab_you_pressed_is_a_click_and_shows_it_at_once() {
+        let now = Instant::now();
+
+        let mut quick = TabPress::armed(A, at(100.0, 20.0), now);
+        assert!(
+            quick.released_over(Some(A)),
+            "a click well inside the grace period is still a click"
+        );
+        assert_eq!(quick.promise, TabPressPromise::Paid);
+
+        let mut elsewhere = TabPress::armed(A, at(100.0, 20.0), now);
+        assert!(
+            !elsewhere.released_over(Some(B)),
+            "lifting on a different tab is not a click on this one"
+        );
+        assert!(
+            !elsewhere.released_over(None),
+            "and lifting off the strip is not a click at all"
+        );
+
+        let mut already = TabPress::armed(A, at(100.0, 20.0), now);
+        assert!(already.matured(now + TAB_PRESS_ACTIVATION_GRACE));
+        assert!(
+            !already.released_over(Some(A)),
+            "a promise is paid once — the release must not switch a second time"
+        );
+    }
+
+    /// J105 — "位移超过拖拽阈值(6px)之前,不切换内容 ... 快速拖走时不会闪一下".
+    ///
+    /// The threshold is `startDrag`'s own 6 logical pixels (mock-up 6727) and it
+    /// is *logical*: the same hand movement on a 200% display crosses twice the
+    /// physical pixels and is the same movement.
+    #[test]
+    fn travelling_past_six_pixels_abandons_the_delayed_switch() {
+        let now = Instant::now();
+        for scale in [1.0, 1.5, 2.0] {
+            let mut press = TabPress::armed(A, at(100.0, 20.0), now);
+            assert!(
+                !press.travelled(at(100.0 + 5.9 * scale, 20.0), scale),
+                "just under the threshold at {scale}x is still a press"
+            );
+            assert_eq!(press.promise, TabPressPromise::Pending);
+            assert!(
+                press.travelled(at(100.0 + 6.0 * scale, 20.0), scale),
+                "at the threshold the press becomes a drag at {scale}x"
+            );
+            assert_eq!(
+                press.promise,
+                TabPressPromise::Slipped,
+                "the state T5 hangs its drag on"
+            );
+            assert!(
+                !press.matured(now + TAB_PRESS_ACTIVATION_GRACE),
+                "and the timer that is still running must find nothing to do"
+            );
+            assert_eq!(press.wake_deadline(), None, "nor ask to be woken for it");
+        }
+    }
+
+    /// J105/J108 — the promise a slipped press still carries.
+    ///
+    /// Two facts T5 needs and this slice must not get wrong: travelling after
+    /// the switch has already landed does not take it back, and a slipped press
+    /// that comes home still pays (the mock-up's release path re-selects on
+    /// exactly this condition, 6888 and 7134).
+    #[test]
+    fn a_slipped_press_keeps_its_promise_and_a_paid_one_cannot_be_unpaid() {
+        let now = Instant::now();
+
+        let mut after_paying = TabPress::armed(A, at(100.0, 20.0), now);
+        assert!(after_paying.matured(now + TAB_PRESS_ACTIVATION_GRACE));
+        assert!(
+            !after_paying.travelled(at(400.0, 20.0), 1.0),
+            "dragging a tab you are already looking at does not un-choose it"
+        );
+        assert_eq!(after_paying.promise, TabPressPromise::Paid);
+
+        let mut came_home = TabPress::armed(A, at(100.0, 20.0), now);
+        assert!(came_home.travelled(at(120.0, 20.0), 1.0));
+        assert!(
+            came_home.released_over(Some(A)),
+            "down and up on one tab is a click however the pointer wandered between"
+        );
+        assert!(
+            !TabPress::armed(A, at(100.0, 20.0), now).released_over(Some(B)),
+            "and the promise stays unpaid when the release lands elsewhere"
+        );
+    }
+
+    /// J105 — "在已激活的 tab 上按下" owes nothing, and must not be able to
+    /// start owing something later (mock-up 5755: `wsId !== state.active`).
+    #[test]
+    fn pressing_the_tab_you_are_already_on_promises_nothing() {
+        let now = Instant::now();
+        let mut press = TabPress::settled(A, at(100.0, 20.0), now);
+        assert_eq!(press.promise, TabPressPromise::Paid);
+        assert_eq!(press.wake_deadline(), None, "no timer is armed");
+        assert!(!press.matured(now + TAB_PRESS_ACTIVATION_GRACE));
+        assert!(!press.released_over(Some(A)));
+    }
+
+    /// J99/J105 — the two clicks of a rename land on one tab inside the
+    /// system's own double-click window, and nothing else pairs with them.
+    #[test]
+    fn two_presses_on_one_tab_inside_the_double_click_window_are_a_double_click() {
+        let now = Instant::now();
+        let mut clicks = TabClicks::default();
+
+        assert_eq!(clicks.register(A, now), TabClick::Single);
+        assert_eq!(
+            clicks.register(A, now + MULTI_CLICK_INTERVAL),
+            TabClick::Double,
+            "the far edge of the window still pairs"
+        );
+        assert_eq!(
+            clicks.register(A, now + MULTI_CLICK_INTERVAL + Duration::from_millis(1)),
+            TabClick::Single,
+            "a double click consumes its own history — a third press starts over"
+        );
+
+        let mut slow = TabClicks::default();
+        assert_eq!(slow.register(A, now), TabClick::Single);
+        assert_eq!(
+            slow.register(A, now + MULTI_CLICK_INTERVAL + Duration::from_millis(1)),
+            TabClick::Single,
+            "past the window it is two single clicks"
+        );
+
+        let mut wandering = TabClicks::default();
+        assert_eq!(wandering.register(A, now), TabClick::Single);
+        assert_eq!(
+            wandering.register(B, now + Duration::from_millis(10)),
+            TabClick::Single,
+            "two tabs are two elements, and `dblclick` needs one"
+        );
+
+        // J99: "`.close`/`.pin` 上的双击不算(那是两次按钮点击)" — the button
+        // press never registers, and it breaks the chain on its way past.
+        let mut interrupted = TabClicks::default();
+        assert_eq!(interrupted.register(A, now), TabClick::Single);
+        interrupted.interrupt();
+        assert_eq!(
+            interrupted.register(A, now + Duration::from_millis(10)),
+            TabClick::Single,
+            "a click on the × between them is not the first half of anything"
+        );
+    }
+
+    /// J101 (mock-up 5863-5870) — the box opens holding YOUR name and nothing
+    /// else, with all of it selected and the caret at its end.
+    #[test]
+    fn the_editor_opens_holding_only_the_name_you_typed() {
+        let named = TabRename::open(A, Some("build"));
+        assert_eq!(named.text, "build");
+        assert_eq!(
+            named.caret, 5,
+            "`input.select()` leaves the caret at the end"
+        );
+        assert!(named.select_all, "and the whole of it selected");
+
+        // The auto name is never *in* the box — it is behind it. A tab that has
+        // never been named opens empty, which is what makes the placeholder the
+        // only thing you can see.
+        let unnamed = TabRename::open(A, None);
+        assert_eq!(unnamed.text, "");
+        assert_eq!(unnamed.caret, 0);
+        assert!(
+            !unnamed.select_all,
+            "there is nothing to select, so nothing is"
+        );
+    }
+
+    /// J101/J102 — typing over the opening selection replaces it, and the
+    /// draft's own verbs move on character boundaries rather than byte ones.
+    #[test]
+    fn typing_over_the_opening_selection_replaces_the_whole_name() {
+        let mut editor = TabRename::open(A, Some("build"));
+        editor.insert("x");
+        assert_eq!(
+            editor.text, "x",
+            "the selection went with the first keystroke"
+        );
+        assert_eq!(editor.caret, 1);
+        assert!(!editor.select_all);
+
+        // Backspace on a fresh selection clears it rather than eating one letter.
+        let mut cleared = TabRename::open(A, Some("build"));
+        cleared.backspace();
+        assert_eq!(cleared.text, "");
+        assert_eq!(cleared.caret, 0);
+
+        // Arrow keys collapse to the near edge, so an accidental select-all is
+        // recoverable rather than destructive.
+        let mut left = TabRename::open(A, Some("build"));
+        left.move_left();
+        assert_eq!((left.text.as_str(), left.caret), ("build", 0));
+        let mut right = TabRename::open(A, Some("build"));
+        right.move_right();
+        assert_eq!((right.text.as_str(), right.caret), ("build", 5));
+    }
+
+    /// J102/§7.1.5 — the editor's minimum verb set, over text that is not ASCII.
+    ///
+    /// A tab name is exactly the kind of short label that gets typed in Chinese,
+    /// and a caret that counts bytes would land inside a character and panic on
+    /// the next slice.
+    #[test]
+    fn the_editors_verbs_move_by_character_and_not_by_byte() {
+        let mut editor = TabRename::open(A, Some("构建"));
+        editor.move_left();
+        assert_eq!(editor.caret, 0, "collapse to the near edge first");
+        editor.move_right();
+        assert_eq!(editor.caret, 3, "one three-byte character");
+        editor.insert("x");
+        assert_eq!(editor.text, "构x建");
+        editor.backspace();
+        assert_eq!(editor.text, "构建");
+        assert_eq!(editor.caret, 3);
+        editor.delete();
+        assert_eq!(editor.text, "构", "Delete takes the character in front");
+        editor.move_home();
+        assert_eq!(editor.caret, 0);
+        editor.delete();
+        assert_eq!(editor.text, "");
+        editor.backspace();
+        assert_eq!(editor.text, "", "and an empty draft survives a backspace");
+        editor.move_end();
+        assert_eq!(editor.caret, 0);
+    }
+
+    /// J102 (mock-up 5883) — "空串 = 撤销 override(name=null)".
+    ///
+    /// The sanitiser runs before the emptiness test, so a draft of nothing but
+    /// spaces is the same answer as a draft of nothing: a name of no characters
+    /// is the absence of a name, not a name that is blank.
+    #[test]
+    fn an_empty_draft_drops_the_override_rather_than_naming_the_tab_nothing() {
+        let mut editor = TabRename::open(A, Some("build"));
+        editor.backspace();
+        assert_eq!(editor.committed_name(), None, "the override is dropped");
+
+        let mut spaces = TabRename::open(A, None);
+        spaces.insert("   ");
+        assert_eq!(
+            spaces.committed_name(),
+            None,
+            "trimmed to nothing is nothing"
+        );
+
+        let mut named = TabRename::open(A, None);
+        named.insert("  build  ");
+        assert_eq!(
+            named.committed_name().as_deref(),
+            Some("build"),
+            "and a real name arrives sanitised, exactly as every other layer does"
+        );
+
+        let mut long = TabRename::open(A, None);
+        long.insert(&"n".repeat(60));
+        assert_eq!(
+            long.committed_name().map(|name| name.chars().count()),
+            Some(TITLE_MAX_CHARS),
+            "the cap the other three layers already answer to"
+        );
+    }
+
+    /// J103 — "编辑期间键盘输入不进终端(编辑器独占)".
+    ///
+    /// Every arm returns a verdict and there is no arm that hands the key on.
+    /// The two that leave are the two the mock-up has: Enter commits, Escape
+    /// abandons (5895-5896).
+    #[test]
+    fn the_open_editor_owns_the_keyboard_and_gives_back_only_two_keys() {
+        let none = ModifiersState::empty();
+        let mut editor = TabRename::open(A, None);
+
+        assert_eq!(
+            rename_key(&mut editor, &Key::Character("a".into()), none),
+            RenameVerdict::Held
+        );
+        assert_eq!(editor.text, "a");
+        assert_eq!(
+            rename_key(&mut editor, &Key::Named(NamedKey::Space), none),
+            RenameVerdict::Held
+        );
+        assert_eq!(editor.text, "a ", "space is text, not a verb");
+
+        // A chord has no meaning here and must not fall through to the shell:
+        // Ctrl+C in a name box is not an interrupt, it is nothing.
+        assert_eq!(
+            rename_key(
+                &mut editor,
+                &Key::Character("c".into()),
+                ModifiersState::CONTROL
+            ),
+            RenameVerdict::Held
+        );
+        assert_eq!(editor.text, "a ", "and it typed nothing either");
+
+        assert_eq!(
+            rename_key(&mut editor, &Key::Named(NamedKey::F5), none),
+            RenameVerdict::Held,
+            "a key with no verb is swallowed, not passed to the terminal"
+        );
+
+        assert_eq!(
+            rename_key(&mut editor, &Key::Named(NamedKey::Enter), none),
+            RenameVerdict::Commit
+        );
+        assert_eq!(
+            rename_key(&mut editor, &Key::Named(NamedKey::Escape), none),
+            RenameVerdict::Cancel
+        );
+    }
 
     // ── T3: one vault, three doors ──
 

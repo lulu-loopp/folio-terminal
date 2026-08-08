@@ -50,6 +50,19 @@ use bt_render::{
 
 use crate::marks::{ChromeMark, ChromeSprite};
 
+/// The tab-name editor's caret, in logical pixels.
+///
+/// `.rename` (mock-up 379-385) declares no caret of its own, so it wears the
+/// browser's: a one-pixel hairline at 100%, DPI-rounded and never thinner than
+/// one device pixel.
+///
+/// It is the same measure the terminal's own bar caret currently takes, and
+/// deliberately not the *same constant*: that one lives behind the cursor
+/// machine's exports, and an insertion point in the chrome is a chrome measure —
+/// the day the terminal's caret becomes configurable, the tab strip's must not
+/// follow it into a setting about terminal cursors.
+pub const TAB_RENAME_CARET_LOGICAL_PX: f32 = 1.0;
+
 /// §2.5 asks `bt-layout` to hold its own subpixel denominator and to pin it
 /// against `bt-doc`'s "on the seam that can legally see both crates". This is
 /// that seam: `bt-app` is the first place both are in scope at once.
@@ -930,6 +943,59 @@ pub fn tab_badge_rect(
     Some([left, top, left + badge_width, top + badge_height])
 }
 
+/// Where a tab's mark sits, which is also where its title starts.
+///
+/// Split out of `window_chrome` when the rename editor needed the same answer:
+/// the editor *is* the title (mock-up 376-378, "same box, same metrics"), so the
+/// box it measures its caret against and the box the strip draws the title in
+/// have to be one computation. Two would drift, and the drift would show as a
+/// caret standing beside its own letters.
+fn tab_mark_left(tab: &TabGeometry, scale: f32) -> f32 {
+    let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+    let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
+    if tab.tier == TabWidthTier::Squeezed {
+        let trailing =
+            tab_trailer_box(tab).map_or(0.0, |trailer| content_gap + trailer[2] - trailer[0]);
+        (tab.body[0] + (tab.body[2] - tab.body[0] - mark - trailing) / 2.0)
+            .max(tab.body[0] + WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX * scale)
+            .round()
+    } else {
+        (tab.body[0] + WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round()
+    }
+}
+
+/// The box a tab's title is laid out in and clipped to, or `None` when the tab
+/// is too narrow to hold one.
+///
+/// `.tab .ttitle { flex: 1; min-width: 0 }` between the mark and whatever the
+/// tab hangs off its trailing end — the `×`, the pin, or the pane-count badge in
+/// front of them. `.tab.squeezed .ttitle { display: none }` (mock-up line 201)
+/// is the `None`: below 90px "the tab is its centred icon" and there is nothing
+/// gained by clipping a word to two letters.
+///
+/// Public because the rename editor is drawn *into* this box and has to measure
+/// its own text against the box's width before the strip is built — only the
+/// font knows how wide a draft is, and only the strip knows how much room it has.
+#[must_use]
+pub fn tab_title_box(
+    tab: &TabGeometry,
+    pane_count: usize,
+    badge_text_width: f32,
+    scale: f32,
+) -> Option<[f32; 4]> {
+    if tab.tier == TabWidthTier::Squeezed {
+        return None;
+    }
+    let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+    let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
+    let left = tab_mark_left(tab, scale) + mark + content_gap;
+    let right = tab_badge_rect(tab, pane_count, badge_text_width, scale)
+        .map_or(tab_trailing_edge(tab, scale), |badge| {
+            badge[0] - content_gap
+        });
+    (left < right).then_some([left, tab.body[1], right, tab.body[3]])
+}
+
 /// The strip's geometry when the caller has no trailers to hand and no use for
 /// them: every tab resting and unpinned.
 ///
@@ -1229,6 +1295,7 @@ pub fn build_chrome_with_preview(
         badge_text_width: 0.0,
         mark: TabMarkState::default(),
         trailer: TabTrailer::default(),
+        edit: None,
     }];
     build_chrome_for_tabs(
         seats,
@@ -1267,6 +1334,41 @@ pub struct TabContent {
     /// hover reveal has run. The caller owns both — one is a fact about the tab,
     /// the other is the clock.
     pub trailer: TabTrailer,
+    /// The open rename editor, when this is the tab being renamed.
+    ///
+    /// `Some` replaces [`Self::title`] in the title's own box and changes
+    /// nothing else about the tab: the mark, the badge and the trailing controls
+    /// stay exactly where they were. That is the whole of mock-up 376-378 — "the
+    /// editor is the tab: same box, same metrics, so committing a name does not
+    /// make the strip jump".
+    pub edit: Option<TabEdit>,
+}
+
+/// The rename editor's contents, already measured.
+///
+/// Everything here is in physical pixels off the title box's left edge, because
+/// the measuring has to happen where the font is (`main.rs`, exactly as
+/// [`TabContent::badge_text_width`] does) and the placing has to happen where the
+/// geometry is. This struct is the seam between the two.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TabEdit {
+    /// The draft from its first visible character on — a box narrower than its
+    /// text scrolls by cutting the head off, and the label's own rect clips the
+    /// tail. Empty means the placeholder shows through.
+    pub text: String,
+    /// The auto name an empty draft reveals: `input.placeholder = autoName(s)`
+    /// (mock-up 5866). Not a hint and not a label — it is the layer *underneath*
+    /// the override, shown so that clearing the box is a visible choice rather
+    /// than a leap.
+    pub placeholder: String,
+    /// The caret's offset from the box's left edge.
+    pub caret_px: f32,
+    /// How much of the visible draft is selected, from the box's left edge —
+    /// the one selection this editor has (`input.select()`, mock-up 5870). Zero
+    /// when nothing is selected.
+    pub selection_px: f32,
+    /// Whether the caret is in its lit phase.
+    pub caret_lit: bool,
 }
 
 /// One tab's mark slot, resolved to pixels-worth of decisions.
@@ -1605,15 +1707,7 @@ fn window_chrome(
             let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
             // `.tab.squeezed { justify-content: center; padding: 0 4px }` — the mark
             // and whatever else survived are centred as one group, not indented.
-            let mark_left = if tab.tier == TabWidthTier::Squeezed {
-                let trailing = tab_trailer_box(tab)
-                    .map_or(0.0, |trailer| content_gap + trailer[2] - trailer[0]);
-                (tab_left + (tab_right - tab_left - mark - trailing) / 2.0)
-                    .max(tab_left + WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX * scale)
-                    .round()
-            } else {
-                (tab_left + WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round()
-            };
+            let mark_left = tab_mark_left(tab, scale);
             let mark_top = (tab_top + (tab_bottom - tab_top - mark) / 2.0).round();
             // The tab row's trailing boundary — the pin, the `×`, or the trailing
             // padding, whichever the cluster leads with. One function with
@@ -1723,21 +1817,111 @@ fn window_chrome(
                     && label_left < content_right
                     && label_left < viewport[1]
                 {
+                    let title_box = clip_label([label_left, tab_top, content_right, tab_bottom]);
+                    // The editor is the tab. `.rename` (mock-up 379-385) declares
+                    // `background: transparent; font: inherit; padding: 0` and
+                    // `flex: 1 1 auto` — every one of which says the same thing:
+                    // it takes the title's box and its metrics and changes only
+                    // the ink and what is written in it. So the label below is
+                    // the *same* label with a different `text` and `color`, and
+                    // the strip cannot jump when the editor opens or closes.
+                    let (text, color) = match &content.edit {
+                        // An empty draft shows the layer underneath, in the ink
+                        // the mock-up gives it: `.rename::placeholder { color:
+                        // var(--ink3) }` (385). `--ink3` over the terminal
+                        // surface this tab wears is `pane_title` — the same ink
+                        // an unfocused pane head takes over the same canvas.
+                        Some(edit) if edit.text.is_empty() => {
+                            (edit.placeholder.clone(), palette.pane_title)
+                        }
+                        // `.rename { color: var(--ink) }` (382). The editing tab
+                        // is always the active one — the first click of the
+                        // double click put it there — so `--ink` over its
+                        // surface is `pane_title_focus`, which is what this tab's
+                        // title was already wearing. The editor changes the ink
+                        // by *not* changing it.
+                        Some(edit) => (edit.text.clone(), palette.pane_title_focus),
+                        None => (
+                            content.title.clone(),
+                            if active || tab_hovered {
+                                palette.pane_title_focus
+                            } else {
+                                palette.title_text
+                            },
+                        ),
+                    };
+                    // The selection goes down before the text and after the tab's
+                    // own silhouette, which is why it is a sprite and not a
+                    // `ChromeQuad`: quads are drawn *under* every mark, and the
+                    // active tab's body is a mark. `input.select()` (5870) is the
+                    // only selection this editor has, and drawing it is what
+                    // makes "type and the old name is gone" a thing you can see
+                    // coming rather than a surprise.
+                    if let Some(edit) = &content.edit
+                        && edit.selection_px > 0.0
+                    {
+                        let band = [
+                            title_box[0],
+                            (tab_top + (tab_bottom - tab_top - mark) / 2.0).round(),
+                            (title_box[0] + edit.selection_px).min(title_box[2]),
+                            (tab_top + (tab_bottom - tab_top + mark) / 2.0).round(),
+                        ];
+                        if band[2] > band[0] && within_strip(viewport, band) {
+                            sprites.push(ChromeSprite::new(
+                                ChromeMark::Fill,
+                                band,
+                                // `--active`, already composited over this tab's
+                                // own surface. The mock-up declares no
+                                // `::selection` and leans on the browser's; what
+                                // it *does* have is one neutral wash meaning
+                                // "this is the chosen thing", and it is this one.
+                                palette.tab_close_pill_on_content,
+                            ));
+                        }
+                    }
                     labels.push(ChromeLabel {
-                        text: content.title.clone(),
-                        rect: clip_label([label_left, tab_top, content_right, tab_bottom]),
+                        text,
+                        rect: title_box,
                         font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
-                        color: if active || tab_hovered {
-                            palette.pane_title_focus
-                        } else {
-                            palette.title_text
-                        },
+                        color,
                         align_right: false,
                         align_center: false,
                         letter_spacing_em: 0.0,
                         weight: ChromeLabelWeight::Regular,
                         tabular_numerals: false,
                     });
+                    // The caret last: it is the one thing in the box that has to
+                    // be visible over the letters as well as over the fill.
+                    if let Some(edit) = &content.edit
+                        && edit.caret_lit
+                    {
+                        // The terminal's own hairline (`CURSOR_BAR_WIDTH_LOGICAL_PX`),
+                        // because an insertion point is an insertion point: two
+                        // carets in one window that disagree about their width
+                        // read as two different applications.
+                        let width = (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0);
+                        let left = (title_box[0] + edit.caret_px).round();
+                        // The tab's own content band — the 15px the mark beside
+                        // it occupies — so the caret is exactly as tall as the
+                        // row it stands in and sits on the same axis everything
+                        // else in the tab is centred on.
+                        let caret = [
+                            left,
+                            (tab_top + (tab_bottom - tab_top - mark) / 2.0).round(),
+                            left + width,
+                            (tab_top + (tab_bottom - tab_top + mark) / 2.0).round(),
+                        ];
+                        if caret[0] >= title_box[0]
+                            && caret[2] <= title_box[2]
+                            && within_strip(viewport, caret)
+                        {
+                            sprites.push(ChromeSprite::new(
+                                ChromeMark::Fill,
+                                caret,
+                                palette.pane_title_focus,
+                            ));
+                        }
+                    }
                 }
             }
             // `.panecount` — the count, its pill, and nothing when there is one pane.
@@ -3290,6 +3474,7 @@ mod tests {
                 badge_text_width: 0.0,
                 mark: TabMarkState::default(),
                 trailer: TabTrailer::default(),
+                edit: None,
             })
             .collect::<Vec<_>>();
         strip_chrome_of(scale, &tabs, active_tab, 0.0, hover, profile_menu_open)
@@ -4039,6 +4224,7 @@ mod tests {
             badge_text_width: 6.0,
             mark: TabMarkState::default(),
             trailer: TabTrailer::default(),
+            edit: None,
         };
         let (_, lone_labels, lone_sprites) = strip_chrome_of(1.0, &[tab(1)], 0, 0.0, None, false);
         let (_, pair_labels, pair_sprites) = strip_chrome_of(1.0, &[tab(2)], 0, 0.0, None, false);
@@ -4112,6 +4298,352 @@ mod tests {
         );
     }
 
+    /// A tab with the rename editor open on it, already measured.
+    fn editing_tab(edit: TabEdit) -> TabContent {
+        TabContent {
+            title: "committed-title".to_owned(),
+            pane_count: 1,
+            badge_text_width: 0.0,
+            mark: TabMarkState::default(),
+            trailer: TabTrailer::default(),
+            edit: Some(edit),
+        }
+    }
+
+    /// The title box the strip gives the one tab in `tabs`.
+    fn only_title_box(scale: f32) -> [f32; 4] {
+        let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(1), 0, 0.0);
+        tab_title_box(&geometry.tabs[0], 1, 0.0, scale).expect("a lone tab has room for its title")
+    }
+
+    /// J100 (mock-up 376-385) — "the editor is the tab: same box, same metrics,
+    /// so committing a name does not make the strip jump".
+    ///
+    /// Red gate: there was no editor at all, so nothing checked that opening one
+    /// leaves the strip's geometry alone. The assertion that matters is the
+    /// *identity* of the two rects — an editor drawn in a box of its own would
+    /// pass every "it renders" test and still move the letters when you clicked.
+    #[test]
+    fn the_editor_takes_the_titles_own_box_and_leaves_the_tab_alone() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let resting_tab = TabContent {
+                title: "committed-title".to_owned(),
+                pane_count: 1,
+                badge_text_width: 0.0,
+                mark: TabMarkState::default(),
+                trailer: TabTrailer::default(),
+                edit: None,
+            };
+            let editing = editing_tab(TabEdit {
+                text: "draft".to_owned(),
+                placeholder: "auto".to_owned(),
+                caret_px: 10.0 * scale,
+                selection_px: 0.0,
+                caret_lit: false,
+            });
+            let (resting_quads, resting_labels, resting_sprites) =
+                strip_chrome_of(scale, &[resting_tab], 0, 0.0, None, false);
+            let (edit_quads, edit_labels, edit_sprites) =
+                strip_chrome_of(scale, &[editing], 0, 0.0, None, false);
+
+            let title = resting_labels
+                .iter()
+                .find(|label| label.text == "committed-title")
+                .expect("the resting tab is titled");
+            let draft = edit_labels
+                .iter()
+                .find(|label| label.text == "draft")
+                .expect("the editing tab shows its draft");
+            assert_eq!(
+                draft.rect, title.rect,
+                "same box at {scale}x — `.rename` is `flex: 1 1 auto; padding: 0`"
+            );
+            assert_eq!(
+                draft.font_size_px, title.font_size_px,
+                "`font: inherit` (mock-up 383)"
+            );
+            assert_eq!(
+                draft.weight, title.weight,
+                "and it inherits the weight with it"
+            );
+            assert!(
+                !edit_labels
+                    .iter()
+                    .any(|label| label.text == "committed-title"),
+                "the committed name is not drawn beside the draft — the draft replaces it"
+            );
+            assert_eq!(
+                edit_quads, resting_quads,
+                "nothing in the tab's own structure moves when the editor opens"
+            );
+            assert_eq!(
+                edit_sprites, resting_sprites,
+                "the mark, the × and the tab's silhouette all stay exactly where they were \
+                 — with the caret dark, an open editor is invisible in the sprite list"
+            );
+        }
+    }
+
+    /// J101 (mock-up 5866, 385) — an empty draft reveals the layer underneath,
+    /// in `--ink3`.
+    ///
+    /// The two inks are the whole point of the placeholder: it has to read as
+    /// *what you would get*, not as a name someone already typed.
+    #[test]
+    fn an_empty_draft_shows_the_auto_name_in_the_placeholder_ink() {
+        let palette = chrome_palette();
+        let empty = editing_tab(TabEdit {
+            text: String::new(),
+            placeholder: "bt-app".to_owned(),
+            caret_px: 0.0,
+            selection_px: 0.0,
+            caret_lit: false,
+        });
+        let (_, labels, _) = strip_chrome_of(1.0, &[empty], 0, 0.0, None, false);
+        let shown = labels
+            .iter()
+            .find(|label| label.text == "bt-app")
+            .expect("the placeholder stands in for the empty draft");
+        assert_eq!(
+            shown.color, palette.pane_title,
+            "`.rename::placeholder {{ color: var(--ink3) }}` over the tab's own surface"
+        );
+
+        let typed = editing_tab(TabEdit {
+            text: "mine".to_owned(),
+            placeholder: "bt-app".to_owned(),
+            caret_px: 0.0,
+            selection_px: 0.0,
+            caret_lit: false,
+        });
+        let (_, labels, _) = strip_chrome_of(1.0, &[typed], 0, 0.0, None, false);
+        assert!(
+            !labels.iter().any(|label| label.text == "bt-app"),
+            "a draft with something in it hides the layer under it"
+        );
+        assert_eq!(
+            labels
+                .iter()
+                .find(|label| label.text == "mine")
+                .expect("the draft is drawn")
+                .color,
+            palette.pane_title_focus,
+            "`.rename {{ color: var(--ink) }}` (mock-up 382)"
+        );
+    }
+
+    /// J102/J103 — the caret stands where it was measured to, is as tall as the
+    /// row it is in, and goes out with the blink.
+    #[test]
+    fn the_caret_stands_at_its_measured_offset_and_blinks() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let title_box = only_title_box(scale);
+            let caret_px = 12.0 * scale;
+            let lit = editing_tab(TabEdit {
+                text: "draft".to_owned(),
+                placeholder: String::new(),
+                caret_px,
+                selection_px: 0.0,
+                caret_lit: true,
+            });
+            let dark = editing_tab(TabEdit {
+                caret_lit: false,
+                ..TabEdit {
+                    text: "draft".to_owned(),
+                    placeholder: String::new(),
+                    caret_px,
+                    selection_px: 0.0,
+                    caret_lit: true,
+                }
+            });
+            let (_, _, lit_sprites) = strip_chrome_of(scale, &[lit], 0, 0.0, None, false);
+            let (_, _, dark_sprites) = strip_chrome_of(scale, &[dark], 0, 0.0, None, false);
+
+            assert_eq!(
+                lit_sprites.len(),
+                dark_sprites.len() + 1,
+                "one sprite is the whole difference between a lit caret and a dark one"
+            );
+            let caret = lit_sprites
+                .iter()
+                .find(|sprite| sprite.mark == ChromeMark::Fill)
+                .expect("a lit caret is drawn");
+            assert_eq!(
+                caret.rect[0],
+                (title_box[0] + caret_px).round(),
+                "at the offset the measurement handed it, off the box's own left edge"
+            );
+            assert_eq!(
+                caret.rect[2] - caret.rect[0],
+                (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0),
+                "a hairline, DPI-rounded and never thinner than one device pixel"
+            );
+            assert_eq!(
+                caret.rect[3] - caret.rect[1],
+                (WINDOW_TAB_MARK_LOGICAL_PX * scale).round(),
+                "as tall as the mark beside it — the tab's own content band"
+            );
+            let axis = (title_box[1] + title_box[3]) / 2.0;
+            assert!(
+                ((caret.rect[1] + caret.rect[3]) / 2.0 - axis).abs() <= 1.0,
+                "on the axis `align-items: center` puts everything else on"
+            );
+            assert_eq!(
+                caret.color,
+                chrome_palette().pane_title_focus,
+                "the caret is the ink it stands in — `.rename {{ color: var(--ink) }}`"
+            );
+        }
+    }
+
+    /// J101 (mock-up 5870, `input.select()`) — the opening selection is drawn,
+    /// under the letters and inside the box.
+    ///
+    /// A selection nobody can see is not a selection: the whole reason it is
+    /// there is to say "the next thing you type replaces this".
+    #[test]
+    fn the_opening_selection_is_a_visible_band_clipped_to_the_editors_box() {
+        let title_box = only_title_box(1.0);
+        let box_width = title_box[2] - title_box[0];
+        let selected = editing_tab(TabEdit {
+            text: "build".to_owned(),
+            placeholder: String::new(),
+            caret_px: 30.0,
+            selection_px: 30.0,
+            caret_lit: false,
+        });
+        let (_, _, sprites) = strip_chrome_of(1.0, &[selected], 0, 0.0, None, false);
+        let band = sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::Fill)
+            .expect("a selected draft wears its band");
+        assert_eq!(band.rect[0], title_box[0], "it starts where the text does");
+        assert_eq!(band.rect[2], title_box[0] + 30.0);
+        assert_eq!(
+            band.color,
+            chrome_palette().tab_close_pill_on_content,
+            "`--active`, pre-composited over the surface this tab is wearing"
+        );
+
+        // A selection wider than the box is clipped by it rather than bleeding
+        // over the × beside it.
+        let overflowing = editing_tab(TabEdit {
+            text: "a very long name indeed".to_owned(),
+            placeholder: String::new(),
+            caret_px: 0.0,
+            selection_px: box_width * 4.0,
+            caret_lit: false,
+        });
+        let (_, _, sprites) = strip_chrome_of(1.0, &[overflowing], 0, 0.0, None, false);
+        let band = sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::Fill)
+            .expect("the band is still drawn");
+        assert_eq!(
+            band.rect[2], title_box[2],
+            "clipped to the box, which is what `overflow` does to a real input"
+        );
+
+        // Nothing selected draws nothing — the band is not a permanent fixture
+        // with a zero width.
+        let plain = editing_tab(TabEdit {
+            text: "build".to_owned(),
+            placeholder: String::new(),
+            caret_px: 30.0,
+            selection_px: 0.0,
+            caret_lit: false,
+        });
+        let (_, _, sprites) = strip_chrome_of(1.0, &[plain], 0, 0.0, None, false);
+        assert!(
+            !sprites.iter().any(|sprite| sprite.mark == ChromeMark::Fill),
+            "a collapsed caret has no band behind it"
+        );
+    }
+
+    /// The caret and the band are drawn *after* the tab's own silhouette.
+    ///
+    /// This is the whole reason they are sprites rather than
+    /// [`bt_render::ChromeQuad`]s: quads land under every mark, and the active
+    /// tab's body is a mark. A caret painted under the tab it is inside is a
+    /// caret nobody sees, and it would have looked exactly like "the caret does
+    /// not work".
+    #[test]
+    fn the_editors_marks_are_painted_over_the_tab_they_are_inside() {
+        let editing = editing_tab(TabEdit {
+            text: "draft".to_owned(),
+            placeholder: String::new(),
+            caret_px: 10.0,
+            selection_px: 20.0,
+            caret_lit: true,
+        });
+        let (_, _, sprites) = strip_chrome_of(1.0, &[editing], 0, 0.0, None, false);
+        let body = sprites
+            .iter()
+            .position(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. }))
+            .expect("the active tab paints its silhouette");
+        let fills = sprites
+            .iter()
+            .enumerate()
+            .filter(|(_, sprite)| sprite.mark == ChromeMark::Fill)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(fills.len(), 2, "the selection band and the caret");
+        assert!(
+            fills.iter().all(|index| *index > body),
+            "both stand after the silhouette in the painter's order"
+        );
+    }
+
+    /// J100 — below the squeeze the tab is its mark, and there is no box to be
+    /// an editor. The draft is not lost, it is merely not on screen.
+    #[test]
+    fn a_squeezed_tab_has_no_title_box_for_an_editor_to_take() {
+        let squeezed = tab_strip_geometry(960.0, 1.0, &resting(30), 0, 0.0);
+        assert_eq!(squeezed.tabs[1].tier, TabWidthTier::Squeezed);
+        assert!(
+            tab_title_box(&squeezed.tabs[1], 1, 0.0, 1.0).is_none(),
+            "`.tab.squeezed .ttitle {{ display: none }}` (mock-up 201)"
+        );
+        let roomy = tab_strip_geometry(960.0, 1.0, &resting(2), 0, 0.0);
+        assert!(tab_title_box(&roomy.tabs[0], 1, 0.0, 1.0).is_some());
+    }
+
+    /// The title box is the one computation the strip and the editor share.
+    ///
+    /// `tab_title_box` was split out of `window_chrome`, so the two must still
+    /// agree exactly — a second derivation would drift, and the drift would show
+    /// as a caret standing beside its own letters.
+    #[test]
+    fn the_title_box_the_editor_measures_is_the_box_the_strip_draws_in() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            for pane_count in [1_usize, 3] {
+                let badge_text_width = if pane_count > 1 { 6.0 * scale } else { 0.0 };
+                let tabs = [TabContent {
+                    title: "measure-me".to_owned(),
+                    pane_count,
+                    badge_text_width,
+                    mark: TabMarkState::default(),
+                    trailer: TabTrailer::default(),
+                    edit: None,
+                }];
+                let (_, labels, _) = strip_chrome_of(scale, &tabs, 0, 0.0, None, false);
+                let drawn = labels
+                    .iter()
+                    .find(|label| label.text == "measure-me")
+                    .expect("the tab is titled")
+                    .rect;
+                let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(1), 0, 0.0);
+                let measured =
+                    tab_title_box(&geometry.tabs[0], pane_count, badge_text_width, scale)
+                        .expect("a lone tab has room");
+                assert_eq!(
+                    drawn, measured,
+                    "one box at {scale}x with {pane_count} panes, not two"
+                );
+            }
+        }
+    }
+
     fn tab_with(mark: TabMarkState) -> TabContent {
         TabContent {
             title: "session".to_owned(),
@@ -4119,6 +4651,7 @@ mod tests {
             badge_text_width: 0.0,
             mark,
             trailer: TabTrailer::default(),
+            edit: None,
         }
     }
 
@@ -4135,6 +4668,7 @@ mod tests {
             badge_text_width: 0.0,
             mark: TabMarkState::default(),
             trailer,
+            edit: None,
         }
     }
 
@@ -4387,6 +4921,7 @@ mod tests {
                 badge_text_width: 6.0,
                 mark: TabMarkState::default(),
                 trailer: TabTrailer::default(),
+                edit: None,
             },
             TabContent {
                 title: "b".to_owned(),
@@ -4394,6 +4929,7 @@ mod tests {
                 badge_text_width: 6.0,
                 mark: TabMarkState::default(),
                 trailer: TabTrailer::default(),
+                edit: None,
             },
         ];
         let (_, labels, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);

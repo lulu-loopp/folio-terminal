@@ -90,6 +90,21 @@ pub enum ChromeMark {
     /// pill over the surface it lands on, because this pipeline blends in linear
     /// light and the design's does not — see `ChromePalette::tab_close_pill_on_content`.
     ControlPill { radius_px: u32 },
+    /// A plain filled rectangle — the tab-name editor's caret and its selection
+    /// band, and nothing else so far.
+    ///
+    /// [`Self::ControlPill`] exists because a quad is a rectangle and a pill is
+    /// not; this exists because of the *other* half of that sentence. A
+    /// [`bt_render::ChromeQuad`] is the right primitive for a rectangle but the
+    /// wrong **layer** for this one: quads are drawn before every mark, and both
+    /// of these have to land on top of [`Self::ActiveTab`] — the opaque
+    /// silhouette the editing tab is wearing. A caret painted under the tab it
+    /// is inside is a caret nobody sees.
+    ///
+    /// It cannot be a degenerate `ControlPill` either: `control_pill_path`
+    /// refuses anything narrower than two pixels, and the caret is a hairline at
+    /// 100% DPI by deliberate choice (`CURSOR_BAR_WIDTH_LOGICAL_PX`).
+    Fill,
     /// One arc of the progress ring (`.pring`, mock-up lines 268-284).
     ///
     /// The mock-up's ring is a *pair* of concentric circles — a full-turn track
@@ -133,6 +148,7 @@ impl ChromeMark {
             Self::ActiveTab { .. } => "tab",
             Self::TabBody { .. } => "tab-body",
             Self::ControlPill { .. } => "control-pill",
+            Self::Fill => "fill",
             Self::ProgressRing { .. } => "progress-ring",
         }
     }
@@ -388,6 +404,13 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 format!(r#"<path fill="currentColor" d="{path}"/>"#),
             )
         }
+        // No path and no rounds: the whole box, which is the only shape a
+        // rectangle has. It still goes through the rasterizer rather than
+        // shortcutting to a quad because the *layer* is what it came here for.
+        ChromeMark::Fill => (
+            format!("0 0 {width_px} {height_px}"),
+            format!(r#"<rect width="{width_px}" height="{height_px}" fill="currentColor"/>"#),
+        ),
         ChromeMark::ProgressRing {
             start_milliturns,
             sweep_milliturns,
@@ -497,6 +520,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ActiveTab { .. } => 8,
         ChromeMark::TabBody { .. } => 8,
         ChromeMark::ControlPill { .. } => 8,
+        ChromeMark::Fill => 8,
         ChromeMark::ProgressRing { .. } => 8,
     }
 }
