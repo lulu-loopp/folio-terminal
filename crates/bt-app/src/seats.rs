@@ -3977,6 +3977,30 @@ mod tests {
         assert_eq!(dot.opacity, 1.0, "the dot does not breathe with the mark");
     }
 
+    /// PIN (T2, real-machine bug): the chrome the strip actually produces
+    /// carries a fully opaque mark once work has stopped.
+    ///
+    /// The sibling of `a_session_that_stops_working_returns_its_mark_to_full_opacity`
+    /// in `main.rs`, one layer down: that one pins the *decision*, this one
+    /// pins what comes out the other end. The bug on hardware was visible as a
+    /// sprite, so it is worth asserting on a sprite — a fade that survived into
+    /// the drawing code would show here even if the decision above were right.
+    #[test]
+    fn a_finished_tab_draws_its_mark_fully_opaque() {
+        let sprites = mark_slot_sprites(TabMarkState::default(), 960.0);
+        let mark = sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+            .expect("a settled tab draws its mark");
+        assert_eq!(
+            mark.opacity, 1.0,
+            "a tab whose command has returned draws no fade at all"
+        );
+        // Exactly, not nearly: this rides to the shader as a multiplier on the
+        // raster's alpha, and 0.999 is a mark that is very slightly not there.
+        assert!(mark.opacity.to_bits() == 1.0_f32.to_bits());
+    }
+
     /// PIN (T2): the dot and the ring survive every squeeze tier.
     ///
     /// The stylesheet narrows a tab by hiding `.ttitle`, `.panecount`, `.pin`

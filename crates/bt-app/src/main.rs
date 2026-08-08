@@ -497,6 +497,12 @@ struct TabState {
     /// The sweep the ring is displaying, which is also what a state change
     /// arriving without a percentage keeps.
     ring_sweep: Option<u16>,
+    /// The mark state the strip was last told to draw for this tab.
+    ///
+    /// The scheduler's own record, and the whole of how it notices that a
+    /// channel has *stopped* — a thing no "is it moving?" test can ever see,
+    /// because by the time it matters, nothing is.
+    last_drawn_mark: Option<seats::TabMarkState>,
     /// When this tab's mark-slot animations started counting.
     ///
     /// Per tab rather than per window, which is what CSS does: an animation
@@ -1733,6 +1739,55 @@ fn seen_revision(previous_seen: u64, published: u64, tab_is_active: bool) -> u64
     }
 }
 
+/// How opaque a tab's mark is drawn.
+///
+/// The breath is on the mark and nothing else, and it is *only* a breath while
+/// there is something to breathe about. Both of the other answers are a flat
+/// `1.0`, and they are flat on purpose:
+///
+/// * a ring has replaced the mark, and the ring is already reporting "still
+///   going" in its own medium — fading it as well would say it twice;
+/// * nothing is running, so the mark is simply itself.
+///
+/// The `!working` case is the one that has to be nailed down rather than left
+/// to fall out of a phase calculation. A breath sampled at the wrong moment
+/// returns whatever the curve happened to be passing through, so a session that
+/// stops working must not be asked where in its breath it was — it must be
+/// answered `1.0` outright, by a rule, at every phase and under every motion
+/// preference.
+fn mark_opacity(working: bool, mark_is_replaced: bool, elapsed: Duration, motion: Motion) -> f32 {
+    if mark_is_replaced || !working {
+        return 1.0;
+    }
+    breathe_opacity(elapsed, motion)
+}
+
+/// Whether a tab owes the strip a frame, given what it last had drawn.
+///
+/// This is the question the scheduler has to ask, and asking a *different* one
+/// is what put a half-faded icon on screen after `Start-Sleep 8` returned. The
+/// old predicate was "is anything moving?", which is the right question for
+/// [`Runtime::strip_animation_deadline`] — how long to keep waking up — and the
+/// wrong one for whether to draw. The two part company at exactly one moment,
+/// and it is the moment that matters: the frame on which motion *stops*.
+/// Nothing is moving any more, so the old predicate said "nothing owed" and
+/// returned before rebuilding — leaving whatever half-transparent frame the
+/// breath happened to end on as the last thing ever drawn.
+///
+/// Comparing against what was last drawn answers it for every channel at once,
+/// because every channel ends up in the same struct: the breath stopping, an
+/// indeterminate ring clearing back to its mark, a reduced-motion mark stepping
+/// between `.6` and `1.0`, and a dot arriving on a tab that is not moving at
+/// all and never was.
+///
+/// Note there is no `is_animating` clause here, and it would be redundant if
+/// there were: an animation that has moved has changed this struct, and one
+/// that has not moved has nothing to draw. Continuous wake-ups are the
+/// deadline's job, not this one's.
+fn tab_owes_frame(last_drawn: Option<seats::TabMarkState>, showing: seats::TabMarkState) -> bool {
+    last_drawn != Some(showing)
+}
+
 /// Whether a tab's latched attention has already been spent by being looked at.
 ///
 /// Watching is consuming (user ruling). A terminal you are sitting in front of
@@ -2084,16 +2139,12 @@ impl TabState {
         seats::TabMarkState {
             dot: claim.dot_color(palette),
             ring,
-            // The breath is on the mark, and only when there is a mark to
-            // breathe: a ring has replaced it, and the ring reports the same
-            // "still going" in its own medium.
-            opacity: if ring.is_some() {
-                1.0
-            } else if facts.status.working {
-                breathe_opacity(self.animation_elapsed(now), motion)
-            } else {
-                1.0
-            },
+            opacity: mark_opacity(
+                facts.status.working,
+                ring.is_some(),
+                self.animation_elapsed(now),
+                motion,
+            ),
             // Prepared and unwired: nothing in this build can report a session
             // that has died while its tab lives on — see `reap_exited_tabs`,
             // which closes the tab the moment the PTY exits.
@@ -2124,15 +2175,14 @@ impl TabState {
     ///
     /// Returns whether anything changed, so the caller can tell a frame that is
     /// owed from one that is not.
-    fn sync_ring(&mut self, now: Instant) -> bool {
+    fn sync_ring(&mut self, now: Instant) {
         let Some(state) = self.session.status().progress else {
             // The run ended: the mark comes back and the ring's memory goes
             // with it, so the next run starts from nothing rather than from
             // wherever the last one stopped.
-            let had = self.ring_sweep.is_some() || self.ring_tween.is_some();
             self.ring_sweep = None;
             self.ring_tween = None;
-            return had;
+            return;
         };
         let target = match state {
             ProgressState::Normal(percent) => Some(sweep_milliturns(percent)),
@@ -2144,19 +2194,19 @@ impl TabState {
             ProgressState::Indeterminate => None,
         };
         let Some(target) = target else {
-            return false;
+            return;
         };
         let showing = match self.ring_tween {
             Some(tween) => tween.sample(now).0,
             None => self.ring_sweep.unwrap_or(0),
         };
         if self.ring_sweep == Some(target) && self.ring_tween.is_none() {
-            return false;
+            return;
         }
         if showing == target {
             self.ring_sweep = Some(target);
             self.ring_tween = None;
-            return false;
+            return;
         }
         self.ring_sweep = Some(target);
         self.ring_tween = Some(SweepTween {
@@ -2164,7 +2214,6 @@ impl TabState {
             to: target,
             started: now,
         });
-        true
     }
 }
 
@@ -2329,6 +2378,7 @@ fn create_tab_state(
             last_seen_revision: 0,
             ring_tween: None,
             ring_sweep: None,
+            last_drawn_mark: None,
             animation_epoch: Instant::now(),
             pending_resize_present: None,
             seats,
@@ -3897,19 +3947,21 @@ impl Runtime {
                 tab.session.clear_attention();
             }
         }
+        let motion = self.motion;
+        let palette = bt_render::chrome_palette();
         let mut owes_frame = false;
-        for tab in &mut self.tabs {
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
             // A new progress reading starts the arc easing toward it. This runs
             // for every tab, active or not: a background download's ring has to
             // keep reporting, and its tab is exactly the one the user cannot
             // otherwise see.
-            owes_frame |= tab.sync_ring(now);
+            tab.sync_ring(now);
+            let showing = tab.mark_state(index == active, now, motion, &palette);
+            if tab_owes_frame(tab.last_drawn_mark, showing) {
+                tab.last_drawn_mark = Some(showing);
+                owes_frame = true;
+            }
         }
-        let motion = self.motion;
-        owes_frame |= self
-            .tabs
-            .iter()
-            .any(|tab| tab.mark_is_animating(now, motion));
         if !owes_frame {
             return Ok(());
         }
@@ -7014,6 +7066,143 @@ mod tests {
         assert!(!attention_is_consumed(true, false));
         assert!(!attention_is_consumed(false, true));
         assert!(!attention_is_consumed(false, false));
+    }
+
+    /// The mark state of a tab whose session is running, sampled mid-breath.
+    fn breathing(motion: Motion) -> seats::TabMarkState {
+        let elapsed = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS).mul_f32(0.5);
+        seats::TabMarkState {
+            opacity: mark_opacity(true, false, elapsed, motion),
+            ..seats::TabMarkState::default()
+        }
+    }
+
+    /// The same tab one instant after its command returned.
+    fn settled(motion: Motion) -> seats::TabMarkState {
+        let elapsed = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS).mul_f32(0.5);
+        seats::TabMarkState {
+            opacity: mark_opacity(false, false, elapsed, motion),
+            ..seats::TabMarkState::default()
+        }
+    }
+
+    /// PIN (T2, real-machine bug): a session that stops working returns its mark
+    /// to full opacity — at every phase of the breath, and under both motion
+    /// preferences.
+    ///
+    /// Red gate, reproduced on hardware: after `Start-Sleep 8` returned, the
+    /// tab icon sat at opacity **0.379** and stayed there. The breath is a
+    /// function of elapsed time, so asking it where it was at the moment work
+    /// stopped returns whatever the curve happened to be passing through —
+    /// which is any value in `.28 ..= 1.0`, and almost never `1.0`. The answer
+    /// cannot be interpolated; it has to be a rule, and this is that rule.
+    #[test]
+    fn a_session_that_stops_working_returns_its_mark_to_full_opacity() {
+        let period = Duration::from_millis(WINDOW_TAB_BREATHE_PERIOD_MS);
+        for motion in [Motion::Full, Motion::Reduced] {
+            for step in 0..=64 {
+                let elapsed = period.mul_f32(step as f32 / 32.0);
+                assert_eq!(
+                    mark_opacity(false, false, elapsed, motion),
+                    1.0,
+                    "{motion:?}: a mark that is not working is never faded, \
+                     whatever phase the breath had reached"
+                );
+                // A ring has replaced the mark, so the mark is not faded either
+                // — the ring is already saying "still going" in its own medium.
+                assert_eq!(mark_opacity(true, true, elapsed, motion), 1.0);
+            }
+            // And while it *is* working the mark really is faded, or the pin
+            // above would pass on a build that had simply deleted the breath.
+            assert!(breathing(motion).opacity < 1.0, "{motion:?}: it breathes");
+        }
+    }
+
+    /// PIN (T2, real-machine bug): the frame on which motion *stops* is owed a
+    /// redraw, and the tab asks for it without waiting for any later event.
+    ///
+    /// This is the bug's real seat. The scheduler used to ask "is anything
+    /// moving?", which is the right question for how long to keep waking up and
+    /// the wrong one for whether to draw — and the two part company at exactly
+    /// one moment, the moment motion ends. Nothing was moving any more, so the
+    /// old predicate said "nothing owed" and returned before rebuilding,
+    /// leaving whatever half-transparent frame the breath ended on as the last
+    /// thing ever drawn. Nothing else was coming: the command was over, so the
+    /// terminal had gone quiet too.
+    #[test]
+    fn the_frame_on_which_the_breath_stops_is_owed_a_redraw() {
+        let mid_breath = breathing(Motion::Full);
+        let finished = settled(Motion::Full);
+        assert_ne!(mid_breath, finished, "the two frames really do differ");
+        assert!(
+            tab_owes_frame(Some(mid_breath), finished),
+            "the working -> idle transition must ask for the frame that \
+             puts the mark back to full opacity"
+        );
+        // What that frame carries is the settled state, at full opacity.
+        assert_eq!(finished.opacity, 1.0);
+        // Having drawn it, the tab stops asking — the fix must not turn a
+        // missing frame into an endless stream of them.
+        assert!(
+            !tab_owes_frame(Some(finished), finished),
+            "a settled tab owes nothing further"
+        );
+        // A tab that has never drawn anything owes its first frame.
+        assert!(tab_owes_frame(None, finished));
+    }
+
+    /// PIN (T2, real-machine bug — the symmetric paths): every other channel
+    /// that can *stop* is owed the same final frame.
+    ///
+    /// The root cause was never specific to the breath: it was a scheduler that
+    /// could not see a channel switching off. These are the three siblings that
+    /// were broken by the same line, and each is checked here so a future
+    /// "optimisation" back to an is-it-moving test fails loudly rather than
+    /// silently freezing one channel at a time.
+    #[test]
+    fn every_channel_that_stops_is_owed_its_final_frame() {
+        let palette = LIGHT_CHROME;
+
+        // 1. An indeterminate ring clearing back to its mark. This one was
+        //    doubly hidden: the old ring signal watched the sweep and the
+        //    tween, and an indeterminate ring keeps neither.
+        let spinning = seats::TabMarkState {
+            ring: Some(seats::TabRing {
+                arc: palette.accent,
+                start_milliturns: 250,
+                sweep_milliturns: 243,
+            }),
+            ..seats::TabMarkState::default()
+        };
+        let cleared = seats::TabMarkState::default();
+        assert!(
+            tab_owes_frame(Some(spinning), cleared),
+            "a ring that clears must hand the slot back to the mark"
+        );
+
+        // 2. Reduced motion, where the mark never animates at all — it steps
+        //    between two held values. An is-it-moving test is blind to *both*
+        //    edges here, so the held .6 would never arrive and never leave.
+        let held = breathing(Motion::Reduced);
+        assert_eq!(held.opacity, WINDOW_TAB_BREATHE_REDUCED_OPACITY);
+        let done = settled(Motion::Reduced);
+        assert!(
+            tab_owes_frame(Some(done), held),
+            "reduced motion must still show that work has started"
+        );
+        assert!(tab_owes_frame(Some(held), done), "and that it has finished");
+
+        // 3. A dot arriving on a tab that is not moving and never was — a bell
+        //    on a background tab. Nothing animates, so nothing asked to draw.
+        let quiet_tab = seats::TabMarkState::default();
+        let ringing = seats::TabMarkState {
+            dot: Some(palette.status_warn),
+            ..seats::TabMarkState::default()
+        };
+        assert!(
+            tab_owes_frame(Some(quiet_tab), ringing),
+            "a bell on a still tab must still light its dot"
+        );
     }
 
     /// PIN (T2 D41): the accessibility preference is read in the right
