@@ -531,6 +531,23 @@ struct TabState {
     /// pulsing in lockstep, which reads as one mechanism rather than as several
     /// sessions each doing their own work.
     animation_epoch: Instant,
+    /// This tab's slide back to its own slot: the FLIP a displaced neighbour
+    /// runs, and the settle the tab you let go of runs, which are the same
+    /// motion started from two different places.
+    flip: FlipTween,
+    /// The landing wash, running down from 1.0 the moment this tab comes to rest
+    /// after a drag.
+    landing: LandTween,
+    /// How far from its slot the strip was last told to draw this tab, rounded
+    /// to whole physical pixels — the drag's half of the frame debt.
+    ///
+    /// Rounded for the reason the pin's reveal is quantised: a pixel is the
+    /// finest difference that can reach the glass, and a tween settling in the
+    /// last thousandth of one would otherwise owe a frame forever.
+    last_drawn_offset: Option<i32>,
+    /// The landing wash the strip was last told to draw, quantised to the 1/255
+    /// a sprite's opacity resolves to.
+    last_drawn_landing: Option<u8>,
 }
 
 struct Runtime {
@@ -656,6 +673,13 @@ struct Runtime {
     /// activation it pays for — a press that has already switched the view is
     /// still a press, and T5's drag needs to find it there.
     tab_press: Option<TabPress>,
+    /// The tab currently being dragged along the strip, if any.
+    ///
+    /// Separate from [`Self::tab_press`] rather than a fourth promise state,
+    /// because the two answer different questions and outlive each other in both
+    /// directions: a press that has not travelled is not a drag, and a drag that
+    /// has been cancelled still has to hand the press back its answer (J108).
+    tab_drag: Option<TabDrag>,
     /// The strip's double-click history (J99).
     tab_clicks: TabClicks,
     /// The open tab-name editor, or `None` when nobody is renaming anything.
@@ -2611,6 +2635,189 @@ impl RevealTween {
     }
 }
 
+/// `transform .16s cubic-bezier(.2, 0, 0, 1)` — the one easing the whole reorder
+/// is drawn with (`GRAB_EASE`, mock-up 6570).
+const TAB_FLIP: Duration = Duration::from_millis(160);
+/// The curve of that transition. Not one of the CSS keywords the strip already
+/// had, so it is a third set of control points through the same solver.
+const GRAB_EASE: [f32; 4] = [0.2, 0.0, 0.0, 1.0];
+/// `animation: tab-land .2s cubic-bezier(.2, 0, 0, 1)` (mock-up 967).
+const TAB_LAND: Duration = Duration::from_millis(200);
+
+/// A tab sliding back to the slot its index gives it.
+///
+/// This is FLIP, in the one form this strip needs it: the order changes first,
+/// then the tab is put back where it *was* with a translation, and the
+/// translation is released. Nothing about the layout is animated — only the
+/// difference between where a tab is drawn and where it belongs, which decays to
+/// zero.
+///
+/// It is one mechanism for two motions the mock-up writes separately, because
+/// they are the same motion: `playStripFlip` starts a displaced neighbour at the
+/// slot it just left (6584-6598), and `releaseGrabbed` starts the tab you let go
+/// of at wherever your hand left it (6622-6635). Both then run the same curve for
+/// the same 160ms down to the same zero.
+#[derive(Clone, Copy, Debug, Default)]
+struct FlipTween {
+    /// How far from its slot the tab starts this slide, in physical pixels.
+    from: f32,
+    started: Option<Instant>,
+}
+
+impl FlipTween {
+    /// The tab's slot has moved by `delta` physical pixels (old left minus new
+    /// left); start it over from where it is *now*.
+    ///
+    /// Reading the current offset first is what the mock-up's `snapshotStrip`
+    /// does by measuring `getBoundingClientRect`, which includes the live
+    /// transform: a tab displaced a second time while the first slide is still
+    /// running starts the new one from where it actually is, not from a slot it
+    /// never reached.
+    fn displace(&mut self, delta: f32, now: Instant, motion: Motion) {
+        let from = self.sample(now, motion).0 + delta;
+        *self = Self {
+            from,
+            started: (motion == Motion::Full && from != 0.0).then_some(now),
+        };
+    }
+
+    /// Where the tab is drawn relative to its slot, and whether it is still
+    /// moving.
+    fn sample(self, now: Instant, motion: Motion) -> (f32, bool) {
+        let Some(started) = self.started.filter(|_| motion == Motion::Full) else {
+            return (0.0, false);
+        };
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= TAB_FLIP {
+            return (0.0, false);
+        }
+        let progress = elapsed.as_secs_f32() / TAB_FLIP.as_secs_f32();
+        (self.from * (1.0 - cubic_bezier(progress, GRAB_EASE)), true)
+    }
+}
+
+/// `@keyframes tab-land` running down (mock-up 955-968).
+///
+/// The keyframe writes only a `from`, so this carries only how much of that
+/// `from` is left: the animation ends at whatever the tab already is, and needs
+/// to know nothing about the tab's real styling to get there.
+///
+/// `prefers-reduced-motion` turns it off outright (line 968) — unlike the FLIP
+/// beside it, which the mock-up's reduced-motion block deliberately does not
+/// mention. Off means the terminal state immediately, which for an animation
+/// that only has a `from` is simply the tab, unwashed.
+#[derive(Clone, Copy, Debug, Default)]
+struct LandTween {
+    started: Option<Instant>,
+}
+
+impl LandTween {
+    fn start(&mut self, now: Instant, motion: Motion) {
+        self.started = (motion == Motion::Full).then_some(now);
+    }
+
+    /// How much of the wash is left, and whether it is still running.
+    fn sample(self, now: Instant, motion: Motion) -> (f32, bool) {
+        let Some(started) = self.started.filter(|_| motion == Motion::Full) else {
+            return (0.0, false);
+        };
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= TAB_LAND {
+            return (0.0, false);
+        }
+        let progress = elapsed.as_secs_f32() / TAB_LAND.as_secs_f32();
+        (1.0 - cubic_bezier(progress, GRAB_EASE), true)
+    }
+}
+
+/// K115 — how far from its slot a grabbed tab is drawn, given where the hand
+/// wants it.
+///
+/// The strip has one axis, so the tab travels in `x` and the row it lives in does
+/// not move at all. `viewport` is the strip's own clip box: a tab held past
+/// either end stops at the end rather than being carried out over the caption
+/// buttons or off the window's left edge, and the *clamped* position is what the
+/// reorder is then judged from — the tab you can see is the tab that decides.
+///
+/// The upper bound is written as a `max` of the lower one rather than trusted,
+/// because a strip narrower than one tab has none: the two bounds cross, and the
+/// leading edge is the one that must win.
+fn grabbed_offset(slot_left: f32, tab_width: f32, viewport: [f32; 2], want_left: f32) -> f32 {
+    let [view_left, view_right] = viewport;
+    want_left.clamp(view_left, (view_right - tab_width).max(view_left)) - slot_left
+}
+
+/// The nearest slot to `to` that a tab now at `from` may legally occupy — F57
+/// stated for a move that geometry did not choose.
+///
+/// The reorder gets the partition for free, because it only ever steps one slot
+/// and asks before each step. A restore does not: Esc names a slot outright, and
+/// between the drag starting and Esc arriving a *pinned* tab may have been
+/// reaped, which shifts every index after it by one. So the same rule is applied
+/// the same way — walk toward the target and stop before the seam.
+fn partition_clamped(pinned: &[bool], from: usize, to: usize) -> usize {
+    let mut at = from;
+    while at != to {
+        let next = if at < to { at + 1 } else { at - 1 };
+        if pinned.get(next) != pinned.get(from) {
+            break;
+        }
+        at = next;
+    }
+    at
+}
+
+/// The shape the pointer wears — K113 included.
+///
+/// "You grabbed this with the pointing finger, and the cursor changing shape
+/// mid-drag would say something happened when nothing did" (mock-up 1710-1711).
+/// The mock-up pins the shape to `pointer` because in a browser an un-pinned
+/// cursor flickers through three shapes on the way to the drop; here the shape a
+/// tab press starts with is the ordinary arrow, so pinning it means keeping
+/// *that* — the point is that it does not change, not which one it is.
+fn pointer_cursor(
+    dragging_tab: bool,
+    divider_axis: Option<bt_layout::Axis>,
+) -> winit::window::CursorIcon {
+    use winit::window::CursorIcon;
+    if dragging_tab {
+        return CursorIcon::Default;
+    }
+    match divider_axis {
+        Some(bt_layout::Axis::Row) => CursorIcon::EwResize,
+        Some(bt_layout::Axis::Col) => CursorIcon::NsResize,
+        None => CursorIcon::Default,
+    }
+}
+
+/// A tab being dragged along the strip (K111, K114-K118).
+///
+/// It begins exactly where [`TabPressPromise::Slipped`] begins — T4 already owns
+/// the 6px and the identity, and this owns everything after them — and it is
+/// keyed on [`TabId`] for the same reason the press is: the thing in your hand is
+/// a tab, not a slot, and the reorder it is performing renumbers slots under it
+/// on almost every frame.
+#[derive(Clone, Copy, Debug)]
+struct TabDrag {
+    tab: TabId,
+    /// Where inside the tab's own body the pointer took hold, in physical
+    /// pixels. It is what makes the tab hang off the pointer where you picked it
+    /// up instead of jumping its own left edge under the cursor.
+    grab_dx: f64,
+    /// The slot the tab held when the drag began. Esc puts it back here.
+    origin: usize,
+    /// How far from its slot the tab is currently drawn, in physical pixels —
+    /// [`Runtime::track_grabbed`]'s answer, kept so that the frame that paints it
+    /// and the frame that lets go of it agree.
+    offset: f32,
+    /// Whether this drag has actually changed the strip's order.
+    ///
+    /// A drag that travelled 8px and came back has decided nothing, and the
+    /// session file records order: writing it anyway would turn a gesture the
+    /// user abandoned into a "meaningful change" (§5.1).
+    moved: bool,
+}
+
 impl TabState {
     /// The reveal as the strip would draw it: quantised to the 1/255 the
     /// sprite's opacity resolves to, which is the finest difference that can
@@ -2622,6 +2829,19 @@ impl TabState {
 
     fn pin_is_animating(&self, now: Instant, motion: Motion) -> bool {
         self.pin_reveal.sample(now, motion).1
+    }
+
+    /// How far from its slot this tab is drawn, in physical pixels.
+    ///
+    /// Two sources, never both: a tab in the hand is wherever the pointer has
+    /// put it, and every other tab is wherever its slide home has got to. Passing
+    /// the drag in rather than reading it here is what keeps this a method on a
+    /// tab instead of a method on the window.
+    fn drawn_offset(&self, now: Instant, motion: Motion, grabbed: Option<TabDrag>) -> f32 {
+        match grabbed {
+            Some(drag) => drag.offset,
+            None => self.flip.sample(now, motion).0,
+        }
     }
 
     /// The facts this tab's session is reporting right now.
@@ -3081,6 +3301,10 @@ fn create_tab_state(
             ring_sweep: None,
             last_drawn_mark: None,
             animation_epoch: Instant::now(),
+            flip: FlipTween::default(),
+            landing: LandTween::default(),
+            last_drawn_offset: None,
+            last_drawn_landing: None,
             pending_resize_present: None,
             seats,
             seat_layout,
@@ -3328,6 +3552,7 @@ impl Runtime {
             profile_menu: profiles::ProfileMenu::default(),
             tab_scroll: 0.0,
             tab_press: None,
+            tab_drag: None,
             tab_clicks: TabClicks::default(),
             rename: None,
             rename_blink: CursorBlink::new(Instant::now()),
@@ -3685,6 +3910,12 @@ impl Runtime {
         {
             self.tab_press = None;
         }
+        if self
+            .tab_drag
+            .is_some_and(|drag| self.tabs.get(index).is_some_and(|tab| tab.id == drag.tab))
+        {
+            self.tab_drag = None;
+        }
         match tab_close_action(self.tabs.len(), self.active_tab, index) {
             TabCloseAction::CloseWindow => {
                 let hwnd = window_hwnd(&self.window)?;
@@ -3757,6 +3988,8 @@ impl Runtime {
         let now = Instant::now();
         let palette = bt_render::chrome_palette();
         let renaming = self.rename.as_ref().map(|editor| editor.tab);
+        let drag = self.tab_drag;
+        let grabbed = drag.and_then(|drag| self.tabs.iter().position(|tab| tab.id == drag.tab));
         let tabs = self
             .tabs
             .iter()
@@ -3771,6 +4004,8 @@ impl Runtime {
                         pinned: tab.pinned,
                         reveal: tab.pin_reveal.sample(now, self.motion).0,
                     },
+                    tab.drawn_offset(now, self.motion, drag.filter(|_| grabbed == Some(index))),
+                    tab.landing.sample(now, self.motion).0,
                     // The layer under the override, which is exactly what the
                     // editor's placeholder shows: `autoName(s)` is `displayName`
                     // with the manual name taken out (mock-up 2605-2606).
@@ -3788,25 +4023,29 @@ impl Runtime {
         let mut tabs = tabs
             .into_iter()
             .map(
-                |(title, pane_count, mark, trailer, placeholder)| seats::TabContent {
-                    badge_text_width: if pane_count > 1 {
-                        self.renderer
-                            .measure_chrome_text(&pane_count.to_string(), badge_font_px)
-                    } else {
-                        0.0
-                    },
-                    // Filled in below, once the strip's own geometry has said how
-                    // much room the box has: the editor scrolls to keep its caret
-                    // in sight, and "in sight" is a width this loop has not
-                    // computed yet.
-                    edit: placeholder.map(|placeholder| seats::TabEdit {
-                        placeholder,
-                        ..seats::TabEdit::default()
-                    }),
-                    title,
-                    pane_count,
-                    mark,
-                    trailer,
+                |(title, pane_count, mark, trailer, offset, landing, placeholder)| {
+                    seats::TabContent {
+                        badge_text_width: if pane_count > 1 {
+                            self.renderer
+                                .measure_chrome_text(&pane_count.to_string(), badge_font_px)
+                        } else {
+                            0.0
+                        },
+                        // Filled in below, once the strip's own geometry has said how
+                        // much room the box has: the editor scrolls to keep its caret
+                        // in sight, and "in sight" is a width this loop has not
+                        // computed yet.
+                        edit: placeholder.map(|placeholder| seats::TabEdit {
+                            placeholder,
+                            ..seats::TabEdit::default()
+                        }),
+                        title,
+                        pane_count,
+                        mark,
+                        trailer,
+                        offset,
+                        landing,
+                    }
                 },
             )
             .collect::<Vec<_>>();
@@ -3829,6 +4068,7 @@ impl Runtime {
             seats::ChromeContent {
                 tabs: &tabs,
                 active_tab: self.active_tab,
+                grabbed,
                 tab_scroll: self.tab_scroll,
                 preview_title: preview_title.as_deref(),
                 preview_message: preview_message.as_deref(),
@@ -5089,6 +5329,16 @@ impl Runtime {
                 tab.last_drawn_pin_reveal = Some(drawn);
                 owes_frame = true;
             }
+            // The tab in hand is driven by the pointer and never by this clock,
+            // so it is deliberately not passed here: a settle or a FLIP is the
+            // only thing on this axis that moves on its own.
+            let offset = tab.drawn_offset(now, motion, None).round() as i32;
+            let landed = (tab.landing.sample(now, motion).0 * 255.0).round() as u8;
+            if tab.last_drawn_offset != Some(offset) || tab.last_drawn_landing != Some(landed) {
+                tab.last_drawn_offset = Some(offset);
+                tab.last_drawn_landing = Some(landed);
+                owes_frame = true;
+            }
             let showing = tab.mark_state(index == active, now, motion, &palette);
             if tab_owes_frame(tab.last_drawn_mark, showing) {
                 tab.last_drawn_mark = Some(showing);
@@ -5123,7 +5373,12 @@ impl Runtime {
         let motion = self.motion;
         self.tabs
             .iter()
-            .any(|tab| tab.mark_is_animating(now, motion) || tab.pin_is_animating(now, motion))
+            .any(|tab| {
+                tab.mark_is_animating(now, motion)
+                    || tab.pin_is_animating(now, motion)
+                    || tab.flip.sample(now, motion).1
+                    || tab.landing.sample(now, motion).1
+            })
             .then(|| now + STRIP_ANIMATION_FRAME)
     }
 
@@ -5645,6 +5900,15 @@ impl Runtime {
 
     fn pointer_left(&mut self) -> Result<()> {
         self.pointer_position = None;
+        // Deliberately *not* a drag cancel, and the reason is measurable rather
+        // than stylistic: winit takes the Win32 mouse capture on button-down
+        // (`capture_mouse`, its `WM_LBUTTONDOWN` arm), so a held drag keeps
+        // receiving motion outside the window and is guaranteed its own
+        // button-up. `CursorLeft` here means the pointer crossed the client
+        // rect, which during a drag is an ordinary thing to do — the tab strip
+        // runs to the window's top edge — and cancelling on it would throw a
+        // reorder away for a pixel of overshoot. K129's real cancel is capture
+        // loss, and the only capture loss winit surfaces is losing the window.
         // The overlay's own hover goes with it: a `×` still lit after the
         // pointer has left the window is a button claiming to be under a
         // pointer that is not there.
@@ -5994,12 +6258,23 @@ impl Runtime {
             return Ok(());
         }
         // A press that has travelled past the drag threshold stops owing its tab
-        // an activation (J105). Nothing else happens here yet — the drag this is
-        // the start of is T5's — but the *withdrawal* is this slice's, because
-        // it is what keeps a quick drag-out from flashing the pressed tab's
-        // content on its way past.
-        if let Some(press) = self.tab_press.as_mut() {
-            press.travelled(position, self.renderer.metrics().scale_factor);
+        // an activation (J105) and becomes a drag (K111). T4 owns the 6px and the
+        // withdrawal; the gesture that starts at exactly that instant is this
+        // slice's, and `Slipped` is the seam between the two.
+        let scale = self.renderer.metrics().scale_factor;
+        if self
+            .tab_press
+            .as_mut()
+            .is_some_and(|press| press.travelled(position, scale))
+        {
+            let press = self.tab_press.expect("a press that travelled is a press");
+            self.begin_tab_drag(press)?;
+        }
+        // A tab drag owns the pointer outright, exactly as a divider drag does:
+        // hover, the peek flyout, the hyperlink underline and the terminal's own
+        // selection all go quiet for the length of the gesture.
+        if self.drive_tab_drag(position)? {
+            return Ok(());
         }
         self.update_chrome_hover(position)?;
         // Everything below reads the pointer through `terminal_pointer` — one
@@ -6172,12 +6447,8 @@ impl Runtime {
                 _ => None,
             }
         });
-        let cursor = match divider_axis {
-            Some(bt_layout::Axis::Row) => winit::window::CursorIcon::EwResize,
-            Some(bt_layout::Axis::Col) => winit::window::CursorIcon::NsResize,
-            None => winit::window::CursorIcon::Default,
-        };
-        self.window.set_cursor(cursor);
+        self.window
+            .set_cursor(pointer_cursor(self.tab_drag.is_some(), divider_axis));
     }
 
     /// Put the frame already on screen back in the slot so a pure chrome change
@@ -6251,6 +6522,252 @@ impl Runtime {
             self.open_rename(clicked)?;
         }
         Ok(())
+    }
+
+    /// The strip's live geometry — the slots every drag judgement is made
+    /// against.
+    fn strip_geometry(&self, now: Instant) -> seats::TabStripGeometry {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (width, _) = self.renderer.presentation_geometry().swapchain_size;
+        seats::tab_strip_geometry(
+            width as f32,
+            scale,
+            &self.tab_trailers(now),
+            self.active_tab,
+            self.tab_scroll,
+        )
+    }
+
+    /// K111 and J106 — the press has travelled 6px, so it is a drag now.
+    ///
+    /// The activation is not a side effect: "reordering IS commitment to the
+    /// strip context: the tab in hand shows itself, whether or not the press
+    /// timer had fired" (mock-up 6800-6801). Committing it here is also what
+    /// pays the press's promise for good, so a drag that is later cancelled has
+    /// nothing left to owe (J108).
+    ///
+    /// The grip is measured from the press's own origin rather than from the
+    /// pointer's position now. That is what `startDrag` does (6457) and it is the
+    /// difference between a tab that stays where your fingers put it and one that
+    /// snaps 6px sideways the instant it comes free.
+    fn begin_tab_drag(&mut self, press: TabPress) -> Result<()> {
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == press.tab) else {
+            return Ok(());
+        };
+        self.activate_tab(index, false)?;
+        // Re-read the strip: activating may have scrolled it to reveal the tab,
+        // and a grip measured against the old scroll would be wrong by exactly
+        // that much.
+        let index = self.tab_index(press.tab);
+        let now = Instant::now();
+        let Some(slot) = self.strip_geometry(now).tabs.get(index).copied() else {
+            return Ok(());
+        };
+        self.tab_drag = Some(TabDrag {
+            tab: press.tab,
+            grab_dx: press.origin.x - f64::from(slot.body[0]),
+            origin: index,
+            offset: 0.0,
+            moved: false,
+        });
+        // Hover goes quiet for the whole gesture: while a tab is in your hand the
+        // strip has nothing to offer the pointer, and a `×` lighting up under a
+        // tab that is sliding past is an affordance that cannot be taken.
+        self.update_chrome_hover_target(None)?;
+        Ok(())
+    }
+
+    /// K114/K115 — hold the grabbed tab under the pointer and answer with how far
+    /// it now sits from its own slot.
+    ///
+    /// One axis, because the strip has one: a tab dragged along it moves in `x`
+    /// and the row it lives in does not move at all. Clamped to the strip's
+    /// viewport, so the tab you are holding cannot be carried out over the
+    /// caption buttons or off the window's left edge.
+    fn track_grabbed(&self, position: PhysicalPosition<f64>) -> Option<f32> {
+        let drag = self.tab_drag?;
+        let index = self.tabs.iter().position(|tab| tab.id == drag.tab)?;
+        let geometry = self.strip_geometry(Instant::now());
+        let slot = geometry.tabs.get(index)?;
+        Some(grabbed_offset(
+            slot.body[0],
+            slot.body[2] - slot.body[0],
+            geometry.viewport,
+            (position.x - drag.grab_dx) as f32,
+        ))
+    }
+
+    /// Drive a drag one pointer move. Returns whether the pointer was consumed.
+    ///
+    /// A drag owns the pointer outright, exactly as a divider drag does: while
+    /// one is in flight nothing below hears the move, so no hover lights up, no
+    /// tooltip arms and no selection extends underneath it.
+    fn drive_tab_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(mut drag) = self.tab_drag else {
+            return Ok(false);
+        };
+        // The tab in hand can go away underneath the gesture — a background shell
+        // exits and `reap_exited_tabs` closes its tab. There is then nothing left
+        // to drag, and the state must not survive the thing it points at.
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == drag.tab) else {
+            self.tab_drag = None;
+            return Ok(true);
+        };
+        let now = Instant::now();
+        let geometry = self.strip_geometry(now);
+        let (Some(offset), Some(slot)) = (self.track_grabbed(position), geometry.tabs.get(index))
+        else {
+            return Ok(true);
+        };
+        let slot_mids = seats::tab_slot_mids(&geometry);
+        let half_width = (slot.body[2] - slot.body[0]) / 2.0;
+        let pinned = self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
+        let to = seats::reorder_target(
+            &slot_mids,
+            &pinned,
+            index,
+            slot_mids[index] + offset,
+            half_width,
+        );
+        if to == index {
+            drag.offset = offset;
+        } else {
+            self.move_tab_with_flip(index, to, now, Some(drag.tab));
+            drag.moved = true;
+            // Its slot has moved, so the distance from the slot to the hand has
+            // changed with it (mock-up 6699-6701).
+            drag.offset = self.track_grabbed(position).unwrap_or(offset);
+        }
+        self.tab_drag = Some(drag);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Move a tab between slots and let every tab the move displaced slide into
+    /// its new one — K117's FLIP.
+    ///
+    /// The order changes first and the animation is derived from the difference,
+    /// which is what makes this FLIP rather than a hand-written slide: nothing
+    /// here has to know *why* the strip re-laid out, only that it did.
+    ///
+    /// `skip` is the tab in hand, which does not take part: it is already
+    /// somewhere of its own choosing, and inverting it back to a slot it is not
+    /// in would tear it out from under the pointer (K117).
+    fn move_tab_with_flip(&mut self, from: usize, to: usize, now: Instant, skip: Option<TabId>) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let motion = self.motion;
+        let active = self.tabs[self.active_tab].id;
+        let before = self.slot_lefts(now);
+        let was = self.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        // Everything keyed on a slot has to be re-derived from identity after the
+        // order changes — the active tab most of all, because its index is what
+        // the session file records.
+        self.active_tab = self.tab_index(active);
+        let after = self.slot_lefts(now);
+        for (old_index, id) in was.into_iter().enumerate() {
+            if skip == Some(id) {
+                continue;
+            }
+            let new_index = self.tab_index(id);
+            let (Some(old_left), Some(new_left)) = (before.get(old_index), after.get(new_index))
+            else {
+                continue;
+            };
+            let delta = old_left - new_left;
+            if delta != 0.0 {
+                self.tabs[new_index].flip.displace(delta, now, motion);
+            }
+        }
+    }
+
+    /// Where every slot's leading edge is, in strip order.
+    fn slot_lefts(&self, now: Instant) -> Vec<f32> {
+        self.strip_geometry(now)
+            .tabs
+            .iter()
+            .map(|tab| tab.body[0])
+            .collect()
+    }
+
+    /// K118 and K121 — let go.
+    ///
+    /// The reorder is already in `tabs`; it was applied live, slot by slot, as
+    /// the tab travelled. So there is nothing here to commit and nothing to
+    /// rebuild: the tab hands its offset to the settle, the settle runs it down
+    /// to its slot, and the strip that was already on screen carries on being the
+    /// strip (K122).
+    fn drop_tab_drag(&mut self) -> Result<bool> {
+        let Some(drag) = self.tab_drag.take() else {
+            return Ok(false);
+        };
+        let now = Instant::now();
+        let motion = self.motion;
+        // A gesture is not a click, and it is not half of one either.
+        self.tab_press = None;
+        self.tab_clicks.interrupt();
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == drag.tab) {
+            self.tabs[index].flip.displace(drag.offset, now, motion);
+            self.tabs[index].landing.start(now, motion);
+        }
+        // The strip's order is the file's order, and a reorder is a choice the
+        // user made rather than a state being explored (§5.1). A drag that moved
+        // nothing decided nothing, and the activation it did commit has already
+        // recorded itself.
+        if drag.moved {
+            self.mark_session_dirty(now);
+        }
+        if let Some(position) = self.pointer_position {
+            self.update_chrome_hover(position)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// K128/K129 — "never mind".
+    ///
+    /// The tab goes back to the slot it was taken from, sliding rather than
+    /// jumping, and everything it displaced on the way out slides back with it.
+    ///
+    /// **Deviation, recorded.** The mock-up's `cancelDrag` settles the tab into
+    /// whatever slot the live reorder last put it in (7126-7135) — it undoes the
+    /// *drop*, not the reordering. This slice's K128 asks for the slot the drag
+    /// began in, which is also the only reading under which Esc means what the
+    /// mock-up's own comment says it means: "never mind, and NO commit".
+    ///
+    /// What Esc does *not* undo is the activation (J108): the press chose this
+    /// tab, and a cancelled drag does not unchoose it. Nothing here has to say so
+    /// — the promise was paid the moment the drag began.
+    fn cancel_tab_drag(&mut self) -> Result<bool> {
+        let Some(drag) = self.tab_drag.take() else {
+            return Ok(false);
+        };
+        let now = Instant::now();
+        let motion = self.motion;
+        self.tab_press = None;
+        self.tab_clicks.interrupt();
+        if let Some(index) = self.tabs.iter().position(|tab| tab.id == drag.tab) {
+            // Hand the settle the offset first, so the slide home starts where
+            // the hand left the tab and the slot change below composes onto it.
+            self.tabs[index].flip.displace(drag.offset, now, motion);
+            let pinned = self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
+            let to = partition_clamped(&pinned, index, drag.origin.min(pinned.len() - 1));
+            self.move_tab_with_flip(index, to, now, None);
+        }
+        if let Some(position) = self.pointer_position {
+            self.update_chrome_hover(position)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
     }
 
     /// Where a tab is now, by identity.
@@ -6363,6 +6880,11 @@ impl Runtime {
             return Ok(false);
         }
         if state == ElementState::Released {
+            // Ahead of the press: a gesture that has become a drag answers with
+            // its drop, and the press that started it is no longer a click.
+            if self.drop_tab_drag()? {
+                return Ok(true);
+            }
             if self.divider_drag.take().is_some() {
                 self.seat_pointer.dragging = None;
                 self.apply_pointer_cursor();
@@ -6962,6 +7484,17 @@ impl Runtime {
         // ruling) without consuming the key: typing means the user has moved on from hovering.
         self.dismiss_peek()?;
 
+        // Esc unwinds one layer per press, top-most first, and a drag in flight
+        // is the top-most layer there is: "Esc mid-drag means 'never mind', and
+        // without this the drop still committed on pointerup" (mock-up 6045-6051).
+        // It stands above even the modal, because a drag is a gesture the user is
+        // in the middle of making and a dialog is one they have already opened.
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && !event.repeat
+            && self.cancel_tab_drag()?
+        {
+            return Ok(());
+        }
         // A modal owns the keyboard. Esc unwinds one layer per press (§7.1.5:
         // the open menu first, then the dialog); every other key is swallowed
         // rather than typed into a terminal the user cannot see. This sits above
@@ -7625,6 +8158,13 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 // being held goes with it — the button-up will arrive to a
                 // window that is no longer listening.
                 let committed = runtime.finish_rename(true);
+                // K129. Losing the window is losing the Win32 mouse capture, and
+                // capture loss is this platform's `pointercancel`: the pointer
+                // stream ends with no button-up to end it. It is the only such
+                // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
+                // and an un-torn-down drag would leave a tab floating over a strip
+                // nobody is holding any more. Same path as Esc: never mind.
+                let cancelled = runtime.cancel_tab_drag();
                 runtime.tab_press = None;
                 runtime.tab_clicks.interrupt();
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
@@ -7633,7 +8173,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 runtime.ime_cursor_throttle.reset();
                 runtime.ime_system_caret.destroy();
                 runtime.set_cursor_focus(false, Instant::now());
-                committed.and_then(|()| {
+                committed.and(cancelled.map(|_| ())).and_then(|()| {
                     runtime.publish_frame(FrameTrigger {
                         occurred_at: Instant::now(),
                         source: FrameSource::Expose,
@@ -12653,5 +13193,207 @@ mod tests {
         assert!(rendered_text.contains("BT_APP_INPUT_OK"));
         pty.write(b"exit\r").unwrap();
         pty.shutdown().unwrap();
+    }
+    // ── T5: the drag's own clocks and rulings ──
+
+    #[test]
+    fn a_grabbed_tab_follows_the_hand_until_the_strip_runs_out() {
+        // K115. The tab travels in x, and stops at the strip's own edges rather
+        // than being carried out over the caption buttons.
+        let viewport = [0.0, 900.0];
+        let (slot_left, width) = (204.0_f32, 200.0);
+        assert_eq!(
+            grabbed_offset(slot_left, width, viewport, 300.0),
+            96.0,
+            "free of both edges, the offset is simply the distance"
+        );
+        assert_eq!(
+            grabbed_offset(slot_left, width, viewport, -50.0),
+            -slot_left,
+            "held past the left edge it stops with its leading edge on it"
+        );
+        assert_eq!(
+            grabbed_offset(slot_left, width, viewport, 5_000.0),
+            700.0 - slot_left,
+            "and past the right edge with its trailing edge on that one"
+        );
+        assert_eq!(
+            grabbed_offset(0.0, 200.0, [0.0, 120.0], 5_000.0),
+            0.0,
+            "a viewport narrower than the tab keeps the leading edge, not the trailing one"
+        );
+    }
+
+    #[test]
+    fn a_flip_runs_the_displacement_down_to_nothing_on_the_grab_curve() {
+        // K117/K118. One motion, 160ms, cubic-bezier(.2, 0, 0, 1).
+        let now = Instant::now();
+        let mut flip = FlipTween::default();
+        assert_eq!(flip.sample(now, Motion::Full), (0.0, false));
+        flip.displace(-96.0, now, Motion::Full);
+        let (start, moving) = flip.sample(now, Motion::Full);
+        assert!((start + 96.0).abs() < 1e-3, "it starts where the tab was");
+        assert!(moving);
+        let (mid, moving) = flip.sample(now + Duration::from_millis(80), Motion::Full);
+        assert!(moving);
+        assert!(
+            mid > -96.0 && mid < 0.0,
+            "and travels the whole way in between"
+        );
+        assert!(
+            mid.abs() < 48.0,
+            "the curve leaves fast: half the time is well past half the distance"
+        );
+        assert_eq!(
+            TAB_FLIP,
+            Duration::from_millis(160),
+            "`transform .16s` (mock-up 6570)"
+        );
+        assert!(
+            flip.sample(now + Duration::from_millis(159), Motion::Full)
+                .1,
+            "still moving one millisecond short of the end"
+        );
+        assert_eq!(
+            flip.sample(now + Duration::from_millis(160), Motion::Full),
+            (0.0, false),
+            "at 160ms the tab is simply in its slot"
+        );
+    }
+
+    #[test]
+    fn a_tab_displaced_again_mid_slide_starts_from_where_it_actually_is() {
+        // The mock-up measures `getBoundingClientRect`, which includes the live
+        // transform (6579-6583): a second swap inside the first slide's 160ms
+        // must not snap the tab back to a slot it never reached.
+        let now = Instant::now();
+        let mut flip = FlipTween::default();
+        flip.displace(-96.0, now, Motion::Full);
+        let at = now + Duration::from_millis(80);
+        let (mid, _) = flip.sample(at, Motion::Full);
+        flip.displace(-204.0, at, Motion::Full);
+        let (restarted, _) = flip.sample(at, Motion::Full);
+        assert!(
+            (restarted - (mid - 204.0)).abs() < 1e-3,
+            "the new slide starts at the old one's live position plus the new delta"
+        );
+    }
+
+    #[test]
+    fn reduced_motion_puts_a_displaced_tab_straight_into_its_slot() {
+        // **Ruling.** The mock-up writes these transitions from JavaScript, where
+        // no `prefers-reduced-motion` block can reach them, so its silence here
+        // is its medium rather than a decision. A transform travelling across the
+        // screen is precisely what the preference is about — unlike the progress
+        // ring's sweep, which carries a reading and is deliberately left running.
+        let now = Instant::now();
+        let mut flip = FlipTween::default();
+        flip.displace(-96.0, now, Motion::Reduced);
+        assert_eq!(flip.sample(now, Motion::Reduced), (0.0, false));
+    }
+
+    #[test]
+    fn the_landing_wash_runs_out_over_its_own_two_hundred_milliseconds() {
+        // K121. Only the `from` is a design value, so only how much of it is left
+        // is a state.
+        let now = Instant::now();
+        let mut landing = LandTween::default();
+        assert_eq!(landing.sample(now, Motion::Full), (0.0, false));
+        landing.start(now, Motion::Full);
+        assert_eq!(landing.sample(now, Motion::Full), (1.0, true));
+        let mut last = 1.0;
+        for step in 1..20 {
+            let (left, moving) =
+                landing.sample(now + Duration::from_millis(step * 10), Motion::Full);
+            assert!(left <= last, "the wash only ever fades");
+            assert!(moving);
+            last = left;
+        }
+        assert_eq!(
+            TAB_LAND,
+            Duration::from_millis(200),
+            "`animation: tab-land .2s` (mock-up 967)"
+        );
+        assert!(
+            landing
+                .sample(now + Duration::from_millis(199), Motion::Full)
+                .1
+        );
+        assert_eq!(
+            landing.sample(now + Duration::from_millis(200), Motion::Full),
+            (0.0, false)
+        );
+    }
+
+    #[test]
+    fn reduced_motion_skips_the_landing_animation_outright() {
+        // Mock-up 968 says so in as many words, and an animation with only a
+        // `from` has nothing to hold: off means the tab, unwashed.
+        let now = Instant::now();
+        let mut landing = LandTween::default();
+        landing.start(now, Motion::Reduced);
+        assert_eq!(landing.sample(now, Motion::Reduced), (0.0, false));
+    }
+
+    #[test]
+    fn a_cancelled_drag_puts_the_tab_back_without_crossing_the_pinned_seam() {
+        // F57, applied to the one move geometry did not choose (K128's restore).
+        let pinned = [true, true, false, false];
+        assert_eq!(
+            partition_clamped(&pinned, 3, 2),
+            2,
+            "inside its own partition the restore reaches its slot"
+        );
+        assert_eq!(
+            partition_clamped(&pinned, 3, 0),
+            2,
+            "and stops at the seam rather than landing among the pinned tabs"
+        );
+        assert_eq!(partition_clamped(&pinned, 0, 3), 1);
+        assert_eq!(partition_clamped(&pinned, 2, 2), 2, "a move to nowhere");
+        assert_eq!(
+            partition_clamped(&[false, false, false], 2, 0),
+            0,
+            "with no seam there is nothing to stop at"
+        );
+    }
+
+    #[test]
+    fn the_pointer_keeps_one_shape_for_the_whole_drag() {
+        // K113. "The cursor changing shape mid-drag would say something happened
+        // when nothing did" (mock-up 1710-1711).
+        use winit::window::CursorIcon;
+        assert_eq!(pointer_cursor(false, None), CursorIcon::Default);
+        assert_eq!(
+            pointer_cursor(false, Some(bt_layout::Axis::Row)),
+            CursorIcon::EwResize
+        );
+        assert_eq!(
+            pointer_cursor(false, Some(bt_layout::Axis::Col)),
+            CursorIcon::NsResize
+        );
+        for axis in [None, Some(bt_layout::Axis::Row), Some(bt_layout::Axis::Col)] {
+            assert_eq!(
+                pointer_cursor(true, axis),
+                CursorIcon::Default,
+                "a tab drag crossing a divider must not flicker into a resize arrow"
+            );
+        }
+    }
+
+    #[test]
+    fn a_drag_that_never_starts_leaves_the_press_exactly_as_t4_left_it() {
+        // The seam between T4 and T5, from T5's side: the 6px and the identity
+        // are the press's, and `Slipped` is the only thing this slice reads.
+        let now = Instant::now();
+        let mut press = TabPress::armed(TabId(1), PhysicalPosition::new(100.0, 20.0), now);
+        assert!(!press.travelled(PhysicalPosition::new(105.0, 20.0), 1.0));
+        assert_eq!(press.promise, TabPressPromise::Pending);
+        assert!(press.travelled(PhysicalPosition::new(106.0, 20.0), 1.0));
+        assert_eq!(press.promise, TabPressPromise::Slipped);
+        assert!(
+            !press.travelled(PhysicalPosition::new(300.0, 20.0), 1.0),
+            "the drag starts once — every later move is the gesture, not its start"
+        );
     }
 }

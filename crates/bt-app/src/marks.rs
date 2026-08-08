@@ -76,6 +76,16 @@ pub enum ChromeMark {
     ActiveTab { radius_px: u32 },
     /// A regular tab's rounded body, used only for the inactive hover fill.
     TabBody { radius_px: u32 },
+    /// The same body as a ring drawn *inside* its own edge — CSS `box-shadow:
+    /// inset 0 0 0 Npx`, which is what `@keyframes tab-land` puts on a tab
+    /// coming to rest (mock-up 964).
+    ///
+    /// It is its own mark rather than two nested [`Self::TabBody`] fills for the
+    /// reason every mark here exists: the hole has the same rounded corners the
+    /// outline does, and cutting one shape out of another with opaque fills
+    /// works only when the surface underneath is known — which for a translucent
+    /// wash over a moving tab it is not.
+    TabBodyRing { radius_px: u32, stroke_px: u32 },
     /// A title-bar control's hover pill: one round on all four corners, filled
     /// edge to edge. `.newtab` wears it at 6px and `.tab .close` at 4px.
     ///
@@ -147,6 +157,7 @@ impl ChromeMark {
             Self::Pin { filled: true } => "i-pinned",
             Self::ActiveTab { .. } => "tab",
             Self::TabBody { .. } => "tab-body",
+            Self::TabBodyRing { .. } => "tab-body-ring",
             Self::ControlPill { .. } => "control-pill",
             Self::Fill => "fill",
             Self::ProgressRing { .. } => "progress-ring",
@@ -321,6 +332,13 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     if let ChromeMark::ControlPill { radius_px } = sprite.mark {
         let _ = write!(key, ":r{radius_px}");
     }
+    if let ChromeMark::TabBodyRing {
+        radius_px,
+        stroke_px,
+    } = sprite.mark
+    {
+        let _ = write!(key, ":r{radius_px}w{stroke_px}");
+    }
     if let ChromeMark::ProgressRing {
         start_milliturns,
         sweep_milliturns,
@@ -395,6 +413,22 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
             (
                 format!("0 0 {width_px} {height_px}"),
                 format!(r#"<path fill="currentColor" d="{path}"/>"#),
+            )
+        }
+        // A stroked path, not a filled one: `stroke-width` centres on the path,
+        // so the path is the tab's own box pulled in by half the stroke and the
+        // ring lands exactly inside the edge — which is what `inset` means.
+        ChromeMark::TabBodyRing {
+            radius_px,
+            stroke_px,
+        } => {
+            let inset = f32::from(u16::try_from(stroke_px).ok()?) / 2.0;
+            let path = tab_body_inset_path(width_px, height_px, radius_px, inset)?;
+            (
+                format!("0 0 {width_px} {height_px}"),
+                format!(
+                    r#"<path fill="none" stroke="currentColor" stroke-width="{stroke_px}" d="{path}"/>"#
+                ),
             )
         }
         ChromeMark::ControlPill { radius_px } => {
@@ -519,6 +553,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
         ChromeMark::TabBody { .. } => 8,
+        ChromeMark::TabBodyRing { .. } => 8,
         ChromeMark::ControlPill { .. } => 8,
         ChromeMark::Fill => 8,
         ChromeMark::ProgressRing { .. } => 8,
@@ -658,6 +693,30 @@ fn tab_body_path(width: u32, height: u32, radius: u32) -> Option<String> {
     }
     Some(format!(
         "M0,{h} L0,{r} A{r},{r} 0 0 1 {r},0 L{right},0 A{r},{r} 0 0 1 {w},{r} L{w},{h} Z",
+        right = w - r,
+    ))
+}
+
+/// [`tab_body_path`] pulled `inset` pixels in on every side it has an edge on.
+///
+/// The foot is left where it is: the tab has no bottom edge — it runs into the
+/// content plane — and a ring that closed across the bottom would draw a line
+/// through the join the whole silhouette exists to make.
+fn tab_body_inset_path(width: u32, height: u32, radius: u32, inset: f32) -> Option<String> {
+    let (w, h) = (width as f32 - inset, height as f32);
+    let l = inset;
+    // The round shrinks with the box, exactly as a browser's inset shadow does:
+    // a corner pulled in by `inset` has `inset` less radius, and never less
+    // than none at all.
+    let r = (radius as f32 - inset).max(0.0);
+    let t = inset;
+    if r < 0.5 || w - l < 2.0 * r || h - t < r {
+        return None;
+    }
+    Some(format!(
+        "M{l},{h} L{l},{top_r} A{r},{r} 0 0 1 {left_r},{t}          L{right},{t} A{r},{r} 0 0 1 {w},{top_r} L{w},{h}",
+        top_r = t + r,
+        left_r = l + r,
         right = w - r,
     ))
 }

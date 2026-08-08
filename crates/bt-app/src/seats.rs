@@ -63,6 +63,17 @@ use crate::marks::{ChromeMark, ChromeSprite};
 /// follow it into a setting about terminal cursors.
 pub const TAB_RENAME_CARET_LOGICAL_PX: f32 = 1.0;
 
+/// `@keyframes tab-land`'s `from`, read straight off mock-up 962-965.
+///
+/// `background: color-mix(in srgb, var(--accent) 9%, transparent)` — the accent
+/// at 9%, over whatever surface the tab is wearing.
+pub const TAB_LAND_WASH_ALPHA: f32 = 0.09;
+/// `box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 45%, transparent)`
+/// — the same accent at 45%, as a ring drawn *inside* the tab's own box.
+pub const TAB_LAND_RING_ALPHA: f32 = 0.45;
+/// The `1.5px` of that inset ring, in logical pixels.
+pub const TAB_LAND_RING_LOGICAL_PX: f32 = 1.5;
+
 /// §2.5 asks `bt-layout` to hold its own subpixel denominator and to pin it
 /// against `bt-doc`'s "on the seam that can legally see both crates". This is
 /// that seam: `bt-app` is the first place both are in scope at once.
@@ -608,6 +619,27 @@ pub struct TabGeometry {
     pub tier: TabWidthTier,
 }
 
+impl TabGeometry {
+    /// The same tab drawn `dx` physical pixels along the strip.
+    ///
+    /// A drag moves a tab *visually* and never in layout: the slot this geometry
+    /// describes stays where the tab's index puts it, and only the paint is
+    /// displaced. Every box inside a tab is measured off its body, so shifting
+    /// the whole geometry once — rather than each of the mark, the title, the
+    /// badge, the pin and the `×` at its own call site — is what keeps a
+    /// translated tab internally consistent by construction.
+    #[must_use]
+    pub fn shifted(&self, dx: f32) -> Self {
+        let slide = |rect: [f32; 4]| [rect[0] + dx, rect[1], rect[2] + dx, rect[3]];
+        Self {
+            body: slide(self.body),
+            close: self.close.map(slide),
+            pin: self.pin.map(slide),
+            ..*self
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabStripGeometry {
     pub tabs: Vec<TabGeometry>,
@@ -1056,6 +1088,119 @@ pub fn tab_scroll_to_reveal(
     scrolled.clamp(0.0, geometry.max_scroll)
 }
 
+/// How far past "half the neighbour is covered" a tab must travel before the two
+/// trade places, as a fraction of half a tab (mock-up 6571-6576).
+///
+/// "Half is the floor stability allows; everything above it is dead zone bought
+/// at the price of travel. 10% of half a tab ≈ 21px of dead zone on a 200px tab —
+/// twenty times pointer noise, and invisible to the hand."
+pub const TAB_REORDER_MARGIN: f32 = 0.1;
+
+/// Where the strip's slots have their centres, in physical pixels.
+///
+/// The reorder judgement is made against *layout* and never against paint, which
+/// is the whole of mock-up 6659-6662: "rects include transforms, and the
+/// neighbours are mid-FLIP for 160ms after every swap, so rects would report
+/// where a tab is flying rather than where its slot is". These are slot centres —
+/// the `offsetLeft` half of that sentence — and they do not move when two tabs
+/// trade places, because `tab_strip_geometry` gives every tab in the run the same
+/// width.
+#[must_use]
+pub fn tab_slot_mids(geometry: &TabStripGeometry) -> Vec<f32> {
+    geometry
+        .tabs
+        .iter()
+        .map(|tab| (tab.body[0] + tab.body[2]) / 2.0)
+        .collect()
+}
+
+/// One step of the reorder judgement: the neighbour the dragged tab has now
+/// covered enough of to trade places with, or `None` while it has not.
+///
+/// **Tab against tab, never the pointer against a tab** (mock-up 6640-6658). The
+/// pointer sits wherever you happened to take hold, so judging by it moves the
+/// threshold with your grip and can send a tab past a neighbour it has not
+/// visually reached. The test is the dragged tab's *leading edge* against the
+/// neighbour's *centre*: they swap once it covers more than half of it.
+///
+/// The margin is the hysteresis, and half a slot is the floor beneath which
+/// dithering becomes possible: a forward swap at `d = T` makes `d' = d - pitch`,
+/// so a swap straight back needs `d < pitch - T`, which can only happen when
+/// `T < pitch/2`.
+#[must_use]
+pub fn reorder_step(
+    slot_mids: &[f32],
+    cur: usize,
+    visual_mid: f32,
+    half_width: f32,
+) -> Option<usize> {
+    let margin = half_width * TAB_REORDER_MARGIN;
+    if let Some(next) = slot_mids.get(cur + 1)
+        && visual_mid + half_width > next + margin
+    {
+        return Some(cur + 1);
+    }
+    if let Some(prev) = cur.checked_sub(1).and_then(|prev| slot_mids.get(prev))
+        && visual_mid - half_width < prev - margin
+    {
+        return cur.checked_sub(1);
+    }
+    None
+}
+
+/// The slot a tab dragged to `visual_mid` belongs in — the whole judgement, F57
+/// included.
+///
+/// Loops one slot at a time so that flinging a tab across several slots in a
+/// single pointer event still lands right; each pass moves it exactly one slot,
+/// so the strip's own length bounds the walk.
+///
+/// **F57.** Pinned is a partition, not a decoration, and a reorder may not cross
+/// it: without this the strip has two authorities on order — `normalize_pins`'
+/// "pinned lead" invariant and whatever the drag last wrote — and they disagree
+/// the moment you drag across the seam. Refusing the step leaves `tabs` the
+/// single truth and stops the tab at the boundary, which is also what it looks
+/// like it should do.
+#[must_use]
+pub fn reorder_target(
+    slot_mids: &[f32],
+    pinned: &[bool],
+    cur: usize,
+    visual_mid: f32,
+    half_width: f32,
+) -> usize {
+    let mut cur = cur;
+    for _ in 0..slot_mids.len() {
+        let Some(to) = reorder_step(slot_mids, cur, visual_mid, half_width) else {
+            break;
+        };
+        if pinned.get(to) != pinned.get(cur) {
+            break;
+        }
+        cur = to;
+    }
+    cur
+}
+
+/// The slot a pointer at `pos` would insert into: the first entry whose centre it
+/// has not yet passed, else the end of the run (mock-up 6467-6477).
+///
+/// Unused by the reorder above on purpose, and the two are not rivals: a reorder
+/// moves a tab that is *already in* the strip and therefore judges tab against
+/// tab, while this answers "where would a thing that is not in the strip yet go",
+/// which is a question only the pointer can answer. It is stated here, as a pure
+/// function of the same slot centres, because it is the public part of the future
+/// cross-boundary drop (K123-K125/K130/J107) and stating it once is what stops
+/// the two readings of "which slot" from drifting apart.
+#[allow(dead_code)]
+#[must_use]
+pub fn insert_index_at(slot_mids: &[f32], pos: f32) -> usize {
+    slot_mids
+        .iter()
+        .position(|mid| pos < *mid)
+        .unwrap_or(slot_mids.len())
+}
+
 /// The mock-up's two measured thresholds, read off the tab's own logical width.
 fn tab_width_tier(tab_width: f32, scale: f32) -> TabWidthTier {
     let logical = tab_width / scale.max(f32::EPSILON);
@@ -1295,6 +1440,8 @@ pub fn build_chrome_with_preview(
         badge_text_width: 0.0,
         mark: TabMarkState::default(),
         trailer: TabTrailer::default(),
+        offset: 0.0,
+        landing: 0.0,
         edit: None,
     }];
     build_chrome_for_tabs(
@@ -1305,6 +1452,7 @@ pub fn build_chrome_with_preview(
         ChromeContent {
             tabs: &tabs,
             active_tab: 0,
+            grabbed: None,
             tab_scroll: 0.0,
             preview_title,
             preview_message,
@@ -1334,6 +1482,24 @@ pub struct TabContent {
     /// hover reveal has run. The caller owns both — one is a fact about the tab,
     /// the other is the clock.
     pub trailer: TabTrailer,
+    /// How far this tab is *drawn* from the slot its index gives it, in physical
+    /// pixels along the strip.
+    ///
+    /// Paint only: it moves nothing in layout, and every judgement the strip
+    /// makes — which slot a tab is in, where the pointer's reorder threshold
+    /// lies, what the `×` will close — is made against the unshifted geometry.
+    /// One tab rides the pointer while its displaced neighbours run their FLIP
+    /// home, and both are this one number sampled from two different clocks.
+    pub offset: f32,
+    /// How much of the landing wash this tab still wears, `0.0 ..= 1.0`
+    /// (`@keyframes tab-land`, mock-up 955-968).
+    ///
+    /// Only the animation's `from` is a design value — an accent wash and an
+    /// accent inset ring — because the keyframe writes only a `from`: "the
+    /// animation ends at whatever the tab already is, so it needs no knowledge of
+    /// the tab's real styling". `0.0` is that end, and is therefore also "no
+    /// landing in flight".
+    pub landing: f32,
     /// The open rename editor, when this is the tab being renamed.
     ///
     /// `Some` replaces [`Self::title`] in the title's own box and changes
@@ -1420,6 +1586,13 @@ pub struct TabRing {
 pub struct ChromeContent<'a> {
     pub tabs: &'a [TabContent],
     pub active_tab: usize,
+    /// The tab currently riding the pointer, if any — `.tab.grabbed`.
+    ///
+    /// It buys exactly one thing: paint order. `.tab.grabbed { z-index: 20 }`
+    /// against `.tab.active { z-index: 1 }` (mock-up 971 and 216), and a
+    /// painter's-algorithm list has no `z-index`, so the tab in hand is laid down
+    /// after the active tab rather than merely after its ordinary neighbours.
+    pub grabbed: Option<usize>,
     /// How far the strip is scrolled, in physical pixels. Clamped by the
     /// geometry, so a stale value cannot draw a strip past its own content.
     pub tab_scroll: f32,
@@ -1442,6 +1615,7 @@ pub fn build_chrome_for_tabs(
     let ChromeContent {
         tabs,
         active_tab,
+        grabbed,
         tab_scroll,
         preview_title,
         preview_message,
@@ -1464,6 +1638,7 @@ pub fn build_chrome_for_tabs(
         TabStrip {
             tabs,
             active_tab,
+            grabbed,
             scroll: tab_scroll,
             profile_menu_open,
         },
@@ -1613,6 +1788,7 @@ pub fn build_chrome_for_tabs(
 struct TabStrip<'a> {
     tabs: &'a [TabContent],
     active_tab: usize,
+    grabbed: Option<usize>,
     scroll: f32,
     profile_menu_open: bool,
 }
@@ -1631,6 +1807,7 @@ fn window_chrome(
     let TabStrip {
         tabs,
         active_tab,
+        grabbed,
         scroll: tab_scroll,
         profile_menu_open,
     } = strip;
@@ -1672,12 +1849,38 @@ fn window_chrome(
     // corners — so its `--hover` fill squared the arc off and the tab met the
     // terminal at a notch. The mock-up records the same bug in its own medium at
     // lines 178-180, where DOM order plays the part paint order plays here.
-    for painting_the_active_tab in [false, true] {
-        for (index, (tab, content)) in geometry.tabs.iter().zip(tabs).enumerate() {
-            let active = index == active_tab;
-            if active != painting_the_active_tab {
+    //
+    // The tab in hand is a third layer above both (`.tab.grabbed { z-index: 20 }`,
+    // line 971): while it is being dragged it passes *over* its neighbours, and
+    // the active tab is one of them — usually the same tab, since starting a
+    // reorder commits the activation (J106), but the ordering is stated rather
+    // than assumed.
+    let layer_of = |index: usize| -> u8 {
+        if grabbed == Some(index) {
+            2
+        } else if index == active_tab {
+            1
+        } else {
+            0
+        }
+    };
+    for layer in 0..=2u8 {
+        for (index, (slot, content)) in geometry.tabs.iter().zip(tabs).enumerate() {
+            if layer_of(index) != layer {
                 continue;
             }
+            let active = index == active_tab;
+            // Everything below draws the tab where the drag has *put* it, while
+            // every rectangle the strip reasons about stays in the slot the
+            // index gives it. One shift, at the top, so no box inside the tab
+            // can be left behind by it.
+            let shifted;
+            let tab = if content.offset == 0.0 {
+                slot
+            } else {
+                shifted = slot.shifted(content.offset);
+                &shifted
+            };
             let [tab_left, tab_top, tab_right, tab_bottom] = tab.body;
             // `.tab:hover` is one hover: a pointer on the `×` — or on the pin
             // beside it — is still a pointer on the tab, so the body lights up
@@ -1702,6 +1905,36 @@ fn window_chrome(
                     tab.body,
                     palette.caption_hover,
                 ));
+            }
+            // `@keyframes tab-land` — the wash and the ring the landing tab
+            // arrives wearing, on their way to nothing. Both are the accent at a
+            // stated alpha, so both ride as `opacity` on the accent rather than
+            // as pre-composited palette entries: the alpha is a function of the
+            // clock here, and a constant cannot be one.
+            //
+            // They go down after the tab's own silhouette and before everything
+            // inside it, which is where a `background` and an inset `box-shadow`
+            // sit in CSS — over the surface, under the content.
+            if content.landing > 0.0 && within_strip(viewport, tab.body) {
+                let mut wash = ChromeSprite::new(
+                    ChromeMark::TabBody {
+                        radius_px: radius as u32,
+                    },
+                    tab.body,
+                    palette.accent,
+                );
+                wash.opacity = TAB_LAND_WASH_ALPHA * content.landing;
+                sprites.push(wash);
+                let mut ring = ChromeSprite::new(
+                    ChromeMark::TabBodyRing {
+                        radius_px: radius as u32,
+                        stroke_px: (TAB_LAND_RING_LOGICAL_PX * scale).round().max(1.0) as u32,
+                    },
+                    tab.body,
+                    palette.accent,
+                );
+                ring.opacity = TAB_LAND_RING_ALPHA * content.landing;
+                sprites.push(ring);
             }
             let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
             let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
@@ -3474,6 +3707,8 @@ mod tests {
                 badge_text_width: 0.0,
                 mark: TabMarkState::default(),
                 trailer: TabTrailer::default(),
+                offset: 0.0,
+                landing: 0.0,
                 edit: None,
             })
             .collect::<Vec<_>>();
@@ -3511,6 +3746,7 @@ mod tests {
             ChromeContent {
                 tabs,
                 active_tab,
+                grabbed: None,
                 tab_scroll,
                 preview_title: None,
                 preview_message: None,
@@ -4224,6 +4460,8 @@ mod tests {
             badge_text_width: 6.0,
             mark: TabMarkState::default(),
             trailer: TabTrailer::default(),
+            offset: 0.0,
+            landing: 0.0,
             edit: None,
         };
         let (_, lone_labels, lone_sprites) = strip_chrome_of(1.0, &[tab(1)], 0, 0.0, None, false);
@@ -4306,6 +4544,8 @@ mod tests {
             badge_text_width: 0.0,
             mark: TabMarkState::default(),
             trailer: TabTrailer::default(),
+            offset: 0.0,
+            landing: 0.0,
             edit: Some(edit),
         }
     }
@@ -4332,6 +4572,8 @@ mod tests {
                 badge_text_width: 0.0,
                 mark: TabMarkState::default(),
                 trailer: TabTrailer::default(),
+                offset: 0.0,
+                landing: 0.0,
                 edit: None,
             };
             let editing = editing_tab(TabEdit {
@@ -4624,6 +4866,8 @@ mod tests {
                     badge_text_width,
                     mark: TabMarkState::default(),
                     trailer: TabTrailer::default(),
+                    offset: 0.0,
+                    landing: 0.0,
                     edit: None,
                 }];
                 let (_, labels, _) = strip_chrome_of(scale, &tabs, 0, 0.0, None, false);
@@ -4651,6 +4895,8 @@ mod tests {
             badge_text_width: 0.0,
             mark,
             trailer: TabTrailer::default(),
+            offset: 0.0,
+            landing: 0.0,
             edit: None,
         }
     }
@@ -4668,6 +4914,8 @@ mod tests {
             badge_text_width: 0.0,
             mark: TabMarkState::default(),
             trailer,
+            offset: 0.0,
+            landing: 0.0,
             edit: None,
         }
     }
@@ -4921,6 +5169,8 @@ mod tests {
                 badge_text_width: 6.0,
                 mark: TabMarkState::default(),
                 trailer: TabTrailer::default(),
+                offset: 0.0,
+                landing: 0.0,
                 edit: None,
             },
             TabContent {
@@ -4929,6 +5179,8 @@ mod tests {
                 badge_text_width: 6.0,
                 mark: TabMarkState::default(),
                 trailer: TabTrailer::default(),
+                offset: 0.0,
+                landing: 0.0,
                 edit: None,
             },
         ];
@@ -5565,5 +5817,448 @@ mod tests {
                 }
             }
         }
+    }
+    // ── T5: reordering inside the strip ──
+
+    /// Three 200px slots with the strip's own 4px gap between them, stated as
+    /// plainly as the mock-up states the rule they exist to test.
+    fn slot_mids_of(count: usize, pitch: f32) -> Vec<f32> {
+        (0..count).map(|i| 100.0 + i as f32 * pitch).collect()
+    }
+
+    #[test]
+    fn a_reorder_fires_when_the_leading_edge_has_covered_half_the_neighbour_plus_the_margin() {
+        // Tab against tab, never the pointer against a tab (mock-up 6640-6658):
+        // the test is the dragged tab's LEADING edge against the neighbour's
+        // CENTRE, plus a tenth of half a tab of hysteresis.
+        assert_eq!(
+            TAB_REORDER_MARGIN, 0.1,
+            "a tenth of half a tab (mock-up 6571-6576)"
+        );
+        let mids = slot_mids_of(3, 204.0);
+        let half = 100.0;
+        // Written out rather than derived from the constant: a threshold test
+        // that computes its own expectation from the number it is testing agrees
+        // with every value that number could take.
+        let margin = 10.0;
+        // The neighbour's centre is at 304; covering half of it means the leading
+        // edge (visual_mid + half) has reached 304, and the margin buys 10 more.
+        let fires_at = 304.0 + margin - half;
+        assert_eq!(
+            reorder_step(&mids, 0, fires_at, half),
+            None,
+            "exactly on the threshold is not yet past it"
+        );
+        assert_eq!(
+            reorder_step(&mids, 0, fires_at + 0.5, half),
+            Some(1),
+            "a hair past it, and they trade places"
+        );
+        // Half a slot is the *travel*, not the threshold: 100 of half-tab plus the
+        // 4px gap plus the 10px margin, and no more.
+        assert!(
+            (fires_at - mids[0] - (half + 4.0 + margin)).abs() < 1e-3,
+            "the reorder costs half a tab of travel, not a whole one"
+        );
+    }
+
+    #[test]
+    fn a_reorder_reads_the_same_threshold_backwards() {
+        let mids = slot_mids_of(3, 204.0);
+        let half = 100.0;
+        let margin = 10.0;
+        let fires_at = mids[0] - margin + half;
+        assert_eq!(reorder_step(&mids, 1, fires_at, half), None);
+        assert_eq!(reorder_step(&mids, 1, fires_at - 0.5, half), Some(0));
+        assert_eq!(
+            reorder_step(&mids, 0, -10_000.0, half),
+            None,
+            "and the first slot has nothing to its left to trade with"
+        );
+    }
+
+    #[test]
+    fn the_margin_is_hysteresis_so_a_swapped_tab_cannot_dither_back() {
+        // The algebra the mock-up spells out at 6650-6655: a forward swap makes
+        // d' = d - pitch, so a swap straight back needs d < pitch - T. With T at
+        // half a slot plus a margin, that window is empty — which is what makes
+        // this a threshold and not a coin toss.
+        let mids = slot_mids_of(3, 204.0);
+        let half = 100.0;
+        let mut worst = f32::NEG_INFINITY;
+        for step in 0..2_000 {
+            let visual_mid = mids[0] + step as f32 * 0.2;
+            let Some(to) = reorder_step(&mids, 0, visual_mid, half) else {
+                continue;
+            };
+            // Immediately re-ask from the slot it just landed in, with the tab
+            // still exactly where it is: it must not want to come straight back.
+            assert_ne!(
+                reorder_step(&mids, to, visual_mid, half),
+                Some(0),
+                "swapped forward at {visual_mid} and wanted to swap straight back"
+            );
+            worst = worst.max(visual_mid);
+        }
+        assert!(
+            worst > f32::NEG_INFINITY,
+            "the sweep must cross a threshold"
+        );
+    }
+
+    #[test]
+    fn one_event_that_flings_a_tab_across_several_slots_lands_it_right() {
+        // "bounded by the strip's length because each pass moves it exactly one
+        // slot" (mock-up 6672-6674).
+        let mids = slot_mids_of(5, 204.0);
+        let unpinned = vec![false; 5];
+        assert_eq!(
+            reorder_target(&mids, &unpinned, 0, mids[4], 100.0),
+            4,
+            "carried the whole way in a single pointer event"
+        );
+        assert_eq!(reorder_target(&mids, &unpinned, 4, mids[0], 100.0), 0);
+        assert_eq!(
+            reorder_target(&mids, &unpinned, 2, mids[2], 100.0),
+            2,
+            "and a tab sitting in its own slot does not move at all"
+        );
+    }
+
+    #[test]
+    fn a_reorder_stops_dead_at_the_pinned_seam() {
+        // F57. Pinned is a partition, not a decoration.
+        let mids = slot_mids_of(4, 204.0);
+        let pinned = [true, true, false, false];
+        assert_eq!(
+            reorder_target(&mids, &pinned, 3, mids[0], 100.0),
+            2,
+            "an unpinned tab dragged to the head of the strip stops at the seam"
+        );
+        assert_eq!(
+            reorder_target(&mids, &pinned, 0, mids[3], 100.0),
+            1,
+            "and a pinned one dragged to the tail stops at the same seam"
+        );
+        assert_eq!(
+            reorder_target(&mids, &pinned, 0, mids[1], 100.0),
+            1,
+            "while inside its own partition it moves freely"
+        );
+    }
+
+    #[test]
+    fn no_reorder_can_ever_break_the_pinned_partition() {
+        // The invariant T3 stated and left for this slice to be held to.
+        for pinned_count in 0..=4usize {
+            let mids = slot_mids_of(4, 204.0);
+            let pinned = (0..4).map(|i| i < pinned_count).collect::<Vec<_>>();
+            for cur in 0..4 {
+                for step in -40..=40 {
+                    let visual_mid = mids[cur] + step as f32 * 20.0;
+                    let to = reorder_target(&mids, &pinned, cur, visual_mid, 100.0);
+                    let mut order = pinned.clone();
+                    let moved = order.remove(cur);
+                    order.insert(to, moved);
+                    assert!(
+                        crate::seed::pins_are_normalized(&order, |pinned| *pinned),
+                        "{pinned:?}: dragging slot {cur} to {visual_mid} left {order:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn slot_centres_do_not_move_when_two_tabs_trade_places() {
+        // The whole reason the judgement is made against layout and not paint
+        // (mock-up 6659-6662): a slot is a property of the strip, so swapping
+        // who stands in it changes nothing about where it is — and the FLIP that
+        // is lying about positions for the next 160ms cannot reach this.
+        let pinned = TabTrailer {
+            pinned: true,
+            reveal: 1.0,
+        };
+        let open = TabTrailer {
+            pinned: false,
+            reveal: 0.5,
+        };
+        let before = tab_strip_geometry(960.0, 1.0, &[pinned, open, open], 0, 0.0);
+        let after = tab_strip_geometry(960.0, 1.0, &[open, pinned, open], 1, 0.0);
+        let mids = tab_slot_mids(&before);
+        assert_eq!(mids, tab_slot_mids(&after));
+        // And they are the slots' own centres: each one inside the tab it
+        // belongs to, one even pitch apart, which is the property the reorder's
+        // whole threshold arithmetic rests on.
+        for (mid, slot) in mids.iter().zip(&before.tabs) {
+            assert!(
+                *mid > slot.body[0] && *mid < slot.body[2],
+                "{mid} is not inside {:?}",
+                slot.body
+            );
+        }
+        let pitch = mids[1] - mids[0];
+        assert_eq!(pitch, mids[2] - mids[1], "one even pitch down the run");
+        assert!(
+            pitch > before.tabs[0].body[2] - before.tabs[0].body[0],
+            "a pitch is a tab plus the gap beside it"
+        );
+    }
+
+    #[test]
+    fn an_insertion_index_is_the_first_centre_the_pointer_has_not_passed() {
+        // K126, the public part of the future cross-boundary drop.
+        let mids = slot_mids_of(3, 204.0);
+        assert_eq!(insert_index_at(&mids, mids[0] - 1.0), 0);
+        assert_eq!(
+            insert_index_at(&mids, mids[0]),
+            1,
+            "on the centre is past it: `pos < mid` and not `<=`"
+        );
+        assert_eq!(insert_index_at(&mids, mids[0] + 1.0), 1);
+        assert_eq!(insert_index_at(&mids, mids[1] + 1.0), 2);
+        assert_eq!(
+            insert_index_at(&mids, mids[2] + 1.0),
+            3,
+            "past the last one"
+        );
+        assert_eq!(insert_index_at(&[], 0.0), 0, "an empty strip has one slot");
+    }
+
+    #[test]
+    fn a_shifted_tab_moves_every_box_it_holds_and_changes_nothing_else() {
+        // K114: a drag is paint, so it moves the whole tab and none of its facts.
+        let trailer = TabTrailer {
+            pinned: false,
+            reveal: 1.0,
+        };
+        let geometry = tab_strip_geometry(960.0, 1.0, &[trailer, trailer], 0, 0.0);
+        let slot = geometry.tabs[0];
+        let moved = slot.shifted(31.0);
+        assert_eq!(moved.body[0], slot.body[0] + 31.0);
+        assert_eq!(moved.body[2], slot.body[2] + 31.0);
+        assert_eq!([moved.body[1], moved.body[3]], [slot.body[1], slot.body[3]]);
+        for (moved, slot) in [(moved.close, slot.close), (moved.pin, slot.pin)] {
+            let (moved, slot) = (moved.expect("a full tab"), slot.expect("a full tab"));
+            assert_eq!(moved[0], slot[0] + 31.0);
+            assert_eq!(moved[2], slot[2] + 31.0);
+            assert_eq!([moved[1], moved[3]], [slot[1], slot[3]]);
+        }
+        assert_eq!(moved.tier, slot.tier);
+        assert_eq!(moved.trailer, slot.trailer);
+    }
+
+    /// The strip with one tab picked up and carried `offset` pixels along it.
+    fn strip_chrome_grabbed(
+        tabs: &[TabContent],
+        active_tab: usize,
+        grabbed: Option<usize>,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        let scale = 1.0;
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let seats = Seats::lone_terminal();
+        let layout = solved(&seats, viewport_of(960, 600, dpi_milli), &metrics);
+        build_chrome_for_tabs(
+            &seats,
+            &layout,
+            scale,
+            ChromePointer {
+                hover: None,
+                dragging: None,
+            },
+            ChromeContent {
+                tabs,
+                active_tab,
+                grabbed,
+                tab_scroll: 0.0,
+                preview_title: None,
+                preview_message: None,
+                profile_menu_open: false,
+            },
+        )
+    }
+
+    fn plain_tabs(count: usize) -> Vec<TabContent> {
+        (0..count)
+            .map(|index| TabContent {
+                title: format!("tab {index}"),
+                pane_count: 1,
+                badge_text_width: 0.0,
+                mark: TabMarkState::default(),
+                trailer: TabTrailer::default(),
+                offset: 0.0,
+                landing: 0.0,
+                edit: None,
+            })
+            .collect()
+    }
+
+    /// Where in the paint order one named tab's own mark went down.
+    ///
+    /// By its slot's own address rather than by "the first mark in the list",
+    /// because the list's order is exactly what these tests are about.
+    fn mark_paint_index(sprites: &[ChromeSprite], count: usize, scale: f32, tab: usize) -> usize {
+        let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(count), 0, 0.0);
+        let left = tab_mark_left(&geometry.tabs[tab], scale);
+        sprites
+            .iter()
+            .position(|sprite| {
+                sprite.mark == ChromeMark::ProfilePowerShell && sprite.rect[0] == left
+            })
+            .expect("every tab draws its mark")
+    }
+
+    #[test]
+    fn the_tab_in_hand_is_painted_above_the_active_one() {
+        // `.tab.grabbed { z-index: 20 }` against `.tab.active { z-index: 1 }`
+        // (mock-up 971, 216), in a painter's-algorithm list.
+        let tabs = plain_tabs(3);
+        let (_, _, resting) = strip_chrome_grabbed(&tabs, 1, None);
+        let active = resting
+            .iter()
+            .position(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. }))
+            .expect("the active tab wears its silhouette");
+        assert!(
+            mark_paint_index(&resting, 3, 1.0, 0) < active,
+            "at rest the active tab is the last one down"
+        );
+        let (_, _, grabbed) = strip_chrome_grabbed(&tabs, 1, Some(0));
+        let active = grabbed
+            .iter()
+            .position(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. }))
+            .expect("the active tab wears its silhouette");
+        assert!(
+            mark_paint_index(&grabbed, 3, 1.0, 0) > active,
+            "the tab in hand passes over the active tab, not under it"
+        );
+    }
+
+    #[test]
+    fn picking_a_tab_up_moves_that_tab_and_nothing_else() {
+        // K122's other half: the strip does not re-lay out around a tab that is
+        // only being *drawn* somewhere else. Every box in the dragged tab moves
+        // by exactly the offset, and every box outside it does not move at all.
+        let mut carried = plain_tabs(3);
+        carried[0].offset = 37.0;
+        let (_, resting_labels, resting_sprites) = strip_chrome_grabbed(&plain_tabs(3), 0, Some(0));
+        let (_, moved_labels, moved_sprites) = strip_chrome_grabbed(&carried, 0, Some(0));
+        assert_eq!(resting_sprites.len(), moved_sprites.len());
+        assert_eq!(resting_labels.len(), moved_labels.len());
+        let first_slot_right = tab_strip_geometry(960.0, 1.0, &resting(3), 0, 0.0).tabs[0].body[2];
+        for (resting, moved) in resting_sprites.iter().zip(&moved_sprites) {
+            let dx = if resting.rect[0] < first_slot_right {
+                37.0
+            } else {
+                0.0
+            };
+            assert_eq!(moved.rect[0], resting.rect[0] + dx, "{:?}", resting.mark);
+            assert_eq!(moved.rect[2], resting.rect[2] + dx, "{:?}", resting.mark);
+            assert_eq!(
+                [moved.rect[1], moved.rect[3]],
+                [resting.rect[1], resting.rect[3]]
+            );
+        }
+        for (resting, moved) in resting_labels.iter().zip(&moved_labels) {
+            let dx = if resting.rect[0] < first_slot_right {
+                37.0
+            } else {
+                0.0
+            };
+            assert_eq!(moved.rect[0], resting.rect[0] + dx, "{}", resting.text);
+        }
+    }
+
+    #[test]
+    fn a_landing_tab_wears_the_accent_wash_and_its_inset_ring() {
+        // K121, straight off `@keyframes tab-land` (mock-up 961-967).
+        let palette = chrome_palette();
+        // The ring's DPI-rounded width, written out at each scale rather than
+        // recomputed from the constant it is meant to pin.
+        for (scale, ring_px) in [(1.0_f32, 2_u32), (1.5, 2), (2.0, 3)] {
+            let mut tabs = plain_tabs(2);
+            tabs[0].landing = 1.0;
+            let dpi_milli = (scale * 1_000.0) as u32;
+            let metrics = seat_metrics(dpi_milli);
+            let seats = Seats::lone_terminal();
+            let layout = solved(
+                &seats,
+                viewport_of((960.0 * scale) as u32, (600.0 * scale) as u32, dpi_milli),
+                &metrics,
+            );
+            let (_, _, sprites) = build_chrome_for_tabs(
+                &seats,
+                &layout,
+                scale,
+                ChromePointer {
+                    hover: None,
+                    dragging: None,
+                },
+                ChromeContent {
+                    tabs: &tabs,
+                    active_tab: 0,
+                    grabbed: None,
+                    tab_scroll: 0.0,
+                    preview_title: None,
+                    preview_message: None,
+                    profile_menu_open: false,
+                },
+            );
+            let wash = sprites
+                .iter()
+                .position(|sprite| {
+                    matches!(sprite.mark, ChromeMark::TabBody { .. })
+                        && sprite.color == palette.accent
+                })
+                .expect("the wash");
+            let ring = sprites
+                .iter()
+                .position(|sprite| matches!(sprite.mark, ChromeMark::TabBodyRing { .. }))
+                .expect("the ring");
+            assert!(
+                (sprites[wash].opacity - 0.09).abs() < 1e-6,
+                "the accent at 9%, and the constant is not allowed to define itself"
+            );
+            assert!(
+                (sprites[ring].opacity - 0.45).abs() < 1e-6,
+                "the accent at 45%"
+            );
+            assert_eq!(sprites[ring].color, palette.accent);
+            let ChromeMark::TabBodyRing { stroke_px, .. } = sprites[ring].mark else {
+                unreachable!("matched above");
+            };
+            assert_eq!(
+                stroke_px, ring_px,
+                "the inset ring is 1.5 logical pixels wide at scale {scale}"
+            );
+            let silhouette = sprites
+                .iter()
+                .position(|sprite| matches!(sprite.mark, ChromeMark::ActiveTab { .. }))
+                .expect("the landing tab is the active one");
+            let mark = mark_paint_index(&sprites, 2, scale, 0);
+            assert!(
+                silhouette < wash && wash < ring && ring < mark,
+                "a background and an inset shadow go over the surface and under the content"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_that_is_not_landing_draws_no_wash_at_all() {
+        let (_, _, sprites) = strip_chrome_grabbed(&plain_tabs(2), 0, None);
+        assert!(
+            !sprites
+                .iter()
+                .any(|sprite| matches!(sprite.mark, ChromeMark::TabBodyRing { .. })),
+            "the landing ring exists only while a landing is running"
+        );
+        let palette = chrome_palette();
+        assert!(
+            !sprites
+                .iter()
+                .any(|sprite| matches!(sprite.mark, ChromeMark::TabBody { .. })
+                    && sprite.color == palette.accent),
+            "and so does the wash"
+        );
     }
 }
