@@ -33,10 +33,13 @@ use bt_render::{
     WINDOW_NEW_TAB_BOX_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX,
     WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX, WINDOW_NEW_TAB_GLYPH_LOGICAL_PX,
     WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX,
-    WINDOW_NEW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX, WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
-    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
+    WINDOW_NEW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+    WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX, WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX, WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
+    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
     WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
     WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
     WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
@@ -100,7 +103,16 @@ impl Seats {
 
     /// Pane heads disambiguate siblings; a one-pane tree needs no pane chrome.
     pub fn has_pane_headers(&self) -> bool {
-        self.tree.seats_in_order().len() > 1
+        self.pane_count() > 1
+    }
+
+    /// How many panes this tab holds — `paneCount = leavesOf(w.tree).length`
+    /// (mock-up line 3222).
+    ///
+    /// Every leaf counts, not only the terminals: the badge answers "how many
+    /// rooms are behind this door", and a files pane is a room.
+    pub fn pane_count(&self) -> usize {
+        self.tree.seats_in_order().len()
     }
 
     /// The unpinned preview seat, if the tree has one.
@@ -533,10 +545,36 @@ pub struct TabStripGeometry {
     pub new_tab: [f32; 4],
     /// The `˅` beside the `+`: the same 28px box, no margin between them.
     pub new_tab_menu: [f32; 4],
+    /// The strip's clip box as `[left, right]` — `.tabs-inline`'s own border box,
+    /// which is what `overflow-x: auto` crops its content to.
+    ///
+    /// The left edge is the window's, not the first tab's inset: content scrolled
+    /// off that end leaves the surface entirely and the framebuffer is its clip.
+    /// The right edge is where the caption run begins, and it is the edge that
+    /// matters — the mock-up added the scroller precisely so that many tabs stop
+    /// "spilling into the caption buttons" (line 187).
+    pub viewport: [f32; 2],
+    /// The furthest this strip may be scrolled, and therefore also the test for
+    /// whether it scrolls at all: `0.0` exactly when everything fits.
+    pub max_scroll: f32,
 }
 
-/// Equal-share horizontal tab geometry. The mock-up's 200px cap is retained; once the strip is
-/// full every tab compresses by the same amount. Scrolling is deliberately deferred.
+/// Equal-share horizontal tab geometry, scrolled by `scroll` physical pixels.
+///
+/// Every tab takes the same share of the run, clamped to the mock-up's own two
+/// bounds — `.tab { flex: 1 1 0; min-width: 46px; max-width: 200px }`. The floor
+/// is the whole of A7/A8: a flex item that has hit `min-width` stops shrinking,
+/// so the row overflows its `overflow-x: auto` parent and becomes a scroller
+/// instead of compressing into illegibility.
+///
+/// `scroll` is clamped here rather than trusted, so no caller can produce a strip
+/// scrolled past its own content — including the caller that has not yet noticed
+/// the window got wider or a tab got closed.
+///
+/// The `+`/`˅` pair rides *inside* the scroller, because the mock-up puts it
+/// inside: `paintStrip` writes both buttons into `#tabstrip` (line 4315), and
+/// `.tabs-inline .newtab` (line 404) is the rule that spaces them there. So they
+/// are content, they scroll with the tabs, and they are last in the run.
 ///
 /// `active_tab` is a geometry input and not merely a paint one, because the
 /// mock-up's width tiers keep the active tab's `×` and take everyone else's:
@@ -546,6 +584,7 @@ pub fn tab_strip_geometry(
     scale: f32,
     tab_count: usize,
     active_tab: usize,
+    scroll: f32,
 ) -> TabStripGeometry {
     let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
@@ -562,9 +601,22 @@ pub fn tab_strip_geometry(
     let tab_width = if tab_count == 0 {
         0.0
     } else {
-        ((available - total_gaps).max(0.0) / tab_count as f32)
-            .min(WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale)
+        // `min-width: 46px` is a floor, not a preference: below it the row stops
+        // shrinking and the parent starts scrolling. Clamping here is what turns
+        // "infinitely compressible" into "scrollable past 46".
+        ((available - total_gaps).max(0.0) / tab_count as f32).clamp(
+            WINDOW_TAB_MIN_WIDTH_LOGICAL_PX * scale,
+            WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale,
+        )
     };
+    // The run at its natural width, buttons included. When the tabs were free to
+    // compress this always equalled the space available and nothing scrolled;
+    // now that they stop at 46px it is allowed to exceed it, and the excess is
+    // exactly how far the strip may be scrolled.
+    let content = tab_count as f32 * tab_width + total_gaps + new_margin + 2.0 * new_box;
+    let max_scroll = (radius + content - run_left).max(0.0);
+    let scroll = scroll.clamp(0.0, max_scroll);
+    let origin = radius - scroll;
     let tier = tab_width_tier(tab_width, scale);
     let tab_height = (WINDOW_TAB_HEIGHT_LOGICAL_PX * scale).round();
     let tab_top = title - tab_height;
@@ -574,7 +626,7 @@ pub fn tab_strip_geometry(
     let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
     let tabs = (0..tab_count)
         .map(|index| {
-            let left = radius + index as f32 * (tab_width + gap);
+            let left = origin + index as f32 * (tab_width + gap);
             let right = left + tab_width;
             let active = index == active_tab;
             let close_top = tab_top + (tab_height - close_box) / 2.0;
@@ -612,25 +664,125 @@ pub fn tab_strip_geometry(
             }
         })
         .collect::<Vec<_>>();
-    let tabs_right = tabs.last().map_or(radius, |tab| tab.body[2]);
-    let new_left = (tabs_right + new_margin).min(run_left);
+    let tabs_right = tabs.last().map_or(origin, |tab| tab.body[2]);
+    let new_left = tabs_right + new_margin;
     let new_bottom = title - WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX * scale;
-    let menu_left = (new_left + new_box).min(run_left);
+    let menu_left = new_left + new_box;
+    // Neither button is clamped to the run's end any more. They used to be,
+    // because a strip that could not scroll had to stop *somewhere* and the
+    // caption run was the wall; a strip that scrolls has the wall in the right
+    // place already — `viewport` — and clamping on top of it would pin the pair
+    // to the edge while the tabs slid under them.
     TabStripGeometry {
         tabs,
         new_tab: [
             new_left,
             new_bottom - new_box,
-            (new_left + new_box).min(run_left),
+            new_left + new_box,
             new_bottom,
         ],
         new_tab_menu: [
             menu_left,
             new_bottom - new_box,
-            (menu_left + new_box).min(run_left),
+            menu_left + new_box,
             new_bottom,
         ],
+        viewport: [0.0, run_left],
+        max_scroll,
     }
+}
+
+/// Whether a mark at `rect` may be drawn without spilling past the strip's
+/// right edge.
+///
+/// Only that edge is tested, and that asymmetry is the honest one: the strip's
+/// left edge *is* the surface's left edge, so a quad running off it is clipped
+/// by the framebuffer with its texture coordinates interpolated correctly, for
+/// free and exactly. Nothing lies beyond the right edge but the caption buttons,
+/// and a tab drawn over those is the very bug the mock-up added this scroller to
+/// fix (line 187).
+///
+/// That a mark crossing the right edge is dropped rather than cropped is a
+/// **ruling**. `ChromeLabel` clips per glyph and per pixel, so a title is cropped
+/// exactly as CSS would crop it; a chrome icon, by contrast, is rasterised into
+/// the precise box it occupies and drawn with whole-texture UVs, so cropping one
+/// would mean re-rasterising it on every scrolled pixel — trading a real cache
+/// for half a 15px square that says nothing the whole one did not. The case that
+/// would actually have been felt cannot arise: the active tab's silhouette is
+/// always whole, because activating a tab scrolls it wholly into view first (see
+/// [`tab_scroll_to_reveal`]).
+fn within_strip(viewport: [f32; 2], rect: [f32; 4]) -> bool {
+    rect[2] <= viewport[1]
+}
+
+/// The `.panecount` pill's box on a tab, or `None` when the tab shows none.
+///
+/// Two conditions take it away, and they are different facts. `paneCount > 1`
+/// is the badge's whole reason — "only shown once it holds more than one"
+/// (mock-up line 292) — and a lone pane reserves no space for the badge it is
+/// not drawing. `.tab.squeezed .panecount { display: none }` (line 201) is the
+/// other: under 90px the tab is its centred mark and carries nothing else.
+///
+/// The width is the mock-up's own `max(min-width, text + padding)`: 15px until
+/// the number needs more, and then 4px of padding either side of it.
+#[must_use]
+pub fn tab_badge_rect(
+    tab: &TabGeometry,
+    pane_count: usize,
+    badge_text_width: f32,
+    scale: f32,
+) -> Option<[f32; 4]> {
+    if pane_count <= 1 || tab.tier == TabWidthTier::Squeezed {
+        return None;
+    }
+    let content_gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
+    let trailing = tab.close.map_or(
+        tab.body[2] - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
+        |close| close[0] - content_gap,
+    );
+    let badge_width = (badge_text_width + 2.0 * WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX * scale)
+        .max(WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX * scale)
+        .round();
+    let badge_height = (WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX * scale).round();
+    let left = (trailing - badge_width).round();
+    let top = (tab.body[1] + (tab.body[3] - tab.body[1] - badge_height) / 2.0).round();
+    Some([left, top, left + badge_width, top + badge_height])
+}
+
+/// The scroll offset that brings tab `index` wholly inside the strip, moving as
+/// little as it can — the mock-up's `scrollIntoView({ block: "nearest" })` habit,
+/// which is also the only behaviour that does not yank the strip about when the
+/// tab you asked for was already on screen.
+///
+/// The tab is measured with its skirt: an active tab paints
+/// [`WINDOW_TAB_RADIUS_LOGICAL_PX`] of outward corner on each side, so bringing
+/// only its body into view would still clip the very thing that marks it active.
+#[must_use]
+pub fn tab_scroll_to_reveal(
+    width: f32,
+    scale: f32,
+    tab_count: usize,
+    active_tab: usize,
+    scroll: f32,
+    index: usize,
+) -> f32 {
+    let geometry = tab_strip_geometry(width, scale, tab_count, active_tab, scroll);
+    let Some(tab) = geometry.tabs.get(index) else {
+        return scroll.clamp(0.0, geometry.max_scroll);
+    };
+    let skirt = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
+    let [left, right] = [tab.body[0] - skirt, tab.body[2] + skirt];
+    let [view_left, view_right] = geometry.viewport;
+    // Already framed: do not move. Overhanging one end: move by just the
+    // overhang, and let the clamp below refuse anything the content cannot back.
+    let scrolled = if left < view_left {
+        scroll - (view_left - left)
+    } else if right > view_right {
+        scroll + (right - view_right)
+    } else {
+        scroll
+    };
+    scrolled.clamp(0.0, geometry.max_scroll)
 }
 
 /// The mock-up's two measured thresholds, read off the tab's own logical width.
@@ -645,11 +797,24 @@ fn tab_width_tier(tab_width: f32, scale: f32) -> TabWidthTier {
     }
 }
 
-/// Physical right edge of the app-owned tab run, including both end buttons.
+/// Physical right edge of the app-owned tab run — everything left of it is the
+/// app's, and everything right of it up to the caption run is window drag.
+///
+/// Under scroll the answer is the strip's own right edge rather than the `˅`'s:
+/// a scrolling strip has no slack left in it, every pixel of the run is content,
+/// and the `˅` that used to mark the end of the app's territory is now somewhere
+/// off to the right of the viewport. Reporting the button's edge there would
+/// hand the app's own tabs to the window's drag handler.
 pub fn tab_strip_right_px(width: f32, scale: f32, tab_count: usize) -> i32 {
-    // The tiers move nothing outside a tab's own body, so the run's right edge
-    // is the same whichever tab is active.
-    tab_strip_geometry(width, scale, tab_count, 0).new_tab_menu[2].ceil() as i32
+    // Neither the tiers nor the scroll offset move this answer: the tiers change
+    // nothing outside a tab's own body, and a strip either scrolls or it does
+    // not, whatever it currently shows.
+    let geometry = tab_strip_geometry(width, scale, tab_count, 0, 0.0);
+    if geometry.max_scroll > 0.0 {
+        geometry.viewport[1].ceil() as i32
+    } else {
+        geometry.new_tab_menu[2].ceil() as i32
+    }
 }
 
 pub fn hit_tab_chrome(
@@ -657,11 +822,18 @@ pub fn hit_tab_chrome(
     scale: f32,
     tab_count: usize,
     active_tab: usize,
+    scroll: f32,
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    let geometry = tab_strip_geometry(width, scale, tab_count, active_tab);
+    let geometry = tab_strip_geometry(width, scale, tab_count, active_tab, scroll);
+    // What is cropped away is not there to be clicked. Without this the run's
+    // scrolled-out tail would still answer the pointer, under the caption
+    // buttons drawn on top of it.
+    if x < geometry.viewport[0] || x >= geometry.viewport[1] {
+        return None;
+    }
     for (index, tab) in geometry.tabs.iter().enumerate() {
         if tab.close.is_some_and(|close| contains(close, x, y)) {
             return Some(ChromeTarget::TabClose(index));
@@ -674,6 +846,19 @@ pub fn hit_tab_chrome(
         return Some(ChromeTarget::NewTab);
     }
     contains(geometry.new_tab_menu, x, y).then_some(ChromeTarget::NewTabMenu)
+}
+
+/// Whether the pointer is over the tab strip's viewport — the question the wheel
+/// asks before it scrolls the strip instead of the terminal.
+///
+/// It is the *strip's* box and not the title bar's: the caption buttons share
+/// that bar and a notch over them is not the strip's to take.
+#[must_use]
+pub fn tab_strip_contains(width: f32, scale: f32, tab_count: usize, x: f64, y: f64) -> bool {
+    let (x, y) = (x as f32, y as f32);
+    let geometry = tab_strip_geometry(width, scale, tab_count, 0, 0.0);
+    let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    x >= geometry.viewport[0] && x < geometry.viewport[1] && y >= 0.0 && y < title
 }
 
 /// What the pointer is over, in device pixels of the window.
@@ -825,15 +1010,20 @@ pub fn build_chrome_with_preview(
     preview_title: Option<&str>,
     preview_message: Option<&str>,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
-    let titles = [tab_title.unwrap_or("PowerShell").to_owned()];
+    let tabs = [TabContent {
+        title: tab_title.unwrap_or("PowerShell").to_owned(),
+        pane_count: seats.pane_count(),
+        badge_text_width: 0.0,
+    }];
     build_chrome_for_tabs(
         seats,
         layout,
         scale,
         pointer,
         ChromeContent {
-            tab_titles: &titles,
+            tabs: &tabs,
             active_tab: 0,
+            tab_scroll: 0.0,
             preview_title,
             preview_message,
             profile_menu_open: false,
@@ -841,9 +1031,29 @@ pub fn build_chrome_with_preview(
     )
 }
 
+/// What one tab in the strip has to say for itself.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TabContent {
+    pub title: String,
+    /// How many panes this tab holds. The badge appears above one and never at
+    /// one — `paneBadge` (mock-up line 4189) prints nothing for a lone pane,
+    /// and prints no placeholder either.
+    pub pane_count: usize,
+    /// The physical width of `pane_count`'s own digits at the badge's font size.
+    ///
+    /// Measured by the renderer and carried in, because it is the one thing
+    /// about this strip that geometry cannot derive: only the font knows how
+    /// wide a number is, and the mock-up sizes the pill from exactly that
+    /// (`max(min-width, text + padding)`).
+    pub badge_text_width: f32,
+}
+
 pub struct ChromeContent<'a> {
-    pub tab_titles: &'a [String],
+    pub tabs: &'a [TabContent],
     pub active_tab: usize,
+    /// How far the strip is scrolled, in physical pixels. Clamped by the
+    /// geometry, so a stale value cannot draw a strip past its own content.
+    pub tab_scroll: f32,
     pub preview_title: Option<&'a str>,
     pub preview_message: Option<&'a str>,
     /// Whether the profile picker is up. The chevron states where its list is —
@@ -861,8 +1071,9 @@ pub fn build_chrome_for_tabs(
     content: ChromeContent<'_>,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
     let ChromeContent {
-        tab_titles,
+        tabs,
         active_tab,
+        tab_scroll,
         preview_title,
         preview_message,
         profile_menu_open,
@@ -881,9 +1092,12 @@ pub fn build_chrome_for_tabs(
         surface_width,
         scale,
         pointer.hover,
-        tab_titles,
-        active_tab,
-        profile_menu_open,
+        TabStrip {
+            tabs,
+            active_tab,
+            scroll: tab_scroll,
+            profile_menu_open,
+        },
         (&mut quads, &mut labels, &mut sprites),
     );
     for placement in &layout.rects {
@@ -1021,19 +1235,32 @@ pub fn build_chrome_for_tabs(
     (quads, labels, sprites)
 }
 
+/// Everything the tab strip needs to know about itself: what it holds, which of
+/// them is active, how far it is scrolled, and whether its `˅` is open.
+struct TabStrip<'a> {
+    tabs: &'a [TabContent],
+    active_tab: usize,
+    scroll: f32,
+    profile_menu_open: bool,
+}
+
 fn window_chrome(
     width: f32,
     scale: f32,
     hover: Option<ChromeTarget>,
-    tab_titles: &[String],
-    active_tab: usize,
-    profile_menu_open: bool,
+    strip: TabStrip<'_>,
     output: (
         &mut Vec<ChromeQuad>,
         &mut Vec<ChromeLabel>,
         &mut Vec<ChromeSprite>,
     ),
 ) {
+    let TabStrip {
+        tabs,
+        active_tab,
+        scroll: tab_scroll,
+        profile_menu_open,
+    } = strip;
     let (quads, labels, sprites) = output;
     let palette = chrome_palette();
     let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
@@ -1051,23 +1278,31 @@ fn window_chrome(
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * button).max(0.0);
-    let geometry = tab_strip_geometry(width, scale, tab_titles.len(), active_tab);
-    for (index, (tab, tab_title)) in geometry.tabs.iter().zip(tab_titles).enumerate() {
+    let geometry = tab_strip_geometry(width, scale, tabs.len(), active_tab, tab_scroll);
+    let viewport = geometry.viewport;
+    // `.tabs-inline` crops its content, and a label is the one chrome primitive
+    // that can be cropped exactly: `ChromeLabel`'s rect is also its clip box, and
+    // the text renderer clips it per glyph and per pixel. Only the right edge
+    // needs pulling in — the left edge of the strip is the surface's own, so a
+    // glyph that runs off it is clipped by the framebuffer for free.
+    let clip_label = |rect: [f32; 4]| [rect[0], rect[1], rect[2].min(viewport[1]), rect[3]];
+    for (index, (tab, content)) in geometry.tabs.iter().zip(tabs).enumerate() {
         let [tab_left, tab_top, tab_right, tab_bottom] = tab.body;
         let active = index == active_tab;
         // `.tab:hover` is one hover: a pointer on the `×` is still a pointer on
         // the tab, so the body lights up and the title steps to `--ink` for both.
         let tab_hovered =
             hover == Some(ChromeTarget::Tab(index)) || hover == Some(ChromeTarget::TabClose(index));
-        if active && tab_right - tab_left >= 2.0 * radius {
+        let skirted = [tab_left - radius, tab_top, tab_right + radius, tab_bottom];
+        if active && tab_right - tab_left >= 2.0 * radius && within_strip(viewport, skirted) {
             sprites.push(ChromeSprite {
                 mark: ChromeMark::ActiveTab {
                     radius_px: radius as u32,
                 },
-                rect: [tab_left - radius, tab_top, tab_right + radius, tab_bottom],
+                rect: skirted,
                 color: palette.active_tab,
             });
-        } else if tab_hovered {
+        } else if tab_hovered && within_strip(viewport, tab.body) {
             sprites.push(ChromeSprite {
                 mark: ChromeMark::TabBody {
                     radius_px: radius as u32,
@@ -1091,25 +1326,37 @@ fn window_chrome(
             (tab_left + WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round()
         };
         let mark_top = (tab_top + (tab_bottom - tab_top - mark) / 2.0).round();
-        // What the title may not run past: the `×` and the tab's own 8px gap
+        // The tab row's trailing boundary: the `×` and the tab's own 8px gap
         // before it, or the trailing padding when there is no `×` to clear.
-        let content_right = tab.close.map_or(
+        let trailing = tab.close.map_or(
             tab_right - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
             |close| close[0] - content_gap,
         );
+        // `.panecount` is `flex: none` and stands between the title and the `×`,
+        // so it takes its width off the trailing end and the title — `flex: 1`,
+        // `min-width: 0` — keeps whatever is left.
+        let badge = tab_badge_rect(tab, content.pane_count, content.badge_text_width, scale);
+        // What the title may not run past.
+        let content_right = badge.map_or(trailing, |badge| badge[0] - content_gap);
+        let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
         if mark_left + mark <= tab.close.map_or(tab_right, |close| close[0]) {
-            sprites.push(ChromeSprite {
-                mark: ChromeMark::ProfilePowerShell,
-                rect: [mark_left, mark_top, mark_left + mark, mark_top + mark],
-                color: palette.accent,
-            });
+            if within_strip(viewport, mark_rect) {
+                sprites.push(ChromeSprite {
+                    mark: ChromeMark::ProfilePowerShell,
+                    rect: mark_rect,
+                    color: palette.accent,
+                });
+            }
             let label_left = mark_left + mark + content_gap;
             // `.tab.squeezed .ttitle { display: none }`: below 90px the tab is
             // its mark, and nothing is gained by clipping a word to two letters.
-            if tab.tier != TabWidthTier::Squeezed && label_left < content_right {
+            if tab.tier != TabWidthTier::Squeezed
+                && label_left < content_right
+                && label_left < viewport[1]
+            {
                 labels.push(ChromeLabel {
-                    text: tab_title.clone(),
-                    rect: [label_left, tab_top, content_right, tab_bottom],
+                    text: content.title.clone(),
+                    rect: clip_label([label_left, tab_top, content_right, tab_bottom]),
                     font_size_px: WINDOW_TAB_FONT_LOGICAL_PX * scale,
                     color: if active || tab_hovered {
                         palette.pane_title_focus
@@ -1122,11 +1369,53 @@ fn window_chrome(
                 });
             }
         }
+        // `.panecount` — the count, its pill, and nothing when there is one pane.
+        if let Some(badge) = badge
+            && within_strip(viewport, badge)
+        {
+            sprites.push(ChromeSprite {
+                mark: ChromeMark::ControlPill {
+                    radius_px: (WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX * scale)
+                        .round()
+                        .max(1.0) as u32,
+                },
+                rect: pixel_snapped(badge),
+                // `background: var(--active)` on every tab — the same fill the
+                // `×`'s pill wears, over whichever of the three surfaces this tab
+                // is showing.
+                color: if active {
+                    palette.tab_close_pill_on_content
+                } else if tab_hovered {
+                    palette.tab_close_pill_on_hovered_tab
+                } else {
+                    palette.tab_badge_on_resting_tab
+                },
+            });
+            labels.push(ChromeLabel {
+                text: content.pane_count.to_string(),
+                // `justify-content: center` — the number is centred in its pill,
+                // which is what makes `min-width` a floor and not an indent.
+                rect: badge,
+                font_size_px: WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale,
+                // `--ink2`, rising to `--ink` on the active tab and deliberately
+                // never to the accent (mock-up line 297).
+                color: if active {
+                    palette.tab_badge_text_on_active_tab
+                } else if tab_hovered {
+                    palette.tab_badge_text_on_hovered_tab
+                } else {
+                    palette.tab_badge_text_on_resting_tab
+                },
+                align_right: false,
+                align_center: true,
+                letter_spacing_em: 0.0,
+            });
+        }
         let Some(close) = tab.close else {
             continue;
         };
         let close_hovered = hover == Some(ChromeTarget::TabClose(index));
-        if close_hovered {
+        if close_hovered && within_strip(viewport, close) {
             // `.tab .close:hover { background: var(--active) }` — 4px of round,
             // over whichever of the two surfaces this tab is showing: `--termbg`
             // when it is the active one, its own `--hover` fill when it is not.
@@ -1147,9 +1436,13 @@ fn window_chrome(
         let glyph = (WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
         let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
         let glyph_top = ((close[1] + close[3] - glyph) / 2.0).round();
+        let glyph_rect = [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph];
+        if !within_strip(viewport, glyph_rect) {
+            continue;
+        }
         sprites.push(ChromeSprite {
             mark: ChromeMark::TabClose,
-            rect: [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+            rect: glyph_rect,
             color: if close_hovered {
                 palette.title_text_hover
             } else {
@@ -1170,7 +1463,7 @@ fn window_chrome(
         (geometry.new_tab, new_hovered),
         (geometry.new_tab_menu, menu_hovered),
     ] {
-        if hovered && rect[2] > rect[0] {
+        if hovered && within_strip(viewport, rect) {
             sprites.push(ChromeSprite {
                 mark: ChromeMark::ControlPill {
                     radius_px: pill_radius,
@@ -1185,10 +1478,11 @@ fn window_chrome(
     let plus = (WINDOW_NEW_TAB_GLYPH_LOGICAL_PX * scale).round().max(1.0);
     let plus_left = ((geometry.new_tab[0] + geometry.new_tab[2] - plus) / 2.0).round();
     let plus_top = ((geometry.new_tab[1] + geometry.new_tab[3] - plus) / 2.0).round();
-    if geometry.new_tab[2] > geometry.new_tab[0] {
+    let plus_rect = [plus_left, plus_top, plus_left + plus, plus_top + plus];
+    if within_strip(viewport, plus_rect) {
         sprites.push(ChromeSprite {
             mark: ChromeMark::Plus,
-            rect: [plus_left, plus_top, plus_left + plus, plus_top + plus],
+            rect: plus_rect,
             color: if new_hovered {
                 palette.title_text_hover
             } else {
@@ -1206,17 +1500,18 @@ fn window_chrome(
         ((geometry.new_tab_menu[0] + geometry.new_tab_menu[2] - chevron_width) / 2.0).round();
     let chevron_top =
         ((geometry.new_tab_menu[1] + geometry.new_tab_menu[3] - chevron_height) / 2.0).round();
-    if geometry.new_tab_menu[2] > geometry.new_tab_menu[0] {
+    let chevron_rect = [
+        chevron_left,
+        chevron_top,
+        chevron_left + chevron_width,
+        chevron_top + chevron_height,
+    ];
+    if within_strip(viewport, chevron_rect) {
         sprites.push(ChromeSprite {
             mark: ChromeMark::Chevron {
                 open: profile_menu_open,
             },
-            rect: [
-                chevron_left,
-                chevron_top,
-                chevron_left + chevron_width,
-                chevron_top + chevron_height,
-            ],
+            rect: chevron_rect,
             color: if menu_hovered || profile_menu_open {
                 palette.title_text_hover
             } else {
@@ -2443,7 +2738,7 @@ mod tests {
     #[test]
     fn multi_tab_strip_is_equal_width_and_exposes_plus_close_and_middle_click_targets() {
         for scale in [1.0, 1.25, 1.5, 2.0] {
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 4, 2);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 4, 2, 0.0);
             assert_eq!(geometry.tabs.len(), 4);
             let widths = geometry
                 .tabs
@@ -2464,6 +2759,7 @@ mod tests {
                     scale,
                     4,
                     2,
+                    0.0,
                     f64::from((plus[0] + plus[2]) / 2.0),
                     f64::from((plus[1] + plus[3]) / 2.0),
                 ),
@@ -2476,6 +2772,7 @@ mod tests {
                     scale,
                     4,
                     2,
+                    0.0,
                     f64::from((close[0] + close[2]) / 2.0),
                     f64::from((close[1] + close[3]) / 2.0),
                 ),
@@ -2488,6 +2785,7 @@ mod tests {
                     scale,
                     4,
                     2,
+                    0.0,
                     f64::from(body[0] + 2.0 * scale),
                     f64::from((body[1] + body[3]) / 2.0),
                 ),
@@ -2509,7 +2807,7 @@ mod tests {
             );
             assert_eq!(
                 one,
-                tab_strip_geometry(width, scale, 1, 0).new_tab_menu[2].ceil() as i32,
+                tab_strip_geometry(width, scale, 1, 0, 0.0).new_tab_menu[2].ceil() as i32,
                 "the published edge includes both end buttons at scale {scale}"
             );
         }
@@ -2520,6 +2818,27 @@ mod tests {
         scale: f32,
         titles: &[String],
         active_tab: usize,
+        hover: Option<ChromeTarget>,
+        profile_menu_open: bool,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        let tabs = titles
+            .iter()
+            .map(|title| TabContent {
+                title: title.clone(),
+                pane_count: 1,
+                badge_text_width: 0.0,
+            })
+            .collect::<Vec<_>>();
+        strip_chrome_of(scale, &tabs, active_tab, 0.0, hover, profile_menu_open)
+    }
+
+    /// The strip at one scale, told exactly what each tab holds and how far it
+    /// is scrolled.
+    fn strip_chrome_of(
+        scale: f32,
+        tabs: &[TabContent],
+        active_tab: usize,
+        tab_scroll: f32,
         hover: Option<ChromeTarget>,
         profile_menu_open: bool,
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
@@ -2542,8 +2861,9 @@ mod tests {
                 dragging: None,
             },
             ChromeContent {
-                tab_titles: titles,
+                tabs,
                 active_tab,
+                tab_scroll,
                 preview_title: None,
                 preview_message: None,
                 profile_menu_open,
@@ -2589,7 +2909,7 @@ mod tests {
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(1);
             let radius = (WINDOW_NEW_TAB_RADIUS_LOGICAL_PX * scale).round() as u32;
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 1, 0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 1, 0, 0.0);
             for (rest_hover, hovered_target, box_rect) in [
                 (None, ChromeTarget::NewTab, geometry.new_tab),
                 (None, ChromeTarget::NewTabMenu, geometry.new_tab_menu),
@@ -2643,7 +2963,7 @@ mod tests {
     fn the_strip_s_two_end_buttons_share_one_box_and_one_ink() {
         let palette = chrome_palette();
         for scale in [1.0_f32, 1.25, 2.0] {
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 1, 0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 1, 0, 0.0);
             let box_side = WINDOW_NEW_TAB_BOX_LOGICAL_PX * scale;
             for rect in [geometry.new_tab, geometry.new_tab_menu] {
                 assert!((rect[2] - rect[0] - box_side).abs() < 0.01);
@@ -2729,7 +3049,7 @@ mod tests {
                 (9, TabWidthTier::Squeezed),
             ] {
                 let width = 960.0 * scale;
-                let geometry = tab_strip_geometry(width, scale, count, 0);
+                let geometry = tab_strip_geometry(width, scale, count, 0, 0.0);
                 assert_eq!(
                     geometry.tabs[0].tier, tier,
                     "scale {scale}: {count} tabs must land in {tier:?}"
@@ -2752,6 +3072,7 @@ mod tests {
                             scale,
                             count,
                             0,
+                            0.0,
                             f64::from((close[0] + close[2]) / 2.0),
                             f64::from((close[1] + close[3]) / 2.0),
                         ),
@@ -2767,6 +3088,7 @@ mod tests {
                             scale,
                             count,
                             0,
+                            0.0,
                             f64::from(trailing),
                             f64::from((body[1] + body[3]) / 2.0),
                         ),
@@ -2784,7 +3106,7 @@ mod tests {
                 !labels.iter().any(|label| label.text == "tab 1"),
                 "scale {scale}: `.tab.squeezed .ttitle {{ display: none }}`"
             );
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 9, 0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 9, 0, 0.0);
             let body = geometry.tabs[1].body;
             let mark = sprites
                 .iter()
@@ -2829,7 +3151,7 @@ mod tests {
         let palette = chrome_palette();
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(2);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 2, 0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 2, 0, 0.0);
             let radius = (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale).round() as u32;
             for (index, expected) in [
                 (0, palette.tab_close_pill_on_content),
@@ -2894,7 +3216,7 @@ mod tests {
     fn a_tab_title_clears_the_close_affordance_by_the_tab_s_own_gap() {
         for scale in [1.0_f32, 1.5, 2.0] {
             let titles = strip_titles(2);
-            let geometry = tab_strip_geometry(960.0 * scale, scale, 2, 0);
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 2, 0, 0.0);
             let close = geometry.tabs[0].close.expect("a Full-tier tab has its ×");
             let (_, labels, _) = strip_chrome(scale, &titles, 0, None, false);
             let title = labels
@@ -2936,5 +3258,284 @@ mod tests {
                 title.rect
             );
         }
+    }
+
+    /// PIN — A7/A8: `.tab { min-width: 46px }` is a floor, and past it the strip
+    /// scrolls rather than compressing further (mock-up lines 187-191, 208).
+    ///
+    /// Red gate: the run used to be divided evenly under only a 200px cap, so
+    /// forty tabs were seventeen pixels wide each and the strip never scrolled.
+    #[test]
+    fn tabs_stop_shrinking_at_the_46px_floor_and_the_strip_scrolls_instead() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let floor = WINDOW_TAB_MIN_WIDTH_LOGICAL_PX * scale;
+            let mut ever_scrolled = false;
+            for count in 1..=40 {
+                let geometry = tab_strip_geometry(width, scale, count, 0, 0.0);
+                let tab_width = geometry.tabs[0].body[2] - geometry.tabs[0].body[0];
+                assert!(
+                    tab_width >= floor - 0.01,
+                    "scale {scale}, {count} tabs: {tab_width} is under the 46px floor"
+                );
+                assert!(tab_width <= WINDOW_TAB_MAX_WIDTH_LOGICAL_PX * scale + 0.01);
+                // The two are one fact: a strip scrolls exactly when its tabs
+                // have reached the floor and the run stopped fitting.
+                if geometry.max_scroll > 0.0 {
+                    ever_scrolled = true;
+                    assert!(
+                        (tab_width - floor).abs() < 0.01,
+                        "scale {scale}, {count} tabs: a scrolling strip sits on its floor"
+                    );
+                }
+            }
+            assert!(
+                ever_scrolled,
+                "scale {scale}: forty tabs cannot fit a 960px window without scrolling"
+            );
+        }
+        // The anchor, worked through by hand at 1x: a 960px window leaves a
+        // 776px run, 707px of it for tabs once the 7px inset and the 62px of
+        // button furniture are taken. Fifteen tabs share that at 46.2px each and
+        // still fit; the sixteenth puts every tab on the floor and starts the
+        // scroller.
+        assert_eq!(tab_strip_geometry(960.0, 1.0, 15, 0, 0.0).max_scroll, 0.0);
+        assert!(tab_strip_geometry(960.0, 1.0, 16, 0, 0.0).max_scroll > 0.0);
+    }
+
+    /// PIN — A7/A8: the strip is cropped to its viewport, and no caller can park
+    /// it past its own content.
+    #[test]
+    fn a_scrolling_strip_is_cropped_and_never_parks_past_its_content() {
+        let (scale, width, count) = (1.0_f32, 960.0_f32, 30);
+        let rest = tab_strip_geometry(width, scale, count, 0, 0.0);
+        assert!(rest.max_scroll > 0.0);
+        assert!(
+            (rest.tabs[0].body[0] - (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round()).abs() < 0.01,
+            "at rest the first tab still sits at its own inset"
+        );
+        let end = tab_strip_geometry(width, scale, count, 0, rest.max_scroll);
+        assert_eq!(
+            tab_strip_geometry(width, scale, count, 0, rest.max_scroll * 4.0),
+            end,
+            "a strip cannot be scrolled past its own content"
+        );
+        assert_eq!(
+            tab_strip_geometry(width, scale, count, 0, -500.0),
+            rest,
+            "nor before the start of it"
+        );
+        assert!(
+            (end.new_tab_menu[2] - end.viewport[1]).abs() < 0.01,
+            "scrolled to the end, the last thing in the run lands on the last pixel of it"
+        );
+        // What is cropped away is not there to be clicked.
+        let y = f64::from(rest.tabs[0].body[1] + 1.0);
+        for x in [
+            rest.viewport[1],
+            rest.viewport[1] + 4.0,
+            rest.viewport[1] + 40.0,
+        ] {
+            assert_eq!(
+                hit_tab_chrome(width, scale, count, 0, 0.0, f64::from(x), y),
+                None,
+                "x={x} is past the strip's crop and belongs to the caption run"
+            );
+        }
+    }
+
+    /// PIN — A7/A8: a scrolling strip leaves no slack, so it leaves no window
+    /// drag room either. `tab_strip_right_px` is the boundary the platform's
+    /// hit-test uses, and reporting the `˅`'s edge under scroll would hand the
+    /// app's own tabs to the window drag handler.
+    #[test]
+    fn a_scrolling_strip_leaves_no_window_drag_room_beside_it() {
+        let (scale, width) = (1.0_f32, 960.0_f32);
+        let roomy = tab_strip_geometry(width, scale, 2, 0, 0.0);
+        assert_eq!(roomy.max_scroll, 0.0);
+        assert_eq!(
+            tab_strip_right_px(width, scale, 2),
+            roomy.new_tab_menu[2].ceil() as i32,
+            "with room to spare the app owns up to the `˅`, and the rest is drag"
+        );
+        let full = tab_strip_geometry(width, scale, 30, 0, 0.0);
+        assert!(full.max_scroll > 0.0);
+        assert_eq!(
+            tab_strip_right_px(width, scale, 30),
+            full.viewport[1].ceil() as i32,
+            "a scrolling strip owns its whole run"
+        );
+    }
+
+    /// PIN — A7/A8: activating or opening a tab scrolls it wholly into view, and
+    /// moves the strip no further than it must.
+    #[test]
+    fn revealing_a_tab_frames_it_whole_and_moves_no_further_than_needed() {
+        let (scale, width, count) = (1.0_f32, 960.0_f32, 30);
+        let skirt = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round();
+        for index in [0, 1, 7, 15, count - 1] {
+            let scrolled = tab_scroll_to_reveal(width, scale, count, index, 0.0, index);
+            let geometry = tab_strip_geometry(width, scale, count, index, scrolled);
+            let body = geometry.tabs[index].body;
+            assert!(
+                body[0] - skirt >= geometry.viewport[0] - 0.01
+                    && body[2] + skirt <= geometry.viewport[1] + 0.01,
+                "tab {index} is still cropped at scroll {scrolled}: {body:?} in {:?}",
+                geometry.viewport
+            );
+        }
+        assert_eq!(
+            tab_scroll_to_reveal(width, scale, count, 0, 0.0, 0),
+            0.0,
+            "a tab already framed does not move the strip"
+        );
+        let once = tab_scroll_to_reveal(width, scale, count, 20, 0.0, 20);
+        assert!(once > 0.0);
+        assert_eq!(
+            tab_scroll_to_reveal(width, scale, count, 20, once, 20),
+            once,
+            "revealing does not overshoot: asking twice is asking once"
+        );
+    }
+
+    /// PIN — C27-C29: the pane-count badge appears above one pane and reserves
+    /// nothing below it (mock-up lines 292-304, 4189).
+    ///
+    /// Red gate: there was no badge at all, so a tab holding three panes said so
+    /// nowhere in the strip.
+    #[test]
+    fn the_pane_count_badge_appears_only_above_one_pane() {
+        let tab = |pane_count| TabContent {
+            title: "tab".to_owned(),
+            pane_count,
+            badge_text_width: 6.0,
+        };
+        let (_, lone_labels, lone_sprites) = strip_chrome_of(1.0, &[tab(1)], 0, 0.0, None, false);
+        let (_, pair_labels, pair_sprites) = strip_chrome_of(1.0, &[tab(2)], 0, 0.0, None, false);
+        assert!(
+            !lone_labels.iter().any(|label| label.text == "1"),
+            "one pane prints no number and reserves no hole for one"
+        );
+        assert!(pair_labels.iter().any(|label| label.text == "2"));
+        assert_eq!(
+            pair_sprites.len(),
+            lone_sprites.len() + 1,
+            "and exactly one pill arrives with it"
+        );
+        let title_right = |labels: &[ChromeLabel]| {
+            labels
+                .iter()
+                .find(|label| label.text == "tab")
+                .expect("the tab is titled")
+                .rect[2]
+        };
+        assert!(
+            title_right(&lone_labels) > title_right(&pair_labels),
+            "the badge takes its width off the title's room, and only when it is there"
+        );
+    }
+
+    /// PIN — C27-C29: the badge is the mock-up's own pill, in the mock-up's own
+    /// place — icon, title, badge, then the `×`.
+    #[test]
+    fn the_badge_is_the_mockups_pill_and_stands_between_the_title_and_the_close() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let geometry = tab_strip_geometry(960.0 * scale, scale, 2, 0, 0.0);
+            let tab = &geometry.tabs[0];
+            let badge = tab_badge_rect(tab, 3, 0.0, scale).expect("three panes wear a badge");
+            assert_eq!(
+                badge[3] - badge[1],
+                (WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX * scale).round(),
+                "height: 15px"
+            );
+            assert_eq!(
+                badge[2] - badge[0],
+                (WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX * scale).round(),
+                "min-width: 15px holds a narrow digit"
+            );
+            let wide = tab_badge_rect(tab, 12, 20.0 * scale, scale).expect("two digits");
+            assert_eq!(
+                wide[2] - wide[0],
+                (20.0 * scale + 2.0 * WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX * scale).round(),
+                "padding: 0 4px is what a wider number grows by"
+            );
+            let close = tab.close.expect("a roomy active tab keeps its ×");
+            assert!(
+                (badge[2] - (close[0] - WINDOW_TAB_GAP_LOGICAL_PX * scale)).abs() < 0.51,
+                "the badge clears the row's own 8px gap before the ×"
+            );
+            let axis = (tab.body[1] + tab.body[3]) / 2.0;
+            assert!(
+                ((badge[1] + badge[3]) / 2.0 - axis).abs() <= 1.0,
+                "`align-items: center` puts it on the tab's own axis"
+            );
+        }
+        // `.tab.squeezed .panecount { display: none }` (mock-up line 201).
+        let squeezed = tab_strip_geometry(960.0, 1.0, 30, 0, 0.0);
+        assert_eq!(squeezed.tabs[1].tier, TabWidthTier::Squeezed);
+        assert!(
+            tab_badge_rect(&squeezed.tabs[1], 3, 0.0, 1.0).is_none(),
+            "under 90px the tab is its mark and carries nothing else"
+        );
+    }
+
+    /// PIN — C27-C29: the badge wears `--active` over whichever of the three
+    /// surfaces its tab is showing, and its ink is never the accent.
+    #[test]
+    fn the_badge_wears_active_over_its_own_tab_and_never_the_accent() {
+        let palette = chrome_palette();
+        let tabs = [
+            TabContent {
+                title: "a".to_owned(),
+                pane_count: 2,
+                badge_text_width: 6.0,
+            },
+            TabContent {
+                title: "b".to_owned(),
+                pane_count: 3,
+                badge_text_width: 6.0,
+            },
+        ];
+        let (_, labels, sprites) = strip_chrome_of(1.0, &tabs, 0, 0.0, None, false);
+        let pill = |color: [u8; 3]| {
+            sprites.iter().any(|sprite| {
+                sprite.color == color
+                    && matches!(
+                        sprite.mark,
+                        ChromeMark::ControlPill { radius_px }
+                            if radius_px == WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX as u32
+                    )
+            })
+        };
+        assert!(
+            pill(palette.tab_close_pill_on_content),
+            "the active tab's badge is `--active` over `--termbg`"
+        );
+        assert!(
+            pill(palette.tab_badge_on_resting_tab),
+            "a resting tab's is `--active` over `--panel`"
+        );
+        let ink = |text: &str| {
+            labels
+                .iter()
+                .find(|label| label.text == text)
+                .map(|label| (label.color, label.font_size_px, label.align_center))
+        };
+        assert_eq!(
+            ink("2"),
+            Some((palette.tab_badge_text_on_active_tab, 10.0, true)),
+            "`--ink` on the active tab, 10px, centred in its pill"
+        );
+        assert_eq!(
+            ink("3"),
+            Some((palette.tab_badge_text_on_resting_tab, 10.0, true)),
+            "`--ink2` elsewhere"
+        );
+        assert!(
+            !labels.iter().any(|label| {
+                matches!(label.text.as_str(), "2" | "3") && label.color == palette.accent
+            }),
+            "mock-up line 297 rules the accent out here"
+        );
     }
 }

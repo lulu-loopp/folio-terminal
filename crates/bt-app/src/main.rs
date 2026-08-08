@@ -5,7 +5,7 @@ use std::{
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
     ops::{Deref, DerefMut},
     panic,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -455,6 +455,15 @@ struct TabState {
     id: TabId,
     pty: Option<PtySession>,
     session: DualPlaneSession,
+    /// The name the user typed for this tab, overriding every layer under it.
+    ///
+    /// "`name` is an OVERRIDE, not a field, and that single fact designs the
+    /// whole editor: clearing it does not blank the tab, it REVEALS the layer
+    /// underneath" (mock-up line 2595). The slot and its precedence land here;
+    /// the editor that writes to it is the rename ticket's, so today nothing
+    /// sets it and every tab reads through to what the program or the shell
+    /// said.
+    manual_name: Option<String>,
     shell_fallback_notice: Option<String>,
     projection: ViewportProjection,
     grid: GridSize,
@@ -563,6 +572,15 @@ struct Runtime {
     /// the same reasons — and separate from it because the two are different
     /// kinds of surface: one is modal and one is a popup.
     profile_menu: profiles::ProfileMenu,
+    /// How far the tab strip is scrolled, in physical pixels (A7/A8).
+    ///
+    /// App state and nothing else: a scroll offset is where you are looking, not
+    /// what you have, so it is not a seat and it is not in the session file. It
+    /// is stored unclamped-by-nobody — every read runs it back through
+    /// `tab_strip_geometry`, which clamps it to the content that exists right
+    /// now, so a resize or a closed tab cannot leave the strip parked past its
+    /// own end.
+    tab_scroll: f32,
     /// The overlay's own mark rasters. A second cache rather than a share,
     /// because `ChromeMarkRasters::resolve` keeps exactly what the call asked
     /// for: one cache serving two lists would evict each on the other's turn.
@@ -613,6 +631,22 @@ fn window_minimum_changed(
 
 fn earliest_deadline<const N: usize>(deadlines: [Option<Instant>; N]) -> Option<Instant> {
     deadlines.into_iter().flatten().min()
+}
+
+impl TabState {
+    /// This tab's name, resolved through the four layers of C25.
+    ///
+    /// It lives on the tab and not on the runtime because every tab has one and
+    /// the strip needs all of them at once; `Runtime` reaches the active tab's
+    /// through `Deref`, which is how the OS window title stays the active tab's
+    /// title without a second code path deciding what that is.
+    fn display_title(&self) -> String {
+        display_title(
+            self.manual_name.as_deref(),
+            self.session.window_title(),
+            self.session.working_directory(),
+        )
+    }
 }
 
 impl Deref for Runtime {
@@ -1613,6 +1647,7 @@ fn create_tab_state(
     render_physical: PhysicalSize<u32>,
     wake: OutputWake,
     probe_input: Option<&[u8]>,
+    working_directory: Option<PathBuf>,
 ) -> Result<(TabState, String)> {
     let (seat_layout, terminal_seat) = solve_seats(&seats, renderer, render_physical);
     let grid = renderer
@@ -1620,12 +1655,13 @@ fn create_tab_state(
         .grid_for_pixels(terminal_seat.width, terminal_seat.height);
     let mut pty = if probe_input.is_none() {
         Some(
-            PtySession::spawn_default(
+            PtySession::spawn_default_in(
                 pty_size(
                     grid,
                     PhysicalSize::new(terminal_seat.width, terminal_seat.height),
                 ),
                 wake,
+                working_directory,
             )
             .context("spawn default PowerShell in ConPTY")?,
         )
@@ -1671,6 +1707,7 @@ fn create_tab_state(
             id,
             pty,
             session,
+            manual_name: None,
             shell_fallback_notice,
             projection,
             grid,
@@ -1843,6 +1880,10 @@ impl Runtime {
                 } else {
                     None
                 },
+                // A restored tab has no tab to inherit from: the session it is
+                // being rebuilt from is the authority on where it stood, and
+                // carrying that through is the restore ticket's business.
+                None,
             )?;
             tabs.push(tab);
             conpty_sources.push(conpty_source);
@@ -1911,6 +1952,7 @@ impl Runtime {
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
             profile_menu: profiles::ProfileMenu::default(),
+            tab_scroll: 0.0,
             settings_marks: marks::ChromeMarkRasters::default(),
             divider_drag: None,
             work_area: WorkAreaHint::NeverKnown,
@@ -1920,7 +1962,7 @@ impl Runtime {
         };
         runtime.refresh_work_area();
         runtime.apply_window_min_inner_size();
-        runtime.window.set_title(runtime.display_title());
+        runtime.window.set_title(&runtime.display_title());
         runtime.refresh_chrome();
         if trace_startup {
             let renderer_phases = runtime.renderer.init_timings();
@@ -1992,6 +2034,12 @@ impl Runtime {
         });
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
+        // I88 — "a new shell opens where the one you are looking at is standing"
+        // (mock-up line 3961). The address is the focused session's own OSC 7
+        // report, so a tab only inherits a directory its shell actually named;
+        // a session that has never reported one hands over nothing and the new
+        // shell starts where it always did.
+        let inherited = self.session.working_directory().map(Path::to_path_buf);
         let (tab, _) = create_tab_state(
             id,
             seats::Seats::lone_terminal(),
@@ -1999,10 +2047,34 @@ impl Runtime {
             render_physical,
             wake,
             None,
+            inherited,
         )?;
         self.tabs.push(tab);
         self.apply_window_min_inner_size();
         self.activate_tab(self.tabs.len() - 1, true)
+    }
+
+    /// Scroll the strip until `index` is wholly on screen, and report whether
+    /// anything moved.
+    ///
+    /// The verb that needs it is activation: a tab you have just switched to, or
+    /// have just made, is the one thing in the strip that must not be off-screen.
+    /// Everything else the strip does about scrolling, it does because the wheel
+    /// asked.
+    fn reveal_tab(&mut self, index: usize) -> bool {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
+        let scrolled = seats::tab_scroll_to_reveal(
+            width,
+            scale,
+            self.tabs.len(),
+            self.active_tab,
+            self.tab_scroll,
+            index,
+        );
+        let moved = scrolled != self.tab_scroll;
+        self.tab_scroll = scrolled;
+        moved
     }
 
     fn activate_tab(&mut self, index: usize, force: bool) -> Result<()> {
@@ -2010,6 +2082,10 @@ impl Runtime {
             return Ok(());
         }
         self.active_tab = index;
+        // Ordered after the assignment on purpose: the tab being revealed is the
+        // active one, and an active tab is measured with the skirt only an active
+        // tab has.
+        self.reveal_tab(index);
         let _ = self.pending_frames.take();
         self.last_presented_frame = None;
         self.preedit = None;
@@ -2030,7 +2106,7 @@ impl Runtime {
             "resize activated tab to its seat layout",
         )?;
         self.sync_math_layout_key();
-        self.window.set_title(self.display_title());
+        self.window.set_title(&self.display_title());
         self.refresh_chrome();
         self.mark_session_dirty(Instant::now());
         self.publish_frame(FrameTrigger {
@@ -2104,10 +2180,30 @@ impl Runtime {
                 scale,
                 self.tabs.len(),
             ));
-        let tab_titles = self
+        // The badge's box is a function of the number in it, and only the font
+        // knows how wide a number is — so the measuring happens here, where the
+        // renderer is, and the strip is handed the answer rather than a font.
+        let tabs = self
             .tabs
             .iter()
-            .map(|tab| display_title(tab.session.window_title()).to_owned())
+            .map(|tab| {
+                let pane_count = tab.seats.pane_count();
+                (tab.display_title(), pane_count)
+            })
+            .collect::<Vec<_>>();
+        let badge_font_px = bt_render::WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale;
+        let tabs = tabs
+            .into_iter()
+            .map(|(title, pane_count)| seats::TabContent {
+                badge_text_width: if pane_count > 1 {
+                    self.renderer
+                        .measure_chrome_text(&pane_count.to_string(), badge_font_px)
+                } else {
+                    0.0
+                },
+                title,
+                pane_count,
+            })
             .collect::<Vec<_>>();
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
         let preview_message = match self.preview_image.as_ref() {
@@ -2125,8 +2221,9 @@ impl Runtime {
             scale,
             self.seat_pointer,
             seats::ChromeContent {
-                tab_titles: &tab_titles,
+                tabs: &tabs,
                 active_tab: self.active_tab,
+                tab_scroll: self.tab_scroll,
                 preview_title: preview_title.as_deref(),
                 preview_message: preview_message.as_deref(),
                 profile_menu_open: self.profile_menu.is_open(),
@@ -2148,9 +2245,14 @@ impl Runtime {
         }
         let scale = self.renderer.metrics().scale_factor as f32;
         let (width, _) = self.renderer.presentation_geometry().swapchain_size;
-        let anchor =
-            seats::tab_strip_geometry(width as f32, scale, self.tabs.len(), self.active_tab)
-                .new_tab_menu;
+        let anchor = seats::tab_strip_geometry(
+            width as f32,
+            scale,
+            self.tabs.len(),
+            self.active_tab,
+            self.tab_scroll,
+        )
+        .new_tab_menu;
         Some(profiles::layout(anchor, width as f32, scale))
     }
 
@@ -3039,7 +3141,7 @@ impl Runtime {
             chrome_changed |= title_changed;
         }
         if chrome_changed {
-            self.window.set_title(self.display_title());
+            self.window.set_title(&self.display_title());
             self.refresh_chrome();
             if !active_changed {
                 self.present_chrome_change()?;
@@ -3077,7 +3179,7 @@ impl Runtime {
             active_finished |= index == self.active_tab && finished;
         }
         if chrome_changed {
-            self.window.set_title(self.display_title());
+            self.window.set_title(&self.display_title());
             self.refresh_chrome();
         }
         if active_finished {
@@ -4050,6 +4152,7 @@ impl Runtime {
             scale,
             self.tabs.len(),
             self.active_tab,
+            self.tab_scroll,
             position.x,
             position.y,
         )
@@ -4397,12 +4500,84 @@ impl Runtime {
         }
     }
 
+    /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
+    fn scroll_tab_strip(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
+        let geometry = seats::tab_strip_geometry(
+            width,
+            scale,
+            self.tabs.len(),
+            self.active_tab,
+            self.tab_scroll,
+        );
+        let travel = match delta {
+            MouseScrollDelta::LineDelta(x, y) => {
+                // A strip has no lines of its own to count, so a notch moves one
+                // wheel-amount of *this product's* line — the same distance the
+                // terminal under it would have moved. A notch that changed length
+                // depending on what it was over is a distance the hand has to
+                // relearn at every surface.
+                let line = self.projection.cell_height_subpixels().get() as f32
+                    / bt_viewport::SUBPIXELS_PER_PX as f32;
+                let amount =
+                    match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
+                        bt_platform::WheelScrollAmount::Lines(lines) => lines as f32 * line,
+                        // A page of a horizontal scroller is a screenful of it.
+                        bt_platform::WheelScrollAmount::Page => geometry.viewport[1],
+                    };
+                // A horizontal wheel says what it means. A vertical one over a
+                // scroller that only has a horizontal axis is the case that has
+                // to be translated, and translating it is why a one-axis mouse
+                // can reach the far end of the strip at all.
+                if x != 0.0 { x * amount } else { y * amount }
+            }
+            MouseScrollDelta::PixelDelta(position) => {
+                // A trackpad gesture already speaks pixels, and it has both axes:
+                // honour whichever one the fingers actually moved along.
+                let (x, y) = (position.x as f32, position.y as f32);
+                if x.abs() >= y.abs() { x } else { y }
+            }
+        };
+        // Wheel-up reveals what lies to the left, which is a smaller offset.
+        let scrolled = (self.tab_scroll - travel).clamp(0.0, geometry.max_scroll);
+        if scrolled == self.tab_scroll {
+            return Ok(());
+        }
+        self.tab_scroll = scrolled;
+        // The strip moved under a stationary pointer, so what it is over changed
+        // without the pointer having done anything.
+        if let Some(position) = self.pointer_position {
+            self.seat_pointer.hover = self.chrome_target_at(position);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
         // A notch behind the scrim is nobody's. The dialog's own content fits,
         // so there is nothing here for a wheel to move — and scrolling the
         // terminal under a modal is the same violation as clicking it.
         if self.settings_layout().is_some() {
             return Ok(());
+        }
+        // A7/A8 — a notch over the tab strip is the strip's. The mock-up gives
+        // `.tabs-inline` `overflow-x: auto`, and a wheel over an overflowing
+        // scroller scrolls it; a vertical wheel over a horizontal-only scroller
+        // is exactly the case browsers translate into horizontal motion, because
+        // most mice have no second axis to offer.
+        if let Some(position) = self.pointer_position
+            && seats::tab_strip_contains(
+                self.renderer.presentation_geometry().swapchain_size.0 as f32,
+                self.renderer.metrics().scale_factor as f32,
+                self.tabs.len(),
+                position.x,
+                position.y,
+            )
+        {
+            return self.scroll_tab_strip(delta);
         }
         // A notch over another seat is that seat's, not the terminal's. Guarded
         // on there being another seat at all, so a lone leaf scrolls exactly as
@@ -4657,9 +4832,10 @@ impl Runtime {
         }
         // Dev-only: open or close the preview seat at its ruled fixed-right
         // address, so the layout can be felt before the verbs that will really
-        // open it exist. Ctrl+Shift+P is a placeholder binding and is documented
-        // as such; it is checked here, above the PTY encoder, so the chord never
-        // reaches the child.
+        // open it exist. Ctrl+Alt+Shift+P is a placeholder binding and is
+        // documented as such — it wears Alt to leave Ctrl+Shift+P to the command
+        // palette the mock-up promises. It is checked here, above the PTY
+        // encoder, so the chord never reaches the child.
         if is_preview_toggle_shortcut(&event.logical_key, self.modifiers) {
             if !event.repeat {
                 self.toggle_preview_seat()?;
@@ -4926,10 +5102,6 @@ impl Runtime {
             source: FrameSource::Expose,
         })?;
         Ok(true)
-    }
-
-    fn display_title(&self) -> &str {
-        display_title(self.session.window_title())
     }
 
     fn sync_math_layout_key(&mut self) {
@@ -5423,8 +5595,73 @@ fn startup_poll_delay(first_text_presented: bool) -> Option<std::time::Duration>
     (!first_text_presented).then_some(STARTUP_PTY_POLL_INTERVAL)
 }
 
-fn display_title(session_title: Option<&str>) -> &str {
-    session_title.unwrap_or(DEFAULT_PROFILE_TITLE)
+/// The longest a tab's name may be: `TITLE_MAX` (`design/ui-mockup.html` line
+/// 2603).
+///
+/// Counted in characters rather than the mock-up's UTF-16 code units, which is
+/// the same number for everything that is not an astral plane character and the
+/// more honest reading of "40 characters" for the rest.
+const TITLE_MAX_CHARS: usize = 40;
+
+/// `cleanTitle` — the mock-up's own sanitiser, applied to text this terminal did
+/// not write.
+///
+/// Strip the C0 and C1 control ranges, trim, cap. The reason is stated at the
+/// mock-up's own definition: a program-controlled title is untrusted input, and
+/// "in the product it must also never be able to impersonate chrome". A title
+/// carrying a newline, a backspace or a C1 escape introducer is a title that can
+/// redraw the strip around it.
+fn clean_title(text: &str) -> String {
+    text.chars()
+        .filter(|character| !matches!(character, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
+        .collect::<String>()
+        .trim()
+        .chars()
+        .take(TITLE_MAX_CHARS)
+        .collect()
+}
+
+/// `cwdLeaf` — "what to show when there is room for one word: the folder you are
+/// in" (mock-up line 2585).
+///
+/// Ported as the mock-up writes it, over the path's own text rather than through
+/// `Path::file_name`, because the two disagree exactly where it matters: the
+/// mock-up's `"C:\\".replace(/[\\/]+$/,"").split(...)` yields `C:`, while
+/// `file_name` yields nothing at a drive root. A drive root is a place you can
+/// stand, so it gets a name.
+fn cwd_leaf(directory: &Path) -> Option<String> {
+    let text = directory.to_str()?;
+    let trimmed = text.trim_end_matches(['\\', '/']);
+    let leaf = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
+    let leaf = if leaf.is_empty() { trimmed } else { leaf };
+    (!leaf.is_empty()).then(|| leaf.to_owned())
+}
+
+/// A tab's name: 手动 > 程序标题 (OSC 2) > cwd (OSC 7) > the profile's own name.
+///
+/// "Each layer is more specific than the one under it, and each is something
+/// someone actually said: you typed it, the program announced it, or the shell
+/// reported where it stands" (mock-up line 2593). Nothing here is inferred.
+///
+/// Precedence is decided on the *sanitised* layers, not the raw ones, and that
+/// is a **ruling** the mock-up does not have to make because nothing in it is
+/// hostile. A program that sets its title to a lone control character has said
+/// nothing; if the raw value decided precedence, that program could blank a tab,
+/// which is precisely the impersonation the sanitiser exists to refuse. An empty
+/// answer therefore falls through to the layer beneath it.
+fn display_title(
+    manual_name: Option<&str>,
+    program_title: Option<&str>,
+    working_directory: Option<&Path>,
+) -> String {
+    let layer = |text: Option<String>| {
+        text.map(|text| clean_title(&text))
+            .filter(|text| !text.is_empty())
+    };
+    layer(manual_name.map(str::to_owned))
+        .or_else(|| layer(program_title.map(str::to_owned)))
+        .or_else(|| layer(working_directory.and_then(cwd_leaf)))
+        .unwrap_or_else(|| DEFAULT_PROFILE_TITLE.to_owned())
 }
 
 #[cfg(test)]
@@ -5655,14 +5892,21 @@ fn pty_frame_is_unchanged(
         .is_some_and(|previous| presentation_equivalent(previous, next))
 }
 
-/// The dev-only preview toggle: `Ctrl+Shift+P`.
+/// The dev-only preview toggle: `Ctrl+Alt+Shift+P`.
 ///
 /// Matched on the *character* the layout produced rather than on a physical key
-/// so it behaves the same on every keyboard layout, and required to carry both
-/// Ctrl and Shift and nothing else — a bare `Ctrl+P` is a real terminal control
+/// so it behaves the same on every keyboard layout, and required to carry the
+/// whole chord and nothing else — a bare `Ctrl+P` is a real terminal control
 /// byte (DLE) and must keep reaching the child.
+///
+/// Alt is in the chord because `Ctrl+Shift+P` is spoken for: the mock-up gives
+/// it to the command palette (`design/ui-mockup.html` line 5988), and that
+/// binding tests `!e.altKey`, so adding Alt is precisely how a placeholder gets
+/// out of the way of the verb that is coming. This toggle is scaffolding for
+/// feeling the preview seat's ruled address before the real verbs exist; the
+/// palette is product, and product wins the shorter chord.
 fn is_preview_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
-    modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
+    modifiers == ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("p"))
 }
 
@@ -7306,10 +7550,137 @@ mod tests {
         );
     }
 
+    /// PIN — C25: a tab's name is the topmost layer with something to say.
+    /// 手动 > 程序标题 (OSC 2) > cwd 叶名 (OSC 7) > profile (mock-up line 2593).
+    ///
+    /// Red gate: the name used to be `window_title().unwrap_or(profile)`, which
+    /// had no manual layer at all and fell from OSC 2 straight past the shell's
+    /// own report to the profile.
     #[test]
-    fn os_window_title_uses_session_text_or_the_profile_fallback() {
-        assert_eq!(display_title(Some("Claude ✳ 任务")), "Claude ✳ 任务");
-        assert_eq!(display_title(None), "PowerShell");
+    fn a_tab_name_takes_the_most_specific_layer_that_actually_spoke() {
+        let cwd = Path::new(r"D:\Developer\BetterTerminal");
+        assert_eq!(
+            display_title(Some("我的构建"), Some("pwsh"), Some(cwd)),
+            "我的构建",
+            "what you typed outranks everything under it"
+        );
+        assert_eq!(
+            display_title(None, Some("Claude ✳ 任务"), Some(cwd)),
+            "Claude ✳ 任务",
+            "then what the program announced"
+        );
+        assert_eq!(
+            display_title(None, None, Some(cwd)),
+            "BetterTerminal",
+            "then where the shell says it is standing"
+        );
+        assert_eq!(
+            display_title(None, None, None),
+            "PowerShell",
+            "and the profile catches what is left"
+        );
+    }
+
+    /// PIN — C25: `cwdLeaf` (mock-up line 2585) is a walk over the path's own
+    /// text, which is why a drive root keeps a name where `Path::file_name`
+    /// gives none.
+    #[test]
+    fn the_cwd_layer_names_the_folder_you_are_standing_in() {
+        for (path, leaf) in [
+            (r"D:\Developer\BetterTerminal", "BetterTerminal"),
+            (r"D:\Developer\BetterTerminal\", "BetterTerminal"),
+            (r"D:\Developer\BetterTerminal\\", "BetterTerminal"),
+            (r"C:\", "C:"),
+            (r"\\server\share\work", "work"),
+            ("/home/weiyi/src", "src"),
+        ] {
+            assert_eq!(
+                display_title(None, None, Some(Path::new(path))),
+                leaf,
+                "cwd {path}"
+            );
+        }
+    }
+
+    /// PIN — C26: a program-controlled title is untrusted input. It is stripped
+    /// of C0 and C1, trimmed, and capped at `TITLE_MAX`, because "in the product
+    /// it must also never be able to impersonate chrome" (mock-up line 2601).
+    ///
+    /// Red gate: OSC 2 text used to reach the strip byte for byte — a title of
+    /// `"\u{1b}[2J"` or eighty characters of anything was drawn as given.
+    #[test]
+    fn a_program_title_is_stripped_and_capped_before_it_reaches_the_strip() {
+        assert_eq!(
+            display_title(None, Some("a\u{7}b\u{1b}c"), None),
+            "abc",
+            "C0 goes, including the escape that starts every sequence"
+        );
+        assert_eq!(
+            display_title(None, Some("\u{9b}0m evil"), None),
+            "0m evil",
+            "and C1 goes, including the single-byte CSI"
+        );
+        assert_eq!(
+            display_title(None, Some("  \tspaced  "), None),
+            "spaced",
+            "the trim happens after the strip, as `cleanTitle` writes it"
+        );
+        assert_eq!(
+            display_title(None, Some(&"x".repeat(80)), None)
+                .chars()
+                .count(),
+            TITLE_MAX_CHARS,
+            "forty characters, and the forty-first is not a title"
+        );
+        // A layer that sanitises to nothing has said nothing, and falls through
+        // — otherwise a program could blank a tab with one control byte.
+        assert_eq!(
+            display_title(None, Some("\u{1}\u{2}"), Some(Path::new(r"C:\work"))),
+            "work"
+        );
+        assert_eq!(display_title(None, Some(""), None), "PowerShell");
+        assert_eq!(
+            display_title(Some("hi\u{0}there"), Some("prog"), None),
+            "hithere",
+            "the name you type goes through the same sieve (mock-up line 5882)"
+        );
+        assert_eq!(
+            display_title(Some("   "), Some("prog"), None),
+            "prog",
+            "emptying the override reveals the layer underneath"
+        );
+    }
+
+    /// PIN — N144: `Ctrl+Shift+P` is the command palette's
+    /// (`design/ui-mockup.html` line 5988), so the dev-only preview toggle
+    /// stands aside to `Ctrl+Alt+Shift+P`. The mock-up's own palette binding
+    /// tests `!e.altKey`, so the chord it leaves free is exactly this one and
+    /// the two can never collide.
+    ///
+    /// Red gate: the toggle used to answer to `Ctrl+Shift+P`, which would have
+    /// eaten the palette's chord before it was ever built.
+    #[test]
+    fn the_dev_preview_toggle_leaves_ctrl_shift_p_to_the_command_palette() {
+        let lower = Key::Character("p".into());
+        let upper = Key::Character("P".into());
+        let ctrl_alt_shift = ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT;
+        assert!(
+            !is_preview_toggle_shortcut(&lower, ModifiersState::CONTROL | ModifiersState::SHIFT),
+            "Ctrl+Shift+P belongs to the command palette"
+        );
+        assert!(is_preview_toggle_shortcut(&lower, ctrl_alt_shift));
+        assert!(
+            is_preview_toggle_shortcut(&upper, ctrl_alt_shift),
+            "the chord is matched on the character, whatever case the layout produced"
+        );
+        // A bare Ctrl+P is DLE and must keep reaching the child; so must every
+        // near-miss that is not the whole chord.
+        assert!(!is_preview_toggle_shortcut(&lower, ModifiersState::CONTROL));
+        assert!(!is_preview_toggle_shortcut(
+            &lower,
+            ModifiersState::CONTROL | ModifiersState::ALT
+        ));
+        assert!(!is_preview_toggle_shortcut(&lower, ModifiersState::empty()));
     }
 
     #[test]

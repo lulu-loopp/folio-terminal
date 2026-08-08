@@ -51,15 +51,18 @@ pub use theme::{
     WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
     WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
     WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
-    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
-    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
-    WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX,
-    WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette, current_cursor_style,
-    current_theme, foreground_rgb, set_cursor_style, set_theme, theme_revision,
+    WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
+    WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX, WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
+    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_PADDING_LEFT_LOGICAL_PX,
+    WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_SQUEEZED_LOGICAL_PX, WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX,
+    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, background_rgb, chrome_palette,
+    current_cursor_style, current_theme, foreground_rgb, set_cursor_style, set_theme,
+    theme_revision,
 };
 use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
 
@@ -2574,6 +2577,17 @@ impl Renderer {
         changed
     }
 
+    /// How wide `text` will be when drawn as a [`ChromeLabel`] at
+    /// `font_size_px`, in physical pixels.
+    ///
+    /// The one caller that cannot do without it is the tab's pane-count badge:
+    /// the mock-up sizes that pill as `max(min-width, text + padding)`, so its
+    /// box is a function of the number inside it, and the font is the only thing
+    /// that knows how wide a number is.
+    pub fn measure_chrome_text(&mut self, text: &str, font_size_px: f32) -> f32 {
+        measure_chrome_text(&mut self.font_system, text, font_size_px)
+    }
+
     pub fn update_scale_factor(&mut self, scale_factor: f64) -> Result<CellMetrics, RenderError> {
         self.metrics = CellMetrics::measure(&mut self.font_system, scale_factor)?;
         self.text_rows.clear();
@@ -4220,6 +4234,39 @@ struct ChromeTextLayout {
     top: f32,
     bounds: TextBounds,
     color: Color,
+}
+
+/// How wide a chrome label's text will be, in physical pixels.
+///
+/// Shaped through the same face, the same size and the same shaper
+/// [`shape_chrome_labels`] uses, because a width arrived at any other way is a
+/// second opinion about the same font — and a box sized from a second opinion is
+/// a box the ink does not fit.
+///
+/// The caller of the hour is the tab's pane-count badge, which the mock-up sizes
+/// as `max(min-width, text + padding)` (`.panecount`, lines 292-304): the badge
+/// cannot know its own width without knowing the number's.
+fn measure_chrome_text(font_system: &mut FontSystem, text: &str, font_size_px: f32) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let line_height = font_size_px * 1.4;
+    let mut buffer = Buffer::new(font_system, Metrics::new(font_size_px, line_height));
+    buffer.set_wrap(Wrap::None);
+    // No width bound at all: this asks what the text *wants*, not what it would
+    // be squeezed into.
+    buffer.set_size(None, Some(line_height));
+    buffer.set_text(
+        text,
+        &Attrs::new().family(Family::SansSerif),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+    buffer
+        .layout_runs()
+        .map(|run| run.line_w)
+        .fold(0.0_f32, f32::max)
 }
 
 /// Shape every chrome label. The buffers are owned by the returned vector so
