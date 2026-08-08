@@ -19,6 +19,91 @@ pub(crate) const DEFAULT_FOREGROUND_RGB: [u8; 3] = [0xe1, 0xe1, 0xe1];
 const LIGHT_BACKGROUND_FOREGROUND_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
 /// The mock-up's `--cursor` on dark.
 pub(crate) const DEFAULT_CURSOR_RGB: [u8; 3] = [0xd4, 0xd4, 0xd4];
+/// The mock-up's `--cursor` on light — `:root { --cursor: #37352F }`, which on
+/// that canvas is the ink itself.
+pub(crate) const LIGHT_CURSOR_RGB: [u8; 3] = [0x37, 0x35, 0x2f];
+
+/// The caret's ink paired with the canvas it stands on.
+///
+/// Like the terminal's own default ink and the selection fill, this is a
+/// *default* colour, so it takes the background-luma decision rather than
+/// [`current_theme`]'s: under a `BT_BG` override the caret follows the canvas
+/// it is actually drawn on.
+pub(crate) fn cursor_for_background(background: [u8; 3]) -> [u8; 3] {
+    if background_is_light(background) {
+        LIGHT_CURSOR_RGB
+    } else {
+        DEFAULT_CURSOR_RGB
+    }
+}
+
+/// The caret ink in force, from the same atomic snapshot as its background.
+pub(crate) fn cursor_rgb() -> [u8; 3] {
+    cursor_for_background(background_rgb())
+}
+
+/// How far an unfocused caret's ink falls back toward its canvas, in percent.
+///
+/// One constant, both canvases. On light it reproduces the mock-up's own
+/// `--ink3` exactly — there `--cursor` *is* `--ink`, and `--ink3` is that ink at
+/// .45 — so the quiet caret is the same third step the design already spends on
+/// a resting pane title, rather than a new number.
+pub(crate) const UNFOCUSED_CURSOR_ALPHA_PERCENT: i32 = 45;
+
+/// `ink` at [`UNFOCUSED_CURSOR_ALPHA_PERCENT`] over `canvas`, composited in sRGB
+/// and rounded half away from zero.
+///
+/// The pre-composition is the convention [`ChromePalette`] documents; doing it
+/// here rather than in a comment means the alpha and the bytes cannot drift
+/// apart, and the compiler still hands the pipeline a plain opaque colour.
+const fn cursor_ink_faded_over(canvas: [u8; 3], ink: [u8; 3]) -> [u8; 3] {
+    let mut faded = [0u8; 3];
+    let mut channel = 0;
+    while channel < 3 {
+        let base = canvas[channel] as i32;
+        let scaled = (ink[channel] as i32 - base) * UNFOCUSED_CURSOR_ALPHA_PERCENT;
+        let step = if scaled >= 0 {
+            (scaled + 50) / 100
+        } else {
+            (scaled - 50) / 100
+        };
+        faded[channel] = (base + step) as u8;
+        channel += 1;
+    }
+    faded
+}
+
+/// [`DEFAULT_CURSOR_RGB`] faded over `--termbg #1B1B1B`:
+/// 27 + (212 − 27) × .45 = 110.25 → #6E6E6E.
+pub(crate) const DEFAULT_UNFOCUSED_CURSOR_RGB: [u8; 3] =
+    cursor_ink_faded_over(DEFAULT_BACKGROUND_RGB, DEFAULT_CURSOR_RGB);
+/// [`LIGHT_CURSOR_RGB`] faded over `--termbg #FFFFFF`:
+/// 255 − (255 − 55) × .45 = 165 and its two companions → #A5A4A1.
+pub(crate) const LIGHT_UNFOCUSED_CURSOR_RGB: [u8; 3] =
+    cursor_ink_faded_over(LIGHT_BACKGROUND_RGB, LIGHT_CURSOR_RGB);
+
+/// The unfocused caret's ink, paired with its canvas.
+///
+/// The caret does not change shape when the window loses focus — a bar stays
+/// that bar — so the whole of the focus cue lives in this one colour, and it is
+/// pre-composited rather than blended at draw time for the reason
+/// [`ChromePalette`] gives: this pipeline composites in linear light, so handing
+/// the blender an sRGB alpha does not reproduce the design's own value. The
+/// surface under a caret *is* known — it is the terminal canvas — so the
+/// composite is knowable, and here it is.
+pub(crate) fn unfocused_cursor_for_background(background: [u8; 3]) -> [u8; 3] {
+    if background_is_light(background) {
+        LIGHT_UNFOCUSED_CURSOR_RGB
+    } else {
+        DEFAULT_UNFOCUSED_CURSOR_RGB
+    }
+}
+
+/// The unfocused caret ink in force, from the same atomic snapshot as its
+/// background.
+pub(crate) fn unfocused_cursor_rgb() -> [u8; 3] {
+    unfocused_cursor_for_background(background_rgb())
+}
 /// Focused bar cursor width in logical pixels, DPI-rounded and never below one device pixel.
 pub const CURSOR_BAR_WIDTH_LOGICAL_PX: f32 = 1.0;
 /// Focused underline cursor height in logical pixels, DPI-rounded and never below one device pixel.
@@ -994,6 +1079,61 @@ mod tests {
         assert_eq!(LIGHT_CHROME.caption_close_hover, [0xe5, 0x48, 0x4d]);
         assert_eq!(DARK_CHROME.active_tab, DEFAULT_BACKGROUND_RGB);
         assert_eq!(LIGHT_CHROME.active_tab, [0xff, 0xff, 0xff]);
+    }
+
+    /// PIN: the unfocused caret is the focused caret's own ink, faded toward
+    /// the canvas by one constant, pre-composited the way every other paired
+    /// colour in this module is. Both canvases are checked, and on each the
+    /// faded ink must land strictly between the canvas and the focused ink —
+    /// plainly there, plainly quieter.
+    #[test]
+    fn the_unfocused_caret_is_the_focused_caret_faded_toward_its_canvas() {
+        assert_eq!(
+            cursor_for_background(DEFAULT_BACKGROUND_RGB),
+            [0xd4, 0xd4, 0xd4]
+        );
+        assert_eq!(
+            cursor_for_background(LIGHT_BACKGROUND_RGB),
+            [0x37, 0x35, 0x2f]
+        );
+        assert_eq!(
+            unfocused_cursor_for_background(DEFAULT_BACKGROUND_RGB),
+            [0x6e, 0x6e, 0x6e]
+        );
+        assert_eq!(
+            unfocused_cursor_for_background(LIGHT_BACKGROUND_RGB),
+            [0xa5, 0xa4, 0xa1]
+        );
+        // On light this is byte-for-byte the mock-up's own `--ink3` over white,
+        // because there `--cursor` *is* `--ink` and `--ink3` is that ink at .45.
+        assert_eq!(
+            unfocused_cursor_for_background(LIGHT_BACKGROUND_RGB),
+            LIGHT_CHROME.pane_title
+        );
+
+        for background in [DEFAULT_BACKGROUND_RGB, LIGHT_BACKGROUND_RGB] {
+            let focused = cursor_for_background(background);
+            let faded = unfocused_cursor_for_background(background);
+            assert_ne!(
+                faded, focused,
+                "the two focus states must not share one ink"
+            );
+            let alpha = f64::from(UNFOCUSED_CURSOR_ALPHA_PERCENT) / 100.0;
+            for channel in 0..3 {
+                let canvas = f64::from(background[channel]);
+                let ink = f64::from(focused[channel]);
+                assert_eq!(
+                    f64::from(faded[channel]),
+                    (canvas + (ink - canvas) * alpha).round(),
+                    "channel {channel} is not the caret's ink at {alpha} over its canvas"
+                );
+                let (low, high) = (canvas.min(ink), canvas.max(ink));
+                assert!(
+                    f64::from(faded[channel]) > low && f64::from(faded[channel]) < high,
+                    "channel {channel} must sit between the canvas and the focused ink"
+                );
+            }
+        }
     }
 
     /// PIN (visual pass): the three numbers the mock-up gives a floating window

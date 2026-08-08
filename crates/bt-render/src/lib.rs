@@ -35,8 +35,8 @@ use wgpu::util::DeviceExt;
 
 use rounded_rect::{rounded_rect_coverage, rounded_rect_halo_coverage};
 use theme::{
-    CURSOR_BAR_WIDTH_LOGICAL_PX, CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_CURSOR_RGB,
-    DEFAULT_DIM_FOREGROUND_RGB, ansi_16_rgb,
+    CURSOR_BAR_WIDTH_LOGICAL_PX, CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX, DEFAULT_DIM_FOREGROUND_RGB,
+    ansi_16_rgb, cursor_rgb, unfocused_cursor_rgb,
 };
 pub use theme::{
     ChromePalette, CursorStyle, DARK_CHROME, DEFAULT_BACKGROUND_RGB,
@@ -3915,11 +3915,17 @@ impl Renderer {
         ) && (frame.cursor.row as usize) < drawable_rows
             && frame.cursor.column < frame.columns.get()
         {
+            // Losing focus fades the caret's ink; it never redraws it in another shape.
+            let ink = if self.window_focused {
+                cursor_rgb()
+            } else {
+                unfocused_cursor_rgb()
+            };
             rects.extend(
                 cursor_pixel_bounds(self.metrics, frame, self.window_focused)
                     .into_iter()
                     .map(|[left, top, right, bottom]| {
-                        self.pixel_rect(left, top, right, bottom, DEFAULT_CURSOR_RGB)
+                        self.pixel_rect(left, top, right, bottom, ink)
                     }),
             );
         }
@@ -4820,21 +4826,34 @@ fn cursor_pixel_bounds(
     frame: &ViewportFrame,
     focused: bool,
 ) -> Vec<[f32; 4]> {
+    cursor_pixel_bounds_for_style(metrics, frame, focused, current_cursor_style())
+}
+
+/// The caret's rectangles for one explicitly named shape.
+///
+/// The process-wide shape is read once, at the call site above, so nothing below this line depends
+/// on global state.
+fn cursor_pixel_bounds_for_style(
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    focused: bool,
+    style: CursorStyle,
+) -> Vec<[f32; 4]> {
     let (column, span) = cursor_cell_span(frame);
     let [left, top, _, bottom] =
         frame_cell_bounds_px(metrics, frame, frame.cursor.row as usize, column);
     let right = left + span as f32 * metrics.cell_width_px;
-    if focused {
-        return focused_cursor_pixel_bounds(
-            metrics,
-            [left, top, right, bottom],
-            current_cursor_style(),
-        );
+    let cell = [left, top, right, bottom];
+    // Losing focus fades the caret's ink and leaves its shape alone: a bar stays the same bar in
+    // the same place, an underline the same underline. A block is the one shape whose faded form
+    // is geometric — the classic hollow box, which is also the only way for a full-cell caret to
+    // stop hiding the cell's own glyph while the window is away. Every other shape already lets
+    // the cell read through it, so it has nothing to hollow out.
+    if focused || style != CursorStyle::Block {
+        return cursor_shape_pixel_bounds(metrics, cell, style);
     }
 
-    // Match Windows Terminal's focus cue: retain a visible one-logical-pixel hollow caret while
-    // allowing the cell contents to remain readable through its center.
-    // This stays the whole cell's outline for every selected focused shape.
+    // The outline is one logical pixel at every DPI, never wider than half the cell it rings.
     let stroke = (metrics.scale_factor as f32)
         .max(1.0)
         .round()
@@ -4848,7 +4867,7 @@ fn cursor_pixel_bounds(
     ]
 }
 
-fn focused_cursor_pixel_bounds(
+fn cursor_shape_pixel_bounds(
     metrics: CellMetrics,
     [left, top, right, bottom]: [f32; 4],
     style: CursorStyle,
@@ -5926,7 +5945,7 @@ fn terminal_color(color: TerminalColor, foreground: bool) -> [u8; 3] {
         TerminalColor::Indexed(index) => indexed_color(index),
         TerminalColor::Named(16 | 27) if foreground => default_foreground(),
         TerminalColor::Named(17) if !foreground => default_background(),
-        TerminalColor::Named(18) => DEFAULT_CURSOR_RGB,
+        TerminalColor::Named(18) => cursor_rgb(),
         TerminalColor::Named(28) => DEFAULT_DIM_FOREGROUND_RGB,
         TerminalColor::Named(code @ 19..=26) => {
             indexed_color(code - 19).map(|channel| channel.saturating_mul(2) / 3)
@@ -7999,10 +8018,13 @@ mod tests {
             .unwrap_or(DEFAULT_BACKGROUND_RGB);
         assert_eq!(default_background(), expected_background);
         assert_eq!(default_foreground(), foreground_rgb());
-        assert_eq!(DEFAULT_CURSOR_RGB, [0xd4, 0xd4, 0xd4]);
+        assert_eq!(
+            theme::cursor_for_background(DEFAULT_BACKGROUND_RGB),
+            [0xd4, 0xd4, 0xd4]
+        );
         assert_eq!(
             terminal_color(TerminalColor::Named(18), true),
-            DEFAULT_CURSOR_RGB,
+            cursor_rgb(),
             "the cursor quad and cursor named color share the mock-up cursor"
         );
         for (index, expected) in ansi_16_rgb().iter().copied().enumerate() {
@@ -8781,7 +8803,7 @@ mod tests {
                 view_generation: bt_doc::ViewGeneration(1),
             };
             let cell = frame_cell_bounds_px(metrics, &frame, 0, 0);
-            let bar = focused_cursor_pixel_bounds(metrics, cell, CursorStyle::Bar);
+            let bar = cursor_shape_pixel_bounds(metrics, cell, CursorStyle::Bar);
             assert_eq!(bar.len(), 1);
             let [left, top, right, bottom] = bar[0];
             assert_eq!(
@@ -8799,11 +8821,11 @@ mod tests {
             assert_eq!([top, bottom], [cell[1], cell[3]], "the row's full height");
 
             assert_eq!(
-                focused_cursor_pixel_bounds(metrics, cell, CursorStyle::Block),
+                cursor_shape_pixel_bounds(metrics, cell, CursorStyle::Block),
                 vec![cell],
                 "at {dpi_milli} milli-DPI block is the whole cell"
             );
-            let underline = focused_cursor_pixel_bounds(metrics, cell, CursorStyle::Underline);
+            let underline = cursor_shape_pixel_bounds(metrics, cell, CursorStyle::Underline);
             assert_eq!(underline.len(), 1);
             assert_eq!(underline[0][0], cell[0]);
             assert_eq!(underline[0][2], cell[2]);
@@ -8876,20 +8898,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn unfocused_cursor_is_a_visible_hollow_outline_and_focus_restores_the_caret() {
-        let metrics = CellMetrics {
-            cell_width_px: 8.0,
-            cell_height_px: 20.0,
-            font_size_px: 16.0,
-            padding_px: 4.0,
-            scale_factor: 1.0,
-            ascii_baseline_px: 0.0,
-            primary_advance_px: 8.0,
-            primary_cap_height_px: 10.0,
-            primary_cap_center_y_px: 5.0,
-        };
-        let frame = ViewportFrame {
+    /// One cell, one caret in it, at whatever DPI the metrics describe.
+    fn single_cell_cursor_frame(metrics: CellMetrics) -> ViewportFrame {
+        ViewportFrame {
             columns: NonZeroU32::new(1).unwrap(),
             grid_rows: NonZeroU32::new(1).unwrap(),
             rows: NonZeroU32::new(1).unwrap(),
@@ -8910,19 +8921,82 @@ mod tests {
             scroll_offset_rows: 0,
             layout_key: bt_doc_layout_key(1),
             view_generation: bt_doc::ViewGeneration(1),
-        };
+        }
+    }
+
+    /// Square cells at a chosen scale, so a caret's geometry can be read at any
+    /// DPI without a font.
+    fn cursor_test_metrics(scale: f32) -> CellMetrics {
+        CellMetrics {
+            cell_width_px: 8.0 * scale,
+            cell_height_px: 20.0 * scale,
+            font_size_px: 16.0 * scale,
+            padding_px: 4.0 * scale,
+            scale_factor: f64::from(scale),
+            ascii_baseline_px: 0.0,
+            primary_advance_px: 8.0 * scale,
+            primary_cap_height_px: 10.0 * scale,
+            primary_cap_center_y_px: 5.0 * scale,
+        }
+    }
+
+    /// PIN — losing focus fades the caret's ink and leaves its shape alone. A
+    /// bar stays the same bar in the same place; an underline the same
+    /// underline. Only the block, whose faded form is the classic hollow box,
+    /// changes geometry at all.
+    #[test]
+    fn an_unfocused_caret_keeps_the_shape_the_user_chose() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let metrics = cursor_test_metrics(scale);
+            let frame = single_cell_cursor_frame(metrics);
+            for style in [CursorStyle::Bar, CursorStyle::Underline] {
+                assert_eq!(
+                    cursor_pixel_bounds_for_style(metrics, &frame, false, style),
+                    cursor_pixel_bounds_for_style(metrics, &frame, true, style),
+                    "at {scale}× a {style:?} caret must not change shape when the window \
+                     loses focus — only its ink fades"
+                );
+            }
+            let focused_block =
+                cursor_pixel_bounds_for_style(metrics, &frame, true, CursorStyle::Block);
+            let unfocused_block =
+                cursor_pixel_bounds_for_style(metrics, &frame, false, CursorStyle::Block);
+            assert_eq!(focused_block.len(), 1, "a focused block is one filled cell");
+            assert_eq!(
+                unfocused_block.len(),
+                4,
+                "at {scale}× a block's faded form is its hollow outline"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unfocused_block_hollows_out_and_focus_refills_it() {
+        let metrics = cursor_test_metrics(1.0);
+        let frame = single_cell_cursor_frame(metrics);
 
         assert_eq!(
-            cursor_pixel_bounds(metrics, &frame, true),
-            vec![[4.0, 4.0, 5.0, 24.0]],
-            "a focused caret is the one-logical-pixel bar"
+            cursor_pixel_bounds_for_style(metrics, &frame, true, CursorStyle::Block),
+            vec![[4.0, 4.0, 12.0, 24.0]],
+            "a focused block is the whole cell"
         );
-        let outline = cursor_pixel_bounds(metrics, &frame, false);
+        let outline = cursor_pixel_bounds_for_style(metrics, &frame, false, CursorStyle::Block);
         assert_eq!(outline.len(), 4);
         assert_eq!(outline[0], [4.0, 4.0, 12.0, 5.0]);
         assert_eq!(outline[1], [4.0, 23.0, 12.0, 24.0]);
         assert_eq!(outline[2], [4.0, 5.0, 5.0, 23.0]);
         assert_eq!(outline[3], [11.0, 5.0, 12.0, 23.0]);
+
+        assert_eq!(
+            cursor_pixel_bounds_for_style(metrics, &frame, true, CursorStyle::Bar),
+            vec![[4.0, 4.0, 5.0, 24.0]],
+            "a focused caret in the default shape is the one-logical-pixel bar"
+        );
+        assert_eq!(
+            cursor_pixel_bounds_for_style(metrics, &frame, false, CursorStyle::Bar),
+            vec![[4.0, 4.0, 5.0, 24.0]],
+            "and that bar is exactly what an unfocused window keeps"
+        );
     }
 
     /// PIN — the hollow outline's stroke is one *logical* pixel: it scales with
@@ -8930,41 +9004,10 @@ mod tests {
     /// pixel at 200%.
     #[test]
     fn the_hollow_outline_stroke_scales_with_the_dpi() {
-        let metrics = CellMetrics {
-            cell_width_px: 16.0,
-            cell_height_px: 40.0,
-            font_size_px: 32.0,
-            padding_px: 8.0,
-            scale_factor: 2.0,
-            ascii_baseline_px: 0.0,
-            primary_advance_px: 16.0,
-            primary_cap_height_px: 20.0,
-            primary_cap_center_y_px: 10.0,
-        };
-        let frame = ViewportFrame {
-            columns: NonZeroU32::new(1).unwrap(),
-            grid_rows: NonZeroU32::new(1).unwrap(),
-            rows: NonZeroU32::new(1).unwrap(),
-            presentation_offset_subpixels: 0,
-            cells: vec![CapturedCell::plain("x")],
-            cursor: bt_viewport::GridCursor {
-                row: 0,
-                column: 0,
-                visible: true,
-            },
-            cell_anchors: test_cell_anchors(1),
-            row_map: test_row_map_for_metrics(1, metrics),
-            selection_spans: Vec::new(),
-            math_blocks: Vec::new(),
-            math_failures: Vec::new(),
-            status_text: None,
-            viewport_origin: FrameViewportOrigin::Bottom,
-            scroll_offset_rows: 0,
-            layout_key: bt_doc_layout_key(1),
-            view_generation: bt_doc::ViewGeneration(1),
-        };
+        let metrics = cursor_test_metrics(2.0);
+        let frame = single_cell_cursor_frame(metrics);
 
-        let outline = cursor_pixel_bounds(metrics, &frame, false);
+        let outline = cursor_pixel_bounds_for_style(metrics, &frame, false, CursorStyle::Block);
         assert_eq!(outline.len(), 4);
         assert_eq!(
             outline[0][3] - outline[0][1],
@@ -8976,6 +9019,39 @@ mod tests {
             2.0,
             "the vertical strokes wear the same width"
         );
+    }
+
+    /// PIN — an unfocused caret is drawn in a *different, quieter* ink than a
+    /// focused one, and a live theme switch reaches both of them.
+    #[test]
+    fn theme_switch_repaints_both_caret_inks() {
+        let _lock = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_theme = current_theme();
+        let _restore = RestoreTheme(original_theme);
+        assert_ne!(
+            set_theme(Theme::Dark),
+            ThemeChange::LockedByEnvironment,
+            "the runtime theme must be switchable for this renderer pin"
+        );
+
+        assert_eq!(cursor_rgb(), [0xd4, 0xd4, 0xd4]);
+        assert_eq!(unfocused_cursor_rgb(), [0x6e, 0x6e, 0x6e]);
+        assert_ne!(
+            unfocused_cursor_rgb(),
+            cursor_rgb(),
+            "an unfocused caret must be visibly quieter than a focused one"
+        );
+
+        assert_eq!(set_theme(Theme::Light), ThemeChange::Changed);
+        assert_eq!(cursor_rgb(), [0x37, 0x35, 0x2f]);
+        assert_eq!(
+            unfocused_cursor_rgb(),
+            [0xa5, 0xa4, 0xa1],
+            "the switch must reach the faded caret, not only the focused one"
+        );
+        assert_ne!(unfocused_cursor_rgb(), cursor_rgb());
     }
 
     #[test]
