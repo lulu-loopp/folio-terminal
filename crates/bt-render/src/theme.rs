@@ -26,6 +26,46 @@ pub const CURSOR_UNDERLINE_HEIGHT_LOGICAL_PX: f32 = 2.0;
 pub(crate) const DEFAULT_DIM_FOREGROUND_RGB: [u8; 3] = [0x88, 0x88, 0x88];
 /// Background-only selection treatment; foreground colors remain terminal-authored.
 pub(crate) const DEFAULT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0x26, 0x4f, 0x78];
+/// The same treatment over a light canvas.
+///
+/// The mock-up declares no `::selection` — the terminal surface there is a
+/// static mock with nothing selected in it — so this value is derived rather
+/// than copied, and it is derived from inside the mock-up's own palette instead
+/// of imported from another product. `--accent` is #5E6AD2; the one in-terminal
+/// highlight the mock-up does draw, `mark.srch`, is that accent at 30% over
+/// `--termbg`. Selection is the same kind of mark, so it takes the same step:
+/// 30% of #5E6AD2 over the light `--termbg` #FFFFFF, which is 255 − 161×.30,
+/// 255 − 149×.30, 255 − 45×.30 → #CFD2F2.
+///
+/// That lands where it should on both counts. Against the reference the eye is
+/// trained on — VS Code Light's #ADD6FF — it is the same weight, dropping the
+/// canvas from luminance 1.0 to .658 where #ADD6FF drops it to .642; and it is
+/// accent's own hue rather than a borrowed blue, so the selection reads as this
+/// product's palest surface instead of a guest from another one.
+pub(crate) const LIGHT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0xcf, 0xd2, 0xf2];
+
+/// The selection fill paired with the canvas it lies on.
+///
+/// This is a *default* colour in the same sense as the terminal's own ink, not
+/// an explicit ANSI entry, so it takes the ink's dark/light decision — the
+/// background-luma threshold — and not [`current_theme`]'s. Under a `BT_BG`
+/// override the two disagree on purpose: `BT_BG=#FFFFFF` keeps the selected
+/// theme dark while painting a light canvas, and the ink already follows the
+/// canvas there. A selection fill that followed the theme instead would be the
+/// one colour on that screen still dressed for the other canvas.
+pub(crate) fn selection_background_for_background(background: [u8; 3]) -> [u8; 3] {
+    if background_is_light(background) {
+        LIGHT_SELECTION_BACKGROUND_RGB
+    } else {
+        DEFAULT_SELECTION_BACKGROUND_RGB
+    }
+}
+
+/// The selection fill in force, read through the same atomic snapshot as the
+/// background it sits on, so a runtime theme switch changes it on the next frame.
+pub(crate) fn selection_background_rgb() -> [u8; 3] {
+    selection_background_for_background(background_rgb())
+}
 pub(crate) const DEFAULT_STATUS_BACKGROUND_RGB: [u8; 3] = [0x33, 0x33, 0x33];
 
 // ---------------------------------------------------------------------------
@@ -890,6 +930,52 @@ mod tests {
         ];
         assert_eq!(ansi_16_rgb_for(Theme::Dark), &CAMPBELL);
         assert_eq!(ansi_16_rgb_for(Theme::Light), &MAC_TERMINAL);
+    }
+
+    /// PIN: the selection fill is a *default* colour, so it follows the same
+    /// background-luma switch that already chooses the terminal's own ink —
+    /// never one value for both canvases.
+    ///
+    /// Dark keeps the value it shipped with; light is the mock-up's `--accent`
+    /// #5E6AD2 at the 30% its own in-terminal highlight (`mark.srch`) uses,
+    /// composited over the light `--termbg` #FFFFFF in sRGB the way every other
+    /// translucent-over-known-surface colour in this file is pre-composited.
+    #[test]
+    fn selection_background_follows_the_same_luma_threshold_as_the_terminal_ink() {
+        assert_eq!(
+            selection_background_for_background(DEFAULT_BACKGROUND_RGB),
+            [0x26, 0x4f, 0x78],
+            "the dark canvas keeps the fill the user never complained about",
+        );
+        assert_eq!(
+            selection_background_for_background(LIGHT_BACKGROUND_RGB),
+            [0xcf, 0xd2, 0xf2],
+            "the light canvas gets accent's palest face, not the dark navy",
+        );
+        // The switch is the ink's switch, taken at the same threshold.
+        assert_eq!(
+            selection_background_for_background([0x0c; 3]),
+            DEFAULT_SELECTION_BACKGROUND_RGB
+        );
+        assert_eq!(
+            selection_background_for_background([0xf5; 3]),
+            LIGHT_SELECTION_BACKGROUND_RGB
+        );
+        // Default ink stays legible on whichever fill it lands on: the light
+        // fill is pale enough that `--ink` #37352F still reads, which is why no
+        // inverted selection foreground is invented anywhere in the renderer.
+        assert_ne!(
+            LIGHT_SELECTION_BACKGROUND_RGB,
+            DEFAULT_SELECTION_BACKGROUND_RGB
+        );
+        assert!(
+            background_is_light(LIGHT_SELECTION_BACKGROUND_RGB),
+            "black text on the light selection, so the fill must stay a light one"
+        );
+        assert!(
+            !background_is_light(DEFAULT_SELECTION_BACKGROUND_RGB),
+            "light text on the dark selection"
+        );
     }
 
     /// PIN (styling pass): the chrome's dark/light decision is the terminal

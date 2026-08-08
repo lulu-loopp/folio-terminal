@@ -64,7 +64,7 @@ pub use theme::{
     current_cursor_style, current_theme, foreground_rgb, set_cursor_style, set_theme,
     theme_revision,
 };
-use theme::{DEFAULT_SELECTION_BACKGROUND_RGB, DEFAULT_STATUS_BACKGROUND_RGB};
+use theme::{DEFAULT_STATUS_BACKGROUND_RGB, selection_background_rgb};
 
 const BASE_FONT_SIZE_LOGICAL_PX: f32 = 16.0;
 const BASE_LINE_HEIGHT_LOGICAL_PX: f32 = 22.0;
@@ -3865,6 +3865,10 @@ impl Renderer {
                 rects.push(self.cell_rect(frame, index / columns, index % columns, background));
             }
         }
+        // Read once per frame from the same atomic word the background comes
+        // from, so a theme switch cannot leave a live selection wearing the
+        // previous canvas's fill.
+        let selection_background = selection_background_rgb();
         for span in &frame.selection_spans {
             let start = span.start_column.min(frame.columns.get()) as usize;
             let end = span.end_column.min(frame.columns.get()) as usize;
@@ -3874,7 +3878,7 @@ impl Renderer {
                     span,
                     start,
                     end - start,
-                    DEFAULT_SELECTION_BACKGROUND_RGB,
+                    selection_background,
                 ));
             }
         }
@@ -4828,10 +4832,14 @@ fn cursor_pixel_bounds(
         );
     }
 
-    // Match Windows Terminal's focus cue: retain a visible one-device-pixel hollow caret while
+    // Match Windows Terminal's focus cue: retain a visible one-logical-pixel hollow caret while
     // allowing the cell contents to remain readable through its center.
     // This stays the whole cell's outline for every selected focused shape.
-    let stroke = 1.0_f32.min((right - left) / 2.0).min((bottom - top) / 2.0);
+    let stroke = (metrics.scale_factor as f32)
+        .max(1.0)
+        .round()
+        .min((right - left) / 2.0)
+        .min((bottom - top) / 2.0);
     vec![
         [left, top, right, top + stroke],
         [left, bottom - stroke, right, bottom],
@@ -8395,17 +8403,51 @@ mod tests {
         assert_ne!(key, status);
     }
 
+    /// The process theme is process-wide, so every test that moves it has to
+    /// take the same lock — one per test would let two of them interleave a
+    /// switch with another's reads.
+    static THEME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct RestoreTheme(Theme);
+    impl Drop for RestoreTheme {
+        fn drop(&mut self) {
+            let _ = set_theme(self.0);
+        }
+    }
+
+    /// PIN: a live selection changes colour the moment the theme does. The fill
+    /// is read from the same atomic word as the background, so there is no
+    /// frame on which a selection is still wearing the other canvas's colour.
+    #[test]
+    fn theme_switch_repaints_the_selection_fill() {
+        let _lock = THEME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_theme = current_theme();
+        let _restore = RestoreTheme(original_theme);
+        assert_ne!(
+            set_theme(Theme::Dark),
+            ThemeChange::LockedByEnvironment,
+            "the runtime theme must be switchable for this renderer pin"
+        );
+
+        assert_eq!(theme::selection_background_rgb(), [0x26, 0x4f, 0x78]);
+        let dark_revision = theme_revision();
+
+        assert_eq!(set_theme(Theme::Light), ThemeChange::Changed);
+        assert_eq!(
+            theme::selection_background_rgb(),
+            [0xcf, 0xd2, 0xf2],
+            "the switch must reach the selection fill, not only the ink"
+        );
+        assert!(
+            theme_revision() > dark_revision,
+            "the selection rides the revision channel that invalidates theme-authored artifacts"
+        );
+    }
+
     #[test]
     fn theme_switch_recomposes_an_ansi_colored_rendered_row() {
-        static THEME_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-        struct RestoreTheme(Theme);
-        impl Drop for RestoreTheme {
-            fn drop(&mut self) {
-                let _ = set_theme(self.0);
-            }
-        }
-
         let _lock = THEME_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -8881,6 +8923,59 @@ mod tests {
         assert_eq!(outline[1], [4.0, 23.0, 12.0, 24.0]);
         assert_eq!(outline[2], [4.0, 5.0, 5.0, 23.0]);
         assert_eq!(outline[3], [11.0, 5.0, 12.0, 23.0]);
+    }
+
+    /// PIN — the hollow outline's stroke is one *logical* pixel: it scales with
+    /// the DPI like every other measure, instead of thinning to half a logical
+    /// pixel at 200%.
+    #[test]
+    fn the_hollow_outline_stroke_scales_with_the_dpi() {
+        let metrics = CellMetrics {
+            cell_width_px: 16.0,
+            cell_height_px: 40.0,
+            font_size_px: 32.0,
+            padding_px: 8.0,
+            scale_factor: 2.0,
+            ascii_baseline_px: 0.0,
+            primary_advance_px: 16.0,
+            primary_cap_height_px: 20.0,
+            primary_cap_center_y_px: 10.0,
+        };
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(1).unwrap(),
+            grid_rows: NonZeroU32::new(1).unwrap(),
+            rows: NonZeroU32::new(1).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::plain("x")],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(1),
+            row_map: test_row_map_for_metrics(1, metrics),
+            selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(1),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+
+        let outline = cursor_pixel_bounds(metrics, &frame, false);
+        assert_eq!(outline.len(), 4);
+        assert_eq!(
+            outline[0][3] - outline[0][1],
+            2.0,
+            "at 200% the stroke is two device pixels, one logical pixel"
+        );
+        assert_eq!(
+            outline[2][2] - outline[2][0],
+            2.0,
+            "the vertical strokes wear the same width"
+        );
     }
 
     #[test]
