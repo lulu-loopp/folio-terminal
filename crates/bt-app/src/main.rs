@@ -23,8 +23,8 @@ use bt_doc::{Bias, LayoutKey};
 use bt_layout::{Axis, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
-    SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionThemeV1, SessionV1, TabV1, WindowBoundsV1,
-    WindowStateV1,
+    SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionThemeV1, SessionV1, TabV1, ThemeModeV1,
+    WindowBoundsV1, WindowStateV1,
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
@@ -50,7 +50,7 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
-    window::{Window, WindowId},
+    window::{Theme as OsTheme, Window, WindowId},
 };
 
 const INITIAL_WIDTH: f64 = 960.0;
@@ -571,9 +571,9 @@ struct Runtime {
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
     session_store: persist::SessionStore,
-    /// Persisted user choice. Under `BT_BG` the process colors are locked but this choice is kept so
-    /// a diagnostic launch cannot overwrite the user's real preference on clean exit.
-    selected_theme: Theme,
+    /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
+    /// colors are locked but this mode is still kept across a diagnostic launch.
+    theme_mode: ThemeModeV1,
     /// The last aggregate minimum handed to winit. On Windows, winit 0.30 re-applies the current
     /// inner size whenever this setter runs; repeating an unchanged minimum can therefore feed the
     /// non-client adjustment back into the client size. The outer `Option` distinguishes "never
@@ -1735,13 +1735,8 @@ impl Runtime {
         // be the window's opening bounds rather than a correction applied after
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
-        let selected_theme = render_theme(session_store.loaded().theme);
+        let theme_mode = render_theme_mode(session_store.loaded().theme);
         set_cursor_style(render_cursor_style(session_store.loaded().cursor_style));
-        if set_theme(selected_theme) == ThemeChange::LockedByEnvironment {
-            eprintln!(
-                "BT_THEME persisted_theme={selected_theme:?} ignored_for_runtime=true reason=BT_BG"
-            );
-        }
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
             .with_title(DEFAULT_PROFILE_TITLE)
@@ -1761,6 +1756,12 @@ impl Runtime {
                 .create_window(attributes)
                 .context("create native window")?,
         );
+        let resolved_theme = resolve_theme_mode(theme_mode, window.theme());
+        if set_theme(resolved_theme) == ThemeChange::LockedByEnvironment {
+            eprintln!(
+                "BT_THEME persisted_mode={theme_mode:?} resolved_theme={resolved_theme:?} ignored_for_runtime=true reason=BT_BG"
+            );
+        }
         install_theme_class_background(&window)?;
         window.set_ime_allowed(true);
         let hwnd = window_hwnd(&window)?;
@@ -1915,7 +1916,7 @@ impl Runtime {
             divider_drag: None,
             work_area: WorkAreaHint::NeverKnown,
             session_store,
-            selected_theme,
+            theme_mode,
             window_min_inner_size: None,
         };
         runtime.refresh_work_area();
@@ -2182,7 +2183,7 @@ impl Runtime {
     /// picker is closed the moment the dialog opens.
     fn refresh_overlay(&mut self) -> bool {
         let (quads, labels, sprites) = if let Some(layout) = self.settings_layout() {
-            settings::build(&layout, self.settings.hover(), self.selected_theme)
+            settings::build(&layout, self.settings.hover(), self.theme_mode)
         } else if let Some(layout) = self.profile_menu_layout() {
             profiles::build(&layout, self.profile_menu.hover())
         } else {
@@ -2255,8 +2256,8 @@ impl Runtime {
             }
             target @ settings::SettingsTarget::ThemeOption(_) => {
                 self.settings.set_menu_open(false);
-                if let Some(theme) = settings::theme_requested(target) {
-                    self.apply_theme(theme)?;
+                if let Some(mode) = settings::theme_requested(target) {
+                    self.apply_theme_mode(mode)?;
                 }
             }
             settings::SettingsTarget::CursorCombo => {
@@ -2345,7 +2346,7 @@ impl Runtime {
             .map(|p| (p.x, p.y))
             .unwrap_or((session.window.bounds.x, session.window.bounds.y));
         session.schema_version = SESSION_SCHEMA_VERSION;
-        session.theme = session_theme(self.selected_theme);
+        session.theme = session_theme_mode(self.theme_mode);
         session.cursor_style = session_cursor_style(current_cursor_style());
         session.window = WindowStateV1 {
             bounds: WindowBoundsV1 {
@@ -2382,6 +2383,26 @@ impl Runtime {
     /// Commit every theme-dependent surface at one event-loop safe point. Until the resulting frame
     /// presents, DWM retains the previous complete back buffer; the renderer never submits a frame
     /// with only one side of this transaction applied.
+    fn apply_theme_mode(&mut self, mode: ThemeModeV1) -> Result<bool> {
+        let mode_changed = self.theme_mode != mode;
+        self.theme_mode = mode;
+        let theme_changed = self.apply_theme(resolve_theme_mode(mode, self.window.theme()))?;
+        if mode_changed {
+            self.mark_session_dirty(Instant::now());
+            if !theme_changed && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+        }
+        Ok(mode_changed || theme_changed)
+    }
+
+    fn os_theme_changed(&mut self, os_theme: OsTheme) -> Result<bool> {
+        let Some(theme) = resolved_theme_change(self.theme_mode, os_theme) else {
+            return Ok(false);
+        };
+        self.apply_theme(theme)
+    }
+
     fn apply_theme(&mut self, theme: Theme) -> Result<bool> {
         match set_theme(theme) {
             ThemeChange::LockedByEnvironment => {
@@ -2392,11 +2413,9 @@ impl Runtime {
             }
             ThemeChange::Unchanged => Ok(false),
             ThemeChange::Changed => {
-                self.selected_theme = theme;
                 install_theme_class_background(&self.window)?;
                 self.sync_math_layout_key();
                 self.refresh_chrome();
-                self.mark_session_dirty(Instant::now());
                 self.publish_frame(FrameTrigger {
                     occurred_at: Instant::now(),
                     source: FrameSource::Expose,
@@ -5172,6 +5191,7 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             WindowEvent::MouseWheel { delta, .. } => runtime.mouse_wheel(delta),
             WindowEvent::Resized(size) => runtime.resize(size),
             WindowEvent::ScaleFactorChanged { .. } => runtime.scale_factor_changed(),
+            WindowEvent::ThemeChanged(theme) => runtime.os_theme_changed(theme).map(|_| ()),
             WindowEvent::RedrawRequested => runtime.redraw(),
             WindowEvent::Focused(false) => {
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
@@ -5576,17 +5596,37 @@ fn install_theme_class_background(window: &Window) -> Result<()> {
         .context("install theme-colored winit class background brush")
 }
 
-fn render_theme(theme: SessionThemeV1) -> Theme {
+fn render_theme_mode(theme: SessionThemeV1) -> ThemeModeV1 {
     match theme {
-        SessionThemeV1::Dark => Theme::Dark,
-        SessionThemeV1::Light => Theme::Light,
+        SessionThemeV1::System => ThemeModeV1::System,
+        SessionThemeV1::Light => ThemeModeV1::Light,
+        SessionThemeV1::Dark => ThemeModeV1::Dark,
     }
 }
 
-fn session_theme(theme: Theme) -> SessionThemeV1 {
-    match theme {
-        Theme::Dark => SessionThemeV1::Dark,
-        Theme::Light => SessionThemeV1::Light,
+fn session_theme_mode(mode: ThemeModeV1) -> SessionThemeV1 {
+    match mode {
+        ThemeModeV1::System => SessionThemeV1::System,
+        ThemeModeV1::Light => SessionThemeV1::Light,
+        ThemeModeV1::Dark => SessionThemeV1::Dark,
+    }
+}
+
+fn resolve_theme_mode(mode: ThemeModeV1, os_theme: Option<OsTheme>) -> Theme {
+    match mode {
+        ThemeModeV1::System => match os_theme {
+            Some(OsTheme::Light) => Theme::Light,
+            Some(OsTheme::Dark) | None => Theme::Dark,
+        },
+        ThemeModeV1::Light => Theme::Light,
+        ThemeModeV1::Dark => Theme::Dark,
+    }
+}
+
+fn resolved_theme_change(mode: ThemeModeV1, os_theme: OsTheme) -> Option<Theme> {
+    match mode {
+        ThemeModeV1::System => Some(resolve_theme_mode(mode, Some(os_theme))),
+        ThemeModeV1::Light | ThemeModeV1::Dark => None,
     }
 }
 
@@ -5830,6 +5870,39 @@ mod tests {
     use winit::keyboard::{Key, NamedKey};
 
     #[test]
+    fn theme_mode_resolution_covers_every_os_theme_input() {
+        use bt_persist::ThemeModeV1::{Dark, Light, System};
+        use winit::window::Theme::{Dark as OsDark, Light as OsLight};
+
+        for (mode, os_theme, expected) in [
+            (System, Some(OsDark), Theme::Dark),
+            (System, Some(OsLight), Theme::Light),
+            (System, None, Theme::Dark),
+            (Light, Some(OsDark), Theme::Light),
+            (Light, Some(OsLight), Theme::Light),
+            (Light, None, Theme::Light),
+            (Dark, Some(OsDark), Theme::Dark),
+            (Dark, Some(OsLight), Theme::Dark),
+            (Dark, None, Theme::Dark),
+        ] {
+            assert_eq!(resolve_theme_mode(mode, os_theme), expected);
+        }
+    }
+
+    #[test]
+    fn theme_changed_is_ignored_by_explicit_modes_and_resolved_by_system() {
+        use bt_persist::ThemeModeV1::{Dark, Light, System};
+        use winit::window::Theme::{Dark as OsDark, Light as OsLight};
+
+        assert_eq!(resolved_theme_change(System, OsDark), Some(Theme::Dark));
+        assert_eq!(resolved_theme_change(System, OsLight), Some(Theme::Light));
+        assert_eq!(resolved_theme_change(Light, OsDark), None);
+        assert_eq!(resolved_theme_change(Light, OsLight), None);
+        assert_eq!(resolved_theme_change(Dark, OsDark), None);
+        assert_eq!(resolved_theme_change(Dark, OsLight), None);
+    }
+
+    #[test]
     fn repeated_tab_switches_do_not_feed_window_chrome_back_into_inner_size() {
         let first = Some((260, 160));
         let second = Some((520, 240));
@@ -6017,8 +6090,8 @@ mod tests {
             "nothing but a picker item asks for a theme"
         );
         assert_eq!(
-            settings::theme_requested(settings::SettingsTarget::ThemeOption(Theme::Light)),
-            Some(Theme::Light)
+            settings::theme_requested(settings::SettingsTarget::ThemeOption(ThemeModeV1::Light)),
+            Some(ThemeModeV1::Light)
         );
     }
 

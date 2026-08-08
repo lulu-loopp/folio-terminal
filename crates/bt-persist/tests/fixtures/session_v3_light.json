@@ -1,0 +1,14 @@
+{
+  "schema_version": 3,
+  "theme": "light",
+  "cursor_style": "bar",
+  "window": {
+    "bounds": { "x": 100, "y": 100, "width": 1280, "height": 800 },
+    "dpi": 96,
+    "maximized": false,
+    "monitor_id": null
+  },
+  "tabs": [],
+  "active_tab": 0,
+  "recent": []
+}

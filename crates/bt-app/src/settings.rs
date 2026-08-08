@@ -24,10 +24,11 @@
 //! Nothing here is layout: the dialog is not a seat, takes no space from the
 //! solver, and is never persisted (a dialog does not survive a restart).
 
+use bt_persist::ThemeModeV1;
 use bt_render::{
     ChromeLabel, CursorStyle, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX,
-    FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, Theme, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
-    chrome_palette, rounded_overlay_fill, rounded_overlay_halo,
+    FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, WINDOW_CAPTION_GLYPH_LOGICAL_PX, chrome_palette,
+    rounded_overlay_fill, rounded_overlay_halo,
 };
 
 use crate::marks::{ChromeMark, ChromeSprite};
@@ -128,21 +129,18 @@ const TICK_WIDTH_LOGICAL_PX: f32 = 14.0;
 const TICK_FONT_LOGICAL_PX: f32 = 11.0;
 const TICK: &str = "\u{2713}";
 
-/// The theme options, in the mock-up's own order.
-///
-/// The mock-up lists three — Light, Dark, System — and this build has two. See
-/// the deviation note in the module's own delivery report: `bt_render::Theme` is
-/// a two-value runtime switch with no follow-the-OS resolution behind it, and
-/// offering a third entry that resolves to nothing would be a control that lies.
-pub const THEME_OPTIONS: [Theme; 2] = [Theme::Light, Theme::Dark];
+/// The persisted theme modes, in product order.
+pub const THEME_OPTIONS: [ThemeModeV1; 3] =
+    [ThemeModeV1::System, ThemeModeV1::Light, ThemeModeV1::Dark];
 pub const CURSOR_OPTIONS: [CursorStyle; 3] =
     [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline];
 
 /// The label a theme wears in the picker, matching the mock-up's own casing.
-fn theme_label(theme: Theme) -> &'static str {
+fn theme_label(theme: ThemeModeV1) -> &'static str {
     match theme {
-        Theme::Light => "Light",
-        Theme::Dark => "Dark",
+        ThemeModeV1::System => "System",
+        ThemeModeV1::Light => "Light",
+        ThemeModeV1::Dark => "Dark",
     }
 }
 
@@ -248,7 +246,7 @@ pub enum SettingsTarget {
     ThemeCombo,
     /// The open menu's own body, between or around its items.
     ThemeMenu,
-    ThemeOption(Theme),
+    ThemeOption(ThemeModeV1),
     CursorCombo,
     CursorMenu,
     CursorOption(CursorStyle),
@@ -281,14 +279,14 @@ pub struct SettingsLayout {
     menu_kind: Option<SettingsMenu>,
 }
 
-/// The theme a press on the overlay asks the process to switch to, if it asks
-/// for one at all.
+/// The persisted theme mode a press on the overlay asks the process to select,
+/// if it asks for one at all.
 ///
 /// A named function rather than a `match` at the call site so the mapping from
-/// "what the pointer hit" to "what `bt_render::set_theme` is told" is one thing
-/// that can be stated, and pinned, without a live window.
+/// "what the pointer hit" to the mode the app resolves against the OS is one
+/// thing that can be stated, and pinned, without a live window.
 #[must_use]
-pub fn theme_requested(target: SettingsTarget) -> Option<Theme> {
+pub fn theme_requested(target: SettingsTarget) -> Option<ThemeModeV1> {
     match target {
         SettingsTarget::ThemeOption(theme) => Some(theme),
         _ => None,
@@ -577,7 +575,7 @@ pub fn hit(layout: &SettingsLayout, x: f64, y: f64) -> SettingsTarget {
 pub fn build(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
-    selected: Theme,
+    selected: ThemeModeV1,
 ) -> (Vec<OverlayQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
     let palette = chrome_palette();
     let scale = layout.scale;
@@ -1203,6 +1201,12 @@ mod tests {
         );
     }
 
+    #[test]
+    fn theme_picker_orders_system_light_dark() {
+        let labels: Vec<_> = THEME_OPTIONS.into_iter().map(theme_label).collect();
+        assert_eq!(labels, ["System", "Light", "Dark"]);
+    }
+
     /// PIN: the mapping a press on a picker item makes to `set_theme` — the one
     /// thing between "the user clicked Light" and the process being light.
     ///
@@ -1218,7 +1222,10 @@ mod tests {
                 Some(THEME_OPTIONS[index])
             );
         }
-        assert_eq!(THEME_OPTIONS, [Theme::Light, Theme::Dark]);
+        assert_eq!(
+            THEME_OPTIONS,
+            [ThemeModeV1::System, ThemeModeV1::Light, ThemeModeV1::Dark,]
+        );
         for target in [
             SettingsTarget::Scrim,
             SettingsTarget::Panel,
@@ -1265,7 +1272,7 @@ mod tests {
         let (x, y) = centre(placed.cursor_combo);
         assert_eq!(hit(&placed, x, y), SettingsTarget::CursorCombo);
         assert_eq!(placed.items.len(), 3);
-        let (_, labels, _) = build(&placed, None, Theme::Dark);
+        let (_, labels, _) = build(&placed, None, ThemeModeV1::Dark);
         for label in ["Bar", "Block", "Underline"] {
             assert!(labels.iter().any(|candidate| candidate.text == label));
         }
@@ -1362,7 +1369,7 @@ mod tests {
     fn quads_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
-        selected: Theme,
+        selected: ThemeModeV1,
     ) -> Vec<OverlayQuad> {
         build(placed, hover, selected).0
     }
@@ -1374,7 +1381,7 @@ mod tests {
     fn the_scrim_is_the_mock_ups_own_alpha_over_the_whole_window() {
         let placed = open(1.0, false);
         let palette = chrome_palette();
-        let scrim = quads_of(&placed, None, Theme::Dark)[0];
+        let scrim = quads_of(&placed, None, ThemeModeV1::Dark)[0];
         assert_eq!(scrim.rect, [0.0, 0.0, SURFACE.0, SURFACE.1]);
         assert_eq!(scrim.color, [0x0f, 0x0f, 0x0f]);
         assert_eq!(scrim.color, palette.modal_scrim);
@@ -1396,7 +1403,7 @@ mod tests {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let placed = open(scale, false);
             let palette = chrome_palette();
-            let quads = quads_of(&placed, None, Theme::Dark);
+            let quads = quads_of(&placed, None, ThemeModeV1::Dark);
             let border_alpha = f32::from(palette.menu_border_alpha) / 255.0;
             let hairline = quads
                 .iter()
@@ -1435,16 +1442,16 @@ mod tests {
         }
     }
 
-    /// Visual PIN: the picker shows the theme in force, and marks it with the
+    /// Visual PIN: the picker shows the selected mode, and marks it with the
     /// accent tick when the menu is open — exactly one tick, never two.
     #[test]
-    fn the_picker_shows_and_ticks_the_theme_in_force() {
+    fn the_picker_shows_and_ticks_the_selected_mode() {
         for selected in THEME_OPTIONS {
             let placed = open(1.0, true);
             let palette = chrome_palette();
             let (_, labels, _) = build(&placed, None, selected);
             let ticks: Vec<_> = labels.iter().filter(|label| label.text == TICK).collect();
-            assert_eq!(ticks.len(), 1, "exactly one option is the one in force");
+            assert_eq!(ticks.len(), 1, "exactly one option is the selected mode");
             assert_eq!(ticks[0].color, palette.accent, "the tick is the accent");
             // The button says what the tick marks.
             let shown = theme_label(selected);
@@ -1455,13 +1462,13 @@ mod tests {
                         && label.rect[1] >= placed.combo[1]
                         && label.rect[3] <= placed.combo[3]
                 })
-                .expect("the button shows the theme in force");
+                .expect("the button shows the selected mode");
             assert_eq!(on_button.color, palette.dialog_title_text);
             // And the tick sits in the row of the option it marks.
             let index = THEME_OPTIONS
                 .iter()
                 .position(|option| *option == selected)
-                .expect("the theme in force is one of the options");
+                .expect("the selected mode is one of the options");
             let item = placed.items[index];
             assert!(ticks[0].rect[1] >= item[1] && ticks[0].rect[3] <= item[3]);
         }
@@ -1474,7 +1481,7 @@ mod tests {
         let placed = open(1.0, true);
         let palette = chrome_palette();
         let count = |hover, color| {
-            quads_of(&placed, hover, Theme::Dark)
+            quads_of(&placed, hover, ThemeModeV1::Dark)
                 .iter()
                 .filter(|quad| quad.color == color)
                 .count()
@@ -1511,7 +1518,7 @@ mod tests {
     #[test]
     fn the_group_heading_is_uppercase_and_tracked() {
         let placed = open(1.0, false);
-        let (_, labels, _) = build(&placed, None, Theme::Dark);
+        let (_, labels, _) = build(&placed, None, ThemeModeV1::Dark);
         let heading = labels
             .iter()
             .find(|label| label.text == "APPEARANCE")
@@ -1528,7 +1535,7 @@ mod tests {
         // heading out letter by letter. A ratio does not carry the DPI scale.
         for scale in [1.0_f32, 2.0] {
             let placed = open(scale, false);
-            let (_, labels, _) = build(&placed, None, Theme::Dark);
+            let (_, labels, _) = build(&placed, None, ThemeModeV1::Dark);
             let heading = labels
                 .iter()
                 .find(|label| label.text == "APPEARANCE")
@@ -1546,7 +1553,7 @@ mod tests {
     #[test]
     fn the_close_affordance_wears_the_mock_ups_own_close_symbol() {
         let placed = open(1.0, true);
-        let (_, _, sprites) = build(&placed, None, Theme::Dark);
+        let (_, _, sprites) = build(&placed, None, ThemeModeV1::Dark);
         assert_eq!(sprites.len(), 1);
         assert_eq!(sprites[0].mark, ChromeMark::WindowClose);
         let glyph = sprites[0].rect;

@@ -51,7 +51,7 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
     // Spot-check individual non-default fields end to end, not just an
     // opaque byte comparison — each of these would fail on its own if the
     // corresponding piece of parsing regressed.
-    assert_eq!(session.schema_version, 3);
+    assert_eq!(session.schema_version, 4);
     assert_eq!(session.theme, SessionThemeV1::Dark);
     assert_eq!(session.cursor_style, SessionCursorStyleV1::Bar);
     assert_eq!(session.active_tab, 1);
@@ -93,23 +93,58 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
 }
 
 #[test]
-fn light_theme_round_trips_through_the_public_session_api() {
-    let dir =
-        std::env::temp_dir().join(format!("bt-persist-theme-roundtrip-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("session.json");
-    let session = SessionV1 {
-        theme: SessionThemeV1::Light,
-        ..SessionV1::default()
-    };
+fn every_theme_mode_round_trips_through_the_public_session_api() {
+    for theme in [
+        SessionThemeV1::System,
+        SessionThemeV1::Light,
+        SessionThemeV1::Dark,
+    ] {
+        let dir = std::env::temp_dir().join(format!(
+            "bt-persist-theme-roundtrip-{}-{theme:?}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.json");
+        let session = SessionV1 {
+            theme,
+            ..SessionV1::default()
+        };
 
-    write_session_atomic(&path, &session).unwrap();
-    let (loaded, report, degradation) = read_session(&path);
-    assert_eq!(report, ReadReport::Loaded);
-    assert!(degradation.is_clean());
-    assert_eq!(loaded, session);
+        write_session_atomic(&path, &session).unwrap();
+        let (loaded, report, degradation) = read_session(&path);
+        assert_eq!(report, ReadReport::Loaded);
+        assert!(degradation.is_clean());
+        assert_eq!(loaded, session);
 
-    std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn v3_dark_and_light_fixtures_migrate_and_round_trip_without_changing_mode() {
+    for (fixture, expected_theme) in [
+        ("session_v3_dark.json", SessionThemeV1::Dark),
+        ("session_v3_light.json", SessionThemeV1::Light),
+    ] {
+        let (migrated, report, degradation) = read_session(&fixture_path(fixture));
+        assert_eq!(report, ReadReport::Loaded);
+        assert!(degradation.is_clean());
+        assert_eq!(migrated.schema_version, 4);
+        assert_eq!(migrated.theme, expected_theme);
+
+        let dir = std::env::temp_dir().join(format!(
+            "bt-persist-v3-theme-migration-{}-{expected_theme:?}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.json");
+        write_session_atomic(&path, &migrated).unwrap();
+        let (round_tripped, report, degradation) = read_session(&path);
+        assert_eq!(report, ReadReport::Loaded);
+        assert!(degradation.is_clean());
+        assert_eq!(round_tripped, migrated);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[test]

@@ -27,7 +27,7 @@ use serde_json::Value;
 /// One migration step: transforms a JSON value at schema_version `N` (the
 /// key it is registered under) into schema_version `N+1`. Structural only —
 /// see this module's doc comment, rule 3. `settings.json` is still v1;
-/// `session.json` uses this scaffold for its registered v1-to-v2 theme migration.
+/// `session.json` uses this scaffold for its registered forward migrations.
 pub type MigrationStep = fn(Value) -> Value;
 
 /// Migration table for `settings.json`. Empty: v1 is the only version that
@@ -35,8 +35,11 @@ pub type MigrationStep = fn(Value) -> Value;
 pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.
-pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] =
-    &[(1, migrate_session_v1_to_v2), (2, migrate_session_v2_to_v3)];
+pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
+    (1, migrate_session_v1_to_v2),
+    (2, migrate_session_v2_to_v3),
+    (3, migrate_session_v3_to_v4),
+];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
@@ -50,6 +53,13 @@ fn migrate_session_v2_to_v3(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(3));
         object.insert("cursor_style".to_owned(), Value::from("bar"));
+    }
+    value
+}
+
+fn migrate_session_v3_to_v4(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(4));
     }
     value
 }
@@ -284,6 +294,22 @@ mod tests {
         assert_eq!(migrated["schema_version"], json!(3));
         assert_eq!(migrated["theme"], json!("light"));
         assert_eq!(migrated["cursor_style"], json!("bar"));
+    }
+
+    #[test]
+    fn real_session_v3_to_v4_migration_preserves_explicit_theme_modes() {
+        for theme in ["dark", "light"] {
+            let migrated = migrate_value(
+                json!({"schema_version": 3, "theme": theme, "cursor_style": "bar"}),
+                3,
+                4,
+                SESSION_MIGRATIONS,
+            )
+            .unwrap();
+            assert_eq!(migrated["schema_version"], json!(4));
+            assert_eq!(migrated["theme"], json!(theme));
+            assert_eq!(migrated["cursor_style"], json!("bar"));
+        }
     }
 
     #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]

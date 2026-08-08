@@ -5,16 +5,17 @@ use serde::{Deserialize, Serialize};
 use crate::layout::LayoutNodeV1;
 
 /// Current `schema_version` for `session.json`.
-pub const SESSION_SCHEMA_VERSION: u32 = 3;
+pub const SESSION_SCHEMA_VERSION: u32 = 4;
 
-/// Runtime theme restored with the session. This deliberately has only the two themes the renderer
-/// can apply; `BT_BG` remains a process diagnostic override and is never persisted as a third mode.
+/// Persisted theme mode restored with the session. `System` is resolved by the app against winit's
+/// OS theme; `BT_BG` remains a process diagnostic override and is never persisted as a mode.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionThemeV1 {
     #[default]
     Dark,
     Light,
+    System,
 }
 
 /// Focused cursor shape restored with the session.
@@ -31,8 +32,9 @@ pub enum SessionCursorStyleV1 {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionV1 {
     pub schema_version: u32,
-    /// Added in schema v2. `default` also makes hand-authored v2 documents with the field omitted
-    /// degrade to the product default rather than losing the entire session.
+    /// Added in schema v2 and expanded with `system` in schema v4. `default` also makes
+    /// hand-authored documents with the field omitted degrade to the dark product default rather
+    /// than losing the entire session.
     #[serde(default)]
     pub theme: SessionThemeV1,
     /// Added in schema v3; missing values degrade to the historical bar cursor.

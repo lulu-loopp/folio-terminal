@@ -8378,7 +8378,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&text_rows[0], &dark_row));
         assert_eq!(
             text_rows[0].narrow_glyphs[0].color,
-            Color::rgb(0x94, 0x98, 0x00)
+            Color::rgb(0xab, 0x64, 0x00)
         );
     }
 
