@@ -527,7 +527,9 @@ mod tests {
         let scale = 1.0;
         let layout = layout(anchor(scale), 960.0, scale);
         let palette = chrome_palette();
-        let (_, labels, sprites) = build(&layout, None);
+        let layers = build(&layout, None);
+        let labels: Vec<_> = layers.iter().flat_map(|layer| &layer.labels).collect();
+        let sprites: Vec<_> = layers.iter().flat_map(|layer| &layer.sprites).collect();
         let hint = labels
             .iter()
             .find(|label| label.text == HINT_TEXT)
