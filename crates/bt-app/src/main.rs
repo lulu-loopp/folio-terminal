@@ -2453,7 +2453,8 @@ impl Runtime {
             return;
         };
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) = seats::preview_body_viewport(&self.seat_layout, preview_seat, scale)
+        let Some(body) =
+            seats::preview_body_viewport(&self.seats, &self.seat_layout, preview_seat, scale)
         else {
             self.renderer.set_preview_image(None);
             return;
@@ -5648,6 +5649,7 @@ fn solve_seats(
         .solve(viewport, &metrics)
         .unwrap_or_else(|_| seats::fit_what_fits(seats, viewport, &metrics));
     let terminal = seats::pane_body_viewport(
+        seats,
         &layout,
         seats.terminal(),
         renderer.metrics().scale_factor as f32,
@@ -7406,12 +7408,78 @@ mod tests {
         let layout = seats
             .solve(viewport, &metrics)
             .unwrap_or_else(|_| seats::fit_what_fits(seats, viewport, &metrics));
-        seats::pane_body_viewport(&layout, seats.terminal(), dpi_milli as f32 / 1_000.0).unwrap_or(
-            bt_render::SeatViewport::whole(
+        seats::pane_body_viewport(seats, &layout, seats.terminal(), dpi_milli as f32 / 1_000.0)
+            .unwrap_or(bt_render::SeatViewport::whole(
                 render_physical.width.max(1),
                 render_physical.height.max(1),
-            ),
-        )
+            ))
+    }
+
+    /// Crossing the one/two-pane boundary changes terminal rows immediately,
+    /// while each resulting ConPTY size still waits on the shared 200ms quiet
+    /// window used by ordinary window and divider resizes.
+    #[test]
+    fn pane_count_boundary_reflows_rows_through_the_existing_resize_coalescer() {
+        let dpi_milli = 1_000;
+        let physical = PhysicalSize::new(1600, 900);
+        let metrics = seats::seat_metrics(dpi_milli);
+        let mut seats = seats::Seats::lone_terminal();
+        let lone = solved_terminal_seat(&seats, dpi_milli, physical);
+
+        assert!(seats.toggle_preview(&metrics));
+        let split = solved_terminal_seat(&seats, dpi_milli, physical);
+        assert_eq!(lone.y, 40);
+        assert_eq!(lone.height, 860, "lone terminal body is the whole seat");
+        assert_eq!(split.y, lone.y + 28);
+        assert_eq!(split.height, lone.height - 28);
+
+        // Representative renderer metrics make the viewport-to-grid boundary
+        // explicit here; CellMetrics::grid_for_pixels owns the same floor.
+        let rows_for = |height: u32| ((height.saturating_sub(16)) / 20).max(1) as u16;
+        let lone_grid = grid_of(100, rows_for(lone.height));
+        let split_grid = grid_of(100, rows_for(split.height));
+        assert!(split_grid.rows < lone_grid.rows);
+
+        let start = Instant::now();
+        let mut pending = None;
+        assert!(coalesce_pty_resize_on_grid_change(
+            &mut pending,
+            split_grid,
+            lone_grid,
+            PhysicalSize::new(split.width, split.height),
+            start,
+        ));
+        assert!(
+            take_due_pty_resize(
+                &mut pending,
+                start + WINDOW_RESIZE_QUIET - Duration::from_millis(1)
+            )
+            .is_none()
+        );
+        assert_eq!(
+            take_due_pty_resize(&mut pending, start + WINDOW_RESIZE_QUIET)
+                .unwrap()
+                .grid,
+            split_grid
+        );
+
+        assert!(seats.toggle_preview(&metrics));
+        let closed = solved_terminal_seat(&seats, dpi_milli, physical);
+        assert_eq!(closed, lone);
+        let close_at = start + Duration::from_secs(1);
+        assert!(coalesce_pty_resize_on_grid_change(
+            &mut pending,
+            lone_grid,
+            split_grid,
+            PhysicalSize::new(closed.width, closed.height),
+            close_at,
+        ));
+        assert_eq!(
+            take_due_pty_resize(&mut pending, close_at + WINDOW_RESIZE_QUIET)
+                .unwrap()
+                .grid,
+            lone_grid
+        );
     }
 
     /// PIN (startup order): a session restore with a preview seat open must spawn ConPTY at the

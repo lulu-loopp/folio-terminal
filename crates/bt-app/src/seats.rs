@@ -98,6 +98,11 @@ impl Seats {
         matches!(&self.tree, LayoutNode::Seat(seat) if seat.kind == SeatKind::Terminal)
     }
 
+    /// Pane heads disambiguate siblings; a one-pane tree needs no pane chrome.
+    pub fn has_pane_headers(&self) -> bool {
+        self.tree.seats_in_order().len() > 1
+    }
+
     /// The unpinned preview seat, if the tree has one.
     pub fn preview(&self) -> Option<SeatId> {
         self.tree
@@ -445,10 +450,19 @@ pub fn seat_viewport(layout: &SeatLayout, seat: SeatId) -> Option<SeatViewport> 
     })
 }
 
-/// A pane's content rectangle, excluding the common 28px pane head. In
-/// particular this is the only rectangle allowed to derive terminal rows.
-pub fn pane_body_viewport(layout: &SeatLayout, seat: SeatId, scale: f32) -> Option<SeatViewport> {
+/// A pane's content rectangle. A multi-pane tree excludes the common 28px pane
+/// head; a lone terminal leaf consumes its whole seat. This is the only
+/// rectangle allowed to derive terminal rows.
+pub fn pane_body_viewport(
+    seats: &Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+) -> Option<SeatViewport> {
     let mut viewport = seat_viewport(layout, seat)?;
+    if !seats.has_pane_headers() {
+        return Some(viewport);
+    }
     let head_height = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
     let consumed = head_height.min(viewport.height.saturating_sub(1));
     viewport.y = viewport.y.saturating_add(consumed);
@@ -458,11 +472,12 @@ pub fn pane_body_viewport(layout: &SeatLayout, seat: SeatId, scale: f32) -> Opti
 
 /// The drawable body of a preview seat, excluding its existing title bar.
 pub fn preview_body_viewport(
+    seats: &Seats,
     layout: &SeatLayout,
     seat: SeatId,
     scale: f32,
 ) -> Option<SeatViewport> {
-    pane_body_viewport(layout, seat, scale)
+    pane_body_viewport(seats, layout, seat, scale)
 }
 
 /// Something in the chrome the pointer can be over.
@@ -691,9 +706,11 @@ pub fn hit_chrome(
             }
             continue;
         }
-        let head_bottom = (rect[1] + SEAT_TITLE_BAR_LOGICAL_PX * scale).min(rect[3]);
-        if contains([rect[0], rect[1], rect[2], head_bottom], x, y) {
-            return Some(ChromeTarget::PaneHeader(placement.id));
+        if seats.has_pane_headers() {
+            let head_bottom = (rect[1] + SEAT_TITLE_BAR_LOGICAL_PX * scale).min(rect[3]);
+            if contains([rect[0], rect[1], rect[2], head_bottom], x, y) {
+                return Some(ChromeTarget::PaneHeader(placement.id));
+            }
         }
     }
     for slot in seats.split_slots(layout) {
@@ -899,6 +916,9 @@ pub fn build_chrome_for_tabs(
                 );
             }
             Presentation::Full => {
+                if !seats.has_pane_headers() {
+                    continue;
+                }
                 let bar = SEAT_TITLE_BAR_LOGICAL_PX * scale;
                 let title_bottom = (rect[1] + bar).min(rect[3]);
                 if placement.id != seats.terminal() {
@@ -1569,10 +1589,10 @@ mod tests {
         }
     }
 
-    /// A lone leaf still owns two pieces of chrome now: the window titlebar and
-    /// the terminal pane head. No split/divider is introduced.
+    /// A lone terminal leaf owns only window chrome: pane chrome starts when a
+    /// second pane gives the head a disambiguating job.
     #[test]
-    fn a_lone_leaf_draws_window_chrome_and_its_terminal_head() {
+    fn a_lone_leaf_draws_no_terminal_pane_head() {
         let seats = Seats::lone_terminal();
         let metrics = seat_metrics(1_000);
         let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
@@ -1583,7 +1603,7 @@ mod tests {
                 && quad.color == palette.title_bar
         }));
         assert!(labels.iter().any(|label| label.text == "PowerShell"));
-        assert!(labels.iter().any(|label| label.text == "Terminal"));
+        assert!(!labels.iter().any(|label| label.text == "Terminal"));
         for mark in [
             ChromeMark::Gear,
             ChromeMark::WindowMinimize,
@@ -1600,9 +1620,10 @@ mod tests {
                 .iter()
                 .filter(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
                 .count(),
-            2,
-            "the profile mark is worn by both the tab and the terminal's own head"
+            1,
+            "the lone leaf wears its profile mark only in the window tab"
         );
+        assert!(!quads.iter().any(|quad| quad.color == palette.pane_head));
         assert!(hit_chrome(&seats, &layout, 1.0, 480.0, 300.0).is_none());
     }
 
@@ -1821,29 +1842,65 @@ mod tests {
         }));
     }
 
-    /// The terminal's head is chrome, never a terminal row. This pins the exact
-    /// physical height passed to `CellMetrics::grid_for_pixels` at every DPI.
+    /// A lone leaf has no pane head, so its terminal body is exactly its seat.
     #[test]
-    fn terminal_body_viewport_deducts_the_common_pane_head_before_grid_sizing() {
+    fn lone_terminal_body_viewport_is_the_whole_seat() {
         for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000, 2_500] {
             let seats = Seats::lone_terminal();
             let metrics = seat_metrics(dpi_milli);
             let layout = solved(&seats, viewport_of(1200, 900, dpi_milli), &metrics);
             let whole = seat_viewport(&layout, seats.terminal()).unwrap();
-            let body =
-                pane_body_viewport(&layout, seats.terminal(), dpi_milli as f32 / 1_000.0).unwrap();
-            let expected_head = logical_to_device(SEAT_TITLE_BAR_LOGICAL_PX, scale_ppm(dpi_milli));
-            assert_eq!(body.y, whole.y + expected_head, "{dpi_milli} milli-DPI");
+            let body = pane_body_viewport(
+                &seats,
+                &layout,
+                seats.terminal(),
+                dpi_milli as f32 / 1_000.0,
+            )
+            .unwrap();
             assert_eq!(
-                body.height,
-                whole.height - expected_head,
-                "grid height must exclude the pane head at {dpi_milli} milli-DPI"
-            );
-            assert!(
-                body.height < whole.height,
-                "red gate: passing the seat rectangle itself would count head pixels as rows"
+                body, whole,
+                "lone body must equal its seat at {dpi_milli} milli-DPI"
             );
         }
+    }
+
+    /// Once the tree has two panes, every full pane keeps the common head and
+    /// terminal grid sizing excludes it.
+    #[test]
+    fn two_panes_draw_heads_and_deduct_them_from_their_bodies() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        assert!(seats.toggle_preview(&metrics));
+        let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+        let whole = seat_viewport(&layout, seats.terminal()).unwrap();
+        let body = pane_body_viewport(&seats, &layout, seats.terminal(), 1.0).unwrap();
+        assert_eq!(body.y, whole.y + SEAT_TITLE_BAR_LOGICAL_PX as u32);
+        assert_eq!(body.height, whole.height - SEAT_TITLE_BAR_LOGICAL_PX as u32);
+
+        let (quads, labels, sprites) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
+        let palette = chrome_palette();
+        for placement in &layout.rects {
+            let rect = placement.device_rect.unwrap();
+            assert!(quads.iter().any(|quad| {
+                quad.color == palette.pane_head
+                    && quad.rect
+                        == [
+                            rect.left as f32,
+                            rect.top as f32,
+                            rect.right as f32,
+                            rect.top as f32 + SEAT_TITLE_BAR_LOGICAL_PX,
+                        ]
+            }));
+        }
+        assert!(labels.iter().any(|label| label.text == "Terminal"));
+        assert!(labels.iter().any(|label| label.text == "Preview"));
+        assert!(
+            sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+        );
+        assert!(sprites.iter().any(|sprite| sprite.mark == ChromeMark::File));
     }
 
     /// PIN (styling pass): a preview state notice is a quiet centred note in the
