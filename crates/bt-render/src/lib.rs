@@ -607,6 +607,17 @@ struct MathDraw {
     first_vertex: u32,
 }
 
+/// One overlay layer's GPU resources for this frame: its rectangles, its marks
+/// and whether its text made it into the atlas. Held apart per layer so the pass
+/// can draw all three channels of one layer before starting the next.
+struct PreparedOverlayLayer {
+    rect_buffer: Option<wgpu::Buffer>,
+    rect_count: u32,
+    icon_buffer: Option<wgpu::Buffer>,
+    icon_draws: Vec<MathDraw>,
+    text_prepared: bool,
+}
+
 /// One frame's math block draws plus the indices of the `frame.math_blocks` entries that actually
 /// put pixels on screen. Overlays that decorate a block (the hover dim) read `drawn` so they can
 /// never outlive the raster they decorate.
@@ -1590,13 +1601,15 @@ pub struct Renderer {
     chrome_quads: Vec<ChromeQuad>,
     chrome_labels: Vec<ChromeLabel>,
     chrome_icons: Vec<ChromeIcon>,
-    /// The modal overlay's own three lists. Kept apart from the chrome's rather
+    /// The modal overlay's own stack. Kept apart from the chrome's lists rather
     /// than appended to them because the two are drawn in different places in the
     /// frame: seat chrome owns the space between seats, and a modal owns the
     /// window — including the seats' own content, which is drawn *after* chrome.
-    overlay_quads: Vec<OverlayQuad>,
-    overlay_labels: Vec<ChromeLabel>,
-    overlay_icons: Vec<ChromeIcon>,
+    ///
+    /// A stack rather than one triple because a popup inside a dialog has to
+    /// cover the dialog in every channel, not just in the one it happens to draw
+    /// its own surface with — see [`OverlayLayer`].
+    overlay_layers: Vec<OverlayLayer>,
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
@@ -1608,7 +1621,9 @@ pub struct Renderer {
     text_renderer: TextRenderer,
     status_text_renderer: TextRenderer,
     chrome_text_renderer: TextRenderer,
-    overlay_text_renderer: TextRenderer,
+    /// One text renderer per overlay layer, grown on demand: a glyphon renderer
+    /// holds one prepared batch, so two layers of text are two renderers.
+    overlay_text_renderers: Vec<TextRenderer>,
     rect_pipeline: wgpu::RenderPipeline,
     math_pipeline: wgpu::RenderPipeline,
     math_bind_group_layout: wgpu::BindGroupLayout,
@@ -1780,6 +1795,34 @@ pub struct OverlayQuad {
     /// `0.0 ..= 1.0`. Carries both the design's own alpha and, for a rounded
     /// shape, that pixel's coverage — already multiplied together.
     pub alpha: f32,
+}
+
+/// One stacking layer of the modal overlay: its fills, its marks and its text.
+///
+/// The overlay draws in three channels — instanced rectangles, rasterized marks,
+/// then shaped glyphs — and the channels have a fixed order inside the pass, so
+/// "pushed later" only wins *within* a channel. A popup whose surface is a fill
+/// and whose neighbours' captions are text is therefore not covered by being
+/// pushed last: the text channel runs after every fill in the same layer, and the
+/// captions come back out through the popup's face.
+///
+/// A layer is the fix, and it is the mock-up's own `z-index` in this pipeline's
+/// terms: every channel of layer *n* is drawn before any channel of layer *n+1*,
+/// so a popup on a layer of its own covers whatever the layers under it drew,
+/// whichever channel that content went down and however many rows are added to
+/// them later.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverlayLayer {
+    pub quads: Vec<OverlayQuad>,
+    pub labels: Vec<ChromeLabel>,
+    pub icons: Vec<ChromeIcon>,
+}
+
+impl OverlayLayer {
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.quads.is_empty() && self.labels.is_empty() && self.icons.is_empty()
+    }
 }
 
 /// The fills a rounded rectangle is made of: whole runs where it covers a pixel
@@ -2310,8 +2353,7 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let chrome_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let overlay_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let overlay_text_renderers = Vec::new();
         let rect_pipeline = create_rect_pipeline(&device, config.format);
         let (math_pipeline, math_bind_group_layout, math_sampler) =
             create_math_pipeline(&device, config.format);
@@ -2328,9 +2370,7 @@ impl Renderer {
             chrome_quads: Vec::new(),
             chrome_labels: Vec::new(),
             chrome_icons: Vec::new(),
-            overlay_quads: Vec::new(),
-            overlay_labels: Vec::new(),
-            overlay_icons: Vec::new(),
+            overlay_layers: Vec::new(),
             font_system,
             swash_cache,
             viewport,
@@ -2339,7 +2379,7 @@ impl Renderer {
             text_renderer,
             status_text_renderer,
             chrome_text_renderer,
-            overlay_text_renderer,
+            overlay_text_renderers,
             rect_pipeline,
             math_pipeline,
             math_bind_group_layout,
@@ -2550,27 +2590,22 @@ impl Renderer {
         changed
     }
 
-    /// Replace the modal overlay: the scrim and whatever dialog stands on it.
-    /// Returns whether the visible overlay changed, so the caller can skip a
-    /// redundant redraw. Empty vectors mean "no modal", which is the state every
-    /// frame that has never opened one is already in.
+    /// Replace the modal overlay: the scrim and whatever dialog stands on it,
+    /// bottom layer first. Returns whether the visible overlay changed, so the
+    /// caller can skip a redundant redraw. An empty stack means "no modal", which
+    /// is the state every frame that has never opened one is already in.
+    ///
+    /// Each [`OverlayLayer`] is drawn whole — fills, then marks, then text —
+    /// before the next one starts, so a layer covers every channel of the layers
+    /// below it.
     ///
     /// This is presentation state beside the frame, exactly as the peek flyout is
     /// (DESIGN §7.1.5: a modal is a window-level stance, not a property of the
     /// terminal's content), so `ViewportFrame` equality and the replay contracts
     /// stay untouched by a visible dialog.
-    pub fn set_modal_overlay(
-        &mut self,
-        quads: Vec<OverlayQuad>,
-        labels: Vec<ChromeLabel>,
-        icons: Vec<ChromeIcon>,
-    ) -> bool {
-        let changed = self.overlay_quads != quads
-            || self.overlay_labels != labels
-            || self.overlay_icons != icons;
-        self.overlay_quads = quads;
-        self.overlay_labels = labels;
-        self.overlay_icons = icons;
+    pub fn set_modal_overlay(&mut self, layers: Vec<OverlayLayer>) -> bool {
+        let changed = self.overlay_layers != layers;
+        self.overlay_layers = layers;
         changed
     }
 
@@ -2807,59 +2842,85 @@ impl Renderer {
                 &chrome_layouts,
             )
             .is_ok();
-        // The modal overlay. Empty on every frame no dialog is up, and every
-        // branch below is guarded on emptiness, so a window without one issues
-        // exactly the command stream it issued before modals existed.
-        let overlay_rects: Vec<RectInstance> = self
-            .overlay_quads
-            .iter()
-            .map(|quad| {
-                surface_pixel_rect_with_alpha(
-                    quad.rect,
-                    quad.color,
-                    quad.alpha,
-                    self.config.width,
-                    self.config.height,
-                )
-            })
-            .collect();
-        let overlay_rect_buffer = (!overlay_rects.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("modal overlay rectangles"),
-                    contents: bytemuck::cast_slice(overlay_rects.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
+        // The modal overlay, one layer at a time. Empty on every frame no dialog
+        // is up, and every branch below is guarded on emptiness, so a window
+        // without one issues exactly the command stream it issued before modals
+        // existed.
+        //
+        // Each layer keeps its own rectangle buffer, its own mark buffer and its
+        // own text renderer, because that is what lets the pass finish a layer's
+        // three channels before opening the next one's — a popup's face cannot
+        // cover a caption it shares a text batch with.
+        let overlay_layers = std::mem::take(&mut self.overlay_layers);
+        let mut overlay_draws: Vec<PreparedOverlayLayer> = Vec::with_capacity(overlay_layers.len());
+        for (index, layer) in overlay_layers.iter().enumerate() {
+            let rects: Vec<RectInstance> = layer
+                .quads
+                .iter()
+                .map(|quad| {
+                    surface_pixel_rect_with_alpha(
+                        quad.rect,
+                        quad.color,
+                        quad.alpha,
+                        self.config.width,
+                        self.config.height,
+                    )
                 })
-        });
-        let overlay_icons = std::mem::take(&mut self.overlay_icons);
-        let (overlay_icon_draws, overlay_icon_vertices) =
-            self.prepare_chrome_icon_draws(&overlay_icons);
-        self.overlay_icons = overlay_icons;
-        let overlay_icon_buffer = (!overlay_icon_vertices.is_empty()).then(|| {
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("modal overlay mark vertices"),
-                    contents: bytemuck::cast_slice(overlay_icon_vertices.as_slice()),
-                    usage: wgpu::BufferUsages::VERTEX,
-                })
-        });
-        let overlay_layouts = shape_chrome_labels(
-            &mut self.font_system,
-            &self.overlay_labels,
-            self.chrome_cap_height_ratio,
-        );
-        let overlay_prepared = !overlay_layouts.is_empty()
-            && prepare_chrome_text_atlas(
-                &mut self.overlay_text_renderer,
-                &self.device,
-                &self.queue,
+                .collect();
+            let rect_buffer = (!rects.is_empty()).then(|| {
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("modal overlay rectangles"),
+                        contents: bytemuck::cast_slice(rects.as_slice()),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            });
+            let (icon_draws, icon_vertices) = self.prepare_chrome_icon_draws(&layer.icons);
+            let icon_buffer = (!icon_vertices.is_empty()).then(|| {
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("modal overlay mark vertices"),
+                        contents: bytemuck::cast_slice(icon_vertices.as_slice()),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            });
+            let layouts = shape_chrome_labels(
                 &mut self.font_system,
-                &mut self.atlas,
-                &self.chrome_viewport,
-                &mut self.swash_cache,
-                &overlay_layouts,
-            )
-            .is_ok();
+                &layer.labels,
+                self.chrome_cap_height_ratio,
+            );
+            while self.overlay_text_renderers.len() <= index {
+                self.overlay_text_renderers.push(TextRenderer::new(
+                    &mut self.atlas,
+                    &self.device,
+                    wgpu::MultisampleState::default(),
+                    None,
+                ));
+            }
+            let text_prepared = !layouts.is_empty()
+                && prepare_chrome_text_atlas(
+                    &mut self.overlay_text_renderers[index],
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &self.chrome_viewport,
+                    &mut self.swash_cache,
+                    &layouts,
+                )
+                .is_ok();
+            overlay_draws.push(PreparedOverlayLayer {
+                rect_buffer,
+                rect_count: rects.len() as u32,
+                icon_buffer,
+                icon_draws,
+                text_prepared,
+            });
+        }
+        self.overlay_layers = overlay_layers;
+        let overlay_has_work = overlay_draws.iter().any(|layer| {
+            layer.rect_buffer.is_some() || layer.icon_buffer.is_some() || layer.text_prepared
+        });
         let rectangles_prepared_at = Instant::now();
         // Keep the old DXGI back buffers alive while CPU shaping and GPU resource preparation run.
         // ResizeBuffers discards them; configuring only immediately before acquire/submit bounds
@@ -3043,7 +3104,7 @@ impl Renderer {
             // chrome, the peek flyout and a preview seat's own picture. A scrim
             // that anything at all can be seen through unblurred is a scrim in
             // name only.
-            if overlay_rect_buffer.is_some() || overlay_icon_buffer.is_some() || overlay_prepared {
+            if overlay_has_work {
                 pass.set_viewport(
                     0.0,
                     0.0,
@@ -3053,27 +3114,33 @@ impl Renderer {
                     1.0,
                 );
                 pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
-                if let Some(buffer) = overlay_rect_buffer.as_ref() {
-                    pass.set_pipeline(&self.rect_pipeline);
-                    pass.set_vertex_buffer(0, buffer.slice(..));
-                    pass.draw(0..6, 0..overlay_rects.len() as u32);
-                }
-                if let Some(buffer) = overlay_icon_buffer.as_ref() {
-                    pass.set_pipeline(&self.math_pipeline);
-                    pass.set_vertex_buffer(0, buffer.slice(..));
-                    for draw in &overlay_icon_draws {
-                        if let Some(texture) = self.math_textures.get(&draw.key)
-                            && let Some(tile) = texture.tiles.get(draw.tile_index)
-                        {
-                            pass.set_bind_group(0, &tile.bind_group, &[]);
-                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                // Bottom layer first, and each one's three channels closed before
+                // the next one's open: this loop *is* the overlay's z-order, and
+                // it is the reason a picker's popup covers the row under it
+                // whether that row drew itself as a fill, a mark or a caption.
+                for (index, layer) in overlay_draws.iter().enumerate() {
+                    if let Some(buffer) = layer.rect_buffer.as_ref() {
+                        pass.set_pipeline(&self.rect_pipeline);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        pass.draw(0..6, 0..layer.rect_count);
+                    }
+                    if let Some(buffer) = layer.icon_buffer.as_ref() {
+                        pass.set_pipeline(&self.math_pipeline);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                        for draw in &layer.icon_draws {
+                            if let Some(texture) = self.math_textures.get(&draw.key)
+                                && let Some(tile) = texture.tiles.get(draw.tile_index)
+                            {
+                                pass.set_bind_group(0, &tile.bind_group, &[]);
+                                pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                            }
                         }
                     }
-                }
-                if overlay_prepared {
-                    self.overlay_text_renderer
-                        .render(&self.atlas, &self.chrome_viewport, &mut pass)
-                        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                    if layer.text_prepared {
+                        self.overlay_text_renderers[index]
+                            .render(&self.atlas, &self.chrome_viewport, &mut pass)
+                            .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                    }
                 }
             }
         }
@@ -8378,7 +8445,7 @@ mod tests {
         assert!(!Arc::ptr_eq(&text_rows[0], &dark_row));
         assert_eq!(
             text_rows[0].narrow_glyphs[0].color,
-            Color::rgb(0xab, 0x64, 0x00)
+            Color::rgb(0x99, 0x99, 0x00)
         );
     }
 

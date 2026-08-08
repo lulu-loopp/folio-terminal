@@ -19,12 +19,12 @@
 //!   under a popup but whatever the terminal happens to be showing.
 
 use bt_render::{
-    ChromeLabel, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad,
-    chrome_palette, rounded_overlay_fill,
+    ChromeLabel, FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX, chrome_palette,
+    rounded_overlay_fill,
 };
 
 use crate::{
-    marks::{ChromeMark, ChromeSprite},
+    marks::{ChromeMark, ChromeSprite, OverlayLayer},
     settings::push_float_window,
 };
 
@@ -194,12 +194,15 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
     x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
 }
 
-/// The menu's three planes and its rows.
+/// The menu's three planes and its rows, as one overlay layer.
+///
+/// One layer and not more: a popup with nothing of its own inside it has nothing
+/// to cover but the window, and the window is not the overlay's to draw. The
+/// stack exists so a surface can cover another surface the overlay drew — see
+/// [`crate::settings::build`], where the picker is a second layer over the dialog
+/// it hangs off.
 #[must_use]
-pub fn build(
-    layout: &ProfileMenuLayout,
-    hover: Option<usize>,
-) -> (Vec<OverlayQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+pub fn build(layout: &ProfileMenuLayout, hover: Option<usize>) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
     let px = |value: f32| value * scale;
@@ -285,12 +288,24 @@ pub fn build(
         }
     }
 
-    (quads, labels, sprites)
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+    }]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one layer a popup with nothing inside it draws.
+    fn one_layer(layers: Vec<OverlayLayer>) -> OverlayLayer {
+        let [layer]: [OverlayLayer; 1] = layers
+            .try_into()
+            .expect("a popup with no popup of its own is one layer");
+        layer
+    }
 
     /// The `˅`'s box in a 960x600 window at 1x, taken from the strip's own
     /// geometry rather than restated here.
@@ -416,8 +431,10 @@ mod tests {
         let scale = 1.0;
         let layout = layout(anchor(scale), 960.0, scale);
         let palette = chrome_palette();
-        let (rest_quads, rest_labels, sprites) = build(&layout, None);
-        let (hover_quads, hover_labels, _) = build(&layout, Some(0));
+        let rest = one_layer(build(&layout, None));
+        let hover = one_layer(build(&layout, Some(0)));
+        let (rest_quads, rest_labels, sprites) = (rest.quads, rest.labels, rest.sprites);
+        let (hover_quads, hover_labels) = (hover.quads, hover.labels);
         assert!(
             sprites
                 .iter()

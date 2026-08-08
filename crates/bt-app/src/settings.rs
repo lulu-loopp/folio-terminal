@@ -31,7 +31,7 @@ use bt_render::{
     rounded_overlay_fill, rounded_overlay_halo,
 };
 
-use crate::marks::{ChromeMark, ChromeSprite};
+use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
 
 // ── `.settings`, `.overlay` ────────────────────────────────────────────────
 /// `.settings { width: min(480px, 92%) }` — the cap and the share.
@@ -565,18 +565,21 @@ pub fn hit(layout: &SettingsLayout, x: f64, y: f64) -> SettingsTarget {
     SettingsTarget::Scrim
 }
 
-/// Every fill, label and mark the overlay draws, back to front.
+/// Every fill, label and mark the overlay draws, bottom layer first.
 ///
-/// Order matters and is not incidental: the renderer draws all of the fills,
-/// then all of the marks, then all of the text, so anything that must cover a
-/// fill has to be a later fill. The open menu is therefore pushed after the
-/// combo it covers.
+/// Order matters and is not incidental. Inside one layer the renderer draws all
+/// of the fills, then all of the marks, then all of the text, so within a layer
+/// only a *fill* can cover a fill — a caption pushed after a popup's surface
+/// still lands on top of it, because the text channel runs after every fill in
+/// the layer. Covering therefore happens between layers and not inside one: the
+/// dialog and its rows are the first layer, the open picker is a second one over
+/// it, and a row added to the first layer tomorrow cannot reach through.
 #[must_use]
 pub fn build(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
     selected: ThemeModeV1,
-) -> (Vec<OverlayQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
     let px = |value: f32| value * scale;
@@ -739,9 +742,15 @@ pub fn build(
         );
     }
 
+    // The open picker, on a layer of its own above everything the dialog drew.
+    // Not "pushed last": pushed last it covers the fills under it and none of the text,
+    // which is the one channel its own face has to cover — the value and chevron
+    // of the control it hangs over are captions, and captions draw after every
+    // fill in their layer.
+    let mut popup = OverlayLayer::default();
     if let Some(menu) = layout.menu {
         push_float_window(
-            &mut quads,
+            &mut popup.quads,
             menu,
             px(MENU_RADIUS_LOGICAL_PX),
             border,
@@ -773,7 +782,7 @@ pub fn build(
                 }
             };
             if is_hovered {
-                quads.extend(rounded_overlay_fill(
+                popup.quads.extend(rounded_overlay_fill(
                     *item,
                     px(ITEM_RADIUS_LOGICAL_PX),
                     palette.menu_item_hover,
@@ -783,7 +792,7 @@ pub fn build(
             let tick_left = item[0] + px(ITEM_PADDING_X_LOGICAL_PX);
             let tick_right = tick_left + px(TICK_WIDTH_LOGICAL_PX);
             if is_selected {
-                labels.push(ChromeLabel {
+                popup.labels.push(ChromeLabel {
                     text: TICK.to_owned(),
                     rect: [tick_left, item[1], tick_right, item[3]],
                     font_size_px: px(TICK_FONT_LOGICAL_PX),
@@ -793,7 +802,7 @@ pub fn build(
                     letter_spacing_em: 0.0,
                 });
             }
-            labels.push(ChromeLabel {
+            popup.labels.push(ChromeLabel {
                 text: label.to_owned(),
                 rect: [
                     tick_right + px(ITEM_GAP_LOGICAL_PX),
@@ -814,7 +823,16 @@ pub fn build(
         }
     }
 
-    (quads, labels, sprites)
+    let content = OverlayLayer {
+        quads,
+        labels,
+        sprites,
+    };
+    if popup.is_empty() {
+        vec![content]
+    } else {
+        vec![content, popup]
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1272,7 +1290,7 @@ mod tests {
         let (x, y) = centre(placed.cursor_combo);
         assert_eq!(hit(&placed, x, y), SettingsTarget::CursorCombo);
         assert_eq!(placed.items.len(), 3);
-        let (_, labels, _) = build(&placed, None, ThemeModeV1::Dark);
+        let labels = labels_of(&placed, None, ThemeModeV1::Dark);
         for label in ["Bar", "Block", "Underline"] {
             assert!(labels.iter().any(|candidate| candidate.text == label));
         }
@@ -1366,12 +1384,183 @@ mod tests {
         assert!(!panel.is_open());
     }
 
+    /// Every fill the overlay draws, whatever layer it is on — the question
+    /// "does the dialog paint this at all" is not a question about z-order.
     fn quads_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
         selected: ThemeModeV1,
     ) -> Vec<OverlayQuad> {
-        build(placed, hover, selected).0
+        build(placed, hover, selected)
+            .into_iter()
+            .flat_map(|layer| layer.quads)
+            .collect()
+    }
+
+    fn labels_of(
+        placed: &SettingsLayout,
+        hover: Option<SettingsTarget>,
+        selected: ThemeModeV1,
+    ) -> Vec<ChromeLabel> {
+        build(placed, hover, selected)
+            .into_iter()
+            .flat_map(|layer| layer.labels)
+            .collect()
+    }
+
+    fn sprites_of(
+        placed: &SettingsLayout,
+        hover: Option<SettingsTarget>,
+        selected: ThemeModeV1,
+    ) -> Vec<ChromeSprite> {
+        build(placed, hover, selected)
+            .into_iter()
+            .flat_map(|layer| layer.sprites)
+            .collect()
+    }
+
+    /// Whether `inner` lies wholly inside `outer`.
+    fn within(inner: [f32; 4], outer: [f32; 4]) -> bool {
+        inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+    }
+
+    /// Whether the two rectangles share any area at all.
+    fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
+        a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3]
+    }
+
+    /// Which layer the open picker's own surface is drawn on.
+    fn popup_layer(layers: &[OverlayLayer]) -> usize {
+        let surface = chrome_palette().menu_surface;
+        layers
+            .iter()
+            .position(|layer| layer.quads.iter().any(|quad| quad.color == surface))
+            .expect("an open picker draws its own face in --menu")
+    }
+
+    /// PIN (z-order): an open picker is a layer of its own, it is the last one,
+    /// and nothing but the picker is on it — so every product of every row lands
+    /// underneath it, in whichever channel that row drew itself.
+    ///
+    /// This is the shape of the bug it exists to keep out, caught on screen with
+    /// the Theme picker open: the popup hangs over the Cursor row, and the row's
+    /// value, its chevron and its tick came back out through the popup's face.
+    /// The reason is that the overlay draws a layer's fills, then its marks, then
+    /// its text: the popup's surface is a *fill* and the row's value is *text*, so
+    /// pushing the popup last covered the row's own fills and nothing else. Only
+    /// a later layer covers a later channel.
+    ///
+    /// Stated as the geometry the screenshot shows: where the popup's rectangle
+    /// crosses a row's, the row's drawing product is on a lower layer — never on
+    /// the popup's, and never above it.
+    ///
+    /// Red gate: the second half is what fails while the popup shares the rows'
+    /// layer, and it names the row content it found there. The last assertion
+    /// keeps the whole test from going vacuous if the picker ever stops
+    /// overhanging the row below it — there would then be nothing to cover.
+    #[test]
+    fn an_open_picker_is_the_last_layer_and_carries_nothing_but_itself() {
+        let mut covered_row_products = 0;
+        for kind in [SettingsMenu::Theme, SettingsMenu::Cursor] {
+            let placed = layout_for_menu(SURFACE.0, SURFACE.1, 1.0, Some(kind))
+                .expect("this window can host the dialog");
+            let menu = placed.menu.expect("the picker is open");
+            let layers = build(&placed, None, ThemeModeV1::Dark);
+            let popup = popup_layer(&layers);
+            assert_eq!(
+                popup,
+                layers.len() - 1,
+                "{kind:?}: nothing at all is drawn over an open picker"
+            );
+
+            // The popup's layer is the popup and only the popup. Its captions and
+            // marks stand inside its own frame; its fills are that frame plus the
+            // shadow it casts, which is the one thing it draws outside itself.
+            let lift = FLOAT_WINDOW_SHADOW_LOGICAL_PX.ceil() + 1.0;
+            let halo = [
+                menu[0] - lift,
+                menu[1] - lift,
+                menu[2] + lift,
+                menu[3] + lift,
+            ];
+            let top = &layers[popup];
+            for label in &top.labels {
+                assert!(
+                    within(label.rect, menu),
+                    "{kind:?}: {:?} at {:?} is not the picker's own text and shares its layer",
+                    label.text,
+                    label.rect
+                );
+            }
+            for sprite in &top.sprites {
+                assert!(
+                    within(sprite.rect, menu),
+                    "{kind:?}: {:?} is a mark on the picker's layer that is not the picker's",
+                    sprite.mark
+                );
+            }
+            for quad in &top.quads {
+                assert!(
+                    within(quad.rect, halo),
+                    "{kind:?}: a fill at {:?} is on the picker's layer but outside its shadow",
+                    quad.rect
+                );
+            }
+
+            // Count what the popup is actually covering, for the vacuity guard
+            // below: content that crosses the popup's rectangle and is drawn on
+            // a layer under it.
+            covered_row_products += layers[..popup]
+                .iter()
+                .flat_map(|layer| &layer.labels)
+                .filter(|label| overlaps(label.rect, menu))
+                .count();
+        }
+        // The claim is not vacuous: a picker really does hang over row content
+        // that was on top of it before. The Theme picker is the one that does —
+        // it covers the Cursor row's value and its chevron, which is the pair
+        // the screenshot caught on the popup's face — while the Cursor picker,
+        // opening off the last row, has nothing under it but the scrim.
+        assert!(
+            covered_row_products >= 2,
+            "no picker overhangs any row's text, so this test proves nothing"
+        );
+    }
+
+    /// PIN (modal, one layer down): a press inside an open picker belongs to the
+    /// picker, even where the picker hangs over another row's control — the hit
+    /// test reads the same z-order the draw does, so a click on the popup can
+    /// never open a second one behind it.
+    ///
+    /// Red gate: the sweep is over the *intersection* of the popup and the combo
+    /// it covers, and it is asserted to be a real rectangle first, so a hit test
+    /// that answered the row under the popup would be caught by the sweep rather
+    /// than by an empty loop.
+    #[test]
+    fn a_press_inside_an_open_picker_never_reaches_the_row_beneath_it() {
+        let placed = open(1.0, true);
+        let menu = placed.menu.expect("the picker is open");
+        let covered = clipped(placed.cursor_combo, menu)
+            .expect("the Theme picker hangs over the Cursor row's control");
+        let mut swept = 0;
+        let mut y = covered[1] + 0.5;
+        while y < covered[3] {
+            let mut x = covered[0] + 0.5;
+            while x < covered[2] {
+                let target = hit(&placed, f64::from(x), f64::from(y));
+                assert!(
+                    matches!(
+                        target,
+                        SettingsTarget::ThemeMenu | SettingsTarget::ThemeOption(_)
+                    ),
+                    "({x}, {y}) is under the open picker and answered {target:?}"
+                );
+                swept += 1;
+                x += 3.0;
+            }
+            y += 3.0;
+        }
+        assert!(swept > 0, "the sweep must cover real ground");
     }
 
     /// Visual PIN: the scrim is the mock-up's own `rgba(15,15,15,.35)` across
@@ -1449,7 +1638,7 @@ mod tests {
         for selected in THEME_OPTIONS {
             let placed = open(1.0, true);
             let palette = chrome_palette();
-            let (_, labels, _) = build(&placed, None, selected);
+            let labels = labels_of(&placed, None, selected);
             let ticks: Vec<_> = labels.iter().filter(|label| label.text == TICK).collect();
             assert_eq!(ticks.len(), 1, "exactly one option is the selected mode");
             assert_eq!(ticks[0].color, palette.accent, "the tick is the accent");
@@ -1518,7 +1707,7 @@ mod tests {
     #[test]
     fn the_group_heading_is_uppercase_and_tracked() {
         let placed = open(1.0, false);
-        let (_, labels, _) = build(&placed, None, ThemeModeV1::Dark);
+        let labels = labels_of(&placed, None, ThemeModeV1::Dark);
         let heading = labels
             .iter()
             .find(|label| label.text == "APPEARANCE")
@@ -1535,7 +1724,7 @@ mod tests {
         // heading out letter by letter. A ratio does not carry the DPI scale.
         for scale in [1.0_f32, 2.0] {
             let placed = open(scale, false);
-            let (_, labels, _) = build(&placed, None, ThemeModeV1::Dark);
+            let labels = labels_of(&placed, None, ThemeModeV1::Dark);
             let heading = labels
                 .iter()
                 .find(|label| label.text == "APPEARANCE")
@@ -1553,7 +1742,7 @@ mod tests {
     #[test]
     fn the_close_affordance_wears_the_mock_ups_own_close_symbol() {
         let placed = open(1.0, true);
-        let (_, _, sprites) = build(&placed, None, ThemeModeV1::Dark);
+        let sprites = sprites_of(&placed, None, ThemeModeV1::Dark);
         assert_eq!(sprites.len(), 1);
         assert_eq!(sprites[0].mark, ChromeMark::WindowClose);
         let glyph = sprites[0].rect;

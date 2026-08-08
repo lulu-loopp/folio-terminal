@@ -2182,17 +2182,15 @@ impl Runtime {
     /// every popup, so a modal that is up owns the layer outright, and the
     /// picker is closed the moment the dialog opens.
     fn refresh_overlay(&mut self) -> bool {
-        let (quads, labels, sprites) = if let Some(layout) = self.settings_layout() {
+        let layers = if let Some(layout) = self.settings_layout() {
             settings::build(&layout, self.settings.hover(), self.theme_mode)
         } else if let Some(layout) = self.profile_menu_layout() {
             profiles::build(&layout, self.profile_menu.hover())
         } else {
-            return self
-                .renderer
-                .set_modal_overlay(Vec::new(), Vec::new(), Vec::new());
+            Vec::new()
         };
-        let icons = self.settings_marks.resolve(&sprites);
-        self.renderer.set_modal_overlay(quads, labels, icons)
+        let layers = self.settings_marks.resolve_overlay(layers);
+        self.renderer.set_modal_overlay(layers)
     }
 
     /// The `˅`'s verb: show the profile list, or put away the one on screen.

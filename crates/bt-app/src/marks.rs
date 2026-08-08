@@ -21,7 +21,7 @@
 
 use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
-use bt_render::ChromeIcon;
+use bt_render::{ChromeIcon, ChromeLabel, OverlayQuad};
 
 /// One mark the chrome can wear. Every variant except [`ChromeMark::ActiveTab`]
 /// is a `<symbol>` lifted straight out of the mock-up.
@@ -116,6 +116,31 @@ pub struct ChromeSprite {
     pub color: [u8; 3],
 }
 
+/// One stacking layer of the modal overlay as a builder leaves it: its fills, its
+/// captions, and its marks still named rather than rasterized.
+///
+/// The unrasterized twin of [`bt_render::OverlayLayer`], and it exists for the
+/// same reason: the overlay's three channels have a fixed order inside the render
+/// pass, so a popup is only above a row it covers if the two are on different
+/// layers. Anything that must cover something else goes on a later layer; being
+/// pushed later into the same layer buys nothing across channels.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OverlayLayer {
+    pub quads: Vec<OverlayQuad>,
+    pub labels: Vec<ChromeLabel>,
+    pub sprites: Vec<ChromeSprite>,
+}
+
+impl OverlayLayer {
+    /// Whether the layer draws nothing at all — an empty layer is not a layer,
+    /// and handing one to the renderer would cost a text renderer and a pass
+    /// through three channels to draw nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.quads.is_empty() && self.labels.is_empty() && self.sprites.is_empty()
+    }
+}
+
 /// Rasterized marks, keyed by mark + physical size + colour.
 ///
 /// The map is rebuilt from the sprites of each frame, so it holds exactly what
@@ -139,6 +164,37 @@ impl ChromeMarkRasters {
     /// the order the sprites were requested — which is the order they paint.
     pub fn resolve(&mut self, sprites: &[ChromeSprite]) -> Vec<ChromeIcon> {
         let mut kept: HashMap<String, Raster> = HashMap::with_capacity(sprites.len());
+        let icons = self.icons_for(sprites, &mut kept);
+        self.rasters = kept;
+        icons
+    }
+
+    /// The same for a whole overlay stack, layer by layer.
+    ///
+    /// One pass over every layer rather than one call each, because the map is
+    /// trimmed to what the *frame* asked for: resolving layer by layer would let
+    /// the popup's marks retire the dialog's on the way past, and every frame
+    /// would rasterize both again.
+    pub fn resolve_overlay(&mut self, layers: Vec<OverlayLayer>) -> Vec<bt_render::OverlayLayer> {
+        let mut kept: HashMap<String, Raster> = HashMap::new();
+        let resolved = layers
+            .into_iter()
+            .map(|layer| bt_render::OverlayLayer {
+                quads: layer.quads,
+                labels: layer.labels,
+                icons: self.icons_for(&layer.sprites, &mut kept),
+            })
+            .collect();
+        self.rasters = kept;
+        resolved
+    }
+
+    /// Rasterize what `kept` does not already hold, adding to it as it goes.
+    fn icons_for(
+        &self,
+        sprites: &[ChromeSprite],
+        kept: &mut HashMap<String, Raster>,
+    ) -> Vec<ChromeIcon> {
         let mut icons = Vec::with_capacity(sprites.len());
         for sprite in sprites {
             let width_px = (sprite.rect[2] - sprite.rect[0]).round();
@@ -166,7 +222,6 @@ impl ChromeMarkRasters {
             });
             kept.insert(key, raster);
         }
-        self.rasters = kept;
         icons
     }
 }
