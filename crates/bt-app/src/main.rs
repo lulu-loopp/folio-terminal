@@ -1295,10 +1295,12 @@ enum TabPressPromise {
     /// pointer has not travelled.
     Pending,
     /// The pointer left the press's own neighbourhood before the grace period
-    /// ran out, so the delayed activation was abandoned — this is the instant
-    /// the mock-up calls `drag.started`, and T5's drag begins exactly here.
-    /// Nothing has been shown, which is the point: "a quick drag-out to split
-    /// never flashes the pressed tab's content".
+    /// ran out, so the delayed activation was abandoned. Nothing has been
+    /// shown, which is the point: "a quick drag-out to split never flashes the
+    /// pressed tab's content". It is the mock-up's `drag.started` seen from the
+    /// promise's side only — whether a drag has begun is
+    /// [`TabPress::drag_begun`], because a press that owed nothing to begin
+    /// with can drag without ever passing through here.
     Slipped,
     /// The switch has landed. `drag.pressActivated` in the mock-up.
     Paid,
@@ -1317,6 +1319,16 @@ struct TabPress {
     /// When the delayed activation is due.
     deadline: Instant,
     promise: TabPressPromise,
+    /// Whether the pointer has already left the press's own neighbourhood, so
+    /// the gesture that starts there has started.
+    ///
+    /// Held apart from [`Self::promise`] on purpose, because the two answer
+    /// different questions: the promise is what the press still *owes* its tab,
+    /// and this is whether the hand has begun carrying it. A press on the tab
+    /// you are already looking at owes nothing the instant it lands, and it is
+    /// exactly as draggable as any other — reading the debt to decide the
+    /// gesture is what made the active tab immovable.
+    drag_begun: bool,
 }
 
 impl TabPress {
@@ -1327,6 +1339,7 @@ impl TabPress {
             origin,
             deadline: now + TAB_PRESS_ACTIVATION_GRACE,
             promise: TabPressPromise::Pending,
+            drag_begun: false,
         }
     }
 
@@ -1336,6 +1349,10 @@ impl TabPress {
     /// and the reason is not efficiency: an activation that has nothing to
     /// change must not be able to *become* one later, because by then the
     /// active tab may be somebody else.
+    ///
+    /// Owing nothing is not the same as doing nothing. This press still holds a
+    /// tab, and hands carry the tab they are looking at more often than any
+    /// other — see [`Self::travelled`].
     fn settled(tab: TabId, origin: PhysicalPosition<f64>, now: Instant) -> Self {
         Self {
             promise: TabPressPromise::Paid,
@@ -1344,20 +1361,29 @@ impl TabPress {
     }
 
     /// Tell the press where the pointer is now. Returns whether this is the
-    /// move that abandoned the delayed activation.
+    /// move the drag begins on — once per press, and for every press.
     ///
-    /// Only a `Pending` press can slip. A promise already paid stays paid —
-    /// travelling after the switch has landed is a drag of a tab you are looking
-    /// at, and taking the view back would be a second, unasked-for switch.
+    /// Crossing the threshold *also* withdraws a delayed activation that is
+    /// still waiting, and that is a side effect rather than the answer. Only a
+    /// `Pending` press can slip; a promise already paid stays paid, because
+    /// travelling after the switch has landed is a drag of a tab you are
+    /// already looking at and taking the view back would be a second,
+    /// unasked-for switch. What it is not is a reason to refuse the drag: a
+    /// press that owes its tab nothing — the one onto the active tab, or one
+    /// whose grace period ran out under a still-held finger — is a hand on a
+    /// tab like any other.
     fn travelled(&mut self, position: PhysicalPosition<f64>, scale: f64) -> bool {
-        if self.promise != TabPressPromise::Pending {
+        if self.drag_begun {
             return false;
         }
         let threshold = TAB_DRAG_THRESHOLD_LOGICAL_PX * scale;
         if (position.x - self.origin.x).hypot(position.y - self.origin.y) < threshold {
             return false;
         }
-        self.promise = TabPressPromise::Slipped;
+        self.drag_begun = true;
+        if self.promise == TabPressPromise::Pending {
+            self.promise = TabPressPromise::Slipped;
+        }
         true
     }
 
@@ -6847,10 +6873,12 @@ impl Runtime {
         if self.drive_divider_drag(position)? {
             return Ok(());
         }
-        // A press that has travelled past the drag threshold stops owing its tab
-        // an activation (J105) and becomes a drag (K111). T4 owns the 6px and the
-        // withdrawal; the gesture that starts at exactly that instant is this
-        // slice's, and `Slipped` is the seam between the two.
+        // A press that has travelled past the drag threshold becomes a drag
+        // (K111), and on its way withdraws any activation it was still holding
+        // back (J105). T4 owns the 6px, the identity and the withdrawal; the
+        // gesture that starts at exactly that instant is this slice's. Every
+        // press can start one — what the press owes its tab is a separate
+        // question, and the tab under your finger is often the active one.
         let scale = self.renderer.metrics().scale_factor;
         if self
             .tab_press
@@ -9749,10 +9777,14 @@ mod tests {
         let mut after_paying = TabPress::armed(A, at(100.0, 20.0), now);
         assert!(after_paying.matured(now + TAB_PRESS_ACTIVATION_GRACE));
         assert!(
-            !after_paying.travelled(at(400.0, 20.0), 1.0),
+            after_paying.travelled(at(400.0, 20.0), 1.0),
+            "a finger held past the grace period is still a finger that can carry the tab"
+        );
+        assert_eq!(
+            after_paying.promise,
+            TabPressPromise::Paid,
             "dragging a tab you are already looking at does not un-choose it"
         );
-        assert_eq!(after_paying.promise, TabPressPromise::Paid);
 
         let mut came_home = TabPress::armed(A, at(100.0, 20.0), now);
         assert!(came_home.travelled(at(120.0, 20.0), 1.0));
@@ -9776,6 +9808,71 @@ mod tests {
         assert_eq!(press.wake_deadline(), None, "no timer is armed");
         assert!(!press.matured(now + TAB_PRESS_ACTIVATION_GRACE));
         assert!(!press.released_over(Some(A)));
+    }
+
+    /// The bug T5 shipped with, off real hardware: with two tabs open, the tab
+    /// you were looking at could not be dragged *at all*. It read as
+    /// "sometimes" because which tab that is changes as you work — and the tab
+    /// a hand reaches for is very often the one already in front of it.
+    ///
+    /// Red gate: `travelled` refused any press whose promise was not `Pending`,
+    /// and a press onto the active tab is born `Paid` (`TabPress::settled`), so
+    /// it never reported the move a drag begins on, at any distance.
+    #[test]
+    fn the_tab_you_are_already_on_is_still_draggable() {
+        let now = Instant::now();
+        for scale in [1.0, 1.5, 2.0] {
+            let mut press = TabPress::settled(A, at(100.0, 20.0), now);
+            assert!(
+                !press.travelled(at(100.0 + 5.9 * scale, 20.0), scale),
+                "the active tab is held to the same 6px as every other tab"
+            );
+            assert!(
+                press.travelled(at(100.0 + 7.0 * scale, 20.0), scale),
+                "and past it the press is a drag at {scale}x, owing nothing or not"
+            );
+            assert_eq!(
+                press.promise,
+                TabPressPromise::Paid,
+                "the drag neither borrows from the promise nor pays it back"
+            );
+            assert!(
+                !press.travelled(at(400.0, 20.0), scale),
+                "and it still starts exactly once"
+            );
+        }
+    }
+
+    /// J99/K111 — the second press of a would-be rename lands on the tab the
+    /// first click just activated, so it too owes nothing. Holding it and
+    /// moving carries the tab; it does not sit inside the double-click window
+    /// waiting for an editor.
+    #[test]
+    fn pressing_again_inside_the_double_click_window_and_moving_is_a_drag() {
+        let now = Instant::now();
+        let mut clicks = TabClicks::default();
+
+        let mut first = TabPress::armed(A, at(100.0, 20.0), now);
+        assert!(first.released_over(Some(A)), "click one shows the tab");
+        assert_eq!(clicks.register(A, now), TabClick::Single);
+
+        // Press two, well inside the window — and now onto the active tab.
+        let again = now + Duration::from_millis(80);
+        let mut second = TabPress::settled(A, at(100.0, 20.0), again);
+        assert!(
+            second.travelled(at(106.0, 20.0), 1.0),
+            "a press-and-move inside the double-click window is a drag, not half a rename"
+        );
+
+        // And the gesture takes its own release with it: `drop_tab_drag`
+        // interrupts the chain, so the lift that ends the drag cannot land as
+        // the second click and open the editor behind the drop.
+        clicks.interrupt();
+        assert_eq!(
+            clicks.register(A, again + Duration::from_millis(10)),
+            TabClick::Single,
+            "a click that became a drag is not the first half of anything"
+        );
     }
 
     /// J99/J105 — the two clicks of a rename land on one tab inside the
@@ -14371,7 +14468,8 @@ mod tests {
     #[test]
     fn a_drag_that_never_starts_leaves_the_press_exactly_as_t4_left_it() {
         // The seam between T4 and T5, from T5's side: the 6px and the identity
-        // are the press's, and `Slipped` is the only thing this slice reads.
+        // are the press's, and the move it names as the drag's first is the
+        // only thing this slice reads.
         let now = Instant::now();
         let mut press = TabPress::armed(TabId(1), PhysicalPosition::new(100.0, 20.0), now);
         assert!(!press.travelled(PhysicalPosition::new(105.0, 20.0), 1.0));
