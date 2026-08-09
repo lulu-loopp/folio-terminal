@@ -312,6 +312,35 @@ pub struct ChromePalette {
     pub active_tab: [u8; 3],
     /// The pane-head surface: exactly `--termbg`, not panel chrome.
     pub pane_head: [u8; 3],
+    // ── the pane head's `×`, mixed over the one ground a pane head has ──
+    //
+    // A pane head is `--termbg` and nothing else: C24 rules out a fill for
+    // focus, and there is no hover fill on a pane head either, so unlike the
+    // tab's `×` — which has to answer to four grounds — this one has exactly
+    // two states over one ground, plus its pill.
+    //
+    // They are numerically the tab's own three on both canvases, because the
+    // active tab and a pane head stand on the same surface. Named separately
+    // for the reason [`Self::tab_close_glyph_on_active_tab`] gives for being
+    // named separately from [`Self::pane_title`]: two declarations, either of
+    // which could be re-struck without the other.
+    /// `.panehead .pane-close { color: var(--ink3) }` over `--termbg`.
+    pub pane_close_glyph: [u8; 3],
+    /// `.panehead .pane-close:hover { background: var(--active) }` over
+    /// `--termbg`.
+    pub pane_close_pill: [u8; 3],
+    /// `.panehead .pane-close:hover { color: var(--ink) }`, standing on
+    /// [`Self::pane_close_pill`] and never on the bare head.
+    pub pane_close_glyph_on_pill: [u8; 3],
+    /// `.termhost { background: var(--panel) }` (mock-up 1022-1023).
+    ///
+    /// The one surface in the seat layer that is *chrome* rather than terminal,
+    /// and the mock-up's own comment says where it is seen: only through the gap
+    /// that opens between the panes while a divider is being dragged. Numerically
+    /// [`Self::title_bar`] on both canvases and a separate field all the same —
+    /// the title bar is the frame around the window and this is the floor the
+    /// panes sit on, and F63's card gap is the only place the floor shows.
+    pub termhost: [u8; 3],
     /// `--border-soft` composited over the pane-head surface.
     pub pane_head_edge: [u8; 3],
     /// Unfocused `.panehead` ink (`--ink3`) over its terminal surface.
@@ -530,6 +559,13 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     caption_close_text: [0xff, 0xff, 0xff],
     active_tab: [0x1b, 0x1b, 0x1b],
     pane_head: [0x1b, 0x1b, 0x1b],
+    // `--ink3` (white .38) over `--termbg` #1B1B1B: 27 + 228×.38 = 113.6.
+    pane_close_glyph: [0x72, 0x72, 0x72],
+    // `--active` (white .09) over the same: 27 + 228×.09 = 47.5.
+    pane_close_pill: [0x30, 0x30, 0x30],
+    // `--ink` (white .87) over that pill: 47.5 + 207.5×.87 = 228.0.
+    pane_close_glyph_on_pill: [0xe4, 0xe4, 0xe4],
+    termhost: [0x25, 0x25, 0x25],
     pane_head_edge: [0x29, 0x29, 0x29],
     // `--ink3` over `--termbg #1B1B1B`, not over `--win #202020`: the pane head
     // is the terminal surface (see `pane_head` above), and mixing this ink over
@@ -626,6 +662,13 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     caption_close_text: [0xff, 0xff, 0xff],
     active_tab: [0xff, 0xff, 0xff],
     pane_head: [0xff, 0xff, 0xff],
+    // `--ink3` (rgb(55,53,47) at .45) over `--termbg` #FFFFFF.
+    pane_close_glyph: [0xa5, 0xa4, 0xa1],
+    // `--active` (the same ink at .09) over the same white.
+    pane_close_pill: [0xed, 0xed, 0xec],
+    // `--ink` #37352F is opaque on this canvas, so the lit `×` is that literal.
+    pane_close_glyph_on_pill: [0x37, 0x35, 0x2f],
+    termhost: [0xf7, 0xf7, 0xf5],
     pane_head_edge: [0xf1, 0xf1, 0xf1],
     pane_title: [0xa5, 0xa4, 0xa1],
     pane_title_focus: [0x37, 0x35, 0x2f],
@@ -862,6 +905,25 @@ pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;
 pub const SEAT_TITLE_PADDING_LOGICAL_PX: f32 = 12.0;
 /// `.panehead { gap: 7px }` — between the mark and the title.
 pub const SEAT_TITLE_GAP_LOGICAL_PX: f32 = 7.0;
+/// The other half of `.panehead { padding: 0 6px 0 12px }`: the inset the
+/// trailing control run stops at.
+///
+/// Its own constant rather than a second reading of
+/// [`SEAT_TITLE_PADDING_LOGICAL_PX`], because the two are different numbers in
+/// the one declaration they come from — the head is padded 12px on the side that
+/// holds words and 6px on the side that holds buttons, since a 17px button box
+/// already carries its own visual margin inside it.
+pub const SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX: f32 = 6.0;
+/// `.panehead .pane-close { width: 17px; height: 17px }` (mock-up 1650-1654).
+///
+/// The same 17 as `.tab .close`, and deliberately spelled again rather than
+/// aliased: they are two declarations in two stylesheets' worth of rules, and a
+/// pane head could be re-struck without the tab strip moving.
+pub const SEAT_PANE_CLOSE_BOX_LOGICAL_PX: f32 = 17.0;
+/// `.panehead .pane-close { border-radius: 4px }`.
+pub const SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX: f32 = 4.0;
+/// `.panehead .pane-close svg { width: 8px; height: 8px }`.
+pub const SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX: f32 = 8.0;
 /// A terminal pane head wears the session's profile mark, at `.pmark`'s 15px.
 pub const PANE_HEAD_PROFILE_MARK_LOGICAL_PX: f32 = 15.0;
 /// `.preview-head .files-ico { width: 14px; height: 14px; color: var(--accent) }`.
@@ -877,7 +939,26 @@ pub const SEAT_TITLE_EDGE_LOGICAL_PX: f32 = 1.0;
 pub const SEAT_DIVIDER_VISUAL_LOGICAL_PX: f32 = 1.0;
 /// A divider's hit zone, in logical pixels — wider than its line, because a
 /// one-pixel target is not a target.
-pub const SEAT_DIVIDER_HIT_LOGICAL_PX: f32 = 6.0;
+///
+/// Seven, which is `.split-row > .divider { width: 7px; margin: 0 -3px }`
+/// (mock-up 1475-1476) and `DESIGN.md` §7.1.1 both, read literally. The negative
+/// margin is why seven costs nothing: the box overhangs its two neighbours by
+/// 3px each and still spends only [`SEAT_DIVIDER_VISUAL_LOGICAL_PX`] of layout.
+/// It carried 6 until this pass, which was a number no document ever said.
+pub const SEAT_DIVIDER_HIT_LOGICAL_PX: f32 = 7.0;
+/// The grip on a divider — `.divider::after`, mock-up 1485-1491. Three logical
+/// pixels across the band and twenty-eight along it, so it reads as a handle on
+/// the line rather than as a second line.
+pub const SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX: f32 = 3.0;
+/// `height: 28px` on a row divider, `width: 28px` on a column one.
+pub const SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX: f32 = 28.0;
+/// `border-radius: 2px`.
+pub const SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX: f32 = 2.0;
+/// `.slot.resizing .pane { margin: 5px }` (mock-up 1465-1469) — how far the two
+/// panes a divider drag is resizing pull in from their own edges.
+pub const SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX: f32 = 5.0;
+/// `.slot.resizing .pane { border-radius: 8px }`.
+pub const SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX: f32 = 8.0;
 /// A floating window's corner radius (`.float-win`, `#files-flyout`,
 /// `.term-menu`: `border-radius: 10px`). Shared by every window that floats over
 /// content, the hover-peek flyout included — they are one shape in the mock-up
@@ -1629,6 +1710,73 @@ mod tests {
             assert!(
                 dark > light,
                 "the {ring} ring is {dark} on dark and {light} on light"
+            );
+        }
+    }
+
+    /// PIN (U1): the pane head's `×` composites over `--termbg` and over its own
+    /// pill, and the head's floor is `--panel`.
+    ///
+    /// The same discipline as the tab `×`'s six composites, applied to a control
+    /// that has fewer grounds to answer to rather than more: a pane head has
+    /// exactly one surface, because C24 rules out a fill for focus and there is
+    /// no hover fill on a head at all. So the `×` is two inks over `--termbg`
+    /// plus the pill between them — three, not six — and the test's job is to
+    /// pin the arithmetic and to pin the *reuse*, which is the part that could
+    /// silently go wrong: each of the three is numerically the tab's own
+    /// counterpart, because the active tab stands on `--termbg` too, and any
+    /// future divergence there is a bug in one of the two.
+    #[test]
+    fn the_pane_heads_close_button_is_mixed_over_the_head_and_over_its_own_pill() {
+        // `--ink3` over `--termbg`, which is `pane_title`'s own ground.
+        assert_eq!(DARK_CHROME.pane_close_glyph, [0x72, 0x72, 0x72]);
+        assert_eq!(LIGHT_CHROME.pane_close_glyph, [0xa5, 0xa4, 0xa1]);
+        // `--active` over `--termbg`: 27 + 228×.09 on dark, 255 - {200,202,208}
+        // ×.09 on light.
+        assert_eq!(DARK_CHROME.pane_close_pill, [0x30, 0x30, 0x30]);
+        assert_eq!(LIGHT_CHROME.pane_close_pill, [0xed, 0xed, 0xec]);
+        // `--ink` over that pill — never over the bare head.
+        assert_eq!(DARK_CHROME.pane_close_glyph_on_pill, [0xe4, 0xe4, 0xe4]);
+        assert_eq!(LIGHT_CHROME.pane_close_glyph_on_pill, [0x37, 0x35, 0x2f]);
+        // The reuse, stated: same ink, same ground, therefore same number.
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_eq!(
+                palette.pane_close_glyph, palette.pane_title,
+                "the resting `×` is `--ink3` over the head, which is the title's own ink"
+            );
+            assert_eq!(
+                palette.pane_close_pill, palette.tab_close_pill_on_content,
+                "a pane head and the active tab are the same surface"
+            );
+            assert_eq!(
+                palette.pane_close_glyph_on_pill, palette.tab_close_glyph_on_pill_over_active_tab,
+                "so are the two pills, and so is the ink that stands on them"
+            );
+            // The lit `×` has to be a real step above the resting one, or the
+            // hover says nothing.
+            assert_ne!(palette.pane_close_glyph, palette.pane_close_glyph_on_pill);
+            assert_ne!(palette.pane_close_pill, palette.pane_head);
+        }
+    }
+
+    /// PIN (U1/E57): the termhost floor is `--panel`, and it is not the pane's
+    /// own surface.
+    ///
+    /// A1's whole note is that this colour is invisible until a divider drag
+    /// opens the gap F63 draws. Which means nothing on screen can catch it being
+    /// wrong — only this can.
+    #[test]
+    fn the_termhost_floor_is_panel_and_parts_from_the_pane_surface() {
+        assert_eq!(DARK_CHROME.termhost, [0x25, 0x25, 0x25], "--panel");
+        assert_eq!(LIGHT_CHROME.termhost, [0xf7, 0xf7, 0xf5]);
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_eq!(
+                palette.termhost, palette.title_bar,
+                "one `--panel`, two declarations"
+            );
+            assert_ne!(
+                palette.termhost, palette.pane_head,
+                "a gap that matched the pane it opened between would not be a gap"
             );
         }
     }

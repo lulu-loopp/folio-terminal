@@ -909,6 +909,21 @@ impl DerefMut for Runtime {
 struct DividerDrag {
     split: SplitId,
     dir: Axis,
+    /// The ratio this split held when the gesture began — F61's "remember what
+    /// Esc has to put back", and the *whole* of what it has to put back.
+    ///
+    /// One `Ratio`, not a snapshot of the tree. T225 is explicit that the
+    /// rollback restores that one value: a whole-tree snapshot would also undo
+    /// anything else that happened while the button was down, and the things
+    /// that can happen while the button is down — a command finishing and
+    /// re-solving, a DPI change, the window being resized by the WM — are
+    /// exactly the edits nobody asked Esc to touch.
+    ///
+    /// It costs nothing to be right about, because §3.3 already guarantees the
+    /// restoring edit writes nothing else: `DragDivider`'s focus set is this one
+    /// split, and theorem N says every ratio outside a focus set is bit-identical
+    /// before and after.
+    origin: bt_layout::Ratio,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4247,6 +4262,11 @@ impl Runtime {
             .collect::<Vec<_>>();
         self.measure_open_rename(&mut tabs, scale, width as f32);
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
+        // C28: a terminal pane head names the place it is in, at full length.
+        let terminal_cwd = self
+            .session
+            .working_directory()
+            .map(|path| path.to_string_lossy().into_owned());
         let preview_message = match self.preview_image.as_ref() {
             Some(preview) => preview.message(),
             // An open pane with nothing chosen invites rather than sits mute.
@@ -4260,13 +4280,21 @@ impl Runtime {
             &self.seats,
             &self.seat_layout,
             scale,
-            self.seat_pointer,
+            // E53's `body.dragging` is derived here rather than mirrored into a
+            // field at every place a drag starts and ends: it is a fact about
+            // the runtime, and the way for a mirror of it to go wrong is for one
+            // of those places to be added later and forget.
+            seats::ChromePointer {
+                other_drag_in_flight: self.tab_drag.is_some(),
+                ..self.seat_pointer
+            },
             seats::ChromeContent {
                 tabs: &tabs,
                 active_tab: self.active_tab,
                 grabbed,
                 tab_scroll: self.tab_scroll,
                 preview_title: preview_title.as_deref(),
+                terminal_cwd: terminal_cwd.as_deref(),
                 preview_message: preview_message.as_deref(),
                 profile_menu_open: self.profile_menu.is_open(),
                 chevron_turn: self.chevron_turn.sample(now, self.motion).0,
@@ -4596,6 +4624,12 @@ impl Runtime {
         );
         let focus = tab.seats.focus();
         let preview_title = tab.preview_image.as_ref().map(PreviewImageState::title);
+        // The peek reads the caption through the same door the head does, so a
+        // schematic can never name a pane something the pane itself does not.
+        let terminal_cwd = tab
+            .session
+            .working_directory()
+            .map(|path| path.to_string_lossy().into_owned());
         let leaves: Vec<peek_strip::PeekLeaf> = tab
             .seats
             .tree()
@@ -4603,7 +4637,12 @@ impl Runtime {
             .iter()
             .map(|seat| peek_strip::PeekLeaf {
                 kind: seat.kind,
-                title: seats::seat_caption(seat.kind, preview_title.as_deref()).to_owned(),
+                title: seats::seat_caption(
+                    seat.kind,
+                    preview_title.as_deref(),
+                    terminal_cwd.as_deref(),
+                )
+                .to_owned(),
                 focused: seat.id == focus,
                 // Only a terminal has a session that can be working in it.
                 mark_opacity: if seat.kind == bt_layout::SeatKind::Terminal {
@@ -5227,6 +5266,83 @@ impl Runtime {
         self.divider_drag = None;
         self.apply_window_min_inner_size()?;
         self.commit_seat_geometry()
+    }
+
+    /// `closePane` (mock-up 3558-3578, I102/I103/I105).
+    ///
+    /// One verb for every kind of leaf: the leaf leaves the tree, its sibling is
+    /// promoted, and the run it left is re-balanced — all of which `close_seat`
+    /// already does, because G79/G80 rule that leaving is balanced exactly as
+    /// joining is.
+    ///
+    /// The branch that is new here is the last one. `detachLeaf` returns null
+    /// when the tree holds a single pane, and the mock-up's answer to that is not
+    /// "refuse" but `closeTab(w.id)` — **an empty tab is not a state that
+    /// exists** (T226/§2.1), so closing the last pane *is* closing the tab. That
+    /// falls through to `close_tab`, which keeps its own rule about the last tab
+    /// in the strip: the window does not empty either.
+    fn close_pane(&mut self, seat: bt_layout::SeatId) -> Result<()> {
+        if self.seats.pane_count() <= 1 {
+            return self.close_tab(self.active_tab);
+        }
+        let kind = self
+            .seat_layout
+            .get(seat)
+            .map(|placement| placement.kind)
+            .unwrap_or(bt_layout::SeatKind::Terminal);
+        let metrics = self.seat_metrics();
+        if !self.seats.close_seat(&metrics, seat) {
+            return Ok(());
+        }
+        // A preview seat holds an image the way a terminal holds a session, and
+        // the pane going away is the one taking it. Everything else a leaf owns
+        // is owned by the tab, and the tab is still here.
+        if kind == bt_layout::SeatKind::Preview {
+            self.preview_image = None;
+            self.renderer.set_preview_image(None);
+        }
+        // The pointer's whole picture is stale: the rectangle it was over has
+        // been re-solved out from under it, and a `pane_hover` naming a seat
+        // that no longer exists would keep a `×` lit on a pane that is gone.
+        self.seat_pointer = seats::ChromePointer::default();
+        self.divider_drag = None;
+        self.apply_window_min_inner_size()?;
+        self.commit_seat_geometry()?;
+        if let Some(position) = self.pointer_position {
+            self.update_chrome_hover(position)?;
+        }
+        self.mark_session_dirty(Instant::now());
+        Ok(())
+    }
+
+    /// D40: pressing anywhere in a pane moves the layout focus there.
+    ///
+    /// Anywhere at all — the head, the terminal's own body, a preview's body —
+    /// which is what `document.querySelectorAll(".pane")` listening for `click`
+    /// means at mock-up 5823-5834. It runs *above* the chrome router and never
+    /// consumes the press: focus is what the press means in addition to whatever
+    /// else it meant, and a press in a terminal still has a selection to start.
+    ///
+    /// The one thing it deliberately does not move is keyboard focus. §7.1.5
+    /// keeps that on the terminal in v1, and layout focus is a different fact:
+    /// it is the solver's input to W2 and to the collapse order, and the pane
+    /// whose caption is at `--ink`. With one shell to a tab there is nothing for
+    /// the caret, the selection or the IME to follow — they are already there.
+    /// When a tab grows a second session, this is the call that grows a second
+    /// half, and `close_pane` above is the other place that has to hear about it.
+    fn focus_pane_at(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        let Some(seat) = seats::pane_at(&self.seat_layout, position.x, position.y) else {
+            return Ok(());
+        };
+        if !self.seats.set_focus(seat) {
+            return Ok(());
+        }
+        // Focus is W2's input, so the window's own minimum can move with it —
+        // the focus seat is the last one the concession ladder folds.
+        self.apply_window_min_inner_size()?;
+        self.commit_seat_geometry()?;
+        self.mark_session_dirty(Instant::now());
+        Ok(())
     }
 
     /// Open the ruled preview seat if necessary, otherwise reuse its geometry, then ask the shared
@@ -7054,6 +7170,61 @@ impl Runtime {
         Ok(true)
     }
 
+    /// F71/T225: abandon a divider drag and put back the one value it moved.
+    ///
+    /// "Never mind, and no commit" — the same sentence Esc says to a tab drag,
+    /// and it reaches here by the same two doors: the Esc key, and losing the
+    /// window, which on Win32 is losing the mouse capture and is this platform's
+    /// only `pointercancel` (F72). A drag that ends without either a button-up
+    /// or a teardown would keep steering the layout from a pointer nobody is
+    /// holding.
+    ///
+    /// The restore goes back through `Edit::DragDivider` rather than writing the
+    /// ratio into the tree directly, and that is the point of it: §2.4's
+    /// feasibility judgement and clamp are asked once more, so if the viewport
+    /// changed mid-gesture the answer is the *current* legal value nearest the
+    /// one we started from, rather than a ratio that was legal for a window that
+    /// no longer exists. When nothing changed the clamp is idempotent and the
+    /// origin comes back byte for byte.
+    ///
+    /// Zero side effects when there is nothing to undo: a press that never moved
+    /// the ratio restores a value equal to the one already there, `drag_divider`
+    /// reports no change, and no re-solve is asked for.
+    fn cancel_divider_drag(&mut self) -> Result<bool> {
+        let Some(drag) = self.divider_drag.take() else {
+            return Ok(false);
+        };
+        self.seat_pointer.dragging = None;
+        let usable = self
+            .seats
+            .split_slots(&self.seat_layout)
+            .into_iter()
+            .find(|slot| slot.id == drag.split)
+            .map(|slot| slot.slot.extent(slot.dir) - bt_layout::DIVIDER);
+        let metrics = self.seat_metrics();
+        let restored = match usable {
+            Some(usable) => {
+                self.seats
+                    .drag_divider(&metrics, drag.split, drag.origin, usable)
+                    == Ok(true)
+            }
+            // The split is gone from the solve, so there is no ratio of its to
+            // put back and nothing to re-solve for.
+            None => false,
+        };
+        if restored {
+            self.commit_seat_geometry()?;
+        }
+        self.apply_pointer_cursor();
+        if let Some(position) = self.pointer_position {
+            self.update_chrome_hover(position)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
     /// Repaint the chrome when the pointer moves onto or off a divider, a close
     /// affordance or a collapsed bar.
     fn chrome_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
@@ -7082,14 +7253,31 @@ impl Runtime {
 
     fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         let hover = self.chrome_target_at(position);
-        self.update_chrome_hover_target(hover)
+        // `.pane:hover` is a second question about the same pointer, and it has
+        // to be asked here rather than derived from `hover`: over a terminal's
+        // body `hover` is `None`, because a terminal is not chrome, and that is
+        // most of the pane.
+        let pane = seats::pane_at(&self.seat_layout, position.x, position.y);
+        self.update_chrome_hover_target_in_pane(hover, pane)
     }
 
     fn update_chrome_hover_target(&mut self, hover: Option<seats::ChromeTarget>) -> Result<()> {
-        if self.seat_pointer.hover == hover {
+        // A caller that has decided the pointer belongs to something floating
+        // over the panes — an open picker, the restore prompt — is saying the
+        // pointer is not in a pane either.
+        self.update_chrome_hover_target_in_pane(hover, None)
+    }
+
+    fn update_chrome_hover_target_in_pane(
+        &mut self,
+        hover: Option<seats::ChromeTarget>,
+        pane: Option<bt_layout::SeatId>,
+    ) -> Result<()> {
+        if self.seat_pointer.hover == hover && self.seat_pointer.pane_hover == pane {
             return Ok(());
         }
         self.seat_pointer.hover = hover;
+        self.seat_pointer.pane_hover = pane;
         self.apply_pointer_cursor();
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -7572,6 +7760,11 @@ impl Runtime {
             return Ok(target.is_some());
         }
         let target = self.chrome_target_at(position);
+        // D40, above the router and consuming nothing: every press inside a pane
+        // moves the layout focus there, whatever else the press goes on to mean.
+        // Above the rename guard too — clicking into another pane is a blur, and
+        // a blur that committed the editor still landed in that pane.
+        self.focus_pane_at(position)?;
         // Blur commits, and blur is every press that is not inside the editor
         // (J102; mock-up 5898 `input.addEventListener("blur", () => finish(true))`,
         // which the browser fires on `pointerdown`, before the press does
@@ -7625,9 +7818,19 @@ impl Runtime {
                 else {
                     return Ok(true);
                 };
+                let Some(origin) = self
+                    .seats
+                    .tree()
+                    .ratios()
+                    .into_iter()
+                    .find_map(|(id, ratio)| (id == split).then_some(ratio))
+                else {
+                    return Ok(true);
+                };
                 self.divider_drag = Some(DividerDrag {
                     split,
                     dir: slot.dir,
+                    origin,
                 });
                 self.seat_pointer.dragging = Some(split);
                 self.apply_pointer_cursor();
@@ -7645,7 +7848,17 @@ impl Runtime {
                     self.commit_seat_geometry()?;
                 }
             }
+            // D40. The focus move is done for every press in the pane by
+            // `focus_pane_at` above the router; the head has nothing left to do
+            // until it becomes a drag handle (J118, a later slice).
             seats::ChromeTarget::PaneHeader(_) => {}
+            // I102/I105: one verb for every kind of leaf. A files pane has no
+            // session to clear, which is the whole of what `closeFilesPane =
+            // closePane` means (mock-up 3579).
+            seats::ChromeTarget::PaneClose(seat) => {
+                self.tab_clicks.interrupt();
+                self.close_pane(seat)?;
+            }
             seats::ChromeTarget::Tab(index) => self.press_tab(index, position)?,
             // J99: "`.close`/`.pin` 上的双击不算(那是两次按钮点击)". Neither
             // records a click, so neither can be half of a rename — and both
@@ -8168,9 +8381,14 @@ impl Runtime {
         // without this the drop still committed on pointerup" (mock-up 6045-6051).
         // It stands above even the modal, because a drag is a gesture the user is
         // in the middle of making and a dialog is one they have already opened.
+        //
+        // A resize is a drag for this purpose too, and it stands beside the tab
+        // drag rather than below it: J122 rules the two mutually exclusive — one
+        // gesture owns the pointer at a time — so the order between them is a
+        // formality and only one of the two calls can ever answer `true`.
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
             && !event.repeat
-            && self.cancel_tab_drag()?
+            && (self.cancel_tab_drag()? || self.cancel_divider_drag()?)
         {
             return Ok(());
         }
@@ -8843,7 +9061,14 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 // signal winit surfaces — there is no `WM_CAPTURECHANGED` event —
                 // and an un-torn-down drag would leave a tab floating over a strip
                 // nobody is holding any more. Same path as Esc: never mind.
-                let cancelled = runtime.cancel_tab_drag();
+                // F72: the same capture loss ends a divider drag, and ends it
+                // the same way — restoring the one ratio it had been moving.
+                // Left holding the button over a window that is no longer
+                // listening, the gesture was never finished, and a drag nobody
+                // finished did not choose a ratio.
+                let cancelled = runtime
+                    .cancel_tab_drag()
+                    .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
                 runtime.tab_press = None;
                 runtime.tab_clicks.interrupt();
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial

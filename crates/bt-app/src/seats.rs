@@ -27,28 +27,39 @@ use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromeQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
     PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
-    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
+    SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX, SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
+    SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
     SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
-    SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX, WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
-    WINDOW_CAPTION_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_BOX_LOGICAL_PX,
-    WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX,
-    WINDOW_NEW_TAB_GLYPH_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX,
-    WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX, WINDOW_NEW_TAB_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_BADGE_FONT_LOGICAL_PX, WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX,
-    WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX,
-    WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX, WINDOW_TAB_CLOSE_BOX_LOGICAL_PX,
-    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX, WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_FONT_LOGICAL_PX, WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX,
-    WINDOW_TAB_HEIGHT_LOGICAL_PX, WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX,
-    WINDOW_TAB_MIN_WIDTH_LOGICAL_PX, WINDOW_TAB_PADDING_LEFT_LOGICAL_PX,
-    WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX, WINDOW_TAB_RADIUS_LOGICAL_PX,
-    WINDOW_TAB_RING_STROKE_LOGICAL_PX, WINDOW_TAB_SQUEEZED_LOGICAL_PX,
-    WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_LOGICAL_PX,
-    WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX,
-    WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX, chrome_palette,
+    SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, SeatViewport, WINDOW_CAPTION_BUTTON_LOGICAL_PX,
+    WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX, WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+    WINDOW_NEW_TAB_BOX_LOGICAL_PX, WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX,
+    WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX, WINDOW_NEW_TAB_GLYPH_LOGICAL_PX,
+    WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX, WINDOW_NEW_TAB_MARGIN_LEFT_LOGICAL_PX,
+    WINDOW_NEW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+    WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX, WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX, WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_BOX_LOGICAL_PX, WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX,
+    WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX, WINDOW_TAB_FONT_LOGICAL_PX,
+    WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX, WINDOW_TAB_GAP_LOGICAL_PX, WINDOW_TAB_HEIGHT_LOGICAL_PX,
+    WINDOW_TAB_MARK_LOGICAL_PX, WINDOW_TAB_MAX_WIDTH_LOGICAL_PX, WINDOW_TAB_MIN_WIDTH_LOGICAL_PX,
+    WINDOW_TAB_PADDING_LEFT_LOGICAL_PX, WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_RADIUS_LOGICAL_PX, WINDOW_TAB_RING_STROKE_LOGICAL_PX,
+    WINDOW_TAB_SQUEEZED_LOGICAL_PX, WINDOW_TAB_SQUEEZED_PADDING_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_LOGICAL_PX, WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX,
+    WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX, WINDOW_TAB_TIGHT_LOGICAL_PX, WINDOW_TITLE_BAR_LOGICAL_PX,
+    chrome_palette,
 };
 
-use crate::marks::{ChromeMark, ChromeSprite};
+use crate::marks::{ChromeMark, ChromeSprite, Corner};
+
+/// `.pane:not(.focused) .panehead .ticon { opacity: .5 }` (mock-up 1647).
+///
+/// The mark recedes on panes you are not in, through a channel of its own so it
+/// cannot collide with what the accent or the breathing already say.
+pub const PANE_MARK_UNFOCUSED_OPACITY: f32 = 0.5;
 
 /// The tab-name editor's caret, in logical pixels.
 ///
@@ -128,8 +139,30 @@ impl Seats {
     }
 
     /// Pane heads disambiguate siblings; a one-pane tree needs no pane chrome.
+    ///
+    /// The tree-wide answer, which is the one the *terminal* obeys. A files pane
+    /// does not — see [`Self::seat_wears_head`].
     pub fn has_pane_headers(&self) -> bool {
         self.pane_count() > 1
+    }
+
+    /// Whether this one seat draws a head (C25, C26).
+    ///
+    /// Two rules, not one, and the mock-up states both at 4534-4542. A terminal
+    /// pane earns its head only by having a sibling — a lone terminal's head
+    /// would name the thing the tab above it already names, which is the zero-
+    /// chrome discipline the whole product opens with. A files pane draws one
+    /// *always*, because a tree that does not say where it is rooted is not
+    /// useful, and because that head is also the pane's drag handle and its
+    /// close button — take it away and the pane loses the two verbs every other
+    /// pane has.
+    ///
+    /// Preview follows the terminal's rule rather than the files pane's: it is
+    /// only ever opened beside something, so `pane_count > 1` is already true
+    /// wherever it exists, and giving it the unconditional rule would be writing
+    /// a branch no state can reach.
+    pub fn seat_wears_head(&self, kind: SeatKind) -> bool {
+        kind == SeatKind::Files || self.has_pane_headers()
     }
 
     /// How many panes this tab holds — `paneCount = leavesOf(w.tree).length`
@@ -498,7 +531,8 @@ pub fn pane_body_viewport(
     scale: f32,
 ) -> Option<SeatViewport> {
     let mut viewport = seat_viewport(layout, seat)?;
-    if !seats.has_pane_headers() {
+    let kind = layout.get(seat)?.kind;
+    if !seats.seat_wears_head(kind) {
         return Some(viewport);
     }
     let head_height = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round().max(1.0) as u32;
@@ -524,9 +558,16 @@ pub enum ChromeTarget {
     Divider(SplitId),
     /// A collapsed seat's bar (§2.6.3): the whole strip is clickable.
     CollapseBar(SeatId),
-    /// The common pane head. Tool buttons arrive in a later slice; for now the
-    /// bar is chrome and therefore never terminal input.
+    /// The common pane head, everywhere its own controls are not.
     PaneHeader(SeatId),
+    /// `.panehead .pane-close` — the `×` that closes this pane (mock-up
+    /// 1650-1657, `closePane` at 5825).
+    ///
+    /// Its own target rather than a sub-case of [`Self::PaneHeader`] because the
+    /// head is a drag handle and the `×` is a dead zone inside it (C35, mock-up
+    /// 5837/5844): "the button is not the bar" has to be true at the hit test or
+    /// it is not true anywhere.
+    PaneClose(SeatId),
     Settings,
     Minimize,
     Maximize,
@@ -1331,12 +1372,17 @@ pub fn hit_chrome(
             }
             continue;
         }
-        if seats.has_pane_headers() {
+        if seats.seat_wears_head(placement.kind) {
             // The border box, hairline included, rounded the way the drawing and
             // `pane_body_viewport` both round it: the header you can grab is
             // exactly the header you can see.
-            let head_bottom = (rect[1] + (SEAT_TITLE_BAR_LOGICAL_PX * scale).round()).min(rect[3]);
-            if contains([rect[0], rect[1], rect[2], head_bottom], x, y) {
+            let head = pane_head_geometry(rect, placement.kind, scale);
+            // Smallest first inside the head too: the `×` is a dead zone in the
+            // drag handle (C35), so it has to answer before the handle does.
+            if head.close.is_some_and(|close| contains(close, x, y)) {
+                return Some(ChromeTarget::PaneClose(placement.id));
+            }
+            if contains(head.head, x, y) {
                 return Some(ChromeTarget::PaneHeader(placement.id));
             }
         }
@@ -1438,6 +1484,117 @@ fn pixel_snapped(rect: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// Where everything inside one pane head stands, in physical pixels.
+///
+/// One function answers this for the hit test and for the drawing both, which is
+/// D4 applied to chrome: the `×` you can press is the `×` you can see, and a
+/// second copy of `right - 6px - 17px` is how those two come apart at the one
+/// fractional scale nobody tested.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneHeadGeometry {
+    /// The head's border box — 28 logical pixels including the hairline.
+    pub head: [f32; 4],
+    /// The content box the flex row centres in: the border box less its border.
+    pub content_bottom: f32,
+    /// The seat's own mark, at its per-kind size.
+    pub mark: [f32; 4],
+    /// What is left for the title once the mark and the trailing run have taken
+    /// theirs. `.ptitle` is the flex child that gives, so this shrinks rather
+    /// than pushing the controls off the end.
+    pub title: [f32; 4],
+    /// `.pane-close`'s 17px box, or `None` when the head is too narrow to seat
+    /// it — at which point a press there must fall through to the head, exactly
+    /// as a squeezed tab's does.
+    pub close: Option<[f32; 4]>,
+}
+
+/// Lay out one pane head.
+///
+/// The trailing run is placed from the right edge inward, which is what
+/// `margin-left: auto` does: the controls keep their boxes and the title is the
+/// one that yields. The mock-up hangs three things off that end — `.pane-files`,
+/// `.pane-float` and `.pane-close` — and only the `×` is this slice's; the other
+/// two belong to the Files and floating-window blocks. They arrive by taking
+/// their box off `trailing` before the `×` does, in the mock-up's own DOM order,
+/// and nothing else here has to change.
+pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHeadGeometry {
+    let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round();
+    let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
+    let head_bottom = (rect[1] + bar).min(rect[3]);
+    let content_bottom = (head_bottom - edge).max(rect[1]);
+    let head = [rect[0], rect[1], rect[2], head_bottom];
+
+    let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
+    let (_, mark_logical_px, _) = pane_mark(kind, chrome_palette());
+    let mark_size = (mark_logical_px * scale).round().max(1.0);
+    let mark_left = (rect[0] + pad).round();
+    let mark_top = (rect[1] + ((content_bottom - rect[1]) - mark_size) / 2.0).round();
+    let mark = [
+        mark_left,
+        mark_top,
+        mark_left + mark_size,
+        mark_top + mark_size,
+    ];
+
+    // The trailing run, right to left from `padding-right: 6px`.
+    let trailing_pad = SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX * scale;
+    let close_box = (SEAT_PANE_CLOSE_BOX_LOGICAL_PX * scale).round().max(1.0);
+    let close_right = rect[2] - trailing_pad;
+    let close_left = close_right - close_box;
+    let close_top = (rect[1] + ((content_bottom - rect[1]) - close_box) / 2.0).round();
+    // A control that would overlap the mark has nowhere to stand, and a control
+    // half off its own head is worse than none: the press lands on a box whose
+    // other half belongs to the pane next door.
+    let close = (close_left > mark[2] && close_top >= rect[1])
+        .then(|| pixel_snapped([close_left, close_top, close_right, close_top + close_box]));
+
+    let title_right = match close {
+        Some(close) => close[0] - SEAT_TITLE_GAP_LOGICAL_PX * scale,
+        None => rect[2] - trailing_pad,
+    };
+    PaneHeadGeometry {
+        head,
+        content_bottom,
+        mark,
+        title: [
+            mark[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale,
+            rect[1],
+            title_right.max(mark[2]),
+            content_bottom,
+        ],
+        close,
+    }
+}
+
+/// Which pane the pointer is inside — `.pane:hover`, and nothing narrower.
+///
+/// The whole seat rectangle, head and body together, because that is what the
+/// mock-up's `.pane` element is. A collapsed seat is not one: it is a bar with
+/// no room for a control to be revealed in, and its own hover already has a
+/// meaning.
+#[must_use]
+pub fn pane_at(layout: &SeatLayout, x: f64, y: f64) -> Option<SeatId> {
+    let (x, y) = (x as f32, y as f32);
+    layout
+        .rects
+        .iter()
+        .filter(|placement| matches!(placement.presentation, Presentation::Full))
+        .find_map(|placement| {
+            let device = placement.device_rect?;
+            contains(
+                [
+                    device.left as f32,
+                    device.top as f32,
+                    device.right as f32,
+                    device.bottom as f32,
+                ],
+                x,
+                y,
+            )
+            .then_some(placement.id)
+        })
+}
+
 /// A divider's hit zone: the drawn band widened to something a hand can land
 /// on. One drawn pixel is not a target.
 fn hit_band(slot: SplitSlot, scale: f32) -> [f32; 4] {
@@ -1460,6 +1617,23 @@ fn hit_band(slot: SplitSlot, scale: f32) -> [f32; 4] {
 pub struct ChromePointer {
     pub hover: Option<ChromeTarget>,
     pub dragging: Option<SplitId>,
+    /// `.pane:hover` — which pane the pointer is *inside*, whatever it is on.
+    ///
+    /// A separate channel from [`Self::hover`] and it has to be: the pane's tool
+    /// buttons are revealed by the pointer being anywhere in the pane, and for
+    /// most of that area — the terminal's own body — `hover` is `None`, because
+    /// the terminal is not chrome. Deriving one from the other would mean the
+    /// `×` appeared only while the pointer was already on the head, which is the
+    /// "you have to know it is there to make it appear" bug C33 names.
+    pub pane_hover: Option<SeatId>,
+    /// `body.dragging` — something is being dragged *somewhere* (E53).
+    ///
+    /// Not the same question as [`Self::dragging`], which names the divider this
+    /// gesture is moving. This one is about every other gesture: while one is in
+    /// flight the dividers go silent, because a divider lighting up under the
+    /// pointer is an offer that is not on the table, made in the very colour
+    /// that during a drag means "let go and it lands here".
+    pub other_drag_in_flight: bool,
 }
 
 /// Build every flat rectangle and label the chrome layer draws.
@@ -1509,6 +1683,7 @@ pub fn build_chrome_with_preview(
             grabbed: None,
             tab_scroll: 0.0,
             preview_title,
+            terminal_cwd: None,
             preview_message,
             profile_menu_open: false,
             chevron_turn: 0.0,
@@ -1652,6 +1827,14 @@ pub struct ChromeContent<'a> {
     /// geometry, so a stale value cannot draw a strip past its own content.
     pub tab_scroll: f32,
     pub preview_title: Option<&'a str>,
+    /// The focused terminal session's own `cwd` — C28's `s.cwd`.
+    ///
+    /// It arrives from above rather than being read here for the reason
+    /// `to_persisted` gives: a seat does not know its session. This window runs
+    /// one shell to a tab, so one path describes every terminal leaf in it;
+    /// when panes get their own children this becomes the per-leaf lookup and
+    /// nothing else about the caption changes.
+    pub terminal_cwd: Option<&'a str>,
     pub preview_message: Option<&'a str>,
     /// Whether the profile picker is up. The chevron states where its list is —
     /// down when it is folded away, up when it is already on screen — so the
@@ -1687,6 +1870,7 @@ pub fn build_chrome_for_tabs(
         grabbed,
         tab_scroll,
         preview_title,
+        terminal_cwd,
         preview_message,
         profile_menu_open,
         chevron_turn,
@@ -1745,21 +1929,18 @@ pub fn build_chrome_for_tabs(
                 );
             }
             Presentation::Full => {
-                if !seats.has_pane_headers() {
+                if !seats.seat_wears_head(placement.kind) {
                     continue;
                 }
                 // `* { box-sizing: border-box }` (mock-up line 77) rules the
                 // arithmetic here: `.panehead { height: 28px; border-bottom: 1px }`
                 // is twenty-eight rows *including* the hairline, not twenty-eight
-                // plus one. Rounded once, because `pane_body_viewport` rounds the
-                // same product to decide where the terminal starts and the two
-                // must not round apart at a fractional scale.
-                let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round();
-                let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
-                let head_bottom = (rect[1] + bar).min(rect[3]);
-                // The content box the flex row lays out in: the border box less
-                // its border, which is what everything inside the head centres on.
-                let title_bottom = (head_bottom - edge).max(rect[1]);
+                // plus one. Rounded once, in `pane_head_geometry`, because
+                // `pane_body_viewport` and the hit test round the same product
+                // and the three must not round apart at a fractional scale.
+                let head = pane_head_geometry(rect, placement.kind, scale);
+                let head_bottom = head.head[3];
+                let title_bottom = head.content_bottom;
                 if placement.id != seats.terminal() {
                     quads.push(ChromeQuad {
                         rect: [rect[0], head_bottom, rect[2], rect[3]],
@@ -1785,28 +1966,26 @@ pub fn build_chrome_for_tabs(
                 // preview the file mark, a files pane the folder — the marks the
                 // mock-up puts in exactly these three heads.
                 let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
-                let (mark, mark_logical_px, mark_color) = pane_mark(placement.kind, palette);
-                let mark_size = (mark_logical_px * scale).round().max(1.0);
-                let mark_left = (rect[0] + pad).round();
-                let mark_top = (rect[1] + ((title_bottom - rect[1]) - mark_size) / 2.0).round();
-                sprites.push(ChromeSprite::new(
-                    mark,
-                    [
-                        mark_left,
-                        mark_top,
-                        mark_left + mark_size,
-                        mark_top + mark_size,
-                    ],
-                    mark_color,
+                let focused = placement.id == seats.focus();
+                let (mark, _, mark_color) = pane_mark(placement.kind, palette);
+                sprites.push(ChromeSprite::new(mark, head.mark, mark_color).with_opacity(
+                    // `.pane:not(.focused) .panehead .ticon { opacity: .5 }`
+                    // (mock-up 1645-1647). Opacity and not a paler ink,
+                    // because the mark is often the profile square, which
+                    // carries colours of its own that no palette entry can
+                    // stand in for — and because D38's whole argument is
+                    // that focus must not move a hue. A channel of its own,
+                    // so it cannot collide with what the accent or the
+                    // breathing already say.
+                    if focused {
+                        1.0
+                    } else {
+                        PANE_MARK_UNFOCUSED_OPACITY
+                    },
                 ));
                 labels.push(ChromeLabel {
-                    text: seat_caption(placement.kind, preview_title).to_owned(),
-                    rect: [
-                        mark_left + mark_size + SEAT_TITLE_GAP_LOGICAL_PX * scale,
-                        rect[1],
-                        rect[2] - pad,
-                        title_bottom,
-                    ],
+                    text: seat_caption(placement.kind, preview_title, terminal_cwd).to_owned(),
+                    rect: head.title,
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                     // `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
                     // (mock-up line 1644) — one declaration with two halves, and
@@ -1814,7 +1993,7 @@ pub fn build_chrome_for_tabs(
                     // focused pane is marked by *hierarchy* rather than by a fill,
                     // after tinting it with the accent was ruled out for colliding
                     // with the unread dot in the same row.
-                    color: if placement.id == seats.focus() {
+                    color: if focused {
                         palette.pane_title_focus
                     } else {
                         palette.pane_title
@@ -1822,13 +2001,59 @@ pub fn build_chrome_for_tabs(
                     align_right: false,
                     align_center: false,
                     letter_spacing_em: 0.0,
-                    weight: if placement.id == seats.focus() {
+                    weight: if focused {
                         ChromeLabelWeight::Medium
                     } else {
                         ChromeLabelWeight::Regular
                     },
                     tabular_numerals: false,
                 });
+                // `.panehead .pane-close { visibility: hidden }` with
+                // `.pane:hover .pane-close { visibility: visible }` (mock-up
+                // 1650-1657): the control is not there at all until the pointer
+                // is in this pane, and then it is there at once.
+                //
+                // `visibility` and not `opacity` is the mock-up's own choice and
+                // it is the reason nothing here fades: the `×` has no
+                // `transition` of any kind, unlike `.pane-files` two rules above
+                // it, which does. So there is no reduced-motion branch to write
+                // — the control already behaves the way reduced motion would ask
+                // it to.
+                if pointer.pane_hover == Some(placement.id)
+                    && let Some(close) = head.close
+                {
+                    let close_hovered =
+                        pointer.hover == Some(ChromeTarget::PaneClose(placement.id));
+                    if close_hovered {
+                        // `.panehead .pane-close:hover { background: var(--active) }`
+                        // at `border-radius: 4px`, over the one ground a pane
+                        // head has.
+                        sprites.push(ChromeSprite::new(
+                            ChromeMark::ControlPill {
+                                radius_px: (SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX * scale)
+                                    .round()
+                                    .max(1.0) as u32,
+                            },
+                            close,
+                            palette.pane_close_pill,
+                        ));
+                    }
+                    let glyph = (SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+                    let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
+                    let glyph_top = ((close[1] + close[3] - glyph) / 2.0).round();
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::PaneClose,
+                        [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+                        // `color: var(--ink3)` at rest, `--ink` under the
+                        // pointer — and under the pointer there is always the
+                        // pill this pass has just drawn, never the bare head.
+                        if close_hovered {
+                            palette.pane_close_glyph_on_pill
+                        } else {
+                            palette.pane_close_glyph
+                        },
+                    ));
+                }
                 if placement.kind == SeatKind::Preview
                     && let Some(message) = preview_message
                 {
@@ -1857,20 +2082,205 @@ pub fn build_chrome_for_tabs(
             }
         }
     }
-    for slot in seats.split_slots(layout) {
-        let color = if pointer.dragging == Some(slot.id) {
-            palette.divider_active
-        } else if pointer.hover == Some(ChromeTarget::Divider(slot.id)) {
-            palette.divider_hover
-        } else {
-            palette.divider
-        };
+    let slots = seats.split_slots(layout);
+    // F63, and it is drawn before the dividers so the accent line and its grip
+    // stay on top of the gap they are opening.
+    if let Some(split) = pointer.dragging
+        && let Some(slot) = slots.iter().find(|slot| slot.id == split)
+    {
+        resizing_cards(layout, *slot, scale, palette, &mut quads, &mut sprites);
+    }
+    for slot in &slots {
+        let dragging = pointer.dragging == Some(slot.id);
+        // E53: while any other gesture owns the pointer, a divider says nothing.
+        // The offer is not on the table with the button already down, and it
+        // would be made in the very colour that during a drag means "let go and
+        // it lands here" — the one line under the pointer that means nothing at
+        // all, impersonating the one thing that does.
+        let lit =
+            !pointer.other_drag_in_flight && pointer.hover == Some(ChromeTarget::Divider(slot.id));
         quads.push(ChromeQuad {
             rect: slot.band,
-            color,
+            color: if dragging {
+                palette.divider_active
+            } else if lit {
+                palette.divider_hover
+            } else {
+                palette.divider
+            },
         });
+        // `.divider::after` (mock-up 1485-1492): a grip, so the boundary reads
+        // as something you can grab. `opacity: 0` at rest and 1 on hover or
+        // while dragging — so it is simply not drawn otherwise.
+        if dragging || lit {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: (SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX * scale)
+                        .round()
+                        .max(1.0) as u32,
+                },
+                divider_grip(*slot, scale),
+                palette.divider_active,
+            ));
+        }
     }
     (quads, labels, sprites)
+}
+
+/// `.divider::after` in physical pixels: 3 logical pixels across the band, 28
+/// along it, centred on both.
+///
+/// Centred on the *band* rather than placed at the mock-up's `left: 2px`, which
+/// is the same thing said in the coordinate system we have. The mock-up's grip
+/// spans 2..5 inside a 7px box whose hairline spans 3..4 — one pixel of grip on
+/// each side of the line. Here the band is the hairline itself, wherever the
+/// solver's boundary snapping put it, so the grip grows symmetrically out of it
+/// and lands on the same pixels at every scale instead of inheriting a 3 that
+/// only means "centred" at 1x.
+fn divider_grip(slot: SplitSlot, scale: f32) -> [f32; 4] {
+    let thickness = (SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let length = (SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let band = slot.band;
+    match slot.dir {
+        Axis::Row => {
+            let centre_x = (band[0] + band[2]) / 2.0;
+            let centre_y = (band[1] + band[3]) / 2.0;
+            // A grip longer than the boundary it sits on would poke out of both
+            // ends of it, which is a shape the mock-up's `overflow` never lets
+            // happen.
+            let length = length.min(band[3] - band[1]);
+            pixel_snapped([
+                centre_x - thickness / 2.0,
+                centre_y - length / 2.0,
+                centre_x + thickness / 2.0,
+                centre_y + length / 2.0,
+            ])
+        }
+        Axis::Col => {
+            let centre_x = (band[0] + band[2]) / 2.0;
+            let centre_y = (band[1] + band[3]) / 2.0;
+            let length = length.min(band[2] - band[0]);
+            pixel_snapped([
+                centre_x - length / 2.0,
+                centre_y - thickness / 2.0,
+                centre_x + length / 2.0,
+                centre_y + thickness / 2.0,
+            ])
+        }
+    }
+}
+
+/// F63: the two panes a divider drag is resizing pull in from their own edges
+/// into slightly smaller rounded cards, and the `--panel` floor shows through.
+///
+/// The mock-up's own note (1458-1463) is what decides the shape: *the gap is the
+/// consequence of the panes getting smaller, not a seam that widened*. So it
+/// appears on all four sides of each pane, not only along the boundary being
+/// moved — what you read is "these two are being resized", not "the seam moved".
+///
+/// Drawn as four rectangles and four corners rather than as one frame-shaped
+/// mark, for the reason [`ChromeMark::CardCorner`] gives: this shape exists only
+/// while the pane's size is changing on every frame, and a size-keyed raster
+/// would miss its cache on every one of them.
+///
+/// What is *not* here is `box-shadow: 0 2px 12px`. A blurred rounded rectangle
+/// is size-keyed the same way the frame would be, and it cannot be cut into
+/// fixed corners the way a hard edge can — its straight sections have to stretch,
+/// and the sprite pipeline blits a raster at its own size rather than scaling
+/// one. Recorded rather than approximated: a hand-drawn falloff would be a
+/// different shadow wearing this one's name.
+fn resizing_cards(
+    layout: &SeatLayout,
+    slot: SplitSlot,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+    quads: &mut Vec<ChromeQuad>,
+    sprites: &mut Vec<ChromeSprite>,
+) {
+    let margin = (SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let radius = (SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    for placement in &layout.rects {
+        let Some(device) = placement.device_rect else {
+            continue;
+        };
+        if !matches!(placement.presentation, Presentation::Full) {
+            continue;
+        }
+        let rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        // `.slot.resizing` is the two slots of *this* split and no others, at
+        // any depth: a pane inside the leading slot is inside the slot being
+        // resized. Membership is therefore the slot's own rectangle, which is
+        // the same rectangle `split_slots` read the band out of.
+        if !slot_contains(slot.slot, layout, placement.id) {
+            continue;
+        }
+        let card = [
+            rect[0] + margin,
+            rect[1] + margin,
+            rect[2] - margin,
+            rect[3] - margin,
+        ];
+        if card[2] - card[0] < 2.0 * radius || card[3] - card[1] < 2.0 * radius {
+            // Too small to have both of its rounds: drawing the frame anyway
+            // would eat the pane rather than inset it.
+            continue;
+        }
+        let floor = palette.termhost;
+        for band in [
+            [rect[0], rect[1], rect[2], card[1]],
+            [rect[0], card[3], rect[2], rect[3]],
+            [rect[0], card[1], card[0], card[3]],
+            [card[2], card[1], rect[2], card[3]],
+        ] {
+            quads.push(ChromeQuad {
+                rect: band,
+                color: floor,
+            });
+        }
+        for (corner, at) in [
+            (Corner::TopLeft, [card[0], card[1]]),
+            (Corner::TopRight, [card[2] - radius, card[1]]),
+            (Corner::BottomLeft, [card[0], card[3] - radius]),
+            (Corner::BottomRight, [card[2] - radius, card[3] - radius]),
+        ] {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::CardCorner {
+                    radius_px: radius as u32,
+                    corner,
+                },
+                [at[0], at[1], at[0] + radius, at[1] + radius],
+                floor,
+            ));
+        }
+    }
+}
+
+/// Whether this seat's rectangle lies inside the slot a divider drag is moving.
+///
+/// Geometry rather than a tree walk, and deliberately: `SplitSlot::slot` is read
+/// off the solved rectangles, so asking "is this seat in there" in the same
+/// coordinates keeps the card and the band answering to one measurement (D4).
+fn slot_contains(slot: LogicalRect, layout: &SeatLayout, seat: SeatId) -> bool {
+    let Some(Some(rect)) = layout.get(seat).map(|placement| placement.rect) else {
+        return false;
+    };
+    rect.left >= slot.left
+        && rect.right <= slot.right
+        && rect.top >= slot.top
+        && rect.bottom <= slot.bottom
 }
 
 /// Everything the tab strip needs to know about itself: what it holds, which of
@@ -2626,9 +3036,27 @@ fn collapse_bar_contents(
 /// because a tab holds exactly one terminal and that terminal's name is the
 /// tab's. When terminals learn per-seat titles, this is the one place that has
 /// to hear about it.
-pub(crate) fn seat_caption(kind: SeatKind, preview_title: Option<&str>) -> &str {
+pub(crate) fn seat_caption<'a>(
+    kind: SeatKind,
+    preview_title: Option<&'a str>,
+    terminal_cwd: Option<&'a str>,
+) -> &'a str {
     match kind {
         SeatKind::Preview => preview_title.unwrap_or_else(|| seat_title(kind)),
+        // C28: `<span class="ptitle">${s.cwd}</span>` (mock-up 4559) — the whole
+        // path, and the mock-up is deliberate about that. The *other* place a
+        // pane's name is written, the drag ghost and the drop preview, uses
+        // `cwdLeaf(s)` and shows only the last segment (3304): a caption has a
+        // whole head to fill and answers "where is this", a label riding the
+        // pointer has one line and answers "which one is this". Two questions,
+        // two lengths, one place each.
+        //
+        // Falls back to the kind's own name when the shell has never reported an
+        // OSC 7, because that is the honest answer to "where is this" when
+        // nobody has said — the same reading `term_leaf` gives the vault.
+        SeatKind::Terminal => terminal_cwd
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or_else(|| seat_title(kind)),
         _ => seat_title(kind),
     }
 }
@@ -2975,6 +3403,7 @@ mod tests {
                 ChromePointer {
                     hover: Some(ChromeTarget::CloseWindow),
                     dragging: None,
+                    ..ChromePointer::default()
                 },
             );
             let expected = [
@@ -3125,6 +3554,7 @@ mod tests {
             ChromePointer {
                 hover: Some(ChromeTarget::Settings),
                 dragging: None,
+                ..ChromePointer::default()
             },
         );
         assert!(settings_quads.iter().any(|quad| {
@@ -3156,6 +3586,7 @@ mod tests {
             ChromePointer {
                 hover: Some(ChromeTarget::CloseWindow),
                 dragging: None,
+                ..ChromePointer::default()
             },
         );
         assert!(close_quads.iter().any(|quad| {
@@ -3991,6 +4422,7 @@ mod tests {
                 ChromePointer {
                     hover: None,
                     dragging: None,
+                    ..ChromePointer::default()
                 },
                 ChromeContent {
                     tabs: &tabs,
@@ -3998,6 +4430,7 @@ mod tests {
                     grabbed: None,
                     tab_scroll: 0.0,
                     preview_title: None,
+                    terminal_cwd: None,
                     preview_message: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
@@ -4184,7 +4617,7 @@ mod tests {
             scale,
             ChromePointer {
                 hover,
-                dragging: None,
+                ..ChromePointer::default()
             },
             ChromeContent {
                 tabs,
@@ -4192,6 +4625,7 @@ mod tests {
                 grabbed: None,
                 tab_scroll,
                 preview_title: None,
+                terminal_cwd: None,
                 preview_message: None,
                 profile_menu_open,
                 chevron_turn,
@@ -6668,6 +7102,7 @@ mod tests {
             ChromePointer {
                 hover: None,
                 dragging: None,
+                ..ChromePointer::default()
             },
             ChromeContent {
                 tabs,
@@ -6675,6 +7110,7 @@ mod tests {
                 grabbed,
                 tab_scroll: 0.0,
                 preview_title: None,
+                terminal_cwd: None,
                 preview_message: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
@@ -6796,6 +7232,7 @@ mod tests {
                 ChromePointer {
                     hover: None,
                     dragging: None,
+                    ..ChromePointer::default()
                 },
                 ChromeContent {
                     tabs: &tabs,
@@ -6803,6 +7240,7 @@ mod tests {
                     grabbed: None,
                     tab_scroll: 0.0,
                     preview_title: None,
+                    terminal_cwd: None,
                     preview_message: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
@@ -6863,6 +7301,780 @@ mod tests {
                 .any(|sprite| matches!(sprite.mark, ChromeMark::TabBody { .. })
                     && sprite.color == palette.accent),
             "and so does the wash"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // U1 — the pane head's `×`, and who wears a head at all
+    // ---------------------------------------------------------------------
+
+    /// A tree with a terminal beside a files column, so a pane head exists to
+    /// measure and a fixed leaf exists to prove `seat_wears_head` is per-seat.
+    fn term_beside_files() -> Seats {
+        Seats::from_persisted(&LayoutNodeV1::Split(SplitNodeV1 {
+            dir: SplitDirV1::Row,
+            ratio: 700_000,
+            children: [
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                    profile_id: "pwsh".to_owned(),
+                    cwd: String::new(),
+                    manual_name: None,
+                }))),
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Files(
+                    bt_persist::FilesLeafV1 {
+                        root: "D:\\".to_owned(),
+                        open: Vec::new(),
+                        sel: None,
+                        width: 240,
+                    },
+                ))),
+            ],
+        }))
+        .expect("a two-leaf tree restores")
+    }
+
+    fn term_leaf() -> Box<LayoutNodeV1> {
+        Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+            profile_id: "pwsh".to_owned(),
+            cwd: String::new(),
+            manual_name: None,
+        })))
+    }
+
+    /// Three terminals as `a | (b | c)`, so one split's slot excludes a pane.
+    fn three_in_a_row() -> Seats {
+        Seats::from_persisted(&LayoutNodeV1::Split(SplitNodeV1 {
+            dir: SplitDirV1::Row,
+            ratio: 500_000,
+            children: [
+                term_leaf(),
+                Box::new(LayoutNodeV1::Split(SplitNodeV1 {
+                    dir: SplitDirV1::Row,
+                    ratio: 500_000,
+                    children: [term_leaf(), term_leaf()],
+                })),
+            ],
+        }))
+        .expect("a three-leaf tree restores")
+    }
+
+    fn head_chrome(
+        seats: &Seats,
+        layout: &SeatLayout,
+        scale: f32,
+        pointer: ChromePointer,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        build_chrome_for_tabs(
+            seats,
+            layout,
+            scale,
+            pointer,
+            ChromeContent {
+                tabs: &[TabContent {
+                    title: "PowerShell".to_owned(),
+                    pane_count: seats.pane_count(),
+                    badge_text_width: 0.0,
+                    mark: TabMarkState::default(),
+                    trailer: TabTrailer::default(),
+                    offset: 0.0,
+                    landing: 0.0,
+                    edit: None,
+                }],
+                active_tab: 0,
+                grabbed: None,
+                tab_scroll: 0.0,
+                preview_title: None,
+                terminal_cwd: None,
+                preview_message: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+            },
+        )
+    }
+
+    /// Everything below the 40px window title bar — that is, the pane layer.
+    ///
+    /// The tests below need it because the strip above draws from the *same*
+    /// palette: a pane head and the active tab stand on one surface, so the
+    /// tab's own close pill and the head's are one colour by construction, and
+    /// `--panel` is both the title bar and the termhost floor. Filtering by
+    /// colour alone would keep finding the strip and calling it a pane.
+    fn in_the_pane_layer(rect: [f32; 4], scale: f32) -> bool {
+        rect[1] >= (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round()
+    }
+
+    fn device_rect_of(layout: &SeatLayout, seat: SeatId) -> [f32; 4] {
+        let rect = layout
+            .get(seat)
+            .and_then(|placement| placement.device_rect)
+            .expect("a presented seat has a device rectangle");
+        [
+            rect.left as f32,
+            rect.top as f32,
+            rect.right as f32,
+            rect.bottom as f32,
+        ]
+    }
+
+    /// C25/C26: two rules for one head, and the difference is the whole point.
+    ///
+    /// A terminal earns its head by having a sibling; a files pane draws one
+    /// unconditionally, because a tree that does not say where it is rooted is
+    /// useless and because that head carries the pane's other two verbs.
+    ///
+    /// Red gate: collapse the two rules back into `has_pane_headers()` and the
+    /// second assertion fails — which is the state this build shipped in.
+    #[test]
+    fn a_files_pane_always_wears_a_head_and_a_lone_terminal_never_does() {
+        let lone = Seats::lone_terminal();
+        assert!(!lone.seat_wears_head(SeatKind::Terminal));
+        assert!(
+            lone.seat_wears_head(SeatKind::Files),
+            "a files pane's head does not depend on the company it keeps"
+        );
+
+        let split = term_beside_files();
+        assert!(split.seat_wears_head(SeatKind::Terminal));
+        assert!(split.seat_wears_head(SeatKind::Files));
+    }
+
+    /// C30/C27: the `×`'s box, read off the mock-up's own declaration.
+    ///
+    /// `margin-left: auto` puts it against the head's trailing padding, and
+    /// `padding: 0 6px 0 12px` says that padding is six, not the twelve the
+    /// leading side gets. Checked at four scales because the whole reason this
+    /// geometry is one function is that a second copy rounds differently.
+    #[test]
+    fn the_pane_close_button_stands_in_the_mock_ups_own_box() {
+        // Spelled out rather than read back off the constants the geometry
+        // itself reads: an expectation derived from the value under test is a
+        // tautology that passes on every value, which is exactly what this
+        // assertion did in its first draft — the trailing padding could be
+        // silently re-read as the leading 12 and nothing noticed.
+        assert_eq!(SEAT_PANE_CLOSE_BOX_LOGICAL_PX, 17.0);
+        assert_eq!(SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX, 4.0);
+        assert_eq!(SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX, 8.0);
+        assert_eq!(SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, 6.0);
+        assert_ne!(
+            SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
+            "`padding: 0 6px 0 12px` is two numbers: words get twelve, buttons six"
+        );
+
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let rect = [100.0_f32, 40.0, 700.0, 500.0];
+            let head = pane_head_geometry(rect, SeatKind::Terminal, scale);
+            let close = head.close.expect("a 600px head seats a 17px button");
+            let box_px = (17.0 * scale).round();
+
+            assert_eq!(close[2] - close[0], box_px, "17 logical pixels wide");
+            assert_eq!(close[3] - close[1], box_px, "and square");
+            assert_eq!(
+                close[2],
+                (rect[2] - 6.0 * scale).round(),
+                "flush against `padding-right: 6px`, not the leading 12"
+            );
+            // Centred in the *content* box — the border box less its hairline —
+            // which is what `align-items: center` centres in.
+            let slack = (head.content_bottom - rect[1]) - box_px;
+            assert!(
+                (close[1] - (rect[1] + slack / 2.0)).abs() <= 1.0,
+                "vertically centred at {scale}x"
+            );
+            // C29: the title yields, the control does not. The label's box stops
+            // before the button rather than running under it.
+            assert!(
+                head.title[2] <= close[0],
+                "the title's box ends before the `×` begins at {scale}x"
+            );
+            assert!(head.title[0] >= head.mark[2], "and starts after the mark");
+        }
+    }
+
+    /// C35/I110: the `×` is a dead zone inside the drag handle, so it has to win
+    /// the hit test against the head it sits on.
+    ///
+    /// Red gate: drop the `PaneClose` arm from `hit_chrome` and every press on
+    /// the button answers `PaneHeader` — a press that will one day start a drag
+    /// instead of closing the pane.
+    #[test]
+    fn pressing_the_close_button_is_not_pressing_the_head_it_sits_on() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        let close = head.close.expect("the head is wide enough");
+
+        let middle_y = f64::from((close[1] + close[3]) / 2.0);
+        assert_eq!(
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                f64::from((close[0] + close[2]) / 2.0),
+                middle_y
+            ),
+            Some(ChromeTarget::PaneClose(terminal)),
+        );
+        // One pixel to the left of the box is the head again — the boundary is
+        // where the drawing says it is, not a pixel either side of it.
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, f64::from(close[0]) - 1.0, middle_y),
+            Some(ChromeTarget::PaneHeader(terminal)),
+        );
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, f64::from(close[0]), middle_y),
+            Some(ChromeTarget::PaneClose(terminal)),
+            "the box is half-open on its leading edge, like every other target"
+        );
+    }
+
+    /// C30/C33: `visibility: hidden` until `.pane:hover`, and the reveal is the
+    /// pane's, not the head's.
+    ///
+    /// The second half is the one that could quietly go wrong: keyed on the
+    /// *head* being hovered, the `×` would appear only once the pointer was
+    /// already on it — the "you have to know it is there" bug. So the pointer is
+    /// put in the pane's **body**, where `hover` is `None` because a terminal is
+    /// not chrome, and the button must still be there.
+    #[test]
+    fn the_close_button_is_not_there_until_the_pointer_is_in_the_pane() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+
+        let has_close = |pointer: ChromePointer| {
+            head_chrome(&seats, &layout, 1.0, pointer)
+                .2
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::PaneClose)
+        };
+
+        assert!(
+            !has_close(ChromePointer::default()),
+            "an idle split header stays quiet"
+        );
+        assert!(
+            has_close(ChromePointer {
+                pane_hover: Some(terminal),
+                hover: None,
+                ..ChromePointer::default()
+            }),
+            "the pointer anywhere in the pane reveals it, terminal body included"
+        );
+    }
+
+    /// C30 again, on the ink: `--ink3` at rest, `--ink` on `--active` under the
+    /// pointer — and the pill is drawn only under the pointer, never at rest.
+    #[test]
+    fn the_close_buttons_ink_answers_to_whether_it_is_under_the_pointer() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+        let palette = chrome_palette();
+
+        let glyph_and_pill = |hover: Option<ChromeTarget>| {
+            let (_, _, sprites) = head_chrome(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer {
+                    pane_hover: Some(terminal),
+                    hover,
+                    ..ChromePointer::default()
+                },
+            );
+            let glyph = sprites
+                .iter()
+                .find(|sprite| sprite.mark == ChromeMark::PaneClose)
+                .map(|sprite| sprite.color);
+            let pill = sprites
+                .iter()
+                .find(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && sprite.color == palette.pane_close_pill
+                        && in_the_pane_layer(sprite.rect, 1.0)
+                })
+                .map(|sprite| sprite.rect);
+            (glyph, pill)
+        };
+
+        let (resting, no_pill) = glyph_and_pill(Some(ChromeTarget::PaneHeader(terminal)));
+        assert_eq!(resting, Some(palette.pane_close_glyph));
+        assert_eq!(no_pill, None, "no fill until the pointer is on the button");
+
+        let (lit, pill) = glyph_and_pill(Some(ChromeTarget::PaneClose(terminal)));
+        assert_eq!(lit, Some(palette.pane_close_glyph_on_pill));
+        // The pill is the button's own box, so the lit area is exactly the area
+        // that answers the press.
+        let head = pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        assert_eq!(pill, head.close);
+    }
+
+    /// D39: the mark recedes on panes you are not in, through `opacity` — a
+    /// channel of its own, so it cannot collide with the accent or the breathing.
+    ///
+    /// Opacity rather than a paler ink is load-bearing, and the test says why by
+    /// leaving the colour alone: a terminal's mark is a profile square carrying
+    /// colours no palette entry can restate, and D38 rules that focus must not
+    /// move a hue.
+    #[test]
+    fn the_pane_mark_recedes_on_a_pane_you_are_not_in() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let focused = seats.focus();
+
+        let (_, _, sprites) = head_chrome(&seats, &layout, 1.0, ChromePointer::default());
+        let marks: Vec<_> = sprites
+            .iter()
+            .filter(|sprite| {
+                matches!(
+                    sprite.mark,
+                    ChromeMark::ProfilePowerShell | ChromeMark::Folder | ChromeMark::File
+                ) && in_the_pane_layer(sprite.rect, 1.0)
+            })
+            .collect();
+        assert_eq!(marks.len(), 2, "one mark per head");
+
+        let mut saw_focused = false;
+        for placement in &layout.rects {
+            let rect = device_rect_of(&layout, placement.id);
+            let mark = marks
+                .iter()
+                .find(|sprite| sprite.rect[0] >= rect[0] && sprite.rect[2] <= rect[2])
+                .expect("each head's mark stands inside its own pane");
+            if placement.id == focused {
+                saw_focused = true;
+                assert_eq!(mark.opacity, 1.0, "the pane you are in is at full strength");
+            } else {
+                assert_eq!(mark.opacity, PANE_MARK_UNFOCUSED_OPACITY);
+            }
+        }
+        assert!(saw_focused, "one of the two panes holds the focus");
+        assert_eq!(PANE_MARK_UNFOCUSED_OPACITY, 0.5, "`opacity: .5`");
+    }
+
+    // ---------------------------------------------------------------------
+    // U2 — the divider's complete state
+    // ---------------------------------------------------------------------
+
+    /// E47, and the one carried number this slice was asked to roll back: the
+    /// hit zone is seven logical pixels, which the mock-up (`width: 7px;
+    /// margin: 0 -3px`) and `DESIGN.md` §7.1.1 both say and which this build
+    /// spent a slice answering as six.
+    ///
+    /// The constant *and* the band it feeds, because pinning only the constant
+    /// would leave the arithmetic that consumes it free to drift.
+    #[test]
+    fn the_divider_hit_zone_is_seven_logical_pixels_wide() {
+        assert_eq!(SEAT_DIVIDER_HIT_LOGICAL_PX, 7.0);
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let slot = seats.split_slots(&layout)[0];
+        let band = hit_band(slot, 1.0);
+        assert_eq!(band[2] - band[0], 7.0, "the drawn 1px, widened to seven");
+        // The negative margin, stated as the property it buys: the zone reaches
+        // three pixels into each neighbour while the layout still spends one.
+        assert_eq!(slot.band[2] - slot.band[0], 1.0);
+        assert_eq!(slot.band[0] - band[0], 3.0);
+        assert_eq!(band[2] - slot.band[2], 3.0);
+    }
+
+    /// E50/E51: the grip is `opacity: 0` at rest and 1 on hover or while
+    /// dragging, so it is drawn in exactly those two states and no other.
+    #[test]
+    fn the_divider_grip_appears_on_hover_and_while_dragging_and_never_otherwise() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let split = seats.split_slots(&layout)[0].id;
+        let palette = chrome_palette();
+
+        let grip = |pointer: ChromePointer| {
+            head_chrome(&seats, &layout, 1.0, pointer)
+                .2
+                .into_iter()
+                .find(|sprite| {
+                    matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && sprite.color == palette.divider_active
+                        && in_the_pane_layer(sprite.rect, 1.0)
+                })
+                .map(|sprite| sprite.rect)
+        };
+
+        assert_eq!(grip(ChromePointer::default()), None, "no grip at rest");
+        assert!(
+            grip(ChromePointer {
+                hover: Some(ChromeTarget::Divider(split)),
+                ..ChromePointer::default()
+            })
+            .is_some(),
+            "`:hover::after` turns the grip on"
+        );
+        assert!(
+            grip(ChromePointer {
+                dragging: Some(split),
+                ..ChromePointer::default()
+            })
+            .is_some(),
+            "and so does `.dragging::after`"
+        );
+    }
+
+    /// E50: three logical pixels across the boundary and twenty-eight along it,
+    /// centred on both — a handle on the line, not a second line.
+    #[test]
+    fn the_divider_grip_is_three_by_twenty_eight_centred_on_the_band() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let slot = seats.split_slots(&layout)[0];
+        let grip = divider_grip(slot, 1.0);
+
+        assert_eq!(grip[2] - grip[0], 3.0, "across the band");
+        assert_eq!(grip[3] - grip[1], 28.0, "along it");
+        assert_eq!(
+            (grip[0] + grip[2]) / 2.0,
+            (slot.band[0] + slot.band[2]) / 2.0,
+            "one pixel of grip either side of the hairline"
+        );
+        assert_eq!(
+            (grip[1] + grip[3]) / 2.0,
+            (slot.band[1] + slot.band[3]) / 2.0,
+            "and halfway down it"
+        );
+    }
+
+    /// E53: every divider goes quiet while some other gesture owns the pointer.
+    ///
+    /// A divider lighting up mid-drag is an offer that is not on the table, and
+    /// it makes the offer in the very colour that during a drag means "let go
+    /// and it lands here" — the one line under the pointer that means nothing at
+    /// all, impersonating the one thing that does.
+    ///
+    /// Red gate: drop the `other_drag_in_flight` guard and the hovered divider
+    /// lights and grows a grip in the middle of a tab drag.
+    #[test]
+    fn a_hovered_divider_says_nothing_while_something_else_is_being_dragged() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let slot = seats.split_slots(&layout)[0];
+        let palette = chrome_palette();
+
+        let hovering = ChromePointer {
+            hover: Some(ChromeTarget::Divider(slot.id)),
+            ..ChromePointer::default()
+        };
+        let line_of = |pointer: ChromePointer| {
+            head_chrome(&seats, &layout, 1.0, pointer)
+                .0
+                .into_iter()
+                .find(|quad| quad.rect == slot.band)
+                .expect("the divider is always drawn")
+                .color
+        };
+        assert_eq!(line_of(hovering), palette.divider_hover);
+
+        let during_a_drag = ChromePointer {
+            other_drag_in_flight: true,
+            ..hovering
+        };
+        assert_eq!(
+            line_of(during_a_drag),
+            palette.divider,
+            "the hairline stays at rest"
+        );
+        assert!(
+            !head_chrome(&seats, &layout, 1.0, during_a_drag)
+                .2
+                .iter()
+                .any(
+                    |sprite| matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                        && sprite.color == palette.divider_active
+                        && in_the_pane_layer(sprite.rect, 1.0)
+                ),
+            "and the grip does not appear either"
+        );
+        // The divider being *dragged* is a different sentence and keeps saying
+        // it: `other_drag_in_flight` is about every gesture but this one.
+        assert_eq!(
+            line_of(ChromePointer {
+                dragging: Some(slot.id),
+                ..hovering
+            }),
+            palette.divider_active,
+        );
+    }
+
+    /// F63/E57: grabbing a divider pulls the two panes it resizes into slightly
+    /// smaller rounded cards, and the `--panel` floor shows through the gap.
+    ///
+    /// The assertions are the mock-up's own reading of the shape: the gap is on
+    /// **all four sides** of each pane, because it is the consequence of the
+    /// panes getting smaller rather than of the seam widening. A gap only along
+    /// the boundary would read as "this seam moved", which is precisely what the
+    /// treatment exists in order not to say.
+    #[test]
+    fn grabbing_a_divider_pulls_its_two_panes_into_cards_and_shows_the_floor() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let split = seats.split_slots(&layout)[0].id;
+        let palette = chrome_palette();
+        let dragging = ChromePointer {
+            dragging: Some(split),
+            ..ChromePointer::default()
+        };
+
+        let floor_of = |pointer: ChromePointer| {
+            head_chrome(&seats, &layout, 1.0, pointer)
+                .0
+                .into_iter()
+                .filter(|quad| quad.color == palette.termhost && in_the_pane_layer(quad.rect, 1.0))
+                .map(|quad| quad.rect)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            floor_of(ChromePointer::default()).is_empty(),
+            "panes sit flush until you grab something"
+        );
+
+        let bands = floor_of(dragging);
+        assert_eq!(bands.len(), 8, "four sides each, for both panes");
+        let margin = SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX;
+        for placement in &layout.rects {
+            let rect = device_rect_of(&layout, placement.id);
+            let mine: Vec<_> = bands
+                .iter()
+                .filter(|band| band[0] >= rect[0] && band[2] <= rect[2])
+                .collect();
+            assert_eq!(mine.len(), 4, "this pane gives on every side");
+            assert!(
+                mine.iter()
+                    .any(|b| b[1] == rect[1] && b[3] == rect[1] + margin),
+                "and the top is one of them"
+            );
+            assert!(
+                mine.iter()
+                    .any(|b| b[3] == rect[3] && b[1] == rect[3] - margin),
+                "and so is the bottom, which no seam ever moved"
+            );
+        }
+
+        // The four rounds, one mark each and all at the card's 8px.
+        let corners: Vec<_> = head_chrome(&seats, &layout, 1.0, dragging)
+            .2
+            .into_iter()
+            .filter(|sprite| matches!(sprite.mark, ChromeMark::CardCorner { .. }))
+            .collect();
+        assert_eq!(corners.len(), 8, "four corners on each of the two cards");
+        for corner in &corners {
+            assert_eq!(corner.color, palette.termhost);
+            assert_eq!(
+                corner.rect[2] - corner.rect[0],
+                SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
+            );
+        }
+    }
+
+    /// F63, the other half: only the slot being resized is carded.
+    ///
+    /// Three panes, the inner split dragged — the pane outside that split is not
+    /// being resized and must stay flush. A card on it would say "this one too",
+    /// which is the reverse of the fact.
+    #[test]
+    fn a_pane_outside_the_slot_being_resized_stays_flush() {
+        let seats = three_in_a_row();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1600, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let palette = chrome_palette();
+
+        let slots = seats.split_slots(&layout);
+        let inner = slots
+            .iter()
+            .find(|slot| slot.slot.left > LogicalPx::ZERO)
+            .expect("the inner split does not start at the viewport's edge");
+        let (quads, _, _) = head_chrome(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                dragging: Some(inner.id),
+                ..ChromePointer::default()
+            },
+        );
+        let carded: Vec<_> = quads
+            .iter()
+            .filter(|quad| quad.color == palette.termhost && in_the_pane_layer(quad.rect, 1.0))
+            .collect();
+        assert_eq!(carded.len(), 8, "two panes carded, not three");
+        let outsider = device_rect_of(&layout, layout.rects[0].id);
+        assert!(
+            !carded
+                .iter()
+                .any(|quad| quad.rect[0] >= outsider[0] && quad.rect[2] <= outsider[2]),
+            "the pane nobody is resizing keeps its edges"
+        );
+    }
+
+    /// F61/F71/T225: cancelling a divider drag restores that one ratio, and
+    /// **only** that one.
+    ///
+    /// This is the assertion the spec asks for in so many words — "零副作用回滚,
+    /// 而且只回滚那一个值 —— 不是整棵树快照回滚,后者会把并发的无关编辑一起撤
+    /// 掉". So the test does the thing a snapshot would get wrong: while the
+    /// gesture is notionally in flight, a *different* split is edited, and the
+    /// cancel has to leave that edit standing.
+    ///
+    /// The restore runs through `Edit::DragDivider`, whose focus set is the one
+    /// split, so §3.3's necessity theorem is what makes "only that one" true
+    /// rather than merely observed — and it is asserted directly.
+    #[test]
+    fn cancelling_a_divider_drag_puts_back_one_ratio_and_no_others() {
+        let mut seats = three_in_a_row();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1600, 800, 1_000);
+        let usable = |slot: SplitSlot| slot.slot.extent(slot.dir) - DIVIDER;
+        let ratio_of = |seats: &Seats, split: SplitId| {
+            seats
+                .tree()
+                .ratios()
+                .into_iter()
+                .find_map(|(id, ratio)| (id == split).then_some(ratio))
+                .expect("the split has a ratio")
+        };
+        let slot_of = |seats: &Seats, split: SplitId| {
+            let layout = solved(seats, viewport, &metrics);
+            *seats
+                .split_slots(&layout)
+                .iter()
+                .find(|slot| slot.id == split)
+                .expect("the split is in the solve")
+        };
+
+        let slots = seats.split_slots(&solved(&seats, viewport, &metrics));
+        let outer = slots[0].id;
+        let inner = slots
+            .iter()
+            .find(|slot| slot.id != outer)
+            .expect("two splits")
+            .id;
+
+        // The value the gesture will have to put back.
+        let origin = ratio_of(&seats, outer);
+
+        // Drag it somewhere else …
+        let slot = slot_of(&seats, outer);
+        assert_eq!(
+            seats.drag_divider(
+                &metrics,
+                outer,
+                Ratio::clamped_from_ppm(350_000),
+                usable(slot)
+            ),
+            Ok(true),
+        );
+        // … and, mid-gesture, let an unrelated edit land on the other split. A
+        // window resize, a command finishing, a second pointer: the tree is not
+        // frozen while a button is down.
+        let slot = slot_of(&seats, inner);
+        assert_eq!(
+            seats.drag_divider(
+                &metrics,
+                inner,
+                Ratio::clamped_from_ppm(700_000),
+                usable(slot)
+            ),
+            Ok(true),
+        );
+        let concurrent = ratio_of(&seats, inner);
+        assert_ne!(
+            concurrent, origin,
+            "the two splits are telling values apart"
+        );
+
+        // Esc.
+        let before = seats.tree().clone();
+        let slot = slot_of(&seats, outer);
+        assert_eq!(
+            seats.drag_divider(&metrics, outer, origin, usable(slot)),
+            Ok(true),
+        );
+
+        assert_eq!(
+            ratio_of(&seats, outer),
+            origin,
+            "the dragged split comes back byte for byte"
+        );
+        assert_eq!(
+            ratio_of(&seats, inner),
+            concurrent,
+            "and the edit that happened alongside it is not undone with it"
+        );
+        assert!(
+            bt_layout::necessity_holds(
+                &before,
+                seats.tree(),
+                &bt_layout::FocusSet::of(vec![outer]),
+            ),
+            "§3.3: the restore writes inside its focus set and nowhere else"
+        );
+    }
+
+    /// C28: a terminal pane head names the place it is in, at **full length**.
+    ///
+    /// The mock-up writes `${s.cwd}` into `.ptitle` (4559) and `cwdLeaf(s)` —
+    /// the last segment alone — into the drag ghost (3304). Two lengths, and
+    /// deliberately: a caption has a head to fill and answers "where is this",
+    /// a label riding the pointer has one line and answers "which one". This
+    /// pins the caption's half; the ghost's arrives with the ghost.
+    ///
+    /// Red gate: hand the head `cwd_leaf`'s answer and the first assertion
+    /// fails on the very case the distinction exists for — two panes rooted in
+    /// two different `src` directories.
+    #[test]
+    fn a_terminal_pane_head_names_the_whole_path_and_falls_back_honestly() {
+        let cwd = r"D:\Developer\BetterTerminal\crates\bt-app";
+        assert_eq!(seat_caption(SeatKind::Terminal, None, Some(cwd)), cwd);
+        // A shell that never reported an OSC 7 has not said where it is, and
+        // the honest answer to "where is this" is then the kind's own name —
+        // never an empty caption, and never a guess at the filesystem.
+        assert_eq!(
+            seat_caption(SeatKind::Terminal, None, None),
+            "Terminal",
+            "no report, no place"
+        );
+        assert_eq!(
+            seat_caption(SeatKind::Terminal, None, Some("")),
+            "Terminal",
+            "an empty report is not a path to the root"
+        );
+        // The other kinds are untouched: a preview names its file, and the two
+        // that have no session of their own answer by kind.
+        assert_eq!(
+            seat_caption(SeatKind::Preview, Some("notes.md"), Some(cwd)),
+            "notes.md"
+        );
+        assert_eq!(seat_caption(SeatKind::Files, None, Some(cwd)), "Files");
+        assert_eq!(
+            seat_caption(SeatKind::Placeholder, None, Some(cwd)),
+            "Unavailable",
+            "T227: a leaf this build cannot name says so rather than borrowing one"
         );
     }
 }

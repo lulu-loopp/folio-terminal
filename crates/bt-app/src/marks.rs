@@ -23,6 +23,19 @@ use std::{collections::HashMap, fmt::Write as _, sync::Arc};
 
 use bt_render::{ChromeIcon, ChromeLabel, OverlayQuad};
 
+/// Which corner of a card [`ChromeMark::CardCorner`] fills the floor around.
+///
+/// Named for the corner of the *card*, not for the direction the bite faces:
+/// the caller places it at the card's top-left and asks for `TopLeft`, and the
+/// mark works out which way to curve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
 /// One mark the chrome can wear. Every variant except [`ChromeMark::ActiveTab`]
 /// is a `<symbol>` lifted straight out of the mock-up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +50,17 @@ pub enum ChromeMark {
     WindowClose,
     /// The same `#i-close` source, at the tab control's smaller 8px size.
     TabClose,
+    /// The same `#i-close` again, at the pane head's 8px
+    /// (`.panehead .pane-close svg`, mock-up 1657).
+    ///
+    /// A third name for one drawing, on the precedent [`Self::WindowClose`] and
+    /// [`Self::TabClose`] already set: they too share a symbol and differ only
+    /// in the box they are asked for. What makes them separate variants is that
+    /// `mark_key` keys the raster cache on [`ChromeMark::id`], so a control that
+    /// might one day be re-struck at another size — or given its own stroke
+    /// weight, which an 8px `×` inside a 17px box on a *caption* rather than on
+    /// a strip could well want — has a slot of its own to be re-struck in.
+    PaneClose,
     /// `#i-plus` — the new-tab button.
     Plus,
     /// `#i-chev` — the profile picker beside the `+`, at some angle through its
@@ -116,6 +140,29 @@ pub enum ChromeMark {
     /// pill over the surface it lands on, because this pipeline blends in linear
     /// light and the design's does not — see `ChromePalette::tab_close_pill_on_content`.
     ControlPill { radius_px: u32 },
+    /// One corner of the floor showing around a rounded card: a `radius × radius`
+    /// square with a quarter-disc bitten out of it, filled edge to edge.
+    ///
+    /// It exists for F63, `.slot.resizing .pane { margin: 5px; border-radius: 8px }`
+    /// — the two panes a divider drag is resizing pull in from their own edges
+    /// and the `--panel` floor shows through the gap. The gap's four straight
+    /// sides are rectangles and go out as [`bt_render::ChromeQuad`]s; only the
+    /// four corners are curved, and this is one of them.
+    ///
+    /// **Why four small marks rather than one frame-shaped one.** The obvious
+    /// mark is the whole gap: the pane's rectangle with a rounded rectangle
+    /// punched out. That mark's raster is keyed on the pane's size — and the
+    /// pane's size is the one thing that changes on *every frame* of the gesture
+    /// this shape only ever appears during. It would miss the cache every frame
+    /// and rasterize a pane-sized SVG at pointer rate, which is the cost F69
+    /// ("拖动期间只改 flexGrow") exists to keep off this path. A corner is
+    /// `radius × radius` whatever the pane does, so all four are rasterized once
+    /// and then hit the cache for the rest of the drag.
+    ///
+    /// The bite is subtracted with `fill-rule="evenodd"` over a square and a
+    /// whole circle rather than drawn as an arc, so the shape does not depend on
+    /// getting a sweep flag right in four different orientations.
+    CardCorner { radius_px: u32, corner: Corner },
     /// A plain filled rectangle — the tab-name editor's caret and its selection
     /// band, and nothing else so far.
     ///
@@ -162,6 +209,7 @@ impl ChromeMark {
             Self::WindowMaximize => "i-max",
             Self::WindowClose => "i-close",
             Self::TabClose => "tab-close",
+            Self::PaneClose => "pane-close",
             Self::Plus => "i-plus",
             // One id for every angle: there is one arrow. What tells two frames
             // of the turn apart is the angle, which `mark_key` adds — see
@@ -177,6 +225,10 @@ impl ChromeMark {
             Self::TabBody { .. } => "tab-body",
             Self::TabBodyRing { .. } => "tab-body-ring",
             Self::ControlPill { .. } => "control-pill",
+            // One id for four orientations, like the chevron's one id for every
+            // angle: `mark_key` adds the corner, so the four rasters are four
+            // cache slots under one name.
+            Self::CardCorner { .. } => "card-corner",
             Self::Fill => "fill",
             Self::ProgressRing { .. } => "progress-ring",
         }
@@ -309,6 +361,19 @@ impl ChromeSprite {
             color,
             opacity: 1.0,
             grayscale: false,
+        }
+    }
+
+    /// The same mark, faded — `opacity` on the element, not a paler ink.
+    ///
+    /// The distinction is the whole point of the field: a paler ink is a
+    /// different colour, and the marks that ask for this are the ones carrying
+    /// colours of their own that no palette entry can restate.
+    #[must_use]
+    pub fn with_opacity(self, opacity: f32) -> Self {
+        Self {
+            opacity: opacity.clamp(0.0, 1.0),
+            ..self
         }
     }
 }
@@ -461,6 +526,11 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     if let ChromeMark::ControlPill { radius_px } = sprite.mark {
         let _ = write!(key, ":r{radius_px}");
     }
+    // The corner is the only thing that tells one card corner from another —
+    // one id, one box, one colour, four different bites.
+    if let ChromeMark::CardCorner { radius_px, corner } = sprite.mark {
+        let _ = write!(key, ":r{radius_px}{corner:?}");
+    }
     if let ChromeMark::TabBodyRing {
         radius_px,
         stroke_px,
@@ -573,6 +643,28 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
             (
                 format!("0 0 {width_px} {height_px}"),
                 format!(r#"<path fill="currentColor" d="{path}"/>"#),
+            )
+        }
+        ChromeMark::CardCorner { radius_px, corner } => {
+            // The bite's centre is the card's own arc centre, which is `radius`
+            // inside the box on each axis the card runs away along.
+            let radius = f64::from(radius_px.max(1));
+            let (centre_x, centre_y) = match corner {
+                Corner::TopLeft => (radius, radius),
+                Corner::TopRight => (0.0, radius),
+                Corner::BottomLeft => (radius, 0.0),
+                Corner::BottomRight => (0.0, 0.0),
+            };
+            (
+                format!("0 0 {width_px} {height_px}"),
+                // Square minus circle, `evenodd`. The circle is written as two
+                // half-arcs because a single arc from a point to itself is a
+                // degenerate `A` command every renderer is entitled to drop.
+                format!(
+                    r#"<path fill="currentColor" fill-rule="evenodd" d="M0 0H{width_px}V{height_px}H0Z M{left} {centre_y} a{radius} {radius} 0 1 0 {diameter} 0 a{radius} {radius} 0 1 0 -{diameter} 0Z"/>"#,
+                    left = centre_x - radius,
+                    diameter = radius * 2.0,
+                ),
             )
         }
         // No path and no rounds: the whole box, which is the only shape a
@@ -761,6 +853,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::WindowMaximize => 2,
         ChromeMark::WindowClose => 3,
         ChromeMark::TabClose => 3,
+        ChromeMark::PaneClose => 3,
         ChromeMark::Plus => 4,
         ChromeMark::ProfilePowerShell => 5,
         ChromeMark::File => 6,
@@ -775,6 +868,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::TabBody { .. } => 8,
         ChromeMark::TabBodyRing { .. } => 8,
         ChromeMark::ControlPill { .. } => 8,
+        ChromeMark::CardCorner { .. } => 8,
         ChromeMark::Fill => 8,
         ChromeMark::ProgressRing { .. } => 8,
     }
@@ -1196,6 +1290,85 @@ mod tests {
         );
     }
 
+    /// F63: a card corner fills the floor *outside* the card's round, and each
+    /// of the four faces its own way.
+    ///
+    /// The shape is the one thing about this mark that can be wrong without
+    /// looking wrong in a count of sprites, so it is checked where it matters:
+    /// the box's outer corner — the one pointing away from the card — is solid
+    /// floor, and the diagonally opposite pixel, which is deep inside the card,
+    /// is empty. Getting a sweep or a centre backwards swaps exactly those two.
+    ///
+    /// Red gate: give every orientation the same centre and three of the four
+    /// pairs invert.
+    #[test]
+    fn a_card_corner_fills_the_floor_outside_the_round_and_faces_its_own_way() {
+        let floor = [0x25, 0x25, 0x25];
+        let radius = 12u32;
+        let last = radius - 1;
+        // (corner, the pixel pointing away from the card, the pixel inside it)
+        let cases = [
+            (Corner::TopLeft, (0, 0), (last, last)),
+            (Corner::TopRight, (last, 0), (0, last)),
+            (Corner::BottomLeft, (0, last), (last, 0)),
+            (Corner::BottomRight, (last, last), (0, 0)),
+        ];
+        let mut rasters = ChromeMarkRasters::default();
+        for (corner, outside, inside) in cases {
+            let mark = ChromeMark::CardCorner {
+                radius_px: radius,
+                corner,
+            };
+            let icons = rasters.resolve(&[sprite(mark, radius as f32, radius as f32, floor)]);
+            let icon = icons.first().expect("a card corner rasterizes");
+            assert_eq!(icon.width_px, radius);
+            assert_eq!(icon.height_px, radius);
+            assert_eq!(
+                alpha_at(icon, outside.0, outside.1),
+                255,
+                "{corner:?}: the corner away from the card is floor"
+            );
+            assert_eq!(
+                rgb_at(icon, outside.0, outside.1),
+                floor,
+                "{corner:?}: and it wears the colour it was handed"
+            );
+            assert_eq!(
+                alpha_at(icon, inside.0, inside.1),
+                0,
+                "{corner:?}: and the card's own area is not painted over"
+            );
+        }
+        // Four orientations, four cache slots: one id with the corner in the
+        // key, the way the chevron keeps one id per angle.
+        let all: Vec<_> = [
+            Corner::TopLeft,
+            Corner::TopRight,
+            Corner::BottomLeft,
+            Corner::BottomRight,
+        ]
+        .into_iter()
+        .map(|corner| {
+            sprite(
+                ChromeMark::CardCorner {
+                    radius_px: radius,
+                    corner,
+                },
+                radius as f32,
+                radius as f32,
+                floor,
+            )
+        })
+        .collect();
+        let icons = rasters.resolve(&all);
+        let keys: std::collections::HashSet<_> = icons.iter().map(|icon| &icon.key).collect();
+        assert_eq!(
+            keys.len(),
+            4,
+            "four different bites are four different keys"
+        );
+    }
+
     /// PIN (visual fidelity pass): every mark the chrome wears is a real raster
     /// with ink in it, at exactly the physical box asked for, and a mark that
     /// takes `currentColor` wears the colour it was handed.
@@ -1212,6 +1385,9 @@ mod tests {
             (ChromeMark::WindowMaximize, 10.0),
             (ChromeMark::WindowClose, 10.0),
             (ChromeMark::TabClose, 8.0),
+            // The same source at the same size, on a caption rather than on the
+            // strip: `.panehead .pane-close svg { width: 8px; height: 8px }`.
+            (ChromeMark::PaneClose, 8.0),
             (ChromeMark::Plus, 10.0),
             (ChromeMark::ProfilePowerShell, 15.0),
             (ChromeMark::File, 14.0),
