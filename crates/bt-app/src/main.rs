@@ -504,6 +504,10 @@ struct TabState {
     pending_resize_present: Option<GridSize>,
     seats: seats::Seats,
     seat_layout: SeatLayout,
+    /// What the L4 fit-what-fits strip could not show, when the last solve
+    /// landed there. Stored beside the layout because it is the other half of
+    /// the same answer and is derived by the same pass (§4.3).
+    seat_overflow: Option<seats::FitOverflow>,
     preview_image: Option<PreviewImageState>,
     /// The revision this tab's session had reached the last time the user was
     /// looking at it — the whole of what "unread" is measured against.
@@ -579,6 +583,22 @@ struct Runtime {
     startup_started: Instant,
     trace_startup: bool,
     trace_resize: bool,
+    trace_layout_events: bool,
+    /// The geometry changes the most recent layout commit produced (T230).
+    ///
+    /// An outbox, replaced whole at each commit rather than appended to, because
+    /// "exactly one batch per commit" is the contract and an accumulating list
+    /// would let two commits arrive looking like one. A commit that changed
+    /// nothing leaves it empty, which is the honest report and not an omission.
+    ///
+    /// Nobody reads it yet beyond the trace. `M2-tiny-window-priority.md` §3.5
+    /// names the consumer — a TRANSIENT overlay anchored inside a seat, which
+    /// dissolves when its anchor rectangle stops being the one it was laid out
+    /// against — and the floating-window slice owns it. Publishing first is
+    /// deliberate: the four facts are only visible from inside this block, and a
+    /// consumer written later against an interface that does not exist yet is
+    /// how the mapping gets invented twice.
+    last_layout_events: Vec<seats::LayoutEvent>,
     trace_perf: bool,
     resize_trace_logged_transaction: u64,
     resize_trace_logged_events: usize,
@@ -3399,7 +3419,8 @@ fn create_tab_state(
     working_directory: Option<PathBuf>,
     seed: TabSeed,
 ) -> Result<(TabState, String)> {
-    let (seat_layout, terminal_seat) = solve_seats(&seats, renderer, render_physical);
+    let (seat_layout, seat_overflow, terminal_seat) =
+        solve_seats(&seats, renderer, render_physical);
     let grid = renderer
         .metrics()
         .grid_for_pixels(terminal_seat.width, terminal_seat.height);
@@ -3487,6 +3508,7 @@ fn create_tab_state(
             pending_resize_present: None,
             seats,
             seat_layout,
+            seat_overflow,
             preview_image: None,
         },
         conpty_source,
@@ -3535,6 +3557,7 @@ impl Runtime {
     ) -> Result<Self> {
         let trace_startup = std::env::var_os("BT_STARTUP_TRACE").is_some();
         let trace_resize = std::env::var_os("BT_RESIZE_TRACE").is_some();
+        let trace_layout_events = std::env::var_os("BT_LAYOUT_EVENTS").is_some();
         let trace_perf = std::env::var_os("BT_PERF_TRACE").is_some();
         let phase_started = Instant::now();
         // Read the previous session before the window exists, so its bounds can
@@ -3683,7 +3706,8 @@ impl Runtime {
         // lone restored tab is a tab, and must never be swept away by a later
         // Restore.
         let placeholder_tab = plan.placeholder.then(|| tabs[0].id);
-        let (_, terminal_seat) = solve_seats(&tabs[active_tab].seats, &renderer, render_physical);
+        let (_, _, terminal_seat) =
+            solve_seats(&tabs[active_tab].seats, &renderer, render_physical);
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
             eprintln!("BT_CONPTY_SOURCE sources={conpty_sources:?}");
@@ -3707,6 +3731,8 @@ impl Runtime {
             startup_started,
             trace_startup,
             trace_resize,
+            trace_layout_events,
+            last_layout_events: Vec::new(),
             trace_perf,
             resize_trace_logged_transaction: 0,
             resize_trace_logged_events: 0,
@@ -4168,14 +4194,33 @@ impl Runtime {
     /// window's. The direction is one-way (red line L10): what comes back out
     /// of the terminal never re-enters here.
     fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) -> GridSize {
-        let (layout, terminal_seat) = solve_seats(&self.seats, &self.renderer, render_physical);
+        let (layout, overflow, terminal_seat) =
+            solve_seats(&self.seats, &self.renderer, render_physical);
+        // T230, and the reason the diff is taken *here*: this is the one place a
+        // solved layout becomes the layout, so it is the one place that can tell
+        // a real change from a rebuild that landed on the same answer. Every
+        // cause §3.5 lists — the ladder, a divider drag, a swap, focus mode —
+        // passes through it, and none of them has to remember to say so.
+        let events = seats::layout_events(&self.seat_layout, &layout);
         self.seat_layout = layout;
+        self.seat_overflow = overflow;
+        self.publish_layout_events(events);
         self.renderer.set_seat_viewport(terminal_seat);
         self.refresh_preview_for_layout();
         self.refresh_chrome();
         self.renderer
             .metrics()
             .grid_for_pixels(terminal_seat.width, terminal_seat.height)
+    }
+
+    /// Hand one commit's geometry changes to whoever is listening (T230).
+    ///
+    /// See [`Runtime::last_layout_events`] for who that is, and is not, today.
+    fn publish_layout_events(&mut self, events: Vec<seats::LayoutEvent>) {
+        self.last_layout_events = events;
+        if self.trace_layout_events && !self.last_layout_events.is_empty() {
+            eprintln!("BT_LAYOUT_EVENTS {:?}", self.last_layout_events);
+        }
     }
 
     fn seat_metrics(&self) -> SeatMetrics {
@@ -4296,6 +4341,7 @@ impl Runtime {
                 preview_title: preview_title.as_deref(),
                 terminal_cwd: terminal_cwd.as_deref(),
                 preview_message: preview_message.as_deref(),
+                fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
                 chevron_turn: self.chevron_turn.sample(now, self.motion).0,
             },
@@ -7843,6 +7889,28 @@ impl Runtime {
                 // to the focus — W2 then makes it the last seat to fall, and
                 // the concession chain gives it the room by itself. Keyboard
                 // focus does not move; v1 keeps that on the terminal.
+                //
+                // §2.6.3 asks for three ways in and this is one of them. The
+                // other two are recorded rather than approximated:
+                //
+                // * *Tab-reachable, Enter to expand.* There is no chrome focus
+                //   ring in this build at all — `Tab` is forwarded to the PTY as
+                //   a byte (`input.rs`), which is the correct behaviour while the
+                //   terminal owns the keyboard. A ring is a window-wide decision
+                //   about who owns `Tab` and in what order, not a thing one bar
+                //   may invent for itself; it belongs with D45/O173, the
+                //   still-open ruling on whether this product has *any* keyboard
+                //   route between panes.
+                // * *Selectable from the command palette.* There is no command
+                //   palette. `Ctrl+Shift+P` is deliberately kept clear for it
+                //   (see the dev-only chord below), and O166 already records that
+                //   the palette has no pane entries of any kind to be consistent
+                //   with.
+                //
+                // Both are keyboard reach, and a bar that can only be clicked is
+                // exactly as reachable as every other pane in this build — which
+                // is the honest statement of where the gap is: it is not the
+                // collapsed bar's, it is the whole block's.
                 if self.seats.set_focus(seat) {
                     self.apply_window_min_inner_size()?;
                     self.commit_seat_geometry()?;
@@ -9770,7 +9838,7 @@ fn solve_seats(
     seats: &seats::Seats,
     renderer: &Renderer,
     render_physical: PhysicalSize<u32>,
-) -> (SeatLayout, SeatViewport) {
+) -> (SeatLayout, Option<seats::FitOverflow>, SeatViewport) {
     let dpi_milli = renderer.metrics().dpi_milli().get();
     let metrics = seats::seat_metrics(dpi_milli);
     let viewport = seats::logical_viewport(
@@ -9778,9 +9846,10 @@ fn solve_seats(
         render_physical.height,
         seats::scale_ppm(dpi_milli),
     );
-    let layout = seats
-        .solve(viewport, &metrics)
-        .unwrap_or_else(|_| seats::fit_what_fits(seats, viewport, &metrics));
+    let (layout, overflow) = match seats.solve(viewport, &metrics) {
+        Ok(layout) => (layout, None),
+        Err(_) => seats::fit_what_fits(seats, viewport, &metrics),
+    };
     let terminal = seats::pane_body_viewport(
         seats,
         &layout,
@@ -9791,7 +9860,7 @@ fn solve_seats(
         render_physical.width.max(1),
         render_physical.height.max(1),
     ));
-    (layout, terminal)
+    (layout, overflow, terminal)
 }
 
 /// A caret rectangle the frame produced, moved from the terminal seat's
@@ -13348,9 +13417,10 @@ mod tests {
             render_physical.height,
             seats::scale_ppm(dpi_milli),
         );
-        let layout = seats
-            .solve(viewport, &metrics)
-            .unwrap_or_else(|_| seats::fit_what_fits(seats, viewport, &metrics));
+        let layout = match seats.solve(viewport, &metrics) {
+            Ok(layout) => layout,
+            Err(_) => seats::fit_what_fits(seats, viewport, &metrics).0,
+        };
         seats::pane_body_viewport(seats, &layout, seats.terminal(), dpi_milli as f32 / 1_000.0)
             .unwrap_or(bt_render::SeatViewport::whole(
                 render_physical.width.max(1),

@@ -161,8 +161,14 @@ impl Seats {
     /// only ever opened beside something, so `pane_count > 1` is already true
     /// wherever it exists, and giving it the unconditional rule would be writing
     /// a branch no state can reach.
+    /// A placeholder joins the files pane on the unconditional side, for the
+    /// same reason and a sharper one: T227 asks the degradation to be visible,
+    /// and a lone unrecognised leaf with no head and no body notice is a blank
+    /// window — indistinguishable from the silent destruction the rule exists to
+    /// forbid. The pane that cannot say what it is, is exactly the pane that has
+    /// to say it.
     pub fn seat_wears_head(&self, kind: SeatKind) -> bool {
-        kind == SeatKind::Files || self.has_pane_headers()
+        matches!(kind, SeatKind::Files | SeatKind::Placeholder) || self.has_pane_headers()
     }
 
     /// How many panes this tab holds — `paneCount = leavesOf(w.tree).length`
@@ -320,47 +326,248 @@ impl Seats {
     }
 }
 
+/// What L4 had no room to show, and the row that says so.
+///
+/// Not a seat, so it cannot travel as a [`bt_layout::SeatPlacement`]: it stands
+/// for a number of seats rather than for one, and the solver's output type is
+/// the tree's shape, not the chrome's. It rides beside the layout instead, laid
+/// out by the same pass that laid out the bars so that the two cannot disagree
+/// about where the strip ends (D4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FitOverflow {
+    /// How many seats the foot had no row for. Never zero.
+    pub hidden: usize,
+    /// The row that names that number, in device pixels.
+    pub row: bt_layout::DeviceRect,
+}
+
 /// The L4 presentation: what to show when `solve` says the window cannot hold
 /// this tree at all (tiny-window §2 last row, §4.3).
 ///
-/// The focus seat takes the viewport and every other seat is simply not
-/// presented. Two things about that are worth stating plainly:
+/// The focus seat keeps a real pane (DESIGN §7.1.1, "保 focused pane") and every
+/// other seat becomes a collapsed bar in a strip along the foot of the viewport,
+/// as many bars as go in, with a trailing "N more do not fit" (tiny-window §4.3,
+/// ruling 1). No buttons: window size is a gesture the user makes with the OS and
+/// the app does not reach over and change it (§4.3, ruling and T214).
+///
+/// Three things about that are worth stating plainly:
 ///
 /// * It is **not** a cached previous frame. §4.3 forbids silently reusing the
 ///   last geometry, because that dresses a failed solve up as a successful one.
-///   This rectangle is derived from the current viewport and nothing else.
+///   Every rectangle here is derived from the current viewport and nothing else.
 /// * For a lone terminal leaf it is *numerically the same answer* `solve`
 ///   returns on success — one seat, the whole viewport — so a window dragged
 ///   below the terminal's own minimum behaves exactly as it did before seats
-///   existed, rather than acquiring a new failure state.
+///   existed, rather than acquiring a new failure state. There are no other
+///   seats, so there is no strip, so the stage is the viewport.
+/// * The bars are clickable exactly as L3's are, because they are the same
+///   `Collapsed` placements: [`hit_chrome`] answers `CollapseBar`, the click
+///   promotes that seat to the focus, and the next solve makes it the stage
+///   (§2.6.3). L4 is therefore an escapable state without owning a single verb.
 ///
-/// What is not implemented here is the refinement §4.3 also names: rendering as
-/// many collapsed bars as *do* fit with a trailing "N more do not fit". That
-/// wants a second allocator with its own stopping rule, and this slice's gate is
-/// the lone-leaf identity; the gap is recorded rather than approximated.
-pub fn fit_what_fits(seats: &Seats, viewport: LogicalRect, metrics: &SeatMetrics) -> SeatLayout {
+/// **Rulings this function makes, which neither document spells out.**
+///
+/// *The strip runs along the foot, in rows.* §4.3 says "尾行" — a tail *line* —
+/// which only reads as a line if the bars are lines. A column of 24-wide strips
+/// could carry neither the names §2.6.3 asks a bar for nor the sentence §4.3
+/// asks the tail for. The foot rather than the head, because the tab strip is
+/// already at the head and C24's argument is that the active tab must stay
+/// welded to the surface below it.
+///
+/// *The stage is never given less than one bar's worth.* A pane thinner than a
+/// collapsed bar is not a pane, it is a fourth bar without a name — so the strip
+/// stops one row short of the viewport. When even that leaves no row, there is no
+/// strip and no tail: at a height under two bars there is nowhere honest to print
+/// a sentence, and the other seats go unpresented and unreported. That is the one
+/// place this state cannot say everything it knows, and it is recorded rather
+/// than papered over with a rectangle that does not fit.
+///
+/// *The seats that lose their row are the ones furthest from the focus.* That is
+/// not a new order — it is `collapse_order`, the very order L3 uses to decide who
+/// gives way first (H99), read one step further. The bars that remain are drawn
+/// in tree order, because a bar's claim is that it still holds its place in the
+/// tree (§2.6.3) and reading order is what that place looks like.
+pub fn fit_what_fits(
+    seats: &Seats,
+    viewport: LogicalRect,
+    metrics: &SeatMetrics,
+) -> (SeatLayout, Option<FitOverflow>) {
     let device = |rect: LogicalRect| bt_layout::DeviceRect {
         left: snap(rect.left, metrics.scale_ppm()),
         top: snap(rect.top, metrics.scale_ppm()),
         right: snap(rect.right, metrics.scale_ppm()),
         bottom: snap(rect.bottom, metrics.scale_ppm()),
     };
-    let rects = seats
-        .tree
-        .seats_in_order()
+    let in_order = seats.tree.seats_in_order();
+    let others = in_order
+        .iter()
+        .filter(|seat| seat.id != seats.focus)
+        .count();
+    // One row of the foot per seat, and one row the strip may not touch so the
+    // stage keeps a pane's worth of its own.
+    let unit = bt_layout::COLLAPSED_EXTENT.subpixels();
+    let capacity = (viewport.extent(Axis::Col).subpixels() / unit).max(0) as usize;
+    let capacity = capacity.saturating_sub(1);
+    let (shown, tail) = if capacity == 0 || others == 0 {
+        (0, false)
+    } else if others <= capacity {
+        (others, false)
+    } else {
+        (capacity - 1, true)
+    };
+    let rows = shown + usize::from(tail);
+
+    let unit = bt_layout::LogicalPx::from_subpixels(unit);
+    let strip_top =
+        viewport.bottom - bt_layout::LogicalPx::from_subpixels(unit.subpixels() * rows as i64);
+    let row_rect = |index: usize| {
+        let top = strip_top + bt_layout::LogicalPx::from_subpixels(unit.subpixels() * index as i64);
+        LogicalRect::new(viewport.left, top, viewport.right, top + unit)
+    };
+    let stage = LogicalRect::new(viewport.left, viewport.top, viewport.right, strip_top);
+
+    // The nearest `shown` seats keep a row; `collapse_order` runs farthest first,
+    // so the survivors are its tail.
+    let keeping = bt_layout::collapse_order(&seats.tree, seats.focus);
+    let keeping: Vec<SeatId> = keeping
+        .into_iter()
+        .filter(|id| *id != seats.focus)
+        .rev()
+        .take(shown)
+        .collect();
+
+    let mut next_row = 0usize;
+    let rects = in_order
         .into_iter()
         .map(|seat| {
-            let on_stage = seat.id == seats.focus;
+            if seat.id == seats.focus {
+                return bt_layout::SeatPlacement {
+                    id: seat.id,
+                    kind: seat.kind,
+                    rect: Some(stage),
+                    device_rect: Some(device(stage)),
+                    presentation: Presentation::Full,
+                };
+            }
+            if !keeping.contains(&seat.id) {
+                // Not presented, and honestly so: a seat with no rectangle is the
+                // shape the solver itself uses for "this one is not on screen",
+                // never a zero-area one (red line L4).
+                return bt_layout::SeatPlacement {
+                    id: seat.id,
+                    kind: seat.kind,
+                    rect: None,
+                    device_rect: None,
+                    presentation: Presentation::Full,
+                };
+            }
+            let rect = row_rect(next_row);
+            next_row += 1;
             bt_layout::SeatPlacement {
                 id: seat.id,
                 kind: seat.kind,
-                rect: on_stage.then_some(viewport),
-                device_rect: on_stage.then(|| device(viewport)),
-                presentation: Presentation::Full,
+                rect: Some(rect),
+                device_rect: Some(device(rect)),
+                // Squeezed along Col: 24 tall, the slot's full width — the shape
+                // that can still carry a name.
+                presentation: Presentation::Collapsed(bt_layout::AxisSet::COL),
             }
         })
         .collect();
-    SeatLayout { rects }
+
+    let overflow = tail.then(|| FitOverflow {
+        hidden: others - shown,
+        row: device(row_rect(rows - 1)),
+    });
+    (SeatLayout { rects }, overflow)
+}
+
+/// One seat's geometry stopped being what it was at the last commit (T230).
+///
+/// The obligation this block owes outward, stated as a type. `M2-tiny-window-
+/// priority.md` §3.5 generalises an already-implemented rule — a TRANSIENT
+/// overlay dissolves the moment the rectangle it anchored itself to moves —
+/// from resize and wheel notches to *every* cause, and names four of them:
+/// the concession ladder collapsing or expanding a seat across the L3 boundary,
+/// a divider drag, a centre swap or replace, and entering or leaving focus mode.
+/// Those four are things this block does; nobody outside it can see them happen;
+/// so this block has to say so.
+///
+/// The four variants below are not those four causes. They are the four *facts*
+/// a consumer can act on, and every one of the causes lands in one of them: the
+/// ladder shows up as [`Self::Presentation`], a divider drag and a resize as
+/// [`Self::Moved`], focus mode's parked seats as [`Self::Vanished`] and
+/// [`Self::Appeared`], and so does opening or closing a pane. Naming causes
+/// instead would put the burden of the mapping on every consumer, and each of
+/// them would get it slightly differently.
+///
+/// One event per seat per commit, in the precedence the variants are declared
+/// in. A collapse is also a move — 24 logical pixels is a different rectangle —
+/// and reporting it as two facts would only ask a consumer to decide which of
+/// them it already handled. The single case where a presentation could change
+/// without the rectangle following, a seat that was already exactly
+/// `COLLAPSED_EXTENT` along the axis it is now collapsed on, is subsumed rather
+/// than lost: the consumer is told the seat changed, which is the question it
+/// asked.
+///
+/// **Not covered, and deliberately so.** A centre swap exchanges what two seats
+/// *hold* without moving either rectangle (`a_center_swap_moves_no_rectangle`).
+/// Today a seat holds nothing but its `SeatKind`, which travels on the placement,
+/// so a swap that changes anything at all is visible here as a
+/// [`Self::Presentation`]-free `kind` difference — and a swap that changes
+/// nothing is not an event. When seats grow payloads of their own, the edit that
+/// swaps them has to publish for itself; a diff of rectangles will not see it,
+/// and this comment is the place that says so before it is a bug.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LayoutEvent {
+    /// A seat that had no rectangle at the last commit has one now.
+    Appeared(SeatId),
+    /// A seat that had a rectangle no longer has one — closed, or parked off
+    /// the stage by focus mode.
+    Vanished(SeatId),
+    /// The same seat, presented differently: the ladder crossed L3 for it, in
+    /// either direction, or it changed which axis it is squeezed on.
+    Presentation(SeatId),
+    /// The same seat, the same presentation, a different rectangle.
+    Moved(SeatId),
+}
+
+/// Everything that changed between two commits of the layout (T230).
+///
+/// A diff and not a set of hooks hung off the edits, for the reason §4.3 gives
+/// about geometry generally: the edits are many and growing, the commit is one,
+/// and an edit added later that forgets to publish is a bug that shows up as a
+/// stale overlay days afterwards. Here an edit *cannot* forget, because it is not
+/// asked — the commit point compares what it is about to store against what it
+/// stored last, and a rebuild that changed nothing produces nothing.
+///
+/// Events come out in tree order (D2/L8: never a hash iteration), seats that
+/// left the tree last.
+#[must_use]
+pub fn layout_events(before: &SeatLayout, after: &SeatLayout) -> Vec<LayoutEvent> {
+    let mut events = Vec::new();
+    for placement in &after.rects {
+        let was = before.get(placement.id);
+        match (was.and_then(|was| was.rect), placement.rect) {
+            (None, Some(_)) => events.push(LayoutEvent::Appeared(placement.id)),
+            (Some(_), None) => events.push(LayoutEvent::Vanished(placement.id)),
+            (None, None) => {}
+            (Some(old), Some(new)) => {
+                let was = was.expect("a rectangle came from a placement");
+                if was.presentation != placement.presentation || was.kind != placement.kind {
+                    events.push(LayoutEvent::Presentation(placement.id));
+                } else if old != new {
+                    events.push(LayoutEvent::Moved(placement.id));
+                }
+            }
+        }
+    }
+    for placement in &before.rects {
+        if placement.rect.is_some() && after.get(placement.id).is_none() {
+            events.push(LayoutEvent::Vanished(placement.id));
+        }
+    }
+    events
 }
 
 /// Boundary snapping, matching `bt-layout`'s own: round half away from zero, in
@@ -1685,6 +1892,7 @@ pub fn build_chrome_with_preview(
             preview_title,
             terminal_cwd: None,
             preview_message,
+            fit_overflow: None,
             profile_menu_open: false,
             chevron_turn: 0.0,
         },
@@ -1836,6 +2044,9 @@ pub struct ChromeContent<'a> {
     /// nothing else about the caption changes.
     pub terminal_cwd: Option<&'a str>,
     pub preview_message: Option<&'a str>,
+    /// What the L4 fit-what-fits strip could not show, when the window is in
+    /// that state at all ([`fit_what_fits`]). `None` on every ordinary solve.
+    pub fit_overflow: Option<FitOverflow>,
     /// Whether the profile picker is up. The chevron states where its list is —
     /// down when it is folded away, up when it is already on screen — so the
     /// button has to be told, and the menu itself is drawn in the overlay layer.
@@ -1872,6 +2083,7 @@ pub fn build_chrome_for_tabs(
         preview_title,
         terminal_cwd,
         preview_message,
+        fit_overflow,
         profile_menu_open,
         chevron_turn,
     } = content;
@@ -1923,9 +2135,11 @@ pub fn build_chrome_for_tabs(
                 collapse_bar_contents(
                     rect,
                     scale,
-                    seat_title(placement.kind),
-                    &mut quads,
+                    placement.kind,
+                    placement.presentation,
+                    seat_short_caption(placement.kind, preview_title, terminal_cwd),
                     &mut labels,
+                    &mut sprites,
                 );
             }
             Presentation::Full => {
@@ -2054,9 +2268,19 @@ pub fn build_chrome_for_tabs(
                         },
                     ));
                 }
-                if placement.kind == SeatKind::Preview
-                    && let Some(message) = preview_message
-                {
+                let body_notice = match placement.kind {
+                    SeatKind::Preview => preview_message,
+                    // T227: the degradation has to be *visible*. A leaf whose
+                    // kind this build does not know keeps its place in the tree
+                    // rather than taking the tree down with it (§2.1), but a
+                    // silent placeholder and a silently destroyed pane look the
+                    // same on screen — and the second is the thing the rule
+                    // exists to forbid. So it says what it is, in its own body,
+                    // in the same quiet ink an empty preview uses.
+                    SeatKind::Placeholder => Some(PLACEHOLDER_SEAT_NOTICE),
+                    _ => None,
+                };
+                if let Some(message) = body_notice {
                     // A state notice, not content: quiet ink, centred in the
                     // body, so an empty pane reads as an invitation and a
                     // failure reads as a note rather than a wall of alarm.
@@ -2081,6 +2305,36 @@ pub fn build_chrome_for_tabs(
                 }
             }
         }
+    }
+    if let Some(overflow) = fit_overflow {
+        let row = [
+            overflow.row.left as f32,
+            overflow.row.top as f32,
+            overflow.row.right as f32,
+            overflow.row.bottom as f32,
+        ];
+        // The same ground the bars stand on, because it is the same strip and
+        // the sentence is the strip's last line — not a banner laid over it.
+        quads.push(ChromeQuad {
+            rect: row,
+            color: palette.collapse_bar,
+        });
+        let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
+        labels.push(ChromeLabel {
+            text: overflow_notice(overflow.hidden),
+            rect: [row[0] + pad, row[1], row[2] - pad, row[3]],
+            font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+            // Quiet ink and no mark: it is not a seat and must not be mistaken
+            // for one, and it is a limit rather than an error (M147's reading of
+            // the same distinction). Nothing to press — T214 rules the app does
+            // not offer to resize a window the user is holding.
+            color: palette.body_hint_text,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+        });
     }
     let slots = seats.split_slots(layout);
     // F63, and it is drawn before the dividers so the accent line and its grip
@@ -2982,47 +3236,89 @@ fn window_chrome(
     }
 }
 
-/// A collapsed seat's bar carries a name and a state icon (§2.6.3) — except in
-/// the double-collapsed 24x24 case, where 24 square cannot hold a name and
+/// A collapsed seat's bar carries its name and its state icon (§2.6.3) — except
+/// in the double-collapsed 24x24 case, where 24 square cannot hold a name and
 /// forcing one in would be a mosaic pretending to be text (tiny-window §1.3).
-/// The state icon is a placeholder block until the shared `stateIcon` component
-/// of DESIGN §7.1.5b exists to be borrowed.
+///
+/// The icon is [`pane_mark`], the same component the pane head wears, because
+/// §2.6.3 asks for the very same `stateIcon` a tab and a card carry: a bar that
+/// breathes and lights a dot is the cheapest way to say "something is running in
+/// here", and it can only do that by being the same thing. A block of ink shaped
+/// like an icon says nothing at all.
+///
+/// Which of the three shapes to draw is read from the solver's own verdict and
+/// not from the rectangle's aspect ratio. `Collapsed(AxisSet)` already names
+/// which axis was squeezed (tiny-window §1.3), and a 24-wide bar in a 24-tall
+/// slot is a legal single-axis collapse that guessing from `width > height`
+/// would silently promote to the degenerate square.
+///
+/// * Squeezed along Col — a bar 24 tall and as wide as its slot. The pane head's
+///   own row: mark at the leading padding, name after the gap.
+/// * Squeezed along Row — a bar 24 wide and as tall as its slot. No name: the
+///   chrome label pipeline draws horizontally, and 24 logical pixels do not hold
+///   a horizontal word. The mark sits at the head of the strip, where a title
+///   would have started, rather than adrift in the middle of it.
+/// * Squeezed along both — the mark alone, centred (T209).
 fn collapse_bar_contents(
     rect: [f32; 4],
     scale: f32,
+    kind: SeatKind,
+    presentation: Presentation,
     title: &str,
-    quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ChromeLabel>,
+    sprites: &mut Vec<ChromeSprite>,
 ) {
     let palette = chrome_palette();
-    let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
-    let icon = 6.0 * scale;
     let width = rect[2] - rect[0];
     let height = rect[3] - rect[1];
-    let icon_left = rect[0] + (width - icon).max(0.0) / 2.0;
-    let icon_top = rect[1] + (height - icon).max(0.0) / 2.0;
-    if width >= icon && height >= icon {
-        quads.push(ChromeQuad {
-            rect: [icon_left, icon_top, icon_left + icon, icon_top + icon],
-            color: palette.title_text,
-        });
+    let (mark, mark_logical_px, mark_color) = pane_mark(kind, palette);
+    let size = (mark_logical_px * scale)
+        .round()
+        .max(1.0)
+        .min(width)
+        .min(height);
+    if size < 1.0 {
+        return;
     }
-    // A name only fits along the axis that was *not* squeezed. A bar squeezed on
-    // both is the degenerate square, and it gets the icon alone.
-    let horizontal_bar = width > height;
-    if horizontal_bar && width > icon + 4.0 * pad {
-        labels.push(ChromeLabel {
-            text: title.to_owned(),
-            rect: [rect[0] + pad, rect[1], icon_left - pad, rect[3]],
-            font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
-            color: palette.title_text,
-            align_right: false,
-            align_center: false,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-        });
+    let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
+    let names_itself =
+        presentation.is_collapsed_along(Axis::Col) && !presentation.is_double_collapsed();
+    let centre_x = rect[0] + (width - size) / 2.0;
+    let centre_y = rect[1] + (height - size) / 2.0;
+    let (mark_left, mark_top) = if names_itself {
+        ((rect[0] + pad).min(rect[2] - size), centre_y)
+    } else if presentation.is_double_collapsed() {
+        (centre_x, centre_y)
+    } else {
+        (centre_x, (rect[1] + pad).min(rect[3] - size))
+    };
+    let mark_left = mark_left.round();
+    let mark_top = mark_top.round();
+    let mark_box = [mark_left, mark_top, mark_left + size, mark_top + size];
+    // Full ink, where a pane head's unfocused mark is halved (D39). A collapsed
+    // seat is never the focus — W2 makes it the last to fall — so the halving
+    // rule would apply to every bar there is, and on a bar the mark is not a
+    // redundant flourish beside a name and a body, it is the whole message.
+    sprites.push(ChromeSprite::new(mark, mark_box, mark_color));
+    if !names_itself {
+        return;
     }
+    let title_left = mark_box[2] + SEAT_TITLE_GAP_LOGICAL_PX * scale;
+    let title_right = rect[2] - SEAT_TITLE_TRAILING_PADDING_LOGICAL_PX * scale;
+    if title_right <= title_left {
+        return;
+    }
+    labels.push(ChromeLabel {
+        text: title.to_owned(),
+        rect: [title_left, rect[1], title_right, rect[3]],
+        font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+        color: palette.title_text,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: 0.0,
+        weight: ChromeLabelWeight::Regular,
+        tabular_numerals: false,
+    });
 }
 
 /// What a pane calls itself.
@@ -3059,6 +3355,51 @@ pub(crate) fn seat_caption<'a>(
             .unwrap_or_else(|| seat_title(kind)),
         _ => seat_title(kind),
     }
+}
+
+/// What a leaf this build cannot name says about itself, in its own body (T227).
+///
+/// It names the cause rather than apologising, because the cause is the only
+/// actionable thing in it: the tree came off disk carrying a kind this binary has
+/// no code for, which is what a session written by a newer build looks like.
+pub(crate) const PLACEHOLDER_SEAT_NOTICE: &str =
+    "This pane was saved by a newer version of BetterTerminal";
+
+/// The tail line of the L4 strip: how many seats it had no row for.
+///
+/// Plain counting, and a verb that agrees with it — the sentence is read at the
+/// exact moment the window is at its least trustworthy, and a number wearing the
+/// wrong verb is one more thing that looks broken.
+fn overflow_notice(hidden: usize) -> String {
+    if hidden == 1 {
+        "1 more does not fit".to_owned()
+    } else {
+        format!("{hidden} more do not fit")
+    }
+}
+
+/// The same name, cut to the one segment that answers "which one is this".
+///
+/// C28 is a ruling about two lengths, not two names: a pane head has a whole bar
+/// to fill and answers "where is this" with the full path, while a label riding
+/// the pointer has one line and shows `cwdLeaf(s)` — the last segment only
+/// (mock-up 3304). A collapsed bar is 24 logical pixels of the second kind, so
+/// it takes the second reading.
+///
+/// It is *derived* from [`seat_caption`] rather than read from the source a
+/// second time, which is the whole of that function's warning: two call sites
+/// evaluating two expressions is how two names drift apart. Cutting a path at
+/// its last separator is a no-op on every name that is not a path, so preview
+/// titles and kind names arrive unchanged.
+pub(crate) fn seat_short_caption<'a>(
+    kind: SeatKind,
+    preview_title: Option<&'a str>,
+    terminal_cwd: Option<&'a str>,
+) -> &'a str {
+    let full = seat_caption(kind, preview_title, terminal_cwd);
+    full.rsplit(['/', '\\'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(full)
 }
 
 fn seat_title(kind: SeatKind) -> &'static str {
@@ -3288,9 +3629,18 @@ mod tests {
     }
 
     fn solved(seats: &Seats, viewport: LogicalRect, metrics: &SeatMetrics) -> SeatLayout {
-        seats
-            .solve(viewport, metrics)
-            .unwrap_or_else(|_| fit_what_fits(seats, viewport, metrics))
+        solved_with_overflow(seats, viewport, metrics).0
+    }
+
+    fn solved_with_overflow(
+        seats: &Seats,
+        viewport: LogicalRect,
+        metrics: &SeatMetrics,
+    ) -> (SeatLayout, Option<FitOverflow>) {
+        match seats.solve(viewport, metrics) {
+            Ok(layout) => (layout, None),
+            Err(_) => fit_what_fits(seats, viewport, metrics),
+        }
     }
 
     /// The hard gate of this slice, stated as an equality rather than as a
@@ -4432,6 +4782,7 @@ mod tests {
                     preview_title: None,
                     terminal_cwd: None,
                     preview_message: None,
+                    fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
                 },
@@ -4627,6 +4978,7 @@ mod tests {
                 preview_title: None,
                 terminal_cwd: None,
                 preview_message: None,
+                fit_overflow: None,
                 profile_menu_open,
                 chevron_turn,
             },
@@ -7112,6 +7464,7 @@ mod tests {
                 preview_title: None,
                 terminal_cwd: None,
                 preview_message: None,
+                fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
             },
@@ -7242,6 +7595,7 @@ mod tests {
                     preview_title: None,
                     terminal_cwd: None,
                     preview_message: None,
+                    fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
                 },
@@ -7386,6 +7740,7 @@ mod tests {
                 preview_title: None,
                 terminal_cwd: None,
                 preview_message: None,
+                fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
             },
@@ -8076,5 +8431,720 @@ mod tests {
             "Unavailable",
             "T227: a leaf this build cannot name says so rather than borrowing one"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // U9: the collapsed presentation (H101, T209, T210, T211, T227)
+    // ---------------------------------------------------------------------
+
+    /// A tree of `count` terminals in one row, focus on the first.
+    ///
+    /// Built by hand because `bt-app` still has no split verb — `Edit::SplitSeat`
+    /// exists and is unconstructed — and the concession ladder's interesting
+    /// shapes start at three seats.
+    fn row_of_terminals(count: u64) -> Seats {
+        let mut tree = LayoutNode::seat(Seat::new(SeatId(1), SeatKind::Terminal));
+        for index in 1..count {
+            tree = LayoutNode::split(
+                SplitId(index),
+                Axis::Row,
+                tree,
+                LayoutNode::seat(Seat::new(SeatId(index + 1), SeatKind::Terminal)),
+            );
+        }
+        Seats {
+            tree,
+            terminal: SeatId(1),
+            focus: SeatId(1),
+            next_seat: count + 1,
+            next_split: count,
+        }
+    }
+
+    /// A layout of one hand-placed seat, for the two collapse shapes the app's
+    /// own verbs cannot yet reach.
+    ///
+    /// `Collapsed(Col)` and `Collapsed(Row, Col)` are both legal solver output —
+    /// `bt-layout`'s own pins produce them — but reaching them from here needs a
+    /// column split, and nothing in `bt-app` constructs one yet. The chrome has
+    /// to draw what the solver can say, not only what today's verbs can ask for.
+    fn one_collapsed_seat(
+        kind: SeatKind,
+        presentation: Presentation,
+        rect: LogicalRect,
+    ) -> SeatLayout {
+        SeatLayout {
+            rects: vec![bt_layout::SeatPlacement {
+                id: SeatId(1),
+                kind,
+                rect: Some(rect),
+                device_rect: Some(bt_layout::DeviceRect {
+                    left: rect.left.floor_px(),
+                    top: rect.top.floor_px(),
+                    right: rect.right.floor_px(),
+                    bottom: rect.bottom.floor_px(),
+                }),
+                presentation,
+            }],
+        }
+    }
+
+    struct ChromeParts {
+        quads: Vec<ChromeQuad>,
+        labels: Vec<ChromeLabel>,
+        sprites: Vec<ChromeSprite>,
+    }
+
+    fn chrome_of(seats: &Seats, layout: &SeatLayout, cwd: Option<&str>) -> ChromeParts {
+        chrome_with_overflow(seats, layout, cwd, None)
+    }
+
+    fn chrome_with_overflow(
+        seats: &Seats,
+        layout: &SeatLayout,
+        cwd: Option<&str>,
+        fit_overflow: Option<FitOverflow>,
+    ) -> ChromeParts {
+        let tabs = [TabContent {
+            title: "PowerShell".to_owned(),
+            pane_count: seats.pane_count(),
+            ..TabContent::default()
+        }];
+        let (quads, labels, sprites) = build_chrome_for_tabs(
+            seats,
+            layout,
+            1.0,
+            ChromePointer::default(),
+            ChromeContent {
+                tabs: &tabs,
+                active_tab: 0,
+                grabbed: None,
+                tab_scroll: 0.0,
+                preview_title: None,
+                terminal_cwd: cwd,
+                preview_message: None,
+                fit_overflow,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+            },
+        );
+        ChromeParts {
+            quads,
+            labels,
+            sprites,
+        }
+    }
+
+    fn inside(outer: [f32; 4], inner: [f32; 4]) -> bool {
+        inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+    }
+
+    /// T210: a collapsed bar wears the *same* mark component a pane head wears.
+    ///
+    /// §2.6.3 does not ask for "an icon", it asks for the `stateIcon` a tab and a
+    /// card carry — the one that breathes while a command runs and lights a dot
+    /// when something wants you. A bar can only make that promise by being drawn
+    /// from the same component.
+    ///
+    /// Red gate: the drawing this replaced pushed a plain 6x6 `title_text` quad,
+    /// which is a rectangle of ink no state can ever reach. Both halves below
+    /// fail against it — there is no sprite in the bar, and there is a quad in
+    /// the bar that is neither of the bar's two ground colours.
+    #[test]
+    fn a_collapsed_bar_wears_the_pane_heads_own_mark() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let viewport = viewport_of(500, 600, 1_000);
+        let layout = seats.solve(viewport, &metrics).expect("L3 satisfies 500px");
+        let preview = seats.preview().unwrap();
+        let placement = layout.get(preview).unwrap();
+        assert!(
+            matches!(placement.presentation, Presentation::Collapsed(_)),
+            "the non-focus seat is the one that gives way"
+        );
+        let device = placement.device_rect.unwrap();
+        let bar_rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        let parts = chrome_of(&seats, &layout, None);
+        let palette = chrome_palette();
+        let (expected_mark, _, _) = pane_mark(SeatKind::Preview, palette);
+        let marks: Vec<_> = parts
+            .sprites
+            .iter()
+            .filter(|sprite| inside(bar_rect, sprite.rect))
+            .collect();
+        assert_eq!(
+            marks.len(),
+            1,
+            "one mark, and nothing else, stands in the bar"
+        );
+        assert_eq!(
+            marks[0].mark, expected_mark,
+            "the bar borrows `pane_mark`, so it cannot name the seat differently \
+             than the seat's own head would"
+        );
+        for quad in &parts.quads {
+            if inside(bar_rect, quad.rect) {
+                assert!(
+                    quad.color == palette.collapse_bar || quad.color == palette.collapse_bar_hover,
+                    "a hand-drawn block standing in for an icon is what T209 forbids"
+                );
+            }
+        }
+    }
+
+    /// T209: squeezed on both axes, the seat is a colour block carrying only its
+    /// state icon — no border and, above all, no name (tiny-window §1.3, ruling
+    /// 2). Twenty-four square cannot hold a word, and forcing one in is a mosaic
+    /// pretending to be text.
+    ///
+    /// The verdict is read from `Presentation`, not guessed from the rectangle:
+    /// this square is 24 by 24, so an implementation that decided by
+    /// `width > height` would call it a bar and try to write in it.
+    ///
+    /// Red gate: pass `AxisSet::COL` instead and the label assertion fails,
+    /// because that shape is allowed a name.
+    #[test]
+    fn a_double_collapsed_seat_draws_a_colour_block_with_only_its_mark() {
+        let square = LogicalRect::new(
+            LogicalPx::ZERO,
+            LogicalPx::ZERO,
+            bt_layout::COLLAPSED_EXTENT,
+            bt_layout::COLLAPSED_EXTENT,
+        );
+        let seats = Seats::lone_terminal();
+        let layout = one_collapsed_seat(
+            SeatKind::Terminal,
+            Presentation::Collapsed(bt_layout::AxisSet::BOTH),
+            square,
+        );
+        let parts = chrome_of(&seats, &layout, Some("C:\\Users\\Weiyi\\bt"));
+        let block = [0.0, 0.0, 24.0, 24.0];
+        assert!(
+            parts
+                .quads
+                .iter()
+                .any(|quad| quad.rect == block && quad.color == chrome_palette().collapse_bar),
+            "the square is a plain colour block"
+        );
+        let marks: Vec<_> = parts
+            .sprites
+            .iter()
+            .filter(|sprite| inside(block, sprite.rect))
+            .collect();
+        assert_eq!(marks.len(), 1, "the state icon, alone");
+        assert_eq!(
+            marks[0].rect,
+            [5.0, 5.0, 20.0, 20.0],
+            "centred on both axes: the degenerate square is its own style, not a \
+             bar with the writing cut off, and a bar's mark stands at the head"
+        );
+        assert!(
+            !parts.labels.iter().any(|label| inside(block, label.rect)),
+            "24 square holds no name (tiny-window 1.3)"
+        );
+    }
+
+    /// The third shape, and the one with nowhere to put a word: squeezed along
+    /// Row, a seat is 24 wide and as tall as its slot.
+    ///
+    /// **Ruling.** No name. The chrome label pipeline draws horizontally and 24
+    /// logical pixels do not hold a horizontal word; rotating one is not a thing
+    /// this renderer can do, and cutting it to an initial would be the mosaic
+    /// tiny-window §1.3 rejects for the square. The mark instead stands at the
+    /// *head* of the strip, where a title would have begun — which is also what
+    /// keeps this shape distinguishable from the double-collapsed square, whose
+    /// mark is centred. Recorded rather than approximated: a vertical bar cannot
+    /// say its name until something can set type on its side.
+    ///
+    /// Red gate: place it by the square's rule and the mark lands at 5 rather
+    /// than at the head's own padding.
+    #[test]
+    fn a_bar_squeezed_along_row_carries_its_mark_at_the_head_and_no_name() {
+        let seats = Seats::lone_terminal();
+        // Below the title bar, so the window chrome's own marks cannot wander
+        // into the rectangle this pin measures.
+        let bar = LogicalRect::new(
+            LogicalPx::ZERO,
+            LogicalPx::px(100),
+            bt_layout::COLLAPSED_EXTENT,
+            LogicalPx::px(300),
+        );
+        let layout = one_collapsed_seat(
+            SeatKind::Terminal,
+            Presentation::Collapsed(bt_layout::AxisSet::ROW),
+            bar,
+        );
+        let parts = chrome_of(&seats, &layout, Some("C:\\Users\\Weiyi\\bt"));
+        let strip = [0.0, 100.0, 24.0, 300.0];
+        let marks: Vec<_> = parts
+            .sprites
+            .iter()
+            .filter(|sprite| inside(strip, sprite.rect))
+            .collect();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(
+            marks[0].rect,
+            [5.0, 112.0, 20.0, 127.0],
+            "centred across the 24, and one head's padding down from the top"
+        );
+        assert!(
+            !parts.labels.iter().any(|label| inside(strip, label.rect)),
+            "24 logical pixels do not hold a horizontal word"
+        );
+    }
+
+    /// T210 and C28 together: a bar squeezed along Col has a whole line to give,
+    /// so it names its seat — by the *short* name, the one a label riding the
+    /// pointer uses, while the pane head of the very same seat spells the path
+    /// out in full.
+    ///
+    /// Red gate: point the bar at `seat_caption` instead of `seat_short_caption`
+    /// and the first assertion reads the whole path.
+    #[test]
+    fn a_collapsed_bar_names_its_seat_short_where_the_head_names_it_long() {
+        let cwd = "C:\\Users\\Weiyi\\Developer\\BetterTerminal";
+        let seats = Seats::lone_terminal();
+        let bar = LogicalRect::new(
+            LogicalPx::ZERO,
+            LogicalPx::ZERO,
+            LogicalPx::px(400),
+            bt_layout::COLLAPSED_EXTENT,
+        );
+        let layout = one_collapsed_seat(
+            SeatKind::Terminal,
+            Presentation::Collapsed(bt_layout::AxisSet::COL),
+            bar,
+        );
+        let parts = chrome_of(&seats, &layout, Some(cwd));
+        let strip = [0.0, 0.0, 400.0, 24.0];
+        let named: Vec<_> = parts
+            .labels
+            .iter()
+            .filter(|label| inside(strip, label.rect))
+            .collect();
+        assert_eq!(named.len(), 1, "one name on the bar");
+        assert_eq!(
+            named[0].text, "BetterTerminal",
+            "the last segment, not the path"
+        );
+        let mark = parts
+            .sprites
+            .iter()
+            .find(|sprite| inside(strip, sprite.rect))
+            .expect("the bar carries its mark");
+        assert_eq!(
+            mark.rect,
+            [12.0, 5.0, 27.0, 20.0],
+            "the pane head's own row: the mark at the leading padding, centred \
+             on the bar's middle — not the square's two-axis centring"
+        );
+        assert!(
+            named[0].rect[0] >= mark.rect[2],
+            "the name follows the mark, as it does in a pane head"
+        );
+
+        // The same seat, drawn as a head, answers the other question at the
+        // other length (C28).
+        let metrics = seat_metrics(1_000);
+        let mut with_head = Seats::lone_terminal();
+        with_head.toggle_preview(&metrics);
+        let full = solved(&with_head, viewport_of(1600, 900, 1_000), &metrics);
+        let head = chrome_of(&with_head, &full, Some(cwd));
+        assert!(
+            head.labels.iter().any(|label| label.text == cwd),
+            "a pane head has a bar to fill and answers `where is this` in full"
+        );
+    }
+
+    /// T227: a leaf this build cannot name says so where it stands.
+    ///
+    /// The tree survives an unknown kind (§2.1) — but a placeholder that is only
+    /// a blank rectangle is indistinguishable from the silent destruction that
+    /// rule exists to forbid, and the difference matters most to the user who has
+    /// just downgraded and is looking for a pane that is not there.
+    ///
+    /// Red gate: the notice is the *body*'s, not the head's, so a build that
+    /// merely titles the pane "Unavailable" fails the centred-body assertion —
+    /// and a lone placeholder, which would wear no head under the sibling rule,
+    /// would then say nothing at all.
+    #[test]
+    fn a_placeholder_leaf_says_why_it_cannot_be_shown() {
+        let node = LayoutNodeV1::Split(SplitNodeV1 {
+            dir: SplitDirV1::Row,
+            ratio: 600_000,
+            children: [
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                    profile_id: "pwsh.exe".to_owned(),
+                    cwd: String::new(),
+                    manual_name: None,
+                }))),
+                Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Unknown)),
+            ],
+        });
+        let seats = Seats::from_persisted(&node).unwrap();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let parts = chrome_of(&seats, &layout, None);
+        let notice = parts
+            .labels
+            .iter()
+            .find(|label| label.text == PLACEHOLDER_SEAT_NOTICE)
+            .expect("T227: the degradation has to be visible");
+        assert!(
+            notice.align_center,
+            "a state notice sits centred in the body, like an empty preview's"
+        );
+        assert_eq!(
+            notice.color,
+            chrome_palette().body_hint_text,
+            "a note about this build, not an alarm"
+        );
+
+        // And it says it even with no sibling to earn it a head.
+        let lone = Seats {
+            tree: LayoutNode::seat(Seat::new(SeatId(1), SeatKind::Placeholder)),
+            terminal: SeatId(1),
+            focus: SeatId(1),
+            next_seat: 2,
+            next_split: 1,
+        };
+        let lone_layout = solved(&lone, viewport_of(1600, 900, 1_000), &metrics);
+        let lone_parts = chrome_of(&lone, &lone_layout, None);
+        assert!(
+            lone_parts
+                .labels
+                .iter()
+                .any(|label| label.text == PLACEHOLDER_SEAT_NOTICE),
+            "the pane that cannot say what it is, is the one that has to say it"
+        );
+    }
+
+    /// H101: L4 keeps the focus seat a pane and gives every other seat a row of
+    /// the strip along the foot (DESIGN §7.1.1 + tiny-window §4.3).
+    ///
+    /// Red gate: the previous implementation gave the focus seat the whole
+    /// viewport and left every other seat unpresented, so both the stage's bottom
+    /// edge and every bar rectangle below fail against it.
+    #[test]
+    fn fit_what_fits_gives_the_stage_the_viewport_less_the_bars_it_shows() {
+        let metrics = seat_metrics(1_000);
+        let seats = row_of_terminals(4);
+        // 4 x 260 plus 3 dividers needs 1043; folded to the floor it still needs
+        // 260 + 3 x 24 + 3 = 335. 300 has neither, so the ladder runs out.
+        let viewport = viewport_of(300, 240, 1_000);
+        assert!(
+            seats.solve(viewport, &metrics).is_err(),
+            "the scenario has to actually be L4"
+        );
+        let (layout, overflow) = fit_what_fits(&seats, viewport, &metrics);
+        assert_eq!(overflow, None, "200px of height holds every bar");
+
+        let unit = bt_layout::COLLAPSED_EXTENT;
+        let strip_top = viewport.bottom - LogicalPx::from_subpixels(unit.subpixels() * 3);
+        assert_eq!(
+            layout.get(SeatId(1)).unwrap().rect,
+            Some(LogicalRect::new(
+                viewport.left,
+                viewport.top,
+                viewport.right,
+                strip_top
+            )),
+            "the focus seat keeps a pane, less the strip"
+        );
+        for (index, id) in [SeatId(2), SeatId(3), SeatId(4)].into_iter().enumerate() {
+            let placement = layout.get(id).unwrap();
+            let top = strip_top + LogicalPx::from_subpixels(unit.subpixels() * index as i64);
+            assert_eq!(
+                placement.rect,
+                Some(LogicalRect::new(
+                    viewport.left,
+                    top,
+                    viewport.right,
+                    top + unit
+                )),
+                "bars stack in tree order, each one row tall"
+            );
+            assert_eq!(
+                placement.presentation,
+                Presentation::Collapsed(bt_layout::AxisSet::COL),
+                "squeezed along Col: the shape that can still carry a name"
+            );
+        }
+        // Red line L6 reaches this allocator too: the stage's foot *is* the first
+        // bar's head, so no seam and no overlap can open between them.
+        assert_eq!(
+            layout.get(SeatId(1)).unwrap().device_rect.unwrap().bottom,
+            layout.get(SeatId(2)).unwrap().device_rect.unwrap().top
+        );
+    }
+
+    /// H101, the other half: when the foot cannot hold every bar it says how many
+    /// it dropped, and drops the ones furthest from the focus — `collapse_order`,
+    /// the ladder's own order, read one step further.
+    ///
+    /// Red gate: drop from the tail of tree order instead and seat 2 loses its
+    /// row while seat 4 keeps one, which is the assertion below reversed.
+    #[test]
+    fn fit_what_fits_says_how_many_seats_had_no_row() {
+        let metrics = seat_metrics(1_000);
+        let seats = row_of_terminals(4);
+        // 72 logical pixels of viewport: three rows, one of which the stage
+        // keeps, leaving two — one bar and the sentence.
+        let viewport = viewport_of(300, 112, 1_000);
+        assert_eq!(viewport.extent(Axis::Col), LogicalPx::px(72));
+        let (layout, overflow) = fit_what_fits(&seats, viewport, &metrics);
+        let overflow = overflow.expect("three seats do not fit in one row");
+        assert_eq!(overflow.hidden, 2, "one bar shown, two seats spoken for");
+        assert_eq!(
+            overflow.row.top, 88,
+            "the sentence is the strip's last line"
+        );
+        assert_eq!(overflow.row.bottom, 112);
+        assert!(
+            layout.get(SeatId(2)).unwrap().rect.is_some(),
+            "the seat nearest the focus keeps its row"
+        );
+        for id in [SeatId(3), SeatId(4)] {
+            assert_eq!(
+                layout.get(id).unwrap().rect,
+                None,
+                "a seat with no row has no rectangle — never a zero-area one (L4)"
+            );
+        }
+        assert_eq!(overflow_notice(2), "2 more do not fit");
+        assert_eq!(overflow_notice(1), "1 more does not fit");
+
+        let told = chrome_with_overflow(&seats, &layout, None, Some(overflow));
+        assert!(
+            told.labels
+                .iter()
+                .any(|label| label.text == "2 more do not fit"),
+            "the tail line is drawn when it is handed over"
+        );
+        let untold = chrome_of(&seats, &layout, None);
+        assert!(
+            !untold
+                .labels
+                .iter()
+                .any(|label| label.text == "2 more do not fit"),
+            "and only then — an ordinary solve never carries one"
+        );
+    }
+
+    /// The identity the previous implementation was built to protect, kept: a
+    /// lone terminal dragged below its own minimum is one seat filling the
+    /// viewport, exactly as it was before seats existed. There is no other seat,
+    /// so there is no strip to take a row from it.
+    #[test]
+    fn fit_what_fits_is_still_the_whole_viewport_for_a_lone_leaf() {
+        let metrics = seat_metrics(1_000);
+        let seats = Seats::lone_terminal();
+        for (width, height) in [(100u32, 100u32), (1, 1), (259, 400)] {
+            let viewport = viewport_of(width, height, 1_000);
+            let (layout, overflow) = fit_what_fits(&seats, viewport, &metrics);
+            assert_eq!(layout.get(seats.terminal()).unwrap().rect, Some(viewport));
+            assert_eq!(overflow, None);
+        }
+    }
+
+    /// T211 reaching L4: the bars down there are the same `Collapsed` placements
+    /// L3 makes, so the hit test already answers for them and the click already
+    /// means "expand" — which is what makes L4 an escapable state without the
+    /// action button §4.3 forbids.
+    ///
+    /// Red gate: give the strip its own quads instead of real placements and
+    /// `hit_chrome` finds nothing to press.
+    #[test]
+    fn a_bar_in_the_fit_what_fits_strip_is_still_a_hit_target() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = row_of_terminals(4);
+        let viewport = viewport_of(300, 240, 1_000);
+        let (layout, _) = fit_what_fits(&seats, viewport, &metrics);
+        let bar = layout.get(SeatId(3)).unwrap().device_rect.unwrap();
+        assert_eq!(
+            hit_chrome(
+                &seats,
+                &layout,
+                1.0,
+                f64::from((bar.left + bar.right) as i32) / 2.0,
+                f64::from((bar.top + bar.bottom) as i32) / 2.0,
+            ),
+            Some(ChromeTarget::CollapseBar(SeatId(3))),
+        );
+        // And pressing it is the whole escape: the seat becomes the focus, so the
+        // next solve puts it on the stage.
+        assert!(seats.set_focus(SeatId(3)));
+        let (after, _) = fit_what_fits(&seats, viewport, &metrics);
+        assert_eq!(
+            after.get(SeatId(3)).unwrap().presentation,
+            Presentation::Full,
+            "the bar you pressed is the pane you get"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // U10: the layout event broadcast (T230)
+    // ---------------------------------------------------------------------
+
+    /// The contract's floor: solving the same tree against the same viewport
+    /// twice is not an event. A consumer that dissolved an overlay on every
+    /// commit would dissolve it on every frame of a resize that had settled.
+    #[test]
+    fn an_idempotent_rebuild_publishes_no_layout_events() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        for (width, height) in [(1600u32, 900u32), (500, 600), (300, 240)] {
+            let viewport = viewport_of(width, height, 1_000);
+            let first = solved(&seats, viewport, &metrics);
+            let second = solved(&seats, viewport, &metrics);
+            assert_eq!(
+                layout_events(&first, &second),
+                vec![],
+                "{width}x{height}: a rebuild that landed on the same answer says nothing"
+            );
+        }
+    }
+
+    /// Opening a pane is one arrival and one displacement, and closing it is the
+    /// mirror. The seat that made room moved, and it is told so — an overlay
+    /// anchored in the terminal is no longer over the rectangle it measured.
+    ///
+    /// Red gate: report only the new seat and the `Moved` assertion fails; walk
+    /// only the new layout and the closed seat's `Vanished` never arrives,
+    /// because it is not there to be compared against.
+    #[test]
+    fn opening_and_closing_a_pane_publishes_the_arrival_and_the_departure() {
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1600, 900, 1_000);
+        let mut seats = Seats::lone_terminal();
+        let before = solved(&seats, viewport, &metrics);
+        assert!(seats.toggle_preview(&metrics));
+        let opened = solved(&seats, viewport, &metrics);
+        let preview = seats.preview().unwrap();
+        assert_eq!(
+            layout_events(&before, &opened),
+            vec![
+                LayoutEvent::Moved(seats.terminal()),
+                LayoutEvent::Appeared(preview),
+            ],
+            "in tree order, and the terminal really did give up width"
+        );
+        assert!(seats.toggle_preview(&metrics));
+        let closed = solved(&seats, viewport, &metrics);
+        assert_eq!(
+            layout_events(&opened, &closed),
+            vec![
+                LayoutEvent::Moved(seats.terminal()),
+                LayoutEvent::Vanished(preview),
+            ],
+            "a seat that left the tree is still reported, last"
+        );
+    }
+
+    /// A divider drag moves exactly the two seats it is between, and says so once
+    /// each — §3.5 names it as one of the four causes an anchored overlay has to
+    /// hear about.
+    ///
+    /// Red gate: the second half. Re-solving after the drag writes nothing, so a
+    /// diff that reported on being called rather than on having changed fails
+    /// there.
+    #[test]
+    fn a_divider_drag_publishes_one_move_for_each_seat_it_moved() {
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1600, 900, 1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let before = solved(&seats, viewport, &metrics);
+        let slot = seats.split_slots(&before)[0];
+        let usable = slot.slot.extent(slot.dir) - bt_layout::DIVIDER;
+        assert!(
+            seats
+                .drag_divider(&metrics, slot.id, Ratio::clamped_from_ppm(400_000), usable)
+                .unwrap(),
+            "a legal drag writes a ratio"
+        );
+        let after = solved(&seats, viewport, &metrics);
+        let events = layout_events(&before, &after);
+        assert_eq!(events.len(), 2, "both sides moved, and nothing else did");
+        assert!(
+            events
+                .iter()
+                .all(|event| matches!(event, LayoutEvent::Moved(_)))
+        );
+
+        let again = solved(&seats, viewport, &metrics);
+        assert_eq!(layout_events(&after, &again), vec![]);
+    }
+
+    /// Crossing the L3 boundary is a presentation change, not merely a move —
+    /// the seat did not just get smaller, it stopped being a pane. §3.5 lists it
+    /// first among the four, because it is the one an overlay cannot survive.
+    ///
+    /// Red gate: compare rectangles only and this reports `Moved`, which tells a
+    /// consumer the anchor shifted when what actually happened is that the thing
+    /// it was anchored to is no longer there.
+    #[test]
+    fn crossing_the_collapse_boundary_publishes_a_presentation_change() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        seats.toggle_preview(&metrics);
+        let preview = seats.preview().unwrap();
+        let roomy = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let cramped = solved(&seats, viewport_of(500, 900, 1_000), &metrics);
+        assert!(matches!(
+            cramped.get(preview).unwrap().presentation,
+            Presentation::Collapsed(_)
+        ));
+        let events = layout_events(&roomy, &cramped);
+        assert!(
+            events.contains(&LayoutEvent::Presentation(preview)),
+            "the seat that collapsed is reported as a presentation change, got {events:?}"
+        );
+        assert!(
+            events.contains(&LayoutEvent::Moved(seats.terminal())),
+            "and the seat that took the room is reported as having moved"
+        );
+        assert_eq!(events.len(), 2, "one event per seat per commit");
+        assert!(
+            layout_events(&cramped, &roomy).contains(&LayoutEvent::Presentation(preview)),
+            "the ladder crosses L3 in both directions"
+        );
+    }
+
+    /// A window resize is the plainest of the four: every seat whose rectangle
+    /// changed says so, and one whose rectangle did not stays quiet.
+    #[test]
+    fn a_resize_publishes_a_move_for_every_seat_whose_rectangle_changed() {
+        let metrics = seat_metrics(1_000);
+        let seats = Seats::lone_terminal();
+        let wide = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let narrow = solved(&seats, viewport_of(1200, 900, 1_000), &metrics);
+        assert_eq!(
+            layout_events(&wide, &narrow),
+            vec![LayoutEvent::Moved(seats.terminal())]
+        );
+    }
+
+    /// Falling to L4 takes rectangles away from the seats that lose their row,
+    /// and that is a departure like any other — the four facts cover a fifth
+    /// cause without anyone having named it.
+    #[test]
+    fn falling_to_fit_what_fits_publishes_what_left_the_screen() {
+        let metrics = seat_metrics(1_000);
+        let seats = row_of_terminals(4);
+        let roomy = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let (starved, _) = solved_with_overflow(&seats, viewport_of(300, 112, 1_000), &metrics);
+        let events = layout_events(&roomy, &starved);
+        assert!(events.contains(&LayoutEvent::Vanished(SeatId(3))));
+        assert!(events.contains(&LayoutEvent::Vanished(SeatId(4))));
+        assert!(events.contains(&LayoutEvent::Presentation(SeatId(2))));
+        assert!(events.contains(&LayoutEvent::Moved(SeatId(1))));
     }
 }
