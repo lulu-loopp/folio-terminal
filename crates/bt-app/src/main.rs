@@ -5627,6 +5627,15 @@ fn pane_into_new_tab(
 /// tree no longer has it to be asked about and everything durable about the pane
 /// — its kind, its fixed extent — lives on it (§5).
 ///
+/// **The tab it returns is already wearing `.landing`** (N157, mock-up 3514:
+/// `renderWithPaneFlip(before)` and then the 200ms wash on the tab that just
+/// appeared). It is started here rather than at the window's insertion because
+/// it is a fact about the gesture, not about the plumbing — and because this is
+/// the arrival that most needs announcing: every other tab that appears in the
+/// strip was dragged there under your eye, whereas N157 deliberately leaves you
+/// in the layout you were in, so without the wash a tab merely *exists* that did
+/// not a frame ago, in a run you are not looking at.
+///
 /// `None` when the seat is not in this tree, when it is the last one (G84 —
 /// `close_seat` refuses to empty a tree, so the gesture is a no-op rather than a
 /// tab that closes behind your back), or when it holds no session. The tree is
@@ -5636,13 +5645,17 @@ fn tear_pane_into_tab(
     metrics: &SeatMetrics,
     seat: SeatId,
     id: TabId,
+    now: Instant,
+    motion: Motion,
     solve: impl FnOnce(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
 ) -> Option<TabState> {
     let seat = from.seats.tree().find_seat(seat)?.clone();
     if !from.seats.close_seat(metrics, seat.id) {
         return None;
     }
-    pane_into_new_tab(from, &seat, id, false, solve)
+    let mut torn = pane_into_new_tab(from, &seat, id, false, solve)?;
+    torn.landing.start(now, motion);
+    Some(torn)
 }
 
 /// **N159/K124 — a tab merged into a pane's layout hands its fleet over.**
@@ -11381,10 +11394,19 @@ impl Runtime {
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
         let renderer = &self.renderer;
         let source = self.active_tab;
-        let torn = tear_pane_into_tab(&mut self.tabs[source], &metrics, seat, id, |seats| {
-            let (layout, overflow, _, _) = solve_seats(seats, renderer, render_physical);
-            (layout, overflow)
-        });
+        let motion = self.motion;
+        let torn = tear_pane_into_tab(
+            &mut self.tabs[source],
+            &metrics,
+            seat,
+            id,
+            Instant::now(),
+            motion,
+            |seats| {
+                let (layout, overflow, _, _) = solve_seats(seats, renderer, render_physical);
+                (layout, overflow)
+            },
+        );
         let Some(torn) = torn else {
             return Ok(false);
         };
@@ -22072,10 +22094,17 @@ mod tests {
     /// pane) and the new tab is unpinned even when the tab it came out of was
     /// pinned — N158, because you aimed at the strip and made a new tab.
     ///
+    /// The landing wash is asserted here too, and it is asserted as a *tween in
+    /// flight* rather than as a field being set: `sample` is the only thing the
+    /// strip ever asks, so a `started` nothing samples to would be a wash that
+    /// exists in the struct and never on the glass. Its reduced-motion twin is
+    /// `reduced_motion_skips_the_landing_animation_outright`, which is why this
+    /// one hands `Motion::Full` explicitly instead of taking a default.
+    ///
     /// Red gate: spawn a new session for the torn pane instead of moving it and
     /// the two content assertions go red; file it under the old `SeatId` and
     /// `sessions_match_terminals` goes red; carry `pinned` across and N158 goes
-    /// red.
+    /// red; drop the `landing.start` and the tab arrives with no wash at all.
     #[test]
     fn a_torn_out_pane_carries_its_own_shell_into_its_own_tab() {
         let mut source = cross_tab(1, &["ALPHA", "BETA"]);
@@ -22087,6 +22116,8 @@ mod tests {
             &cross_metrics(),
             SeatId(2),
             TabId(9),
+            Instant::now(),
+            Motion::Full,
             cross_solve,
         )
         .expect("a two-pane tab can spare one");
@@ -22119,6 +22150,14 @@ mod tests {
             !torn.pinned,
             "N158: you aimed at the strip and made a new tab, so it is unpinned"
         );
+        // N157: it arrives wearing `.landing`, and it is still wearing it a
+        // frame later — the wash is a 200ms flight, not a flag.
+        let (wash, moving) = torn.landing.sample(Instant::now(), Motion::Full);
+        assert!(
+            moving && wash > 0.0,
+            "the torn-out tab lands with the mock-up's wash still running: \
+             {wash} / {moving}"
+        );
     }
 
     /// **The keyboard follows the pane out, and what stays keeps a shell to type
@@ -22141,6 +22180,8 @@ mod tests {
             &cross_metrics(),
             SeatId(2),
             TabId(9),
+            Instant::now(),
+            Motion::Full,
             cross_solve,
         )
         .expect("a two-pane tab can spare one");
@@ -22169,6 +22210,8 @@ mod tests {
             &cross_metrics(),
             SeatId(1),
             TabId(9),
+            Instant::now(),
+            Motion::Full,
             cross_solve,
         );
         assert!(torn.is_none(), "G84: a tree may not be emptied");

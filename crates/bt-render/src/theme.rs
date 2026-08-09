@@ -1891,6 +1891,37 @@ mod tests {
         }
     }
 
+    /// PIN (U11/B15): a files or preview body is `--termbg`, never `--panel`.
+    ///
+    /// The mock-up's own ruling (466-480) and the one place the pane rebuild can
+    /// be undone by a single hex digit: painting a files pane `--panel` makes it
+    /// read as "a fourth slab of chrome that leaked into the split", visually
+    /// glued to the tab rail above it — which is the reading panes exist to kill.
+    /// The two greys are four levels apart on dark (`#1B1B1B` against `#252525`)
+    /// and that is the whole of the difference.
+    ///
+    /// Red gate: light hides this the way it hides every surface question —
+    /// `--termbg` is `#FFFFFF` and `--panel` is `#F7F7F5`, close enough that a
+    /// wrong value looks merely a little warm. So the dark canvas carries the
+    /// inequality and both canvases carry the value, and the companion
+    /// assertion is that this body is exactly the head that sits on it: one
+    /// terminal surface, two declarations, no seam where a pane meets its brow.
+    #[test]
+    fn a_non_terminal_pane_body_is_the_terminal_surface_and_not_panel_chrome() {
+        assert_eq!(DARK_CHROME.seat_body, [0x1b, 0x1b, 0x1b], "--termbg");
+        assert_eq!(LIGHT_CHROME.seat_body, [0xff, 0xff, 0xff]);
+        for palette in [DARK_CHROME, LIGHT_CHROME] {
+            assert_eq!(
+                palette.seat_body, palette.pane_head,
+                "a pane's body and its head are one surface"
+            );
+            assert_ne!(
+                palette.seat_body, palette.termhost,
+                "a files pane painted `--panel` is chrome that leaked into the split"
+            );
+        }
+    }
+
     /// PIN: the pane head's four tokens composite over `--termbg`, and nothing
     /// else.
     ///

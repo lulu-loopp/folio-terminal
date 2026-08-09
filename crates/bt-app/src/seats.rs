@@ -2949,9 +2949,18 @@ pub struct ChromeContent<'a> {
     /// whole of B22. `.pane { transition: margin .1s ease, border-radius .1s
     /// ease }` (mock-up 1464) keeps drawing for 100ms *after* `.slot.resizing`
     /// comes off, so the cards outlive the grab; while the divider's own colour
-    /// and its grip have no transition at all and go out with the button. One
-    /// field for two lifetimes would make the cards snap out or the accent line
-    /// linger, depending on which won.
+    /// and its grip go out with the button. One field for two lifetimes would
+    /// make the cards snap out or the accent line linger, depending on which
+    /// won.
+    ///
+    /// The divider's half of that is this build's behaviour and not the
+    /// mock-up's ruling, and the difference is on the ledger as **E52**:
+    /// `.divider::before` and `::after` each declare `.12s ease` (mock-up 1479,
+    /// 1488), and both are drawn here as a straight switch — the band changes
+    /// colour and the grip is present or absent. The two lifetimes still part
+    /// either way, because a fade that begins when the button goes down still
+    /// ends when the button comes up, whereas the card's 100ms is measured from
+    /// the release; so this field would exist even once E52 lands.
     pub resizing_cards: Option<ResizingCards>,
 }
 
@@ -5766,6 +5775,75 @@ mod tests {
                 f64::from(left_body.x) + 4.0,
                 f64::from(left_body.y) + 4.0
             ),
+            Some(left)
+        );
+    }
+
+    /// PIN — D40. A press anywhere in a pane names that pane, its head
+    /// included, and naming it is what moves layout focus.
+    ///
+    /// `document.querySelectorAll(".pane")` listening for `click` (mock-up
+    /// 5823-5834) is the whole surface, and "anywhere" is the load-bearing word:
+    /// the head is part of the pane, not a strip above it. The neighbouring pin
+    /// [`a_pointer_in_the_second_pane_routes_to_that_panes_body`] already probes
+    /// bodies, so bodies were never the risk — a hit test written off
+    /// [`pane_body_viewport`] instead of the seat rectangle would pass every
+    /// assertion there and leave the twenty-eight rows a hand actually aims at
+    /// answering `None`, which reads on screen as a head you can press without
+    /// anything happening.
+    ///
+    /// Red gate: the focus half is asserted through [`Seats::set_focus`] rather
+    /// than assumed from the hit test, because the two are separate failures —
+    /// `Runtime::focus_pane_at` shipped in U1 with no test of its own, and a hit
+    /// test that answers correctly into a focus call that refuses the seat is
+    /// still a pane you cannot focus.
+    #[test]
+    fn a_press_anywhere_in_a_pane_head_included_moves_focus_to_it() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        let left = seats.terminal();
+        let right = seats
+            .split_terminal(&metrics, left, Axis::Row, false)
+            .expect("room for two");
+        let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+        assert_eq!(seats.focus(), left, "focus starts where the split began");
+
+        let seat_rect = |seat: SeatId| {
+            layout
+                .rects
+                .iter()
+                .find(|placement| placement.id == seat)
+                .and_then(|placement| placement.device_rect)
+                .expect("both seats are laid out")
+        };
+        let right_rect = seat_rect(right);
+        let right_body = pane_body_viewport(&seats, &layout, right, 1.0).unwrap();
+
+        // A point in the head: below the seat's own top edge and above the body
+        // the head displaces. That the two are genuinely different rows is the
+        // premise, so it is asserted rather than trusted.
+        assert!(
+            f64::from(right_body.y) > right_rect.top as f64,
+            "a pane with a head has body rows below its own top edge"
+        );
+        let head_y = (right_rect.top as f64 + f64::from(right_body.y)) / 2.0;
+        let head_x = right_rect.left as f64 + 12.0;
+        assert_eq!(
+            pane_at(&layout, head_x, head_y),
+            Some(right),
+            "a press on the head belongs to the pane wearing it"
+        );
+
+        // And what the press then does with that name.
+        assert!(seats.set_focus(right), "the named pane accepts focus");
+        assert_eq!(seats.focus(), right);
+
+        // The other pane's head answers for itself, so the head test is not
+        // simply "every point is the pane that happens to be first".
+        let left_rect = seat_rect(left);
+        assert_eq!(
+            pane_at(&layout, left_rect.left as f64 + 12.0, head_y),
             Some(left)
         );
     }
