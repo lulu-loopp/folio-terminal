@@ -3061,17 +3061,34 @@ enum DragSource {
 /// Where a drag would land if the hand opened right now — the engine's entire
 /// knowledge of drop targets.
 ///
-/// **This is the seam U5 plugs into.** The engine asks
+/// **This is the seam U5 plugged into.** The engine asks
 /// [`Runtime::survey_drop`] on every pointer move and stores the answer; it
-/// never asks *why*. Adding the strip-rectangle test (K123), the 48px rim
-/// (K130), the pane zones (K133/K134) and the refusals (K135) is adding variants
-/// here and arms to that one function, and nothing in the state machine below
-/// has to learn about any of them.
+/// never asks *why*. The strip-rectangle test (K123), the 48px rim (K130) and
+/// the pane zones (K133/K134) are variants here and arms of that one function,
+/// and nothing in the state machine below had to learn about any of them.
 ///
-/// One variant in this slice, and it is the landing that already existed: the
-/// strip reordering under a tab in hand. `None` — no landing — is the other half,
-/// and it is not an error state. It is what a pane over open air answers, and
-/// what J120 is about.
+/// `None` — no landing — is not an error state and not a fifth variant. It is
+/// what a pointer over open air answers, what a pane held over itself answers
+/// (K135), and what J120 is about.
+///
+/// **What a landing carries, and what it deliberately does not.** Identities and
+/// a direction, never a rectangle. U6 draws the preview from the same solved
+/// layout this was answered against and U7 commits from the same tree; a
+/// rectangle copied in here would be a third opinion, and the first one to go
+/// stale (A12, T228).
+///
+/// **`Refused` is not among these, and that is a finding rather than an
+/// omission.** The mock-up has a refused state and it is loud about needing one
+/// (M147: a silent refusal makes "this pane is too narrow to split" and "this
+/// app is broken" look identical). But every producer of it is somewhere else.
+/// `refused` is set by `!fits` — `planFits` over the tree the drop *would*
+/// build (M155, H93/H94) — which is the plan computation U6 owns; by the
+/// folder/file centre verbs (L141/L142), which need a drag source this build
+/// cannot yet have; and by `refuseFocusStage`, whose state no code in this crate
+/// constructs. The two refusals K itself names are not refusals at all: a pane
+/// held over its own rectangle (K135, 7101) and a tab held over its own layout
+/// (K129, 6934) both call `hidePreview()` and leave `drag.target` null. Adding a
+/// variant here now would be a variant nothing can answer.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DropLanding {
     /// The strip has it, at this slot: `reorderWhileDragging` followed by
@@ -3082,6 +3099,36 @@ enum DropLanding {
     /// treats `reordered` beside "no target at all" (7202). They are not the
     /// same thing here: one has already happened, the other never will.
     StripReorder { slot: usize },
+    /// **K124/N157** — a *pane* over the strip: it leaves the tree and becomes
+    /// its own tab at this slot (`extractPaneToTab`).
+    ///
+    /// Only offered while the tab has more than one pane. A lone pane torn into
+    /// its own tab would be the same pane in the same strip position it already
+    /// occupies, with an empty tab left behind (G84 forbids the tree being
+    /// emptied), so the mock-up asks `paneCount > 1` before it will draw
+    /// anything at all (6789).
+    StripExtract { slot: usize },
+    /// **K130/G82** — the layout's own rim: the *root* splits on this side.
+    ///
+    /// No target seat, and that absence is the entire point of the gesture.
+    /// With two panes stacked, every zone on screen belongs to the top one or
+    /// the bottom one, so a third pane can only ever join one of them — "put
+    /// this beside all of it" needs the root split, and the root had no edge to
+    /// aim at until the rim gave it one (G83).
+    RootRim { edge: seats::DropEdge },
+    /// **K134/L136** — the outer 35% of one pane: that pane splits on this side.
+    SeatEdge {
+        target: SeatId,
+        edge: seats::DropEdge,
+    },
+    /// **K134/L136** — a pane's middle: its place is taken.
+    ///
+    /// One shape, two sentences, and which one it is depends on what is in the
+    /// hand rather than on where the pointer is: a pane swaps payloads with the
+    /// target (L138) and a tab replaces it (L139). That is why L137 rules the
+    /// centre box must carry *words* — the geometry is identical and the
+    /// outcomes are not.
+    SeatCentre { target: SeatId },
 }
 
 impl DropLanding {
@@ -3093,9 +3140,17 @@ impl DropLanding {
     /// one under the pointer and one in the slot it is about to take, is the
     /// drag telling you twice — and the one in the slot is the one that is
     /// telling you *where*.
+    ///
+    /// True for both strip landings and neither of the layout ones, which is the
+    /// mock-up's split exactly: the strip yields the ghost because the strip
+    /// draws a stand-in *in the run* — "the preview in the strip is the ghost
+    /// now" (6792), written beside the pane case rather than the tab one. A rim
+    /// or a pane zone draws its box over the layout instead, far from the
+    /// pointer and saying something the ghost does not, so the two coexist.
     fn shows_itself(self) -> bool {
         match self {
-            Self::StripReorder { .. } => true,
+            Self::StripReorder { .. } | Self::StripExtract { .. } => true,
+            Self::RootRim { .. } | Self::SeatEdge { .. } | Self::SeatCentre { .. } => false,
         }
     }
 }
@@ -3127,6 +3182,15 @@ struct TabCarry {
     grab_dx: f64,
     /// The slot the tab held when the drag began. J120 puts it back here.
     origin: usize,
+    /// **N163/J107** — the tab that was *showing* when the drag began, which is
+    /// not always the tab in hand: a press on a background tab activates it so
+    /// you can see what you have picked up.
+    ///
+    /// The mock-up carries the same pair (`drag.wsId` beside `drag.homeWs`,
+    /// 6911-6918) and needs to, because the two halves of the gesture want
+    /// different tabs. Leaving the strip says "now place A somewhere in the
+    /// layout I was in", and the layout you were in is this one.
+    home: TabId,
     /// How far from its slot the tab is currently drawn, in physical pixels —
     /// [`Runtime::track_grabbed`]'s answer, kept so that the frame that paints it
     /// and the frame that lets go of it agree.
@@ -3213,10 +3277,53 @@ enum DragRelease {
 /// fact about this slice rather than a claim about the ruling: the moment a
 /// landing exists that a release can commit and an Esc must not, the two callers
 /// are already separate.
+/// What an aim means once you know what is in the hand — K135, stated once.
+///
+/// **Never onto yourself.** A pane held over its own rectangle has no landing in
+/// any zone: `if (drag.kind === "pane" && drag.leafId === leafId) { hidePreview();
+/// return; }` (7101). Splitting a pane against itself and swapping it with
+/// itself are both the identity, and the honest report of a gesture that would
+/// do nothing is that there is nothing there.
+///
+/// The rim is exempt and could not be otherwise. It docks against the *whole*
+/// layout (G82/G83), so it has no target seat that could be yours — the pane in
+/// your hand is part of the whole rather than the thing being aimed at, and
+/// dragging your own pane out to the rim is exactly how you move it beside
+/// everything else.
+///
+/// A free function rather than a method because it needs nothing from the
+/// window: it is the sentence "who may land on what", and separating it from
+/// "what is under the pointer" is what lets each be tested against its own
+/// inputs.
+fn landing_for_aim(source: DragSource, aim: seats::LayoutAim) -> Option<DropLanding> {
+    let (target, landing) = match aim {
+        seats::LayoutAim::Rim(edge) => return Some(DropLanding::RootRim { edge }),
+        seats::LayoutAim::SeatEdge(target, edge) => {
+            (target, DropLanding::SeatEdge { target, edge })
+        }
+        seats::LayoutAim::SeatCentre(target) => (target, DropLanding::SeatCentre { target }),
+    };
+    (source != DragSource::Pane(target)).then_some(landing)
+}
+
+/// **U5's own deferral, written where the compiler will police it.** The four
+/// landings U5 added are geometry that has found its target and has no verb to
+/// perform on it yet: the tearing (N157), the merge (N159), the replace (N161)
+/// and the swap (L138) are U7's, and until they exist a release over one of them
+/// must leave the tree exactly as it found it. Home is the honest outcome — the
+/// gesture completed and there was nowhere for it to be — and it is the same
+/// outcome J120 already gives, so nothing here is a special case waiting to be
+/// removed. What U7 removes is the arm, not a workaround.
 fn release_verdict(landing: Option<DropLanding>) -> DragRelease {
     match landing {
-        Some(_) => DragRelease::Commit,
-        None => DragRelease::Home,
+        Some(DropLanding::StripReorder { .. }) => DragRelease::Commit,
+        Some(
+            DropLanding::StripExtract { .. }
+            | DropLanding::RootRim { .. }
+            | DropLanding::SeatEdge { .. }
+            | DropLanding::SeatCentre { .. },
+        )
+        | None => DragRelease::Home,
     }
 }
 
@@ -7778,6 +7885,10 @@ impl Runtime {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == press.tab) else {
             return Ok(());
         };
+        // N163's `homeWs`, read before the activation below can change the
+        // answer: this is the tab whose layout the user was looking at when the
+        // gesture started, and the one they mean when they aim below the strip.
+        let home = self.tabs[self.active_tab].id;
         self.activate_tab(index, false)?;
         // Re-read the strip: activating may have scrolled it to reveal the tab,
         // and a grip measured against the old scroll would be wrong by exactly
@@ -7794,6 +7905,7 @@ impl Runtime {
                 origin: index,
                 offset: 0.0,
                 moved: false,
+                home,
             }),
             position,
         )
@@ -7880,49 +7992,87 @@ impl Runtime {
         ))
     }
 
-    /// Where this drag would land if the hand opened now — **the seam U5 plugs
+    /// Where this drag would land if the hand opened now — **the seam U5 plugged
     /// into** (K123-K135).
     ///
     /// Pure: it reads the window and answers a [`DropLanding`], and the live half
     /// of whatever it answers is applied by [`Runtime::drive_drag`] afterwards.
-    /// Keeping the survey and the commitment apart is what lets U5's geometry
-    /// grow without the state machine growing with it, and it is why this takes
-    /// a source and a position rather than `&self.drag`: the question "what is
+    /// Keeping the survey and the commitment apart is what lets the geometry grow
+    /// without the state machine growing with it, and it is why this takes a
+    /// source and a position rather than `&self.drag`: the question "what is
     /// under the pointer" has nothing to do with how far a tab has slid.
     ///
-    /// **What this slice answers, and what it deliberately does not.**
+    /// **The priority chain, and why it is in this order.**
     ///
-    /// * A **tab** always lands on the strip. The mock-up's first question is
-    ///   whether the pointer is inside the strip rectangle (K123, 6786-6787) and
-    ///   that question is *not asked here*, because the whole of its `else` — the
-    ///   rim, the pane zones, the centre — is U5's. Asking it now would mean
-    ///   answering "no landing" for a tab dragged below the strip, which is not
-    ///   K123's behaviour; it is K123's behaviour with everything K123 leads to
-    ///   removed. So the tab keeps T5's reading exactly, and U5 inserts the test
-    ///   in front of it.
-    /// * A **pane** lands nowhere at all. Every landing a pane has is in K or L:
-    ///   the strip (K124), an edge (L136), a centre (L138), the root rim (K130).
-    ///   None of them exist yet, and `None` is the honest answer for a pointer
-    ///   over a window that has nothing to offer it — the same answer the
-    ///   mock-up gives whenever `drag.target` is left null.
+    /// 1. **The strip, whatever is in the hand** (K123, 6786-6787). It is asked
+    ///    first because the strip is a surface in its own right and sits above
+    ///    the layout, not because a tab belongs to it — a *pane* over the strip
+    ///    is K124's tearing, and a tab over the layout is N159's merge. Neither
+    ///    source is confined to one surface, and reading the source before the
+    ///    rectangle is what used to make it look like they were.
+    /// 2. **A tab over its own layout is nothing** (K129, 6934). This test only
+    ///    ever passes because of the flip in [`Runtime::leave_strip`]: while the
+    ///    dragged tab is the one on screen there is no other layout for it to
+    ///    join, and the merge would be a tab merging into itself.
+    /// 3. **The layout's rim, then a pane's zones** — [`seats::aim_at_layout`],
+    ///    which carries K127, K128 and K130-K134 and states the rim-before-pane
+    ///    ruling at length.
+    /// 4. **Never onto yourself** (K135, 7101): a pane held over its own
+    ///    rectangle has no landing at all, in any zone. Applied to the aim rather
+    ///    than inside it, because "which pane is this" is a fact about the
+    ///    pointer and "is that pane the one in my hand" is a fact about the hand.
     ///
     /// It re-reads the strip's geometry rather than being handed it, and that is
     /// a deliberate cost: a surveyor that depends on what its caller happened to
-    /// measure is a surveyor U5 cannot extend without threading a second
-    /// argument through every new branch. The price is one strip solve per
+    /// measure is a surveyor that cannot grow a branch without threading a second
+    /// argument through every existing one. The price is one strip solve per
     /// pointer move, on a strip of at most a few dozen tabs.
     fn survey_drop(
         &self,
         source: DragSource,
         position: PhysicalPosition<f64>,
     ) -> Option<DropLanding> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let geometry = self.strip_geometry(Instant::now());
+        if seats::in_strip(&geometry, scale, position.x, position.y) {
+            return self.survey_strip(source, &geometry, position);
+        }
+        // K129 — dragging the active tab onto its own layout is meaningless.
+        if source == DragSource::Tab(self.tabs[self.active_tab].id) {
+            return None;
+        }
+        let aim = seats::aim_at_layout(
+            &self.seat_layout,
+            self.layout_host_rect(),
+            self.seats.pane_count(),
+            scale,
+            position.x,
+            position.y,
+        )?;
+        landing_for_aim(source, aim)
+    }
+
+    /// The strip's arm of [`Runtime::survey_drop`] (K123-K125).
+    ///
+    /// The two sources ask the strip for different things and measure it
+    /// differently, which is why they are two arms rather than one with a flag.
+    /// A tab in the strip is a *body* sliding along a run and it swaps with a
+    /// neighbour once it has covered half of it ([`seats::reorder_target`]); a
+    /// pane arriving from the layout has no body in the strip yet, so the only
+    /// operand is the pointer against the slot midpoints
+    /// ([`seats::insert_index_at`], K125).
+    fn survey_strip(
+        &self,
+        source: DragSource,
+        geometry: &seats::TabStripGeometry,
+        position: PhysicalPosition<f64>,
+    ) -> Option<DropLanding> {
+        let slot_mids = seats::tab_slot_mids(geometry);
         match source {
             DragSource::Tab(tab) => {
                 let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
-                let geometry = self.strip_geometry(Instant::now());
                 let slot = geometry.tabs.get(index)?;
                 let offset = self.track_grabbed(position)?;
-                let slot_mids = seats::tab_slot_mids(&geometry);
                 Some(DropLanding::StripReorder {
                     slot: seats::reorder_target(
                         &slot_mids,
@@ -7933,8 +8083,28 @@ impl Runtime {
                     ),
                 })
             }
-            DragSource::Pane(_) => None,
+            // K124 — only while something would be left behind. G84 is the reason
+            // and it is a rule of the tree rather than of the gesture: a tree may
+            // not be emptied, so the last pane has nowhere to be torn to.
+            DragSource::Pane(_) => {
+                (self.seats.pane_count() > 1).then(|| DropLanding::StripExtract {
+                    slot: seats::insert_index_at(&slot_mids, position.x as f32),
+                })
+            }
         }
+    }
+
+    /// The layout's own box in device pixels — what every rim distance is
+    /// measured from (K128/K130).
+    ///
+    /// Built from the swapchain and the DPI rather than from the seats inside it,
+    /// through the same helper the solver's viewport comes from, so the rim and
+    /// the rectangles it competes with cannot disagree about where the layout
+    /// begins.
+    fn layout_host_rect(&self) -> [f64; 4] {
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let dpi_milli = self.renderer.metrics().dpi_milli().get();
+        seats::device_viewport(width, height, seats::scale_ppm(dpi_milli))
     }
 
     /// Drive a drag one pointer move. Returns whether the pointer was consumed.
@@ -7965,6 +8135,7 @@ impl Runtime {
             return Ok(true);
         }
         drag.pointer = position;
+        self.leave_strip(&mut drag, position)?;
         drag.landing = self.survey_drop(drag.source, position);
         if let (Some(DropLanding::StripReorder { slot }), Some(tab), Some(carry)) =
             (drag.landing, drag.tab(), drag.tab_carry())
@@ -7990,6 +8161,66 @@ impl Runtime {
             DragSource::Tab(tab) => self.tabs.iter().any(|candidate| candidate.id == tab),
             DragSource::Pane(seat) => self.seats.tree().contains(seat),
         }
+    }
+
+    /// **K126/N163 — the hand has left the strip.**
+    ///
+    /// Two things happen at that boundary and the mock-up does both in one place
+    /// (6909-6919), because they are one sentence: the tab stops being carried
+    /// along the run and the *view* goes back to where the gesture set out from.
+    ///
+    /// `releaseGrabbed(true)` is the first half — the tab falls into whatever
+    /// slot the live reorder left it in, sliding rather than jumping, and the
+    /// ghost takes over as the thing under the pointer. Nothing is committed by
+    /// it: the reorder was already applied, and letting go over open air still
+    /// takes it home (J120).
+    ///
+    /// The second half is press-activation's counterpart. Pressing a background
+    /// tab activates it so you can see what you have picked up, which means the
+    /// layout on screen is now the *dragged* tab's — and a tab cannot be merged
+    /// into itself (K129). Aiming below the strip says "now place A somewhere in
+    /// the layout I was in", so the view flips back to
+    /// [`TabCarry::home`] and the merge gets a target. Without this the whole of
+    /// K's lower half is unreachable for a tab: every pointer below the strip
+    /// would be over the dragged tab's own layout, and K129 would answer nothing
+    /// every time.
+    ///
+    /// Idempotent by construction, which matters because a pointer moves many
+    /// times outside the strip and this runs on all of them: the slide home only
+    /// has an offset to run down once, and the flip's own condition is false the
+    /// moment it has happened.
+    fn leave_strip(&mut self, drag: &mut Drag, position: PhysicalPosition<f64>) -> Result<()> {
+        let (Some(tab), Some(mut carry)) = (drag.tab(), drag.tab_carry()) else {
+            return Ok(());
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        if seats::in_strip(
+            &self.strip_geometry(Instant::now()),
+            scale,
+            position.x,
+            position.y,
+        ) {
+            return Ok(());
+        }
+        if carry.offset != 0.0
+            && let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab)
+        {
+            self.tabs[index]
+                .flip
+                .displace(carry.offset, Instant::now(), self.motion);
+            carry.offset = 0.0;
+            drag.carry = DragCarry::Tab(carry);
+        }
+        if carry.home != tab
+            && self.tabs[self.active_tab].id == tab
+            && let Some(home) = self
+                .tabs
+                .iter()
+                .position(|candidate| candidate.id == carry.home)
+        {
+            self.activate_tab(home, false)?;
+        }
+        Ok(())
     }
 
     /// The live half of [`DropLanding::StripReorder`]: put the strip in the order
@@ -15600,11 +15831,12 @@ mod tests {
         Drag {
             source,
             carry: match source {
-                DragSource::Tab(_) => DragCarry::Tab(TabCarry {
+                DragSource::Tab(tab) => DragCarry::Tab(TabCarry {
                     grab_dx: 0.0,
                     origin: 0,
                     offset: 0.0,
                     moved: false,
+                    home: tab,
                 }),
                 DragSource::Pane(_) => DragCarry::Pane,
             },
@@ -15723,5 +15955,147 @@ mod tests {
         let tab = drag_of(DragSource::Tab(TabId(4)), None);
         assert_eq!(tab.tab(), Some(TabId(4)));
         assert!(tab.tab_carry().is_some());
+    }
+
+    // ── U5: what the pointer has found (K123-K135) ──
+
+    /// **K135 — never onto yourself, in any zone.**
+    ///
+    /// Splitting a pane against itself and swapping it with itself are both the
+    /// identity, so the honest report of a gesture that would do nothing is that
+    /// there is nothing under the pointer. Note it is the *whole* pane that goes
+    /// dead and not only its middle: `drag.leafId === leafId` is tested after the
+    /// zone is computed and ignores it (7101).
+    ///
+    /// Red gate: drop the identity test and a pane held over its own left third
+    /// answers `SeatEdge`, which U7 would turn into a split of a seat against
+    /// itself.
+    #[test]
+    fn a_pane_has_no_landing_anywhere_on_itself() {
+        let mine = bt_layout::SeatId(3);
+        let other = bt_layout::SeatId(4);
+        let held = DragSource::Pane(mine);
+        for aim in [
+            seats::LayoutAim::SeatEdge(mine, seats::DropEdge::Left),
+            seats::LayoutAim::SeatEdge(mine, seats::DropEdge::Bottom),
+            seats::LayoutAim::SeatCentre(mine),
+        ] {
+            assert_eq!(
+                landing_for_aim(held, aim),
+                None,
+                "a pane held over its own rectangle has no landing: {aim:?}"
+            );
+        }
+        assert_eq!(
+            landing_for_aim(held, seats::LayoutAim::SeatCentre(other)),
+            Some(DropLanding::SeatCentre { target: other }),
+            "a neighbour is a target like any other"
+        );
+        assert_eq!(
+            landing_for_aim(
+                DragSource::Tab(TabId(1)),
+                seats::LayoutAim::SeatCentre(mine)
+            ),
+            Some(DropLanding::SeatCentre { target: mine }),
+            "a tab is not any pane, so no pane is its own"
+        );
+    }
+
+    /// **K130/G83 — the rim belongs to no seat, so it can never be your own.**
+    ///
+    /// Dragging your own pane out to the rim is precisely how you ask for it to
+    /// sit beside everything else, which is the gesture G82 exists to give and
+    /// the one the root split had no edge to offer before.
+    ///
+    /// Red gate: run the identity test before the match instead of inside its two
+    /// seat arms and the rim goes dead for pane drags — the only source that has
+    /// any use for it.
+    #[test]
+    fn the_rim_is_no_ones_pane() {
+        for edge in seats::DropEdge::NEAREST_FIRST {
+            assert_eq!(
+                landing_for_aim(
+                    DragSource::Pane(bt_layout::SeatId(1)),
+                    seats::LayoutAim::Rim(edge)
+                ),
+                Some(DropLanding::RootRim { edge })
+            );
+        }
+    }
+
+    /// **The two strip landings yield the ghost; the three layout ones do not.**
+    ///
+    /// The mock-up sets `drag.ghost.style.opacity = "0"` inside the strip and
+    /// says why beside the *pane* case: "the preview in the strip is the ghost
+    /// now" (6792). Out over the layout the preview is a box drawn somewhere
+    /// else, saying something the ghost does not, so both are on screen at once.
+    ///
+    /// Red gate: give `StripExtract` the layout's answer and a pane torn towards
+    /// the strip is labelled twice, once under the pointer and once in the slot;
+    /// give a rim the strip's answer and the hand goes empty over the layout.
+    #[test]
+    fn only_the_strip_takes_the_ghosts_place() {
+        assert!(DropLanding::StripReorder { slot: 0 }.shows_itself());
+        assert!(DropLanding::StripExtract { slot: 2 }.shows_itself());
+        assert!(
+            !DropLanding::RootRim {
+                edge: seats::DropEdge::Left
+            }
+            .shows_itself()
+        );
+        assert!(
+            !DropLanding::SeatEdge {
+                target: bt_layout::SeatId(1),
+                edge: seats::DropEdge::Top
+            }
+            .shows_itself()
+        );
+        assert!(
+            !DropLanding::SeatCentre {
+                target: bt_layout::SeatId(1)
+            }
+            .shows_itself()
+        );
+    }
+
+    /// **U5 commits nothing it did not already commit.**
+    ///
+    /// The strip's reorder was applied live and there is nothing left to do with
+    /// it. The four landings this slice added have no verb yet — the tearing
+    /// (N157), the merge (N159), the replace (N161) and the swap (L138) are U7's
+    /// — so a release over any of them has to leave the tree exactly as it found
+    /// it, and Home is what "the gesture finished and found nowhere to be"
+    /// already means (J120).
+    ///
+    /// Red gate: this is the test U7 must *break*. When a landing grows a commit,
+    /// its arm here has to move, and if it moves without one the drop silently
+    /// does nothing while the preview promised otherwise.
+    #[test]
+    fn the_landings_without_a_verb_yet_all_go_home() {
+        assert_eq!(
+            release_verdict(Some(DropLanding::StripReorder { slot: 3 })),
+            DragRelease::Commit,
+            "the strip already did it"
+        );
+        for landing in [
+            DropLanding::StripExtract { slot: 1 },
+            DropLanding::RootRim {
+                edge: seats::DropEdge::Bottom,
+            },
+            DropLanding::SeatEdge {
+                target: bt_layout::SeatId(2),
+                edge: seats::DropEdge::Right,
+            },
+            DropLanding::SeatCentre {
+                target: bt_layout::SeatId(2),
+            },
+        ] {
+            assert_eq!(
+                release_verdict(Some(landing)),
+                DragRelease::Home,
+                "{landing:?} has no verb until U7, so it must change nothing"
+            );
+        }
+        assert_eq!(release_verdict(None), DragRelease::Home);
     }
 }

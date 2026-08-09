@@ -695,14 +695,44 @@ pub fn seat_metrics(dpi_milli: u32) -> SeatMetrics {
 /// fractional DPI. It does: the inverse errs by at most half a subpixel, which
 /// re-snaps to under 0.002 device pixels at any scale this product will meet.
 pub fn logical_viewport(width_px: u32, height_px: u32, scale_ppm: u32) -> LogicalRect {
-    let title_px =
-        logical_to_device(WINDOW_TITLE_BAR_LOGICAL_PX, scale_ppm).min(height_px.saturating_sub(1));
+    let title_px = seats_top_device_px(height_px, scale_ppm);
     LogicalRect::new(
         LogicalPx::ZERO,
         device_to_logical(title_px, scale_ppm),
         device_to_logical(width_px, scale_ppm),
         device_to_logical(height_px, scale_ppm),
     )
+}
+
+/// The device row the seats begin on: the lower edge of the 40px title bar,
+/// never past the bottom of a client area too short to hold it.
+fn seats_top_device_px(height_px: u32, scale_ppm: u32) -> u32 {
+    logical_to_device(WINDOW_TITLE_BAR_LOGICAL_PX, scale_ppm).min(height_px.saturating_sub(1))
+}
+
+/// The layout's own box in device pixels — the mock-up's `#termhost` rectangle
+/// (`[left, top, right, bottom]`).
+///
+/// Every drop-zone distance in K is measured from *this* and not from the union
+/// of the seats inside it, and the difference is the whole of K130: the rim
+/// belongs to the layout, so it has to exist even where no seat reaches. Under
+/// the L4 concession ladder the seats stop short of the bottom, and a rim
+/// derived from them would move with the ladder — the window's own edge does
+/// not.
+///
+/// It shares [`seats_top_device_px`] with [`logical_viewport`] rather than
+/// re-deriving the title bar, because the two answers are the same fact seen
+/// from either side: the row the solver's viewport starts on is the row the
+/// pointer enters the layout on, and a drop zone that disagreed with the solver
+/// by one pixel would be a zone that aims at a seam.
+#[must_use]
+pub fn device_viewport(width_px: u32, height_px: u32, scale_ppm: u32) -> [f64; 4] {
+    [
+        0.0,
+        f64::from(seats_top_device_px(height_px, scale_ppm)),
+        f64::from(width_px),
+        f64::from(height_px),
+    ]
 }
 
 fn logical_to_device(logical_px: f32, scale_ppm: u32) -> u32 {
@@ -1453,10 +1483,11 @@ pub fn reorder_target(
 /// moves a tab that is *already in* the strip and therefore judges tab against
 /// tab, while this answers "where would a thing that is not in the strip yet go",
 /// which is a question only the pointer can answer. It is stated here, as a pure
-/// function of the same slot centres, because it is the public part of the future
+/// function of the same slot centres, because it is the public part of the
 /// cross-boundary drop (K123-K125/K130/J107) and stating it once is what stops
-/// the two readings of "which slot" from drifting apart.
-#[allow(dead_code)]
+/// the two readings of "which slot" from drifting apart. K124 is now its caller:
+/// a pane arriving from the layout has no body in the strip to judge against, so
+/// the pointer is the only operand there is.
 #[must_use]
 pub fn insert_index_at(slot_mids: &[f32], pos: f32) -> usize {
     slot_mids
@@ -1800,6 +1831,221 @@ pub fn pane_at(layout: &SeatLayout, x: f64, y: f64) -> Option<SeatId> {
             )
             .then_some(placement.id)
         })
+}
+
+/// `OUTER_RIM = 48` (mock-up 7060), in logical pixels.
+///
+/// Kept here rather than in `bt-render`'s theme table on purpose: it is not a
+/// dimension anything draws. It is the depth of a question the pointer is asked,
+/// and the only thing that reads it is the answer below.
+///
+/// The mock-up argues the number twice over (7042-7059). Being generous costs a
+/// pane's own edge zone nothing — a pane claims its outer 35%, around 190px on a
+/// half-width pane, so a 48px rim pushes that zone inward rather than displacing
+/// it and both gestures stay reachable. And 22px was rejected by name: a ribbon
+/// two percent of the window wide asks for precision this gesture has not
+/// earned.
+const DROP_RIM_LOGICAL_PX: f32 = 48.0;
+
+/// `zone = d4[near] < 0.35 ? near : "center"` (mock-up 7100).
+///
+/// A fraction of the pane rather than a distance, which is what makes "the outer
+/// third splits" true of a 260px pane and a 1600px one alike.
+const DROP_EDGE_FRACTION: f64 = 0.35;
+
+/// Which side of a rectangle a drop is aiming at.
+///
+/// **Declaration order is load-bearing.** The mock-up picks the nearest side with
+/// `Object.keys(d).reduce((a, b) => d[a] <= d[b] ? a : b)` over `{left, right,
+/// top, bottom}` — `<=` keeps the accumulator, so an exact tie goes to the key
+/// named *first*. That is the whole of the corner rule: at the corner of a
+/// square pane all four distances are equal and the answer is `left`; along the
+/// vertical centre line of a wide pane `top` beats `bottom`. Reordering these
+/// four names silently re-decides every corner in the product, so
+/// [`DropEdge::NEAREST_FIRST`] is the one place the order is written and every
+/// tie-break reads it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DropEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl DropEdge {
+    /// The four sides in the order a tie is settled in — the mock-up's own key
+    /// order, which is also the order distances are indexed in below.
+    pub const NEAREST_FIRST: [Self; 4] = [Self::Left, Self::Right, Self::Top, Self::Bottom];
+
+    /// The axis a split on this side runs along: left/right divide a row,
+    /// top/bottom divide a column (`zone→dir`, mock-up 3412-3427).
+    ///
+    /// Stated here with no caller yet, for the same reason
+    /// [`insert_index_at`] was: this pair is `splitLeafIn`'s first two lines,
+    /// and both of the things that will read it — U6 drawing which half of the
+    /// target the arriving pane takes, U7 building `Edit::SplitSeat` and
+    /// `Edit::RootRimDrop` — need the *same* answer. Two readings of "which
+    /// side is left" is exactly the drift the mock-up's one-engine ruling
+    /// (6352) is about, and a rule with a test on it does not drift.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn axis(self) -> Axis {
+        match self {
+            Self::Left | Self::Right => Axis::Row,
+            Self::Top | Self::Bottom => Axis::Col,
+        }
+    }
+
+    /// Whether the arriving seat takes the *first* slot of the new split —
+    /// `first = (zone === "left" || zone === "top")`. See [`Self::axis`] for why
+    /// it is stated ahead of its caller.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn leading(self) -> bool {
+        matches!(self, Self::Left | Self::Top)
+    }
+}
+
+/// The nearest side, ties going to the side named first (see [`DropEdge`]).
+///
+/// The distances are indexed in [`DropEdge::NEAREST_FIRST`]'s order, so the
+/// comparison here is exactly the mock-up's `reduce`: keep what you have unless
+/// the next one is strictly smaller.
+fn nearest_side(distances: [f64; 4]) -> DropEdge {
+    let mut near = 0usize;
+    for candidate in 1..4 {
+        if distances[candidate] < distances[near] {
+            near = candidate;
+        }
+    }
+    DropEdge::NEAREST_FIRST[near]
+}
+
+/// What the pointer is aiming at inside the layout — K130 through K134, with
+/// nothing about *what* is being dropped.
+///
+/// Split from the landing proper because these three are facts about a pointer
+/// and a set of rectangles, and nothing else: they are the same whether a tab, a
+/// pane or a file is in the hand. Who may drop what on them is the caller's
+/// question, and keeping it there is what lets this be tested against solved
+/// rectangles alone.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LayoutAim {
+    /// K130 — the layout's own rim: the root splits on this side.
+    Rim(DropEdge),
+    /// K134 — the outer 35% of one pane: that pane splits on this side.
+    SeatEdge(SeatId, DropEdge),
+    /// K134 — a pane's middle: its place is taken.
+    SeatCentre(SeatId),
+}
+
+/// Where in the layout a pointer is aiming (K127, K128, K130-K134).
+///
+/// The order of the four questions below is not an implementation detail, and
+/// the mock-up spends twenty lines saying so (7042-7059). **The rim is measured
+/// before any pane is looked for.** Run the pane hit first and a pointer on the
+/// rim at the height of a divider matches no pane, returns early, and never
+/// reaches the rim at all — the gesture dies exactly along the seam of the
+/// layout it exists to serve, which is how the feature was lost on its first
+/// attempt.
+///
+/// * **K127 — above is not overshooting.** A pointer above the layout gets
+///   nothing, because the strip lives up there and has already had its say.
+/// * **K128 — the other three sides clamp rather than cancel.** Pushing past an
+///   edge is how a hand aims at an edge, so the rim is 48px deep going in and
+///   bottomless going out. Unclamped it would be a 48px target with a wall
+///   behind it, and every overshoot a miss; widening the band would only move
+///   the wall.
+/// * **K131 — a lone pane skips the rim entirely**, because splitting the root
+///   and splitting the only pane are the same act.
+/// * **K132 — no pane under the pointer means nothing to aim at.** That is a
+///   pointer on a divider, and a divider is not a target.
+///
+/// `host` is the layout's box in device pixels ([`device_viewport`]) and
+/// `layout` carries the solved rectangles for this same frame. Both are passed
+/// in rather than derived, so this function has no way of reading a rectangle
+/// from a frame that is over (T228).
+#[must_use]
+pub fn aim_at_layout(
+    layout: &SeatLayout,
+    host: [f64; 4],
+    pane_count: usize,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<LayoutAim> {
+    if y < host[1] {
+        return None;
+    }
+    // The mock-up clamps to a *closed* box, because the DOM's rectangle
+    // comparisons are closed on both sides (`cx <= r.right`). Every rectangle in
+    // this build is half-open instead — a device column belongs to exactly one
+    // seat, and `right` is the first column that is not inside — so "push it back
+    // to the edge" has to mean the last column *in*, not the first column out.
+    // Clamping to `host[2]` itself lands the pointer on the one column no seat
+    // claims. Two panes hide that (the rim answers first at a distance of zero),
+    // and a lone pane does not: it skips the rim entirely (K131), so a hand
+    // pressed past its own right edge would find nothing at all.
+    let cx = x.clamp(host[0], (host[2] - 1.0).max(host[0]));
+    let cy = y.min((host[3] - 1.0).max(host[1]));
+    let rim = [cx - host[0], host[2] - cx, cy - host[1], host[3] - cy];
+    let near_rim = nearest_side(rim);
+    let depth = f64::from(DROP_RIM_LOGICAL_PX * scale);
+    if pane_count > 1 && rim[side_index(near_rim)] < depth {
+        return Some(LayoutAim::Rim(near_rim));
+    }
+    let seat = pane_at(layout, cx, cy)?;
+    let device = layout.get(seat)?.device_rect?;
+    let (width, height) = (device.width() as f64, device.height() as f64);
+    // A seat the solver has published is non-degenerate (red line L4), so the
+    // normalisation below cannot divide by zero — `pane_at` only answered
+    // because the pointer is inside a rectangle with room in it.
+    let rx = (cx - device.left as f64) / width;
+    let ry = (cy - device.top as f64) / height;
+    let d4 = [rx, 1.0 - rx, ry, 1.0 - ry];
+    let near = nearest_side(d4);
+    Some(if d4[side_index(near)] < DROP_EDGE_FRACTION {
+        LayoutAim::SeatEdge(seat, near)
+    } else {
+        LayoutAim::SeatCentre(seat)
+    })
+}
+
+/// A side's index into the distance arrays [`aim_at_layout`] builds — the
+/// inverse of [`DropEdge::NEAREST_FIRST`].
+fn side_index(edge: DropEdge) -> usize {
+    match edge {
+        DropEdge::Left => 0,
+        DropEdge::Right => 1,
+        DropEdge::Top => 2,
+        DropEdge::Bottom => 3,
+    }
+}
+
+/// The strip's own rectangle, `[left, top, right, bottom]` in device pixels —
+/// the mock-up's `stripEl().getBoundingClientRect()` (K123).
+///
+/// Horizontally it is the scroller's clip box, which stops where the caption run
+/// begins; vertically it is the whole 40px title band, because that band is the
+/// strip's element and a pointer anywhere in it is over the strip. Its bottom
+/// edge is [`device_viewport`]'s top edge, so the two boxes partition the window
+/// between them with neither a gap nor an overlap — which is what lets K123's
+/// "is it in the strip" and K127's "is it above the layout" be asked in that
+/// order without either of them having to know about the other.
+#[must_use]
+pub fn strip_band(geometry: &TabStripGeometry, scale: f32) -> [f32; 4] {
+    [
+        geometry.viewport[0],
+        0.0,
+        geometry.viewport[1],
+        (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round(),
+    ]
+}
+
+/// Whether the pointer is over the strip (K123).
+#[must_use]
+pub fn in_strip(geometry: &TabStripGeometry, scale: f32, x: f64, y: f64) -> bool {
+    contains(strip_band(geometry, scale), x as f32, y as f32)
 }
 
 /// A divider's hit zone: the drawn band widened to something a hand can land
@@ -9502,5 +9748,379 @@ mod tests {
         assert!(events.contains(&LayoutEvent::Vanished(SeatId(4))));
         assert!(events.contains(&LayoutEvent::Presentation(SeatId(2))));
         assert!(events.contains(&LayoutEvent::Moved(SeatId(1))));
+    }
+}
+
+/// U5 — drop-landing geometry (K127-K134), tested against solved rectangles.
+///
+/// Every case here builds a real tree, runs the real solver and asks the real
+/// question. Nothing hand-places a rectangle, because the ruling these tests
+/// exist to protect is that the aim is taken against the layout that *is* rather
+/// than against one reconstructed beside it (T228, A12).
+#[cfg(test)]
+mod drop_geometry_tests {
+    use super::*;
+
+    const DPI: u32 = 1_000;
+    const W: u32 = 1_600;
+    const H: u32 = 900;
+
+    fn term(id: u64) -> LayoutNode {
+        LayoutNode::seat(Seat::new(SeatId(id), SeatKind::Terminal))
+    }
+
+    /// A solved layout, its host box, its pane count and its scale — the four
+    /// things `aim_at_layout` takes, all derived from one tree so that no two of
+    /// them can disagree about the window they describe.
+    fn stage(tree: LayoutNode, dpi_milli: u32) -> (SeatLayout, [f64; 4], usize, f32) {
+        let metrics = seat_metrics(dpi_milli);
+        let ppm = scale_ppm(dpi_milli);
+        let layout = solve(
+            &tree,
+            logical_viewport(W, H, ppm),
+            &metrics,
+            SeatId(1),
+            LayoutMode::Parallel,
+        )
+        .expect("the stage layouts all fit");
+        let count = tree.seats_in_order().len();
+        (
+            layout,
+            device_viewport(W, H, ppm),
+            count,
+            dpi_milli as f32 / 1_000.0,
+        )
+    }
+
+    /// Two panes stacked, so the seam between them runs horizontally and meets
+    /// both side rims.
+    fn stacked() -> LayoutNode {
+        LayoutNode::split(SplitId(1), Axis::Col, term(1), term(2))
+    }
+
+    fn side_by_side() -> LayoutNode {
+        LayoutNode::split(SplitId(1), Axis::Row, term(1), term(2))
+    }
+
+    fn aim(stage: &(SeatLayout, [f64; 4], usize, f32), x: f64, y: f64) -> Option<LayoutAim> {
+        aim_at_layout(&stage.0, stage.1, stage.2, stage.3, x, y)
+    }
+
+    fn rect_of(layout: &SeatLayout, seat: u64) -> bt_layout::DeviceRect {
+        layout.get(SeatId(seat)).unwrap().device_rect.unwrap()
+    }
+
+    /// **K131, the ruling the whole ordering exists for.** The rim is measured
+    /// before any pane is looked for, and the proof is the one pointer that can
+    /// tell the two orders apart: on the rim, at the height of a divider.
+    ///
+    /// Run the pane hit first and this pointer matches no pane, returns early,
+    /// and never reaches the rim — "the gesture died exactly along the seam of
+    /// the very layout it exists to serve" (mock-up 7048-7051). The assertion
+    /// below is that it does not.
+    ///
+    /// Red gate: the mutation is the reordering itself. Move the `pane_at` call
+    /// above the rim test in `aim_at_layout` and the first two assertions answer
+    /// `None`, while every other test in this module still passes — which is
+    /// exactly how the feature was lost the first time.
+    #[test]
+    fn the_rim_is_measured_before_any_pane_is_found() {
+        let stage = stage(stacked(), DPI);
+        let seam = rect_of(&stage.0, 1).bottom as f64;
+        assert_eq!(
+            aim(&stage, 4.0, seam),
+            Some(LayoutAim::Rim(DropEdge::Left)),
+            "a pointer on the left rim at the seam's height must reach the rim"
+        );
+        assert_eq!(
+            aim(&stage, f64::from(W) - 4.0, seam),
+            Some(LayoutAim::Rim(DropEdge::Right)),
+            "and so must the right rim"
+        );
+        // The same height away from the rim is the seam and nothing else (K132),
+        // which is what makes the pair above a statement about ordering rather
+        // than about the seam being generous.
+        assert_eq!(aim(&stage, f64::from(W) / 2.0, seam), None);
+    }
+
+    /// **K130 — `OUTER_RIM = 48`, and it is 48 *logical* pixels.**
+    ///
+    /// Both halves are load-bearing: the depth is exact and strict (`< 48`), and
+    /// it scales with the display, because a rim measured in device pixels would
+    /// be half as deep on a 200% screen and the gesture would get harder as the
+    /// window got bigger.
+    ///
+    /// Red gate: change the constant to 47 or 49 and the boundary pair below
+    /// disagrees; drop the `* scale` and the 1.5x and 2x cases fall through to a
+    /// pane zone.
+    #[test]
+    fn the_rim_is_forty_eight_logical_pixels_deep_at_every_scale() {
+        for dpi_milli in [1_000u32, 1_500, 2_000] {
+            let stage = stage(stacked(), dpi_milli);
+            let scale = f64::from(stage.3);
+            let mid = f64::from(H) / 2.0;
+            assert_eq!(
+                aim(&stage, 48.0 * scale - 0.5, mid),
+                Some(LayoutAim::Rim(DropEdge::Left)),
+                "just inside the rim at {dpi_milli} milli-DPI"
+            );
+            let outside = aim(&stage, 48.0 * scale, mid);
+            assert!(
+                matches!(outside, Some(LayoutAim::SeatEdge(_, DropEdge::Left))),
+                "exactly 48 logical px in is past the rim and inside a pane's own \
+                 edge zone at {dpi_milli} milli-DPI, got {outside:?}"
+            );
+        }
+    }
+
+    /// **K131 — a lone pane skips the rim entirely**, because splitting the root
+    /// and splitting the only pane are the same act.
+    ///
+    /// Red gate: delete the `pane_count > 1` guard and this answers `Rim(Left)`.
+    #[test]
+    fn a_lone_pane_has_no_rim() {
+        let stage = stage(term(1), DPI);
+        assert_eq!(stage.2, 1);
+        assert_eq!(
+            aim(&stage, 4.0, f64::from(H) / 2.0),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Left)),
+            "the only pane's own left edge, not the root's"
+        );
+    }
+
+    /// **K127 and K128 together: up is somewhere else, the other three clamp.**
+    ///
+    /// Pushing past an edge is how a hand aims at an edge, so the rim is 48px
+    /// deep going in and bottomless going out — a pointer half a window past the
+    /// left edge is still asking for the left rim. Up is the exception, because
+    /// the strip lives up there and has already had its say.
+    ///
+    /// Red gate: drop either clamp and the far-out pointers fall through to
+    /// `pane_at`, which answers `None`; clamp the top as well and the pointer
+    /// above the window starts claiming the top rim, which is the strip's.
+    #[test]
+    fn three_sides_clamp_and_above_the_layout_is_somewhere_else() {
+        let stacked_stage = stage(stacked(), DPI);
+        let mid_x = f64::from(W) / 2.0;
+        let mid_y = f64::from(H) / 2.0;
+        assert_eq!(
+            aim(&stacked_stage, -500.0, mid_y),
+            Some(LayoutAim::Rim(DropEdge::Left))
+        );
+        assert_eq!(
+            aim(&stacked_stage, f64::from(W) + 500.0, mid_y),
+            Some(LayoutAim::Rim(DropEdge::Right))
+        );
+        assert_eq!(
+            aim(&stacked_stage, mid_x, f64::from(H) + 500.0),
+            Some(LayoutAim::Rim(DropEdge::Bottom))
+        );
+        assert_eq!(
+            aim(&stacked_stage, mid_x, stacked_stage.1[1] - 0.5),
+            None,
+            "one pixel above the layout is the strip's business, not a rim"
+        );
+        assert_eq!(
+            aim(&stacked_stage, mid_x, stacked_stage.1[1]),
+            Some(LayoutAim::Rim(DropEdge::Top)),
+            "the layout's own first row is the top rim"
+        );
+        // With two panes the rim answers a pushed-past pointer at a distance of
+        // zero, so it would answer even unclamped. A *lone* pane skips the rim
+        // (K131) and therefore has to be hit by the clamp itself — which is the
+        // only place the clamp is observable, and the reason it must land on the
+        // last column inside the layout rather than on the first one outside it.
+        let lone = stage(term(1), DPI);
+        assert_eq!(
+            aim(&lone, -500.0, mid_y),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Left))
+        );
+        assert_eq!(
+            aim(&lone, f64::from(W) + 500.0, mid_y),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Right))
+        );
+        assert_eq!(
+            aim(&lone, mid_x, f64::from(H) + 500.0),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Bottom))
+        );
+    }
+
+    /// **The corner rule, in both places it applies.** `reduce((a, b) => d[a] <=
+    /// d[b] ? a : b)` keeps the accumulator on a tie, so an exact tie goes to the
+    /// side named first in `{left, right, top, bottom}`.
+    ///
+    /// Red gate: reorder `DropEdge::NEAREST_FIRST`, or turn `<` into `<=` in
+    /// `nearest_side`, and every assertion here picks the other side of its
+    /// corner.
+    #[test]
+    fn a_corner_belongs_to_the_side_named_first() {
+        let stacked_stage = stage(stacked(), DPI);
+        // The layout's own top-left corner: left and top are both zero.
+        assert_eq!(
+            aim(&stacked_stage, 0.0, stacked_stage.1[1]),
+            Some(LayoutAim::Rim(DropEdge::Left)),
+            "left is named before top"
+        );
+        // The bottom-right: right and bottom are both zero, right is named first.
+        assert_eq!(
+            aim(&stacked_stage, f64::from(W), f64::from(H)),
+            Some(LayoutAim::Rim(DropEdge::Right))
+        );
+        // And inside a pane, away from the rim: a pointer equidistant from the
+        // left and the top of its own pane takes the left.
+        let stage = stage(side_by_side(), DPI);
+        let pane = rect_of(&stage.0, 1);
+        let (w, h) = (pane.width() as f64, pane.height() as f64);
+        assert_eq!(
+            aim(
+                &stage,
+                pane.left as f64 + w * 0.2,
+                pane.top as f64 + h * 0.2
+            ),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Left))
+        );
+        assert_eq!(
+            aim(
+                &stage,
+                pane.left as f64 + w * 0.8,
+                pane.top as f64 + h * 0.8
+            ),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Right)),
+            "right is named before bottom"
+        );
+    }
+
+    /// **K134 — the outer 35% splits, the middle takes its place**, and the
+    /// threshold is strict.
+    ///
+    /// The fraction is what makes "anywhere in the outer third splits" true
+    /// without the hand having to reach the very edge, and what makes the middle
+    /// a target that needs no aim at all.
+    ///
+    /// Red gate: move the fraction to 0.3 or 0.4 and the boundary pair below
+    /// disagrees; turn `<` into `<=` and the exact-35% case flips.
+    #[test]
+    fn the_outer_thirty_five_percent_splits_and_the_middle_takes_its_place() {
+        let stage = stage(side_by_side(), DPI);
+        let pane = rect_of(&stage.0, 1);
+        let (w, h) = (pane.width() as f64, pane.height() as f64);
+        let y = pane.top as f64 + h / 2.0;
+        let at = |fraction: f64| aim(&stage, pane.left as f64 + w * fraction, y);
+        assert_eq!(
+            at(0.34),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Left))
+        );
+        assert_eq!(
+            at(0.35),
+            Some(LayoutAim::SeatCentre(SeatId(1))),
+            "exactly 35% in is already the middle"
+        );
+        assert_eq!(at(0.5), Some(LayoutAim::SeatCentre(SeatId(1))));
+        assert_eq!(
+            at(0.66),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Right))
+        );
+        // The vertical zones of the same pane, which the horizontal ones must not
+        // have eaten: at the pane's horizontal centre the nearest side is a top
+        // or a bottom.
+        let x = pane.left as f64 + w / 2.0;
+        assert_eq!(
+            aim(&stage, x, pane.top as f64 + h * 0.1),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Top))
+        );
+        assert_eq!(
+            aim(&stage, x, pane.top as f64 + h * 0.9),
+            Some(LayoutAim::SeatEdge(SeatId(1), DropEdge::Bottom))
+        );
+    }
+
+    /// **K132 — no pane under the pointer means nothing to aim at.** That is a
+    /// pointer on a divider, and a divider is not a target.
+    ///
+    /// Red gate: widen the pane hit to the nearest rectangle instead of the
+    /// containing one and this starts answering a seat.
+    #[test]
+    fn a_pointer_on_a_divider_aims_at_nothing() {
+        let stage = stage(side_by_side(), DPI);
+        assert_eq!(
+            aim(
+                &stage,
+                rect_of(&stage.0, 1).right as f64,
+                f64::from(H) / 2.0
+            ),
+            None,
+            "the device column the divider occupies belongs to neither pane"
+        );
+    }
+
+    /// **G81's `zone→dir`, stated as a table.** left/right divide a row,
+    /// top/bottom divide a column, and the leading slot is the one named by left
+    /// or top — which is what makes "drop on the left" put the arriving seat on
+    /// the left.
+    ///
+    /// Red gate: swap either mapping and half the drops land on the wrong side of
+    /// their own divider.
+    #[test]
+    fn an_edge_names_an_axis_and_a_side() {
+        assert_eq!(DropEdge::Left.axis(), Axis::Row);
+        assert_eq!(DropEdge::Right.axis(), Axis::Row);
+        assert_eq!(DropEdge::Top.axis(), Axis::Col);
+        assert_eq!(DropEdge::Bottom.axis(), Axis::Col);
+        assert!(DropEdge::Left.leading());
+        assert!(DropEdge::Top.leading());
+        assert!(!DropEdge::Right.leading());
+        assert!(!DropEdge::Bottom.leading());
+    }
+
+    /// **K123 against K127: the strip and the layout partition the window.**
+    ///
+    /// The strip's bottom edge is the layout's top edge exactly, and the
+    /// half-open test gives the boundary row to the layout. That is what lets the
+    /// two questions be asked in order without either knowing about the other:
+    /// no row is in both, and no row is in neither.
+    ///
+    /// Red gate: give the strip its own idea of the title bar's height — round
+    /// where the solver floors, or read a different constant — and some scale
+    /// produces a row that answers "not the strip" and "above the layout" at
+    /// once, which is a row where a drag can point at nothing.
+    #[test]
+    fn the_strip_ends_exactly_where_the_layout_begins() {
+        for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000, 2_500] {
+            let scale = dpi_milli as f32 / 1_000.0;
+            let geometry = tab_strip_geometry(W as f32, scale, &[TabTrailer::default()], 0, 0.0);
+            let band = strip_band(&geometry, scale);
+            let host = device_viewport(W, H, scale_ppm(dpi_milli));
+            assert_eq!(
+                f64::from(band[3]),
+                host[1],
+                "the strip's floor is the layout's ceiling at {dpi_milli} milli-DPI"
+            );
+            assert!(in_strip(&geometry, scale, 10.0, host[1] - 1.0));
+            assert!(!in_strip(&geometry, scale, 10.0, host[1]));
+        }
+    }
+
+    /// **K125 — `insertIndexAt`: the first slot whose middle the pointer has not
+    /// passed, else the end of the run.**
+    ///
+    /// Red gate: turn `<` into `<=`, or drop the `unwrap_or(len)`, and a pointer
+    /// past the last tab stops asking for the end of the strip.
+    #[test]
+    fn a_pane_arriving_at_the_strip_takes_the_slot_it_points_at() {
+        let mids = [50.0f32, 150.0, 250.0];
+        assert_eq!(insert_index_at(&mids, 0.0), 0);
+        assert_eq!(insert_index_at(&mids, 49.0), 0);
+        assert_eq!(
+            insert_index_at(&mids, 50.0),
+            1,
+            "a middle belongs to the slot after it"
+        );
+        assert_eq!(insert_index_at(&mids, 149.0), 1);
+        assert_eq!(
+            insert_index_at(&mids, 251.0),
+            3,
+            "past every middle is the end of the run"
+        );
+        assert_eq!(insert_index_at(&[], 10.0), 0);
     }
 }
