@@ -2839,11 +2839,16 @@ pub struct ChromeContent<'a> {
     ///
     /// The names arrive **already resolved**, and that is red line L1 rather
     /// than a convenience. A seat does not know its session, and the walk that
-    /// picks a name — the program's OSC 2 title, else the shell's OSC 7 folder,
-    /// else nothing — is a walk over *sessions*, so it lives in `bt-app` where
-    /// the pairing between seats and shells is held. What reaches this module is
-    /// a string per seat id, and the tree still knows nothing about what runs
-    /// inside it.
+    /// picks a name — the program's OSC 2 title, else the shell's OSC 7 folder
+    /// written whole, else nothing — is a walk over *sessions*, so it lives in
+    /// `bt-app` where the pairing between seats and shells is held. What reaches
+    /// this module is a string per seat id, and the tree still knows nothing
+    /// about what runs inside it.
+    ///
+    /// Resolved at the *head's* length, which is C28's `${s.cwd}` entire. The
+    /// shorter answer the ghost and the collapsed bar want is not a second entry
+    /// in this map but a cut taken from this one, by [`seat_short_caption`], so
+    /// that the two lengths can never come from two sources and disagree.
     ///
     /// A seat with no entry — a Files column, a Preview, or a Terminal whose
     /// shell has said nothing at all — falls back to the kind's own name in
@@ -4172,15 +4177,22 @@ fn collapse_bar_contents(
 /// no session behind them answer by kind. Both names arrive already resolved —
 /// this is a printer, not a policy.
 ///
-/// **`terminal_name` is a per-seat name, not the tab's `cwd`, and that is a user
-/// ruling that supersedes C28's letter.** C28 writes `${s.cwd}` into `.ptitle`
-/// (mock-up 4559) — the whole path — because in the mock-up a pane head is the
-/// only place the shell's location is ever written. The ruling replaces it: a
+/// **`terminal_name` is a per-seat name rather than the tab's single `cwd`, and
+/// at its cwd layer it is the whole path — C28's own letter.** C28 writes
+/// `${s.cwd}` into `.ptitle` (mock-up 4559), and it writes `cwdLeaf(s)` into the
+/// drag ghost and the drop preview instead (mock-up 3304). Those are two lines
+/// of one mock-up and the difference between them is the point: a pane head has
+/// a whole bar to fill and answers "where is this" with the place entire, while
+/// a label riding the pointer has one line and answers "which one is this" with
+/// the last segment. Two questions, two lengths, one place each — and
+/// [`seat_short_caption`] is where the other length lives.
+///
+/// What is per-seat is *which* session is asked, not how long its answer is. A
 /// terminal pane head shows its own session's OSC 2 program title, falling back
-/// to the *leaf* of its own OSC 7 folder, falling back to the kind's name. Two
-/// panes in `crates\bt-app` and `crates\bt-term` are then told apart by the word
-/// that differs rather than by the forty characters they share, and a head that
-/// is a third of a window wide has room for the word but not for the path.
+/// to its own OSC 7 folder written in full, falling back to the kind's name. An
+/// earlier stage of this slice recorded a user ruling narrowing the head to the
+/// leaf as well; the user has overturned it as a typo in their own work order,
+/// so C28's letter governs and the head is once more the long answer.
 ///
 /// The walk itself is deliberately *not* here. It is a walk over sessions, and
 /// red line L1 keeps this module free of them; `bt-app` resolves and hands over
@@ -4225,14 +4237,13 @@ fn overflow_notice(hidden: usize) -> String {
 
 /// The same name, cut to the one segment that answers "which one is this".
 ///
-/// C28 was a ruling about two lengths — a pane head answering "where is this"
-/// with the full path against a label riding the pointer showing `cwdLeaf(s)`,
-/// the last segment only (mock-up 3304). The user's per-pane ruling has since
-/// moved the head's own answer to the leaf as well ([`seat_caption`]), so for a
-/// terminal the two lengths now coincide. The cut stays, and stays honest, for
-/// the two readers that are not a terminal head: a preview naming a file with a
-/// path in it, and a collapsed bar of 24 logical pixels, which is the second
-/// kind of label whatever it is showing.
+/// C28 is a ruling about two lengths — a pane head answering "where is this"
+/// with the full path ([`seat_caption`], mock-up 4559) against a label riding
+/// the pointer showing `cwdLeaf(s)`, the last segment only (mock-up 3304). This
+/// is that second length, and it has three readers, all of them labels rather
+/// than bars: the drag ghost, the drop preview, and a collapsed bar of 24
+/// logical pixels, which is a label whatever it happens to be showing. A preview
+/// naming a file by path is cut here for the same reason.
 ///
 /// It is *derived* from [`seat_caption`] rather than read from the source a
 /// second time, which is the whole of that function's warning: two call sites
@@ -9981,24 +9992,35 @@ mod tests {
         );
     }
 
-    /// C28 as the user re-ruled it: a terminal pane head prints the name its own
-    /// session was resolved to, and falls back to the kind when there is none.
+    /// C28 by its letter: a terminal pane head prints the name its own session
+    /// was resolved to — for a shell that has only reported a folder, the whole
+    /// path (mock-up 4559) — and falls back to the kind when there is none.
     ///
-    /// This function used to *be* the ruling — it took the tab's `cwd` and wrote
-    /// the whole path (mock-up 4559). It is now a printer: the walk that picks
-    /// between the OSC 2 title, the OSC 7 folder's leaf and nothing at all is a
-    /// walk over sessions, and red line L1 keeps this module free of those. What
-    /// is pinned here is the half that is genuinely about seats — the last
-    /// fallback, and the fact that a name is never invented for a kind that has
-    /// no session.
+    /// This function used to *be* the ruling, reading the tab's single `cwd`
+    /// directly. It is now a printer: the walk that picks between the OSC 2
+    /// title, the OSC 7 folder and nothing at all is a walk over sessions, and
+    /// red line L1 keeps this module free of those. What is pinned here is the
+    /// half that is genuinely about seats — that the head prints what it is
+    /// handed at its full length, that the last fallback holds, and that a name
+    /// is never invented for a kind that has no session.
+    ///
+    /// The first assertion is handed a path rather than a word on purpose. It is
+    /// the only input on which printing whole and cutting to the leaf disagree,
+    /// so it is the only input that can catch this function quietly acquiring
+    /// [`seat_short_caption`]'s cut — which is precisely the reversed ruling this
+    /// slice exists to undo.
     ///
     /// Red gate: drop the `filter` on emptiness and the third assertion draws a
     /// head with no word in it, which is the one outcome the fallback exists to
     /// refuse.
     #[test]
     fn a_terminal_pane_head_prints_its_own_name_and_falls_back_honestly() {
-        let name = "bt-app";
-        assert_eq!(seat_caption(SeatKind::Terminal, None, Some(name)), name);
+        let name = r"D:\Developer\BetterTerminal\crates\bt-app";
+        assert_eq!(
+            seat_caption(SeatKind::Terminal, None, Some(name)),
+            name,
+            "C28: the head has a bar to fill and prints the place whole"
+        );
         // A shell that has said nothing at all — no title, no folder — has not
         // named itself, and the honest answer is then the kind's own name; never
         // an empty caption, and never a guess at the filesystem.
@@ -10036,6 +10058,13 @@ mod tests {
     /// a map read in tree order rather than by id would pass the first form and
     /// fail this one the moment the solver laid the panes out right-to-left.
     ///
+    /// The two names are whole paths under one repository, which is C28's own
+    /// hard case rather than a comfortable one: they agree for every character
+    /// but the last segment. That is deliberate. It is what makes the closing
+    /// assertion — the two heads say *different* things — depend on the head
+    /// printing the place whole and not on the two seats having been handed two
+    /// conveniently unlike words.
+    ///
     /// Red gate: hand both heads the same `Option<&str>`, as the old field did,
     /// and both assertions fail at once.
     #[test]
@@ -10046,13 +10075,19 @@ mod tests {
         let [left, right] = seats.terminals()[..] else {
             panic!("a row of two terminals holds two terminal seats");
         };
-        let names = BTreeMap::from([(left, "bt-app".to_owned()), (right, "bt-term".to_owned())]);
+        let left_name = r"C:\repo\crates\bt-app";
+        let right_name = r"C:\repo\crates\bt-term";
+        assert_ne!(
+            left_name, right_name,
+            "the fixture is only a fixture if the two places really are two"
+        );
+        let names = BTreeMap::from([(left, left_name.to_owned()), (right, right_name.to_owned())]);
         let parts = chrome_with_names(&seats, &layout, &names, None);
 
         // Each head is found by the rectangle its own seat was solved into, so
         // the name is checked against the geometry rather than against the order
         // the labels happen to have been pushed in.
-        for (seat, expected) in [(left, "bt-app"), (right, "bt-term")] {
+        for (seat, expected) in [(left, left_name), (right, right_name)] {
             let rect = layout
                 .get(seat)
                 .and_then(|placement| placement.device_rect)
@@ -10281,37 +10316,54 @@ mod tests {
         assert_eq!(layer.opacity, 1.0);
     }
 
-    /// J116: the ghost answers "which one is this", so it still cuts a name at
-    /// its last separator.
+    /// J116 against C28: one session, two lengths — the head prints the place
+    /// whole, the ghost cuts it at its last separator.
     ///
-    /// C28's two-lengths distinction has been narrowed by the user's per-pane
-    /// ruling: a terminal head is now handed an already-resolved name, and for
-    /// the common case — a shell that has only reported a folder — that name is
-    /// already the leaf, so the head and the ghost say the same word. The cut
-    /// survives for the readers where a separator can still arrive: a preview
-    /// naming a file by path, and any caller handing over a raw address.
+    /// This is the contrast in its own right, and it is a real one again. C28
+    /// writes `${s.cwd}` into `.ptitle` (mock-up 4559) and mock-up 3304 writes
+    /// `cwdLeaf(s)` into the ghost and the drop preview, and the two are
+    /// different lines in the same mock-up because they answer different
+    /// questions: a head has a whole bar and says "where is this", a label
+    /// riding the pointer has one line and says "which one is this". An earlier
+    /// stage narrowed the head to the leaf too, at which point this pin still
+    /// bore this name while asserting only that a printer prints — the contrast
+    /// had gone degenerate and nothing here could have noticed. The user has
+    /// overturned that, so the first two assertions are once more a *pair*: the
+    /// same input, through the two functions, at two lengths.
     ///
-    /// Both assertions are therefore about the *printer*, and the pair is kept
-    /// together because it is the pair that says which of the two functions
-    /// cuts: `seat_caption` prints what it is given, `seat_short_caption` cuts
-    /// it, and neither of them decides what "it" is any more.
+    /// Kept together for exactly that reason. Split across two tests, each half
+    /// reads as "this function returns what it returns"; together they are the
+    /// only statement in this module that the two lengths have not collapsed
+    /// into one.
     ///
-    /// Red gate: point `seat_short_caption` at its source instead of deriving
-    /// from `seat_caption` and the first assertion survives while the fallback
-    /// behaviour they share silently forks.
+    /// Red gate: give `seat_caption` the cut — point a terminal head at
+    /// `rsplit` as the reversed ruling did — and the second assertion fails
+    /// while the first stays green, which is the exact shape of the regression.
     #[test]
     fn the_ghost_cuts_a_name_at_its_last_separator_where_the_head_prints_it_whole() {
         let path = r"D:\Developer\BetterTerminal\crates\bt-app";
         assert_eq!(
             seat_short_caption(SeatKind::Terminal, None, Some(path)),
-            "bt-app"
+            "bt-app",
+            "3304: the label riding the pointer answers `which one is this`"
         );
-        assert_eq!(seat_caption(SeatKind::Terminal, None, Some(path)), path);
-        // On a name with no separator in it — which is what a resolved terminal
-        // name now is — the cut is a no-op and the two agree.
         assert_eq!(
-            seat_short_caption(SeatKind::Terminal, None, Some("bt-app")),
-            seat_caption(SeatKind::Terminal, None, Some("bt-app"))
+            seat_caption(SeatKind::Terminal, None, Some(path)),
+            path,
+            "4559: the head has a bar to fill and answers `where is this`"
+        );
+        assert_ne!(
+            seat_caption(SeatKind::Terminal, None, Some(path)),
+            seat_short_caption(SeatKind::Terminal, None, Some(path)),
+            "two questions, two lengths — a session under a path answers them \
+             differently or the distinction is not being drawn at all"
+        );
+        // The cut is a no-op on a name with no separator in it, so a program
+        // title and a kind name reach both readers unchanged. That is what lets
+        // one derive from the other instead of reading the source twice.
+        assert_eq!(
+            seat_short_caption(SeatKind::Terminal, None, Some("cargo build")),
+            seat_caption(SeatKind::Terminal, None, Some("cargo build"))
         );
     }
 
@@ -10610,13 +10662,13 @@ mod tests {
     /// T210: a bar squeezed along Col has a whole line to give, so it names its
     /// seat — by the *short* name, the one a label riding the pointer uses.
     ///
-    /// It is handed a raw path here rather than a resolved name on purpose. The
-    /// user's per-pane ruling means the chrome is normally given a leaf already
-    /// (`seat_caption`), so the cut would be a no-op and this would be pinning
-    /// nothing; feeding the bar the one input on which the two spellings still
-    /// differ is what keeps the assertion able to fail. The head's half of the
-    /// old C28 comparison has moved to
-    /// `a_terminal_pane_head_prints_its_own_name_and_falls_back_honestly`.
+    /// It is handed a raw path here because a path is the one input on which the
+    /// two spellings differ, and the closing assertion spends that difference:
+    /// the same `cwd`, on a bar, is cut to `BetterTerminal`, and on a head is
+    /// printed whole. A collapsed bar is 24 logical pixels of the other axis and
+    /// is a label in the same sense the drag ghost is, so it takes the ghost's
+    /// length; C28's own comparison between the two lengths is stated in full at
+    /// `the_ghost_cuts_a_name_at_its_last_separator_where_the_head_prints_it_whole`.
     ///
     /// Red gate: point the bar at `seat_caption` instead of `seat_short_caption`
     /// and the first assertion reads the whole path.

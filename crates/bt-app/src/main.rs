@@ -1068,6 +1068,15 @@ impl TabState {
 
     /// What one Terminal seat's own shell is called (C28, per leaf).
     ///
+    /// [`pane_head_title`] and not [`resolve_title`], which is the one place
+    /// this differs from the tab's own name and is C28 by its letter: a pane
+    /// head is written `${s.cwd}` (mock-up 4559) because it has a whole bar to
+    /// fill and answers "where is this", while a tab has room for one word
+    /// (mock-up 2585) and a label riding the pointer takes `cwdLeaf` (mock-up
+    /// 3304). The shortening a narrow head needs is C29's business —
+    /// `.ptitle { overflow: hidden; text-overflow: ellipsis }` — done visually,
+    /// at the width the head actually has, by the only thing that knows it.
+    ///
     /// `None` when that seat holds no session, or holds one that has said
     /// nothing at all — no OSC 2 title and no OSC 7 folder. That is not a
     /// failure to answer but the honest answer, and [`seats::seat_caption`]
@@ -1075,7 +1084,7 @@ impl TabState {
     /// invented here: a name a shell did not say is a name nobody said.
     fn terminal_name(&self, seat: SeatId) -> Option<String> {
         let leaf = self.sessions.get(&seat)?;
-        session_title(
+        pane_head_title(
             leaf.session.window_title(),
             leaf.session.working_directory(),
         )
@@ -12332,6 +12341,37 @@ fn startup_poll_delay(first_text_presented: bool) -> Option<std::time::Duration>
 /// more honest reading of "40 characters" for the rest.
 const TITLE_MAX_CHARS: usize = 40;
 
+/// The longest a pane head's **folder** may be — Windows `MAX_PATH`.
+///
+/// A separate bound from [`TITLE_MAX_CHARS`] because it bounds a different kind
+/// of thing. Forty characters is a sane cap on a *name*: a name is something a
+/// person or a program chose to be read at a glance, and forty of them is a
+/// generous glance. It is a nonsensical cap on a *path*, because nearly every
+/// real working directory is longer — `D:\Developer\BetterTerminal\crates\bt-app`
+/// is already forty-one — so capping the head's cwd layer at `TITLE_MAX` would
+/// print `D:\Developer\BetterTerminal\crates\bt-ap` and stop, which defeats the
+/// exact thing C28 puts a whole path in a head for. A head that answers "where
+/// is this" with a path cut off before its last segment has answered nothing,
+/// and has done it while looking like a complete answer.
+///
+/// Nor is the shortening this cap's job. C29 gives `.ptitle` `overflow: hidden;
+/// text-overflow: ellipsis`, which is the mock-up saying that the *label* does
+/// the shortening, visually, at whatever width the head happens to have — and
+/// that is the right place for it, because only the label knows the width. This
+/// constant is not a layout decision that got written in characters.
+///
+/// It is a **resource bound**, and it is here because there has to be one. OSC 7
+/// is program-controlled input in precisely the sense the sanitiser's own note
+/// means: a shell — or something wearing a shell's pipe — can report a folder
+/// ten thousand characters long, and an unbounded head would then pay a text
+/// shaping pass that size on every frame that draws it. `MAX_PATH` is the
+/// principled number to spend there rather than a round one plucked for feeling
+/// large enough: it is the platform's own statement of how long a path gets, so
+/// no path this window can actually be standing in reaches it. C28's "whole
+/// path" is therefore honoured for every path that exists, and the shaping cost
+/// is still bounded for every path that does not.
+const CWD_MAX_CHARS: usize = 260;
+
 /// `cleanTitle` — the mock-up's own sanitiser, applied to text this terminal did
 /// not write.
 ///
@@ -12341,12 +12381,31 @@ const TITLE_MAX_CHARS: usize = 40;
 /// carrying a newline, a backspace or a C1 escape introducer is a title that can
 /// redraw the strip around it.
 fn clean_title(text: &str) -> String {
+    clean_title_capped(text, TITLE_MAX_CHARS)
+}
+
+/// The same sanitiser, told how long the thing it is cleaning is allowed to be.
+///
+/// The cap is the *only* part of "strip the control ranges, trim, cut" that
+/// differs between the two kinds of text this window sanitises — a name, capped
+/// at [`TITLE_MAX_CHARS`], and a pane head's folder, capped at
+/// [`CWD_MAX_CHARS`]. So the cap is the only part that is a parameter, and there
+/// is still exactly one place that knows which characters a title may not
+/// contain and in what order the strip and the trim happen.
+///
+/// Written this way round — one body, two bounds — rather than as a second
+/// function beside [`clean_title`], because a second spelling of the strip is a
+/// second place for a control range to be forgotten, and the whole argument for
+/// sanitising at all is that the ranges are not optional. The trim runs before
+/// the cut, as `cleanTitle` writes it, so a title padded to its cap with spaces
+/// does not spend the cap on them.
+fn clean_title_capped(text: &str, maximum: usize) -> String {
     text.chars()
         .filter(|character| !matches!(character, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
         .collect::<String>()
         .trim()
         .chars()
-        .take(TITLE_MAX_CHARS)
+        .take(maximum)
         .collect()
 }
 
@@ -12365,6 +12424,79 @@ fn cwd_leaf(directory: &Path) -> Option<String> {
     let leaf = if leaf.is_empty() { trimmed } else { leaf };
     (!leaf.is_empty()).then(|| leaf.to_owned())
 }
+
+/// `${s.cwd}` — the folder written entire, which is what C28 puts in a pane head
+/// (mock-up line 4559).
+///
+/// The other half of the pair [`cwd_leaf`] opens, and the two are deliberately
+/// the same shape — `fn(&Path) -> Option<String>` — because they are the two
+/// answers to one question that [`session_title`] takes as a parameter. A head
+/// has a whole bar to fill and answers "where is this"; a label riding the
+/// pointer has one line and answers "which one is this" (mock-up 3304). Two
+/// questions, two lengths, one place each.
+///
+/// `None` on a path that is not UTF-8, matching [`cwd_leaf`] exactly rather than
+/// reaching for `to_string_lossy`: a folder this window cannot spell is a folder
+/// it has not been told the name of, and a head carrying replacement characters
+/// where a path's characters should be would be answering "where is this" with
+/// something that is not where anything is. It falls through to the kind's name,
+/// which is the honest answer and the one the empty layers already give.
+///
+/// No trailing-separator trim here, and that is the difference between the two
+/// beyond their length. `cwd_leaf` trims because it has to *find* a segment and
+/// `C:\` would otherwise yield an empty one. This function is not looking for
+/// anything; it is printing what the shell reported, and if the shell said `C:\`
+/// then `C:\` is where it is standing.
+fn cwd_whole(directory: &Path) -> Option<String> {
+    directory.to_str().map(ToOwned::to_owned)
+}
+
+/// How one reader wants a session's folder written: the rendering, and the
+/// length that rendering is entitled to.
+///
+/// The two travel together in one value because they are **not independently
+/// choosable**, and the pairing is the point. `cwd_leaf` at [`CWD_MAX_CHARS`]
+/// would give a tab strip a two-hundred-and-sixty-character word to fit into a
+/// slot the mock-up sizes for one; `cwd_whole` at [`TITLE_MAX_CHARS`] is the
+/// truncated-mid-path head C28 exists to rule out. Both mismatches are silent —
+/// each looks like a working name until the day a folder is long — so the two
+/// facts are held where picking one picks the other, rather than as two
+/// arguments a call site could get half right.
+///
+/// Named constants rather than a constructor, because there are exactly two
+/// readers and the inventory names both: a pane head ([`CWD_AS_WHOLE_PATH`],
+/// C28, mock-up 4559) and a tab ([`CWD_AS_LEAF`], mock-up 2585). A third would
+/// be a new claim about what a folder is for, and should have to be written down
+/// here beside the two that already are.
+struct CwdRendering {
+    /// The folder as this reader writes it. `None` for a path this window
+    /// cannot spell, which both renderers treat as a folder never named.
+    write: fn(&Path) -> Option<String>,
+    /// The bound the sanitiser cuts that rendering to, in characters.
+    maximum: usize,
+}
+
+/// A tab's folder: one word, capped where a *name* is capped.
+///
+/// "What to show when there is room for one word: the folder you are in"
+/// (mock-up 2585). The output is a single path segment, so it is a name in every
+/// sense [`TITLE_MAX_CHARS`] was chosen for, and it answers to a name's length —
+/// this is the tab exactly as it was before the pane head's bound was widened,
+/// and deliberately so: C28's reversal is a ruling about heads.
+const CWD_AS_LEAF: CwdRendering = CwdRendering {
+    write: cwd_leaf,
+    maximum: TITLE_MAX_CHARS,
+};
+
+/// A pane head's folder: the place entire, capped where a *path* is capped.
+///
+/// C28's `${s.cwd}` (mock-up 4559), bounded by [`CWD_MAX_CHARS`] for the reason
+/// that constant argues at length — a real path is longer than a name's forty
+/// and shorter than anything a hostile OSC 7 could send.
+const CWD_AS_WHOLE_PATH: CwdRendering = CwdRendering {
+    write: cwd_whole,
+    maximum: CWD_MAX_CHARS,
+};
 
 /// The tooltip anchor a window-chrome target answers to, for the four the
 /// caption run is made of.
@@ -12418,16 +12550,17 @@ fn resolve_title(
     program_title: Option<&str>,
     working_directory: Option<&Path>,
 ) -> (String, Option<tooltip::NameSource>) {
-    title_layer(manual_name)
+    title_layer(manual_name, TITLE_MAX_CHARS)
         .map(|text| (text, tooltip::NameSource::Manual))
-        .or_else(|| session_title(program_title, working_directory))
+        .or_else(|| session_title(program_title, working_directory, CWD_AS_LEAF))
         .map_or_else(
             || (DEFAULT_PROFILE_TITLE.to_owned(), None),
             |(text, source)| (text, Some(source)),
         )
 }
 
-/// One layer of a name, sanitised, with an empty answer treated as no answer.
+/// One layer of a name, sanitised at the given bound, with an empty answer
+/// treated as no answer.
 ///
 /// The fall-through is the whole reason this is a function: precedence is
 /// decided on the *sanitised* value, so a program that sets its title to a lone
@@ -12435,12 +12568,27 @@ fn resolve_title(
 /// once so that every stack built out of these layers falls through the same
 /// way — a second spelling of "clean it, then reject the empty" is a second
 /// place for the sanitiser to be forgotten.
-fn title_layer(text: Option<&str>) -> Option<String> {
-    text.map(clean_title).filter(|text| !text.is_empty())
+///
+/// `maximum` is a parameter and not a constant read from inside, because the
+/// layers a stack is made of are not all the same kind of text: a name layer
+/// names [`TITLE_MAX_CHARS`] and a folder layer names [`CWD_MAX_CHARS`]. Passing
+/// it in means each call site states the bound it means at the point it means
+/// it, which is the difference between a cap that was chosen and one that was
+/// inherited from whichever layer happened to be written first.
+///
+/// The sanitiser applies to every layer including the folder, and that is a
+/// security property rather than a formatting one. OSC 7 is as
+/// program-controlled as OSC 2, so a shell reporting a folder made of C1 bytes
+/// is a program trying to redraw the chrome around the head, and a path that
+/// sanitises to nothing must fall through to the layer beneath it exactly as an
+/// empty title does.
+fn title_layer(text: Option<&str>, maximum: usize) -> Option<String> {
+    text.map(|text| clean_title_capped(text, maximum))
+        .filter(|text| !text.is_empty())
 }
 
 /// The two layers a *session* can name itself with: its program's OSC 2 title,
-/// else the leaf of its OSC 7 folder.
+/// else its OSC 7 folder, written the way `place` writes it.
 ///
 /// Factored out of [`resolve_title`] because a pane head asks exactly this
 /// question and a tab asks it as the middle of a longer one. **The user's ruling
@@ -12450,25 +12598,68 @@ fn title_layer(text: Option<&str>) -> Option<String> {
 /// pushing it down would print the tab's name on every one of its panes, which
 /// is the same "one name for several rooms" this whole slice exists to end.
 ///
-/// It also deviates from C28's letter, and the deviation is the user's: C28
-/// writes the *whole* `cwd` into a pane head (mock-up 4559) and this hands back
-/// [`cwd_leaf`], the last segment. A head is a third of a window wide and two
-/// panes under one repository differ in the last segment alone.
+/// **`place` is the one thing the two readers disagree about, and it is a
+/// parameter for exactly that reason.** The disagreement is C28's own: a pane
+/// head writes `${s.cwd}` (mock-up 4559) because it has a whole bar to fill and
+/// is answering "where is this", while a tab has room for one word and takes
+/// `cwdLeaf` — "what to show when there is room for one word: the folder you are
+/// in" (mock-up 2585). So [`TabState::terminal_name`] passes
+/// [`CWD_AS_WHOLE_PATH`] and [`resolve_title`] passes [`CWD_AS_LEAF`], and
+/// everything else about the walk is the same walk.
 ///
 /// One walk with two readers rather than two walks agreeing, exactly as
 /// [`resolve_title`]'s own note argues: a copy would be a second set of
 /// precedence rules to keep in step, and the first thing it would lose is the
-/// sanitiser's fall-through.
+/// sanitiser's fall-through. That argument binds hardest here, where the two
+/// readers genuinely differ, because a difference at one layer is precisely the
+/// pressure that makes forking the walk look reasonable. It is not: the layer
+/// that differs is one function value wide, and the sanitiser, the precedence
+/// order and the [`tooltip::NameSource`] the tab's tooltip reports are all
+/// things the two must never come to differ about.
+///
+/// The provenance handed back is unchanged by `place`, and deliberately so. It
+/// says *which layer spoke*, not how long the answer was, so a head and a tab
+/// standing in the same folder both report [`tooltip::NameSource::Cwd`] — as
+/// they should, because the shell said the same thing to both of them.
 fn session_title(
     program_title: Option<&str>,
     working_directory: Option<&Path>,
+    place: CwdRendering,
 ) -> Option<(String, tooltip::NameSource)> {
-    title_layer(program_title)
+    title_layer(program_title, TITLE_MAX_CHARS)
         .map(|text| (text, tooltip::NameSource::Program))
         .or_else(|| {
-            title_layer(working_directory.and_then(cwd_leaf).as_deref())
-                .map(|text| (text, tooltip::NameSource::Cwd))
+            title_layer(
+                working_directory.and_then(place.write).as_deref(),
+                place.maximum,
+            )
+            .map(|text| (text, tooltip::NameSource::Cwd))
         })
+}
+
+/// A *pane head's* name: its program's OSC 2 title, else its OSC 7 folder
+/// written whole (C28, mock-up 4559), else nothing.
+///
+/// The head's counterpart to [`resolve_title`], and it exists for the same
+/// reason that one does: to be the single place that says which of the two
+/// folder renderings this reader wants. [`session_title`] takes the rendering as
+/// a parameter precisely because its two readers disagree about it, and a
+/// parameter with two legal values is a choice — so the choice is made once,
+/// here, named, rather than at every call site that happens to want a head's
+/// name. A second site passing [`CWD_AS_LEAF`] by hand would be C28's reversal
+/// creeping back in one caller at a time, and nothing would be able to see it
+/// happen.
+///
+/// It is deliberately *not* `#[cfg(test)]`, and that is the load-bearing part.
+/// [`TabState::terminal_name`] and the pins both come through here, so the pins
+/// exercise the wiring the window actually runs instead of restating it; point
+/// this line at [`CWD_AS_LEAF`] and they go red, which is exactly what a pin for
+/// this ruling has to be able to do.
+fn pane_head_title(
+    program_title: Option<&str>,
+    working_directory: Option<&Path>,
+) -> Option<(String, tooltip::NameSource)> {
+    session_title(program_title, working_directory, CWD_AS_WHOLE_PATH)
 }
 
 #[cfg(test)]
@@ -13735,15 +13926,24 @@ mod tests {
         assert_eq!(one.len(), 1);
     }
 
-    /// PIN (C28 as the user re-ruled it): a terminal pane names itself with its
-    /// own program's title, else its own folder's **leaf**, else nothing.
+    /// PIN (C28, by its letter): a terminal pane names itself with its own
+    /// program's title, else its own folder **whole**, else nothing.
     ///
-    /// The deviation from the inventory is deliberate and recorded on
-    /// [`session_title`]: C28's letter writes the whole `cwd` into a pane head
-    /// (mock-up 4559), and the ruling replaces that with the last segment. The
-    /// second assertion is the one that states it — two panes under one
-    /// repository share every character of the path but the last, so a head
-    /// showing the path answers "which pane is this" with the part they agree on.
+    /// C28 writes `${s.cwd}` into `.ptitle` (mock-up 4559) — the entire path —
+    /// and it does so in deliberate contrast with the drag ghost and the drop
+    /// preview, which write `cwdLeaf(s)` (mock-up 3304). An earlier stage of this
+    /// slice recorded a user ruling narrowing the head to the leaf as well; the
+    /// user has since overturned that as a typo in their own work order, so the
+    /// inventory's letter is authoritative again and the contrast is real rather
+    /// than degenerate. The second assertion is the one that states it: a head
+    /// has a whole bar to fill and answers "where is this" in full, while a label
+    /// riding the pointer has one line and answers "which one is this".
+    ///
+    /// The `NameSource` handed back with the path is still `Cwd` and not some
+    /// third provenance, because the layer that won is the same layer: the tab's
+    /// tooltip reports *which* layer spoke, never how long the answer it gave
+    /// was. Only the rendering of the folder differs between the two readers, and
+    /// that is exactly the one thing [`session_title`] takes as a parameter.
     ///
     /// The tab's `manual_name` is deliberately not in this stack: it is a
     /// tab-level override and printing it on every pane would be one name for
@@ -13751,45 +13951,58 @@ mod tests {
     /// assertion, where the same folder resolves the same way whatever the tab
     /// is called — `session_title` cannot see the tab at all.
     ///
-    /// Red gate: point the second layer at the full path instead of [`cwd_leaf`]
-    /// and the second assertion fails; drop the sanitiser's fall-through and the
-    /// control-character case names the pane after a program that said nothing.
+    /// Red gate: point the head's place layer back at [`cwd_leaf`] instead of
+    /// [`cwd_whole`] and the second assertion fails; drop the sanitiser's
+    /// fall-through and the control-character case names the pane after a
+    /// program that said nothing.
     #[test]
-    fn a_pane_names_itself_by_its_program_then_by_its_folders_leaf() {
+    fn a_pane_names_itself_by_its_program_then_by_its_whole_folder() {
         let cwd = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app");
+        let whole = r"D:\Developer\BetterTerminal\crates\bt-app".to_owned();
 
         // A title beats a folder: the program has said something more specific
         // than where it happens to be standing.
         assert_eq!(
-            session_title(Some("cargo build"), Some(cwd)),
+            pane_head_title(Some("cargo build"), Some(cwd)),
             Some(("cargo build".to_owned(), tooltip::NameSource::Program))
         );
-        // With no title it is the folder's LEAF, not the path.
+        // With no title it is the WHOLE folder, not its last segment — C28's own
+        // `${s.cwd}`, the answer to "where is this".
         assert_eq!(
-            session_title(None, Some(cwd)),
-            Some(("bt-app".to_owned(), tooltip::NameSource::Cwd)),
-            "the last segment; the path is what two sibling panes agree on"
+            pane_head_title(None, Some(cwd)),
+            Some((whole.clone(), tooltip::NameSource::Cwd)),
+            "the whole path; the leaf is what a label riding the pointer says"
         );
         // A title that sanitises away has said nothing, and falls through rather
         // than blanking the head — the impersonation the sanitiser refuses.
         assert_eq!(
-            session_title(Some("\u{1b}\u{7}\u{8}"), Some(cwd)),
-            Some(("bt-app".to_owned(), tooltip::NameSource::Cwd)),
+            pane_head_title(Some("\u{1b}\u{7}\u{8}"), Some(cwd)),
+            Some((whole.clone(), tooltip::NameSource::Cwd)),
             "an empty sanitised layer is not an answer"
         );
         assert_eq!(
-            session_title(Some("   "), Some(cwd)),
-            Some(("bt-app".to_owned(), tooltip::NameSource::Cwd))
+            pane_head_title(Some("   "), Some(cwd)),
+            Some((whole.clone(), tooltip::NameSource::Cwd))
+        );
+        // The path layer is sanitised on the same terms, because OSC 7 is as
+        // program-controlled as OSC 2: a folder that sanitises to nothing has
+        // named no place, and falls through exactly as an empty title does.
+        assert_eq!(
+            pane_head_title(None, Some(Path::new("\u{1b}\u{7}"))),
+            None,
+            "a path that sanitises away is not a place either"
         );
         // Neither layer: nobody has said anything, and the caption falls back to
         // the seat's kind where it is drawn rather than to a guess here.
-        assert_eq!(session_title(None, None), None);
-        assert_eq!(session_title(Some(""), None), None);
+        assert_eq!(pane_head_title(None, None), None);
+        assert_eq!(pane_head_title(Some(""), None), None);
 
-        // Two panes, two answers — the whole point of resolving per leaf.
+        // Two panes, two answers — the whole point of resolving per leaf. They
+        // differ in the last segment, and at the head's length they carry the
+        // shared prefix that says which tree the two of them are in.
         assert_ne!(
-            session_title(None, Some(Path::new(r"C:\repo\crates\bt-app"))),
-            session_title(None, Some(Path::new(r"C:\repo\crates\bt-term"))),
+            pane_head_title(None, Some(Path::new(r"C:\repo\crates\bt-app"))),
+            pane_head_title(None, Some(Path::new(r"C:\repo\crates\bt-term"))),
         );
 
         // And the tab's own name is not in this stack at all: `resolve_title`
@@ -13800,9 +14013,148 @@ mod tests {
             "the tab wears the override"
         );
         assert_eq!(
-            session_title(None, Some(cwd)).map(|(name, _)| name),
-            Some("bt-app".to_owned()),
+            pane_head_title(None, Some(cwd)).map(|(name, _)| name),
+            Some(whole),
             "the pane under it does not"
+        );
+    }
+
+    /// PIN: the head's folder is bounded by [`CWD_MAX_CHARS`] and by nothing
+    /// shorter.
+    ///
+    /// Two assertions and they are opposites, because a cap has two ways to be
+    /// wrong and only both of them together say which one this is. The first is
+    /// the failure the reversal exists to prevent: an ordinary working directory
+    /// — longer than [`TITLE_MAX_CHARS`], as nearly every real one is — must
+    /// arrive at the head with every character it had. Cap the path layer at the
+    /// name layer's forty and this is what breaks, silently, while a head that
+    /// merely *looks* full keeps drawing.
+    ///
+    /// The second is the bound itself. OSC 7 is program-controlled, so "print it
+    /// whole" cannot mean "print whatever arrives": an unbounded head shapes
+    /// whatever length a program chose, on every frame it is drawn. The path
+    /// built here is a legal one — real separators, real segments — rather than
+    /// a run of one character, because a bound that only holds against obvious
+    /// junk is not holding against the input that would actually arrive.
+    ///
+    /// Red gate: hand the path layer `TITLE_MAX_CHARS` and the first assertion
+    /// fails at forty; drop the maximum entirely and the second stops bounding
+    /// anything.
+    #[test]
+    fn a_pane_heads_folder_is_capped_at_max_path_and_not_at_a_names_forty() {
+        let ordinary = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app\src");
+        let ordinary_text = ordinary.to_str().expect("a test path is UTF-8");
+        assert!(
+            ordinary_text.chars().count() > TITLE_MAX_CHARS,
+            "the fixture only proves anything if a name's cap would have bitten"
+        );
+        assert_eq!(
+            pane_head_title(None, Some(ordinary)),
+            Some((ordinary_text.to_owned(), tooltip::NameSource::Cwd)),
+            "an ordinary path is not cut at all — C28's whole path, whole"
+        );
+
+        // A path no filesystem can hold, which is what a hostile or broken OSC 7
+        // looks like. It is cut to the bound and the head's shaping cost with
+        // it.
+        let segment = "directory";
+        let long = format!(
+            r"D:\{}",
+            std::iter::repeat_n(segment, 200)
+                .collect::<Vec<_>>()
+                .join("\\")
+        );
+        assert!(long.chars().count() > CWD_MAX_CHARS);
+        let (named, source) =
+            pane_head_title(None, Some(Path::new(&long))).expect("a long path is still a place");
+        assert_eq!(
+            named.chars().count(),
+            CWD_MAX_CHARS,
+            "`MAX_PATH` characters, and the next one is not a folder"
+        );
+        assert_eq!(source, tooltip::NameSource::Cwd);
+        assert!(
+            long.starts_with(&named),
+            "cut from the end, so what survives is the path it really was"
+        );
+
+        // And the two bounds stay two: a *name* is still capped where a name has
+        // always been capped, so widening the path layer did not widen the tab.
+        assert_eq!(
+            display_title(None, Some(&"x".repeat(CWD_MAX_CHARS)), None)
+                .chars()
+                .count(),
+            TITLE_MAX_CHARS,
+            "a program title is a name, and forty characters is a name's length"
+        );
+    }
+
+    /// One OSC 7 report, the way a shell writes it.
+    ///
+    /// Built rather than borrowed, because there is no way to hand a
+    /// [`DualPlaneSession`] a working directory except the way a shell does: the
+    /// field is private to `bt-term` and is only ever written by the parser
+    /// acting on a `file://` URI. That is a feature for this pin — it means the
+    /// path under test travels the whole road a real one travels, escape
+    /// sequence and percent-decoding included, rather than being posted into the
+    /// middle of it.
+    fn osc7_report(path: &str) -> String {
+        format!("\u{1b}]7;file:///{}\u{7}", path.replace('\\', "/"))
+    }
+
+    /// PIN (C28, end to end): the names a *tab* hands the chrome are the whole
+    /// folders its shells reported.
+    ///
+    /// The other C28 pins in this module test the walk; this one tests the
+    /// **wiring**, and the difference is the whole reason it exists. Nothing
+    /// above it can tell [`TabState::terminal_name`] from a version of itself
+    /// that asks for the tab's rendering instead of the head's — every one of
+    /// them names [`pane_head_title`] directly, so all of them stay green while
+    /// the window prints leaves. This one goes through the seat map a real frame
+    /// reads, from two sessions that were told where they stand the only way a
+    /// session can be told: an OSC 7 escape, parsed.
+    ///
+    /// Two panes under one repository, so the assertion cannot pass on the
+    /// strength of two unlike words. They agree on every character but the last
+    /// segment, which is precisely the case the reversed ruling argued the leaf
+    /// was needed for — and C28's answer is that the head has the room, so it
+    /// says the whole thing and the *label* does the shortening (C29).
+    ///
+    /// Red gate: point [`pane_head_title`] at [`CWD_AS_LEAF`], or have
+    /// `terminal_name` resolve through the tab's stack, and both entries collapse
+    /// to their last segment.
+    #[test]
+    fn a_tabs_terminal_names_are_the_whole_folders_its_shells_reported() {
+        let left_path = r"D:\Developer\BetterTerminal\crates\bt-app";
+        let right_path = r"D:\Developer\BetterTerminal\crates\bt-term";
+        let tab = cross_tab(1, &[&osc7_report(left_path), &osc7_report(right_path)]);
+        let [left, right] = tab.seats.terminals()[..] else {
+            panic!("a two-pane cross tab holds two terminal seats");
+        };
+
+        let names = tab.terminal_names();
+        assert_eq!(
+            names.get(&left).map(String::as_str),
+            Some(left_path),
+            "the head over a shell standing here says where it stands, whole"
+        );
+        assert_eq!(names.get(&right).map(String::as_str), Some(right_path));
+        assert_eq!(
+            tab.terminal_name(left).as_deref(),
+            Some(left_path),
+            "and the per-seat lookup agrees with the map built out of it"
+        );
+
+        // The contrast C28 is a ruling about, at the far end of the wiring: the
+        // chrome is handed these names and cuts its own short ones from them.
+        assert_eq!(
+            seats::seat_short_caption(
+                bt_layout::SeatKind::Terminal,
+                None,
+                names.get(&left).map(String::as_str),
+            ),
+            "bt-app",
+            "3304: the label riding the pointer still gets the one word"
         );
     }
 
