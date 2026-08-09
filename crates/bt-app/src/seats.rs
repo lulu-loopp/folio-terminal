@@ -441,7 +441,92 @@ impl Seats {
             tree,
             layout,
             landed,
+            next_seat: ids.seat,
+            next_split: ids.split,
         })
+    }
+
+    /// **U7 — the drop, committed.**
+    ///
+    /// The whole of it is `self.tree = plan.tree`, and that is the point. U6 built
+    /// the tree by running the very [`Edit`] chain a drop would run, on a copy;
+    /// letting go adopts that copy rather than running the chain a second time. So
+    /// there is no question of the preview and the commit agreeing — they are one
+    /// object, and D4's pin ("the rectangles the preview promised are the
+    /// rectangles the drop delivers") holds by construction rather than by two
+    /// code paths being kept in step.
+    ///
+    /// Re-running the chain here would be the same arithmetic performed twice
+    /// against a tree that may have moved underneath it, which is the shape of
+    /// every drift M155 is a bug report about.
+    ///
+    /// **Two refusals, and neither is a fallback.**
+    ///
+    /// A plan with no layout was refused (H93/M147) and refused means it does not
+    /// land — the dashed box already told the user so, and committing behind it
+    /// would make the box a lie in the one direction that costs a pane.
+    ///
+    /// A plan whose tree no longer holds [`Self::terminal`] is refused because
+    /// this type would stop being able to answer its own question. `terminal` is
+    /// where the shell draws (L1); a `Seats` that names a seat its tree does not
+    /// have is not a degraded `Seats`, it is one that cannot be solved against.
+    /// Nothing the gesture layer can aim at produces such a tree today — a swap
+    /// carries whole seats, so identity travels with content — and the day a drop
+    /// can take the terminal seat away, this is where it will be turned away.
+    ///
+    /// **Focus (D43).** The seat the accent box covered is the seat that gets the
+    /// focus: an edge or a rim gives it to the leaf that just landed, and a centre
+    /// gives it to the place you dropped on, which is where the thing in your hand
+    /// now is. Those are two sentences in the mock-up (3543 and 3555) and one rule
+    /// here, because [`DropPlan::landed`] already answers both — focus goes where
+    /// the promise was drawn.
+    ///
+    /// D44 — a tab merging in keeps *its own* focused leaf — is not this rule and
+    /// is not written here. It needs the arriving layout's focus carried across
+    /// the renumbering, and the merge it belongs to cannot be committed by this
+    /// build at all (see `tab_can_host`).
+    ///
+    /// Answers the seat that now has focus, or `None` when nothing was adopted.
+    pub fn adopt_drop(&mut self, plan: DropPlan) -> Option<SeatId> {
+        if !plan.fits() || !plan.tree.contains(self.terminal) {
+            return None;
+        }
+        let focus = *plan.landed.first()?;
+        debug_assert!(
+            plan.tree.contains(focus),
+            "D43: the box was drawn on a seat the tree does not have"
+        );
+        self.tree = plan.tree;
+        // The identities the plan minted are the identities that landed. Re-
+        // deriving them from the tree would be a second opinion about which names
+        // are spent, and a name handed out twice is a `find_seat` answering about
+        // the wrong pane.
+        self.next_seat = plan.next_seat;
+        self.next_split = plan.next_split;
+        self.focus = focus;
+        Some(focus)
+    }
+
+    /// `detachLeaf`'s two halves (N157): what leaves, and what stays.
+    ///
+    /// The mock-up's tear-out is one call that answers with the detached leaf and
+    /// mutates the tree it came from; both halves are returned here instead,
+    /// because the caller's first question is whether the *pair* is admissible —
+    /// a tab is not just a tree, and asking after the edit has happened is asking
+    /// too late.
+    ///
+    /// `None` when the seat is not in this tree, or when it is the only one: G84
+    /// forbids emptying a tree, so the last pane has nowhere to be torn to.
+    pub fn tear_out(
+        &self,
+        metrics: &SeatMetrics,
+        seat: SeatId,
+    ) -> Option<(LayoutNode, LayoutNode)> {
+        let leaving = LayoutNode::seat(self.tree.find_seat(seat)?.clone());
+        let staying = apply(&self.tree, metrics, &Edit::CloseSeat { target: seat })
+            .ok()?
+            .tree;
+        Some((leaving, staying))
     }
 }
 
@@ -483,7 +568,14 @@ pub struct DropPlan {
     pub layout: Option<SeatLayout>,
     /// The seats the accent box covers — one leaf, or every leaf of an arriving
     /// tab's layout.
+    ///
+    /// Also where the focus goes when the drop lands (D43): the promise is drawn
+    /// on the seat you are about to be in.
     pub landed: Vec<SeatId>,
+    /// The seat and split names this plan spent, so the commit inherits the
+    /// bookkeeping rather than re-deriving it. See [`Seats::adopt_drop`].
+    next_seat: u64,
+    next_split: u64,
 }
 
 impl DropPlan {
@@ -492,6 +584,18 @@ impl DropPlan {
     #[must_use]
     pub fn fits(&self) -> bool {
         self.layout.is_some()
+    }
+
+    /// Turn a buildable plan down (M147).
+    ///
+    /// Refusal is the *absence* of rectangles rather than a flag beside them, for
+    /// the reason [`Self::layout`] states: a refused plan's geometry is an answer
+    /// to a question the drop will never ask. So a caller with a reason of its own
+    /// to turn a drop away says so by taking the rectangles off the plan, and
+    /// everything downstream — the dashed box, the missing caption, the release
+    /// that goes home — follows from the one fact without being told twice.
+    pub fn refuse(&mut self) {
+        self.layout = None;
     }
 }
 
@@ -11545,6 +11649,447 @@ mod drop_plan_tests {
         assert!(
             !filled(true),
             "the refused box is an outline and nothing else"
+        );
+    }
+
+    // ------------------------------------------- U7: letting go (L136-L140) --
+
+    /// **The pin the whole slice is for: the tree that lands is the tree that was
+    /// promised, object for object.**
+    ///
+    /// U6 already showed the preview's rectangles equal a fresh solve of the
+    /// planned tree. What is new is that the *window* now holds that tree — not a
+    /// tree an equivalent chain rebuilt, the same one — so the promise and the
+    /// result cannot be two answers even in principle.
+    ///
+    /// Red gate (mutation): make `adopt_drop` re-run the edit chain instead of
+    /// taking `plan.tree`, and this still passes — which is the point of also
+    /// asserting the rectangles. Make it run the chain against the *live* tree
+    /// after some other edit landed, and the rectangles part.
+    #[test]
+    fn the_drop_installs_the_very_tree_the_preview_promised() {
+        for aim in [
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Top),
+            LayoutAim::SeatCentre(SeatId(3)),
+            LayoutAim::Rim(DropEdge::Left),
+            LayoutAim::Rim(DropEdge::Bottom),
+        ] {
+            let mut seats = window(row(1, row(2, term(1), term(2)), term(3)));
+            let planned = plan(&seats, aim, DropCargo::Pane(SeatId(1)));
+            let promised = planned
+                .layout
+                .clone()
+                .expect("every one of these fits")
+                .logical_rects();
+            let expected_tree = planned.tree.clone();
+            assert!(
+                seats.adopt_drop(planned).is_some(),
+                "{aim:?}: a plan that fits must land"
+            );
+            assert_eq!(seats.tree(), &expected_tree, "{aim:?}");
+            assert_eq!(
+                live(&seats).logical_rects(),
+                promised,
+                "{aim:?}: the window solved to something the preview never drew"
+            );
+        }
+    }
+
+    /// **D43 — the focus goes where the box was drawn.**
+    ///
+    /// An edge and a rim give it to the leaf that just landed; a centre gives it
+    /// to the place you dropped on, which under this crate's swap — whole seats
+    /// change places, so a seat's id travels with its content — is again the seat
+    /// that was in your hand. Two sentences in the mock-up (3543, 3555), one rule
+    /// here, and the rule is `landed`.
+    ///
+    /// Red gate: focus the target instead (`aim`'s seat) and the first two arms
+    /// fail; leave the focus where it was and all three do.
+    #[test]
+    fn the_focus_follows_the_pane_that_was_dropped() {
+        for aim in [
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+            LayoutAim::Rim(DropEdge::Bottom),
+            LayoutAim::SeatCentre(SeatId(3)),
+        ] {
+            let mut seats = window(row(1, row(2, term(1), term(2)), term(3)));
+            seats.focus = SeatId(2);
+            let planned = plan(&seats, aim, DropCargo::Pane(SeatId(1)));
+            assert_eq!(
+                seats.adopt_drop(planned),
+                Some(SeatId(1)),
+                "{aim:?}: the hand held seat 1, so seat 1 is where you end up"
+            );
+            assert_eq!(seats.focus(), SeatId(1), "{aim:?}");
+        }
+    }
+
+    /// **L138 — a centre drop trades two whole seats, and rewrites no ratio.**
+    ///
+    /// `F(CenterSwap) = ∅` (T220), and the honest reading of that is about
+    /// *intent*, not pixels: no split's ratio is touched, in either case below.
+    ///
+    /// **The two cases are not the same picture, and T222 is why.** Swap two flex
+    /// panes and nothing moves at all — that is M153's "a replace moves nobody",
+    /// the reason a replace must not draw a dashed outline over every pane in the
+    /// window. Swap a *files* column with a terminal and the rectangles do change,
+    /// because a fixed column's width travels with the seat and the seat has
+    /// changed places: the fixed address moved inboard and the run redistributed
+    /// what was left. No ratio was rewritten to make that happen. T222 states this
+    /// exactly — the theorem does not promise the pixels in a run hold still, only
+    /// that nobody quietly re-decided the layout.
+    ///
+    /// The files case is also what catches a swap of payloads alone: leave the ids
+    /// at their positions and the kinds still land correctly, but `terminal()`
+    /// starts naming the files pane and the shell draws into the navigation.
+    #[test]
+    fn a_centre_drop_swaps_the_pair_and_rewrites_no_ratio() {
+        let mut seats = window(row(1, files(2), row(2, term(1), term(3))));
+        let before_ratios = seats.tree().ratios();
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatCentre(SeatId(2)),
+            DropCargo::Pane(SeatId(1)),
+        );
+        assert!(seats.adopt_drop(planned).is_some());
+        let kinds: Vec<(SeatId, SeatKind)> = seats
+            .tree()
+            .seats_in_order()
+            .iter()
+            .map(|seat| (seat.id, seat.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                (SeatId(1), SeatKind::Terminal),
+                (SeatId(2), SeatKind::Files),
+                (SeatId(3), SeatKind::Terminal),
+            ],
+            "the terminal took the outer slot and the files column went inboard"
+        );
+        assert_eq!(
+            seats.terminal(),
+            SeatId(1),
+            "identity travels with content, so the shell still knows its seat"
+        );
+        assert_eq!(
+            seats.tree().ratios(),
+            before_ratios,
+            "F(CenterSwap) = ∅: the fixed column moved, but nobody re-decided a share"
+        );
+
+        // M153, on the case the mock-up's sentence is about: two flex panes trade
+        // and not one rectangle in the window is different.
+        let mut flex = window(row(1, term(1), row(2, term(2), term(3))));
+        let before = live(&flex).logical_rects();
+        let planned = plan(
+            &flex,
+            LayoutAim::SeatCentre(SeatId(3)),
+            DropCargo::Pane(SeatId(1)),
+        );
+        assert!(flex.adopt_drop(planned).is_some());
+        assert_eq!(
+            live(&flex).logical_rects(),
+            before,
+            "taking a flex seat's place moves no boxes at all"
+        );
+    }
+
+    /// **T220/T221 — a drop rewrites the run it lands in and nothing else.**
+    ///
+    /// Theorem N is asserted inside `bt_layout::apply` for each edit; what this
+    /// pins is the *committed* result of a whole chain. Two columns each holding a
+    /// stack: a pane dropped into the left column's stack re-divides that stack
+    /// and the root, because leaving and joining both rebalance — and the right
+    /// column's own stack keeps its ratio to the bit.
+    ///
+    /// Red gate: rebalance from the root down instead of from the run, and the
+    /// untouched split moves.
+    #[test]
+    fn a_drop_leaves_the_ratios_of_runs_it_never_entered_alone() {
+        let mut seats = window(row(1, col(2, term(1), term(2)), col(3, term(3), term(4))));
+        // Give the far column a ratio no rebalance would ever choose, so that a
+        // stray rewrite cannot coincidentally land on the same number.
+        let untouched = SplitId(3);
+        seats
+            .drag_divider(
+                &metrics(),
+                untouched,
+                Ratio::clamped_from_ppm(300_000),
+                view().extent(Axis::Col),
+            )
+            .expect("a stack of two may be divided");
+        let before = seats
+            .tree()
+            .ratios()
+            .into_iter()
+            .find(|(id, _)| *id == untouched)
+            .expect("the split is there");
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Bottom),
+            DropCargo::Pane(SeatId(1)),
+        );
+        assert!(seats.adopt_drop(planned).is_some());
+        let after = seats
+            .tree()
+            .ratios()
+            .into_iter()
+            .find(|(id, _)| *id == untouched)
+            .expect("the split survived a drop in another column");
+        assert_eq!(before, after, "a run nobody aimed at kept its intent");
+    }
+
+    /// **M147 — a refused plan does not land, and refusing does not damage the
+    /// tree it refused.**
+    ///
+    /// The refusal is the absence of rectangles, so `adopt_drop` reads exactly
+    /// what the dashed box read. Both routes to a refusal are covered: one the
+    /// geometry reached on its own (H93 — a fourth column in a window too narrow
+    /// to hold four), and one a caller imposed (`refuse`, which is how the tab
+    /// model turns a drop down without inventing a second flag).
+    ///
+    /// Red gate: drop the `fits()` guard and the first assertion fails with a
+    /// layout whose panes are under `MIN_PANE_W`.
+    #[test]
+    fn a_refused_plan_does_not_land() {
+        let narrow = logical_viewport(560, H, scale_ppm(DPI));
+        let mut seats = window(row(1, row(2, term(1), term(2)), term(3)));
+        let before = seats.tree().clone();
+        let refused = seats
+            .plan_drop(
+                &metrics(),
+                narrow,
+                LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+                DropCargo::Pane(SeatId(1)),
+            )
+            .expect("the aim names seats this tree has");
+        assert!(!refused.fits(), "three terminals do not fit in 560px");
+        assert_eq!(seats.adopt_drop(refused), None);
+        assert_eq!(seats.tree(), &before, "a refusal costs the tree nothing");
+
+        let mut imposed = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+            DropCargo::Pane(SeatId(1)),
+        );
+        assert!(imposed.fits(), "it fits at 1600px");
+        imposed.refuse();
+        assert_eq!(seats.adopt_drop(imposed), None);
+        assert_eq!(seats.tree(), &before);
+    }
+
+    /// **The names a plan spent are spent.**
+    ///
+    /// A plan mints split ids from the window's counters; adopting it has to take
+    /// the counters too, or the next drop hands out a name the tree is already
+    /// using and `path_to_split` starts answering about the wrong divider.
+    ///
+    /// **The tree has to keep the split the first drop made**, or a stale counter
+    /// cannot collide with anything and the test passes while the bug is present.
+    /// That is why this starts from three seats rather than two: with two, the
+    /// pluck takes the only split out of the tree before the new one goes in, so
+    /// the same name is free again and re-using it is harmless. With three, the
+    /// first drop leaves a split standing and the second drop's name lands on top
+    /// of it.
+    ///
+    /// Red gate: leave `next_split` alone in `adopt_drop` and the second plan
+    /// re-uses the first one's id, which this catches as a duplicate in `ratios`.
+    #[test]
+    fn the_commit_spends_the_names_the_plan_handed_out() {
+        let mut seats = window(row(1, row(2, term(1), term(2)), term(3)));
+        let first = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Bottom),
+            DropCargo::Pane(SeatId(1)),
+        );
+        assert!(seats.adopt_drop(first).is_some());
+        let second = plan(
+            &seats,
+            LayoutAim::Rim(DropEdge::Left),
+            DropCargo::Pane(SeatId(2)),
+        );
+        let ids: Vec<SplitId> = second.tree.ratios().into_iter().map(|(id, _)| id).collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(ids.len(), unique.len(), "a split id was handed out twice");
+    }
+
+    /// **N157's two halves, and G84 underneath them.**
+    ///
+    /// `tear_out` answers with the pane that would leave and the tree that would
+    /// stay, so a caller can judge the *pair* before anything is edited. The last
+    /// pane in a tree has no answer at all: a tree may not be emptied.
+    ///
+    /// Red gate: return only the detached leaf and the caller cannot ask whether
+    /// what remains is still a tab, which is the question that decides this
+    /// gesture today.
+    #[test]
+    fn tearing_a_pane_out_answers_with_both_halves_and_refuses_the_last_one() {
+        let seats = window(row(1, files(2), row(2, term(1), term(3))));
+        let (leaving, staying) = seats
+            .tear_out(&metrics(), SeatId(2))
+            .expect("a tree of three may lose one");
+        assert_eq!(leaving, files(2));
+        assert_eq!(
+            staying.seats_in_order().len(),
+            2,
+            "what stays is the rest of the tree, sibling promoted"
+        );
+        assert!(!staying.contains(SeatId(2)));
+
+        let lone = window(term(1));
+        assert_eq!(
+            lone.tear_out(&metrics(), SeatId(1)),
+            None,
+            "G84: the last pane has nowhere to be torn to"
+        );
+        assert_eq!(
+            seats.tear_out(&metrics(), SeatId(99)),
+            None,
+            "a seat this tree does not have"
+        );
+    }
+
+    /// **`Seats` will not adopt a tree that has lost the seat its shell draws
+    /// in.**
+    ///
+    /// `terminal` is a geometry identity (L1) and the type is unanswerable
+    /// without it. Nothing the gesture layer aims at produces such a tree — a
+    /// swap carries whole seats — so this is reached by asking directly, which is
+    /// also how it will be reached the day a replace can take the terminal away.
+    ///
+    /// Red gate: drop the `contains` guard and the window keeps a `terminal` its
+    /// tree does not hold, which `solve` then answers about a seat that is gone.
+    #[test]
+    fn a_tree_without_this_window_s_terminal_is_not_adopted() {
+        let mut seats = window(row(1, term(1), term(2)));
+        let before = seats.tree().clone();
+        let planned = seats
+            .plan_drop(
+                &metrics(),
+                view(),
+                LayoutAim::SeatCentre(SeatId(1)),
+                DropCargo::Layout(&term(7)),
+            )
+            .expect("a tab may be aimed at a centre");
+        assert!(
+            planned.fits(),
+            "the geometry is fine — it is the identity that is not"
+        );
+        assert_eq!(seats.adopt_drop(planned), None);
+        assert_eq!(seats.tree(), &before);
+    }
+
+    /// **The gesture on the tab this build can actually make.**
+    ///
+    /// Everything above works in trees of terminals because the tree operations
+    /// do not look inside a leaf (A4/R190). This one is the shape a running window
+    /// is in: one shell and the preview seat beside it, reached the way the window
+    /// reaches it. The preview is dragged to the terminal's *left* — out of the
+    /// fixed right address it was created at — which is the point R192 turns on:
+    /// "rightmost" is where a preview *lands* when nobody said otherwise, not a
+    /// cell it is confined to. §7.1.1 says the same thing from the other side —
+    /// a drag aimed at an edge lands where it was aimed.
+    #[test]
+    fn a_preview_dragged_off_its_ruled_address_stays_where_it_was_put() {
+        let mut seats = Seats::lone_terminal();
+        assert!(seats.toggle_preview(&metrics()));
+        let preview = seats.preview().expect("the seat just opened");
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(seats.terminal(), DropEdge::Left),
+            DropCargo::Pane(preview),
+        );
+        assert_eq!(seats.adopt_drop(planned), Some(preview));
+        let kinds: Vec<SeatKind> = seats
+            .tree()
+            .seats_in_order()
+            .iter()
+            .map(|seat| seat.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![SeatKind::Preview, SeatKind::Terminal],
+            "the preview took the left column it was aimed at"
+        );
+        assert_eq!(
+            seats.terminal(),
+            SeatId(1),
+            "the shell's seat is where the shell is, wherever that seat now sits"
+        );
+        assert_eq!(
+            kinds
+                .iter()
+                .filter(|kind| **kind == SeatKind::Terminal)
+                .count(),
+            1,
+            "and the tab still holds exactly one of them"
+        );
+    }
+
+    /// **Q183/Q184/T217 — what a drop decided survives the disk.**
+    ///
+    /// The tree's shape, every ppm ratio and the focused leaf all go through the
+    /// channel that already carries them, so the pin is a round trip rather than a
+    /// list of fields: save the tree a drop made, read it back, solve it, and the
+    /// rectangles must be the ones the window was showing.
+    ///
+    /// Compared in tree order rather than by id, because Q186/§3.2 re-mint every
+    /// identity on the way back — the handle is not persisted and the *order* is
+    /// what is structural, which is the same reason Q184 stores the focus as an
+    /// index.
+    ///
+    /// Red gate: write the ratio as a decimal string or a float anywhere on the
+    /// path and the multi-column comparison parts; keep the focus by id instead of
+    /// by position and the last assertion lands on the wrong leaf.
+    #[test]
+    fn the_layout_a_drop_made_comes_back_the_same_from_disk() {
+        let mut seats = window(row(1, term(1), row(2, term(2), term(3))));
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Left),
+            DropCargo::Pane(SeatId(1)),
+        );
+        assert!(seats.adopt_drop(planned).is_some());
+        let in_order = |seats: &Seats| -> Vec<Option<LogicalRect>> {
+            live(seats)
+                .rects
+                .iter()
+                .map(|placement| placement.rect)
+                .collect()
+        };
+        let before = in_order(&seats);
+        let focus_index = seats
+            .tree()
+            .seats_in_order()
+            .iter()
+            .position(|seat| seat.id == seats.focus())
+            .expect("the focus is a seat this tree has");
+
+        let seed = TermLeafV1 {
+            profile_id: "pwsh".to_owned(),
+            cwd: r"C:\Users".to_owned(),
+            manual_name: None,
+        };
+        let mut revived =
+            Seats::from_persisted(&seats.to_persisted(&seed)).expect("the tree has a terminal");
+        revived.restore_focus_token(&format!("leaf-{focus_index}"));
+        assert_eq!(
+            in_order(&revived),
+            before,
+            "the layout came back as something else"
+        );
+        assert_eq!(
+            revived
+                .tree()
+                .seats_in_order()
+                .iter()
+                .position(|seat| seat.id == revived.focus()),
+            Some(focus_index),
+            "the pane you were left in is the pane you come back to"
         );
     }
 }

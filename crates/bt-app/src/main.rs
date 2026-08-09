@@ -3411,6 +3411,16 @@ struct PlanInputs {
 enum DragRelease {
     /// A landing answered, so the landing decides.
     Commit,
+    /// **U7** — a landing in the *layout* answered: adopt the tree the plan
+    /// built (L136-L140, G81-G83).
+    ///
+    /// Separate from [`Self::Commit`] because the two words mean opposite things
+    /// about work already done. A strip reorder was applied live, slot by slot,
+    /// as the tab travelled: committing it is letting it stand. A layout drop has
+    /// changed nothing at all — the tree was untouched for the whole gesture —
+    /// so this is the release that does the work rather than the one that keeps
+    /// it.
+    Land,
     /// **J120.** Nothing answered, so the carried thing slides back to the slot
     /// the drag began in, displaced neighbours travelling home with it.
     Home,
@@ -3461,25 +3471,71 @@ fn landing_for_aim(source: DragSource, aim: seats::LayoutAim) -> Option<DropLand
     (source != DragSource::Pane(target)).then_some(landing)
 }
 
-/// **U5's own deferral, written where the compiler will police it.** The four
-/// landings U5 added are geometry that has found its target and has no verb to
-/// perform on it yet: the tearing (N157), the merge (N159), the replace (N161)
-/// and the swap (L138) are U7's, and until they exist a release over one of them
-/// must leave the tree exactly as it found it. Home is the honest outcome — the
-/// gesture completed and there was nowhere for it to be — and it is the same
-/// outcome J120 already gives, so nothing here is a special case waiting to be
-/// removed. What U7 removes is the arm, not a workaround.
+/// The mock-up's commit table (7202-7231), as one function.
+///
+/// **Three answers for five landings, and the grouping is the table's own.** A
+/// strip reorder has already happened and is kept; the three landings inside the
+/// layout are performed now; a tear-out and an empty hand are both "nowhere to
+/// be".
+///
+/// **Why [`DropLanding::StripExtract`] sits with `None` and not with `Land`.**
+/// N157's tear-out is the one landing here that ends with a pane in a *different
+/// tab*, and a tab in this build is a tree plus exactly one shell — `TabState`
+/// holds one `PtySession`, [`seats::Seats`] names one `terminal` seat, and
+/// `Seats::to_persisted` takes one seed for the whole tree because (its own
+/// words) "this window runs one shell per tab". Tearing a pane out therefore
+/// produces either a tab with no shell or a tab with two, and I106 is the crash
+/// report for the first of those: a pane that becomes a terminal with no session.
+///
+/// So it goes home — but *silently going home is not the whole answer*, and the
+/// other half is [`Runtime::survey_strip`], which does not offer the landing at
+/// all when the pair of tabs it would make is not one this build can host. M147
+/// rules that a refusal must be visible, and a strip preview has no dashed form
+/// to wear: the honest way for the strip to say "not this one" is the mock-up's
+/// own, which is to draw nothing (6789's `paneCount > 1` guard is the same
+/// sentence about a different limit). This arm is what remains after that — the
+/// answer to a landing that cannot be surveyed today, kept because the *verdict*
+/// is a fact about the landing rather than about which of them are reachable.
 fn release_verdict(landing: Option<DropLanding>) -> DragRelease {
     match landing {
         Some(DropLanding::StripReorder { .. }) => DragRelease::Commit,
         Some(
-            DropLanding::StripExtract { .. }
-            | DropLanding::RootRim { .. }
+            DropLanding::RootRim { .. }
             | DropLanding::SeatEdge { .. }
             | DropLanding::SeatCentre { .. },
-        )
-        | None => DragRelease::Home,
+        ) => DragRelease::Land,
+        Some(DropLanding::StripExtract { .. }) | None => DragRelease::Home,
     }
+}
+
+/// **The tab model's own limit, stated once and asked in two places.**
+///
+/// A tab in this build is a tree *and a shell*: `TabState` carries one
+/// `PtySession` and one `DualPlaneSession`, the frame pipeline publishes one
+/// terminal frame per tab, and [`seats::Seats`] names a single `terminal` seat
+/// that says where that shell draws. So a tree this window can hand to a tab is
+/// one with exactly one terminal leaf in it. Two would be a pane drawn as an
+/// empty box with no session behind it — the 2026-07-16 crash I106 is written
+/// against — and none would be a tab with nothing running.
+///
+/// **This is a limit, not a ruling, and it is deliberately not phrased as one.**
+/// Nothing in the mock-up forbids two shells in a tab; N159's merge and N161's
+/// replace are *about* putting them there. What forbids it is that panes do not
+/// own sessions yet, a gap `seats.rs`' own note names ("when panes get their own
+/// children, this parameter becomes the per-leaf lookup"). Writing it here, as a
+/// question about a tree rather than as a special case inside each gesture, is
+/// what lets it be deleted in one place on the day that changes.
+///
+/// Until then it is asked where M147 can act on the answer: [`Runtime::plan_for`]
+/// turns such a plan down so the promise on screen goes dashed instead of blue,
+/// and [`Runtime::survey_strip`] declines to offer a tear-out that would make
+/// one. A drop that cannot happen must not be drawn as one that can.
+fn tab_can_host(tree: &LayoutNode) -> bool {
+    tree.seats_in_order()
+        .iter()
+        .filter(|seat| seat.kind == bt_layout::SeatKind::Terminal)
+        .count()
+        == 1
 }
 
 /// A left press being held on a pane head (J118).
@@ -5614,7 +5670,16 @@ impl Runtime {
     /// What the plan on screen must be a function of, or `None` when there is no
     /// dock to draw.
     fn plan_inputs(&self) -> Option<PlanInputs> {
-        let drag = self.drag?;
+        self.plan_inputs_for(self.drag?)
+    }
+
+    /// The same question asked of a drag the caller is holding.
+    ///
+    /// [`Runtime::release_drag`] takes the drag out of the window before it
+    /// decides anything — a gesture that has ended must not be in flight while
+    /// its own consequences run — so the commit cannot ask `self.drag` what it
+    /// was aiming at. It asks the drag it has.
+    fn plan_inputs_for(&self, drag: Drag) -> Option<PlanInputs> {
         let landing = drag.landing?;
         // The strip's two landings draw themselves in the strip (K124: "the
         // preview in the strip is the ghost now"), so there is no dock box for
@@ -5652,8 +5717,17 @@ impl Runtime {
             (None, DragSource::Pane(seat)) => seats::DropCargo::Pane(seat),
             (None, DragSource::Tab(_)) => return None,
         };
-        self.seats
-            .plan_drop(&self.seat_metrics(), inputs.viewport, aim, cargo)
+        let mut plan = self
+            .seats
+            .plan_drop(&self.seat_metrics(), inputs.viewport, aim, cargo)?;
+        // A drop this window's tabs cannot hold is refused here rather than at
+        // the release, and that ordering is the whole of M147: refuse at the
+        // release and the box stays blue right up until the hand opens on
+        // nothing, which is the picture "this app is broken" makes too.
+        if !tab_can_host(&plan.tree) {
+            plan.refuse();
+        }
+        Some(plan)
     }
 
     /// The dock drawing's layers: the destinations, then the box over them.
@@ -8500,15 +8574,46 @@ impl Runtime {
                     ),
                 })
             }
-            // K124 — only while something would be left behind. G84 is the reason
-            // and it is a rule of the tree rather than of the gesture: a tree may
-            // not be emptied, so the last pane has nowhere to be torn to.
-            DragSource::Pane(_) => {
-                (self.seats.pane_count() > 1).then(|| DropLanding::StripExtract {
-                    slot: seats::insert_index_at(&slot_mids, position.x as f32),
-                })
+            // K124 — only while both halves would be tabs. G84 is one reason and
+            // it is a rule of the tree rather than of the gesture: a tree may not
+            // be emptied, so the last pane has nowhere to be torn to.
+            //
+            // `tab_can_host` is the second, and it is the one that answers today.
+            // The mock-up's guard here is `paneCount > 1` because in the mock-up
+            // a pane is only a subtree; here it is a subtree *and* possibly the
+            // tab's one shell, so the question is not "is anything left" but "are
+            // both of these still tabs". Drawing an insertion caret in the strip
+            // for a tear-out that the release cannot perform is the silent
+            // refusal M147 forbids, in the one place that has no dashed box to
+            // wear instead.
+            DragSource::Pane(seat) => {
+                self.tear_out_is_hostable(seat)
+                    .then(|| DropLanding::StripExtract {
+                        slot: seats::insert_index_at(&slot_mids, position.x as f32),
+                    })
             }
         }
+    }
+
+    /// **N157's precondition**: whether tearing this pane out would leave two
+    /// tabs this window can hold.
+    ///
+    /// Both halves are asked, and both have to answer, because a tear-out makes
+    /// two tabs rather than moving one pane: the pane that leaves becomes a tab
+    /// on its own, and what stays behind has to go on being one. `tear_out`
+    /// answers `None` for the last pane in a tree (G84), so the mock-up's
+    /// `paneCount > 1` is inside this question rather than beside it.
+    ///
+    /// It is false for every pane today and that is not a stub — it is
+    /// [`tab_can_host`] reporting what the tab model is, evaluated rather than
+    /// assumed. With one shell to a tab, either the pane leaving is the terminal
+    /// (and the tab it leaves has none) or it is not (and the tab it makes has
+    /// none). The day panes own sessions, this starts answering `true` on its own
+    /// with nothing here rewritten.
+    fn tear_out_is_hostable(&self, seat: SeatId) -> bool {
+        self.seats
+            .tear_out(&self.seat_metrics(), seat)
+            .is_some_and(|(leaving, staying)| tab_can_host(&leaving) && tab_can_host(&staying))
     }
 
     /// The layout's own box in device pixels — what every rim distance is
@@ -8770,9 +8875,51 @@ impl Runtime {
                     }
                 }
             }
-            DragRelease::Home => self.settle_home(drag),
+            // A drop that was refused between the last survey and the release —
+            // the pointer's answer is a function of a tree and a viewport, and
+            // both can move under a still hand — has landed nowhere, which is
+            // exactly what J120 is for. One outcome, reached two ways.
+            DragRelease::Land if self.commit_layout_drop(drag)? => {}
+            DragRelease::Land | DragRelease::Home => self.settle_home(drag),
         }
         self.finish_drag()
+    }
+
+    /// **U7 — let go over the layout** (L136-L140, G81-G83, D43).
+    ///
+    /// The plan is computed from the drag's own inputs rather than lifted out of
+    /// [`Runtime::drop_preview`], and the two are the same object for a reason
+    /// that is not a coincidence: `plan_drop` is pure (T223/D2), so the same
+    /// inputs give back the same tree to the bit. Reading the cache would be
+    /// asking a *remembered* answer to a question the world may have changed
+    /// under — the fade that keeps a retired preview alive for its hundred
+    /// milliseconds is enough on its own to make the cache older than the
+    /// release — and re-asking costs one tree walk on a tree of a few leaves.
+    ///
+    /// Everything after the adoption is what a tree change costs, in the order
+    /// `close_pane` and the preview toggle already pay it: the pointer's picture
+    /// is stale because the rectangles moved under it, the window's own minimum
+    /// is a function of the tree, and the terminal's columns are a function of
+    /// its seat's rectangle. `commit_seat_geometry` marks the session dirty on
+    /// the way through, so the strip's order, the tree's shape and the focused
+    /// leaf all reach disk through the one channel that already carries them.
+    ///
+    /// Answers whether the tree changed.
+    fn commit_layout_drop(&mut self, drag: Drag) -> Result<bool> {
+        let Some(inputs) = self.plan_inputs_for(drag) else {
+            return Ok(false);
+        };
+        let Some(plan) = self.plan_for(&inputs) else {
+            return Ok(false);
+        };
+        if self.seats.adopt_drop(plan).is_none() {
+            return Ok(false);
+        }
+        self.seat_pointer = seats::ChromePointer::default();
+        self.divider_drag = None;
+        self.apply_window_min_inner_size()?;
+        self.commit_seat_geometry()?;
+        Ok(true)
     }
 
     /// J119 — "never mind".
@@ -16486,25 +16633,32 @@ mod tests {
 
     /// **U5 commits nothing it did not already commit.**
     ///
-    /// The strip's reorder was applied live and there is nothing left to do with
-    /// it. The four landings this slice added have no verb yet — the tearing
-    /// (N157), the merge (N159), the replace (N161) and the swap (L138) are U7's
-    /// — so a release over any of them has to leave the tree exactly as it found
-    /// it, and Home is what "the gesture finished and found nowhere to be"
-    /// already means (J120).
+    /// **U7 — the commit table, all five landings** (mock-up 7202-7231).
     ///
-    /// Red gate: this is the test U7 must *break*. When a landing grows a commit,
-    /// its arm here has to move, and if it moves without one the drop silently
-    /// does nothing while the preview promised otherwise.
+    /// Three answers, and each one is a different relationship to work: the strip
+    /// reorder is *kept* (it happened live, slot by slot), the three landings in
+    /// the layout are *performed* now (the tree was untouched all gesture), and
+    /// what is left goes home having decided nothing.
+    ///
+    /// `StripExtract` is the one landing that sits with the empty hand, and its
+    /// reason is not that N157 is unwritten but that a torn-out pane needs a tab
+    /// to arrive in — a tab being a tree *and a shell* in this build. It is also
+    /// no longer offered by the survey, so this arm answers about a landing that
+    /// cannot be reached; the verdict is a fact about the landing rather than
+    /// about which of them the pointer can produce.
+    ///
+    /// Red gate: this test replaced U5's `the_landings_without_a_verb_yet_all_go
+    /// _home`, which asserted `Home` for all four. Send any of the three layout
+    /// landings back to `Home` and the drop goes silently missing behind a
+    /// preview that promised it.
     #[test]
-    fn the_landings_without_a_verb_yet_all_go_home() {
+    fn the_release_table_keeps_the_strip_performs_the_layout_and_sends_the_rest_home() {
         assert_eq!(
             release_verdict(Some(DropLanding::StripReorder { slot: 3 })),
             DragRelease::Commit,
             "the strip already did it"
         );
         for landing in [
-            DropLanding::StripExtract { slot: 1 },
             DropLanding::RootRim {
                 edge: seats::DropEdge::Bottom,
             },
@@ -16518,11 +16672,64 @@ mod tests {
         ] {
             assert_eq!(
                 release_verdict(Some(landing)),
-                DragRelease::Home,
-                "{landing:?} has no verb until U7, so it must change nothing"
+                DragRelease::Land,
+                "{landing:?} is a drop, and letting go performs it"
             );
         }
+        assert_eq!(
+            release_verdict(Some(DropLanding::StripExtract { slot: 1 })),
+            DragRelease::Home,
+            "a pane torn into the strip needs a tab to land in, and a tab is a shell"
+        );
         assert_eq!(release_verdict(None), DragRelease::Home);
+    }
+
+    /// **A tab is a tree and a shell, so a tree with any other number of terminal
+    /// leaves is not one.**
+    ///
+    /// The count is what matters and neither direction is benign. Two terminal
+    /// leaves gives the second one no grid at all — the frame pipeline draws one
+    /// `ViewportFrame` per present, placed at `seats.terminal()`'s rectangle — so
+    /// it comes out as a pane head over a blank body, with not even the notice a
+    /// `Placeholder` would earn. That is I106's crash with the volume turned
+    /// down. Zero gives a tab with nothing running in it.
+    ///
+    /// Every other kind is invisible to the question: a preview and a files
+    /// column are panes a tab already holds today.
+    ///
+    /// Red gate: write this as `>= 1` and a tab merged onto a pane is drawn as a
+    /// legal drop; write it as `<= 1` and the ordinary two-pane tab stops being
+    /// hostable and every drop refuses.
+    #[test]
+    fn a_tab_is_a_tree_with_exactly_one_terminal_in_it() {
+        let seat = |id: u64, kind: bt_layout::SeatKind| {
+            LayoutNode::seat(bt_layout::Seat::new(bt_layout::SeatId(id), kind))
+        };
+        let row = |a: LayoutNode, b: LayoutNode| {
+            LayoutNode::split(bt_layout::SplitId(1), Axis::Row, a, b)
+        };
+        let term = |id| seat(id, bt_layout::SeatKind::Terminal);
+
+        assert!(tab_can_host(&term(1)), "the ordinary lone terminal");
+        assert!(
+            tab_can_host(&row(term(1), seat(2, bt_layout::SeatKind::Preview))),
+            "a terminal beside its preview is today's two-pane tab"
+        );
+        assert!(
+            tab_can_host(&row(term(1), seat(2, bt_layout::SeatKind::Files))),
+            "and a files column is a pane like any other"
+        );
+        assert!(
+            !tab_can_host(&row(term(1), term(2))),
+            "the second terminal would be a pane with no session behind it"
+        );
+        assert!(
+            !tab_can_host(&row(
+                seat(1, bt_layout::SeatKind::Preview),
+                seat(2, bt_layout::SeatKind::Files)
+            )),
+            "a tab with nothing running is not a tab"
+        );
     }
 
     // ── U6: the plan, its cache, and the word in the box (M148, M155, L137) ──
