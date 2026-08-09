@@ -500,6 +500,15 @@ struct LeafSession {
     /// and two shells count their own. The tab's badge is the aggregate of these
     /// (D34: the tab takes its loudest member's claim), not a separate tally.
     last_seen_revision: u64,
+    /// The frame this leaf last put on the glass.
+    ///
+    /// Every pointer question is asked of a *frame* — which cell is under the
+    /// pointer, does that cell wear a hyperlink, is there a math block there —
+    /// and with several panes on screen the honest answer depends on which pane
+    /// the pointer is in. Keeping each leaf's own frame is what lets a hover
+    /// over the right-hand pane be answered by the right-hand pane's cells
+    /// instead of by whichever pane happens to hold the keyboard.
+    last_presented_frame: Option<ViewportFrame>,
 }
 
 struct TabState {
@@ -4093,6 +4102,7 @@ fn create_leaf_session(
         pending_pty_resize: None,
         pending_psreadline_resize_reanchor: false,
         last_seen_revision: 0,
+        last_presented_frame: None,
     })
 }
 
@@ -6458,17 +6468,33 @@ impl Runtime {
     /// consumes the press: focus is what the press means in addition to whatever
     /// else it meant, and a press in a terminal still has a selection to start.
     ///
-    /// The one thing it deliberately does not move is keyboard focus. §7.1.5
-    /// keeps that on the terminal in v1, and layout focus is a different fact:
-    /// it is the solver's input to W2 and to the collapse order, and the pane
-    /// whose caption is at `--ink`. With one shell to a tab there is nothing for
-    /// the caret, the selection or the IME to follow — they are already there.
-    /// When a tab grows a second session, this is the call that grows a second
-    /// half, and `close_pane` above is the other place that has to hear about it.
+    /// This is the second half that comment promised. Layout focus is still the
+    /// solver's input to W2 and to the collapse order, and it still moves for a
+    /// press on any leaf; but a tab now holds a shell per terminal leaf, so a
+    /// press in a terminal pane also moves the *keyboard* there — the caret, the
+    /// selection and the IME follow the hand, because there is now somewhere for
+    /// them to follow it to.
+    ///
+    /// Keyboard focus moves only for a terminal pane. Pressing a files column or
+    /// a preview must not take the keyboard away from the shell you were typing
+    /// in and hand it to a pane that cannot accept a keystroke — so those move
+    /// layout focus alone, exactly as before.
+    ///
+    /// It runs above the router and consumes nothing, which is what makes the
+    /// ordering work: focus lands first, and the same press then starts its
+    /// selection in the pane it just focused, through the ordinary path.
     fn focus_pane_at(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
         let Some(seat) = seats::pane_at(&self.seat_layout, position.x, position.y) else {
             return Ok(());
         };
+        // Keyboard first, and independently of whether layout focus moved: the
+        // two can already disagree when a pane was focused by other means.
+        if self.sessions.contains_key(&seat) && self.focused_leaf != seat {
+            self.focused_leaf = seat;
+            // The frame slot holds the pane that *was* focused. Leaving it would
+            // let the next present assert a stale grid against the new pane.
+            self.last_presented_frame = None;
+        }
         if !self.seats.set_focus(seat) {
             return Ok(());
         }
@@ -7578,24 +7604,66 @@ impl Runtime {
         Ok(wake_deadline)
     }
 
+    /// The terminal pane the pointer is inside, its seat-local position, and the
+    /// frame it last drew.
+    ///
+    /// The whole of per-seat hit routing. Every pointer question below used to
+    /// be asked of one frame in one rectangle, because there was one of each;
+    /// with a fleet, "which cell is under the pointer" has no answer until you
+    /// have said *which pane*, and the pointer's own coordinates are what say
+    /// it. Deliberately not the focused leaf: hovering a link in the pane you
+    /// are not typing in must underline that pane's link, and answering from the
+    /// focused pane's cells would underline a cell the pointer is nowhere near.
+    ///
+    /// `None` when the pointer is over chrome, over a non-terminal pane, or over
+    /// a pane that has not drawn yet — all three being "there is no cell here",
+    /// which is exactly what the callers already do nothing about.
+    fn pane_hit_context(
+        &self,
+    ) -> Option<(bt_layout::SeatId, PhysicalPosition<f64>, &ViewportFrame)> {
+        let position = self.pointer_position?;
+        let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;
+        let leaf = self.sessions.get(&seat)?;
+        let frame = leaf.last_presented_frame.as_ref()?;
+        // The pane's *body*, not its seat: a pane with a head draws its grid
+        // below that head, and a pointer measured from the seat's corner would
+        // be off by the head's height on every pane that wears one.
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+        if position.x < f64::from(body.x)
+            || position.y < f64::from(body.y)
+            || position.x >= f64::from(body.x + body.width)
+            || position.y >= f64::from(body.y + body.height)
+        {
+            return None;
+        }
+        Some((
+            seat,
+            PhysicalPosition::new(
+                position.x - f64::from(body.x),
+                position.y - f64::from(body.y),
+            ),
+            frame,
+        ))
+    }
+
     fn frame_hit(&self) -> Option<bt_render::GridHit> {
-        let position = self.terminal_pointer()?;
-        let frame = self.last_presented_frame.as_ref()?;
+        let (_, position, frame) = self.pane_hit_context()?;
         self.renderer
             .metrics()
             .hit_test_frame(frame, position.x, position.y)
     }
 
     fn math_hit(&self) -> Option<MathHit> {
-        let position = self.terminal_pointer()?;
-        let frame = self.last_presented_frame.as_ref()?;
+        let (_, position, frame) = self.pane_hit_context()?;
         self.renderer.math_hit_test(frame, position.x, position.y)
     }
 
     fn hyperlink_hit(&self, hit: bt_render::GridHit) -> Option<HyperlinkHit> {
-        self.last_presented_frame
-            .as_ref()?
-            .hyperlink_at(hit.row, hit.column)
+        // Asked of the pane the pointer is in, so the link that lights up is the
+        // link under the hand.
+        let (_, _, frame) = self.pane_hit_context()?;
+        frame.hyperlink_at(hit.row, hit.column)
     }
 
     /// The file a Ctrl+click at `hit` may hand to the system viewer (preview matrix §4, "leave this
@@ -9892,20 +9960,27 @@ impl Runtime {
         {
             return self.scroll_tab_strip(delta);
         }
-        // A notch over another seat is that seat's, not the terminal's. Guarded
-        // on there being another seat at all, so a lone leaf scrolls exactly as
-        // it always has — including before the pointer has ever moved.
-        if !self.seats.is_lone_terminal()
-            && let Some(position) = self.pointer_position
-            && !seats::terminal_contains(
-                &self.seat_layout,
-                self.seats.terminal(),
-                position.x,
-                position.y,
-            )
-        {
-            return Ok(());
-        }
+        // A notch belongs to the pane it is over. With one terminal that is the
+        // terminal or nothing, which is what this guard has always said; with a
+        // fleet it is whichever terminal pane the pointer is in, and a notch
+        // over a files column or a preview is still nobody's.
+        //
+        // Routing by the pointer rather than by focus is what the rest of the
+        // desktop does, and it is the only reading that lets you read a build
+        // log in one pane while typing in the other — which is the reason to
+        // have two panes at all.
+        let target_seat = match self.pointer_position {
+            Some(position) => match seats::pane_at(&self.seat_layout, position.x, position.y) {
+                Some(seat) if self.sessions.contains_key(&seat) => seat,
+                // Over a pane that is not a terminal: nobody's notch.
+                Some(_) => return Ok(()),
+                // Off every pane — before the pointer has ever moved, a lone
+                // leaf still scrolls exactly as it always has.
+                None if self.seats.is_lone_terminal() => self.focused_leaf,
+                None => return Ok(()),
+            },
+            None => self.focused_leaf,
+        };
         // Scrolling moves the content the flyout was anchored to; the transient peek dissolves.
         self.dismiss_peek()?;
         // One physical event, two currencies. Local routes scroll by exact subpixels (stage C of
@@ -9947,24 +10022,50 @@ impl Runtime {
             } else {
                 delta_px
             };
-            if self
-                .session
-                .scroll_math_block(&math_hit.anchor, horizontal, vertical)
+            // The anchor came from the pane under the pointer, so the block that
+            // pans has to be that pane's too — asking the focused session to
+            // scroll another pane's block would find no such block, or worse,
+            // one that happens to share an anchor.
+            let active = self.active_tab;
+            if self.tabs[active]
+                .sessions
+                .get_mut(&target_seat)
+                .is_some_and(|leaf| {
+                    leaf.session
+                        .scroll_math_block(&math_hit.anchor, horizontal, vertical)
+                })
             {
                 self.local_wheel_subpixel_remainder = tentative;
                 return self.publish_interaction_frame();
             }
         }
-        let modes = self.session.terminal_modes();
+        let target_is_focused = target_seat == self.focused_leaf;
+        let modes = self.sessions.get(&target_seat).map_or_else(
+            || self.session.terminal_modes(),
+            |leaf| leaf.session.terminal_modes(),
+        );
         // Sticky local review: while the alternate-screen viewport is displaced into the
         // projection-local overflow (Shift+wheel entered it), the user is looking at displaced
         // pixels, not the application's live pane — forwarding wheel bytes there would scroll a
         // surface the user cannot see. Plain wheel therefore stays local in both directions;
         // scrolling back to the resting bottom (offset 0) exits and restores forwarding.
-        if modes.alternate_screen && self.projection.is_scrolled() {
-            return self.scroll_view_exact(event_subpixels);
+        let target_is_scrolled = self
+            .sessions
+            .get(&target_seat)
+            .is_some_and(|leaf| leaf.projection.is_scrolled());
+        if modes.alternate_screen && target_is_scrolled {
+            return self.scroll_view_exact_in(target_seat, event_subpixels);
         }
-        if !self.modifiers.shift_key() && modes.mouse_tracking != MouseTracking::Off {
+        // Wheel *bytes* only ever reach the pane that has the keyboard. A mouse
+        // report carries a row and a column, and those coordinates are only
+        // meaningful to the shell whose grid they were measured in; sending an
+        // unfocused pane's notch to the focused pane's TUI would move a cursor
+        // in a program the pointer is nowhere near. An unfocused TUI simply
+        // waits to be clicked into — which is also how it gets a keystroke.
+        if target_is_focused
+            && !self.modifiers.shift_key()
+            && modes.mouse_tracking != MouseTracking::Off
+        {
             // Mouse-protocol wheel reports are per-notch, never per-system-scroll-line: the
             // application applies its own lines-per-event step, so multiplying by the Windows
             // wheel setting had TUIs (user report 2026-08-01: Claude Code transcript) scrolling
@@ -10004,9 +10105,11 @@ impl Runtime {
             // Alternate-screen wheel emulation belongs to the application. Shift is the explicit
             // local override for reviewing projection-only rows displaced above this screen.
             if self.modifiers.shift_key() {
-                return self.scroll_view_exact(event_subpixels);
+                return self.scroll_view_exact_in(target_seat, event_subpixels);
             }
-            if modes.alternate_scroll {
+            // Arrow-key emulation is bytes, so it obeys the same rule the SGR
+            // route above does: only the focused pane's shell is written to.
+            if modes.alternate_scroll && target_is_focused {
                 let lines = self.take_forward_wheel_lines(delta);
                 if lines == 0 {
                     return Ok(());
@@ -10021,7 +10124,7 @@ impl Runtime {
             }
             return Ok(());
         }
-        self.scroll_view_exact(event_subpixels)
+        self.scroll_view_exact_in(target_seat, event_subpixels)
     }
 
     /// Whole-line quantization for the alternate-scroll emulation route: arrow-key emulation
@@ -10066,13 +10169,28 @@ impl Runtime {
     /// Local pixel-exact wheel consumption: accumulate the event's fractional subpixels and
     /// scroll by the integral part. Positive subpixels move into history, matching the wheel's
     /// upward direction, and residue below one subpixel simply waits for the next event.
-    fn scroll_view_exact(&mut self, event_subpixels: f64) -> Result<()> {
+    /// Scroll one pane's view by an exact subpixel amount.
+    ///
+    /// The seat is named rather than assumed because the wheel belongs to the
+    /// pane under the pointer, which is not always the pane under the keyboard.
+    /// The remainder accumulator stays window-wide: it holds the fraction of a
+    /// subpixel one physical notch left over, and a notch is a property of the
+    /// mouse, not of the pane it landed on.
+    fn scroll_view_exact_in(
+        &mut self,
+        seat: bt_layout::SeatId,
+        event_subpixels: f64,
+    ) -> Result<()> {
         self.local_wheel_subpixel_remainder += event_subpixels;
         let take = drain_whole_units(&mut self.local_wheel_subpixel_remainder, 1.0);
         if take == 0 {
             return Ok(());
         }
-        self.projection.scroll_by_subpixels(take);
+        let active = self.active_tab;
+        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        leaf.projection.scroll_by_subpixels(take);
         self.publish_interaction_frame()
     }
 
@@ -10672,7 +10790,8 @@ impl Runtime {
             })
             .collect();
         let active = self.active_tab;
-        let mut unfocused_frames: Vec<(bt_render::SeatViewport, ViewportFrame)> = Vec::new();
+        let mut unfocused_frames: Vec<(bt_layout::SeatId, bt_render::SeatViewport, ViewportFrame)> =
+            Vec::new();
         for (seat, body) in &bodies {
             if *seat == focused_leaf {
                 continue;
@@ -10685,7 +10804,7 @@ impl Runtime {
                 .session
                 .viewport_frame(&mut leaf.projection)
                 .context("project an unfocused pane's grid into a viewport frame")?;
-            unfocused_frames.push((*body, projected));
+            unfocused_frames.push((*seat, *body, projected));
         }
         let focused_body = bodies
             .iter()
@@ -10698,7 +10817,7 @@ impl Runtime {
             frame: &frame,
             focused: true,
         });
-        for (body, projected) in &unfocused_frames {
+        for (_, body, projected) in &unfocused_frames {
             seat_frames.push(bt_render::SeatFrame {
                 seat: *body,
                 frame: projected,
@@ -10737,6 +10856,19 @@ impl Runtime {
                             text_visible.as_millis()
                         );
                     }
+                }
+                // Each pane keeps the frame it just drew, so a pointer question
+                // asked over it can be answered by its own cells. The focused
+                // leaf's copy is `Runtime::last_presented_frame` as well, which
+                // is what the presentation-hold and scroll contracts read.
+                let active = self.active_tab;
+                for (seat, _, projected) in unfocused_frames {
+                    if let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) {
+                        leaf.last_presented_frame = Some(projected);
+                    }
+                }
+                if let Some(leaf) = self.tabs[active].sessions.get_mut(&focused_leaf) {
+                    leaf.last_presented_frame = Some(frame.clone());
                 }
                 self.last_presented_frame = Some(frame);
                 self.pending_resize_present = None;

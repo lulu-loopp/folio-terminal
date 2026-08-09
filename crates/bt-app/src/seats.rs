@@ -5197,6 +5197,66 @@ mod tests {
         );
     }
 
+    /// A pointer in the second pane resolves to the second pane, and to
+    /// coordinates measured from *its* body.
+    ///
+    /// The arithmetic per-seat hit routing stands on. Before U12 every pointer
+    /// question was answered from one frame in one rectangle; the bug this
+    /// forbids is answering a hover over the right-hand pane with the left-hand
+    /// pane's cells, which is what deref-to-focused does. Both halves are
+    /// asserted, because either alone still lets it happen: the right *seat*
+    /// with the wrong origin lands on the wrong cell, and the right origin with
+    /// the wrong seat reads the wrong grid.
+    #[test]
+    fn a_pointer_in_the_second_pane_routes_to_that_panes_body() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        let left = seats.terminal();
+        let right = seats
+            .split_terminal(&metrics, left, Axis::Row, false)
+            .expect("room for two");
+        let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+
+        let left_body = pane_body_viewport(&seats, &layout, left, 1.0).unwrap();
+        let right_body = pane_body_viewport(&seats, &layout, right, 1.0).unwrap();
+        assert!(
+            right_body.x > left_body.x,
+            "the split must put the second pane to the right of the first"
+        );
+
+        // A point a little inside the right pane's body.
+        let probe_x = f64::from(right_body.x) + 12.0;
+        let probe_y = f64::from(right_body.y) + 8.0;
+        assert_eq!(
+            pane_at(&layout, probe_x, probe_y),
+            Some(right),
+            "a pointer inside the right pane belongs to the right pane"
+        );
+
+        // Measured from the right pane's own corner it is the small offset we
+        // put there; measured from the left pane's — which is what answering
+        // from the focused leaf would do — it is off by the whole divider.
+        let local_x = probe_x - f64::from(right_body.x);
+        assert_eq!(local_x, 12.0);
+        let wrong_x = probe_x - f64::from(left_body.x);
+        assert!(
+            wrong_x > local_x + 100.0,
+            "reading the right pane through the left pane's origin must be \
+             visibly wrong, not off by a rounding: {wrong_x} vs {local_x}"
+        );
+
+        // And the left pane still answers for its own points.
+        assert_eq!(
+            pane_at(
+                &layout,
+                f64::from(left_body.x) + 4.0,
+                f64::from(left_body.y) + 4.0
+            ),
+            Some(left)
+        );
+    }
+
     /// Closing the seat `terminal` names repoints it at a terminal that exists.
     #[test]
     fn closing_the_named_terminal_repoints_it_at_a_survivor() {
