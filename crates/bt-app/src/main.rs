@@ -1,5 +1,6 @@
 use std::{
     backtrace::Backtrace,
+    collections::BTreeMap,
     fs::OpenOptions,
     io::Write,
     num::{NonZeroI64, NonZeroU32, NonZeroUsize},
@@ -472,10 +473,52 @@ struct DpiSnapshot {
 /// `Runtime` dereferences to its active entry so the single-tab hot path keeps using the exact
 /// same code. Background entries are only touched by the explicit PTY/timeout drains; they never
 /// publish into the window's frame slot.
-struct TabState {
-    id: TabId,
+/// One shell, and everything that is true of that shell and nothing else.
+///
+/// A tab used to *be* one of these. U12 splits the two apart: a tab is a strip
+/// entry with a layout tree, and every Terminal leaf of that tree owns one of
+/// these — its own ConPTY, its own screen, its own projection, its own idea of
+/// how many columns it has.
+///
+/// Nothing in here knows its own `SeatId`. The mapping lives in
+/// [`TabState::sessions`], which is what keeps red line L1 intact from the other
+/// direction: the layout tree carries no session, and the session carries no
+/// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
+struct LeafSession {
     pty: Option<PtySession>,
     session: DualPlaneSession,
+    shell_fallback_notice: Option<String>,
+    projection: ViewportProjection,
+    grid: GridSize,
+    conpty_grid: GridSize,
+    pending_pty_resize: Option<PendingPtyResize>,
+    pending_psreadline_resize_reanchor: bool,
+    /// The revision this leaf's session had reached the last time the user was
+    /// looking at it — the whole of what "unread" is measured against.
+    ///
+    /// Per leaf because it is measured against a *session's* revision counter,
+    /// and two shells count their own. The tab's badge is the aggregate of these
+    /// (D34: the tab takes its loudest member's claim), not a separate tally.
+    last_seen_revision: u64,
+}
+
+struct TabState {
+    id: TabId,
+    /// This tab's shells, one per Terminal leaf, keyed by the seat they draw
+    /// into and ordered by it.
+    ///
+    /// A `BTreeMap` rather than a `HashMap` for the reason L8 puts on the
+    /// solver's own output: iteration order reaches the screen — it decides
+    /// which seat's frame is built first and which shell drains first — and
+    /// hash order is not an order anyone chose.
+    ///
+    /// The invariant every access below relies on: this is never empty, and it
+    /// always contains `focused_leaf`. A Terminal seat with no session behind it
+    /// is a black rectangle, so seats and sessions are created and destroyed
+    /// together.
+    sessions: BTreeMap<SeatId, LeafSession>,
+    /// Which leaf has the keyboard. Typing, pasting and IME all land here.
+    focused_leaf: SeatId,
     /// Which of [`profiles::PROFILES`] started this tab — the stable half of its
     /// seed, kept so a closed tab can be reopened as the same *kind* of shell
     /// rather than whatever the default happens to be that day.
@@ -496,13 +539,7 @@ struct TabState {
     /// sets it and every tab reads through to what the program or the shell
     /// said.
     manual_name: Option<String>,
-    shell_fallback_notice: Option<String>,
-    projection: ViewportProjection,
-    grid: GridSize,
-    conpty_grid: GridSize,
     pending_keyboard_at: Option<Instant>,
-    pending_pty_resize: Option<PendingPtyResize>,
-    pending_psreadline_resize_reanchor: bool,
     pending_resize_present: Option<GridSize>,
     seats: seats::Seats,
     seat_layout: SeatLayout,
@@ -511,9 +548,6 @@ struct TabState {
     /// the same answer and is derived by the same pass (§4.3).
     seat_overflow: Option<seats::FitOverflow>,
     preview_image: Option<PreviewImageState>,
-    /// The revision this tab's session had reached the last time the user was
-    /// looking at it — the whole of what "unread" is measured against.
-    last_seen_revision: u64,
     /// The arc's easing toward the reading it is now showing, if it is moving.
     ring_tween: Option<SweepTween>,
     /// The sweep the ring is displaying, which is also what a state change
@@ -957,6 +991,55 @@ impl Deref for Runtime {
 impl DerefMut for Runtime {
     fn deref_mut(&mut self) -> &mut Self::Target {
         active_item_mut(&mut self.tabs, self.active_tab)
+    }
+}
+
+impl TabState {
+    /// The leaf holding the keyboard — the shell a keystroke belongs to.
+    fn focused(&self) -> &LeafSession {
+        self.sessions
+            .get(&self.focused_leaf)
+            .expect("every tab holds a session for its focused leaf")
+    }
+
+    fn focused_mut(&mut self) -> &mut LeafSession {
+        self.sessions
+            .get_mut(&self.focused_leaf)
+            .expect("every tab holds a session for its focused leaf")
+    }
+
+    /// Every leaf of this tab, focused one included, in seat order.
+    fn leaves_mut(&mut self) -> impl Iterator<Item = (&SeatId, &mut LeafSession)> {
+        self.sessions.iter_mut()
+    }
+}
+
+/// A tab dereferences to its focused leaf, exactly as `Runtime` dereferences to
+/// its active tab.
+///
+/// The two hops compose: `self.session` on a `Runtime` still reads "the active
+/// tab's focused shell", which is what every keystroke, every paste and every
+/// hit test meant by it when a tab could only hold one. That is deliberate —
+/// the alternative was rewriting a hundred and thirty call sites to say a longer
+/// version of the same sentence, and each rewrite would have been a chance to
+/// pick the wrong shell.
+///
+/// The sites this is *not* right for are the ones that meant "every shell in
+/// this tab" — draining, resizing, DPI changes, reaping. Those are the loops,
+/// and they are written out longhand against [`TabState::leaves_mut`] so that
+/// the difference between "the focused one" and "all of them" is visible in the
+/// text rather than hidden in a deref.
+impl Deref for TabState {
+    type Target = LeafSession;
+
+    fn deref(&self) -> &Self::Target {
+        self.focused()
+    }
+}
+
+impl DerefMut for TabState {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.focused_mut()
     }
 }
 
@@ -3942,30 +4025,26 @@ impl TabSeed {
 // Eight, and every one of them is a different question the answer to which
 // cannot be derived from the others: identity, shape, the two rendering
 // facts, the wake channel, the probe bytes, the place, and the seed. Bundling
-// them into a struct would move the argument list rather than shorten it.
-#[allow(clippy::too_many_arguments)]
-fn create_tab_state(
-    id: TabId,
-    seats: seats::Seats,
+/// Spawn one shell for one Terminal leaf, sized to the rectangle it will draw
+/// into.
+///
+/// Factored out of [`create_tab_state`] because a tab's first shell and a
+/// split's second one are the same act: the only difference is which seat they
+/// are filed under and which directory they open in. Keeping one builder is what
+/// stops a pane born from a split from quietly differing — a missing quota, an
+/// unset baseline, a layout key nobody seeded — from a pane born with its tab.
+fn create_leaf_session(
     renderer: &Renderer,
-    render_physical: PhysicalSize<u32>,
+    body: bt_render::SeatViewport,
     wake: OutputWake,
     probe_input: Option<&[u8]>,
     working_directory: Option<PathBuf>,
-    seed: TabSeed,
-) -> Result<(TabState, String)> {
-    let (seat_layout, seat_overflow, terminal_seat, _) =
-        solve_seats(&seats, renderer, render_physical);
-    let grid = renderer
-        .metrics()
-        .grid_for_pixels(terminal_seat.width, terminal_seat.height);
+) -> Result<LeafSession> {
+    let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
     let mut pty = if probe_input.is_none() {
         Some(
             PtySession::spawn_default_in(
-                pty_size(
-                    grid,
-                    PhysicalSize::new(terminal_seat.width, terminal_seat.height),
-                ),
+                pty_size(grid, PhysicalSize::new(body.width, body.height)),
                 wake,
                 working_directory,
             )
@@ -3977,10 +4056,6 @@ fn create_tab_state(
     let shell_fallback_notice = pty
         .as_mut()
         .and_then(PtySession::take_shell_fallback_notice);
-    let conpty_source = pty
-        .as_ref()
-        .map(|pty| pty.conpty_source().to_string())
-        .unwrap_or_else(|| "direct-input".to_string());
     let columns = nonzero_u32(grid.columns.get());
     let rows = nonzero_u32(grid.rows.get());
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
@@ -4008,22 +4083,57 @@ fn create_tab_state(
             .context("feed BT_PROBE_INPUT bytes directly into terminal")?;
     }
     let projection = session.new_projection(session.layout_key());
+    Ok(LeafSession {
+        pty,
+        session,
+        shell_fallback_notice,
+        projection,
+        grid,
+        conpty_grid: grid,
+        pending_pty_resize: None,
+        pending_psreadline_resize_reanchor: false,
+        last_seen_revision: 0,
+    })
+}
+
+// them into a struct would move the argument list rather than shorten it.
+#[allow(clippy::too_many_arguments)]
+fn create_tab_state(
+    id: TabId,
+    seats: seats::Seats,
+    renderer: &Renderer,
+    render_physical: PhysicalSize<u32>,
+    wake: OutputWake,
+    probe_input: Option<&[u8]>,
+    working_directory: Option<PathBuf>,
+    seed: TabSeed,
+) -> Result<(TabState, String)> {
+    let (seat_layout, seat_overflow, terminal_seat, _) =
+        solve_seats(&seats, renderer, render_physical);
+    // Captured before `seats` moves into the tab: the seat this first shell
+    // draws into is the key its session is filed under.
+    let terminal_seat_id = seats.terminal();
+    let leaf = create_leaf_session(
+        renderer,
+        terminal_seat,
+        wake,
+        probe_input,
+        working_directory,
+    )?;
+    let conpty_source = leaf
+        .pty
+        .as_ref()
+        .map(|pty| pty.conpty_source().to_string())
+        .unwrap_or_else(|| "direct-input".to_string());
     Ok((
         TabState {
             id,
-            pty,
-            session,
+            sessions: BTreeMap::from([(terminal_seat_id, leaf)]),
+            focused_leaf: terminal_seat_id,
             profile: seed.profile,
             pinned: seed.pinned,
             manual_name: seed.manual_name,
-            shell_fallback_notice,
-            projection,
-            grid,
-            conpty_grid: grid,
             pending_keyboard_at: None,
-            pending_pty_resize: None,
-            pending_psreadline_resize_reanchor: false,
-            last_seen_revision: 0,
             // A tab that arrives pinned wears its pin from the first frame; it
             // is a fact about the tab, not an offer that has to be hovered out.
             pin_reveal: RevealTween {
@@ -4051,14 +4161,19 @@ fn create_tab_state(
     ))
 }
 
-fn drain_tab_pty(tab: &mut TabState) -> Result<(bool, bool)> {
-    if tab.pty.is_none() {
+/// Drain one shell's pipe into its own screen.
+///
+/// Returns whether anything arrived, and whether this shell's OSC 2 title
+/// changed — the two facts the caller needs to decide what to redraw and what to
+/// relabel.
+fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<(bool, bool)> {
+    if leaf.pty.is_none() {
         return Ok((false, false));
     }
-    let title_before = tab.session.window_title().map(str::to_owned);
+    let title_before = leaf.session.window_title().map(str::to_owned);
     let mut changed = false;
     loop {
-        let bytes = tab
+        let bytes = leaf
             .pty
             .as_ref()
             .expect("PTY mode checked above")
@@ -4067,11 +4182,11 @@ fn drain_tab_pty(tab: &mut TabState) -> Result<(bool, bool)> {
             break;
         }
         debug_assert!(bytes.len() <= bt_pty::TERM_READ_QUANTUM.get());
-        tab.session
+        leaf.session
             .feed_at(&bytes, Instant::now())
             .context("apply PTY output")?;
-        for reply in tab.session.take_pty_writes() {
-            tab.pty
+        for reply in leaf.session.take_pty_writes() {
+            leaf.pty
                 .as_mut()
                 .expect("PTY mode checked above")
                 .write(&reply)
@@ -4081,8 +4196,25 @@ fn drain_tab_pty(tab: &mut TabState) -> Result<(bool, bool)> {
     }
     Ok((
         changed,
-        tab.session.window_title() != title_before.as_deref(),
+        leaf.session.window_title() != title_before.as_deref(),
     ))
+}
+
+/// Drain every shell this tab holds.
+///
+/// Written as a loop rather than left to the tab's deref because "drain this
+/// tab" has always meant *all of it*: a background pane that stops being read
+/// fills its pipe and blocks the shell writing into it. The tab's answer is the
+/// union of its leaves' — anything arrived anywhere, any title moved anywhere.
+fn drain_tab_pty(tab: &mut TabState) -> Result<(bool, bool)> {
+    let mut changed = false;
+    let mut title_changed = false;
+    for (_, leaf) in tab.leaves_mut() {
+        let (leaf_changed, leaf_title_changed) = drain_leaf_pty(leaf)?;
+        changed |= leaf_changed;
+        title_changed |= leaf_title_changed;
+    }
+    Ok((changed, title_changed))
 }
 
 impl Runtime {
@@ -6220,11 +6352,29 @@ impl Runtime {
             return Ok(());
         }
         // A preview seat holds an image the way a terminal holds a session, and
-        // the pane going away is the one taking it. Everything else a leaf owns
-        // is owned by the tab, and the tab is still here.
+        // the pane going away is the one taking it.
         if kind == bt_layout::SeatKind::Preview {
             self.preview_image = None;
             self.renderer.set_preview_image(None);
+        }
+        // A terminal seat holds a shell, and the pane going away takes that too.
+        // Closing the pane and leaving the ConPTY alive would leak a process
+        // with nothing to draw it and nothing to read it — the pipe fills, and
+        // the child blocks forever on a write no one will ever drain.
+        if kind == bt_layout::SeatKind::Terminal
+            && let Some(mut leaf) = self.sessions.remove(&seat)
+        {
+            if let Some(pty) = leaf.pty.as_mut() {
+                pty.shutdown().context("shut down closed pane's shell")?;
+            }
+            // Keyboard focus cannot stay on a seat that no longer exists. The
+            // layout has already promoted a sibling; follow it to whichever
+            // terminal is still standing.
+            if self.focused_leaf == seat
+                && let Some(next) = self.sessions.keys().next().copied()
+            {
+                self.focused_leaf = next;
+            }
         }
         // The pointer's whole picture is stale: the rectangle it was over has
         // been re-solved out from under it, and a `pane_hover` naming a seat
@@ -6238,6 +6388,66 @@ impl Runtime {
         }
         self.mark_session_dirty(Instant::now());
         Ok(())
+    }
+
+    /// Split the focused terminal pane, seating a second shell beside it.
+    ///
+    /// The creation entry U12 was missing. Two things happen together and must:
+    /// the tree gains a Terminal leaf, and that leaf gains a shell. A seat with
+    /// no session is a black rectangle nothing will ever draw into, and a
+    /// session with no seat is a process nobody can see or reach — so the solver
+    /// is asked first, and if it refuses the split for want of room, nothing at
+    /// all is spawned.
+    ///
+    /// I88's rule for a new tab, read for a new pane: the arriving shell opens
+    /// where the pane it was split from is standing, by that pane's own OSC 7
+    /// report. A pane whose shell has never named a directory hands over
+    /// nothing, and the new shell starts where it always did.
+    fn split_focused_terminal(&mut self, dir: Axis) -> Result<()> {
+        let metrics = self.seat_metrics();
+        let source = self.focused_leaf;
+        // Ask the solver first. `split_terminal` leaves the tree untouched when
+        // it refuses, so there is nothing to undo on this path.
+        let Some(arriving) = self.seats.split_terminal(&metrics, source, dir, false) else {
+            return Ok(());
+        };
+        // Re-solve before spawning: the new pane's shell has to be told how many
+        // columns it has, and that answer comes from the solve the split just
+        // changed — never invented here (red line L10).
+        self.commit_seat_geometry()?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(body) = seats::pane_body_viewport(&self.seats, &self.seat_layout, arriving, scale)
+        else {
+            // The solver placed no rectangle for the seat it just minted, which
+            // would mean the tree and its solve disagree. Undo the split rather
+            // than leave a seat nothing can draw.
+            self.seats.close_seat(&metrics, arriving);
+            self.commit_seat_geometry()?;
+            return Ok(());
+        };
+        let inherited = self
+            .sessions
+            .get(&source)
+            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
+        let proxy = self.event_proxy.clone();
+        let wake: OutputWake = Arc::new(move || {
+            let _ = proxy.send_event(AppEvent::PtyOutput);
+        });
+        let leaf = create_leaf_session(&self.renderer, body, wake, None, inherited)?;
+        self.sessions.insert(arriving, leaf);
+        // Focus follows the split, keyboard and layout together: you split in
+        // order to work in the new pane.
+        self.focused_leaf = arriving;
+        self.seats.set_focus(arriving);
+        self.seat_pointer = seats::ChromePointer::default();
+        self.apply_window_min_inner_size()?;
+        self.commit_seat_geometry()?;
+        self.refresh_chrome();
+        self.mark_session_dirty(Instant::now());
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })
     }
 
     /// D40: pressing anywhere in a pane moves the layout focus there.
@@ -6471,6 +6681,11 @@ impl Runtime {
         let now = Instant::now();
         self.defer_preview_resample(now);
         let next_grid = self.resolve_seat_layout(render_physical);
+        // The panes without the keyboard, before the focused one: they take the
+        // solver's answer unconditionally, so doing them first keeps the focused
+        // leaf's typed-input gate the last word rather than a thing another
+        // pane's resize could race.
+        self.resize_unfocused_leaves()?;
         let solved_at = trace_started.map(|_| Instant::now());
         self.schedule_grid_change(
             next_grid,
@@ -6567,10 +6782,14 @@ impl Runtime {
             &mut self.math_worker_notice_pending,
         );
         let mut terminal_frame = {
-            let tab = &mut self.tabs[active];
-            tab.session.refresh_projection(&mut tab.projection);
-            tab.session
-                .viewport_frame(&mut tab.projection)
+            // Bound once, to the focused leaf: `session` and `projection` are
+            // two fields of one shell, and reaching each through its own deref
+            // would be two borrows of the tab rather than one borrow of the
+            // leaf.
+            let leaf = self.tabs[active].focused_mut();
+            leaf.session.refresh_projection(&mut leaf.projection);
+            leaf.session
+                .viewport_frame(&mut leaf.projection)
                 .context("project terminal grid into viewport frame")?
         };
         // State-driven frame hold. Review displacement holds a vanished scroll anchor during a
@@ -6893,21 +7112,26 @@ impl Runtime {
     fn finish_synchronized_update_if_due(&mut self, now: Instant) -> Result<()> {
         let mut active_finished = false;
         let mut chrome_changed = false;
+        let active = self.active_tab;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
-            let due = tab
-                .session
-                .synchronized_update_deadline()
-                .is_some_and(|deadline| deadline <= now);
-            if !due {
-                continue;
+            // Per leaf: a synchronized update is a property of one screen, and
+            // two shells in one tab time out independently.
+            for (_, leaf) in tab.leaves_mut() {
+                let due = leaf
+                    .session
+                    .synchronized_update_deadline()
+                    .is_some_and(|deadline| deadline <= now);
+                if !due {
+                    continue;
+                }
+                let title_before = leaf.session.window_title().map(str::to_owned);
+                let finished = leaf
+                    .session
+                    .finish_synchronized_update(now)
+                    .context("finish timed-out DEC 2026 synchronized update")?;
+                chrome_changed |= leaf.session.window_title() != title_before.as_deref();
+                active_finished |= index == active && finished;
             }
-            let title_before = tab.session.window_title().map(str::to_owned);
-            let finished = tab
-                .session
-                .finish_synchronized_update(now)
-                .context("finish timed-out DEC 2026 synchronized update")?;
-            chrome_changed |= tab.session.window_title() != title_before.as_deref();
-            active_finished |= index == self.active_tab && finished;
         }
         if chrome_changed {
             self.window.set_title(&self.display_title());
@@ -6969,17 +7193,24 @@ impl Runtime {
         let window_is_focused = self.window_focused;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             let tab_is_active = index == active;
-            tab.last_seen_revision = seen_revision(
-                tab.last_seen_revision,
-                tab.session.published_revision(),
-                tab_is_active,
-            );
-            // Watching is consuming: a latch that arrives on the tab the user
-            // is already reading has been answered by the reading. Both latches
-            // go together because `bt-term` retires them together, and because
-            // "the user has seen this" is one fact and not two.
-            if attention_is_consumed(tab_is_active, window_is_focused) {
-                tab.session.clear_attention();
+            // Unread is counted per shell, against that shell's own revision
+            // counter — two panes of one tab each have their own idea of how far
+            // the user has read. The tab's badge is the aggregate of these
+            // (D34), computed where the badge is drawn rather than tallied into
+            // a second place that could drift.
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.last_seen_revision = seen_revision(
+                    leaf.last_seen_revision,
+                    leaf.session.published_revision(),
+                    tab_is_active,
+                );
+                // Watching is consuming: a latch that arrives on the tab the user
+                // is already reading has been answered by the reading. Both latches
+                // go together because `bt-term` retires them together, and because
+                // "the user has seen this" is one fact and not two.
+                if attention_is_consumed(tab_is_active, window_is_focused) {
+                    leaf.session.clear_attention();
+                }
             }
         }
         let motion = self.motion;
@@ -7136,28 +7367,34 @@ impl Runtime {
 
     fn finish_resize_if_quiescent(&mut self, now: Instant) -> Result<()> {
         let mut active_finished = false;
+        let active = self.active_tab;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
-            if !tab
-                .session
-                .finish_resize_if_quiescent(now)
-                .context("finish ConPTY resize transaction")?
-            {
-                continue;
+            // Per leaf: each shell runs its own ConPTY resize transaction and
+            // each PSReadLine holds its own anchor, so quiescence is reached one
+            // shell at a time.
+            for (_, leaf) in tab.leaves_mut() {
+                if !leaf
+                    .session
+                    .finish_resize_if_quiescent(now)
+                    .context("finish ConPTY resize transaction")?
+                {
+                    continue;
+                }
+                // `[Console]::CursorLeft/Top` in the PSReadLine handler makes ConPTY ask the terminal
+                // `CSI 6 n`. Pay the coalesced repair only after the final resize request *and* every
+                // child byte it caused have been quiet. A new geometry event re-opens the transaction,
+                // so a divider storm cannot install an intermediate commit's still-moving cursor.
+                let shell_input_region_open = leaf.session.shell_input_region_open();
+                if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
+                    &mut leaf.pending_psreadline_resize_reanchor,
+                    shell_input_region_open,
+                ) && let Some(pty) = leaf.pty.as_mut()
+                {
+                    pty.write(reanchor_input)
+                        .context("request PSReadLine anchor repair after resize quiescence")?;
+                }
+                active_finished |= index == active;
             }
-            // `[Console]::CursorLeft/Top` in the PSReadLine handler makes ConPTY ask the terminal
-            // `CSI 6 n`. Pay the coalesced repair only after the final resize request *and* every
-            // child byte it caused have been quiet. A new geometry event re-opens the transaction,
-            // so a divider storm cannot install an intermediate commit's still-moving cursor.
-            let shell_input_region_open = tab.session.shell_input_region_open();
-            if let Some(reanchor_input) = take_psreadline_resize_reanchor_input(
-                &mut tab.pending_psreadline_resize_reanchor,
-                shell_input_region_open,
-            ) && let Some(pty) = tab.pty.as_mut()
-            {
-                pty.write(reanchor_input)
-                    .context("request PSReadLine anchor repair after resize quiescence")?;
-            }
-            active_finished |= index == self.active_tab;
         }
         if active_finished {
             self.publish_frame(FrameTrigger {
@@ -7206,6 +7443,65 @@ impl Runtime {
             )
             .context(context)?;
         self.grid = reflow;
+        Ok(())
+    }
+
+    /// Carry a new solve to the panes the user is not typing in.
+    ///
+    /// [`Self::schedule_grid_change`] speaks for the focused leaf, where the
+    /// typed-input gate lives. That gate exists to keep a shell that is holding
+    /// a half-typed line from being reflowed under the user's hands — a thing
+    /// that can only be true of the pane with the keyboard. The others have no
+    /// typed input to protect, so their grids follow the solver at once, actor
+    /// then ConPTY, in the order every other resize path uses.
+    ///
+    /// Without this a split pane keeps the width it was born with: the window
+    /// resizes, the divider moves, and one pane's shell goes on believing it has
+    /// the columns it had at spawn.
+    fn resize_unfocused_leaves(&mut self) -> Result<()> {
+        let focused = self.focused_leaf;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let bodies: Vec<(bt_layout::SeatId, bt_render::SeatViewport)> = self
+            .seats
+            .terminals()
+            .into_iter()
+            .filter(|seat| *seat != focused)
+            .filter_map(|seat| {
+                seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
+                    .map(|body| (seat, body))
+            })
+            .collect();
+        let active = self.active_tab;
+        for (seat, body) in bodies {
+            let next_grid = self
+                .renderer
+                .metrics()
+                .grid_for_pixels(body.width, body.height);
+            let physical = PhysicalSize::new(body.width, body.height);
+            let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+                continue;
+            };
+            if next_grid == leaf.grid && next_grid == leaf.conpty_grid {
+                continue;
+            }
+            leaf.session
+                .resize(
+                    nonzero_u32(next_grid.columns.get()),
+                    nonzero_u32(next_grid.rows.get()),
+                )
+                .context("resize an unfocused pane's terminal actor for a seat layout change")?;
+            leaf.grid = next_grid;
+            let shell_input_region_open = leaf.session.shell_input_region_open();
+            if let Some(pty) = leaf.pty.as_mut() {
+                pty.resize(pty_size(next_grid, physical))
+                    .context("resize an unfocused pane's ConPTY")?;
+            }
+            replace_psreadline_resize_reanchor_debt(
+                &mut leaf.pending_psreadline_resize_reanchor,
+                shell_input_region_open,
+            );
+            leaf.conpty_grid = next_grid;
+        }
         Ok(())
     }
 
@@ -7795,8 +8091,8 @@ impl Runtime {
     fn copy_selection(&mut self) -> Result<()> {
         let window = Arc::clone(&self.window);
         let active = self.active_tab;
-        let tab = &mut self.tabs[active];
-        if !copy_selection(&mut tab.session, &mut tab.projection, |text| {
+        let leaf = self.tabs[active].focused_mut();
+        if !copy_selection(&mut leaf.session, &mut leaf.projection, |text| {
             write_terminal_clipboard_text(&window, text)
         }) {
             return Ok(());
@@ -9901,6 +10197,15 @@ impl Runtime {
             }
             return Ok(());
         }
+        // Dev-only, and above the PTY encoder for the same reason: the chord
+        // must not reach the child. Splits the focused terminal pane and spawns
+        // the shell that lives in the new one.
+        if let Some(dir) = split_shortcut_direction(&event.logical_key, self.modifiers) {
+            if !event.repeat {
+                self.split_focused_terminal(dir)?;
+            }
+            return Ok(());
+        }
         // The prompt answers Enter with the button it opened focused, and Esc
         // with nothing at all: an unanswered question folds back into
         // `lastSession` (§7.1.4), so Esc must dismiss the *prompt* without
@@ -9983,11 +10288,18 @@ impl Runtime {
     fn paste_from_clipboard(&mut self) -> Result<()> {
         let window = Arc::clone(&self.window);
         let active = self.active_tab;
-        let tab = &mut self.tabs[active];
-        let pty = &mut tab.pty;
+        // Destructured rather than reached through three derefs: the paste needs
+        // the shell's screen, its projection and its pipe held at once, and they
+        // are three fields of one leaf.
+        let LeafSession {
+            pty,
+            session,
+            projection,
+            ..
+        } = self.tabs[active].focused_mut();
         if !paste_from_clipboard(
-            &mut tab.session,
-            &mut tab.projection,
+            session,
+            projection,
             || {
                 window_hwnd(&window).and_then(|hwnd| {
                     bt_platform::clipboard_text(hwnd)
@@ -10242,24 +10554,66 @@ impl Runtime {
             .update_scale_factor(scale_factor)
             .context("remeasure terminal font at new DPI")?;
         ensure_metrics_match_authoritative_scale(metrics.scale_factor, scale_factor)?;
+        // Every shell in every tab: a DPI change is a fact about the display, so
+        // no screen anywhere in the window is exempt from it.
         for tab in &mut self.tabs {
-            tab.session
-                .set_cell_height_subpixels(metrics.cell_height_subpixels());
-            tab.session
-                .set_cell_width_subpixels(cell_width_subpixels(metrics));
-            tab.session
-                .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.session
+                    .set_cell_height_subpixels(metrics.cell_height_subpixels());
+                leaf.session
+                    .set_cell_width_subpixels(cell_width_subpixels(metrics));
+                leaf.session
+                    .set_ascii_baseline_subpixels(metrics.ascii_baseline_subpixels());
+            }
         }
         Ok(())
     }
 
+    /// Retire shells that have exited, and the panes and tabs they emptied.
+    ///
+    /// Two levels now, because a shell exiting is a fact about a *pane*. A tab
+    /// whose right-hand pane's shell exits loses that pane and keeps running;
+    /// only when a tab has no live shell left has the tab itself ended. That is
+    /// the same rule §7.1.4 already gives closing — the last pane closing is the
+    /// tab closing — read from the other direction.
     fn reap_exited_tabs(&mut self) -> Result<()> {
-        let mut exited = Vec::new();
-        for (index, tab) in self.tabs.iter_mut().enumerate() {
-            let Some(pty) = tab.pty.as_mut() else {
+        // Which panes of the *active* tab died: those are the ones that can be
+        // closed as panes, because `close_pane` re-solves the tab the user is
+        // looking at.
+        let active = self.active_tab;
+        let mut exited_panes = Vec::new();
+        for (seat, leaf) in self.tabs[active].leaves_mut() {
+            let Some(pty) = leaf.pty.as_mut() else {
                 continue;
             };
             if pty.try_wait()?.is_some() {
+                exited_panes.push(*seat);
+            }
+        }
+        // Never close the last one here: an empty tab is not a state, and
+        // `close_pane` routes that case to `close_tab` on its own.
+        if self.tabs[active].sessions.len() > exited_panes.len() {
+            for seat in exited_panes {
+                self.close_pane(seat)?;
+            }
+        }
+
+        let mut exited = Vec::new();
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            // A tab has ended when every shell it holds has ended. A tab in
+            // probe mode holds no PTY at all and never ends this way.
+            let mut any_live = false;
+            let mut any_pty = false;
+            for (_, leaf) in tab.leaves_mut() {
+                let Some(pty) = leaf.pty.as_mut() else {
+                    continue;
+                };
+                any_pty = true;
+                if pty.try_wait()?.is_none() {
+                    any_live = true;
+                }
+            }
+            if any_pty && !any_live {
                 exited.push(index);
             }
         }
@@ -10295,9 +10649,65 @@ impl Runtime {
                     .saturating_mul(frame.columns.get() as usize),
             )
             .any(|cell| !cell.text.trim().is_empty());
+        // The other panes of this tab. The focused leaf's frame came out of the
+        // slot above, with every presentation-hold and resize contract the slot
+        // exists to enforce still attached to it; the panes the user is not
+        // typing in hold nothing, so they are projected here, at the moment they
+        // are drawn.
+        //
+        // A lone terminal leaf produces exactly one entry, whose rectangle is
+        // the same `pane_body_viewport` answer `resolve_seat_layout` already
+        // handed the renderer — so the slice is N = 1 and the command stream is
+        // the one that was always issued. The loop is not a second path; it is
+        // the same path counted.
+        let focused_leaf = self.focused_leaf;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let bodies: Vec<(bt_layout::SeatId, bt_render::SeatViewport)> = self
+            .seats
+            .terminals()
+            .into_iter()
+            .filter_map(|seat| {
+                seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
+                    .map(|body| (seat, body))
+            })
+            .collect();
+        let active = self.active_tab;
+        let mut unfocused_frames: Vec<(bt_render::SeatViewport, ViewportFrame)> = Vec::new();
+        for (seat, body) in &bodies {
+            if *seat == focused_leaf {
+                continue;
+            }
+            let Some(leaf) = self.tabs[active].sessions.get_mut(seat) else {
+                continue;
+            };
+            leaf.session.refresh_projection(&mut leaf.projection);
+            let projected = leaf
+                .session
+                .viewport_frame(&mut leaf.projection)
+                .context("project an unfocused pane's grid into a viewport frame")?;
+            unfocused_frames.push((*body, projected));
+        }
+        let focused_body = bodies
+            .iter()
+            .find(|(seat, _)| *seat == focused_leaf)
+            .map(|(_, body)| *body)
+            .unwrap_or_else(|| self.renderer.seat_viewport());
+        let mut seat_frames = Vec::with_capacity(unfocused_frames.len() + 1);
+        seat_frames.push(bt_render::SeatFrame {
+            seat: focused_body,
+            frame: &frame,
+            focused: true,
+        });
+        for (body, projected) in &unfocused_frames {
+            seat_frames.push(bt_render::SeatFrame {
+                seat: *body,
+                frame: projected,
+                focused: false,
+            });
+        }
         match self
             .renderer
-            .present(&frame, trigger)
+            .present_seats(&seat_frames, trigger)
             .context("render terminal frame")?
         {
             PresentOutcome::Presented(receipt) => {
@@ -10354,8 +10764,10 @@ impl Runtime {
         self.session_store.close();
         self.ime_system_caret.destroy();
         for tab in &mut self.tabs {
-            if let Some(pty) = tab.pty.as_mut() {
-                pty.shutdown().context("shut down child process")?;
+            for (_, leaf) in tab.leaves_mut() {
+                if let Some(pty) = leaf.pty.as_mut() {
+                    pty.shutdown().context("shut down child process")?;
+                }
             }
         }
         Ok(())
@@ -11166,6 +11578,33 @@ fn pty_frame_is_unchanged(
 fn is_preview_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
     modifiers == ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("p"))
+}
+
+/// The pane splits: `Ctrl+Alt+Shift+D` beside the focused pane,
+/// `Ctrl+Alt+Shift+E` under it.
+///
+/// Scaffolding of exactly the kind [`is_preview_toggle_shortcut`] is, and
+/// documented as such: U12 gives panes their own shells, and a shell you cannot
+/// create is a shell you cannot try. The real verbs — the pane head's menu, the
+/// command palette — arrive with their own tickets, and they will call the same
+/// [`Runtime::split_focused_terminal`] this chord calls.
+///
+/// The chord carries Alt for the reason the preview toggle does. `Ctrl+D` is a
+/// real terminal control byte (EOT, "end of input") and `Ctrl+Shift+D` is short
+/// enough that product will want it; a placeholder does not get to spend either.
+/// Matched on the character the layout produced, and required to be the whole
+/// chord and nothing looser.
+fn split_shortcut_direction(key: &Key, modifiers: ModifiersState) -> Option<Axis> {
+    if modifiers != ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT {
+        return None;
+    }
+    match key {
+        // Beside: a new column in the row this pane is in.
+        Key::Character(text) if text.eq_ignore_ascii_case("d") => Some(Axis::Row),
+        // Under: a new row in the column this pane is in.
+        Key::Character(text) if text.eq_ignore_ascii_case("e") => Some(Axis::Col),
+        _ => None,
+    }
 }
 
 /// Undo close — "that one, now", and the door with the real traffic (N143).

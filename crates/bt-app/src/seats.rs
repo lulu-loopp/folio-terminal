@@ -128,6 +128,65 @@ impl Seats {
         self.terminal
     }
 
+    /// Every Terminal leaf of this tab, in tree order.
+    ///
+    /// The plural of [`Self::terminal`], and the key set the tab's session fleet
+    /// is indexed by: one shell per Terminal leaf. Order is `seats_in_order`'s
+    /// in-order walk (D2), so it is a function of the tree and never of a hash —
+    /// the same discipline L8 puts on the solver's own output.
+    ///
+    /// This does *not* break red line L1. The mapping from these ids to sessions
+    /// lives in `bt-app`; what comes back is a list of geometry identities, and
+    /// the tree still knows nothing about what runs inside them.
+    pub fn terminals(&self) -> Vec<SeatId> {
+        self.tree
+            .seats_in_order()
+            .into_iter()
+            .filter(|seat| seat.kind == SeatKind::Terminal)
+            .map(|seat| seat.id)
+            .collect()
+    }
+
+    /// Split a terminal seat, seating a second terminal beside it.
+    ///
+    /// Returns the new leaf's id, which is also the id the caller must spawn a
+    /// shell for: a Terminal seat with no session behind it is a black rectangle,
+    /// so the two happen together or not at all.
+    ///
+    /// `None` when the solver refuses — the run cannot be divided at this size —
+    /// and refusing leaves the tree untouched, so the caller has nothing to undo.
+    /// The names are spent only on success, for the reason `adopt_drop` gives at
+    /// length: an id handed out twice is a `find_seat` answering about the wrong
+    /// pane.
+    pub fn split_terminal(
+        &mut self,
+        metrics: &SeatMetrics,
+        target: SeatId,
+        dir: Axis,
+        leading: bool,
+    ) -> Option<SeatId> {
+        let arriving = SeatId(self.next_seat);
+        match apply(
+            &self.tree,
+            metrics,
+            &Edit::SplitSeat {
+                target,
+                dir,
+                leading,
+                arriving: LayoutNode::seat(Seat::new(arriving, SeatKind::Terminal)),
+                split_id: SplitId(self.next_split),
+            },
+        ) {
+            Ok(outcome) => {
+                self.tree = outcome.tree;
+                self.next_seat += 1;
+                self.next_split += 1;
+                Some(arriving)
+            }
+            Err(_) => None,
+        }
+    }
+
     pub fn focus(&self) -> SeatId {
         self.focus
     }
@@ -246,6 +305,17 @@ impl Seats {
         match apply(&self.tree, metrics, &Edit::CloseSeat { target: seat }) {
             Ok(outcome) => {
                 self.tree = outcome.tree;
+                // `terminal` names a seat that has to still exist: it is what
+                // focus falls back to, and what a caller with no seat in hand
+                // asks for. Closing the one it named repoints it at the first
+                // terminal left standing. Before panes could own sessions there
+                // was only ever one terminal and this branch was unreachable;
+                // now it is the ordinary case of closing the left-hand pane.
+                if self.terminal == seat
+                    && let Some(first) = self.terminals().first().copied()
+                {
+                    self.terminal = first;
+                }
                 if self.focus == seat {
                     self.focus = self.terminal;
                 }
@@ -5087,6 +5157,65 @@ mod tests {
         assert!(close_sprites.iter().any(|sprite| {
             sprite.mark == ChromeMark::WindowClose && sprite.color == palette.caption_close_text
         }));
+    }
+
+    /// A lone tab has one terminal; splitting it has two, and they are two
+    /// *different* seats with two disjoint rectangles.
+    ///
+    /// The floor U12 stands on. Before panes could own sessions this tree was
+    /// unreachable — `Seats` minted exactly one Terminal leaf and nothing could
+    /// make a second — so the fleet had nowhere to be indexed by.
+    #[test]
+    fn splitting_a_terminal_seats_a_second_one_beside_it() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        let first = seats.terminal();
+        assert_eq!(seats.terminals(), vec![first]);
+
+        let second = seats
+            .split_terminal(&metrics, first, Axis::Row, false)
+            .expect("a 1600x900 window has room for two terminals");
+        assert_ne!(first, second, "a split must mint a new seat identity");
+        assert_eq!(
+            seats.terminals(),
+            vec![first, second],
+            "both terminals must be enumerable, in tree order"
+        );
+        assert_eq!(seats.pane_count(), 2);
+        assert!(!seats.is_lone_terminal());
+
+        // Two seats, two rectangles, no overlap: the whole point of giving each
+        // one its own frame.
+        let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+        let left = seat_viewport(&layout, first).unwrap();
+        let right = seat_viewport(&layout, second).unwrap();
+        assert_ne!(left, right);
+        assert!(
+            left.x + left.width <= right.x || right.x + right.width <= left.x,
+            "split terminals must not overlap: {left:?} vs {right:?}"
+        );
+    }
+
+    /// Closing the seat `terminal` names repoints it at a terminal that exists.
+    #[test]
+    fn closing_the_named_terminal_repoints_it_at_a_survivor() {
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let mut seats = Seats::lone_terminal();
+        let first = seats.terminal();
+        let second = seats
+            .split_terminal(&metrics, first, Axis::Row, false)
+            .expect("room for two");
+
+        assert!(seats.close_seat(&metrics, first));
+        assert_eq!(seats.terminals(), vec![second]);
+        assert_eq!(
+            seats.terminal(),
+            second,
+            "the named terminal must never be a seat that was closed"
+        );
+        assert_eq!(seats.focus(), second);
     }
 
     /// A lone leaf has no pane head, so its terminal body is exactly its seat.

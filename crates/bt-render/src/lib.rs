@@ -646,6 +646,28 @@ struct PreparedOverlayLayer {
     text_prepared: bool,
 }
 
+/// One terminal seat's GPU resources for this frame, uploaded and ready to draw.
+///
+/// Held apart per seat for the same reason [`PreparedOverlayLayer`] is held
+/// apart per layer: the pass has to finish one seat's channels — cells, bands,
+/// text, status bar, toolbars — inside that seat's viewport before it moves the
+/// viewport to the next one.
+struct PreparedSeat {
+    seat: SeatViewport,
+    focused: bool,
+    /// Which entry of `seat_slots` holds this seat's prepared glyph batches.
+    slot: usize,
+    rect_buffer: wgpu::Buffer,
+    rect_count: usize,
+    math_vertex_buffer: Option<wgpu::Buffer>,
+    math_draws: Vec<MathDraw>,
+    text_prepared: bool,
+    status_rect_buffer: wgpu::Buffer,
+    status_rect_count: usize,
+    math_overlay_buffer: wgpu::Buffer,
+    math_overlay_count: usize,
+}
+
 /// One frame's math block draws plus the indices of the `frame.math_blocks` entries that actually
 /// put pixels on screen. Overlays that decorate a block (the hover dim) read `drawn` so they can
 /// never outlive the raster they decorate.
@@ -1616,6 +1638,19 @@ fn surface_failure_policy(failure: SurfaceFailure) -> SurfaceFailurePolicy {
     }
 }
 
+/// The glyphon state one Terminal seat needs to put text on the glass.
+///
+/// Grid text and the status overlay travel together because they are laid out
+/// in the same seat-local coordinate space and therefore share the seat's
+/// `Viewport`; they need two renderers rather than one because the status bar
+/// draws *over* a rectangle that is itself drawn over the grid, and a single
+/// prepared batch cannot be interleaved with a pipeline change.
+struct SeatTextSlot {
+    viewport: Viewport,
+    text_renderer: TextRenderer,
+    status_text_renderer: TextRenderer,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -1640,14 +1675,28 @@ pub struct Renderer {
     overlay_layers: Vec<OverlayLayer>,
     font_system: FontSystem,
     swash_cache: SwashCache,
-    viewport: Viewport,
+    /// One glyphon viewport and text-renderer pair per Terminal seat, grown on
+    /// demand — the same shape, and for the same reason, as
+    /// [`Renderer::overlay_text_renderers`].
+    ///
+    /// Two constraints force it. A glyphon `Viewport` is a GPU uniform holding
+    /// *one* resolution, and grid text is laid out in seat-local pixels, so two
+    /// seats of different sizes cannot share one. And a `TextRenderer` holds
+    /// exactly one prepared batch, so preparing a second seat into it would
+    /// destroy the first seat's glyphs before the pass ever ran.
+    ///
+    /// Slot 0 is built in `new` and is the slot a lone terminal leaf uses on
+    /// every frame it ever draws, which is the whole of the N = 1 identity
+    /// argument: same object, same resolution, same batch, same draw call.
+    seat_slots: Vec<SeatTextSlot>,
+    /// Kept so a seat that appears mid-session (a split) can mint its own
+    /// viewport without rebuilding the renderer.
+    glyphon_cache: Cache,
     /// A second glyphon viewport whose resolution names the whole surface rather
     /// than the seat, so chrome text can be positioned in window coordinates
     /// while grid text stays in seat-local ones.
     chrome_viewport: Viewport,
     atlas: TextAtlas,
-    text_renderer: TextRenderer,
-    status_text_renderer: TextRenderer,
     chrome_text_renderer: TextRenderer,
     /// One text renderer per overlay layer, grown on demand: a glyphon renderer
     /// holds one prepared batch, so two layers of text are two renderers.
@@ -1738,6 +1787,33 @@ impl SeatViewport {
             height: self.height.clamp(1, height.saturating_sub(y).max(1)),
         }
     }
+}
+
+/// One terminal leaf's content, plus the rectangle it draws into.
+///
+/// A tab holds one of these per Terminal seat. The pair is the whole of what
+/// multi-session presentation adds: [`ViewportFrame`] deliberately carries no
+/// seat and no session identity — its `layout_key` is a *shape* (width, DPI,
+/// font and theme revisions), so two shells the same width at the same DPI
+/// produce equal keys — and that is why the rectangle has to arrive beside the
+/// frame rather than be read out of it.
+///
+/// `N = 1` is not a special case anywhere below it. A lone terminal leaf solves
+/// to the whole seat, so a one-element slice reproduces the single-frame command
+/// stream value for value; the loop that draws it is the loop that draws four.
+#[derive(Clone, Copy, Debug)]
+pub struct SeatFrame<'a> {
+    /// Where this leaf's body lands in the swapchain, from `solve` (red line
+    /// L10: the renderer never invents it).
+    pub seat: SeatViewport,
+    pub frame: &'a ViewportFrame,
+    /// Whether this is the seat holding keyboard focus.
+    ///
+    /// The window-level transients that are laid out in *seat* coordinates —
+    /// today the peek flyout — belong to exactly one seat, and this is how they
+    /// find it. Without the flag a two-pane tab would draw the flyout twice, once
+    /// per seat, each at a different origin.
+    pub focused: bool,
 }
 
 /// One flat rectangle of seat chrome, in physical pixels of the whole surface.
@@ -2522,13 +2598,26 @@ impl Renderer {
         let font_metrics_time = phase_started.elapsed();
         let phase_started = Instant::now();
         let cache = Cache::new(&device);
-        let viewport = Viewport::new(&device, &cache);
         let chrome_viewport = Viewport::new(&device, &cache);
         let mut atlas = TextAtlas::new(&device, &queue, &cache, config.format);
-        let text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
-        let status_text_renderer =
-            TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        // Slot 0: the seat a lone terminal leaf draws into on every frame it
+        // ever draws. Built here rather than on demand so that shape never pays
+        // an allocation mid-frame.
+        let seat_slots = vec![SeatTextSlot {
+            viewport: Viewport::new(&device, &cache),
+            text_renderer: TextRenderer::new(
+                &mut atlas,
+                &device,
+                wgpu::MultisampleState::default(),
+                None,
+            ),
+            status_text_renderer: TextRenderer::new(
+                &mut atlas,
+                &device,
+                wgpu::MultisampleState::default(),
+                None,
+            ),
+        }];
         let chrome_text_renderer =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let overlay_text_renderers = Vec::new();
@@ -2551,11 +2640,10 @@ impl Renderer {
             overlay_layers: Vec::new(),
             font_system,
             swash_cache,
-            viewport,
+            seat_slots,
+            glyphon_cache: cache,
             chrome_viewport,
             atlas,
-            text_renderer,
-            status_text_renderer,
             chrome_text_renderer,
             overlay_text_renderers,
             rect_pipeline,
@@ -2810,24 +2898,77 @@ impl Renderer {
         Ok(self.metrics)
     }
 
+    /// Grow the per-seat glyphon slots so each of `count` seats owns one.
+    ///
+    /// Grown and never shrunk, exactly as `overlay_text_renderers` is: closing a
+    /// pane is a common thing to do and re-opening one should not have to build
+    /// GPU objects again.
+    fn ensure_seat_slots(&mut self, count: usize) {
+        while self.seat_slots.len() < count {
+            self.seat_slots.push(SeatTextSlot {
+                viewport: Viewport::new(&self.device, &self.glyphon_cache),
+                text_renderer: TextRenderer::new(
+                    &mut self.atlas,
+                    &self.device,
+                    wgpu::MultisampleState::default(),
+                    None,
+                ),
+                status_text_renderer: TextRenderer::new(
+                    &mut self.atlas,
+                    &self.device,
+                    wgpu::MultisampleState::default(),
+                    None,
+                ),
+            });
+        }
+    }
+
+    /// Present one terminal frame into the seat the caller last placed.
+    ///
+    /// The N = 1 door into [`Self::present_seats`]. Kept as its own entry point
+    /// because a lone terminal leaf is the shape this product opens in, and
+    /// because every replay and probe path has exactly one shell by
+    /// construction.
     pub fn present(
         &mut self,
         frame: &ViewportFrame,
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
+        self.present_seats(
+            &[SeatFrame {
+                seat: self.seat,
+                frame,
+                focused: true,
+            }],
+            trigger,
+        )
+    }
+
+    /// Present every terminal leaf of a tab, each into its own seat rectangle.
+    ///
+    /// One pass, N seats. The per-seat work — glyphon resolution, grid text,
+    /// the status overlay, cell rectangles, math bands and their toolbars — runs
+    /// once per entry against that entry's rectangle; the window-level work —
+    /// seat chrome, the peek flyout, a preview's picture, the modal overlay —
+    /// runs once, after, exactly where it ran before.
+    ///
+    /// An empty slice is a legal frame, not an error: a tab whose panes are all
+    /// files columns has no terminal to draw and still owes the window its
+    /// chrome.
+    pub fn present_seats(
+        &mut self,
+        seats: &[SeatFrame<'_>],
+        trigger: FrameTrigger,
+    ) -> Result<PresentOutcome, RenderError> {
         let frame_started = Instant::now();
-        frame.validate_shape()?;
+        for entry in seats {
+            entry.frame.validate_shape()?;
+        }
         let validated_at = Instant::now();
-        // Grid text is laid out in seat-local pixels, so glyphon's resolution is
-        // the seat's; the pass viewport below lands those pixels at the seat's
-        // corner. Chrome text is laid out in window pixels and gets its own.
-        self.viewport.update(
-            &self.queue,
-            Resolution {
-                width: self.seat.width,
-                height: self.seat.height,
-            },
-        );
+        // Chrome text is laid out in window pixels and gets its own resolution.
+        // Grid text is laid out in seat-local pixels, so each seat's resolution
+        // is that seat's, updated inside the loop below; the pass viewport lands
+        // those pixels at the seat's corner.
         self.chrome_viewport.update(
             &self.queue,
             Resolution {
@@ -2836,70 +2977,180 @@ impl Renderer {
             },
         );
         let viewport_updated_at = Instant::now();
-        let text_stats = self.prepare_text_rows(frame)?;
-        let rows_prepared_at = Instant::now();
-        let text_prepare_result = prepare_text_atlas(
-            &mut self.text_renderer,
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.atlas,
-            &self.viewport,
-            &mut self.swash_cache,
-            &self.text_rows,
-            self.metrics,
-            frame,
-        );
-        let text_prepare_result = match text_prepare_result {
-            Ok(()) => prepare_status_text_atlas(
-                &mut self.status_text_renderer,
-                &self.device,
+        self.ensure_seat_slots(seats.len());
+        // Outside this function `self.seat` names the focused seat, and the tail
+        // of the loop puts it back. Inside, it is the seat *currently being
+        // composed*, which is what every extent helper below already means by
+        // it: a band's right edge, the status bar's width and the cell
+        // rectangles' normalisation are all seat-relative by design.
+        let focused_seat = seats
+            .iter()
+            .find(|entry| entry.focused)
+            .map_or(self.seat, |entry| entry.seat);
+        let empty_rect = [RectInstance::zeroed()];
+        let mut prepared: Vec<PreparedSeat> = Vec::with_capacity(seats.len());
+        let mut focused_text_stats = None;
+        let mut rows_prepared_at = validated_at;
+        let mut atlas_prepared_at = validated_at;
+        let mut math_prepared_at = validated_at;
+
+        for (index, entry) in seats.iter().enumerate() {
+            let frame = entry.frame;
+            self.seat = entry.seat;
+            self.seat_slots[index].viewport.update(
                 &self.queue,
-                &mut self.font_system,
-                &mut self.atlas,
-                &self.viewport,
-                &mut self.swash_cache,
-                self.status_overlay.as_deref(),
-                self.metrics,
-                frame,
-                self.seat.width as f32,
-            ),
-            Err(error) => Err(error),
-        };
-        let text_prepared = match text_prepare_result {
-            Ok(()) => true,
-            Err(error) => {
-                // glyphon grows each atlas geometrically before returning AtlasFull. If the
-                // device limit is genuinely exhausted, keep the terminal alive and present the
-                // theme/background rectangles; trimming allows the next frame to retry.
-                match prepare_failure_policy(error) {
-                    PrepareFailurePolicy::PresentWithoutText => {
-                        if self.glyph_degraded_frames == 0 {
-                            eprintln!(
-                                "BetterTerminal glyph atlas reached the device limit; presenting without text and retrying"
-                            );
+                Resolution {
+                    width: entry.seat.width,
+                    height: entry.seat.height,
+                },
+            );
+            let text_stats = self.prepare_text_rows(frame)?;
+            rows_prepared_at = Instant::now();
+            // `text_rows` and `status_overlay` stay single slots on purpose:
+            // they are staging for the prepare that immediately follows, and
+            // glyphon copies what it needs into this seat's own renderer. What
+            // may not be shared is the renderer, and it is not.
+            let text_prepare_result = {
+                let slot = &mut self.seat_slots[index];
+                match prepare_text_atlas(
+                    &mut slot.text_renderer,
+                    &self.device,
+                    &self.queue,
+                    &mut self.font_system,
+                    &mut self.atlas,
+                    &slot.viewport,
+                    &mut self.swash_cache,
+                    &self.text_rows,
+                    self.metrics,
+                    frame,
+                ) {
+                    Ok(()) => prepare_status_text_atlas(
+                        &mut slot.status_text_renderer,
+                        &self.device,
+                        &self.queue,
+                        &mut self.font_system,
+                        &mut self.atlas,
+                        &slot.viewport,
+                        &mut self.swash_cache,
+                        self.status_overlay.as_deref(),
+                        self.metrics,
+                        frame,
+                        entry.seat.width as f32,
+                    ),
+                    Err(error) => Err(error),
+                }
+            };
+            let text_prepared = match text_prepare_result {
+                Ok(()) => true,
+                Err(error) => {
+                    // glyphon grows each atlas geometrically before returning AtlasFull. If the
+                    // device limit is genuinely exhausted, keep the terminal alive and present the
+                    // theme/background rectangles; trimming allows the next frame to retry.
+                    match prepare_failure_policy(error) {
+                        PrepareFailurePolicy::PresentWithoutText => {
+                            if self.glyph_degraded_frames == 0 {
+                                eprintln!(
+                                    "BetterTerminal glyph atlas reached the device limit; presenting without text and retrying"
+                                );
+                            }
+                            self.glyph_degraded_frames += 1;
+                            self.atlas.trim();
+                            false
                         }
-                        self.glyph_degraded_frames += 1;
-                        self.atlas.trim();
-                        false
                     }
                 }
-            }
-        };
-        let atlas_prepared_at = Instant::now();
+            };
+            atlas_prepared_at = Instant::now();
 
-        // Math draws first: the hover dim rect decorates a block's raster, so it must know which
-        // rasters this frame actually put on screen before it decides to darken anything.
-        let math_batch = self.prepare_math_draws(frame);
-        let math_prepared_at = Instant::now();
-        let math_vertex_buffer = (!math_batch.vertices.is_empty()).then(|| {
-            self.device
+            // Math draws first: the hover dim rect decorates a block's raster, so it must know which
+            // rasters this frame actually put on screen before it decides to darken anything.
+            let math_batch = self.prepare_math_draws(frame);
+            math_prepared_at = Instant::now();
+            let math_vertex_buffer = (!math_batch.vertices.is_empty()).then(|| {
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("visible math block vertices"),
+                        contents: bytemuck::cast_slice(&math_batch.vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    })
+            });
+            let rects = self.rectangles(frame, &math_batch.drawn);
+            let rect_data = if rects.is_empty() {
+                empty_rect.as_slice()
+            } else {
+                rects.as_slice()
+            };
+            let rect_buffer = self
+                .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("visible math block vertices"),
-                    contents: bytemuck::cast_slice(&math_batch.vertices),
+                    label: Some("terminal cell rectangles"),
+                    contents: bytemuck::cast_slice(rect_data),
                     usage: wgpu::BufferUsages::VERTEX,
+                });
+            let status_rects = frame
+                .status_text
+                .as_deref()
+                .and_then(|status| {
+                    status_overlay_geometry(self.metrics, frame, status, entry.seat.width as f32)
                 })
-        });
+                .map(|geometry| {
+                    self.pixel_rect(
+                        geometry.rect[0],
+                        geometry.rect[1],
+                        geometry.rect[2],
+                        geometry.rect[3],
+                        DEFAULT_STATUS_BACKGROUND_RGB,
+                    )
+                })
+                .into_iter()
+                .collect::<Vec<_>>();
+            let status_rect_data = if status_rects.is_empty() {
+                empty_rect.as_slice()
+            } else {
+                status_rects.as_slice()
+            };
+            let status_rect_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("status overlay rectangle"),
+                        contents: bytemuck::cast_slice(status_rect_data),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            let math_overlays = self.math_overlay_rectangles(frame);
+            let overlay_data = if math_overlays.is_empty() {
+                empty_rect.as_slice()
+            } else {
+                math_overlays.as_slice()
+            };
+            let math_overlay_buffer =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("math toolbar overlay rectangles"),
+                        contents: bytemuck::cast_slice(overlay_data),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            if entry.focused {
+                focused_text_stats = Some(text_stats);
+            }
+            prepared.push(PreparedSeat {
+                seat: entry.seat,
+                focused: entry.focused,
+                slot: index,
+                rect_buffer,
+                rect_count: rects.len(),
+                math_vertex_buffer,
+                math_draws: math_batch.draws,
+                text_prepared,
+                status_rect_buffer,
+                status_rect_count: status_rects.len(),
+                math_overlay_buffer,
+                math_overlay_count: math_overlays.len(),
+            });
+        }
+        // Back to the focused seat before anything window-level is prepared: the
+        // peek flyout is laid out in the coordinates of the seat it belongs to.
+        self.seat = focused_seat;
+
         let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws();
         let peek_rect_buffer = (!peek_rects.is_empty()).then(|| {
             self.device
@@ -2926,64 +3177,6 @@ impl Renderer {
                     usage: wgpu::BufferUsages::VERTEX,
                 })
         });
-        let math_draws = math_batch.draws;
-
-        let rects = self.rectangles(frame, &math_batch.drawn);
-        let empty_rect = [RectInstance::zeroed()];
-        let rect_data = if rects.is_empty() {
-            empty_rect.as_slice()
-        } else {
-            rects.as_slice()
-        };
-        let rect_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("terminal cell rectangles"),
-                contents: bytemuck::cast_slice(rect_data),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let status_rects = frame
-            .status_text
-            .as_deref()
-            .and_then(|status| {
-                status_overlay_geometry(self.metrics, frame, status, self.seat.width as f32)
-            })
-            .map(|geometry| {
-                self.pixel_rect(
-                    geometry.rect[0],
-                    geometry.rect[1],
-                    geometry.rect[2],
-                    geometry.rect[3],
-                    DEFAULT_STATUS_BACKGROUND_RGB,
-                )
-            })
-            .into_iter()
-            .collect::<Vec<_>>();
-        let status_rect_data = if status_rects.is_empty() {
-            empty_rect.as_slice()
-        } else {
-            status_rects.as_slice()
-        };
-        let status_rect_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("status overlay rectangle"),
-                    contents: bytemuck::cast_slice(status_rect_data),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-        let math_overlays = self.math_overlay_rectangles(frame);
-        let overlay_data = if math_overlays.is_empty() {
-            empty_rect.as_slice()
-        } else {
-            math_overlays.as_slice()
-        };
-        let math_overlay_buffer =
-            self.device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("math toolbar overlay rectangles"),
-                    contents: bytemuck::cast_slice(overlay_data),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
         // Seat chrome. Empty whenever the tree is a lone terminal leaf, and every
         // branch below is guarded on emptiness, so a lone leaf issues exactly the
         // command stream it issued before seats existed.
@@ -3159,69 +3352,79 @@ impl Renderer {
                 })],
                 ..Default::default()
             });
-            // Everything the terminal draws is in seat-local pixels; this pair is
-            // the entire translation, and for a lone leaf the seat *is* the
-            // surface, so these are the two calls that were always here.
-            pass.set_viewport(
-                self.seat.x as f32,
-                self.seat.y as f32,
-                self.seat.width as f32,
-                self.seat.height as f32,
-                0.0,
-                1.0,
-            );
-            pass.set_scissor_rect(self.seat.x, self.seat.y, self.seat.width, self.seat.height);
-            if !rects.is_empty() {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, rect_buffer.slice(..));
-                pass.draw(0..6, 0..rects.len() as u32);
-            }
-            if let Some(vertex_buffer) = math_vertex_buffer.as_ref() {
-                pass.set_pipeline(&self.math_pipeline);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                for draw in &math_draws {
-                    if let Some(texture) = self.math_textures.get(&draw.key)
-                        && let Some(tile) = texture.tiles.get(draw.tile_index)
-                    {
-                        pass.set_bind_group(0, &tile.bind_group, &[]);
-                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+            // Everything a terminal draws is in seat-local pixels; the
+            // viewport/scissor pair opening each iteration is the entire
+            // translation, and for a lone leaf the seat *is* the surface, so for
+            // N = 1 these are the two calls that were always here, with the same
+            // values, around the same draws.
+            for seat in &prepared {
+                pass.set_viewport(
+                    seat.seat.x as f32,
+                    seat.seat.y as f32,
+                    seat.seat.width as f32,
+                    seat.seat.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(seat.seat.x, seat.seat.y, seat.seat.width, seat.seat.height);
+                let slot = &self.seat_slots[seat.slot];
+                if seat.rect_count > 0 {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, seat.rect_buffer.slice(..));
+                    pass.draw(0..6, 0..seat.rect_count as u32);
+                }
+                if let Some(vertex_buffer) = seat.math_vertex_buffer.as_ref() {
+                    pass.set_pipeline(&self.math_pipeline);
+                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                    for draw in &seat.math_draws {
+                        if let Some(texture) = self.math_textures.get(&draw.key)
+                            && let Some(tile) = texture.tiles.get(draw.tile_index)
+                        {
+                            pass.set_bind_group(0, &tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                        }
                     }
                 }
-            }
-            if text_prepared {
-                self.text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)
-                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
-            }
-            if text_prepared && !status_rects.is_empty() {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, status_rect_buffer.slice(..));
-                pass.draw(0..6, 0..status_rects.len() as u32);
-                self.status_text_renderer
-                    .render(&self.atlas, &self.viewport, &mut pass)
-                    .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
-            }
-            if !math_overlays.is_empty() {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, math_overlay_buffer.slice(..));
-                pass.draw(0..6, 0..math_overlays.len() as u32);
-            }
-            // The peek flyout is the topmost transient surface: above grid text, bands, the
-            // status bar, and math toolbars.
-            if let Some(rect_buffer) = peek_rect_buffer.as_ref() {
-                pass.set_pipeline(&self.rect_pipeline);
-                pass.set_vertex_buffer(0, rect_buffer.slice(..));
-                pass.draw(0..6, 0..peek_rects.len() as u32);
-            }
-            if let Some(vertex_buffer) = peek_vertex_buffer.as_ref() {
-                pass.set_pipeline(&self.math_pipeline);
-                pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                for draw in &peek_draws {
-                    if let Some(texture) = self.math_textures.get(&draw.key)
-                        && let Some(tile) = texture.tiles.get(draw.tile_index)
-                    {
-                        pass.set_bind_group(0, &tile.bind_group, &[]);
-                        pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                if seat.text_prepared {
+                    slot.text_renderer
+                        .render(&self.atlas, &slot.viewport, &mut pass)
+                        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                }
+                if seat.text_prepared && seat.status_rect_count > 0 {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, seat.status_rect_buffer.slice(..));
+                    pass.draw(0..6, 0..seat.status_rect_count as u32);
+                    slot.status_text_renderer
+                        .render(&self.atlas, &slot.viewport, &mut pass)
+                        .map_err(|error| RenderError::GlyphRender(error.to_string()))?;
+                }
+                if seat.math_overlay_count > 0 {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, seat.math_overlay_buffer.slice(..));
+                    pass.draw(0..6, 0..seat.math_overlay_count as u32);
+                }
+                // The peek flyout is the topmost transient surface inside a
+                // seat: above grid text, bands, the status bar, and math
+                // toolbars. It belongs to the focused seat alone — it was laid
+                // out in that seat's coordinates, and drawing it once per seat
+                // would stamp a copy at every origin.
+                if seat.focused {
+                    if let Some(rect_buffer) = peek_rect_buffer.as_ref() {
+                        pass.set_pipeline(&self.rect_pipeline);
+                        pass.set_vertex_buffer(0, rect_buffer.slice(..));
+                        pass.draw(0..6, 0..peek_rects.len() as u32);
+                    }
+                    if let Some(vertex_buffer) = peek_vertex_buffer.as_ref() {
+                        pass.set_pipeline(&self.math_pipeline);
+                        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                        for draw in &peek_draws {
+                            if let Some(texture) = self.math_textures.get(&draw.key)
+                                && let Some(tile) = texture.tiles.get(draw.tile_index)
+                            {
+                                pass.set_bind_group(0, &tile.bind_group, &[]);
+                                pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                            }
+                        }
                     }
                 }
             }
@@ -3346,7 +3549,18 @@ impl Renderer {
             present_called_at,
         };
         self.atlas.trim();
-        if self.trace_perf {
+        // The trace reports the focused seat: it is the one whose latency a
+        // person is waiting on, and summing counters across seats would invent a
+        // number no cache ever held (`resident_bytes` is a gauge, not a tally).
+        // `seats=` names how many were drawn so the reading is never mistaken
+        // for the whole window's cost.
+        if self.trace_perf
+            && let Some((frame, text_stats)) = seats
+                .iter()
+                .find(|entry| entry.focused)
+                .map(|entry| entry.frame)
+                .zip(focused_text_stats)
+        {
             let total_elapsed = frame_started.elapsed();
             let digest_started = Instant::now();
             let digest = frame_content_digest(frame);
@@ -3354,8 +3568,9 @@ impl Renderer {
             let digest_elapsed = digest_started.elapsed();
             self.perf_frame = self.perf_frame.saturating_add(1);
             eprintln!(
-                "BT_PERF_TRACE frame={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
+                "BT_PERF_TRACE frame={} seats={} source={:?} cells={} nonblank_cells={} first_text_row={} last_text_row={} content_fnv={:016x} alt={} digest_us={} validate_us={} viewport_us={} row_compose_us={} rows_reshaped={} row_cache_hits={} row_cache_misses={} row_cache_evictions={} row_cache_resident_bytes={} shape_miss_us={} narrow_hits={} narrow_misses={} narrow_evictions={} narrow_resident_bytes={} wide_hits={} wide_misses={} wide_evictions={} wide_resident_bytes={} atlas_prepare_upload_us={} atlas_hits=unmeasurable_glyphon_0_12 atlas_misses=unmeasurable_glyphon_0_12 atlas_grows=unmeasurable_glyphon_0_12 atlas_evictions=unmeasurable_glyphon_0_12 atlas_upload_bytes=unmeasurable_glyphon_0_12 rectangles_us={} math_prepare_upload_us={} math_blocks={} math_texture_evictions={} math_texture_refusals={} textureless_math_blocks={} math_texture_resident_bytes={} acquire_us={} encode_us={} submit_present_us={} total_us={}",
                 self.perf_frame,
+                seats.len(),
                 trigger.source,
                 frame.cells.len(),
                 digest.nonblank_cells,
