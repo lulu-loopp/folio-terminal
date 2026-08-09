@@ -18,6 +18,8 @@
 //! about content. Which session lives in the terminal seat, which file the
 //! preview shows — those never enter a `LayoutNode`.
 
+use std::collections::BTreeMap;
+
 use bt_layout::{
     Axis, DIVIDER, Edit, EditError, LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize,
     Presentation, Ratio, SUBPIXELS_PER_PX, Seat, SeatId, SeatKind, SeatLayout, SeatMetrics,
@@ -110,14 +112,54 @@ pub struct Seats {
 impl Seats {
     /// One terminal seat and nothing else: today's window, expressed as a tree.
     pub fn lone_terminal() -> Self {
-        let terminal = SeatId(1);
-        Self {
-            tree: LayoutNode::seat(Seat::new(terminal, SeatKind::Terminal)),
-            terminal,
-            focus: terminal,
-            next_seat: 2,
-            next_split: 1,
-        }
+        Self::lone_seat(&Seat::new(SeatId(1), SeatKind::Terminal)).0
+    }
+
+    /// **N157/N161 — one pane, alone, as a whole tab's layout.**
+    ///
+    /// Both cross-boundary gestures that make a *new* tab out of an existing
+    /// pane end here: the tear-out that puts a pane in the strip under its own
+    /// name (N157/K123), and the replace that pushes a pane back out to the
+    /// strip because a tab took its place (N161/L139). Neither is building a
+    /// fresh tab — they are re-seating a pane that already exists — so what
+    /// arrives is the [`Seat`] itself and every durable thing §5 says lives on
+    /// one: its `kind`, its `fixed_extent`, its `pinned`. A files column torn
+    /// into its own tab is still the same width it was.
+    ///
+    /// **The ids are re-minted from 1, and that is not cosmetic.** Two tabs
+    /// number their seats and splits from one apiece, and the whole reason
+    /// [`PlanIds`] exists is that ids only mean anything inside the tree that
+    /// issued them. A pane that carried `SeatId(7)` into a tab of its own would
+    /// hand that tab a next-seat counter it has to be told about separately, and
+    /// two sources for one counter is how a name gets handed out twice. So the
+    /// pane is renamed on arrival and the new id is **returned**, because the
+    /// caller has a session filed under the old one and re-keying it is the
+    /// other half of the same move.
+    ///
+    /// [`Self::lone_terminal`] is this function with the obvious seat, rather
+    /// than a second constructor beside it: two ways to stand a one-seat tree up
+    /// is two places for the counters to be seeded differently.
+    pub fn lone_seat(seat: &Seat) -> (Self, SeatId) {
+        let id = SeatId(1);
+        // `terminal` is the seat the tab's shell draws into, and a tab with no
+        // shell is the 2026-07-16 crash I106 is the report for.
+        // `pane_can_become_a_tab` upstream is what guarantees only a Terminal
+        // ever reaches here; this says so out loud rather than trusting silently.
+        debug_assert_eq!(
+            seat.kind,
+            SeatKind::Terminal,
+            "I106: only a Terminal pane may become a tab of its own"
+        );
+        (
+            Self {
+                tree: LayoutNode::seat(Seat { id, ..seat.clone() }),
+                terminal: id,
+                focus: id,
+                next_seat: 2,
+                next_split: 1,
+            },
+            id,
+        )
     }
 
     pub fn tree(&self) -> &LayoutNode {
@@ -442,12 +484,13 @@ impl Seats {
             seat: self.next_seat,
             split: self.next_split,
         };
+        let mut arrived: Vec<(SeatId, SeatId)> = Vec::new();
         let (moving, arriving) = match cargo {
             DropCargo::Pane(seat) => (
                 Some(seat),
                 LayoutNode::seat(self.tree.find_seat(seat)?.clone()),
             ),
-            DropCargo::Layout(tree) => (None, renumbered(tree, &mut ids)),
+            DropCargo::Layout(tree) => (None, renumbered(tree, &mut ids, &mut arrived)),
         };
         // Which seats the accent box covers. A swap is the one case where the
         // arriving subtree is not what lands: the moving seat keeps its own id
@@ -511,6 +554,7 @@ impl Seats {
             tree,
             layout,
             landed,
+            arrived,
             next_seat: ids.seat,
             next_split: ids.split,
         })
@@ -530,19 +574,25 @@ impl Seats {
     /// against a tree that may have moved underneath it, which is the shape of
     /// every drift M155 is a bug report about.
     ///
-    /// **Two refusals, and neither is a fallback.**
+    /// **One refusal, and it is not a fallback.**
     ///
     /// A plan with no layout was refused (H93/M147) and refused means it does not
     /// land — the dashed box already told the user so, and committing behind it
     /// would make the box a lie in the one direction that costs a pane.
     ///
-    /// A plan whose tree no longer holds [`Self::terminal`] is refused because
-    /// this type would stop being able to answer its own question. `terminal` is
-    /// where the shell draws (L1); a `Seats` that names a seat its tree does not
-    /// have is not a degraded `Seats`, it is one that cannot be solved against.
-    /// Nothing the gesture layer can aim at produces such a tree today — a swap
-    /// carries whole seats, so identity travels with content — and the day a drop
-    /// can take the terminal seat away, this is where it will be turned away.
+    /// **There used to be a second, and deleting it is what N161 is.** A plan
+    /// whose tree no longer held [`Self::terminal`] was turned away, on the
+    /// argument that a `Seats` naming a seat its tree does not have cannot be
+    /// solved against. The argument is still true; the refusal was the wrong
+    /// answer to it. `terminal` is a *geometry* identity (L1) — which rectangle
+    /// this tab's identity shell draws into — and N161's replace legitimately
+    /// takes that rectangle away: the target pane is ejected to the strip and an
+    /// arriving tab's whole layout takes its slot. Refusing there would forbid the
+    /// gesture rather than serve it. So the field is **re-derived** instead, by
+    /// exactly the rule [`Self::close_seat`] already applies when the pane you
+    /// closed was the one it named: repoint it at the first terminal left
+    /// standing. Two verbs, one sentence about what `terminal` means, and no
+    /// second opinion about when it has to move.
     ///
     /// **Focus (D43).** The seat the accent box covered is the seat that gets the
     /// focus: an edge or a rim gives it to the leaf that just landed, and a centre
@@ -551,14 +601,16 @@ impl Seats {
     /// here, because [`DropPlan::landed`] already answers both — focus goes where
     /// the promise was drawn.
     ///
-    /// D44 — a tab merging in keeps *its own* focused leaf — is not this rule and
-    /// is not written here. It needs the arriving layout's focus carried across
-    /// the renumbering, and the merge it belongs to cannot be committed by this
-    /// build at all (see `tab_can_host`).
+    /// D44 — a tab merging in keeps *its own* focused leaf — is still not this
+    /// rule and is still not written here. It is a fact about the two *tabs*: it
+    /// needs the arriving tab's focused leaf carried across the renumbering
+    /// ([`DropPlan::arrived`]) and it needs to know that a session followed it, and
+    /// this type knows nothing of either. The commit applies it over the top of
+    /// D43, at the call site, where both halves are in scope.
     ///
     /// Answers the seat that now has focus, or `None` when nothing was adopted.
     pub fn adopt_drop(&mut self, plan: DropPlan) -> Option<SeatId> {
-        if !plan.fits() || !plan.tree.contains(self.terminal) {
+        if !plan.fits() {
             return None;
         }
         let focus = *plan.landed.first()?;
@@ -567,6 +619,20 @@ impl Seats {
             "D43: the box was drawn on a seat the tree does not have"
         );
         self.tree = plan.tree;
+        if !self.tree.contains(self.terminal)
+            && let Some(first) = self.terminals().first().copied()
+        {
+            self.terminal = first;
+        }
+        // Every tab in this build holds at least one shell, so every tab's tree
+        // holds at least one Terminal leaf. A tree that arrives here without one
+        // is a tab that lost its last shell somewhere upstream — I106's crash
+        // with a longer fuse — and the honest place to notice is here, not in a
+        // branch that invents a seat to keep going.
+        debug_assert!(
+            !self.terminals().is_empty(),
+            "a tab's tree always holds a Terminal seat for its shell to draw into"
+        );
         // The identities the plan minted are the identities that landed. Re-
         // deriving them from the tree would be a second opinion about which names
         // are spent, and a name handed out twice is a `find_seat` answering about
@@ -642,6 +708,22 @@ pub struct DropPlan {
     /// Also where the focus goes when the drop lands (D43): the promise is drawn
     /// on the seat you are about to be in.
     pub landed: Vec<SeatId>,
+    /// **Which of the arriving layout's seats became which seat here** — every
+    /// pair [`renumbered`] minted, in that walk's own in-order (D2).
+    ///
+    /// The commit's map from a merging tab's world into this one. Its sessions
+    /// are filed under the ids their own tab issued and have to be re-filed
+    /// under the ids this tree now uses (N159); its focused leaf has to be
+    /// remapped the same way before D44 can put focus on it.
+    ///
+    /// **Empty for a [`DropCargo::Pane`], and the emptiness is an answer rather
+    /// than a case nobody wrote.** A pane moving inside its own tab keeps the
+    /// very id it had — `CenterSwap` trades places and the edge and rim drops
+    /// pluck the leaf and re-seat it, all three carrying the same [`Seat`]
+    /// through — so there is nothing to rename and nothing whose session has to
+    /// move maps. A caller that walked this expecting one pair would be looking
+    /// for a rename that by construction did not happen.
+    pub arrived: Vec<(SeatId, SeatId)>,
     /// The seat and split names this plan spent, so the commit inherits the
     /// bookkeeping rather than re-deriving it. See [`Seats::adopt_drop`].
     next_seat: u64,
@@ -735,18 +817,34 @@ impl PlanIds {
 /// In-order, so the renaming is a function of the tree's shape and of nothing
 /// else (D2) — the same arriving layout is renumbered the same way every frame,
 /// and a preview does not renumber itself under a pointer that has not moved.
-fn renumbered(node: &LayoutNode, ids: &mut PlanIds) -> LayoutNode {
+///
+/// **Every rename is recorded into `renames`, and the record is the point.** The
+/// tree that comes back is enough to *draw* the drop and was all U6 ever needed;
+/// it is not enough to *perform* one. A merging tab brings a shell per Terminal
+/// leaf and those shells are filed under the ids the source tab issued (N159),
+/// so migrating them means knowing which arriving seat became which seat here —
+/// and D44's "the merged tab keeps its own focused leaf" is the same question
+/// asked about one seat. Re-deriving the mapping afterwards by walking the two
+/// trees in step would be a second implementation of this walk, and the first
+/// shape either of them failed to agree on would move a session into the wrong
+/// pane. It is written down where it is decided instead.
+fn renumbered(
+    node: &LayoutNode,
+    ids: &mut PlanIds,
+    renames: &mut Vec<(SeatId, SeatId)>,
+) -> LayoutNode {
     match node {
-        LayoutNode::Seat(seat) => LayoutNode::seat(Seat {
-            id: ids.seat(),
-            ..seat.clone()
-        }),
+        LayoutNode::Seat(seat) => {
+            let id = ids.seat();
+            renames.push((seat.id, id));
+            LayoutNode::seat(Seat { id, ..seat.clone() })
+        }
         LayoutNode::Split {
             dir, ratio, a, b, ..
         } => {
-            let a = renumbered(a, ids);
+            let a = renumbered(a, ids, renames);
             let id = ids.split();
-            let b = renumbered(b, ids);
+            let b = renumbered(b, ids, renames);
             LayoutNode::split_at(id, *dir, *ratio, a, b)
         }
     }
@@ -2530,6 +2628,14 @@ pub fn build_chrome(
     build_chrome_with_preview(seats, layout, scale, pointer, None, None, None)
 }
 
+/// "No seat has a session that can name it."
+///
+/// One named value rather than an anonymous empty map at each of the strip-only
+/// call sites below, so that a test which genuinely means "nothing is running
+/// here" says so, and is not mistaken for one that forgot to pass its names.
+#[cfg(test)]
+static NO_TERMINAL_NAMES: BTreeMap<SeatId, String> = BTreeMap::new();
+
 /// Build chrome while supplying the preview seat's content title and optional body placeholder.
 #[cfg(test)]
 pub fn build_chrome_with_preview(
@@ -2563,7 +2669,7 @@ pub fn build_chrome_with_preview(
             strip_preview: None,
             tab_scroll: 0.0,
             preview_title,
-            terminal_cwd: None,
+            terminal_names: &NO_TERMINAL_NAMES,
             preview_message,
             fit_overflow: None,
             profile_menu_open: false,
@@ -2725,14 +2831,27 @@ pub struct ChromeContent<'a> {
     /// geometry, so a stale value cannot draw a strip past its own content.
     pub tab_scroll: f32,
     pub preview_title: Option<&'a str>,
-    /// The focused terminal session's own `cwd` — C28's `s.cwd`.
+    /// What each Terminal seat's own shell is called — C28, per leaf.
     ///
-    /// It arrives from above rather than being read here for the reason
-    /// `to_persisted` gives: a seat does not know its session. This window runs
-    /// one shell to a tab, so one path describes every terminal leaf in it;
-    /// when panes get their own children this becomes the per-leaf lookup and
-    /// nothing else about the caption changes.
-    pub terminal_cwd: Option<&'a str>,
+    /// The per-leaf lookup the old single `terminal_cwd` promised to become, and
+    /// this is it: a tab now runs one shell per Terminal leaf, and one path
+    /// printed on two heads was one name for two rooms.
+    ///
+    /// The names arrive **already resolved**, and that is red line L1 rather
+    /// than a convenience. A seat does not know its session, and the walk that
+    /// picks a name — the program's OSC 2 title, else the shell's OSC 7 folder,
+    /// else nothing — is a walk over *sessions*, so it lives in `bt-app` where
+    /// the pairing between seats and shells is held. What reaches this module is
+    /// a string per seat id, and the tree still knows nothing about what runs
+    /// inside it.
+    ///
+    /// A seat with no entry — a Files column, a Preview, or a Terminal whose
+    /// shell has said nothing at all — falls back to the kind's own name in
+    /// [`seat_caption`]. A `BTreeMap` for the reason L8 gives about the solver's
+    /// output: it is keyed by [`SeatId`], and lookups here are by
+    /// `SeatPlacement::id`, so a name can only ever land on the seat it was
+    /// resolved for.
+    pub terminal_names: &'a BTreeMap<SeatId, String>,
     pub preview_message: Option<&'a str>,
     /// What the L4 fit-what-fits strip could not show, when the window is in
     /// that state at all ([`fit_what_fits`]). `None` on every ordinary solve.
@@ -2772,12 +2891,18 @@ pub fn build_chrome_for_tabs(
         strip_preview,
         tab_scroll,
         preview_title,
-        terminal_cwd,
+        terminal_names,
         preview_message,
         fit_overflow,
         profile_menu_open,
         chevron_turn,
     } = content;
+    // Each seat is asked about *itself*. Written as a closure beside the two
+    // call sites rather than inlined at each, so the collapsed bar and the pane
+    // head of one seat cannot end up looking the name up two different ways —
+    // which is the same argument `seat_short_caption` makes about deriving its
+    // answer from `seat_caption` instead of re-reading the source.
+    let terminal_name = |id: SeatId| terminal_names.get(&id).map(String::as_str);
     let palette = chrome_palette();
     let mut quads = Vec::new();
     let mut labels = Vec::new();
@@ -2829,7 +2954,7 @@ pub fn build_chrome_for_tabs(
                     scale,
                     placement.kind,
                     placement.presentation,
-                    seat_short_caption(placement.kind, preview_title, terminal_cwd),
+                    seat_short_caption(placement.kind, preview_title, terminal_name(placement.id)),
                     &mut labels,
                     &mut sprites,
                 );
@@ -2890,7 +3015,8 @@ pub fn build_chrome_for_tabs(
                     },
                 ));
                 labels.push(ChromeLabel {
-                    text: seat_caption(placement.kind, preview_title, terminal_cwd).to_owned(),
+                    text: seat_caption(placement.kind, preview_title, terminal_name(placement.id))
+                        .to_owned(),
                     rect: head.title,
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                     // `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
@@ -4042,30 +4168,35 @@ fn collapse_bar_contents(
 /// Two call sites reading two expressions is how those two drift apart, and a
 /// peek that disagrees with the window behind it is worse than no peek.
 ///
-/// Today only a preview carries a name of its own; the rest answer by kind,
-/// because a tab holds exactly one terminal and that terminal's name is the
-/// tab's. When terminals learn per-seat titles, this is the one place that has
-/// to hear about it.
+/// A preview and a terminal each carry a name of their own; the two kinds with
+/// no session behind them answer by kind. Both names arrive already resolved —
+/// this is a printer, not a policy.
+///
+/// **`terminal_name` is a per-seat name, not the tab's `cwd`, and that is a user
+/// ruling that supersedes C28's letter.** C28 writes `${s.cwd}` into `.ptitle`
+/// (mock-up 4559) — the whole path — because in the mock-up a pane head is the
+/// only place the shell's location is ever written. The ruling replaces it: a
+/// terminal pane head shows its own session's OSC 2 program title, falling back
+/// to the *leaf* of its own OSC 7 folder, falling back to the kind's name. Two
+/// panes in `crates\bt-app` and `crates\bt-term` are then told apart by the word
+/// that differs rather than by the forty characters they share, and a head that
+/// is a third of a window wide has room for the word but not for the path.
+///
+/// The walk itself is deliberately *not* here. It is a walk over sessions, and
+/// red line L1 keeps this module free of them; `bt-app` resolves and hands over
+/// a string. What survives here is the last fallback, because it is the one step
+/// of the walk that is about seats: a seat whose session said nothing is named
+/// by its kind, never by an empty caption and never by a guess at the
+/// filesystem.
 pub(crate) fn seat_caption<'a>(
     kind: SeatKind,
     preview_title: Option<&'a str>,
-    terminal_cwd: Option<&'a str>,
+    terminal_name: Option<&'a str>,
 ) -> &'a str {
     match kind {
         SeatKind::Preview => preview_title.unwrap_or_else(|| seat_title(kind)),
-        // C28: `<span class="ptitle">${s.cwd}</span>` (mock-up 4559) — the whole
-        // path, and the mock-up is deliberate about that. The *other* place a
-        // pane's name is written, the drag ghost and the drop preview, uses
-        // `cwdLeaf(s)` and shows only the last segment (3304): a caption has a
-        // whole head to fill and answers "where is this", a label riding the
-        // pointer has one line and answers "which one is this". Two questions,
-        // two lengths, one place each.
-        //
-        // Falls back to the kind's own name when the shell has never reported an
-        // OSC 7, because that is the honest answer to "where is this" when
-        // nobody has said — the same reading `term_leaf` gives the vault.
-        SeatKind::Terminal => terminal_cwd
-            .filter(|cwd| !cwd.is_empty())
+        SeatKind::Terminal => terminal_name
+            .filter(|name| !name.is_empty())
             .unwrap_or_else(|| seat_title(kind)),
         _ => seat_title(kind),
     }
@@ -4094,23 +4225,26 @@ fn overflow_notice(hidden: usize) -> String {
 
 /// The same name, cut to the one segment that answers "which one is this".
 ///
-/// C28 is a ruling about two lengths, not two names: a pane head has a whole bar
-/// to fill and answers "where is this" with the full path, while a label riding
-/// the pointer has one line and shows `cwdLeaf(s)` — the last segment only
-/// (mock-up 3304). A collapsed bar is 24 logical pixels of the second kind, so
-/// it takes the second reading.
+/// C28 was a ruling about two lengths — a pane head answering "where is this"
+/// with the full path against a label riding the pointer showing `cwdLeaf(s)`,
+/// the last segment only (mock-up 3304). The user's per-pane ruling has since
+/// moved the head's own answer to the leaf as well ([`seat_caption`]), so for a
+/// terminal the two lengths now coincide. The cut stays, and stays honest, for
+/// the two readers that are not a terminal head: a preview naming a file with a
+/// path in it, and a collapsed bar of 24 logical pixels, which is the second
+/// kind of label whatever it is showing.
 ///
 /// It is *derived* from [`seat_caption`] rather than read from the source a
 /// second time, which is the whole of that function's warning: two call sites
-/// evaluating two expressions is how two names drift apart. Cutting a path at
-/// its last separator is a no-op on every name that is not a path, so preview
-/// titles and kind names arrive unchanged.
+/// evaluating two expressions is how two names drift apart. Cutting at the last
+/// separator is a no-op on every name that has none, so resolved terminal names,
+/// preview titles and kind names all arrive unchanged.
 pub(crate) fn seat_short_caption<'a>(
     kind: SeatKind,
     preview_title: Option<&'a str>,
-    terminal_cwd: Option<&'a str>,
+    terminal_name: Option<&'a str>,
 ) -> &'a str {
-    let full = seat_caption(kind, preview_title, terminal_cwd);
+    let full = seat_caption(kind, preview_title, terminal_name);
     full.rsplit(['/', '\\'])
         .find(|segment| !segment.is_empty())
         .unwrap_or(full)
@@ -4697,17 +4831,41 @@ fn device_to_logical_signed(device_px: f64, scale_ppm: u32) -> i64 {
 // solve's *result* off as its *intent*.
 // ---------------------------------------------------------------------------
 
+/// "What does the shell in *this* seat want written down?"
+///
+/// Named because it is threaded through the whole recursion and an inline
+/// `&dyn Fn(SeatId) -> TermLeafV1` at four sites is four chances to write a
+/// slightly different signature.
+///
+/// The lifetime is spelled out rather than left to the default object bound,
+/// which for a bare alias is `'static`: the answer a caller gives borrows the
+/// tab it is asking about, and it only has to outlive the call.
+type TermLeafV1Fn<'a> = dyn Fn(SeatId) -> TermLeafV1 + 'a;
+
 impl Seats {
-    /// The durable form of this tree, with `term` written into every terminal
-    /// leaf.
+    /// The durable form of this tree, with every terminal leaf asked about
+    /// **itself**.
     ///
     /// The seed arrives from above rather than being read here because a seat
     /// does not know it: `profile_id`, `cwd` and the manual name belong to the
     /// *session* a tab holds, and this module owns rectangles, not sessions.
-    /// This window runs one shell per tab, so one seed describes every terminal
-    /// leaf in it; when panes get their own children, this parameter becomes the
-    /// per-leaf lookup and nothing else about the shape changes.
-    pub fn to_persisted(&self, term: &TermLeafV1) -> LayoutNodeV1 {
+    ///
+    /// This parameter used to be a single `&TermLeafV1`, cloned into every
+    /// terminal leaf, with a note promising it would become the per-leaf lookup
+    /// once panes had children of their own. **That is now done, and this is
+    /// it.** A tab holds one shell per Terminal leaf, so a tab whose two panes
+    /// stand in two directories has two answers, and one of them was being
+    /// thrown away — both panes came back in the first one's folder. Nothing
+    /// about the file changed: `TermLeafV1` was always per leaf on disk, and the
+    /// writer simply had one fact where the schema had two slots. The version
+    /// stays where it is and no migration is owed.
+    ///
+    /// A closure rather than a map because the question is total: every Terminal
+    /// leaf in this tree has a session behind it — a Terminal seat with no shell
+    /// is a black rectangle — so there is no "missing" case for a lookup to
+    /// answer, and a `&dyn Fn` says that where an `Option`-returning map would
+    /// invite a default nobody should ever write.
+    pub fn to_persisted(&self, term: &TermLeafV1Fn<'_>) -> LayoutNodeV1 {
         to_persisted(&self.tree, term)
     }
 
@@ -4738,14 +4896,16 @@ impl Seats {
     }
 }
 
-fn to_persisted(node: &LayoutNode, term: &TermLeafV1) -> LayoutNodeV1 {
+fn to_persisted(node: &LayoutNode, term: &TermLeafV1Fn<'_>) -> LayoutNodeV1 {
     match node {
         LayoutNode::Seat(seat) => LayoutNodeV1::Leaf(match seat.kind {
             // The seed proper — profile, place, your name for it — and the whole
             // of what a closed tab can be rebuilt from. It used to be three
             // placeholders written unconditionally, which meant every restored
-            // tab came back in the wrong folder under the wrong name.
-            SeatKind::Terminal => LeafNodeV1::Term(term.clone()),
+            // tab came back in the wrong folder under the wrong name. Asked by
+            // `seat.id`, so a leaf is written from the shell that was actually
+            // standing in it.
+            SeatKind::Terminal => LeafNodeV1::Term(term(seat.id)),
             SeatKind::Files => LeafNodeV1::Files(bt_persist::FilesLeafV1 {
                 root: String::new(),
                 open: Vec::new(),
@@ -5669,7 +5829,10 @@ mod tests {
         let session = SessionV1 {
             schema_version: SESSION_SCHEMA_VERSION,
             tabs: vec![TabV1 {
-                root: seats.to_persisted(&TermLeafV1 {
+                // Every leaf answers the same here on purpose: this pin is
+                // about the tree's shape surviving the round trip, and a
+                // per-seat answer would be noise in it.
+                root: seats.to_persisted(&|_| TermLeafV1 {
                     profile_id: "pwsh".to_owned(),
                     cwd: String::new(),
                     manual_name: None,
@@ -6112,7 +6275,7 @@ mod tests {
                     strip_preview: None,
                     tab_scroll: 0.0,
                     preview_title: None,
-                    terminal_cwd: None,
+                    terminal_names: &NO_TERMINAL_NAMES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -6309,7 +6472,7 @@ mod tests {
                 strip_preview: None,
                 tab_scroll,
                 preview_title: None,
-                terminal_cwd: None,
+                terminal_names: &NO_TERMINAL_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open,
@@ -8796,7 +8959,7 @@ mod tests {
                 strip_preview: None,
                 tab_scroll: 0.0,
                 preview_title: None,
-                terminal_cwd: None,
+                terminal_names: &NO_TERMINAL_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -8928,7 +9091,7 @@ mod tests {
                     strip_preview: None,
                     tab_scroll: 0.0,
                     preview_title: None,
-                    terminal_cwd: None,
+                    terminal_names: &NO_TERMINAL_NAMES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -9016,7 +9179,7 @@ mod tests {
                     strip_preview,
                     tab_scroll: 0.0,
                     preview_title: None,
-                    terminal_cwd: None,
+                    terminal_names: &NO_TERMINAL_NAMES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -9165,7 +9328,7 @@ mod tests {
                 strip_preview: None,
                 tab_scroll: 0.0,
                 preview_title: None,
-                terminal_cwd: None,
+                terminal_names: &NO_TERMINAL_NAMES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -9818,46 +9981,100 @@ mod tests {
         );
     }
 
-    /// C28: a terminal pane head names the place it is in, at **full length**.
+    /// C28 as the user re-ruled it: a terminal pane head prints the name its own
+    /// session was resolved to, and falls back to the kind when there is none.
     ///
-    /// The mock-up writes `${s.cwd}` into `.ptitle` (4559) and `cwdLeaf(s)` —
-    /// the last segment alone — into the drag ghost (3304). Two lengths, and
-    /// deliberately: a caption has a head to fill and answers "where is this",
-    /// a label riding the pointer has one line and answers "which one". This
-    /// pins the caption's half; the ghost's arrives with the ghost.
+    /// This function used to *be* the ruling — it took the tab's `cwd` and wrote
+    /// the whole path (mock-up 4559). It is now a printer: the walk that picks
+    /// between the OSC 2 title, the OSC 7 folder's leaf and nothing at all is a
+    /// walk over sessions, and red line L1 keeps this module free of those. What
+    /// is pinned here is the half that is genuinely about seats — the last
+    /// fallback, and the fact that a name is never invented for a kind that has
+    /// no session.
     ///
-    /// Red gate: hand the head `cwd_leaf`'s answer and the first assertion
-    /// fails on the very case the distinction exists for — two panes rooted in
-    /// two different `src` directories.
+    /// Red gate: drop the `filter` on emptiness and the third assertion draws a
+    /// head with no word in it, which is the one outcome the fallback exists to
+    /// refuse.
     #[test]
-    fn a_terminal_pane_head_names_the_whole_path_and_falls_back_honestly() {
-        let cwd = r"D:\Developer\BetterTerminal\crates\bt-app";
-        assert_eq!(seat_caption(SeatKind::Terminal, None, Some(cwd)), cwd);
-        // A shell that never reported an OSC 7 has not said where it is, and
-        // the honest answer to "where is this" is then the kind's own name —
-        // never an empty caption, and never a guess at the filesystem.
+    fn a_terminal_pane_head_prints_its_own_name_and_falls_back_honestly() {
+        let name = "bt-app";
+        assert_eq!(seat_caption(SeatKind::Terminal, None, Some(name)), name);
+        // A shell that has said nothing at all — no title, no folder — has not
+        // named itself, and the honest answer is then the kind's own name; never
+        // an empty caption, and never a guess at the filesystem.
         assert_eq!(
             seat_caption(SeatKind::Terminal, None, None),
             "Terminal",
-            "no report, no place"
+            "nothing said, nothing borrowed"
         );
         assert_eq!(
             seat_caption(SeatKind::Terminal, None, Some("")),
             "Terminal",
-            "an empty report is not a path to the root"
+            "an empty name is not a name"
         );
         // The other kinds are untouched: a preview names its file, and the two
         // that have no session of their own answer by kind.
         assert_eq!(
-            seat_caption(SeatKind::Preview, Some("notes.md"), Some(cwd)),
+            seat_caption(SeatKind::Preview, Some("notes.md"), Some(name)),
             "notes.md"
         );
-        assert_eq!(seat_caption(SeatKind::Files, None, Some(cwd)), "Files");
+        assert_eq!(seat_caption(SeatKind::Files, None, Some(name)), "Files");
         assert_eq!(
-            seat_caption(SeatKind::Placeholder, None, Some(cwd)),
+            seat_caption(SeatKind::Placeholder, None, Some(name)),
             "Unavailable",
             "T227: a leaf this build cannot name says so rather than borrowing one"
         );
+    }
+
+    /// PIN (C28, per leaf): two terminal panes wear two names.
+    ///
+    /// The bug this closes is the plainest one in U12: `ChromeContent` carried a
+    /// single `terminal_cwd` for the whole tab, so a split printed one shell's
+    /// address on both heads — two rooms, one door plate. The lookup is by
+    /// `SeatPlacement::id`, which is why the assertion is not merely "two
+    /// different words appear" but "*this* seat's head says *this* seat's name":
+    /// a map read in tree order rather than by id would pass the first form and
+    /// fail this one the moment the solver laid the panes out right-to-left.
+    ///
+    /// Red gate: hand both heads the same `Option<&str>`, as the old field did,
+    /// and both assertions fail at once.
+    #[test]
+    fn two_terminal_panes_wear_their_own_two_names() {
+        let seats = row_of_terminals(2);
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let [left, right] = seats.terminals()[..] else {
+            panic!("a row of two terminals holds two terminal seats");
+        };
+        let names = BTreeMap::from([(left, "bt-app".to_owned()), (right, "bt-term".to_owned())]);
+        let parts = chrome_with_names(&seats, &layout, &names, None);
+
+        // Each head is found by the rectangle its own seat was solved into, so
+        // the name is checked against the geometry rather than against the order
+        // the labels happen to have been pushed in.
+        for (seat, expected) in [(left, "bt-app"), (right, "bt-term")] {
+            let rect = layout
+                .get(seat)
+                .and_then(|placement| placement.device_rect)
+                .expect("both terminals are drawn at this size");
+            let head = [
+                rect.left as f32,
+                rect.top as f32,
+                rect.right as f32,
+                rect.bottom as f32,
+            ];
+            let named: Vec<_> = parts
+                .labels
+                .iter()
+                .filter(|label| inside(head, label.rect))
+                .map(|label| label.text.as_str())
+                .collect();
+            assert_eq!(
+                named,
+                vec![expected],
+                "the head over {seat:?} says that seat's own name and nothing else"
+            );
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -10064,20 +10281,38 @@ mod tests {
         assert_eq!(layer.opacity, 1.0);
     }
 
-    /// J116/C28: the ghost answers "which one is this", so it takes the short
-    /// name — while the head beside it is still answering "where is this".
+    /// J116: the ghost answers "which one is this", so it still cuts a name at
+    /// its last separator.
     ///
-    /// Red gate: hand the ghost `seat_caption` and this passes for `Files` and
-    /// `Preview` and fails only for a terminal, which is the one kind whose two
-    /// answers actually differ.
+    /// C28's two-lengths distinction has been narrowed by the user's per-pane
+    /// ruling: a terminal head is now handed an already-resolved name, and for
+    /// the common case — a shell that has only reported a folder — that name is
+    /// already the leaf, so the head and the ghost say the same word. The cut
+    /// survives for the readers where a separator can still arrive: a preview
+    /// naming a file by path, and any caller handing over a raw address.
+    ///
+    /// Both assertions are therefore about the *printer*, and the pair is kept
+    /// together because it is the pair that says which of the two functions
+    /// cuts: `seat_caption` prints what it is given, `seat_short_caption` cuts
+    /// it, and neither of them decides what "it" is any more.
+    ///
+    /// Red gate: point `seat_short_caption` at its source instead of deriving
+    /// from `seat_caption` and the first assertion survives while the fallback
+    /// behaviour they share silently forks.
     #[test]
-    fn the_ghost_names_the_last_segment_where_the_head_names_the_path() {
-        let cwd = r"D:\Developer\BetterTerminal\crates\bt-app";
+    fn the_ghost_cuts_a_name_at_its_last_separator_where_the_head_prints_it_whole() {
+        let path = r"D:\Developer\BetterTerminal\crates\bt-app";
         assert_eq!(
-            seat_short_caption(SeatKind::Terminal, None, Some(cwd)),
+            seat_short_caption(SeatKind::Terminal, None, Some(path)),
             "bt-app"
         );
-        assert_eq!(seat_caption(SeatKind::Terminal, None, Some(cwd)), cwd);
+        assert_eq!(seat_caption(SeatKind::Terminal, None, Some(path)), path);
+        // On a name with no separator in it — which is what a resolved terminal
+        // name now is — the cut is a no-op and the two agree.
+        assert_eq!(
+            seat_short_caption(SeatKind::Terminal, None, Some("bt-app")),
+            seat_caption(SeatKind::Terminal, None, Some("bt-app"))
+        );
     }
 
     // ---------------------------------------------------------------------
@@ -10142,14 +10377,39 @@ mod tests {
         sprites: Vec<ChromeSprite>,
     }
 
-    fn chrome_of(seats: &Seats, layout: &SeatLayout, cwd: Option<&str>) -> ChromeParts {
-        chrome_with_overflow(seats, layout, cwd, None)
+    /// Chrome for a tree where every Terminal seat answers to the *same* name —
+    /// the shape every one of these tests had when a tab ran one shell.
+    ///
+    /// Kept as a convenience rather than deleted, because most of what these
+    /// tests are pinning is geometry and a name per seat would be noise in them.
+    /// The tests that are about the names use [`chrome_with_names`], which is the
+    /// honest shape.
+    fn chrome_of(seats: &Seats, layout: &SeatLayout, name: Option<&str>) -> ChromeParts {
+        chrome_with_overflow(seats, layout, name, None)
     }
 
     fn chrome_with_overflow(
         seats: &Seats,
         layout: &SeatLayout,
-        cwd: Option<&str>,
+        name: Option<&str>,
+        fit_overflow: Option<FitOverflow>,
+    ) -> ChromeParts {
+        let names = match name {
+            Some(name) => seats
+                .terminals()
+                .into_iter()
+                .map(|seat| (seat, name.to_owned()))
+                .collect(),
+            None => BTreeMap::new(),
+        };
+        chrome_with_names(seats, layout, &names, fit_overflow)
+    }
+
+    /// Chrome for a tree whose Terminal seats each answer to their own name.
+    fn chrome_with_names(
+        seats: &Seats,
+        layout: &SeatLayout,
+        terminal_names: &BTreeMap<SeatId, String>,
         fit_overflow: Option<FitOverflow>,
     ) -> ChromeParts {
         let tabs = [TabContent {
@@ -10169,7 +10429,7 @@ mod tests {
                 strip_preview: None,
                 tab_scroll: 0.0,
                 preview_title: None,
-                terminal_cwd: cwd,
+                terminal_names,
                 preview_message: None,
                 fit_overflow,
                 profile_menu_open: false,
@@ -10347,15 +10607,21 @@ mod tests {
         );
     }
 
-    /// T210 and C28 together: a bar squeezed along Col has a whole line to give,
-    /// so it names its seat — by the *short* name, the one a label riding the
-    /// pointer uses, while the pane head of the very same seat spells the path
-    /// out in full.
+    /// T210: a bar squeezed along Col has a whole line to give, so it names its
+    /// seat — by the *short* name, the one a label riding the pointer uses.
+    ///
+    /// It is handed a raw path here rather than a resolved name on purpose. The
+    /// user's per-pane ruling means the chrome is normally given a leaf already
+    /// (`seat_caption`), so the cut would be a no-op and this would be pinning
+    /// nothing; feeding the bar the one input on which the two spellings still
+    /// differ is what keeps the assertion able to fail. The head's half of the
+    /// old C28 comparison has moved to
+    /// `a_terminal_pane_head_prints_its_own_name_and_falls_back_honestly`.
     ///
     /// Red gate: point the bar at `seat_caption` instead of `seat_short_caption`
     /// and the first assertion reads the whole path.
     #[test]
-    fn a_collapsed_bar_names_its_seat_short_where_the_head_names_it_long() {
+    fn a_collapsed_bar_names_its_seat_by_the_short_name() {
         let cwd = "C:\\Users\\Weiyi\\Developer\\BetterTerminal";
         let seats = Seats::lone_terminal();
         let bar = LogicalRect::new(
@@ -11508,6 +11774,85 @@ mod drop_plan_tests {
         assert!(planned.landed.iter().all(|id| id.0 > 2));
     }
 
+    /// **The plan writes down what it renamed, because the commit has to move
+    /// sessions along it (N159/D44).**
+    ///
+    /// The tree alone is enough to *draw* a merge and was all the preview ever
+    /// needed. Performing one needs the map: every shell the arriving tab holds
+    /// is filed under an id that tab issued, and the seat it now draws into
+    /// answers to a different one. Three things are asserted and each is a way
+    /// the map can be wrong rather than absent — a pair for *every* arriving
+    /// seat and in the source tree's own in-order (D2, so the map is a function
+    /// of shape and nothing else), every new id present in the tree that
+    /// actually landed, and no new id equal to one the target already had, which
+    /// is the collision that would migrate a session on top of a live one.
+    ///
+    /// Red gate: record only the leaves the drop happened to land on and the
+    /// count goes wrong; record the pairs reversed and the lookup silently finds
+    /// nothing; skip [`PlanIds`] and reuse the source ids and the collision
+    /// assertion fires.
+    #[test]
+    fn a_layout_plan_records_every_seat_it_renamed() {
+        let seats = window(row(1, term(1), term(2)));
+        let arriving = row(1, term(1), col(2, term(2), files(3)));
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Right),
+            DropCargo::Layout(&arriving),
+        );
+        let source_order: Vec<SeatId> = arriving
+            .seats_in_order()
+            .iter()
+            .map(|seat| seat.id)
+            .collect();
+        assert_eq!(
+            planned
+                .arrived
+                .iter()
+                .map(|(was, _)| *was)
+                .collect::<Vec<_>>(),
+            source_order,
+            "every arriving seat is paired, in the source tree's own order"
+        );
+        for (was, now) in &planned.arrived {
+            assert!(
+                planned.tree.contains(*now),
+                "{was:?} was renamed to {now:?}, which the landed tree does not have"
+            );
+            assert!(
+                !seats.tree.contains(*now),
+                "{now:?} collides with an id the target tree already had"
+            );
+        }
+    }
+
+    /// **A moving pane renames nothing, and the empty map says so.**
+    ///
+    /// All three pane landings carry the very [`Seat`] that was already in this
+    /// tree — a centre trades places, an edge and a rim pluck the leaf and
+    /// re-seat it — so the id it had is the id it keeps and its session never
+    /// changes key. An empty [`DropPlan::arrived`] is that fact, not a case the
+    /// plan forgot to fill in.
+    #[test]
+    fn a_moving_pane_keeps_its_own_identity_and_renames_nothing() {
+        let seats = window(row(1, files(1), row(2, term(2), term(3))));
+        for aim in [
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+            LayoutAim::SeatCentre(SeatId(3)),
+            LayoutAim::Rim(DropEdge::Left),
+        ] {
+            let planned = plan(&seats, aim, DropCargo::Pane(SeatId(1)));
+            assert!(
+                planned.arrived.is_empty(),
+                "{aim:?} renamed something for a pane that kept its own id"
+            );
+            assert!(
+                planned.tree.contains(SeatId(1)),
+                "{aim:?} lost the moving pane's own identity"
+            );
+        }
+    }
+
     /// **M156 — a pane at the centre is modelled on both sides.**
     ///
     /// Replacing only the target previews two files columns where the drop
@@ -12142,20 +12487,31 @@ mod drop_plan_tests {
         );
     }
 
-    /// **`Seats` will not adopt a tree that has lost the seat its shell draws
-    /// in.**
+    /// **N161 — a replace may take the terminal seat away, and `terminal` is
+    /// re-derived rather than the drop refused.**
     ///
-    /// `terminal` is a geometry identity (L1) and the type is unanswerable
-    /// without it. Nothing the gesture layer aims at produces such a tree — a
-    /// swap carries whole seats — so this is reached by asking directly, which is
-    /// also how it will be reached the day a replace can take the terminal away.
+    /// This test used to assert the opposite. `adopt_drop` turned down any tree
+    /// that had lost [`Seats::terminal`], on the argument that a geometry
+    /// identity (L1) naming a seat the tree does not have is unanswerable — and
+    /// that argument is still true. The refusal was the wrong answer to it: the
+    /// whole of N161 is a tab replacing a pane, and the pane it replaces is
+    /// allowed to be the one the tab's identity shell was drawing into. Refusing
+    /// there forbids the gesture instead of serving it.
     ///
-    /// Red gate: drop the `contains` guard and the window keeps a `terminal` its
-    /// tree does not hold, which `solve` then answers about a seat that is gone.
+    /// So the field moves, by the same rule [`Seats::close_seat`] applies when
+    /// you close the pane it named: the first terminal left standing. What is
+    /// asserted is that the tree lost the old identity, that the new one is a
+    /// seat the tree actually has, and that it is the first — a `terminal` that
+    /// wandered to some other leaf would answer `solve` about the wrong
+    /// rectangle without ever being unanswerable.
+    ///
+    /// Red gate: keep the `contains` refusal and the drop is silently abandoned
+    /// behind a preview that promised it; drop the re-derivation and the window
+    /// keeps a `terminal` its tree does not hold.
     #[test]
-    fn a_tree_without_this_window_s_terminal_is_not_adopted() {
+    fn a_replace_that_takes_the_terminal_seat_re_derives_it() {
         let mut seats = window(row(1, term(1), term(2)));
-        let before = seats.tree().clone();
+        assert_eq!(seats.terminal(), SeatId(1));
         let planned = seats
             .plan_drop(
                 &metrics(),
@@ -12164,12 +12520,24 @@ mod drop_plan_tests {
                 DropCargo::Layout(&term(7)),
             )
             .expect("a tab may be aimed at a centre");
+        assert!(planned.fits());
         assert!(
-            planned.fits(),
-            "the geometry is fine — it is the identity that is not"
+            seats.adopt_drop(planned).is_some(),
+            "N161: the replace lands"
         );
-        assert_eq!(seats.adopt_drop(planned), None);
-        assert_eq!(seats.tree(), &before);
+        assert!(
+            !seats.tree().contains(SeatId(1)),
+            "ReplaceSeat took the identity terminal's own seat away"
+        );
+        assert!(
+            seats.tree().contains(seats.terminal()),
+            "and `terminal` followed it to a seat that exists"
+        );
+        assert_eq!(
+            seats.terminal(),
+            seats.terminals()[0],
+            "the first terminal left standing, as `close_seat` also rules"
+        );
     }
 
     /// **The gesture on the tab this build can actually make.**
@@ -12263,8 +12631,8 @@ mod drop_plan_tests {
             cwd: r"C:\Users".to_owned(),
             manual_name: None,
         };
-        let mut revived =
-            Seats::from_persisted(&seats.to_persisted(&seed)).expect("the tree has a terminal");
+        let mut revived = Seats::from_persisted(&seats.to_persisted(&|_| seed.clone()))
+            .expect("the tree has a terminal");
         revived.restore_focus_token(&format!("leaf-{focus_index}"));
         assert_eq!(
             in_order(&revived),
