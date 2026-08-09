@@ -1332,7 +1332,10 @@ pub fn hit_chrome(
             continue;
         }
         if seats.has_pane_headers() {
-            let head_bottom = (rect[1] + SEAT_TITLE_BAR_LOGICAL_PX * scale).min(rect[3]);
+            // The border box, hairline included, rounded the way the drawing and
+            // `pane_body_viewport` both round it: the header you can grab is
+            // exactly the header you can see.
+            let head_bottom = (rect[1] + (SEAT_TITLE_BAR_LOGICAL_PX * scale).round()).min(rect[3]);
             if contains([rect[0], rect[1], rect[2], head_bottom], x, y) {
                 return Some(ChromeTarget::PaneHeader(placement.id));
             }
@@ -1745,11 +1748,21 @@ pub fn build_chrome_for_tabs(
                 if !seats.has_pane_headers() {
                     continue;
                 }
-                let bar = SEAT_TITLE_BAR_LOGICAL_PX * scale;
-                let title_bottom = (rect[1] + bar).min(rect[3]);
+                // `* { box-sizing: border-box }` (mock-up line 77) rules the
+                // arithmetic here: `.panehead { height: 28px; border-bottom: 1px }`
+                // is twenty-eight rows *including* the hairline, not twenty-eight
+                // plus one. Rounded once, because `pane_body_viewport` rounds the
+                // same product to decide where the terminal starts and the two
+                // must not round apart at a fractional scale.
+                let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round();
+                let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
+                let head_bottom = (rect[1] + bar).min(rect[3]);
+                // The content box the flex row lays out in: the border box less
+                // its border, which is what everything inside the head centres on.
+                let title_bottom = (head_bottom - edge).max(rect[1]);
                 if placement.id != seats.terminal() {
                     quads.push(ChromeQuad {
-                        rect: [rect[0], title_bottom, rect[2], rect[3]],
+                        rect: [rect[0], head_bottom, rect[2], rect[3]],
                         color: palette.seat_body,
                     });
                 }
@@ -1758,10 +1771,12 @@ pub fn build_chrome_for_tabs(
                     color: palette.pane_head,
                 });
                 // The hairline that makes the bar a caption rather than a stripe.
-                let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
-                if title_bottom + edge <= rect[3] {
+                // It is the head's last row, so it stops where the body begins:
+                // drawn below `head_bottom` it would paint over the terminal's
+                // own first row, which is the bug this reading fixes.
+                if title_bottom < head_bottom {
                     quads.push(ChromeQuad {
-                        rect: [rect[0], title_bottom, rect[2], title_bottom + edge],
+                        rect: [rect[0], title_bottom, rect[2], head_bottom],
                         color: palette.pane_head_edge,
                     });
                 }
@@ -1793,6 +1808,12 @@ pub fn build_chrome_for_tabs(
                         title_bottom,
                     ],
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
+                    // `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
+                    // (mock-up line 1644) — one declaration with two halves, and
+                    // the mock-up's note beside it turns on having both: the
+                    // focused pane is marked by *hierarchy* rather than by a fill,
+                    // after tinting it with the accent was ruled out for colliding
+                    // with the unread dot in the same row.
                     color: if placement.id == seats.focus() {
                         palette.pane_title_focus
                     } else {
@@ -1801,7 +1822,11 @@ pub fn build_chrome_for_tabs(
                     align_right: false,
                     align_center: false,
                     letter_spacing_em: 0.0,
-                    weight: ChromeLabelWeight::Regular,
+                    weight: if placement.id == seats.focus() {
+                        ChromeLabelWeight::Medium
+                    } else {
+                        ChromeLabelWeight::Regular
+                    },
                     tabular_numerals: false,
                 });
                 if placement.kind == SeatKind::Preview
@@ -1814,7 +1839,9 @@ pub fn build_chrome_for_tabs(
                         text: message.to_owned(),
                         rect: [
                             rect[0] + pad,
-                            title_bottom + pad,
+                            // Padded from the *body's* top, which is where the
+                            // head's border box ends — not from its fill.
+                            head_bottom + pad,
                             rect[2] - pad,
                             rect[3] - pad,
                         ],
@@ -2320,17 +2347,40 @@ fn window_chrome(
                         // pin this"), filled is the state ("it is pinned").
                         ChromeMark::Pin { filled: pinned },
                         pin_glyph_rect,
-                        if pinned || pin_hovered {
-                            // `.pin.on`, `.pin:hover` — `var(--ink)`, the same
-                            // full ink the `×` steps up to under the pointer.
-                            // "The state is darker than the action: one is a fact
-                            // about this tab, the other is an offer that only
-                            // exists while you are hovering it."
-                            palette.title_text_hover
-                        } else {
+                        // Same slot as the `×`, same two declarations, same duty
+                        // to arrive already mixed over the ground beneath it —
+                        // with one ground the `×` never has to answer for. The
+                        // `×` reaches `--ink` only under the pointer, where its
+                        // pill is always down; a *pinned* pin reaches `--ink` as
+                        // a state, standing on the bare tab.
+                        if pin_hovered {
+                            // `.pin:hover` — `var(--ink)` over the pill this pass
+                            // has just drawn, which is the `×`'s own lit ink.
+                            if active {
+                                palette.tab_close_glyph_on_pill_over_active_tab
+                            } else {
+                                palette.tab_close_glyph_on_pill_over_hovered_tab
+                            }
+                        } else if pinned {
+                            // `.pin.on` — `var(--ink)` with nothing under it but
+                            // the tab. "The state is darker than the action: one
+                            // is a fact about this tab, the other is an offer that
+                            // only exists while you are hovering it."
+                            if active {
+                                palette.tab_pin_state_on_active_tab
+                            } else if tab_hovered {
+                                palette.tab_pin_state_on_hovered_tab
+                            } else {
+                                palette.title_text_hover
+                            }
+                        } else if active {
                             // `.tab .pin { color: var(--ink3) }` — the resting
                             // `×`'s own ink, because at rest they are the same
-                            // kind of offer.
+                            // kind of offer, so they are the same three mixes.
+                            palette.tab_close_glyph_on_active_tab
+                        } else if tab_hovered {
+                            palette.tab_close_glyph_on_hovered_tab
+                        } else {
                             palette.title_text_muted
                         },
                     );
@@ -2370,11 +2420,28 @@ fn window_chrome(
             sprites.push(ChromeSprite::new(
                 ChromeMark::TabClose,
                 glyph_rect,
+                // One declaration, five grounds — and the glyph has to answer to
+                // the one under it for the same reason its pill does, six lines
+                // above: this pipeline composites in linear light, so a
+                // translucent ink cannot be handed to the blender and has to
+                // arrive already mixed over the surface it lands on.
                 if close_hovered {
-                    palette.title_text_hover
+                    // `.tab .close:hover { color: var(--ink) }`, standing on the
+                    // pill this pass has just drawn — never on the bare tab.
+                    if active {
+                        palette.tab_close_glyph_on_pill_over_active_tab
+                    } else {
+                        palette.tab_close_glyph_on_pill_over_hovered_tab
+                    }
+                } else if active {
+                    palette.tab_close_glyph_on_active_tab
+                } else if tab_hovered {
+                    palette.tab_close_glyph_on_hovered_tab
                 } else {
                     // `.tab .close { color: var(--ink3) }` — a step below the caption
                     // run's own ink, because closing a tab is not what the strip is for.
+                    // Over `--panel` that ink is the strip's own muted one, which the
+                    // `+`/`˅` pair beside these tabs already wears.
                     palette.title_text_muted
                 },
             ));
@@ -3146,7 +3213,12 @@ mod tests {
                             rect.left as f32,
                             rect.top as f32,
                             rect.right as f32,
-                            rect.top as f32 + SEAT_TITLE_BAR_LOGICAL_PX,
+                            // The head's *fill*, which is 27 and not 28: the
+                            // mock-up is `box-sizing: border-box`, so the
+                            // hairline is the twenty-eighth row rather than a
+                            // twenty-ninth. Pinned in full below.
+                            rect.top as f32 + SEAT_TITLE_BAR_LOGICAL_PX
+                                - SEAT_TITLE_EDGE_LOGICAL_PX,
                         ]
             }));
         }
@@ -3158,6 +3230,150 @@ mod tests {
                 .any(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
         );
         assert!(sprites.iter().any(|sprite| sprite.mark == ChromeMark::File));
+    }
+
+    /// PIN (D2): the pane head is twenty-eight pixels *including* its hairline,
+    /// and the terminal's first row starts on the twenty-ninth.
+    ///
+    /// The mock-up opens with `* { box-sizing: border-box }` (line 77), so
+    /// `.panehead { height: 28px; border-bottom: 1px }` (lines 1515-1523) is 27
+    /// rows of fill plus one of `--border-soft` — twenty-eight in total, and
+    /// the flex box centres its mark and caption in the 27 that are left.
+    ///
+    /// Red gate: the head was drawn as 28 rows of fill with the hairline laid
+    /// across 28..29, while `pane_body_viewport` advanced the terminal by 28.
+    /// The hairline therefore sat *on top of* the terminal's first logical
+    /// pixel row — one row of every multi-pane terminal painted over by
+    /// chrome, at every scale, in both themes. Border-box is not a detail here:
+    /// it is the difference between a caption that ends where the body begins
+    /// and one that eats into it.
+    ///
+    /// The three numbers are asserted as one chain — fill, then hairline, then
+    /// the body's own origin — because any two of them can agree while the
+    /// third is wrong, and the overlap is exactly what a two-way check misses.
+    #[test]
+    fn the_pane_heads_hairline_is_the_last_row_of_its_own_twenty_eight() {
+        let palette = chrome_palette();
+        for dpi_milli in [1_000u32, 1_250, 1_500, 1_750, 2_000, 2_500] {
+            let scale = dpi_milli as f32 / 1_000.0;
+            let metrics = seat_metrics(dpi_milli);
+            let mut seats = Seats::lone_terminal();
+            assert!(seats.toggle_preview(&metrics));
+            let layout = solved(&seats, viewport_of(1600, 900, dpi_milli), &metrics);
+            let (quads, _, _) = build_chrome(&seats, &layout, scale, ChromePointer::default());
+
+            // The border box, rounded to whole device pixels exactly once, so
+            // the drawing and the viewport cannot round apart.
+            let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round();
+            let edge = (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
+            for placement in &layout.rects {
+                let rect = placement.device_rect.unwrap();
+                let top = rect.top as f32;
+                let head = quads
+                    .iter()
+                    .find(|quad| quad.color == palette.pane_head && quad.rect[1] == top)
+                    .unwrap_or_else(|| panic!("{dpi_milli}: every full pane wears a head"));
+                assert_eq!(
+                    head.rect[3],
+                    top + bar - edge,
+                    "{dpi_milli}: the fill is the border box less its border"
+                );
+                let hairline = quads
+                    .iter()
+                    .find(|quad| quad.color == palette.pane_head_edge && quad.rect[1] >= top)
+                    .unwrap_or_else(|| panic!("{dpi_milli}: and the hairline under it"));
+                assert_eq!(
+                    hairline.rect[1], head.rect[3],
+                    "{dpi_milli}: no seam between the fill and its border"
+                );
+                assert_eq!(
+                    hairline.rect[3],
+                    top + bar,
+                    "{dpi_milli}: `border-box` — the hairline is inside the 28"
+                );
+
+                // And the body starts where the border box ends, so nothing the
+                // head draws can land on a terminal row.
+                let body = pane_body_viewport(&seats, &layout, placement.id, scale)
+                    .expect("a full pane has a body");
+                let whole = seat_viewport(&layout, placement.id).unwrap();
+                assert_eq!(
+                    body.y,
+                    whole.y + bar as u32,
+                    "{dpi_milli}: the body is deducted the whole border box"
+                );
+                assert!(
+                    hairline.rect[3] <= body.y as f32,
+                    "{dpi_milli}: the hairline must not cover the terminal's \
+                     first row — saw it end at {} against a body at {}",
+                    hairline.rect[3],
+                    body.y
+                );
+
+                // The head's hit target is the box the design draws, hairline
+                // and all: a pointer on the last row of the caption is still on
+                // the caption.
+                assert_eq!(
+                    hit_chrome(
+                        &seats,
+                        &layout,
+                        scale,
+                        f64::from(rect.left as f32 + 1.0),
+                        f64::from(top + bar - 1.0),
+                    ),
+                    Some(ChromeTarget::PaneHeader(placement.id)),
+                    "{dpi_milli}: the border box is the header, hairline included"
+                );
+            }
+        }
+    }
+
+    /// PIN (D4): the focused pane's caption is the mock-up's `500`, and it is
+    /// the only one.
+    ///
+    /// `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
+    /// (mock-up line 1644) is one declaration with two halves, and the mock-up's
+    /// own note beside it says why both are needed: the focused pane is told
+    /// apart by *hierarchy* rather than by a fill, after tinting it with the
+    /// accent was ruled out for colliding with the unread dot. "A title at
+    /// `--ink` beside titles at `--ink3` is already a hierarchy" — and the
+    /// weight is the other half of that hierarchy.
+    ///
+    /// Red gate: the colour half shipped and the weight half did not. Every
+    /// pane head was `ChromeLabelWeight::Regular`, because the enum had no 500
+    /// to give it, so the focused head was carrying the whole distinction on
+    /// one channel.
+    #[test]
+    fn the_focused_pane_head_is_the_only_caption_at_five_hundred() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        assert!(seats.toggle_preview(&metrics));
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let (_, labels, _) = build_chrome(&seats, &layout, 1.0, ChromePointer::default());
+        let palette = chrome_palette();
+        let head = |text: &str| {
+            labels
+                .iter()
+                .find(|label| label.text == text)
+                .unwrap_or_else(|| panic!("the strip draws a {text} head"))
+        };
+        let focused = head("Terminal");
+        let resting = head("Preview");
+        assert_eq!(
+            focused.color, palette.pane_title_focus,
+            "the focused pane is the terminal, and it wears `--ink`"
+        );
+        assert_eq!(
+            focused.weight,
+            ChromeLabelWeight::Medium,
+            "`.pane.focused .panehead {{ font-weight: 500 }}`"
+        );
+        assert_eq!(resting.color, palette.pane_title);
+        assert_eq!(
+            resting.weight,
+            ChromeLabelWeight::Regular,
+            "an unfocused head is the face's own weight — the step is the signal"
+        );
     }
 
     /// PIN (styling pass): a preview state notice is a quiet centred note in the
@@ -4448,14 +4664,58 @@ mod tests {
                  {mark_centre} against {body_centre}"
             );
 
-            // Ink: the resting × is `--ink3`, a step below the caption run's own.
+            // Ink: the `×` is `--ink3`, a step below the caption run's own —
+            // over the surface its own tab is wearing, which is not one grey.
+            //
+            // Red gate (D1): this read `.all(|s| s.color == title_text_muted)`,
+            // and that single ink is `--ink3` over `--panel`. `strip_chrome`
+            // makes tab 0 the active one, so on dark the first assertion below
+            // saw `0x78` where its `--termbg` ground asks for `0x72` — the pill
+            // six lines above the glyph in `window_chrome` had already been
+            // split into two composites, and the glyph standing inside it had
+            // not.
             let full_titles = strip_titles(2);
-            let (_, _, rest) = strip_chrome(scale, &full_titles, 0, None, false);
-            assert!(
-                rest.iter()
+            let close_ink = |hover: Option<ChromeTarget>, index: usize| {
+                let close = tab_strip_geometry(960.0 * scale, scale, &resting(2), 0, 0.0).tabs
+                    [index]
+                    .close
+                    .expect("a Full-tier tab has its ×");
+                let (_, _, sprites) = strip_chrome(scale, &full_titles, 0, hover, false);
+                sprites
+                    .iter()
                     .filter(|sprite| sprite.mark == ChromeMark::TabClose)
-                    .all(|sprite| sprite.color == palette.title_text_muted),
-                "scale {scale}: `.tab .close {{ color: var(--ink3) }}`"
+                    .find(|sprite| sprite.rect[0] >= close[0] && sprite.rect[2] <= close[2])
+                    .expect("every Full-tier tab draws its ×")
+                    .color
+            };
+            assert_eq!(
+                close_ink(None, 0),
+                palette.tab_close_glyph_on_active_tab,
+                "scale {scale}: the active tab's `×` is `--ink3` over `--termbg`"
+            );
+            assert_eq!(
+                close_ink(None, 1),
+                palette.title_text_muted,
+                "scale {scale}: a resting tab's is the same ink over `--panel`, \
+                 which is the strip's own muted ink and needs no second name"
+            );
+            assert_eq!(
+                close_ink(Some(ChromeTarget::Tab(1)), 1),
+                palette.tab_close_glyph_on_hovered_tab,
+                "scale {scale}: and over that tab's own `--hover` fill once the \
+                 pointer is inside it"
+            );
+            // `.tab .close:hover { color: var(--ink) }` — over the pill, which
+            // is itself one of two surfaces.
+            assert_eq!(
+                close_ink(Some(ChromeTarget::TabClose(0)), 0),
+                palette.tab_close_glyph_on_pill_over_active_tab,
+                "scale {scale}: the lit `×` stands on its pill, not on the bar"
+            );
+            assert_eq!(
+                close_ink(Some(ChromeTarget::TabClose(1)), 1),
+                palette.tab_close_glyph_on_pill_over_hovered_tab,
+                "scale {scale}: and on a hovered tab that pill is a lighter one"
             );
         }
     }
@@ -5924,9 +6184,12 @@ mod tests {
                     <= 0.5,
                 "scale {scale}: `justify-content: center` inside the 17px box"
             );
+            // `.tab .pin.on { color: var(--ink) }` — over the surface the tab is
+            // wearing, and `strip_chrome_of` makes this pinned tab the active
+            // one, so the ground is `--termbg` with no pill on it.
             assert_eq!(
-                state.color, palette.title_text_hover,
-                "scale {scale}: `.tab .pin.on {{ color: var(--ink) }}`"
+                state.color, palette.tab_pin_state_on_active_tab,
+                "scale {scale}: `.tab .pin.on {{ color: var(--ink) }}` over `--termbg`"
             );
             assert_eq!(
                 state.opacity, 1.0,
@@ -5947,7 +6210,9 @@ mod tests {
                 "scale {scale}: a strip of ordinary tabs carries no extra furniture"
             );
 
-            // Unpinned and revealed: outlined, `--ink3` — the resting ×'s own ink.
+            // Unpinned and revealed: outlined, `--ink3` — the `×`'s own ink over
+            // the `×`'s own ground, which is the whole reason the pin borrows
+            // that field rather than owning a second copy of it.
             let offered = [pinnable_tab(TabTrailer {
                 pinned: false,
                 reveal: 1.0,
@@ -5955,12 +6220,42 @@ mod tests {
             let (_, _, offer_sprites) = strip_chrome_of(scale, &offered, 0, 0.0, None, false);
             let offer = pin_sprite(&offer_sprites, false).expect("a revealed pin is drawn");
             assert_eq!(
-                offer.color, palette.title_text_muted,
-                "scale {scale}: `.tab .pin {{ color: var(--ink3) }}`"
+                offer.color, palette.tab_close_glyph_on_active_tab,
+                "scale {scale}: `.tab .pin {{ color: var(--ink3) }}`, mixed like the `×`'s"
             );
             assert_ne!(
-                palette.title_text_muted, palette.title_text_hover,
-                "the state is darker than the action"
+                palette.tab_close_glyph_on_active_tab, palette.tab_pin_state_on_active_tab,
+                "the state is darker than the action — on one and the same ground"
+            );
+
+            // The other two grounds a pinned pin can stand on. A pinned tab that
+            // is neither active nor hovered is the only place the strip's own
+            // `--panel` mixes are still the right answer, and the hovered one is
+            // where a reading that reused the `×`'s pill entry would pass by
+            // coincidence — so both are stated.
+            let neighbour = [
+                pinnable_tab(TabTrailer::default()),
+                pinnable_tab(TabTrailer {
+                    pinned: true,
+                    reveal: 0.0,
+                }),
+            ];
+            let pinned_ink = |hover: Option<ChromeTarget>| {
+                let (_, _, sprites) = strip_chrome_of(scale, &neighbour, 0, 0.0, hover, false);
+                pin_sprite(&sprites, true)
+                    .expect("the pinned neighbour draws its pin")
+                    .color
+            };
+            assert_eq!(
+                pinned_ink(None),
+                palette.title_text_hover,
+                "scale {scale}: on a resting tab that ink is `--ink` over `--panel`"
+            );
+            assert_eq!(
+                pinned_ink(Some(ChromeTarget::Tab(1))),
+                palette.tab_pin_state_on_hovered_tab,
+                "scale {scale}: and over that tab's own `--hover` fill once the \
+                 pointer is inside it"
             );
         }
     }
@@ -6027,9 +6322,17 @@ mod tests {
             ];
             let tabs = [pinnable_tab(trailers[0]), pinnable_tab(trailers[1])];
             let geometry = tab_strip_geometry(960.0 * scale, scale, &trailers, 0, 0.0);
-            for (index, expected) in [
-                (0, palette.tab_close_pill_on_content),
-                (1, palette.tab_close_pill_on_hovered_tab),
+            for (index, expected, lit) in [
+                (
+                    0,
+                    palette.tab_close_pill_on_content,
+                    palette.tab_close_glyph_on_pill_over_active_tab,
+                ),
+                (
+                    1,
+                    palette.tab_close_pill_on_hovered_tab,
+                    palette.tab_close_glyph_on_pill_over_hovered_tab,
+                ),
             ] {
                 let pin = geometry.tabs[index]
                     .pin
@@ -6060,9 +6363,12 @@ mod tests {
                     .filter(|sprite| matches!(sprite.mark, ChromeMark::Pin { .. }))
                     .find(|sprite| sprite.rect[0] >= pin[0] && sprite.rect[2] <= pin[2])
                     .expect("and its glyph is inside it");
+                // `.tab .pin:hover { color: var(--ink) }` — and under the pointer
+                // there is always a pill, so this is the `×`'s own lit ink, the
+                // one tier the two controls can share outright.
                 assert_eq!(
-                    glyph.color, palette.title_text_hover,
-                    "scale {scale}: `.tab .pin:hover {{ color: var(--ink) }}`"
+                    glyph.color, lit,
+                    "scale {scale}: tab {index}'s pin glyph stands on the wrong pill"
                 );
             }
             let (_, _, sprites) =

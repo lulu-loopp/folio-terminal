@@ -221,6 +221,74 @@ pub struct ChromePalette {
     /// The two are the whole set: `.tab.active` never takes `--hover`, and a tab
     /// that is not hovered cannot have a hovered `×` on it.
     pub tab_close_pill_on_hovered_tab: [u8; 3],
+
+    // ── the `×` itself, over the four surfaces it can land on ──
+    //
+    // Its pill above learned this lesson first and the glyph standing *in* that
+    // pill did not: `.tab .close { color: var(--ink3) }` rising to
+    // `var(--ink)` on hover is one declaration over five different grounds —
+    // `--panel` on a resting tab, the tab's own `--hover` fill on a hovered
+    // one, `--termbg` on the active one, and, once the pointer is on the `×`
+    // itself, whichever of the two pills is under it. Translucent inks cannot
+    // be handed to this blender for the reason spelled out at
+    // [`Self::tab_close_pill_on_content`], so each ground gets its composite.
+    //
+    // The resting tab's is not new: `--ink3` over `--panel` is exactly
+    // [`Self::title_text_muted`], which the `+`/`˅` pair beside the strip
+    // already wears, so the call site uses that name for that one surface.
+    /// `--ink3` over `--termbg` — the `×` on the active tab, the one tab whose
+    /// fill is the terminal's own surface rather than the bar's.
+    ///
+    /// Numerically this is [`Self::pane_title`] on both canvases, and for a
+    /// real reason: a pane head is the terminal surface too, so the same ink
+    /// over the same ground must land on the same grey. They are two names
+    /// because they are two declarations — a strip control and a caption — and
+    /// either could be re-struck without the other.
+    pub tab_close_glyph_on_active_tab: [u8; 3],
+    /// `--ink3` over `--hover` over `--panel` — the `×` on a tab the pointer is
+    /// somewhere inside, but not on the `×`.
+    pub tab_close_glyph_on_hovered_tab: [u8; 3],
+    /// `.tab .close:hover { color: var(--ink) }` over
+    /// [`Self::tab_close_pill_on_content`] — the lit `×` inside its own pill on
+    /// the active tab.
+    pub tab_close_glyph_on_pill_over_active_tab: [u8; 3],
+    /// The same lit `×` over [`Self::tab_close_pill_on_hovered_tab`].
+    ///
+    /// On light these two are one number and on dark they are not, because
+    /// `--ink` is opaque in `:root` and translucent in `body.dark` — the exact
+    /// asymmetry that let a single `title_text_hover` look correct for years on
+    /// the canvas that cannot tell the surfaces apart.
+    pub tab_close_glyph_on_pill_over_hovered_tab: [u8; 3],
+
+    // ── the pin's *state* tier, which the `×` has no equivalent of ──
+    //
+    // `.tab .pin` stands in the `×`'s own slot and wears the same two inks over
+    // the same grounds, so almost all of it is the four fields above: the
+    // unpinned pin is `--ink3` on a bare tab, and a hovered pin is `--ink` on
+    // one of the two pills.
+    //
+    // `.tab .pin.on { color: var(--ink) }` is the one combination the `×` can
+    // never produce. The `×` only reaches `--ink` under the pointer, and under
+    // the pointer there is always a pill beneath it; a pinned pin reaches
+    // `--ink` as a *state*, standing on the bare tab with no pill at all. So
+    // `--ink` has to be mixed over the tab surfaces too, and those are not the
+    // pill mixes: on dark the bare active tab gives 0xE1 where its pill gives
+    // 0xE4, three levels apart, and the two happen to agree on the hovered tab
+    // only by rounding.
+    //
+    // A pinned pin on a *resting* tab is `--ink` over `--panel`, which is
+    // [`Self::title_text_hover`] — already here, like `title_text_muted` is for
+    // the muted tier.
+    /// `.tab .pin.on` on the active tab: `--ink` over `--termbg`, with no pill
+    /// under it.
+    ///
+    /// Numerically [`Self::pane_title_focus`], for the same reason
+    /// [`Self::tab_close_glyph_on_active_tab`] is `pane_title` — the active tab
+    /// and a pane head are both the terminal's own surface.
+    pub tab_pin_state_on_active_tab: [u8; 3],
+    /// `.tab .pin.on` on a tab the pointer is inside but not on the pin itself:
+    /// `--ink` over `--hover` over `--panel`.
+    pub tab_pin_state_on_hovered_tab: [u8; 3],
     /// Body state notices — an empty pane's invitation, "Loading …", a failure.
     pub body_hint_text: [u8; 3],
     /// A divider at rest: one logical pixel of quiet separation.
@@ -438,6 +506,19 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     title_text_muted: [0x78, 0x78, 0x78],
     tab_close_pill_on_content: [0x30, 0x30, 0x30],
     tab_close_pill_on_hovered_tab: [0x44, 0x44, 0x44],
+    // `--ink3` (white .38) over `--termbg` #1B1B1B: 27 + 228×.38 = 113.6.
+    tab_close_glyph_on_active_tab: [0x72, 0x72, 0x72],
+    // The same ink over `--hover` (white .055) over `--panel` #252525, which is
+    // 37 + 218×.055 = 49.0: 49.0 + 206×.38 = 127.3.
+    tab_close_glyph_on_hovered_tab: [0x7f, 0x7f, 0x7f],
+    // `--ink` (white .87) over the two pills — 47.5 on the active tab, 67.5 on
+    // a hovered one: 47.5 + 207.5×.87 = 228.0, and 67.5 + 187.5×.87 = 230.6.
+    tab_close_glyph_on_pill_over_active_tab: [0xe4, 0xe4, 0xe4],
+    tab_close_glyph_on_pill_over_hovered_tab: [0xe7, 0xe7, 0xe7],
+    // `--ink` over the two bare tab surfaces a pinned pin can stand on:
+    // 27 + 228×.87 = 225.4, and 49.0 + 206×.87 = 228.2.
+    tab_pin_state_on_active_tab: [0xe1, 0xe1, 0xe1],
+    tab_pin_state_on_hovered_tab: [0xe4, 0xe4, 0xe4],
     body_hint_text: [0x75, 0x75, 0x75],
     divider: [0x35, 0x35, 0x35],
     divider_hover: [0x51, 0x51, 0x51],
@@ -519,6 +600,21 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     title_text_muted: [0xa1, 0xa0, 0x9c],
     tab_close_pill_on_content: [0xed, 0xed, 0xec],
     tab_close_pill_on_hovered_tab: [0xdc, 0xdc, 0xd9],
+    // `--ink3` (rgb(55,53,47) at .45) over `--termbg` #FFFFFF, which on this
+    // canvas is also what `pane_title` mixes over.
+    tab_close_glyph_on_active_tab: [0xa5, 0xa4, 0xa1],
+    // The same ink over `--hover` over `--panel` #F7F7F5 — 236.4/236.3/234.1
+    // under it, then 154.8/153.8/149.9.
+    tab_close_glyph_on_hovered_tab: [0x9b, 0x9a, 0x96],
+    // `--ink` #37352F is opaque in this theme, so the lit `×` is that literal
+    // whichever pill it stands on. Two entries all the same: the pair has to
+    // exist for dark, and spelling the light values as one shared constant
+    // would hide the day a light `--ink` grows an alpha.
+    tab_close_glyph_on_pill_over_active_tab: [0x37, 0x35, 0x2f],
+    tab_close_glyph_on_pill_over_hovered_tab: [0x37, 0x35, 0x2f],
+    // Opaque `--ink` again: a pinned pin is the same literal on every ground.
+    tab_pin_state_on_active_tab: [0x37, 0x35, 0x2f],
+    tab_pin_state_on_hovered_tab: [0x37, 0x35, 0x2f],
     body_hint_text: [0xa5, 0xa4, 0xa1],
     divider: [0xe9, 0xe9, 0xe9],
     divider_hover: [0xc2, 0xc1, 0xbf],
@@ -1586,6 +1682,166 @@ mod tests {
         assert_ne!(
             DARK_CHROME.pane_title, DARK_CHROME.dialog_muted_text,
             "`--ink3` over `--termbg` and over `--win` are different greys"
+        );
+    }
+
+    /// PIN (D1): the tab `×`'s ink is mixed over the surface it actually lands
+    /// on — all four of them, plus the resting tab's that it shares with the
+    /// strip's other muted controls.
+    ///
+    /// Red gate: the glyph had exactly two inks, `title_text_muted` and
+    /// `title_text_hover`, both mixed over `--panel`. The pill *under* it had
+    /// already been split into two composites six lines away in the same
+    /// function, so on dark a `×` on the active tab was drawn at `0x78` where
+    /// its ground asks for `0x72`, and the lit `×` at `0xe3` on both pills
+    /// where they ask for `0xe4` and `0xe7`. This is the third catch in the
+    /// same family — `menu_item_hint_text`, then `pane_title`, now this — and
+    /// each one was a translucent ink that had been mixed once and then reused
+    /// wherever the same declaration reappeared.
+    #[test]
+    fn the_tab_closes_glyph_is_mixed_over_every_surface_a_tab_can_wear() {
+        // The grounds, stated by the palette itself: `--panel` under a resting
+        // tab, `--termbg` under the active one, and the two pills.
+        assert_eq!(DARK_CHROME.title_bar, [0x25, 0x25, 0x25], "--panel");
+        assert_eq!(DARK_CHROME.active_tab, [0x1b, 0x1b, 0x1b], "--termbg");
+        assert_eq!(DARK_CHROME.tab_close_pill_on_content, [0x30, 0x30, 0x30]);
+        assert_eq!(
+            DARK_CHROME.tab_close_pill_on_hovered_tab,
+            [0x44, 0x44, 0x44]
+        );
+
+        // --ink3 rgba(255,255,255,.38) over each:
+        //   #252525 -> 37 + 218 * .38 = 119.8 -> 120 = 0x78 (title_text_muted),
+        //   #1B1B1B -> 27 + 228 * .38 = 113.6 -> 114 = 0x72,
+        //   --hover over --panel is 37 + 218 * .055 = 49.0, and
+        //     49.0 + 206 * .38 = 127.3 -> 127 = 0x7f.
+        assert_eq!(DARK_CHROME.title_text_muted, [0x78, 0x78, 0x78]);
+        assert_eq!(
+            DARK_CHROME.tab_close_glyph_on_active_tab,
+            [0x72, 0x72, 0x72]
+        );
+        assert_eq!(
+            DARK_CHROME.tab_close_glyph_on_hovered_tab,
+            [0x7f, 0x7f, 0x7f]
+        );
+        // --ink rgba(255,255,255,.87) over the pills' own composites, 47.5 and
+        // 67.5 before rounding:
+        //   47.5 + 207.5 * .87 = 228.0 -> 0xe4,
+        //   67.5 + 187.5 * .87 = 230.6 -> 231 = 0xe7.
+        assert_eq!(
+            DARK_CHROME.tab_close_glyph_on_pill_over_active_tab,
+            [0xe4, 0xe4, 0xe4]
+        );
+        assert_eq!(
+            DARK_CHROME.tab_close_glyph_on_pill_over_hovered_tab,
+            [0xe7, 0xe7, 0xe7]
+        );
+
+        // --ink3 rgba(55,53,47,.45) over #FFFFFF and over --hover-on-#F7F7F5.
+        assert_eq!(
+            LIGHT_CHROME.tab_close_glyph_on_active_tab,
+            [0xa5, 0xa4, 0xa1]
+        );
+        assert_eq!(
+            LIGHT_CHROME.tab_close_glyph_on_hovered_tab,
+            [0x9b, 0x9a, 0x96]
+        );
+        // --ink is opaque on light, so the lit `×` is that literal everywhere.
+        for lit in [
+            LIGHT_CHROME.tab_close_glyph_on_pill_over_active_tab,
+            LIGHT_CHROME.tab_close_glyph_on_pill_over_hovered_tab,
+            LIGHT_CHROME.title_text_hover,
+        ] {
+            assert_eq!(lit, [0x37, 0x35, 0x2f], "`--ink` #37352F, unmixed");
+        }
+
+        // The whole point of the split, asserted where it can fail: on dark the
+        // four are four different greys, and none of them is the `--panel` mix
+        // the glyph used to wear on every one of them.
+        let dark = [
+            DARK_CHROME.title_text_muted,
+            DARK_CHROME.tab_close_glyph_on_active_tab,
+            DARK_CHROME.tab_close_glyph_on_hovered_tab,
+            DARK_CHROME.tab_close_glyph_on_pill_over_active_tab,
+            DARK_CHROME.tab_close_glyph_on_pill_over_hovered_tab,
+        ];
+        for (i, left) in dark.iter().enumerate() {
+            for right in &dark[i + 1..] {
+                assert_ne!(left, right, "five grounds, five composites on dark");
+            }
+        }
+        assert_ne!(
+            DARK_CHROME.title_text_hover, DARK_CHROME.tab_close_glyph_on_pill_over_active_tab,
+            "`--ink` over `--panel` is not `--ink` over the pill"
+        );
+
+        // A pane head is the terminal surface and so is the active tab, so the
+        // same ink over the same ground must agree — on both canvases.
+        assert_eq!(
+            DARK_CHROME.tab_close_glyph_on_active_tab, DARK_CHROME.pane_title,
+            "one ink, one ground, one grey"
+        );
+        assert_eq!(
+            LIGHT_CHROME.tab_close_glyph_on_active_tab,
+            LIGHT_CHROME.pane_title
+        );
+    }
+
+    /// PIN (D1, the pin's half): `.tab .pin.on { color: var(--ink) }` is the one
+    /// ink the `×` cannot lend the pin, and it is mixed over the bare tab.
+    ///
+    /// The pin stands in the `×`'s slot and shares its two declarations, so the
+    /// muted tier and the two pill mixes are literally the `×`'s fields. What
+    /// does not carry across is the *state* tier: the `×` only ever reaches
+    /// `--ink` under the pointer, where a pill is always beneath it, while a
+    /// pinned pin reaches `--ink` standing on nothing but the tab.
+    ///
+    /// Red gate: the pin drew both of its tiers from `title_text_hover` and
+    /// `title_text_muted`, one pair of `--panel` mixes, on all five grounds —
+    /// the same fault as the `×`'s, in the same slot, six lines away. Reusing
+    /// the `×`'s *pill* entries for the state tier is the near-miss this test
+    /// exists to catch: on the hovered tab the two agree by rounding, so a
+    /// wrong reading is invisible there and three levels out on the active tab.
+    #[test]
+    fn a_pinned_pins_ink_is_mixed_over_the_bare_tab_and_not_over_a_pill() {
+        // --ink rgba(255,255,255,.87) over the three tab surfaces:
+        //   --panel  #252525 -> 37 + 218 * .87 = 226.7 -> 227 = 0xe3,
+        //   --hover over --panel is 49.0, and 49.0 + 206 * .87 = 228.2 -> 0xe4,
+        //   --termbg #1B1B1B -> 27 + 228 * .87 = 225.4 -> 225 = 0xe1.
+        assert_eq!(DARK_CHROME.title_text_hover, [0xe3, 0xe3, 0xe3]);
+        assert_eq!(DARK_CHROME.tab_pin_state_on_hovered_tab, [0xe4, 0xe4, 0xe4]);
+        assert_eq!(DARK_CHROME.tab_pin_state_on_active_tab, [0xe1, 0xe1, 0xe1]);
+        for lit in [
+            LIGHT_CHROME.tab_pin_state_on_active_tab,
+            LIGHT_CHROME.tab_pin_state_on_hovered_tab,
+        ] {
+            assert_eq!(lit, [0x37, 0x35, 0x2f], "opaque `--ink` on light");
+        }
+
+        // The near-miss, stated both ways: the bare active tab is three levels
+        // off its own pill, and the hovered pair agree only because both round
+        // to 228 — so the equality is asserted as the coincidence it is, and
+        // the inequality as the fault it would hide.
+        assert_ne!(
+            DARK_CHROME.tab_pin_state_on_active_tab,
+            DARK_CHROME.tab_close_glyph_on_pill_over_active_tab,
+            "a pinned pin has no pill under it"
+        );
+        assert_eq!(
+            DARK_CHROME.tab_pin_state_on_hovered_tab,
+            DARK_CHROME.tab_close_glyph_on_pill_over_active_tab,
+            "228.2 and 228.0 land on the same byte — a coincidence, not a rule"
+        );
+
+        // And the same ink over the same ground as a focused pane head, which
+        // is the terminal surface the active tab also wears.
+        assert_eq!(
+            DARK_CHROME.tab_pin_state_on_active_tab, DARK_CHROME.pane_title_focus,
+            "one ink, one ground, one grey"
+        );
+        assert_eq!(
+            LIGHT_CHROME.tab_pin_state_on_active_tab,
+            LIGHT_CHROME.pane_title_focus
         );
     }
 

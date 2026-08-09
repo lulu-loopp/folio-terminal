@@ -1795,20 +1795,30 @@ const TABULAR_FIGURES: FeatureTag = FeatureTag::new(b"tnum");
 
 /// The weights the chrome draws text at.
 ///
-/// Two, because the mock-up asks for two: everything is the face's regular
-/// weight except `.panecount`, which is `600`. A general "any u16" field would
-/// be a wider promise than the design makes and than the loaded face can keep.
+/// Three, because the mock-up asks for three and no more: everything is the
+/// face's regular weight except `.panecount` at `600` and the focused pane
+/// head at `500`. A general "any u16" field would be a wider promise than the
+/// design makes and than the loaded face can keep.
 ///
 /// The chrome's face is Windows 11's Segoe UI Variable, a variable font whose
 /// default instance is `wght 400`; cosmic-text steers that axis from the shaping
 /// attributes, so `SemiBold` is the real 600 instance of the same face rather
-/// than a second file or a synthetic emboldening.
+/// than a second file or a synthetic emboldening — and `Medium` is the real 500
+/// instance, one interpolation step of the same axis.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ChromeLabelWeight {
     /// The face's own regular weight — `wght 400`, and what every label that
     /// does not ask for otherwise gets.
     #[default]
     Regular,
+    /// `font-weight: 500`, worn by `.pane.focused .panehead` (mock-up line
+    /// 1644).
+    ///
+    /// The mock-up's own note there is that the focused pane is told apart by
+    /// *hierarchy* rather than by a fill — "a title at `--ink` beside titles at
+    /// `--ink3` is already a hierarchy" — and the weight is the second half of
+    /// that hierarchy, not decoration on top of the colour.
+    Medium,
     /// `font-weight: 600`, worn by `.panecount`.
     SemiBold,
 }
@@ -1818,6 +1828,7 @@ impl ChromeLabelWeight {
     fn shaping_weight(self) -> Weight {
         match self {
             Self::Regular => Weight::NORMAL,
+            Self::Medium => Weight::MEDIUM,
             Self::SemiBold => Weight::SEMIBOLD,
         }
     }
@@ -9611,13 +9622,14 @@ mod tests {
     fn glyph_advances(
         font_system: &mut FontSystem,
         text: &str,
+        font_size_px: f32,
         weight: ChromeLabelWeight,
         tabular_numerals: bool,
     ) -> Vec<f32> {
         let label = ChromeLabel {
             text: text.to_owned(),
             rect: [0.0, 0.0, 400.0, 15.0],
-            font_size_px: WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+            font_size_px,
             color: [255, 255, 255],
             align_right: false,
             align_center: false,
@@ -9644,7 +9656,13 @@ mod tests {
         weight: ChromeLabelWeight,
         tabular_numerals: bool,
     ) -> f32 {
-        let advances = glyph_advances(font_system, "0123456789", weight, tabular_numerals);
+        let advances = glyph_advances(
+            font_system,
+            "0123456789",
+            WINDOW_TAB_BADGE_FONT_LOGICAL_PX,
+            weight,
+            tabular_numerals,
+        );
         assert_eq!(advances.len(), 10, "every digit shapes");
         let widest = advances.iter().copied().fold(f32::MIN, f32::max);
         let narrowest = advances.iter().copied().fold(f32::MAX, f32::min);
@@ -9665,8 +9683,21 @@ mod tests {
     #[test]
     fn the_badge_weight_reaches_the_variable_face_and_moves_its_axis() {
         let mut font_system = terminal_font_system();
-        let regular = glyph_advances(&mut font_system, "88", ChromeLabelWeight::Regular, true);
-        let semibold = glyph_advances(&mut font_system, "88", ChromeLabelWeight::SemiBold, true);
+        let badge = WINDOW_TAB_BADGE_FONT_LOGICAL_PX;
+        let regular = glyph_advances(
+            &mut font_system,
+            "88",
+            badge,
+            ChromeLabelWeight::Regular,
+            true,
+        );
+        let semibold = glyph_advances(
+            &mut font_system,
+            "88",
+            badge,
+            ChromeLabelWeight::SemiBold,
+            true,
+        );
         assert_eq!(regular.len(), 2, "both digits shape");
         assert_eq!(semibold.len(), 2);
         // Heavier strokes need more room: if the `wght` axis moved, the advance
@@ -9678,6 +9709,53 @@ mod tests {
         // `Regular` is what a label that says nothing gets, so every call site
         // that predates this field is untouched by it.
         assert_eq!(ChromeLabelWeight::default(), ChromeLabelWeight::Regular);
+    }
+
+    /// PIN (D4): `.pane.focused .panehead { font-weight: 500 }` (mock-up line
+    /// 1644) reaches the face and actually moves it, at the size the pane head
+    /// is drawn at.
+    ///
+    /// Red gate: the focused pane head took the mock-up's `--ink` and left its
+    /// `font-weight` on the floor, because `ChromeLabelWeight` had a 400 and a
+    /// 600 and nothing between them. Adding a variant is the easy half; the
+    /// half that can silently fail is the axis, because 500 is an *interpolated*
+    /// instance of Segoe UI Variable rather than a shipped file, and a request
+    /// the shaper quietly dropped would leave a focused head exactly as light
+    /// as the bug while the enum looked right.
+    ///
+    /// So the three weights are measured as an ordered run: 400 < 500 < 600.
+    /// A pair alone would pass if `Medium` were wired to `SEMIBOLD` by a
+    /// copy-paste, which is precisely how a three-armed `match` goes wrong.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn the_focused_pane_head_weight_reaches_the_variable_face_and_moves_its_axis() {
+        let mut font_system = terminal_font_system();
+        // A pane head's own caption at a pane head's own size: the axis has to
+        // move where the design asks for it, not merely somewhere.
+        let run = |font_system: &mut FontSystem, weight| -> f32 {
+            glyph_advances(
+                font_system,
+                "Terminal",
+                SEAT_TITLE_FONT_LOGICAL_PX,
+                weight,
+                false,
+            )
+            .iter()
+            .sum()
+        };
+        let regular = run(&mut font_system, ChromeLabelWeight::Regular);
+        let medium = run(&mut font_system, ChromeLabelWeight::Medium);
+        let semibold = run(&mut font_system, ChromeLabelWeight::SemiBold);
+        assert!(
+            regular < medium,
+            "500 must outrun 400 — an unmoved axis is a head still drawn at \
+             regular: saw {regular} against {medium}"
+        );
+        assert!(
+            medium < semibold,
+            "and 500 must stay under 600, or `Medium` is `SemiBold` wearing a \
+             different name: saw {medium} against {semibold}"
+        );
     }
 
     /// PIN (T2 badge): `.panecount { font-variant-numeric: tabular-nums }`
@@ -9838,7 +9916,12 @@ mod tests {
             .expect("the chrome sans face publishes or renders a cap height");
         for dpi_milli in [1000_u32, 1250, 1500, 2000] {
             let scale = dpi_milli as f32 / 1000.0;
-            let bar = SEAT_TITLE_BAR_LOGICAL_PX * scale;
+            // The head's *content* box, which is the border box less its
+            // hairline: `* { box-sizing: border-box }` makes `.panehead`'s 28px
+            // twenty-seven rows of flex row plus one of border, and the caption
+            // is centred in the twenty-seven.
+            let bar = (SEAT_TITLE_BAR_LOGICAL_PX * scale).round()
+                - (SEAT_TITLE_EDGE_LOGICAL_PX * scale).max(1.0);
             let label = ChromeLabel {
                 text: "Terminal".to_owned(),
                 rect: [48.0, 0.0, 400.0, bar],
