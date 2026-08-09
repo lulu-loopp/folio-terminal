@@ -3402,6 +3402,142 @@ pub(crate) fn seat_short_caption<'a>(
         .unwrap_or(full)
 }
 
+/// The line box every piece of chrome text is laid out in — `shape_chrome_labels`
+/// sizes a label's buffer to `font_size * 1.4`, and this is that fact restated
+/// where a layout needs to reserve room for it.
+///
+/// **Duplicated**, deliberately and visibly: `tooltip.rs` and `peek_strip.rs`
+/// each carry their own copy of this number for the same reason, and it is one
+/// renderer fact behind all three. The day it moves, it moves to `bt-render`
+/// beside the function that decides it and all three call sites follow — which
+/// is a change to two modules this slice has no business touching.
+const CHROME_LINE_HEIGHT: f32 = 1.4;
+
+/// The drag ghost's box and the two things standing in it, in physical pixels
+/// (J114).
+///
+/// `.drag-ghost` is a two-item flex row — `mark + name`, `gap: 7px`,
+/// `align-items: center` — inside `padding: 5px 12px` and a 1px border, so the
+/// box shrink-wraps whatever is in it and there is no wrapping, no ellipsis and
+/// no width bound. That last part is the mock-up's, not an omission here: the
+/// label is a short name by construction (`seat_short_caption`), and a ghost
+/// that truncated would be answering "which one is this" with half a word.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DragGhostLayout {
+    /// The ghost's outer box, border included.
+    pub frame: [f32; 4],
+    /// The mark's square, vertically centred on the row.
+    pub mark: [f32; 4],
+    /// The name's line box, vertically centred on the same row.
+    pub label: [f32; 4],
+}
+
+/// Hang the ghost off the pointer (J115).
+///
+/// `pointer` is the hotspot in physical pixels and the box goes down-and-right of
+/// it by [`bt_render::DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX`] — deliberately
+/// unclamped, for the reason recorded on that constant.
+///
+/// The row's height is the taller of its two items rather than the mark's or the
+/// text's alone: `align-items: center` on a flex row makes the line box as tall
+/// as the tallest item, and at every scale this build ships the *text* is the
+/// taller of the two (17.5 against 15). Writing it as a `max` rather than as the
+/// line height keeps that a fact about the numbers instead of a coincidence the
+/// code depends on.
+pub(crate) fn drag_ghost_layout(
+    pointer: [f32; 2],
+    mark_logical: f32,
+    label_width: f32,
+    scale: f32,
+) -> DragGhostLayout {
+    let px = |logical: f32| logical * scale;
+    let border = px(bt_render::DRAG_GHOST_BORDER_LOGICAL_PX);
+    let pad_x = px(bt_render::DRAG_GHOST_PADDING_X_LOGICAL_PX);
+    let pad_y = px(bt_render::DRAG_GHOST_PADDING_Y_LOGICAL_PX);
+    let gap = px(bt_render::DRAG_GHOST_GAP_LOGICAL_PX);
+    let mark = px(mark_logical).round();
+    let line = (px(bt_render::DRAG_GHOST_FONT_LOGICAL_PX) * CHROME_LINE_HEIGHT).round();
+    let row = mark.max(line);
+
+    let left = (pointer[0] + px(bt_render::DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX[0])).round();
+    let top = (pointer[1] + px(bt_render::DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX[1])).round();
+    let width = (2.0 * (border + pad_x) + mark + gap + label_width).round();
+    let height = (2.0 * (border + pad_y) + row).round();
+    let frame = [left, top, left + width, top + height];
+
+    let centre = (frame[1] + frame[3]) / 2.0;
+    let mark_left = left + border + pad_x;
+    let mark_top = (centre - mark / 2.0).round();
+    let label_left = mark_left + mark + gap;
+    let label_top = (centre - line / 2.0).round();
+    DragGhostLayout {
+        frame,
+        mark: [mark_left, mark_top, mark_left + mark, mark_top + mark],
+        label: [
+            label_left,
+            label_top,
+            frame[2] - border - pad_x,
+            label_top + line,
+        ],
+    }
+}
+
+/// Paint the ghost — one layer, handed to the renderer above every other
+/// floating surface.
+///
+/// `z-index: 100` against the tip's `60` (mock-up 1717 and 1207). The tip is
+/// otherwise the one surface in this window that is never covered, and the ghost
+/// is the single exception the design allows itself: a tip explains what is under
+/// the pointer, and during a drag what is under the pointer is *this*.
+///
+/// It goes through the same float-window recipe every other floating surface
+/// does — halo, hairline, face — with its own radius and its own pair of shadow
+/// alphas. Nothing about it is hand-drawn.
+pub(crate) fn build_drag_ghost(
+    layout: &DragGhostLayout,
+    mark: ChromeMark,
+    mark_color: [u8; 3],
+    text: &str,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+) -> crate::marks::OverlayLayer {
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let mut quads = Vec::new();
+    crate::settings::push_float_window(
+        &mut quads,
+        layout.frame,
+        bt_render::DRAG_GHOST_RADIUS_LOGICAL_PX * scale,
+        bt_render::DRAG_GHOST_BORDER_LOGICAL_PX * scale,
+        bt_render::FLOAT_WINDOW_SHADOW_LOGICAL_PX * scale,
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.drag_ghost_shadow_inner_alpha),
+        alpha(palette.drag_ghost_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    crate::marks::OverlayLayer {
+        quads,
+        labels: vec![ChromeLabel {
+            text: text.to_owned(),
+            rect: layout.label,
+            font_size_px: bt_render::DRAG_GHOST_FONT_LOGICAL_PX * scale,
+            // `color: var(--ink)` over `--menu`. That composite already has a
+            // name — the one the combo's selected row needed first — and a
+            // second constant holding the same two bytes is how two inks that
+            // are the same ink drift apart.
+            color: palette.menu_item_text_selected,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+        }],
+        sprites: vec![ChromeSprite::new(mark, layout.mark, mark_color)],
+        opacity: 1.0,
+    }
+}
+
 fn seat_title(kind: SeatKind) -> &'static str {
     match kind {
         SeatKind::Terminal => "Terminal",
@@ -8431,6 +8567,226 @@ mod tests {
             "Unavailable",
             "T227: a leaf this build cannot name says so rather than borrowing one"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // U4: the drag ghost (J114, J115, J116)
+    // ---------------------------------------------------------------------
+
+    /// `.drag-ghost` is a shrink-wrapped flex row, so every number in its box is
+    /// the sum of a declaration and its contents — and the contents are a 15px
+    /// mark and one line of 12.5px text.
+    ///
+    /// Red gate: the three easy ways to get a shrink-wrapped box wrong are to
+    /// count the border once instead of on both sides, to forget the gap, and to
+    /// take the row's height off the mark instead of off the taller of the two.
+    /// Each of the four assertions below fails on exactly one of them.
+    #[test]
+    fn the_ghost_shrink_wraps_its_mark_and_its_name_inside_the_mockups_padding() {
+        let ghost = drag_ghost_layout([100.0, 200.0], 15.0, 60.0, 1.0);
+        // 12 + 1 either side, 15 of mark, 7 of gap, 60 of text.
+        assert_eq!(
+            ghost.frame[2] - ghost.frame[0],
+            2.0 * (12.0 + 1.0) + 15.0 + 7.0 + 60.0,
+            "border + padding on both sides, then mark, gap and name"
+        );
+        // The row is `max(15, round(12.5 × 1.4)) = 18`, not the mark's 15.
+        assert_eq!(
+            ghost.frame[3] - ghost.frame[1],
+            2.0 * (5.0 + 1.0) + 18.0,
+            "align-items:center makes the row as tall as its tallest item, and \
+             here that is the line box"
+        );
+        assert_eq!(
+            ghost.mark[0],
+            ghost.frame[0] + 1.0 + 12.0,
+            "the mark stands at the leading padding, inside the border"
+        );
+        assert_eq!(
+            ghost.label[0],
+            ghost.mark[2] + 7.0,
+            "and the name one gap after it"
+        );
+        // Both are centred on the row rather than on boxes of their own — to
+        // within the half pixel an odd item in an even row cannot avoid. The
+        // rounding is not a tolerance the assertion is granting: it is the rule
+        // every other glyph in this chrome is placed by, because a mark whose
+        // top lands on a half pixel is a mark rasterised across two rows.
+        let centre = (ghost.frame[1] + ghost.frame[3]) / 2.0;
+        for (box_, name) in [(ghost.mark, "mark"), (ghost.label, "label")] {
+            assert!(
+                ((box_[1] + box_[3]) / 2.0 - centre).abs() <= 0.5,
+                "the {name} is centred on the row"
+            );
+            assert_eq!(box_[1].fract(), 0.0, "the {name} starts on a whole pixel");
+        }
+    }
+
+    /// J115: `left = clientX + 10`, `top = clientY + 8` — in *logical* pixels, so
+    /// the label sits the same distance from the hand on every display.
+    ///
+    /// Red gate: treat the offset as physical and the ghost drifts onto the
+    /// pointer at 200%, which is the one place it must never be — it would cover
+    /// the thing being aimed at.
+    #[test]
+    fn the_ghost_hangs_below_and_right_of_the_hand_by_the_same_logical_amount() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let pointer = [400.0_f32, 300.0];
+            let ghost = drag_ghost_layout(pointer, 15.0, 60.0, scale);
+            assert_eq!(
+                ghost.frame[0] - pointer[0],
+                (10.0 * scale).round(),
+                "ten logical pixels right of the hand at {scale}×"
+            );
+            assert_eq!(
+                ghost.frame[1] - pointer[1],
+                (8.0 * scale).round(),
+                "eight logical pixels below it at {scale}×"
+            );
+        }
+    }
+
+    /// The ghost is not clamped to the window, and that is the mock-up's own
+    /// `position: fixed` with no bound (1717).
+    ///
+    /// Red gate: add a clamp and the ghost stops reporting where the pointer is
+    /// the moment the pointer nears an edge — which is exactly when a drag is
+    /// most likely to be aiming at something.
+    #[test]
+    fn the_ghost_follows_the_hand_past_the_edge_rather_than_stopping_at_it() {
+        let ghost = drag_ghost_layout([1919.0, 1079.0], 15.0, 60.0, 1.0);
+        assert_eq!(ghost.frame[0], 1929.0);
+        assert_eq!(ghost.frame[1], 1087.0);
+    }
+
+    /// One layer, and everything the mock-up puts in it: a floating box, the
+    /// source's own mark, and the short name beside it.
+    ///
+    /// Red gate: drop the `push_float_window` call and the layer still carries
+    /// its mark and its label — the first assertion is what notices that the box
+    /// they stand in has gone.
+    #[test]
+    fn the_ghost_paints_one_floating_box_carrying_a_mark_and_one_name() {
+        let palette = bt_render::chrome_palette();
+        let layout = drag_ghost_layout([100.0, 100.0], 15.0, 60.0, 1.0);
+        let layer = build_drag_ghost(
+            &layout,
+            ChromeMark::ProfilePowerShell,
+            palette.accent,
+            "bt-app",
+            1.0,
+            palette,
+        );
+        assert!(
+            !layer.quads.is_empty(),
+            "the ghost stands in a box, not on the page"
+        );
+        assert!(
+            layer
+                .quads
+                .iter()
+                .any(|quad| quad.color == palette.menu_surface),
+            "`background: var(--menu)` — a floating plane, not the chrome's"
+        );
+        // `box-shadow: 0 8px 24px rgba(0,0,0,.25)` — the ghost's own single
+        // declaration, and *not* the tip's, which is `.1` on light and `.45` on
+        // dark. Borrowing either would make the label's lift a function of the
+        // theme, which the mock-up never asked for.
+        //
+        // Red gate: hand `build_drag_ghost` `tip_shadow_*` and every other
+        // assertion in this test still passes.
+        let strongest = layer
+            .quads
+            .iter()
+            .filter(|quad| quad.color == palette.menu_shadow)
+            .map(|quad| quad.alpha)
+            .fold(0.0_f32, f32::max);
+        assert!(
+            (strongest - f32::from(palette.drag_ghost_shadow_inner_alpha) / 255.0).abs() < 0.002,
+            "the ghost casts its own lift, got {strongest}"
+        );
+        // And the pair itself is `.25` on both themes — the assertion above pins
+        // only that `build_drag_ghost` reaches for the right field, which stays
+        // true however wrong the field is.
+        for (theme, chrome) in [
+            ("dark", bt_render::DARK_CHROME),
+            ("light", bt_render::LIGHT_CHROME),
+        ] {
+            assert_eq!(
+                chrome.drag_ghost_shadow_inner_alpha, 64,
+                "`rgba(0,0,0,.25)` is written once and never overridden, so {theme} \
+                 gets the same 255 × .25 the other does"
+            );
+            assert_eq!(
+                chrome.drag_ghost_shadow_outer_alpha,
+                chrome.drag_ghost_shadow_inner_alpha / 2,
+                "the outer ring is half the inner one, as on every floating surface"
+            );
+        }
+        let [label]: [ChromeLabel; 1] = layer
+            .labels
+            .try_into()
+            .expect("a ghost says one name on one line");
+        assert_eq!(label.text, "bt-app");
+        assert_eq!(label.font_size_px, 12.5);
+        assert_eq!(
+            label.color, palette.menu_item_text_selected,
+            "`color: var(--ink)` over `--menu` — the full ink, not a menu row's"
+        );
+        assert!(
+            !label.align_center && !label.align_right,
+            "a shrink-wrapped row has nothing to align against"
+        );
+        // `border-radius: 7px`, read off the shape rather than off the constant:
+        // a rounded rectangle's straight sides begin one radius below its top
+        // edge, so the full-width part of the face is inset by exactly that.
+        //
+        // Red gate: hand the recipe `FLOAT_WINDOW_RADIUS_LOGICAL_PX` — the 10 every
+        // *other* floating surface in this window wears — and the band moves to
+        // 10. The ghost is rounded less on purpose: it is the smallest floating
+        // thing here, and 10 on a 30px box is most of its height.
+        let inner_width = (layout.frame[2] - layout.frame[0]) - 2.0;
+        let band_top = layer
+            .quads
+            .iter()
+            .filter(|quad| {
+                quad.color == palette.menu_surface
+                    && (quad.rect[2] - quad.rect[0] - inner_width).abs() < 0.51
+            })
+            .map(|quad| quad.rect[1])
+            .fold(f32::MAX, f32::min);
+        assert_eq!(
+            band_top - layout.frame[1],
+            bt_render::DRAG_GHOST_RADIUS_LOGICAL_PX,
+            "the face goes full width one radius down from the corner"
+        );
+        assert_eq!(
+            bt_render::DRAG_GHOST_RADIUS_LOGICAL_PX,
+            7.0,
+            "and that radius is the ghost's own, not the float window's 10"
+        );
+        let [mark] = layer.sprites.as_slice() else {
+            panic!("a ghost wears exactly one mark");
+        };
+        assert_eq!(mark.mark, ChromeMark::ProfilePowerShell);
+        assert_eq!(mark.rect, layout.mark);
+        assert_eq!(layer.opacity, 1.0);
+    }
+
+    /// J116/C28: the ghost answers "which one is this", so it takes the short
+    /// name — while the head beside it is still answering "where is this".
+    ///
+    /// Red gate: hand the ghost `seat_caption` and this passes for `Files` and
+    /// `Preview` and fails only for a terminal, which is the one kind whose two
+    /// answers actually differ.
+    #[test]
+    fn the_ghost_names_the_last_segment_where_the_head_names_the_path() {
+        let cwd = r"D:\Developer\BetterTerminal\crates\bt-app";
+        assert_eq!(
+            seat_short_caption(SeatKind::Terminal, None, Some(cwd)),
+            "bt-app"
+        );
+        assert_eq!(seat_caption(SeatKind::Terminal, None, Some(cwd)), cwd);
     }
 
     // ---------------------------------------------------------------------

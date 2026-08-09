@@ -24,7 +24,7 @@ mod tooltip;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
-use bt_layout::{Axis, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
+use bt_layout::{Axis, SeatId, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
     LayoutNodeV1, LeafNodeV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionThemeV1,
@@ -742,13 +742,27 @@ struct Runtime {
     /// activation it pays for — a press that has already switched the view is
     /// still a press, and T5's drag needs to find it there.
     tab_press: Option<TabPress>,
-    /// The tab currently being dragged along the strip, if any.
+    /// The left press being held on a pane head (J118).
     ///
-    /// Separate from [`Self::tab_press`] rather than a fourth promise state,
-    /// because the two answer different questions and outlive each other in both
+    /// A second field rather than a second variant of [`Self::tab_press`],
+    /// because the two hold different things — a tab press carries an unpaid
+    /// activation and a pane press carries only the six pixels — and because
+    /// they cannot both exist: `chrome_mouse_input` routes one press to one
+    /// target, and the one it did not choose is cleared.
+    pane_press: Option<PanePress>,
+    /// The gesture in flight, whatever it is carrying (J111).
+    ///
+    /// Separate from the presses rather than a further promise state, because
+    /// they answer different questions and outlive each other in both
     /// directions: a press that has not travelled is not a drag, and a drag that
     /// has been cancelled still has to hand the press back its answer (J108).
-    tab_drag: Option<TabDrag>,
+    ///
+    /// `is_some()` is this window's `body.dragging` (J117), and it is read
+    /// rather than mirrored: every suppression in the window — the cursor's
+    /// shape, the divider's silence, the tip, the peek, the terminal's own
+    /// selection — asks this one field, so a source added later is silenced by
+    /// all of them without touching any of them.
+    drag: Option<Drag>,
     /// The strip's double-click history (J99).
     tab_clicks: TabClicks,
     /// The open tab-name editor, or `None` when nobody is renaming anything.
@@ -1311,12 +1325,58 @@ impl ClickTracker {
 const TAB_PRESS_ACTIVATION_GRACE: Duration = Duration::from_millis(180);
 
 /// How far the pointer may travel before a press stops being a press
-/// (`startDrag`'s own `Math.hypot(...) < 6`, mock-up 6727).
+/// (`startDrag`'s own `Math.hypot(...) < 6`, mock-up 6755).
 ///
 /// Logical pixels, because it is a distance the *hand* travels: the same gesture
 /// on a 200% display covers twice the physical pixels and is still the same
 /// gesture.
-const TAB_DRAG_THRESHOLD_LOGICAL_PX: f64 = 6.0;
+///
+/// J113 — one number for every source. The mock-up has a single `startDrag` and
+/// therefore a single threshold, and the reason is not economy: the 6px is the
+/// hand's own tolerance for holding still, and a pane that needed more resolve to
+/// pick up than a tab would be reporting something about *panes* that is really
+/// about fingers.
+const DRAG_THRESHOLD_LOGICAL_PX: f64 = 6.0;
+
+/// The 6px, and whether it has been crossed yet — the one thing every press that
+/// can become a drag has in common (J112/J113).
+///
+/// It is kept apart from everything else a press holds, because everything else a
+/// press holds is source-specific: a tab press owes its tab an activation
+/// ([`TabPressPromise`]), a pane press owes nothing at all, and both cross the
+/// same six pixels in the same way. Extracting it is what makes "the same
+/// threshold" a fact about the code rather than a promise in a comment.
+#[derive(Clone, Copy, Debug)]
+struct DragLatch {
+    /// Where the press landed, in physical pixels.
+    origin: PhysicalPosition<f64>,
+    /// Whether the pointer has already left the press's own neighbourhood, so
+    /// the gesture that starts there has started.
+    begun: bool,
+}
+
+impl DragLatch {
+    fn new(origin: PhysicalPosition<f64>) -> Self {
+        Self {
+            origin,
+            begun: false,
+        }
+    }
+
+    /// Tell the latch where the pointer is now. Returns whether this is the move
+    /// the drag begins on — once per press, and for every press.
+    fn travelled(&mut self, position: PhysicalPosition<f64>, scale: f64) -> bool {
+        if self.begun {
+            return false;
+        }
+        let threshold = DRAG_THRESHOLD_LOGICAL_PX * scale;
+        if (position.x - self.origin.x).hypot(position.y - self.origin.y) < threshold {
+            return false;
+        }
+        self.begun = true;
+        true
+    }
+}
 
 /// What a press on a tab still owes it.
 ///
@@ -1349,21 +1409,18 @@ enum TabPressPromise {
 #[derive(Clone, Copy, Debug)]
 struct TabPress {
     tab: TabId,
-    /// Where the press landed, in physical pixels.
-    origin: PhysicalPosition<f64>,
-    /// When the delayed activation is due.
-    deadline: Instant,
-    promise: TabPressPromise,
-    /// Whether the pointer has already left the press's own neighbourhood, so
-    /// the gesture that starts there has started.
+    /// The six pixels, shared with every other press in the window (J113).
     ///
     /// Held apart from [`Self::promise`] on purpose, because the two answer
     /// different questions: the promise is what the press still *owes* its tab,
-    /// and this is whether the hand has begun carrying it. A press on the tab
-    /// you are already looking at owes nothing the instant it lands, and it is
-    /// exactly as draggable as any other — reading the debt to decide the
+    /// and the latch is whether the hand has begun carrying it. A press on the
+    /// tab you are already looking at owes nothing the instant it lands, and it
+    /// is exactly as draggable as any other — reading the debt to decide the
     /// gesture is what made the active tab immovable.
-    drag_begun: bool,
+    latch: DragLatch,
+    /// When the delayed activation is due.
+    deadline: Instant,
+    promise: TabPressPromise,
 }
 
 impl TabPress {
@@ -1371,10 +1428,9 @@ impl TabPress {
     fn armed(tab: TabId, origin: PhysicalPosition<f64>, now: Instant) -> Self {
         Self {
             tab,
-            origin,
+            latch: DragLatch::new(origin),
             deadline: now + TAB_PRESS_ACTIVATION_GRACE,
             promise: TabPressPromise::Pending,
-            drag_begun: false,
         }
     }
 
@@ -1408,14 +1464,9 @@ impl TabPress {
     /// whose grace period ran out under a still-held finger — is a hand on a
     /// tab like any other.
     fn travelled(&mut self, position: PhysicalPosition<f64>, scale: f64) -> bool {
-        if self.drag_begun {
+        if !self.latch.travelled(position, scale) {
             return false;
         }
-        let threshold = TAB_DRAG_THRESHOLD_LOGICAL_PX * scale;
-        if (position.x - self.origin.x).hypot(position.y - self.origin.y) < threshold {
-            return false;
-        }
-        self.drag_begun = true;
         if self.promise == TabPressPromise::Pending {
             self.promise = TabPressPromise::Slipped;
         }
@@ -2989,21 +3040,92 @@ fn pointer_cursor(
     }
 }
 
-/// A tab being dragged along the strip (K111, K114-K118).
+/// What is in the hand (J111).
 ///
-/// It begins exactly where [`TabPressPromise::Slipped`] begins — T4 already owns
-/// the 6px and the identity, and this owns everything after them — and it is
-/// keyed on [`TabId`] for the same reason the press is: the thing in your hand is
-/// a tab, not a slot, and the reorder it is performing renumbers slots under it
-/// on almost every frame.
+/// The mock-up's line 6352 is the whole argument for this enum existing at all:
+/// `drag & dock (tabs and panes share one engine)`. One state machine, one
+/// threshold, one ghost, one teardown — and the *only* thing that varies between
+/// a tab and a pane is what a landing does with them, which is not this slice's
+/// question.
+///
+/// Both variants key on identity rather than on position, for the same reason:
+/// the strip renumbers under a finger that has not moved, and a seat tree can be
+/// re-solved between two pointer moves.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DragSource {
+    Tab(TabId),
+    /// A pane, taken by its head (J118, mock-up 5835-5840).
+    Pane(SeatId),
+}
+
+/// Where a drag would land if the hand opened right now — the engine's entire
+/// knowledge of drop targets.
+///
+/// **This is the seam U5 plugs into.** The engine asks
+/// [`Runtime::survey_drop`] on every pointer move and stores the answer; it
+/// never asks *why*. Adding the strip-rectangle test (K123), the 48px rim
+/// (K130), the pane zones (K133/K134) and the refusals (K135) is adding variants
+/// here and arms to that one function, and nothing in the state machine below
+/// has to learn about any of them.
+///
+/// One variant in this slice, and it is the landing that already existed: the
+/// strip reordering under a tab in hand. `None` — no landing — is the other half,
+/// and it is not an error state. It is what a pane over open air answers, and
+/// what J120 is about.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DropLanding {
+    /// The strip has it, at this slot: `reorderWhileDragging` followed by
+    /// `drag.target = { reordered: true }` (mock-up 6835-6836).
+    ///
+    /// The reorder is applied *live*, so by the time a release arrives there is
+    /// nothing left to commit — which is why the mock-up's own commit table
+    /// treats `reordered` beside "no target at all" (7202). They are not the
+    /// same thing here: one has already happened, the other never will.
+    StripReorder { slot: usize },
+}
+
+impl DropLanding {
+    /// Whether this landing is already showing the user what it means, so the
+    /// ghost must get out of the way.
+    ///
+    /// `drag.ghost.style.opacity = "0"` with the mock-up's own reason beside it:
+    /// "the tab itself is the feedback" (6837). Two labels saying the same name,
+    /// one under the pointer and one in the slot it is about to take, is the
+    /// drag telling you twice — and the one in the slot is the one that is
+    /// telling you *where*.
+    fn shows_itself(self) -> bool {
+        match self {
+            Self::StripReorder { .. } => true,
+        }
+    }
+}
+
+/// The part of a drag that only one kind of source has: a tab is carried by the
+/// strip itself, a pane is carried by nothing but the ghost.
+///
+/// Written as an enum rather than as four `Option`s on one struct, because the
+/// asymmetry is real and permanent — a pane has no slot to be offset from and
+/// never will. Flattening it would put four fields on every pane drag that are
+/// meaningless for the whole of its life.
 #[derive(Clone, Copy, Debug)]
-struct TabDrag {
-    tab: TabId,
+enum DragCarry {
+    /// K114-K118: the tab is drawn out of its slot and the strip reorders under
+    /// it.
+    Tab(TabCarry),
+    /// J118: the tree is not touched while a pane is in the air. The pane stays
+    /// exactly where it is and the ghost is the only thing that moves — which is
+    /// also why a pane drag that comes to nothing has nothing to undo.
+    Pane,
+}
+
+/// A tab being dragged along the strip (K111, K114-K118).
+#[derive(Clone, Copy, Debug)]
+struct TabCarry {
     /// Where inside the tab's own body the pointer took hold, in physical
     /// pixels. It is what makes the tab hang off the pointer where you picked it
     /// up instead of jumping its own left edge under the cursor.
     grab_dx: f64,
-    /// The slot the tab held when the drag began. Esc puts it back here.
+    /// The slot the tab held when the drag began. J120 puts it back here.
     origin: usize,
     /// How far from its slot the tab is currently drawn, in physical pixels —
     /// [`Runtime::track_grabbed`]'s answer, kept so that the frame that paints it
@@ -3015,6 +3137,101 @@ struct TabDrag {
     /// session file records order: writing it anyway would turn a gesture the
     /// user abandoned into a "meaningful change" (§5.1).
     moved: bool,
+}
+
+/// A gesture in flight — the `dragging` state of J's state machine.
+///
+/// The other three states are not variants here, and that is the honest shape of
+/// them. *Idle* is `None`. *Pressed* is a latch that has not fired yet, and it
+/// lives on the press ([`TabPress::latch`], [`PanePress::latch`]) because what a
+/// press is holding differs by source while a drag does not. *Cancelled* is not a
+/// state at all but an exit — `Runtime::cancel_drag` unwinds to idle in one
+/// call, and a "cancelled" resting state would be a drag that has stopped being a
+/// drag while still occupying the field that means one is happening.
+#[derive(Clone, Copy, Debug)]
+struct Drag {
+    source: DragSource,
+    carry: DragCarry,
+    /// Where the pointer is, in physical pixels. The ghost hangs off this, and
+    /// it is stored rather than re-read because the frame that paints the ghost
+    /// is not the event that moved it.
+    pointer: PhysicalPosition<f64>,
+    /// What [`Runtime::survey_drop`] answered on the last pointer move.
+    landing: Option<DropLanding>,
+}
+
+impl Drag {
+    /// The tab this drag is carrying, if it is carrying one.
+    ///
+    /// Paired with [`Self::tab_carry`] rather than folded into it: the identity
+    /// survives things the carry does not care about, and several callers want
+    /// only one of the two.
+    fn tab(&self) -> Option<TabId> {
+        match self.source {
+            DragSource::Tab(tab) => Some(tab),
+            DragSource::Pane(_) => None,
+        }
+    }
+
+    fn tab_carry(&self) -> Option<TabCarry> {
+        match self.carry {
+            DragCarry::Tab(carry) => Some(carry),
+            DragCarry::Pane => None,
+        }
+    }
+
+    /// Whether the ghost is drawn for this drag right now (J114).
+    fn ghost_is_shown(&self) -> bool {
+        !self.landing.is_some_and(DropLanding::shows_itself)
+    }
+}
+
+/// What letting go does — the mock-up's commit table (7202-7231) reduced to the
+/// one question this slice can answer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DragRelease {
+    /// A landing answered, so the landing decides.
+    Commit,
+    /// **J120.** Nothing answered, so the carried thing slides back to the slot
+    /// the drag began in, displaced neighbours travelling home with it.
+    Home,
+}
+
+/// J120, stated once.
+///
+/// **Ruling, recorded 2026-08-08.** The mock-up leaves a drag that landed
+/// nowhere exactly where the live reorder last put it (`!d.target` falls into
+/// the same arm as `d.target.reordered` and returns, 7202-7208). The native
+/// build slides it home instead, and the argument is the mock-up's own: a
+/// reorder performed on the way to a drop is part of that drop's gesture, so a
+/// release that commits nothing must not keep half of what it did on the way.
+///
+/// It is deliberately **not** the same verdict as a cancel even though the two
+/// share the motion. A cancel is the user retracting the gesture; this is the
+/// gesture finishing and finding nowhere to be. Nothing downstream distinguishes
+/// them *today* — both go home and neither writes the session — and that is a
+/// fact about this slice rather than a claim about the ruling: the moment a
+/// landing exists that a release can commit and an Esc must not, the two callers
+/// are already separate.
+fn release_verdict(landing: Option<DropLanding>) -> DragRelease {
+    match landing {
+        Some(_) => DragRelease::Commit,
+        None => DragRelease::Home,
+    }
+}
+
+/// A left press being held on a pane head (J118).
+///
+/// It holds the six pixels and nothing else, and the emptiness is the point: a
+/// pane head press owes the pane nothing on the way in. D40's focus move has
+/// already happened above the router by the time this is armed, and it happened
+/// for *every* press inside the pane rather than for this one — so there is no
+/// delayed promise to keep, nothing to withdraw when the hand travels, and
+/// nothing left unpaid when a drag is cancelled.
+#[derive(Clone, Copy, Debug)]
+struct PanePress {
+    seat: SeatId,
+    latch: DragLatch,
 }
 
 impl TabState {
@@ -3034,11 +3251,11 @@ impl TabState {
     ///
     /// Two sources, never both: a tab in the hand is wherever the pointer has
     /// put it, and every other tab is wherever its slide home has got to. Passing
-    /// the drag in rather than reading it here is what keeps this a method on a
-    /// tab instead of a method on the window.
-    fn drawn_offset(&self, now: Instant, motion: Motion, grabbed: Option<TabDrag>) -> f32 {
+    /// the carried offset in rather than reading the window's drag here is what
+    /// keeps this a method on a tab instead of a method on the window.
+    fn drawn_offset(&self, now: Instant, motion: Motion, grabbed: Option<f32>) -> f32 {
         match grabbed {
-            Some(drag) => drag.offset,
+            Some(offset) => offset,
             None => self.flip.sample(now, motion).0,
         }
     }
@@ -3781,7 +3998,8 @@ impl Runtime {
             last_drawn_chevron: None,
             tab_scroll: 0.0,
             tab_press: None,
-            tab_drag: None,
+            pane_press: None,
+            drag: None,
             tab_clicks: TabClicks::default(),
             rename: None,
             rename_blink: CursorBlink::new(Instant::now()),
@@ -4147,11 +4365,12 @@ impl Runtime {
         {
             self.tab_press = None;
         }
-        if self
-            .tab_drag
-            .is_some_and(|drag| self.tabs.get(index).is_some_and(|tab| tab.id == drag.tab))
-        {
-            self.tab_drag = None;
+        if self.drag.is_some_and(|drag| {
+            self.tabs
+                .get(index)
+                .is_some_and(|tab| drag.tab() == Some(tab.id))
+        }) {
+            self.drag = None;
         }
         match tab_close_action(self.tabs.len(), self.active_tab, index) {
             TabCloseAction::CloseWindow => {
@@ -4244,8 +4463,15 @@ impl Runtime {
         let now = Instant::now();
         let palette = bt_render::chrome_palette();
         let renaming = self.rename.as_ref().map(|editor| editor.tab);
-        let drag = self.tab_drag;
-        let grabbed = drag.and_then(|drag| self.tabs.iter().position(|tab| tab.id == drag.tab));
+        // Only a tab drag lifts a tab out of the strip; a pane in the air leaves
+        // the strip exactly as it was.
+        let carried = self
+            .drag
+            .and_then(|drag| drag.tab_carry().map(|carry| carry.offset));
+        let grabbed = self.drag.and_then(|drag| {
+            let tab = drag.tab()?;
+            self.tabs.iter().position(|candidate| candidate.id == tab)
+        });
         let tabs = self
             .tabs
             .iter()
@@ -4260,7 +4486,7 @@ impl Runtime {
                         pinned: tab.pinned,
                         reveal: tab.pin_reveal.sample(now, self.motion).0,
                     },
-                    tab.drawn_offset(now, self.motion, drag.filter(|_| grabbed == Some(index))),
+                    tab.drawn_offset(now, self.motion, carried.filter(|_| grabbed == Some(index))),
                     tab.landing.sample(now, self.motion).0,
                     // The layer under the override, which is exactly what the
                     // editor's placeholder shows: `autoName(s)` is `displayName`
@@ -4330,7 +4556,7 @@ impl Runtime {
             // the runtime, and the way for a mirror of it to go wrong is for one
             // of those places to be added later and forget.
             seats::ChromePointer {
-                other_drag_in_flight: self.tab_drag.is_some(),
+                other_drag_in_flight: self.drag.is_some(),
                 ..self.seat_pointer
             },
             seats::ChromeContent {
@@ -4375,7 +4601,7 @@ impl Runtime {
         // length of the gesture — the same rule hover, the peek flyout and the
         // terminal's own selection already live by. An empty list is how that is
         // said here: there is nothing to be over.
-        if self.tab_drag.is_none() {
+        if self.drag.is_none() {
             let geometry = seats::tab_strip_geometry(
                 width,
                 scale,
@@ -4564,7 +4790,7 @@ impl Runtime {
             tab == self.active_tab,
             // A drag owns the pointer outright — the rule the tip, the hyperlink
             // underline and the terminal's own selection already live by.
-            self.tab_drag.is_some(),
+            self.drag.is_some(),
             // The editor IS the answer, exactly as it is for the tip: a
             // schematic laid over the box you are typing a name into covers the
             // box you are typing it into.
@@ -4966,8 +5192,90 @@ impl Runtime {
         // (`.layout-peek` 35, `.tip` 60).
         layers.extend(self.layout_peek_layer());
         layers.extend(self.tooltip_layer());
+        // Above even the tip: `z-index: 100` against its `60` (mock-up 1717).
+        // The tip's claim to being uncoverable is that it explains what is under
+        // the pointer; during a drag, what is under the pointer *is* the ghost,
+        // and in practice the two never meet anyway — a drag empties the tip's
+        // anchor list (J117's silence, `rebuild_tooltip_anchors`).
+        layers.extend(self.drag_ghost_layer());
         let layers = self.settings_marks.resolve_overlay(layers);
         self.renderer.set_modal_overlay(layers)
+    }
+
+    /// The ghost's own layer, or nothing when nothing is in the hand (J114-J116).
+    ///
+    /// Nothing is built for a drag whose landing is already showing itself
+    /// ([`DropLanding::shows_itself`]) — not built and then hidden, because an
+    /// invisible layer still costs a text shaping pass and a raster lookup every
+    /// frame the pointer moves, and "not drawn" is the same picture either way.
+    fn drag_ghost_layer(&mut self) -> Vec<marks::OverlayLayer> {
+        let Some(drag) = self.drag.filter(Drag::ghost_is_shown) else {
+            return Vec::new();
+        };
+        let palette = bt_render::chrome_palette();
+        let Some((mark, mark_logical, mark_color, text)) = self.drag_label(drag, palette) else {
+            return Vec::new();
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        // Only the font knows how wide a line is, so the measuring happens here,
+        // beside the renderer, exactly as the tip's and the badge's do.
+        let width = self
+            .renderer
+            .measure_chrome_text(&text, bt_render::DRAG_GHOST_FONT_LOGICAL_PX * scale);
+        let layout = seats::drag_ghost_layout(
+            [drag.pointer.x as f32, drag.pointer.y as f32],
+            mark_logical,
+            width,
+            scale,
+        );
+        vec![seats::build_drag_ghost(
+            &layout, mark, mark_color, &text, scale, palette,
+        )]
+    }
+
+    /// What the ghost says — `dragLabel(d)`, mock-up 6734-6751.
+    ///
+    /// "the mark, then the title", and the title is the **short** one: a pane's
+    /// head answers "where is this" with the whole path and a label riding the
+    /// pointer answers "which one is this" with the last segment alone (C28, and
+    /// `seat_short_caption`'s own note). A tab already has exactly one name and
+    /// takes it unchanged — `focusedLeaf(tabById(d.wsId))` in the mock-up is how
+    /// a tab finds a name at all, and here the tab has been carrying its own
+    /// since T1.
+    fn drag_label(
+        &self,
+        drag: Drag,
+        palette: bt_render::ChromePalette,
+    ) -> Option<(marks::ChromeMark, f32, [u8; 3], String)> {
+        match drag.source {
+            DragSource::Tab(id) => {
+                let tab = self.tabs.iter().find(|candidate| candidate.id == id)?;
+                Some((
+                    marks::ChromeMark::ProfilePowerShell,
+                    bt_render::WINDOW_TAB_MARK_LOGICAL_PX,
+                    palette.accent,
+                    tab.display_title(),
+                ))
+            }
+            DragSource::Pane(seat) => {
+                let kind = self.seats.tree().find_seat(seat)?.kind;
+                let (mark, size, colour) = seats::pane_mark(kind, palette);
+                let cwd = self
+                    .session
+                    .working_directory()
+                    .map(|path| path.to_string_lossy().into_owned());
+                let title = self
+                    .preview_image
+                    .as_ref()
+                    .map(|preview| preview.title().to_owned());
+                Some((
+                    mark,
+                    size,
+                    colour,
+                    seats::seat_short_caption(kind, title.as_deref(), cwd.as_deref()).to_owned(),
+                ))
+            }
+        }
     }
 
     /// The tip's own layer, or nothing when none is showing.
@@ -7073,11 +7381,15 @@ impl Runtime {
             return Ok(());
         }
         // A press that has travelled past the drag threshold becomes a drag
-        // (K111), and on its way withdraws any activation it was still holding
-        // back (J105). T4 owns the 6px, the identity and the withdrawal; the
-        // gesture that starts at exactly that instant is this slice's. Every
-        // press can start one — what the press owes its tab is a separate
-        // question, and the tab under your finger is often the active one.
+        // (J112/J113), and a tab press on its way withdraws any activation it was
+        // still holding back (J105). Both sources cross the same six pixels
+        // through the same [`DragLatch`]; what differs is only what each press
+        // was holding on to.
+        //
+        // J122 is upheld by position rather than by a flag: `drive_divider_drag`
+        // has already returned above if a resize is in flight, so neither branch
+        // below can be reached while one is — "one gesture owns the pointer at a
+        // time", and the ordering is what says so.
         let scale = self.renderer.metrics().scale_factor;
         if self
             .tab_press
@@ -7085,12 +7397,22 @@ impl Runtime {
             .is_some_and(|press| press.travelled(position, scale))
         {
             let press = self.tab_press.expect("a press that travelled is a press");
-            self.begin_tab_drag(press)?;
+            self.begin_tab_drag(press, position)?;
+        } else if self
+            .pane_press
+            .as_mut()
+            .is_some_and(|press| press.latch.travelled(position, scale))
+        {
+            let seat = self
+                .pane_press
+                .expect("a press that travelled is a press")
+                .seat;
+            self.begin_pane_drag(seat, position)?;
         }
-        // A tab drag owns the pointer outright, exactly as a divider drag does:
+        // A drag owns the pointer outright, exactly as a divider drag does:
         // hover, the peek flyout, the hyperlink underline and the terminal's own
         // selection all go quiet for the length of the gesture.
-        if self.drive_tab_drag(position)? {
+        if self.drive_drag(position)? {
             return Ok(());
         }
         self.update_chrome_hover(position)?;
@@ -7347,7 +7669,7 @@ impl Runtime {
             }
         });
         self.window
-            .set_cursor(pointer_cursor(self.tab_drag.is_some(), divider_axis));
+            .set_cursor(pointer_cursor(self.drag.is_some(), divider_axis));
     }
 
     /// Put the frame already on screen back in the slot so a pure chrome change
@@ -7385,6 +7707,9 @@ impl Runtime {
         // comes back up, which is why `dblclick` is a release-time event;
         // counting the press as well would pair each click with itself and turn
         // the very first one into a double.
+        // One button, one press: whichever source the router chose, the other is
+        // not being held.
+        self.pane_press = None;
         self.tab_press = Some(if index == self.active_tab {
             TabPress::settled(tab, position, now)
         } else {
@@ -7441,21 +7766,18 @@ impl Runtime {
     ///
     /// The activation is not a side effect: "reordering IS commitment to the
     /// strip context: the tab in hand shows itself, whether or not the press
-    /// timer had fired" (mock-up 6800-6801). Committing it here is also what
+    /// timer had fired" (mock-up 6832-6833). Committing it here is also what
     /// pays the press's promise for good, so a drag that is later cancelled has
     /// nothing left to owe (J108).
     ///
     /// The grip is measured from the press's own origin rather than from the
-    /// pointer's position now. That is what `startDrag` does (6457) and it is the
-    /// difference between a tab that stays where your fingers put it and one that
-    /// snaps 6px sideways the instant it comes free.
-    fn begin_tab_drag(&mut self, press: TabPress) -> Result<()> {
+    /// pointer's position now. That is what `startDrag` does (6484-6486) and it
+    /// is the difference between a tab that stays where your fingers put it and
+    /// one that snaps 6px sideways the instant it comes free.
+    fn begin_tab_drag(&mut self, press: TabPress, position: PhysicalPosition<f64>) -> Result<()> {
         let Some(index) = self.tabs.iter().position(|tab| tab.id == press.tab) else {
             return Ok(());
         };
-        // L135: a drag owns the pointer, and a schematic left hanging under a
-        // tab that is now moving would be describing where the tab used to be.
-        self.hide_layout_peek()?;
         self.activate_tab(index, false)?;
         // Re-read the strip: activating may have scrolled it to reveal the tab,
         // and a grip measured against the old scroll would be wrong by exactly
@@ -7465,18 +7787,76 @@ impl Runtime {
         let Some(slot) = self.strip_geometry(now).tabs.get(index).copied() else {
             return Ok(());
         };
-        self.tab_drag = Some(TabDrag {
-            tab: press.tab,
-            grab_dx: press.origin.x - f64::from(slot.body[0]),
-            origin: index,
-            offset: 0.0,
-            moved: false,
+        self.begin_drag(
+            DragSource::Tab(press.tab),
+            DragCarry::Tab(TabCarry {
+                grab_dx: press.latch.origin.x - f64::from(slot.body[0]),
+                origin: index,
+                offset: 0.0,
+                moved: false,
+            }),
+            position,
+        )
+    }
+
+    /// J118 — the press on a pane head has travelled 6px, so the pane is in the
+    /// air.
+    ///
+    /// Nothing is measured and nothing is committed. A pane's head is not a
+    /// handle the pane hangs from: the tree stays exactly as it was for the whole
+    /// gesture, and the only thing that moves is the ghost. That is the mock-up's
+    /// shape too — `startDrag(e, { kind: "pane", leafId })` records a leaf and
+    /// nothing else (5839) — and it is why a pane drag that comes to nothing
+    /// leaves no trace at all.
+    ///
+    /// The `.pane-close` dead zone (C35, mock-up 5837) needs no guard here: it is
+    /// [`seats::ChromeTarget::PaneClose`], a target of its own, so a press on the
+    /// `×` never reaches the head's arm of the router in the first place. "The
+    /// button is not the bar" is true at the hit test, which is the only place it
+    /// can be true once rather than everywhere.
+    fn begin_pane_drag(&mut self, seat: SeatId, position: PhysicalPosition<f64>) -> Result<()> {
+        // Focus mode parks the tree and refuses every pane drag ("focus mode: the
+        // tree is parked, no pane drags", mock-up 5841). This build has no focus
+        // mode to be in — `LayoutMode::Focus` exists in the solver and nothing in
+        // `bt-app` ever constructs it — so there is no state to test and adding a
+        // condition that is always false would be inventing the guard rather than
+        // implementing it. It belongs with the Focus-Mode slice, which is where
+        // the state it reads is born.
+        self.begin_drag(DragSource::Pane(seat), DragCarry::Pane, position)
+    }
+
+    /// Everything a drag does on the way in, whatever it is carrying (J112).
+    ///
+    /// The three things here are the three the mock-up's `startDrag` does for
+    /// every source alike: put away what was explaining the thing you just picked
+    /// up, take the pointer, and record the gesture. Anything that varies by
+    /// source has already happened in the caller.
+    fn begin_drag(
+        &mut self,
+        source: DragSource,
+        carry: DragCarry,
+        position: PhysicalPosition<f64>,
+    ) -> Result<()> {
+        // `hidePeek()` is the first line of `startDrag` (6482), and L135 is why:
+        // a schematic left hanging under a thing that is now moving would be
+        // describing where that thing used to be.
+        self.hide_layout_peek()?;
+        self.drag = Some(Drag {
+            source,
+            carry,
+            pointer: position,
+            landing: None,
         });
-        // Hover goes quiet for the whole gesture: while a tab is in your hand the
-        // strip has nothing to offer the pointer, and a `×` lighting up under a
-        // tab that is sliding past is an affordance that cannot be taken.
-        self.update_chrome_hover_target(None)?;
-        Ok(())
+        // Hover goes quiet for the whole gesture: while something is in your hand
+        // the chrome has nothing to offer the pointer, and a `×` lighting up
+        // under a tab that is sliding past is an affordance that cannot be taken.
+        //
+        // This is also where J117's pinning lands, and deliberately not in a
+        // second call of its own: clearing the hover target re-applies the
+        // pointer's shape, and the shape is a function of `self.drag` — which was
+        // set one line ago. One expression decides it, in one place, for both the
+        // taking and the letting go.
+        self.update_chrome_hover_target(None)
     }
 
     /// K114/K115 — hold the grabbed tab under the pointer and answer with how far
@@ -7487,16 +7867,74 @@ impl Runtime {
     /// viewport, so the tab you are holding cannot be carried out over the
     /// caption buttons or off the window's left edge.
     fn track_grabbed(&self, position: PhysicalPosition<f64>) -> Option<f32> {
-        let drag = self.tab_drag?;
-        let index = self.tabs.iter().position(|tab| tab.id == drag.tab)?;
+        let drag = self.drag?;
+        let (tab, carry) = (drag.tab()?, drag.tab_carry()?);
+        let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
         let geometry = self.strip_geometry(Instant::now());
         let slot = geometry.tabs.get(index)?;
         Some(grabbed_offset(
             slot.body[0],
             slot.body[2] - slot.body[0],
             geometry.viewport,
-            (position.x - drag.grab_dx) as f32,
+            (position.x - carry.grab_dx) as f32,
         ))
+    }
+
+    /// Where this drag would land if the hand opened now — **the seam U5 plugs
+    /// into** (K123-K135).
+    ///
+    /// Pure: it reads the window and answers a [`DropLanding`], and the live half
+    /// of whatever it answers is applied by [`Runtime::drive_drag`] afterwards.
+    /// Keeping the survey and the commitment apart is what lets U5's geometry
+    /// grow without the state machine growing with it, and it is why this takes
+    /// a source and a position rather than `&self.drag`: the question "what is
+    /// under the pointer" has nothing to do with how far a tab has slid.
+    ///
+    /// **What this slice answers, and what it deliberately does not.**
+    ///
+    /// * A **tab** always lands on the strip. The mock-up's first question is
+    ///   whether the pointer is inside the strip rectangle (K123, 6786-6787) and
+    ///   that question is *not asked here*, because the whole of its `else` — the
+    ///   rim, the pane zones, the centre — is U5's. Asking it now would mean
+    ///   answering "no landing" for a tab dragged below the strip, which is not
+    ///   K123's behaviour; it is K123's behaviour with everything K123 leads to
+    ///   removed. So the tab keeps T5's reading exactly, and U5 inserts the test
+    ///   in front of it.
+    /// * A **pane** lands nowhere at all. Every landing a pane has is in K or L:
+    ///   the strip (K124), an edge (L136), a centre (L138), the root rim (K130).
+    ///   None of them exist yet, and `None` is the honest answer for a pointer
+    ///   over a window that has nothing to offer it — the same answer the
+    ///   mock-up gives whenever `drag.target` is left null.
+    ///
+    /// It re-reads the strip's geometry rather than being handed it, and that is
+    /// a deliberate cost: a surveyor that depends on what its caller happened to
+    /// measure is a surveyor U5 cannot extend without threading a second
+    /// argument through every new branch. The price is one strip solve per
+    /// pointer move, on a strip of at most a few dozen tabs.
+    fn survey_drop(
+        &self,
+        source: DragSource,
+        position: PhysicalPosition<f64>,
+    ) -> Option<DropLanding> {
+        match source {
+            DragSource::Tab(tab) => {
+                let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
+                let geometry = self.strip_geometry(Instant::now());
+                let slot = geometry.tabs.get(index)?;
+                let offset = self.track_grabbed(position)?;
+                let slot_mids = seats::tab_slot_mids(&geometry);
+                Some(DropLanding::StripReorder {
+                    slot: seats::reorder_target(
+                        &slot_mids,
+                        &self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>(),
+                        index,
+                        slot_mids[index] + offset,
+                        (slot.body[2] - slot.body[0]) / 2.0,
+                    ),
+                })
+            }
+            DragSource::Pane(_) => None,
+        }
     }
 
     /// Drive a drag one pointer move. Returns whether the pointer was consumed.
@@ -7504,47 +7942,86 @@ impl Runtime {
     /// A drag owns the pointer outright, exactly as a divider drag does: while
     /// one is in flight nothing below hears the move, so no hover lights up, no
     /// tooltip arms and no selection extends underneath it.
-    fn drive_tab_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
-        let Some(mut drag) = self.tab_drag else {
+    ///
+    /// Three steps, in the mock-up's own order (6753-6790): move the ghost, ask
+    /// what is under the pointer, then let the answer do its live half. The
+    /// ghost moves *first* and unconditionally, because it is the report on where
+    /// the hand is and a hand that has moved has moved whether or not anything is
+    /// willing to receive it.
+    fn drive_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(mut drag) = self.drag else {
             return Ok(false);
         };
-        // The tab in hand can go away underneath the gesture — a background shell
-        // exits and `reap_exited_tabs` closes its tab. There is then nothing left
-        // to drag, and the state must not survive the thing it points at.
-        let Some(index) = self.tabs.iter().position(|tab| tab.id == drag.tab) else {
-            self.tab_drag = None;
+        // What is in the hand can go away underneath the gesture — a background
+        // shell exits and `reap_exited_tabs` closes its tab, or a seat is closed
+        // by a verb this window ran for some other reason. There is then nothing
+        // left to drag, and the state must not survive the thing it points at.
+        if !self.drag_source_lives(drag.source) {
+            self.drag = None;
+            self.apply_pointer_cursor();
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
             return Ok(true);
-        };
-        let now = Instant::now();
-        let geometry = self.strip_geometry(now);
-        let (Some(offset), Some(slot)) = (self.track_grabbed(position), geometry.tabs.get(index))
-        else {
-            return Ok(true);
-        };
-        let slot_mids = seats::tab_slot_mids(&geometry);
-        let half_width = (slot.body[2] - slot.body[0]) / 2.0;
-        let pinned = self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
-        let to = seats::reorder_target(
-            &slot_mids,
-            &pinned,
-            index,
-            slot_mids[index] + offset,
-            half_width,
-        );
-        if to == index {
-            drag.offset = offset;
-        } else {
-            self.move_tab_with_flip(index, to, now, Some(drag.tab));
-            drag.moved = true;
-            // Its slot has moved, so the distance from the slot to the hand has
-            // changed with it (mock-up 6699-6701).
-            drag.offset = self.track_grabbed(position).unwrap_or(offset);
         }
-        self.tab_drag = Some(drag);
+        drag.pointer = position;
+        drag.landing = self.survey_drop(drag.source, position);
+        if let (Some(DropLanding::StripReorder { slot }), Some(tab), Some(carry)) =
+            (drag.landing, drag.tab(), drag.tab_carry())
+        {
+            drag.carry = DragCarry::Tab(self.settle_strip_reorder(tab, carry, slot, position));
+        }
+        self.drag = Some(drag);
+        // The ghost lives in the overlay rather than in the chrome, and it does
+        // not need its own repaint call: `refresh_chrome` rebuilds the overlay
+        // from the same choke point and answers `true` if *either* changed. On a
+        // pane drag the chrome is identical frame to frame and the overlay is the
+        // only thing moving, which is exactly the case that choke point exists
+        // for.
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    /// Whether the thing this drag is carrying is still in the window.
+    fn drag_source_lives(&self, source: DragSource) -> bool {
+        match source {
+            DragSource::Tab(tab) => self.tabs.iter().any(|candidate| candidate.id == tab),
+            DragSource::Pane(seat) => self.seats.tree().contains(seat),
+        }
+    }
+
+    /// The live half of [`DropLanding::StripReorder`]: put the strip in the order
+    /// the hand is asking for, and answer with where the tab now sits.
+    ///
+    /// The reorder is *applied*, not previewed. That is the mock-up's
+    /// `reorderWhileDragging` (6835) and the reason it can be: the strip has one
+    /// axis and one kind of occupant, so the arrangement the drop would produce
+    /// is a thing the strip can simply be in while you are still deciding.
+    fn settle_strip_reorder(
+        &mut self,
+        tab: TabId,
+        mut carry: TabCarry,
+        to: usize,
+        position: PhysicalPosition<f64>,
+    ) -> TabCarry {
+        let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
+            return carry;
+        };
+        let Some(offset) = self.track_grabbed(position) else {
+            return carry;
+        };
+        if to == index {
+            carry.offset = offset;
+            return carry;
+        }
+        self.move_tab_with_flip(index, to, Instant::now(), Some(tab));
+        carry.moved = true;
+        // Its slot has moved, so the distance from the slot to the hand has
+        // changed with it (mock-up 6727-6729).
+        carry.offset = self.track_grabbed(position).unwrap_or(offset);
+        carry
     }
 
     /// Move a tab between slots and let every tab the move displaced slide into
@@ -7597,75 +8074,135 @@ impl Runtime {
             .collect()
     }
 
-    /// K118 and K121 — let go.
+    /// Let go (K118, K121, J120, and the mock-up's commit table at 7202-7231).
     ///
-    /// The reorder is already in `tabs`; it was applied live, slot by slot, as
-    /// the tab travelled. So there is nothing here to commit and nothing to
-    /// rebuild: the tab hands its offset to the settle, the settle runs it down
-    /// to its slot, and the strip that was already on screen carries on being the
-    /// strip (K122).
-    fn drop_tab_drag(&mut self) -> Result<bool> {
-        let Some(drag) = self.tab_drag.take() else {
+    /// One question: what did the last survey answer?
+    ///
+    /// * **A landing.** It decides. The only landing this slice has is the strip
+    ///   reorder, and it decided already — it was applied live, slot by slot, as
+    ///   the tab travelled — so there is nothing to commit and nothing to
+    ///   rebuild. The tab hands its offset to the settle, the settle runs it down
+    ///   to its slot, and the strip that was already on screen carries on being
+    ///   the strip (K122).
+    /// * **No landing — J120.** The carried thing goes back to the slot the drag
+    ///   began in, sliding rather than jumping, displaced neighbours travelling
+    ///   home with it.
+    ///
+    /// **J120 is not a cancel and not a commit, and the distinction is not
+    /// pedantry.** It shares [`Runtime::settle_home`] with Esc because the
+    /// *motion* is the same one — there is only one way for a thing to go back
+    /// where it came from — but nothing else about the two is. A cancel is the
+    /// user retracting a gesture; this is the gesture completing and finding
+    /// nowhere to be. The difference shows up in what each leaves behind: both
+    /// keep the press's activation (J108), and neither writes the session,
+    /// because a drag that landed nowhere chose nothing to record.
+    fn release_drag(&mut self) -> Result<bool> {
+        let Some(drag) = self.drag.take() else {
             return Ok(false);
         };
         let now = Instant::now();
         let motion = self.motion;
         // A gesture is not a click, and it is not half of one either.
         self.tab_press = None;
+        self.pane_press = None;
         self.tab_clicks.interrupt();
-        if let Some(index) = self.tabs.iter().position(|tab| tab.id == drag.tab) {
-            self.tabs[index].flip.displace(drag.offset, now, motion);
-            self.tabs[index].landing.start(now, motion);
+        match release_verdict(drag.landing) {
+            DragRelease::Commit => {
+                if let (Some(tab), Some(carry)) = (drag.tab(), drag.tab_carry())
+                    && let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab)
+                {
+                    self.tabs[index].flip.displace(carry.offset, now, motion);
+                    self.tabs[index].landing.start(now, motion);
+                    // The strip's order is the file's order, and a reorder is a
+                    // choice the user made rather than a state being explored
+                    // (§5.1). A drag that moved nothing decided nothing, and the
+                    // activation it did commit has already recorded itself.
+                    if carry.moved {
+                        self.mark_session_dirty(now);
+                    }
+                }
+            }
+            DragRelease::Home => self.settle_home(drag),
         }
-        // The strip's order is the file's order, and a reorder is a choice the
-        // user made rather than a state being explored (§5.1). A drag that moved
-        // nothing decided nothing, and the activation it did commit has already
-        // recorded itself.
-        if drag.moved {
-            self.mark_session_dirty(now);
-        }
-        if let Some(position) = self.pointer_position {
-            self.update_chrome_hover(position)?;
-        }
-        if self.refresh_chrome() {
-            self.present_chrome_change()?;
-        }
-        Ok(true)
+        self.finish_drag()
     }
 
-    /// K128/K129 — "never mind".
+    /// J119 — "never mind".
     ///
-    /// The tab goes back to the slot it was taken from, sliding rather than
-    /// jumping, and everything it displaced on the way out slides back with it.
+    /// Esc, and the pointer stream ending without a button-up. Everything the
+    /// gesture put on screen comes down and **no drop is committed**; the carried
+    /// thing goes home by the same route J120 uses.
     ///
     /// **Deviation, recorded.** The mock-up's `cancelDrag` settles the tab into
-    /// whatever slot the live reorder last put it in (7126-7135) — it undoes the
-    /// *drop*, not the reordering. This slice's K128 asks for the slot the drag
-    /// began in, which is also the only reading under which Esc means what the
-    /// mock-up's own comment says it means: "never mind, and NO commit".
+    /// whatever slot the live reorder last put it in (7153-7165) — it undoes the
+    /// *drop*, not the reordering. J120 rules that the native build reads the
+    /// mock-up's own sentence literally instead: the reorder is as much a commit
+    /// as the drop is, it was made by the same gesture, and a cancel that keeps
+    /// half of what it cancelled leaves the user to undo the rest by hand.
     ///
     /// What Esc does *not* undo is the activation (J108): the press chose this
     /// tab, and a cancelled drag does not unchoose it. Nothing here has to say so
     /// — the promise was paid the moment the drag began.
-    fn cancel_tab_drag(&mut self) -> Result<bool> {
-        let Some(drag) = self.tab_drag.take() else {
+    fn cancel_drag(&mut self) -> Result<bool> {
+        let Some(drag) = self.drag.take() else {
             return Ok(false);
+        };
+        self.tab_press = None;
+        self.pane_press = None;
+        self.tab_clicks.interrupt();
+        self.settle_home(drag);
+        self.finish_drag()
+    }
+
+    /// Put the carried thing back in the slot the drag began in — the FLIP home
+    /// J119 and J120 share.
+    ///
+    /// A pane has no slot to return to and no offset to run down: it never left.
+    /// The tree was untouched for the whole gesture (see
+    /// [`Runtime::begin_pane_drag`]), so "back where it started" is where it
+    /// already is, and the honest implementation of going home is to do nothing.
+    /// That is not a gap — it is the reason a pane drag is safe to abandon at any
+    /// moment.
+    fn settle_home(&mut self, drag: Drag) {
+        let (Some(tab), Some(carry)) = (drag.tab(), drag.tab_carry()) else {
+            return;
+        };
+        let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab) else {
+            return;
         };
         let now = Instant::now();
         let motion = self.motion;
-        self.tab_press = None;
-        self.tab_clicks.interrupt();
-        if let Some(index) = self.tabs.iter().position(|tab| tab.id == drag.tab) {
-            // Hand the settle the offset first, so the slide home starts where
-            // the hand left the tab and the slot change below composes onto it.
-            self.tabs[index].flip.displace(drag.offset, now, motion);
-            let pinned = self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
-            let to = partition_clamped(&pinned, index, drag.origin.min(pinned.len() - 1));
-            self.move_tab_with_flip(index, to, now, None);
-        }
+        // Hand the settle the offset first, so the slide home starts where the
+        // hand left the tab and the slot change below composes onto it.
+        self.tabs[index].flip.displace(carry.offset, now, motion);
+        let pinned = self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
+        // F57 again, and it has to be re-applied rather than trusted: between the
+        // drag starting and it ending, a pinned tab may have been reaped, which
+        // shifts every index after it by one.
+        let to = partition_clamped(&pinned, index, carry.origin.min(pinned.len() - 1));
+        self.move_tab_with_flip(index, to, now, None);
+    }
+
+    /// What both exits do once the gesture's own business is finished.
+    ///
+    /// One place, because these are the four things that are true of *ending* a
+    /// drag rather than of any particular way of ending one — and the mock-up
+    /// puts the same four in both `cancelDrag` and its `pointerup` (7166-7183
+    /// against 7189-7201) for exactly that reason.
+    /// Answers `true` — a drag that got this far consumed the event that ended
+    /// it, which is what both callers report to their own callers.
+    fn finish_drag(&mut self) -> Result<bool> {
+        // J117 in reverse: the pointer stops being pinned the instant the hand
+        // is empty, and takes back the shape of whatever it is now over.
+        self.apply_pointer_cursor();
+        // Hover was frozen at "nothing" for the whole gesture; the pointer has
+        // not moved, but what is under it has.
         if let Some(position) = self.pointer_position {
             self.update_chrome_hover(position)?;
         }
+        // Taking the ghost down is an overlay change, and on the frame a pane
+        // drag ends it is the *only* change there is — which `refresh_chrome`
+        // reports, because it owns the overlay's rebuild too.
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -7784,7 +8321,7 @@ impl Runtime {
         if state == ElementState::Released {
             // Ahead of the press: a gesture that has become a drag answers with
             // its drop, and the press that started it is no longer a click.
-            if self.drop_tab_drag()? {
+            if self.release_drag()? {
                 return Ok(true);
             }
             if self.divider_drag.take().is_some() {
@@ -7799,8 +8336,15 @@ impl Runtime {
                 return Ok(true);
             }
             let target = self.chrome_target_at(position);
+            // A pane press that never travelled has nothing to settle: D40 moved
+            // the focus on the way down and that is all a press on a head has
+            // ever meant. Dropping it is the whole of letting go.
+            let held_pane = self.pane_press.take().is_some();
             if let Some(press) = self.tab_press.take() {
                 self.release_tab_press(press, target)?;
+                return Ok(true);
+            }
+            if held_pane {
                 return Ok(true);
             }
             return Ok(target.is_some());
@@ -7916,10 +8460,22 @@ impl Runtime {
                     self.commit_seat_geometry()?;
                 }
             }
-            // D40. The focus move is done for every press in the pane by
-            // `focus_pane_at` above the router; the head has nothing left to do
-            // until it becomes a drag handle (J118, a later slice).
-            seats::ChromeTarget::PaneHeader(_) => {}
+            // D40's focus move is done for every press in the pane by
+            // `focus_pane_at` above the router. What the head adds is J118: it is
+            // the pane's handle, so the press arms the six pixels and waits.
+            //
+            // Nothing is consumed and nothing is shown. A press on a head that
+            // never travels is a press that meant "put me in this pane", which
+            // has already happened — so arming costs the click nothing, and that
+            // is exactly the mock-up's shape (`pointerdown` → `startDrag`, with
+            // the ordinary click handler left to run, 5835-5840).
+            seats::ChromeTarget::PaneHeader(seat) => {
+                self.tab_press = None;
+                self.pane_press = Some(PanePress {
+                    seat,
+                    latch: DragLatch::new(position),
+                });
+            }
             // I102/I105: one verb for every kind of leaf. A files pane has no
             // session to clear, which is the whole of what `closeFilesPane =
             // closePane` means (mock-up 3579).
@@ -8456,7 +9012,7 @@ impl Runtime {
         // formality and only one of the two calls can ever answer `true`.
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
             && !event.repeat
-            && (self.cancel_tab_drag()? || self.cancel_divider_drag()?)
+            && (self.cancel_drag()? || self.cancel_divider_drag()?)
         {
             return Ok(());
         }
@@ -9135,9 +9691,10 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
                 // listening, the gesture was never finished, and a drag nobody
                 // finished did not choose a ratio.
                 let cancelled = runtime
-                    .cancel_tab_drag()
+                    .cancel_drag()
                     .and_then(|tab| runtime.cancel_divider_drag().map(|split| tab || split));
                 runtime.tab_press = None;
+                runtime.pane_press = None;
                 runtime.tab_clicks.interrupt();
                 // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                 // Commit during this transition, and the product decision is to accept it.
@@ -15032,5 +15589,139 @@ mod tests {
             !press.travelled(PhysicalPosition::new(300.0, 20.0), 1.0),
             "the drag starts once — every later move is the gesture, not its start"
         );
+    }
+
+    // ── U4: the engine tabs and panes share (J111-J122) ──
+
+    /// A drag carrying `source`, with `landing` last surveyed. The carry is a
+    /// tab's when the source is a tab, because that pairing is the engine's
+    /// invariant rather than a choice any caller makes.
+    fn drag_of(source: DragSource, landing: Option<DropLanding>) -> Drag {
+        Drag {
+            source,
+            carry: match source {
+                DragSource::Tab(_) => DragCarry::Tab(TabCarry {
+                    grab_dx: 0.0,
+                    origin: 0,
+                    offset: 0.0,
+                    moved: false,
+                }),
+                DragSource::Pane(_) => DragCarry::Pane,
+            },
+            pointer: PhysicalPosition::new(0.0, 0.0),
+            landing,
+        }
+    }
+
+    /// J113 — one threshold, and it belongs to the latch rather than to either
+    /// press that owns one.
+    ///
+    /// The tab's half of this is already pinned by
+    /// `travelling_past_six_pixels_abandons_the_delayed_switch`; what is new is
+    /// that a pane head crosses the *same* six pixels, measured the same way, at
+    /// every scale.
+    ///
+    /// Red gate: give the pane its own constant — any other number — and the
+    /// middle assertion of each pass fails, because 6.0 is the only radius that
+    /// is short of at 5px and past at 7px.
+    #[test]
+    fn a_pane_head_and_a_tab_cross_the_same_six_pixels() {
+        for scale in [1.0_f64, 1.5, 2.0] {
+            let origin = PhysicalPosition::new(100.0, 200.0);
+            let mut pane = DragLatch::new(origin);
+            let mut tab = TabPress::armed(TabId(1), origin, Instant::now());
+            let short = PhysicalPosition::new(100.0 + 5.0 * scale, 200.0);
+            let far = PhysicalPosition::new(100.0 + 7.0 * scale, 200.0);
+            assert!(
+                !pane.travelled(short, scale),
+                "5 logical px is still a press"
+            );
+            assert!(!tab.travelled(short, scale), "and the tab agrees");
+            assert!(pane.travelled(far, scale), "7 logical px is a drag");
+            assert!(tab.travelled(far, scale), "and the tab agrees");
+            assert!(
+                !pane.travelled(PhysicalPosition::new(900.0, 900.0), scale),
+                "the drag starts once, for a pane exactly as for a tab"
+            );
+        }
+        // Euclidean, not per-axis: a diagonal hand travels as far as a straight
+        // one. 4/4 is 5.66 and short; 5/5 is 7.07 and past.
+        let mut latch = DragLatch::new(PhysicalPosition::new(0.0, 0.0));
+        assert!(!latch.travelled(PhysicalPosition::new(4.0, 4.0), 1.0));
+        assert!(latch.travelled(PhysicalPosition::new(5.0, 5.0), 1.0));
+    }
+
+    /// J120 — a release that landed nowhere goes home, and it is not the same
+    /// answer as a release that landed.
+    ///
+    /// Red gate: the mock-up's own behaviour is `DragRelease::Commit` for both
+    /// arms — `!d.target` falls in beside `d.target.reordered` and returns
+    /// without undoing the live reorder (7202-7208). Return `Commit` for `None`
+    /// here and this is the assertion that says the ruling was dropped.
+    #[test]
+    fn a_release_that_landed_nowhere_sends_the_gesture_home_rather_than_committing() {
+        assert_eq!(release_verdict(None), DragRelease::Home);
+        assert_eq!(
+            release_verdict(Some(DropLanding::StripReorder { slot: 3 })),
+            DragRelease::Commit,
+            "the strip already applied it — committing is letting it stand"
+        );
+    }
+
+    /// J116/K124 — the ghost stands down when the landing is already showing the
+    /// user what it means.
+    ///
+    /// "The tab itself is the feedback" (mock-up 6837). A tab reordering in the
+    /// strip is holding the slot it would take, so a second label saying the same
+    /// name under the pointer is the drag telling you twice — and the one in the
+    /// strip is the one telling you *where*. A pane has no such stand-in: nothing
+    /// on screen moves for it, so the ghost is the entire report.
+    ///
+    /// Red gate: make `shows_itself` answer `false` and the first assertion
+    /// fails; drop the `!` from `ghost_is_shown` and the second does.
+    #[test]
+    fn the_ghost_yields_to_a_landing_that_is_already_showing_itself() {
+        let tab = drag_of(
+            DragSource::Tab(TabId(1)),
+            Some(DropLanding::StripReorder { slot: 0 }),
+        );
+        assert!(
+            !tab.ghost_is_shown(),
+            "the reordering tab is its own feedback"
+        );
+        let pane = drag_of(DragSource::Pane(bt_layout::SeatId(1)), None);
+        assert!(
+            pane.ghost_is_shown(),
+            "nothing else on screen has moved for a pane, so the ghost is all there is"
+        );
+        assert!(
+            drag_of(DragSource::Tab(TabId(1)), None).ghost_is_shown(),
+            "a tab with nowhere to land is carried by the ghost like anything else"
+        );
+    }
+
+    /// J111/J118 — one drag, two things it can be carrying, and a pane carries
+    /// nothing that would let it be sent home.
+    ///
+    /// This is the guard `settle_home` reads, stated where it can be seen: a
+    /// pane's J120 is a no-op *because* there is no carry to unwind, and there is
+    /// no carry because the tree was never touched. The two are the same fact.
+    ///
+    /// Red gate: fold `TabCarry`'s four fields onto every drag — one struct, four
+    /// `Option`s or four zeros — and `tab_carry()` answers `Some` for a pane.
+    /// `settle_home` then reads `origin: 0` off it and walks whichever tab
+    /// happens to be in slot 0 across the strip, on a gesture that was carrying a
+    /// pane and never named a tab at all.
+    #[test]
+    fn a_pane_drag_carries_no_slot_and_no_offset_so_it_has_no_way_home() {
+        let pane = drag_of(DragSource::Pane(bt_layout::SeatId(7)), None);
+        assert_eq!(pane.tab(), None);
+        assert!(
+            pane.tab_carry().is_none(),
+            "nothing moved, so nothing has to move back"
+        );
+        let tab = drag_of(DragSource::Tab(TabId(4)), None);
+        assert_eq!(tab.tab(), Some(TabId(4)));
+        assert!(tab.tab_carry().is_some());
     }
 }

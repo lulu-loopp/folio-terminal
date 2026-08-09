@@ -394,6 +394,17 @@ pub struct ChromePalette {
     pub tip_shadow_inner_alpha: u8,
     /// Half the inner one, same falloff rule as every other floating surface's.
     pub tip_shadow_outer_alpha: u8,
+    /// The drag ghost's own lift (`.drag-ghost { box-shadow: 0 8px 24px
+    /// rgba(0,0,0,.25) }`, mock-up 1723), split into the same two rings.
+    ///
+    /// A fourth pair, and — unlike the tip's — deliberately *not* theme-varied:
+    /// the mock-up writes this declaration once and never overrides it on dark.
+    /// The tip needed the override because it is a small pale box that has to
+    /// separate from a dark plane it may be sitting flat against; the ghost is
+    /// always moving, and motion has already said it is above everything.
+    pub drag_ghost_shadow_inner_alpha: u8,
+    /// Half the inner one, same falloff rule as every other floating surface's.
+    pub drag_ghost_shadow_outer_alpha: u8,
     /// A modal dialog's face — `--win`. Three surfaces have to be told apart here
     /// and the mock-up names all three: `--termbg` is what a terminal shows,
     /// `--menu` is what floats over it, and `--win` is the window's own plane,
@@ -585,6 +596,9 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // `.45` black — the dark override at mock-up 1219.
     tip_shadow_inner_alpha: 115,
     tip_shadow_outer_alpha: 57,
+    // `.25` black, the ghost's single declaration: 255 × .25 = 63.75.
+    drag_ghost_shadow_inner_alpha: 64,
+    drag_ghost_shadow_outer_alpha: 32,
     dialog_surface: [0x20, 0x20, 0x20],
     dialog_title_text: [0xe2, 0xe2, 0xe2],
     dialog_secondary_text: [0x9b, 0x9b, 0x9b],
@@ -684,6 +698,10 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // `.1` black — the base declaration at mock-up 1217.
     tip_shadow_inner_alpha: 26,
     tip_shadow_outer_alpha: 13,
+    // The ghost's `.25` is written once for both themes, so daylight gets the
+    // same pair the night does — see the field's own note.
+    drag_ghost_shadow_inner_alpha: 64,
+    drag_ghost_shadow_outer_alpha: 32,
     dialog_surface: [0xff, 0xff, 0xff],
     dialog_title_text: [0x37, 0x35, 0x2f],
     dialog_secondary_text: [0x7d, 0x7c, 0x78],
@@ -976,6 +994,36 @@ pub const FLOAT_WINDOW_BORDER_LOGICAL_PX: f32 = 1.0;
 /// shadow: no gaussian tail, and no downward offset, so it sits symmetrically
 /// around the box instead of pooling below it.
 pub const FLOAT_WINDOW_SHADOW_LOGICAL_PX: f32 = 3.0;
+
+/// `.drag-ghost { border-radius: 7px }` (mock-up 1719) — the label that rides
+/// the pointer for the length of a drag.
+///
+/// Its own number rather than [`FLOAT_WINDOW_RADIUS_LOGICAL_PX`]'s 10, and the
+/// mock-up means it: every other floating surface is a *window* over the page,
+/// and this one is a thing in your hand. It is the only surface in the design
+/// that moves with the pointer, and it is rounded less because it is smaller
+/// than all of them — a 10px radius on a 26px-tall box is most of its height.
+pub const DRAG_GHOST_RADIUS_LOGICAL_PX: f32 = 7.0;
+/// `.drag-ghost { border: 1px solid var(--border) }`.
+pub const DRAG_GHOST_BORDER_LOGICAL_PX: f32 = 1.0;
+/// `.drag-ghost { padding: 5px 12px }` — the horizontal half.
+pub const DRAG_GHOST_PADDING_X_LOGICAL_PX: f32 = 12.0;
+/// `.drag-ghost { padding: 5px 12px }` — the vertical half.
+pub const DRAG_GHOST_PADDING_Y_LOGICAL_PX: f32 = 5.0;
+/// `.drag-ghost { gap: 7px }` — between the mark and the name.
+pub const DRAG_GHOST_GAP_LOGICAL_PX: f32 = 7.0;
+/// `.drag-ghost { font-size: 12.5px }`.
+pub const DRAG_GHOST_FONT_LOGICAL_PX: f32 = 12.5;
+/// How far below and to the right of the pointer the ghost hangs — `g.style.left
+/// = clientX + 10`, `g.style.top = clientY + 8` (mock-up 6765-6766).
+///
+/// Down-and-right of the hotspot rather than centred on it, so the label never
+/// covers the thing the pointer is aiming at. It is not clamped to the window:
+/// the mock-up's is `position: fixed` with no bound, and a ghost that stopped at
+/// the edge would be reporting a pointer position that is not where the pointer
+/// is.
+pub const DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX: [f32; 2] = [10.0, 8.0];
+
 /// Breathing room between a previewed image and its seat's edges, in logical
 /// pixels. Skipped entirely when the body is too small to afford it, because a
 /// margin that eats the picture serves nobody.
