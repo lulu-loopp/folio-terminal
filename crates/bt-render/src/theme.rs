@@ -1024,6 +1024,68 @@ pub const DRAG_GHOST_FONT_LOGICAL_PX: f32 = 12.5;
 /// is.
 pub const DRAG_GHOST_POINTER_OFFSET_LOGICAL_PX: [f32; 2] = [10.0, 8.0];
 
+/// `#dock-preview { border-radius: 8px }` (mock-up 1661) — the box that says
+/// where the thing in your hand is about to be.
+pub const DOCK_PREVIEW_RADIUS_LOGICAL_PX: f32 = 8.0;
+/// `#dock-preview { border: 1.5px solid var(--accent) }`, and the same 1.5 the
+/// refused and displaced outlines are drawn at.
+///
+/// One constant for all three because the mock-up writes 1.5 three times: the
+/// arriving box, the dashed refusal and the dashed destinations are cells of one
+/// drawing (M154), and a stroke that differed between them would be reporting a
+/// difference the drawing does not mean.
+pub const DOCK_PREVIEW_BORDER_LOGICAL_PX: f32 = 1.5;
+/// `background: color-mix(in srgb, var(--accent) 13%, transparent)`, in 1/255ths.
+///
+/// Not a palette field, because it is not a composite: `--accent` is opaque on
+/// both themes and the mix is against *transparent*, so the honest expression is
+/// the accent blended at draw time over whatever the pane happens to be showing —
+/// which is the same argument [`ChromePalette::menu_border`] makes for itself.
+pub const DOCK_PREVIEW_FILL_ALPHA: u8 = 33;
+/// `#dock-preview { font-size: 12.5px }` — L137's word inside the box.
+pub const DOCK_PREVIEW_FONT_LOGICAL_PX: f32 = 12.5;
+/// `#dock-preview { letter-spacing: .04em }`.
+pub const DOCK_PREVIEW_LETTER_SPACING_EM: f32 = 0.04;
+/// `#dock-shift i { border-radius: 6px }` — a destination outline.
+///
+/// Smaller than the arriving box's 8, and the mock-up means the difference: the
+/// filled box is the thing that lands and these are places that are still empty.
+pub const DOCK_SHIFT_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// `border: 1.5px dashed color-mix(in srgb, var(--accent) 85%, transparent)`.
+pub const DOCK_SHIFT_BORDER_ALPHA: u8 = 217;
+/// `background: color-mix(in srgb, var(--accent) 5%, transparent)`.
+///
+/// Five percent and not the eleven it started at, because the dashes carry this
+/// drawing and the fill has to get out of their way: a wash at 11% behind the
+/// line put the two at nearly the same value and the line lost — and the line is
+/// the only part that says "outline, not surface" (M151).
+pub const DOCK_SHIFT_FILL_ALPHA: u8 = 13;
+/// `SHIFT_INSET = 1` (mock-up 6479), and it is worn by the arriving box as well
+/// as by the destinations.
+///
+/// **M154 — the inset earns its pixel, and it must be the same one everywhere.**
+/// A split halves one axis and the divider seam halves with it, so on that axis a
+/// 1px gap becomes 0.5px and two neighbouring dashed borders fuse into one
+/// muddled stripe while the untouched axis keeps a clean 1px — which is exactly
+/// the "one direction looks joined and the other looks spaced" the drawing shows
+/// without it. Inset only the dashed ones and the seam beside the *arriving* pane
+/// comes out a pixel narrower than the seams between the others, which is visible
+/// the moment three cells sit in a column.
+pub const DOCK_SHIFT_INSET_LOGICAL_PX: f32 = 1.0;
+/// How long a dash and the gap after it are, as a multiple of the stroke width.
+///
+/// **A ruling, because CSS does not make one.** `border-style: dashed` leaves the
+/// pattern to the engine, so there is no authoritative number to copy out of the
+/// mock-up — what a browser shows is Blink's choice. Three is Blink's ratio, and
+/// it is picked here for the same reason it was picked there: at one and a half
+/// pixels of stroke it is the shortest dash that still reads as a dash rather
+/// than as a dotted line, which matters because these outlines say "this is a
+/// place, not a surface" and a dotted rule says "this is a boundary".
+///
+/// The pattern is fitted to each straight run (see `dashed_outline`), so the
+/// ratio sets the look and the run sets the count.
+pub const DOCK_DASH_RATIO: f32 = 3.0;
+
 /// Breathing room between a previewed image and its seat's edges, in logical
 /// pixels. Skipped entirely when the body is too small to afford it, because a
 /// margin that eats the picture serves nobody.

@@ -25,7 +25,7 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeLabelWeight, ChromeQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
+    ChromeLabel, ChromeLabelWeight, ChromeQuad, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
     PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
     SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
     SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
@@ -323,6 +323,258 @@ impl Seats {
         let mut out = Vec::new();
         collect_split_slots(&self.tree, layout, &mut out);
         out
+    }
+
+    /// **M155 — the layout this drop would make, computed rather than estimated.**
+    ///
+    /// The mock-up's `planDrop`, and its argument for existing is a bug report:
+    /// "a pane dock displaces nothing outside the pane" stopped being true the
+    /// day runs began dividing equally, and it stopped being true silently. The
+    /// preview promised a 269px column, the drop delivered 359, and a column
+    /// nobody had aimed at shrank from 539 and slid across. An estimate has to be
+    /// maintained in step with the rules; a computation cannot drift from them.
+    ///
+    /// So there is no second, approximating geometry here and T223 forbids one
+    /// (D4). The same [`bt_layout::apply`] the commit will run is run on a *copy*
+    /// of this tree, and the same [`bt_layout::solve`] the frame ran is run on the
+    /// result, against the same viewport and the same metrics. What comes back is
+    /// what letting go would put on screen, to the subpixel.
+    ///
+    /// **What arrives** (M156). Three shapes, and the enum that names them is
+    /// [`DropCargo`]:
+    ///
+    /// * a pane already in this tree arrives *as itself* — the very [`Seat`] the
+    ///   commit will move, so a files column brings its fixed-column nature and
+    ///   its width along with it rather than being previewed as a ratio share the
+    ///   drop would never produce;
+    /// * a tab arrives as its **whole** layout, because it is one: drawing three
+    ///   panes' worth of arrival as a single anonymous box would both understate
+    ///   the footprint and let the fit judgement approve a layout whose real
+    ///   leaves come out under their minimum.
+    ///
+    /// **The centre is decided before anything is plucked**, because taking a
+    /// pane's place moves no boxes at all — and a *pane* arriving at a centre is
+    /// a two-sided swap, so both halves are modelled. Previewing only the target
+    /// would draw two files columns where the drop produces one on each side,
+    /// mirrored.
+    ///
+    /// Answers `None` when the aim names something this tree does not have, or
+    /// when the edit chain itself refuses — a plan that cannot be built is not a
+    /// plan that fits, and [`DropPlan::fits`] would be answering about nothing.
+    pub fn plan_drop(
+        &self,
+        metrics: &SeatMetrics,
+        viewport: LogicalRect,
+        aim: LayoutAim,
+        cargo: DropCargo<'_>,
+    ) -> Option<DropPlan> {
+        let mut ids = PlanIds {
+            seat: self.next_seat,
+            split: self.next_split,
+        };
+        let (moving, arriving) = match cargo {
+            DropCargo::Pane(seat) => (
+                Some(seat),
+                LayoutNode::seat(self.tree.find_seat(seat)?.clone()),
+            ),
+            DropCargo::Layout(tree) => (None, renumbered(tree, &mut ids)),
+        };
+        // Which seats the accent box covers. A swap is the one case where the
+        // arriving subtree is not what lands: the moving seat keeps its own id
+        // and simply changes places, so the box is drawn on *its* new rectangle.
+        let landed: Vec<SeatId> = match (aim, moving) {
+            (LayoutAim::SeatCentre(_), Some(seat)) => vec![seat],
+            _ => arriving
+                .seats_in_order()
+                .into_iter()
+                .map(|seat| seat.id)
+                .collect(),
+        };
+        let mut chain: Vec<Edit> = Vec::new();
+        match aim {
+            LayoutAim::SeatCentre(target) => match moving {
+                // L138 — payloads trade, both seats keep their places.
+                Some(seat) => chain.push(Edit::CenterSwap { a: seat, b: target }),
+                // L139/N161 — the target leaves for the strip and the arriving
+                // layout takes the slot it vacated.
+                None => chain.push(Edit::ReplaceSeat { target, arriving }),
+            },
+            LayoutAim::SeatEdge(target, edge) => {
+                // The same pluck the drop will do, rebalance included: the leaf
+                // leaves its run and that run is re-divided before the new one is
+                // cut. Two opinions here is exactly what M155 is about.
+                chain.extend(moving.map(|target| Edit::CloseSeat { target }));
+                chain.push(Edit::SplitSeat {
+                    target,
+                    dir: edge.axis(),
+                    leading: edge.leading(),
+                    arriving,
+                    split_id: ids.split(),
+                });
+            }
+            LayoutAim::Rim(edge) => {
+                chain.extend(moving.map(|target| Edit::CloseSeat { target }));
+                chain.push(Edit::RootRimDrop {
+                    dir: edge.axis(),
+                    leading: edge.leading(),
+                    arriving,
+                    split_id: ids.split(),
+                });
+            }
+        }
+        let mut tree = self.tree.clone();
+        for edit in &chain {
+            tree = apply(&tree, metrics, edit).ok()?.tree;
+        }
+        // D41 — a focus that left the tree falls back to the first leaf. A replace
+        // is the one drop that can take the focused seat away, and the solver is
+        // owed a seat that exists rather than the one that used to.
+        let focus = if tree.contains(self.focus) {
+            self.focus
+        } else {
+            tree.seats_in_order().first()?.id
+        };
+        let layout = solve(&tree, viewport, metrics, focus, LayoutMode::Parallel)
+            .ok()
+            .filter(|layout| plan_fits(layout, metrics));
+        Some(DropPlan {
+            tree,
+            layout,
+            landed,
+        })
+    }
+}
+
+/// What arrives at a drop (M156).
+///
+/// Two shapes rather than three: the mock-up's second case — "a files pane
+/// brings its fixed column nature" — is not a case here at all, because a pane
+/// arrives as the [`Seat`] it already is and a seat is where `fixed_extent`
+/// lives. Writing a third variant to re-derive what the tree already knows is
+/// how the preview and the drop become two opinions.
+#[derive(Clone, Copy, Debug)]
+pub enum DropCargo<'a> {
+    /// A pane already in this tree, moving house.
+    Pane(SeatId),
+    /// Another tab's whole layout.
+    Layout(&'a LayoutNode),
+}
+
+/// The layout a drop would make — [`Seats::plan_drop`]'s answer.
+#[derive(Clone, Debug)]
+pub struct DropPlan {
+    /// The tree the drop would install. U7 commits by adopting exactly this, so
+    /// the promise the preview makes and the tree that lands are one object.
+    ///
+    /// Stated ahead of its caller for the reason [`DropEdge::axis`] was: it is
+    /// the object D4 is *about*, and the pin that holds the preview and the drop
+    /// to the same rectangles reads it. U7 does not add a field here; it stops
+    /// throwing this one away.
+    #[allow(dead_code)]
+    pub tree: LayoutNode,
+    /// That tree solved into the same viewport the live layout was solved into
+    /// — and `None` when the drop is refused (H93/M147).
+    ///
+    /// Refusal and "no rectangles" are deliberately the same fact rather than a
+    /// flag beside a set of rectangles nobody may draw. A refused plan's geometry
+    /// is not a lesser answer to be rendered faintly; it is an answer to a
+    /// question the drop will never ask, and the refusal draws the pane it will
+    /// *not* cut instead (M147).
+    pub layout: Option<SeatLayout>,
+    /// The seats the accent box covers — one leaf, or every leaf of an arriving
+    /// tab's layout.
+    pub landed: Vec<SeatId>,
+}
+
+impl DropPlan {
+    /// **H93/H94** — whether the layout this drop would make is one the rules
+    /// allow.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        self.layout.is_some()
+    }
+}
+
+/// **H93** — every planned rectangle clears its own kind's minimum.
+///
+/// **H94, which is the whole reason this reads the plan and not the target.**
+/// "Too small" is a fact about the layout that *would exist*, never a guess from
+/// what the target measures now. Halving the target was that guess, and it was
+/// wrong in the direction that hurts: it refused a fourth column because
+/// `359 / 2 = 179`, when re-dividing the run gives every column 269 and 269 is
+/// fine. It was turning down drops that would have worked.
+///
+/// **H95 — the kind is read off the rectangle.** A files column is legitimately
+/// slimmer than a terminal's minimum, so holding every rectangle to `MIN_PANE_W`
+/// refuses every layout that merely *contains* one. [`bt_layout::SeatPlacement`]
+/// carries the kind stamped from the tree that was solved (red line L2), which is
+/// the only source that stays right across a swap — look the leaf up in the live
+/// tree and a swap has already moved the content by the time the question is
+/// asked.
+///
+/// A seat the solver did not present fails outright: the concession ladder
+/// reaching for a collapsed bar is the solver saying this layout does not fit,
+/// and a 24px bar is under every minimum in the table anyway.
+fn plan_fits(layout: &SeatLayout, metrics: &SeatMetrics) -> bool {
+    layout.rects.iter().all(|placement| {
+        placement.rect.is_some_and(|rect| {
+            Axis::BOTH.into_iter().all(|axis| {
+                rect.extent(axis) + PLAN_FIT_TOLERANCE >= metrics.min_size(placement.kind, axis)
+            })
+        })
+    })
+}
+
+/// The mock-up's `- 0.5` (line 6470): half a logical pixel of slack, so a
+/// boundary that rounded down by a hair is not read as a refusal.
+const PLAN_FIT_TOLERANCE: LogicalPx = LogicalPx::from_subpixels(SUBPIXELS_PER_PX / 2);
+
+/// The identities a plan hands out.
+///
+/// A drop that brings another tab's layout brings that tab's seat and split
+/// numbers with it, and the two tabs number from one apiece — so the arriving
+/// ids are renamed into this tree's unused range before anything looks a seat up
+/// by id. Without it `path_to_seat` answers with whichever duplicate it reaches
+/// first, and the plan quietly edits the wrong pane.
+struct PlanIds {
+    seat: u64,
+    split: u64,
+}
+
+impl PlanIds {
+    fn seat(&mut self) -> SeatId {
+        let id = SeatId(self.seat);
+        self.seat += 1;
+        id
+    }
+
+    fn split(&mut self) -> SplitId {
+        let id = SplitId(self.split);
+        self.split += 1;
+        id
+    }
+}
+
+/// The same subtree with every identity renamed into `ids`' range, and every
+/// ratio, kind and fixed extent left exactly as it was.
+///
+/// In-order, so the renaming is a function of the tree's shape and of nothing
+/// else (D2) — the same arriving layout is renumbered the same way every frame,
+/// and a preview does not renumber itself under a pointer that has not moved.
+fn renumbered(node: &LayoutNode, ids: &mut PlanIds) -> LayoutNode {
+    match node {
+        LayoutNode::Seat(seat) => LayoutNode::seat(Seat {
+            id: ids.seat(),
+            ..seat.clone()
+        }),
+        LayoutNode::Split {
+            dir, ratio, a, b, ..
+        } => {
+            let a = renumbered(a, ids);
+            let id = ids.split();
+            let b = renumbered(b, ids);
+            LayoutNode::split_at(id, *dir, *ratio, a, b)
+        }
     }
 }
 
@@ -2134,6 +2386,7 @@ pub fn build_chrome_with_preview(
             tabs: &tabs,
             active_tab: 0,
             grabbed: None,
+            strip_preview: None,
             tab_scroll: 0.0,
             preview_title,
             terminal_cwd: None,
@@ -2277,6 +2530,23 @@ pub struct ChromeContent<'a> {
     /// painter's-algorithm list has no `z-index`, so the tab in hand is laid down
     /// after the active tab rather than merely after its ordinary neighbours.
     pub grabbed: Option<usize>,
+    /// **K124 — the slot a pane torn out of the layout would take**, and the
+    /// entry in [`Self::tabs`] standing in it.
+    ///
+    /// The mock-up builds this out of a real tab element (`showDropPreview`,
+    /// 6507-6546): the stand-in is dressed exactly as the tab that would land
+    /// there and inserted into the run, so its neighbours move aside and the slot
+    /// is *occupied* rather than gestured at. That is also why the ghost goes
+    /// transparent for the whole of it — "the preview in the strip is the ghost
+    /// now" (6792). Two labels saying the same name is the drag telling you
+    /// twice, and the one in the slot is the one telling you where.
+    ///
+    /// So it arrives here as an ordinary [`TabContent`] at its index, and this
+    /// field says only which index it is. What that buys is that every measure
+    /// the strip already makes — the width tier, the scroll, the run's gaps — is
+    /// made *with* the stand-in in it, without a single one of them learning
+    /// about drags.
+    pub strip_preview: Option<usize>,
     /// How far the strip is scrolled, in physical pixels. Clamped by the
     /// geometry, so a stale value cannot draw a strip past its own content.
     pub tab_scroll: f32,
@@ -2325,6 +2595,7 @@ pub fn build_chrome_for_tabs(
         tabs,
         active_tab,
         grabbed,
+        strip_preview,
         tab_scroll,
         preview_title,
         terminal_cwd,
@@ -2351,6 +2622,7 @@ pub fn build_chrome_for_tabs(
             tabs,
             active_tab,
             grabbed,
+            strip_preview,
             scroll: tab_scroll,
             profile_menu_open,
             chevron_turn,
@@ -2789,6 +3061,8 @@ struct TabStrip<'a> {
     tabs: &'a [TabContent],
     active_tab: usize,
     grabbed: Option<usize>,
+    /// K124's stand-in slot — see [`ChromeContent::strip_preview`].
+    strip_preview: Option<usize>,
     scroll: f32,
     profile_menu_open: bool,
     chevron_turn: f32,
@@ -2809,6 +3083,7 @@ fn window_chrome(
         tabs,
         active_tab,
         grabbed,
+        strip_preview,
         scroll: tab_scroll,
         profile_menu_open,
         chevron_turn,
@@ -2917,7 +3192,18 @@ fn window_chrome(
             // They go down after the tab's own silhouette and before everything
             // inside it, which is where a `background` and an inset `box-shadow`
             // sit in CSS — over the surface, under the content.
-            if content.landing > 0.0 && within_strip(viewport, tab.body) {
+            // K124's stand-in wears the same wash at full strength for as long as
+            // it stands there, which is exactly what `.drop-preview` is: the
+            // mock-up writes the same two declarations twice, once as a class and
+            // once as the `from` of the landing keyframe. Expressed as the landing
+            // held at 1.0 rather than as a second pair of constants, so the slot
+            // and the tab that lands in it cannot drift apart.
+            let landing = if strip_preview == Some(index) {
+                1.0
+            } else {
+                content.landing
+            };
+            if landing > 0.0 && within_strip(viewport, tab.body) {
                 let mut wash = ChromeSprite::new(
                     ChromeMark::TabBody {
                         radius_px: radius as u32,
@@ -2925,7 +3211,7 @@ fn window_chrome(
                     tab.body,
                     palette.accent,
                 );
-                wash.opacity = TAB_LAND_WASH_ALPHA * content.landing;
+                wash.opacity = TAB_LAND_WASH_ALPHA * landing;
                 sprites.push(wash);
                 let mut ring = ChromeSprite::new(
                     ChromeMark::TabBodyRing {
@@ -2935,7 +3221,7 @@ fn window_chrome(
                     tab.body,
                     palette.accent,
                 );
-                ring.opacity = TAB_LAND_RING_ALPHA * content.landing;
+                ring.opacity = TAB_LAND_RING_ALPHA * landing;
                 sprites.push(ring);
             }
             let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
@@ -3075,6 +3361,14 @@ fn window_chrome(
                         // title was already wearing. The editor changes the ink
                         // by *not* changing it.
                         Some(edit) => (edit.text.clone(), palette.pane_title_focus),
+                        // `.drop-preview { color: var(--accent) }` (mock-up
+                        // 969): the stand-in names the pane in the accent the
+                        // wash and the ring around it are already in, so the
+                        // slot reads as one thing rather than as an ordinary
+                        // title sitting inside a blue box.
+                        None if strip_preview == Some(index) => {
+                            (content.title.clone(), palette.accent)
+                        }
                         None => (
                             content.title.clone(),
                             if active || tab_hovered {
@@ -3782,6 +4076,368 @@ pub(crate) fn build_drag_ghost(
         sprites: vec![ChromeSprite::new(mark, layout.mark, mark_color)],
         opacity: 1.0,
     }
+}
+
+/// The whole dock drawing for one frame: where the thing in your hand lands, and
+/// where everything it displaces is going (M144-M154).
+///
+/// Rectangles only, in physical pixels of the whole surface — no colours, no
+/// alphas, no text metrics. Splitting it this way is what lets the arithmetic
+/// that matters (does the arriving box really cover the planned seats, does an
+/// unmoved pane really get no outline) be asserted without a renderer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DockOverlay {
+    /// The box under the pointer's promise: the arriving pane's own rectangle
+    /// when the drop fits, and the pane that will *not* be cut when it does not.
+    pub preview: [f32; 4],
+    /// **M146/M147 — a refusal has to be visible.** Nothing appearing at all
+    /// makes "this pane is too narrow to divide" and "this app is broken" look
+    /// identical, and the only way to tell them apart is to already know the
+    /// rule. The refused box draws the pane it will not cut: the shape says "I
+    /// heard you", the missing fill says "nothing lands here". Not red — this is
+    /// a limit, not an error.
+    pub refused: bool,
+    /// **L137's word.** The centre's box is the same blue rectangle an edge's is
+    /// and its consequence is nothing like it, so the centre says its name and
+    /// the edges say nothing: their shape has already spoken.
+    pub caption: &'static str,
+    /// **M149-M153** — one outline per pane that actually moves, drawn where it
+    /// is going.
+    pub shift: Vec<[f32; 4]>,
+}
+
+/// Turn a plan into the drawing (M144-M154).
+///
+/// `live` is the layout on screen this instant and `plan` is the layout the drop
+/// would make; both were solved against the same viewport, so the comparison
+/// below is between two answers to the same question rather than between two
+/// measurements of different frames (A12/T228).
+///
+/// `aimed_at` is the pane the pointer is on, and it is used for exactly one
+/// thing: the refused box, which is drawn on the pane that will not be cut. A rim
+/// aim has no such pane and takes the whole host instead — the layout as a whole
+/// is what it was asking to divide.
+#[must_use]
+pub fn dock_overlay(
+    plan: &DropPlan,
+    live: &SeatLayout,
+    host: [f64; 4],
+    aimed_at: Option<SeatId>,
+    caption: &'static str,
+    scale: f32,
+) -> Option<DockOverlay> {
+    // M154 — one inset, worn by the arriving box and by every destination, so
+    // the cells of this drawing are measured the same way.
+    let inset = (bt_render::DOCK_SHIFT_INSET_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let Some(layout) = plan.layout.as_ref() else {
+        let box_ = aimed_at
+            .and_then(|seat| live.get(seat))
+            .and_then(|placement| placement.device_rect)
+            .map_or(
+                [
+                    host[0] as f32,
+                    host[1] as f32,
+                    host[2] as f32,
+                    host[3] as f32,
+                ],
+                |rect| {
+                    [
+                        rect.left as f32,
+                        rect.top as f32,
+                        rect.right as f32,
+                        rect.bottom as f32,
+                    ]
+                },
+            );
+        return Some(DockOverlay {
+            // `I = fits ? SHIFT_INSET : 0` (mock-up 7011): the refusal is not a
+            // cell of the arrival drawing, it is a tracing of a pane that is
+            // already there, so it sits on that pane's own edge.
+            preview: box_,
+            refused: true,
+            caption: "",
+            shift: Vec::new(),
+        });
+    };
+    let mut arriving: Option<[f32; 4]> = None;
+    let mut shift = Vec::new();
+    for placement in &layout.rects {
+        let Some(planned) = placement.device_rect else {
+            continue;
+        };
+        let planned = [
+            planned.left as f32,
+            planned.top as f32,
+            planned.right as f32,
+            planned.bottom as f32,
+        ];
+        if plan.landed.contains(&placement.id) {
+            // One box over everything that is arriving, which is one leaf for a
+            // pane and a whole layout's footprint for a tab.
+            arriving = Some(match arriving {
+                None => planned,
+                Some(seen) => [
+                    seen[0].min(planned[0]),
+                    seen[1].min(planned[1]),
+                    seen[2].max(planned[2]),
+                    seen[3].max(planned[3]),
+                ],
+            });
+            continue;
+        }
+        // **M153 — only the panes that actually move are shown moving.** A dashed
+        // box means "this pane goes here"; drawing one over a pane that does not
+        // budge says the opposite of what is true, and says it about everyone at
+        // once. That is what taking a pane's place used to look like — a replace
+        // moves nobody, and every pane wore an outline of itself. The honest rule
+        // covers the quiet cases too: split a pane inside one column and the panes
+        // in another column do not move either.
+        //
+        // Compared exactly rather than within a tolerance, because both sides are
+        // device rectangles the same solver snapped to the same grid (§2.5). The
+        // mock-up's half-pixel slack is measuring a browser's fractional layout
+        // rects; there are no fractions on this side of the seam to be generous
+        // about.
+        let lives_at = live
+            .get(placement.id)
+            .and_then(|placement| placement.device_rect);
+        let moved = lives_at.is_none_or(|rect| {
+            [rect.left, rect.top, rect.right, rect.bottom]
+                .iter()
+                .zip(planned)
+                .any(|(live, planned)| *live as f32 != planned)
+        });
+        if moved {
+            shift.push(inset_rect(planned, inset));
+        }
+    }
+    Some(DockOverlay {
+        preview: inset_rect(arriving?, inset),
+        refused: false,
+        caption,
+        shift,
+    })
+}
+
+/// A rectangle pulled in on all four sides, never past its own middle.
+fn inset_rect(rect: [f32; 4], inset: f32) -> [f32; 4] {
+    let x = inset.min((rect[2] - rect[0]) / 2.0).max(0.0);
+    let y = inset.min((rect[3] - rect[1]) / 2.0).max(0.0);
+    [rect[0] + x, rect[1] + y, rect[2] - x, rect[3] - y]
+}
+
+/// Paint the dock drawing — the destinations first, the arriving box over them.
+///
+/// Two layers rather than one, because the mock-up gives them two `z-index`es
+/// (`#dock-shift` 24, `#dock-preview` 25) and the overlay's channels are ordered
+/// within a layer, not across them: a box that must cover an outline has to be on
+/// a later layer to do it.
+pub(crate) fn build_dock_overlay(
+    overlay: &DockOverlay,
+    scale: f32,
+    palette: bt_render::ChromePalette,
+) -> Vec<crate::marks::OverlayLayer> {
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let stroke = bt_render::DOCK_PREVIEW_BORDER_LOGICAL_PX * scale;
+    let mut layers = Vec::new();
+    if !overlay.shift.is_empty() {
+        let radius = bt_render::DOCK_SHIFT_RADIUS_LOGICAL_PX * scale;
+        let mut quads = Vec::new();
+        for rect in &overlay.shift {
+            quads.extend(bt_render::rounded_overlay_fill(
+                *rect,
+                radius,
+                palette.accent,
+                alpha(bt_render::DOCK_SHIFT_FILL_ALPHA),
+            ));
+            push_outline(
+                &mut quads,
+                *rect,
+                radius,
+                stroke,
+                palette.accent,
+                alpha(bt_render::DOCK_SHIFT_BORDER_ALPHA),
+                Dash::Dashed,
+            );
+        }
+        layers.push(crate::marks::OverlayLayer {
+            quads,
+            ..Default::default()
+        });
+    }
+    let radius = bt_render::DOCK_PREVIEW_RADIUS_LOGICAL_PX * scale;
+    let mut quads = Vec::new();
+    if overlay.refused {
+        // `background: none` — the shape says "I heard you" and the absence of
+        // fill says "nothing lands here" (M147). `--ink3` over a pane's own
+        // surface already has a name in this palette, and a second constant
+        // holding the same two bytes is how one ink becomes two.
+        push_outline(
+            &mut quads,
+            overlay.preview,
+            radius,
+            stroke,
+            palette.pane_title,
+            1.0,
+            Dash::Dashed,
+        );
+    } else {
+        quads.extend(bt_render::rounded_overlay_fill(
+            overlay.preview,
+            radius,
+            palette.accent,
+            alpha(bt_render::DOCK_PREVIEW_FILL_ALPHA),
+        ));
+        push_outline(
+            &mut quads,
+            overlay.preview,
+            radius,
+            stroke,
+            palette.accent,
+            1.0,
+            Dash::Solid,
+        );
+    }
+    let labels = if overlay.caption.is_empty() {
+        Vec::new()
+    } else {
+        vec![ChromeLabel {
+            text: overlay.caption.to_owned(),
+            rect: overlay.preview,
+            font_size_px: bt_render::DOCK_PREVIEW_FONT_LOGICAL_PX * scale,
+            color: palette.accent,
+            align_right: false,
+            align_center: true,
+            letter_spacing_em: bt_render::DOCK_PREVIEW_LETTER_SPACING_EM,
+            weight: ChromeLabelWeight::SemiBold,
+            tabular_numerals: false,
+        }]
+    };
+    layers.push(crate::marks::OverlayLayer {
+        quads,
+        labels,
+        ..Default::default()
+    });
+    layers
+}
+
+/// Whether an outline is drawn continuously or as a run of dashes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Dash {
+    Solid,
+    Dashed,
+}
+
+/// A rounded outline of `width`, drawn inside `rect` the way a border-box is.
+///
+/// The ring is the coverage between the padding box and the border box, so the
+/// corners are the same anti-aliased quarter-rounds every other floating surface
+/// in this window is built from rather than a second, staircased set.
+///
+/// **A ruling about where the dashes fall**, because CSS makes none. The pattern
+/// is laid along each of the four *straight* runs, fitted so that every run
+/// begins and ends on a dash — which is what a browser does at a corner and what
+/// keeps a rectangle from looking as though one edge started mid-stroke. The
+/// corner arcs are the joints those runs meet at and stay unbroken: a dash walked
+/// around a 6px arc is two pixels of it, and a pattern that fragments only at the
+/// corners reads as damage rather than as a dash.
+fn push_outline(
+    out: &mut Vec<OverlayQuad>,
+    rect: [f32; 4],
+    radius: f32,
+    width: f32,
+    color: [u8; 3],
+    alpha: f32,
+    dash: Dash,
+) {
+    let (w, h) = (rect[2] - rect[0], rect[3] - rect[1]);
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+    let width = width.min(w / 2.0).min(h / 2.0);
+    let radius = radius.min(w / 2.0).min(h / 2.0);
+    let inner = [
+        rect[0] + width,
+        rect[1] + width,
+        rect[2] - width,
+        rect[3] - width,
+    ];
+    let ring =
+        bt_render::rounded_overlay_halo(inner, (radius - width).max(0.0), width, color, alpha);
+    if dash == Dash::Solid {
+        out.extend(ring);
+        return;
+    }
+    // Only the four corner squares survive from the ring; the straight runs
+    // between them are re-laid as dashes below.
+    for corner in [
+        [rect[0], rect[1], rect[0] + radius, rect[1] + radius],
+        [rect[2] - radius, rect[1], rect[2], rect[1] + radius],
+        [rect[0], rect[3] - radius, rect[0] + radius, rect[3]],
+        [rect[2] - radius, rect[3] - radius, rect[2], rect[3]],
+    ] {
+        out.extend(ring.iter().filter_map(|quad| clipped(*quad, corner)));
+    }
+    for (start, end) in dash_runs(rect[0] + radius, rect[2] - radius, width) {
+        out.push(OverlayQuad {
+            rect: [start, rect[1], end, rect[1] + width],
+            color,
+            alpha,
+        });
+        out.push(OverlayQuad {
+            rect: [start, rect[3] - width, end, rect[3]],
+            color,
+            alpha,
+        });
+    }
+    for (start, end) in dash_runs(rect[1] + radius, rect[3] - radius, width) {
+        out.push(OverlayQuad {
+            rect: [rect[0], start, rect[0] + width, end],
+            color,
+            alpha,
+        });
+        out.push(OverlayQuad {
+            rect: [rect[2] - width, start, rect[2], end],
+            color,
+            alpha,
+        });
+    }
+}
+
+/// The dashes of one straight run, fitted so the run begins and ends on one.
+///
+/// `n` dashes and `n - 1` gaps of equal length fill the run exactly, so the
+/// nominal `DOCK_DASH_RATIO x width` sets the look and the run's own length sets
+/// the count. A run too short for even one whole period is one dash: an edge that
+/// is there is drawn, and a stroke that vanished because its side was short would
+/// be the outline lying about the shape.
+fn dash_runs(start: f32, end: f32, width: f32) -> Vec<(f32, f32)> {
+    let length = end - start;
+    if length <= 0.0 || width <= 0.0 {
+        return Vec::new();
+    }
+    let unit = (bt_render::DOCK_DASH_RATIO * width).max(1.0);
+    let count = (((length + unit) / (2.0 * unit)).round() as i32).max(1);
+    let step = length / (2.0 * count as f32 - 1.0);
+    (0..count)
+        .map(|index| {
+            let from = start + 2.0 * index as f32 * step;
+            (from, from + step)
+        })
+        .collect()
+}
+
+/// The part of a quad inside `clip`, or nothing when the two do not meet.
+fn clipped(quad: OverlayQuad, clip: [f32; 4]) -> Option<OverlayQuad> {
+    let rect = [
+        quad.rect[0].max(clip[0]),
+        quad.rect[1].max(clip[1]),
+        quad.rect[2].min(clip[2]),
+        quad.rect[3].min(clip[3]),
+    ];
+    (rect[0] < rect[2] && rect[1] < rect[3]).then_some(OverlayQuad { rect, ..quad })
 }
 
 fn seat_title(kind: SeatKind) -> &'static str {
@@ -5160,6 +5816,7 @@ mod tests {
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
+                    strip_preview: None,
                     tab_scroll: 0.0,
                     preview_title: None,
                     terminal_cwd: None,
@@ -5356,6 +6013,7 @@ mod tests {
                 tabs,
                 active_tab,
                 grabbed: None,
+                strip_preview: None,
                 tab_scroll,
                 preview_title: None,
                 terminal_cwd: None,
@@ -7842,6 +8500,7 @@ mod tests {
                 tabs,
                 active_tab,
                 grabbed,
+                strip_preview: None,
                 tab_scroll: 0.0,
                 preview_title: None,
                 terminal_cwd: None,
@@ -7973,6 +8632,7 @@ mod tests {
                     tabs: &tabs,
                     active_tab: 0,
                     grabbed: None,
+                    strip_preview: None,
                     tab_scroll: 0.0,
                     preview_title: None,
                     terminal_cwd: None,
@@ -8019,6 +8679,97 @@ mod tests {
                 "a background and an inset shadow go over the surface and under the content"
             );
         }
+    }
+
+    /// **K124 — the stand-in holds the slot, wearing the wash at full strength
+    /// and naming the pane in the accent.**
+    ///
+    /// The whole reason the ghost goes transparent over the strip is that this is
+    /// drawn instead, so "the ghost is hidden and nothing takes its place" is the
+    /// one outcome the gesture may not have. Asserted on the paint: the slot's
+    /// neighbours move over for it, it wears `.drop-preview`'s two declarations,
+    /// and its title is `--accent` rather than a resting tab's ink.
+    #[test]
+    fn a_pane_over_the_strip_takes_a_slot_and_wears_the_accent() {
+        let palette = chrome_palette();
+        let mut tabs = plain_tabs(2);
+        tabs.insert(
+            1,
+            TabContent {
+                title: "stand-in".to_owned(),
+                ..TabContent::default()
+            },
+        );
+        let seats = Seats::lone_terminal();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
+        let strip = |strip_preview: Option<usize>| {
+            build_chrome_for_tabs(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer {
+                    hover: None,
+                    dragging: None,
+                    ..ChromePointer::default()
+                },
+                ChromeContent {
+                    tabs: &tabs,
+                    // The stand-in went in ahead of the active tab, so the active
+                    // tab is the one after it — which is exactly the shift
+                    // `refresh_chrome` applies.
+                    active_tab: 2,
+                    grabbed: None,
+                    strip_preview,
+                    tab_scroll: 0.0,
+                    preview_title: None,
+                    terminal_cwd: None,
+                    preview_message: None,
+                    fit_overflow: None,
+                    profile_menu_open: false,
+                    chevron_turn: 0.0,
+                },
+            )
+        };
+        let (_, labels, sprites) = strip(Some(1));
+        let wash = sprites
+            .iter()
+            .find(|sprite| {
+                matches!(sprite.mark, ChromeMark::TabBody { .. }) && sprite.color == palette.accent
+            })
+            .expect("the stand-in wears the wash");
+        assert!((wash.opacity - 0.09).abs() < 1e-6);
+        let ring = sprites
+            .iter()
+            .find(|sprite| matches!(sprite.mark, ChromeMark::TabBodyRing { .. }))
+            .expect("and the inset ring");
+        assert!((ring.opacity - 0.45).abs() < 1e-6);
+        let name = labels
+            .iter()
+            .find(|label| label.text == "stand-in")
+            .expect("the stand-in names the pane it stands for");
+        assert_eq!(
+            name.color, palette.accent,
+            "`.drop-preview {{ color: var(--accent) }}`"
+        );
+        // The same run without the flag: same three entries, but the middle one
+        // is an ordinary tab. That is the mutation this test is here to catch —
+        // a stand-in that occupies a slot and is dressed like everything else in
+        // it says only that a tab appeared.
+        let (_, plain_labels, plain_sprites) = strip(None);
+        assert!(
+            !plain_sprites
+                .iter()
+                .any(|sprite| matches!(sprite.mark, ChromeMark::TabBodyRing { .. }))
+        );
+        assert_ne!(
+            plain_labels
+                .iter()
+                .find(|label| label.text == "stand-in")
+                .expect("still drawn")
+                .color,
+            palette.accent
+        );
     }
 
     #[test]
@@ -8118,6 +8869,7 @@ mod tests {
                 }],
                 active_tab: 0,
                 grabbed: None,
+                strip_preview: None,
                 tab_scroll: 0.0,
                 preview_title: None,
                 terminal_cwd: None,
@@ -9121,6 +9873,7 @@ mod tests {
                 tabs: &tabs,
                 active_tab: 0,
                 grabbed: None,
+                strip_preview: None,
                 tab_scroll: 0.0,
                 preview_title: None,
                 terminal_cwd: cwd,
@@ -10122,5 +10875,676 @@ mod drop_geometry_tests {
             "past every middle is the end of the run"
         );
         assert_eq!(insert_index_at(&[], 10.0), 0);
+    }
+}
+
+/// U6 — the drop plan and the drawing it feeds (M144-M156, H93-H95).
+///
+/// **D4 is the pin this whole module exists for**: the preview promises the
+/// rectangles the drop delivers, cell for cell. Nothing here compares a drawing
+/// against a number typed into a test; every expectation is either the real
+/// solver run a second way, or a rule stated in the mock-up.
+#[cfg(test)]
+mod drop_plan_tests {
+    use super::*;
+    use bt_layout::{FILES_W_MIN, MIN_PANE_W, apply};
+
+    const DPI: u32 = 1_000;
+    const W: u32 = 1_600;
+    const H: u32 = 900;
+
+    fn term(id: u64) -> LayoutNode {
+        LayoutNode::seat(Seat::new(SeatId(id), SeatKind::Terminal))
+    }
+
+    fn files(id: u64) -> LayoutNode {
+        LayoutNode::seat(Seat::new(SeatId(id), SeatKind::Files))
+    }
+
+    fn row(id: u64, a: LayoutNode, b: LayoutNode) -> LayoutNode {
+        LayoutNode::split(SplitId(id), Axis::Row, a, b)
+    }
+
+    fn col(id: u64, a: LayoutNode, b: LayoutNode) -> LayoutNode {
+        LayoutNode::split(SplitId(id), Axis::Col, a, b)
+    }
+
+    /// A window holding this tree, numbered so that a plan's fresh identities
+    /// start above everything already in it.
+    fn window(tree: LayoutNode) -> Seats {
+        let next_seat = tree
+            .seats_in_order()
+            .iter()
+            .map(|seat| seat.id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let next_split = tree.ratios().iter().map(|(id, _)| id.0).max().unwrap_or(0) + 1;
+        Seats {
+            terminal: SeatId(1),
+            focus: SeatId(1),
+            tree,
+            next_seat,
+            next_split,
+        }
+    }
+
+    fn metrics() -> SeatMetrics {
+        seat_metrics(DPI)
+    }
+
+    fn view() -> LogicalRect {
+        logical_viewport(W, H, scale_ppm(DPI))
+    }
+
+    fn host() -> [f64; 4] {
+        device_viewport(W, H, scale_ppm(DPI))
+    }
+
+    fn live(seats: &Seats) -> SeatLayout {
+        seats.solve(view(), &metrics()).expect("the stages all fit")
+    }
+
+    fn plan(seats: &Seats, aim: LayoutAim, cargo: DropCargo<'_>) -> DropPlan {
+        seats
+            .plan_drop(&metrics(), view(), aim, cargo)
+            .expect("the aim names seats this tree has")
+    }
+
+    fn width_px(layout: &SeatLayout, seat: u64) -> i64 {
+        layout
+            .get(SeatId(seat))
+            .and_then(|placement| placement.rect)
+            .expect("the seat is presented")
+            .extent(Axis::Row)
+            .floor_px()
+    }
+
+    // ------------------------------------------------------- D4, the promise --
+
+    /// **D4/M155 — the preview and the drop are not two opinions.**
+    ///
+    /// The plan carries the tree the drop installs, so the promise can be checked
+    /// against the thing that would land: solve *that* tree, on its own, through
+    /// the ordinary window path, and every rectangle must be the one the preview
+    /// drew. There is no estimating half to drift, and this is what says so.
+    #[test]
+    fn the_preview_promises_the_rectangles_the_drop_delivers() {
+        let seats = window(row(1, row(2, term(1), term(2)), term(3)));
+        for aim in [
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Top),
+            LayoutAim::SeatCentre(SeatId(2)),
+            LayoutAim::SeatCentre(SeatId(3)),
+            LayoutAim::Rim(DropEdge::Left),
+            LayoutAim::Rim(DropEdge::Bottom),
+        ] {
+            let planned = plan(&seats, aim, DropCargo::Pane(SeatId(1)));
+            let promised = planned.layout.clone().expect("every one of these fits");
+            // The commit's side of the pin: adopt the planned tree into a window
+            // and solve it the way any frame would.
+            let committed = live(&window(planned.tree.clone()));
+            assert_eq!(
+                promised.logical_rects(),
+                committed.logical_rects(),
+                "{aim:?}: the preview drew a layout the drop would not produce"
+            );
+        }
+    }
+
+    /// **M155 — the same `pluckLeaf` and the same rebalance, reused rather than
+    /// re-derived.**
+    ///
+    /// Built here out of `bt-layout`'s own edits, in the order the commit will run
+    /// them, and compared against what `plan_drop` answered. Drop the pluck, or
+    /// insert without re-dividing the run, and the two sides part company.
+    #[test]
+    fn the_plan_runs_the_edit_chain_the_drop_will_run() {
+        let seats = window(row(1, row(2, term(1), term(2)), term(3)));
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+            DropCargo::Pane(SeatId(1)),
+        );
+
+        let plucked = apply(
+            seats.tree(),
+            &metrics(),
+            &Edit::CloseSeat { target: SeatId(1) },
+        )
+        .expect("a tree of three may lose one")
+        .tree;
+        let split = apply(
+            &plucked,
+            &metrics(),
+            &Edit::SplitSeat {
+                target: SeatId(3),
+                dir: Axis::Row,
+                leading: false,
+                arriving: term(1),
+                split_id: SplitId(seats.next_split),
+            },
+        )
+        .expect("splitting a seat is always structurally possible")
+        .tree;
+        assert_eq!(planned.tree, split);
+    }
+
+    /// **H94 — "too small" is a fact about the layout that would exist.**
+    ///
+    /// The mock-up's own reproduction: three columns in 1080, and a fourth aimed
+    /// at the last one. Halving the target judges `359 / 2 = 179`, calls it under
+    /// the terminal minimum and refuses a drop that in fact leaves every column
+    /// at 269.
+    #[test]
+    fn a_fourth_column_that_fits_is_not_refused_by_halving_the_third() {
+        let seats = window(row(1, row(2, term(1), term(2)), term(3)));
+        let metrics = metrics();
+        let view = logical_viewport(1_080, 700, scale_ppm(DPI));
+        let planned = seats
+            .plan_drop(
+                &metrics,
+                view,
+                LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+                DropCargo::Layout(&term(9)),
+            )
+            .expect("the target is in the tree");
+        assert!(planned.fits(), "269 apiece clears the terminal minimum");
+        let layout = planned
+            .layout
+            .expect("a fitting plan carries its rectangles");
+        assert_eq!(layout.rects.len(), 4);
+        for placement in &layout.rects {
+            let width = placement
+                .rect
+                .expect("presented")
+                .extent(Axis::Row)
+                .floor_px();
+            assert!(
+                width >= MIN_PANE_W.floor_px(),
+                "column {:?} came out at {width}, under the terminal minimum",
+                placement.id
+            );
+        }
+        assert_eq!(width_px(&layout, 1), 269);
+    }
+
+    /// **H95/L2 — each rectangle answers to its own kind's minimum, read off the
+    /// rectangle.**
+    ///
+    /// A files column is legitimately slimmer than a terminal has any business
+    /// being. Hold the whole plan to `MIN_PANE_W` and every layout that merely
+    /// *contains* one is refused — which is why a drop onto a files pane would
+    /// not take.
+    #[test]
+    fn a_files_column_is_judged_by_the_files_minimum() {
+        let seats = window(row(1, files(1), term(2)));
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Right),
+            DropCargo::Layout(&term(9)),
+        );
+        assert!(planned.fits());
+        let layout = planned
+            .layout
+            .expect("a fitting plan carries its rectangles");
+        let files = width_px(&layout, 1);
+        assert!(
+            files < MIN_PANE_W.floor_px() && files >= FILES_W_MIN.floor_px(),
+            "the files column is {files}px — under a terminal's minimum and over its own"
+        );
+    }
+
+    /// **H93/M147 — a plan the rules will not allow is refused, and a refusal
+    /// carries no rectangles.**
+    #[test]
+    fn a_split_neither_half_can_afford_is_refused() {
+        let seats = window(row(1, term(1), term(2)));
+        let narrow = logical_viewport(620, 500, scale_ppm(DPI));
+        let planned = seats
+            .plan_drop(
+                &metrics(),
+                narrow,
+                LayoutAim::SeatEdge(SeatId(2), DropEdge::Right),
+                DropCargo::Layout(&term(9)),
+            )
+            .expect("the target is in the tree");
+        assert!(
+            !planned.fits(),
+            "three terminals cannot share 620px at 260 apiece"
+        );
+        assert!(planned.layout.is_none());
+    }
+
+    // ------------------------------------------------ M156, what arrives here --
+
+    /// **M156 (2) — a pane arrives as the seat it already is.**
+    ///
+    /// A files column brought to an edge stays a fixed column in the plan; drawn
+    /// as a plain terminal placeholder it would be previewed as a ratio share the
+    /// drop never produces.
+    #[test]
+    fn a_files_pane_arrives_still_being_a_files_column() {
+        let seats = window(row(1, files(1), row(2, term(2), term(3))));
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(3), DropEdge::Right),
+            DropCargo::Pane(SeatId(1)),
+        );
+        let layout = planned
+            .layout
+            .expect("a fitting plan carries its rectangles");
+        assert_eq!(planned.landed, vec![SeatId(1)]);
+        assert_eq!(
+            layout.get(SeatId(1)).unwrap().kind,
+            SeatKind::Files,
+            "the arriving seat kept its kind"
+        );
+        assert_eq!(
+            width_px(&layout, 1),
+            bt_layout::FILES_W.floor_px(),
+            "and with it, its fixed width"
+        );
+    }
+
+    /// **M156 (1) — a tab arrives as its whole layout.**
+    ///
+    /// Previewed as one anonymous leaf it would draw a single box where two
+    /// panes are about to land, and let the fit judgement approve a layout whose
+    /// real leaves come out under their minimum.
+    #[test]
+    fn a_tab_arrives_as_every_pane_it_holds() {
+        let seats = window(row(1, term(1), term(2)));
+        let arriving = row(1, term(1), term(2));
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Right),
+            DropCargo::Layout(&arriving),
+        );
+        assert_eq!(
+            planned.landed.len(),
+            2,
+            "both of the arriving tab's panes land"
+        );
+        let layout = planned
+            .layout
+            .expect("a fitting plan carries its rectangles");
+        assert_eq!(layout.rects.len(), 4);
+        // Four columns in one run, so each is worth one column and not a half of
+        // somebody else's.
+        let widths: Vec<i64> = layout
+            .rects
+            .iter()
+            .map(|placement| {
+                placement
+                    .rect
+                    .expect("presented")
+                    .extent(Axis::Row)
+                    .floor_px()
+            })
+            .collect();
+        let (lo, hi) = (*widths.iter().min().unwrap(), *widths.iter().max().unwrap());
+        assert!(hi - lo <= 1, "four equal columns, got {widths:?}");
+    }
+
+    /// The arriving tab's identities are renamed into this tree's unused range,
+    /// so nothing in the plan is looked up by an id two seats answer to.
+    #[test]
+    fn an_arriving_tab_never_collides_with_this_trees_identities() {
+        let seats = window(row(1, term(1), term(2)));
+        let arriving = row(1, term(1), term(2));
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Right),
+            DropCargo::Layout(&arriving),
+        );
+        let ids: Vec<u64> = planned
+            .tree
+            .seats_in_order()
+            .iter()
+            .map(|seat| seat.id.0)
+            .collect();
+        let mut unique = ids.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "two seats answer to one id: {ids:?}"
+        );
+        assert!(planned.landed.iter().all(|id| id.0 > 2));
+    }
+
+    /// **M156 — a pane at the centre is modelled on both sides.**
+    ///
+    /// Replacing only the target previews two files columns where the drop
+    /// produces one on each side, mirrored.
+    #[test]
+    fn a_centre_swap_moves_both_payloads() {
+        let seats = window(row(1, files(1), term(2)));
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatCentre(SeatId(2)),
+            DropCargo::Pane(SeatId(1)),
+        );
+        let kinds: Vec<SeatKind> = planned
+            .tree
+            .seats_in_order()
+            .iter()
+            .map(|seat| seat.kind)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![SeatKind::Terminal, SeatKind::Files],
+            "the two payloads traded places rather than one being duplicated"
+        );
+        assert_eq!(
+            planned.landed,
+            vec![SeatId(1)],
+            "the accent box follows the pane in hand to where it is going"
+        );
+    }
+
+    // ------------------------------------------ M149-M154, the drawing itself --
+
+    /// **M153 — only the panes that actually move wear an outline.**
+    ///
+    /// Split a pane inside one column and the panes of another column do not
+    /// budge, so they get no dashed box. Drawing one over a pane that stays put
+    /// says the opposite of what is true.
+    #[test]
+    fn a_pane_that_does_not_move_gets_no_outline() {
+        let seats = window(row(1, term(1), col(2, term(2), term(3))));
+        let live = live(&seats);
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Top),
+            DropCargo::Layout(&term(9)),
+        );
+        let overlay = dock_overlay(&planned, &live, host(), Some(SeatId(2)), "", 1.0)
+            .expect("a fitting plan draws");
+        assert!(!overlay.refused);
+        // Seat 1 is a whole column away and its rectangle is untouched.
+        let untouched = live.get(SeatId(1)).unwrap().device_rect.unwrap();
+        assert!(
+            !overlay
+                .shift
+                .iter()
+                .any(|rect| rect[0] <= untouched.left as f32 + 2.0
+                    && rect[2] >= untouched.right as f32 - 2.0),
+            "the pane in the other column was drawn as moving"
+        );
+        assert!(
+            !overlay.shift.is_empty(),
+            "the panes that really are pushed down must be drawn"
+        );
+    }
+
+    /// **M153, the case it was written about** — a *replace* moves nobody, so it
+    /// draws nobody moving. This is the drawing that used to lay an outline over
+    /// every pane at once, each one saying "this pane is going here" about a pane
+    /// that was not going anywhere.
+    #[test]
+    fn taking_a_panes_place_draws_no_destinations_at_all() {
+        let seats = window(row(1, term(1), term(2)));
+        let live = live(&seats);
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatCentre(SeatId(2)),
+            DropCargo::Layout(&term(9)),
+        );
+        let overlay = dock_overlay(
+            &planned,
+            &live,
+            host(),
+            Some(SeatId(2)),
+            "Replace pane",
+            1.0,
+        )
+        .expect("a fitting plan draws");
+        assert!(overlay.shift.is_empty());
+        assert_eq!(overlay.caption, "Replace pane");
+    }
+
+    /// **A swap is not a replace, and M153 tells them apart by asking the same
+    /// question of both.**
+    ///
+    /// A ruling, recorded here because the mock-up's answer and this one differ
+    /// and the difference is not a defect. The mock-up keeps a leaf's identity in
+    /// its *position* and trades payloads beneath it (L138), so after a swap every
+    /// id still names the rectangle it always named and its `movers` filter finds
+    /// nothing to draw. `bt-layout`'s `CenterSwap` moves the seats themselves, so
+    /// the pane you did not pick up genuinely changes rectangle — and it does, in
+    /// both models: its content ends up where your hand started. M153's rule is
+    /// "only the panes that actually move are shown moving", and in a swap exactly
+    /// one other pane actually moves, into the slot you are vacating. Drawing it
+    /// is the other half of the sentence (M152); leaving it out would be the
+    /// silence M147 refuses elsewhere.
+    #[test]
+    fn a_swap_draws_the_one_pane_that_is_going_somewhere() {
+        let seats = window(row(1, term(1), term(2)));
+        let live = live(&seats);
+        let vacated = live.get(SeatId(1)).unwrap().device_rect.unwrap();
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatCentre(SeatId(2)),
+            DropCargo::Pane(SeatId(1)),
+        );
+        let overlay = dock_overlay(&planned, &live, host(), Some(SeatId(2)), "Swap panes", 1.0)
+            .expect("a fitting plan draws");
+        assert_eq!(overlay.caption, "Swap panes");
+        assert_eq!(
+            overlay.shift,
+            vec![[
+                vacated.left as f32 + 1.0,
+                vacated.top as f32 + 1.0,
+                vacated.right as f32 - 1.0,
+                vacated.bottom as f32 - 1.0,
+            ]],
+            "the pane being swapped out is drawn arriving in the slot you are leaving"
+        );
+    }
+
+    /// **M154 — the arriving box and the destinations wear the same inset.**
+    ///
+    /// Inset only the dashed ones and the seam beside the arriving pane comes out
+    /// a pixel narrower than the seams between the others.
+    #[test]
+    fn the_arriving_box_and_the_destinations_share_one_inset() {
+        let seats = window(row(1, term(1), term(2)));
+        let live = live(&seats);
+        let planned = plan(
+            &seats,
+            LayoutAim::SeatEdge(SeatId(2), DropEdge::Right),
+            DropCargo::Layout(&term(9)),
+        );
+        let layout = planned
+            .layout
+            .clone()
+            .expect("a fitting plan carries its rectangles");
+        let overlay =
+            dock_overlay(&planned, &live, host(), Some(SeatId(2)), "", 1.0).expect("it draws");
+        let inset = |rect: bt_layout::DeviceRect| {
+            [
+                rect.left as f32 + 1.0,
+                rect.top as f32 + 1.0,
+                rect.right as f32 - 1.0,
+                rect.bottom as f32 - 1.0,
+            ]
+        };
+        let arriving = layout.get(SeatId(3)).unwrap().device_rect.unwrap();
+        assert_eq!(overlay.preview, inset(arriving));
+        let destinations: Vec<[f32; 4]> = layout
+            .rects
+            .iter()
+            .filter(|placement| placement.id != SeatId(3))
+            .filter_map(|placement| placement.device_rect)
+            .map(inset)
+            .filter(|rect| overlay.shift.contains(rect))
+            .collect();
+        assert_eq!(
+            destinations, overlay.shift,
+            "a destination was measured differently from the arriving box"
+        );
+    }
+
+    /// **M147 — a refusal traces the pane it will not cut, on that pane's own
+    /// edge and with nothing else drawn.**
+    #[test]
+    fn a_refusal_traces_the_pane_it_will_not_cut() {
+        let seats = window(row(1, term(1), term(2)));
+        let narrow_view = logical_viewport(620, 500, scale_ppm(DPI));
+        let narrow_host = device_viewport(620, 500, scale_ppm(DPI));
+        let live = seats.solve(narrow_view, &metrics()).expect("two panes fit");
+        let planned = seats
+            .plan_drop(
+                &metrics(),
+                narrow_view,
+                LayoutAim::SeatEdge(SeatId(2), DropEdge::Right),
+                DropCargo::Layout(&term(9)),
+            )
+            .expect("the target is in the tree");
+        let overlay = dock_overlay(
+            &planned,
+            &live,
+            narrow_host,
+            Some(SeatId(2)),
+            "Swap panes",
+            1.0,
+        )
+        .expect("a refusal draws too — that is the whole ruling");
+        assert!(overlay.refused);
+        assert!(
+            overlay.shift.is_empty(),
+            "a refusal promises no destinations"
+        );
+        assert_eq!(
+            overlay.caption, "",
+            "a box that means `this will not happen` does not also say a verb"
+        );
+        let target = live.get(SeatId(2)).unwrap().device_rect.unwrap();
+        assert_eq!(
+            overlay.preview,
+            [
+                target.left as f32,
+                target.top as f32,
+                target.right as f32,
+                target.bottom as f32,
+            ],
+            "the refused outline sits on the pane's own edge, uninset"
+        );
+    }
+
+    /// A rim refusal has no pane to point at, so it traces the whole layout.
+    #[test]
+    fn a_refused_rim_traces_the_whole_layout() {
+        let seats = window(row(1, term(1), term(2)));
+        let narrow_view = logical_viewport(620, 500, scale_ppm(DPI));
+        let narrow_host = device_viewport(620, 500, scale_ppm(DPI));
+        let live = seats.solve(narrow_view, &metrics()).expect("two panes fit");
+        let planned = seats
+            .plan_drop(
+                &metrics(),
+                narrow_view,
+                LayoutAim::Rim(DropEdge::Left),
+                DropCargo::Layout(&term(9)),
+            )
+            .expect("the rim needs no target");
+        let overlay =
+            dock_overlay(&planned, &live, narrow_host, None, "", 1.0).expect("a refusal draws");
+        assert!(overlay.refused);
+        assert_eq!(
+            overlay.preview,
+            [
+                narrow_host[0] as f32,
+                narrow_host[1] as f32,
+                narrow_host[2] as f32,
+                narrow_host[3] as f32,
+            ]
+        );
+    }
+
+    // -------------------------------------------------- the strokes on screen --
+
+    /// A dashed outline is broken and a solid one is not — asserted on the
+    /// strokes themselves rather than on the flag that asked for them.
+    #[test]
+    fn a_dashed_outline_is_broken_and_a_solid_one_is_whole() {
+        let covered = |dash: Dash| {
+            let mut quads = Vec::new();
+            push_outline(
+                &mut quads,
+                [0.0, 0.0, 200.0, 100.0],
+                8.0,
+                2.0,
+                [1, 2, 3],
+                1.0,
+                dash,
+            );
+            // How much of the top edge's own row carries ink.
+            quads
+                .iter()
+                .filter(|quad| quad.rect[1] < 1.0 && quad.rect[3] > 0.0)
+                .map(|quad| quad.rect[2] - quad.rect[0])
+                .sum::<f32>()
+        };
+        let solid = covered(Dash::Solid);
+        let dashed = covered(Dash::Dashed);
+        assert!(solid > 190.0, "a solid border runs the whole edge: {solid}");
+        assert!(
+            dashed < solid * 0.75,
+            "a dashed border leaves gaps: {dashed} of {solid}"
+        );
+    }
+
+    /// Every run begins and ends on a dash, at any length — a rectangle whose
+    /// edge started mid-stroke reads as damage rather than as a dash.
+    #[test]
+    fn every_dashed_run_begins_and_ends_on_a_dash() {
+        for length in [3.0_f32, 7.0, 12.5, 60.0, 397.0] {
+            let runs = dash_runs(10.0, 10.0 + length, 1.5);
+            assert!(!runs.is_empty(), "a run of {length} drew nothing");
+            assert!((runs[0].0 - 10.0).abs() < 0.001);
+            assert!(
+                (runs[runs.len() - 1].1 - (10.0 + length)).abs() < 0.01,
+                "the last dash of a {length} run stops short"
+            );
+            for pair in runs.windows(2) {
+                assert!(pair[0].1 < pair[1].0, "two dashes met with no gap");
+            }
+        }
+        assert!(dash_runs(10.0, 10.0, 1.5).is_empty());
+    }
+
+    /// The refused box carries no fill and the arriving one does — M147's
+    /// "the shape says I heard you, the absence of fill says nothing lands here".
+    #[test]
+    fn only_the_arriving_box_is_filled() {
+        let palette = chrome_palette();
+        let filled = |refused: bool| {
+            let overlay = DockOverlay {
+                preview: [0.0, 0.0, 200.0, 100.0],
+                refused,
+                caption: "",
+                shift: Vec::new(),
+            };
+            let layers = build_dock_overlay(&overlay, 1.0, palette);
+            // Ink over the box's own middle, which no border of any style can
+            // reach: only a background covers the point (100, 50).
+            layers
+                .iter()
+                .flat_map(|layer| layer.quads.iter())
+                .any(|quad| {
+                    quad.rect[0] < 100.0
+                        && quad.rect[2] > 100.0
+                        && quad.rect[1] < 50.0
+                        && quad.rect[3] > 50.0
+                })
+        };
+        assert!(filled(false), "the arriving box is filled");
+        assert!(
+            !filled(true),
+            "the refused box is an outline and nothing else"
+        );
     }
 }

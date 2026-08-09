@@ -24,7 +24,9 @@ mod tooltip;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
-use bt_layout::{Axis, SeatId, SeatLayout, SeatMetrics, SplitId, WorkAreaHint};
+use bt_layout::{
+    Axis, LayoutNode, LogicalRect, SeatId, SeatLayout, SeatMetrics, SplitId, WorkAreaHint,
+};
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
     LayoutNodeV1, LeafNodeV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionThemeV1,
@@ -763,6 +765,28 @@ struct Runtime {
     /// selection — asks this one field, so a source added later is silenced by
     /// all of them without touching any of them.
     drag: Option<Drag>,
+    /// The dock drawing on screen — U6's whole state (M144-M155).
+    ///
+    /// Beside the drag rather than inside it, and for a reason the type system
+    /// makes plain: [`Drag`] is `Copy` because everything in it is an identity or
+    /// a number, and a plan is a tree and a solved layout. But the arrangement
+    /// also says something true — the drawing outlives the answer it draws. When
+    /// the pointer leaves every landing the plan stays for as long as the fade
+    /// takes to run down, exactly as the mock-up's element does when `.show` comes
+    /// off it, and a field inside the drag could not express that.
+    drop_preview: Option<DropPreview>,
+    /// The dock overlay's opacity as it was last handed to the renderer, in the
+    /// 1/255ths a layer's alpha resolves to — the fade's half of the frame debt.
+    last_drawn_dock_reveal: Option<u8>,
+    /// The rectangle the tree was last solved into (§4.1).
+    ///
+    /// A window property and not a tab's, which is why it is here and not beside
+    /// [`TabState::seat_layout`]: every tab is solved into the same box. It is
+    /// *stored* rather than recomputed because a drop plan has to be solved into
+    /// the very rectangle the layout it is compared against was solved into —
+    /// deriving it a second time from the same inputs is how two numbers that
+    /// must be equal acquire a way to differ (A12, T228).
+    seat_viewport: LogicalRect,
     /// The strip's double-click history (J99).
     tab_clicks: TabClicks,
     /// The open tab-name editor, or `None` when nobody is renaming anything.
@@ -2770,22 +2794,43 @@ impl SweepTween {
     }
 }
 
-/// The pin's zero-width expansion: `width 0 -> 17px` and `margin-left -8 -> 0`
-/// as one continuous layout change (mock-up 334-349).
+/// A two-state control easing between "not there" and "there", over a span its
+/// own declaration names.
 ///
-/// It is a *reveal*, not a fade, and the difference is the whole reason the
-/// mock-up animates width at all: the hidden control takes no room, so the badge
-/// beside it docks against the `×` with no dead gap, and hovering widens the
-/// control in while the badge slides aside. A fade would have to reserve the
-/// room permanently and every unhovered tab would carry a hole.
-#[derive(Clone, Copy, Debug, Default)]
+/// Written for the pin's zero-width expansion - `width 0 -> 17px` and
+/// `margin-left -8 -> 0` as one continuous layout change (mock-up 334-349),
+/// which is a *reveal* rather than a fade: the hidden control takes no room, so
+/// the badge beside it docks against the close affordance with no dead gap, and
+/// hovering widens the control in while the badge slides aside. A fade would
+/// have to reserve the room permanently and every unhovered tab would carry a
+/// hole.
+///
+/// The dock preview's `opacity .1s` is the second user, and it is why the span
+/// is a *field*. Both are one declaration easing between two states on the same
+/// curve, and the only thing that differs is how long the mock-up gives it - so
+/// the duration travels with the tween rather than being reached for at the
+/// sample, where two readers of one tween could pick different numbers. There is
+/// deliberately no `Default`: a reveal with no span is either an instant nobody
+/// asked for, or somebody else's 160ms borrowed by accident.
+#[derive(Clone, Copy, Debug)]
 struct RevealTween {
     from: f32,
     to: f32,
     started: Option<Instant>,
+    span: Duration,
 }
 
 impl RevealTween {
+    /// A reveal that is fully out, easing over `span` when it is asked to move.
+    fn over(span: Duration) -> Self {
+        Self {
+            from: 0.0,
+            to: 0.0,
+            started: None,
+            span,
+        }
+    }
+
     /// Aim at `target`, keeping whatever the current position is as the new
     /// start so a reversal mid-flight turns around from where it actually is
     /// rather than snapping to an end it never reached.
@@ -2802,6 +2847,7 @@ impl RevealTween {
             // Unlike the progress arc, whose motion carries a reading, this one
             // carries nothing but polish.
             started: (motion == Motion::Full).then_some(now),
+            span: self.span,
         };
     }
 
@@ -2810,8 +2856,8 @@ impl RevealTween {
         let Some(started) = self.started.filter(|_| motion == Motion::Full) else {
             return (self.to, false);
         };
-        let duration = Duration::from_millis(WINDOW_TAB_PIN_REVEAL_MS);
         let elapsed = now.saturating_duration_since(started);
+        let duration = self.span;
         if elapsed >= duration {
             return (self.to, false);
         }
@@ -3153,6 +3199,57 @@ impl DropLanding {
             Self::RootRim { .. } | Self::SeatEdge { .. } | Self::SeatCentre { .. } => false,
         }
     }
+
+    /// The aim this landing was read off, for the three that are aimed at the
+    /// layout — and `None` for the two the strip answered.
+    ///
+    /// The exact inverse of [`landing_for_aim`], and written as one function so
+    /// that it stays one: a plan is built from an aim, and re-deriving "which
+    /// pane, which side" from a landing at each of U6's call sites is how the
+    /// preview and the drop would come to disagree about the very question they
+    /// are both answering. A strip landing has no aim to give back because it
+    /// never had one — the strip is a surface, not a rectangle inside the layout.
+    fn layout_aim(self) -> Option<seats::LayoutAim> {
+        match self {
+            Self::StripReorder { .. } | Self::StripExtract { .. } => None,
+            Self::RootRim { edge } => Some(seats::LayoutAim::Rim(edge)),
+            Self::SeatEdge { target, edge } => Some(seats::LayoutAim::SeatEdge(target, edge)),
+            Self::SeatCentre { target } => Some(seats::LayoutAim::SeatCentre(target)),
+        }
+    }
+
+    /// The pane a refusal is traced onto (M147), or `None` for the rim.
+    ///
+    /// The rim aims at the layout as a whole, so what it will not cut is the
+    /// whole layout — there is no pane to point at, and pointing at one would be
+    /// naming a pane the gesture was never about.
+    fn aimed_at(self) -> Option<SeatId> {
+        match self {
+            Self::SeatEdge { target, .. } | Self::SeatCentre { target } => Some(target),
+            Self::StripReorder { .. } | Self::StripExtract { .. } | Self::RootRim { .. } => None,
+        }
+    }
+
+    /// **L137 — the centre says its name.**
+    ///
+    /// An edge says "split" by its shape: the box takes half the pane and the
+    /// half it takes is the half you aimed at. The centre's box is the *same*
+    /// blue rectangle and means something else entirely, and which of the two
+    /// things it means depends on what is in your hand rather than on where the
+    /// pointer is — a pane trades payloads with the target (L138) and a tab takes
+    /// its place outright (L139). Two outcomes that far apart cannot be left to
+    /// geometry that is identical in both.
+    ///
+    /// Every other zone answers with nothing, and that is a rule rather than an
+    /// omission: a word on a box whose shape already said it is a second voice
+    /// saying the same thing, and the first one to be believed when they drift.
+    fn caption(self, source: DragSource) -> &'static str {
+        match (self, source) {
+            (Self::SeatCentre { .. }, DragSource::Pane(_)) => "Swap panes",
+            (Self::SeatCentre { .. }, DragSource::Tab(_)) => "Replace pane",
+            _ => "",
+        }
+    }
 }
 
 /// The part of a drag that only one kind of source has: a tab is carried by the
@@ -3248,6 +3345,64 @@ impl Drag {
     fn ghost_is_shown(&self) -> bool {
         !self.landing.is_some_and(DropLanding::shows_itself)
     }
+}
+
+/// The dock drawing on screen: a plan, the question it answers, and how far the
+/// box has faded in (M144-M155).
+struct DropPreview {
+    /// Everything [`seats::Seats::plan_drop`] is a function of.
+    ///
+    /// **This is the cache, and it is a cache over a *computation*.** The plan is
+    /// recomputed when any of these changes and reused when none of them does,
+    /// which is what "only re-plan when the landing moves" means without the
+    /// stale answers that phrasing invites — a window resized under a still
+    /// pointer, or a DPI change mid-drag, changes the plan without changing the
+    /// landing, and keying on the landing alone would leave the promise on screen
+    /// describing a layout that no longer exists. T223's ban on a second
+    /// estimating solver is not weakened by remembering the first one's answer;
+    /// it would be weakened by remembering it past the question.
+    inputs: PlanInputs,
+    plan: seats::DropPlan,
+    /// `#dock-preview { transition: opacity .1s ease }` with `.show` toggling it
+    /// (mock-up 1663-1665).
+    ///
+    /// The *only* thing about this drawing that is allowed to take time, and
+    /// M148 is why. The mock-up also declares `left/top/width/height .12s`, and
+    /// those transitions are unreachable by construction: the box's geometry is a
+    /// function of the promise — `zone:fits` — so any move of the box is a change
+    /// of the promise, and `promise()` puts `.snap` on before the new geometry
+    /// lands. A glide could only ever run while the answer stayed the same and
+    /// the box moved anyway, which within one drag cannot happen. So the box
+    /// snaps, always, and there is no rectangle tween here to be kept honest —
+    /// the implementation that cannot lag is the one M148 asks for, since a
+    /// preview that lags is not a soft transition but a stale promise about what
+    /// happens if you let go *right now*.
+    reveal: RevealTween,
+}
+
+/// `#dock-preview { transition: opacity .1s ease }` (mock-up 1663).
+///
+/// The one duration in this drawing. It is deliberately shorter than every other
+/// transition the chrome runs — the pin's 160, the chevron's 140 — because it is
+/// the only one attached to an answer rather than to a control: what a box that
+/// says "let go here" owes is to be there, and a hundred milliseconds is about
+/// the least a fade can take and still be a fade rather than a flicker.
+const DOCK_PREVIEW_FADE: Duration = Duration::from_millis(100);
+
+/// The inputs a [`seats::DropPlan`] is a function of — see [`DropPreview::inputs`].
+#[derive(Clone, Debug, PartialEq)]
+struct PlanInputs {
+    landing: DropLanding,
+    source: DragSource,
+    /// The tree the drop edits. Carried in full rather than as a revision
+    /// counter, because there is no revision counter to be wrong: two trees that
+    /// compare equal solve to the same rectangles (D2), which is exactly the
+    /// question being asked.
+    tree: LayoutNode,
+    /// The arriving tab's own layout, when a tab is what is arriving (M156①).
+    cargo: Option<LayoutNode>,
+    viewport: LogicalRect,
+    scale_ppm: u32,
 }
 
 /// What letting go does — the mock-up's commit table (7202-7231) reduced to the
@@ -3743,7 +3898,7 @@ fn create_tab_state(
     working_directory: Option<PathBuf>,
     seed: TabSeed,
 ) -> Result<(TabState, String)> {
-    let (seat_layout, seat_overflow, terminal_seat) =
+    let (seat_layout, seat_overflow, terminal_seat, _) =
         solve_seats(&seats, renderer, render_physical);
     let grid = renderer
         .metrics()
@@ -3819,6 +3974,7 @@ fn create_tab_state(
                 from: f32::from(u8::from(seed.pinned)),
                 to: f32::from(u8::from(seed.pinned)),
                 started: None,
+                span: Duration::from_millis(WINDOW_TAB_PIN_REVEAL_MS),
             },
             last_drawn_pin_reveal: None,
             ring_tween: None,
@@ -4030,7 +4186,7 @@ impl Runtime {
         // lone restored tab is a tab, and must never be swept away by a later
         // Restore.
         let placeholder_tab = plan.placeholder.then(|| tabs[0].id);
-        let (_, _, terminal_seat) =
+        let (_, _, terminal_seat, seat_viewport) =
             solve_seats(&tabs[active_tab].seats, &renderer, render_physical);
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
@@ -4107,6 +4263,9 @@ impl Runtime {
             tab_press: None,
             pane_press: None,
             drag: None,
+            drop_preview: None,
+            last_drawn_dock_reveal: None,
+            seat_viewport,
             tab_clicks: TabClicks::default(),
             rename: None,
             rename_blink: CursorBlink::new(Instant::now()),
@@ -4520,8 +4679,9 @@ impl Runtime {
     /// window's. The direction is one-way (red line L10): what comes back out
     /// of the terminal never re-enters here.
     fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) -> GridSize {
-        let (layout, overflow, terminal_seat) =
+        let (layout, overflow, terminal_seat, viewport) =
             solve_seats(&self.seats, &self.renderer, render_physical);
+        self.seat_viewport = viewport;
         // T230, and the reason the diff is taken *here*: this is the one place a
         // solved layout becomes the layout, so it is the one place that can tell
         // a real change from a rebuild that landed on the same answer. Every
@@ -4639,6 +4799,23 @@ impl Runtime {
             )
             .collect::<Vec<_>>();
         self.measure_open_rename(&mut tabs, scale, width as f32);
+        // **K124 — the stand-in goes into the run.** Inserted after the rename
+        // editor has been measured, because the editor is a fact about a real tab
+        // and the indices it was measured against are the strip's own; the
+        // stand-in is a guest that takes a slot for one gesture and then leaves.
+        let mut active_tab = self.active_tab;
+        let mut grabbed = grabbed;
+        let mut strip_preview = None;
+        if let Some((slot, stand_in)) = self.strip_stand_in() {
+            tabs.insert(slot, stand_in);
+            strip_preview = Some(slot);
+            // Everything the strip indexes by position moves over with it. A
+            // stand-in inserted before the active tab does not make its
+            // *neighbour* active, and neither does it hand the grab to someone
+            // else.
+            active_tab += usize::from(active_tab >= slot);
+            grabbed = grabbed.map(|index| index + usize::from(index >= slot));
+        }
         let preview_title = self.preview_image.as_ref().map(PreviewImageState::title);
         // C28: a terminal pane head names the place it is in, at full length.
         let terminal_cwd = self
@@ -4668,8 +4845,9 @@ impl Runtime {
             },
             seats::ChromeContent {
                 tabs: &tabs,
-                active_tab: self.active_tab,
+                active_tab,
                 grabbed,
+                strip_preview,
                 tab_scroll: self.tab_scroll,
                 preview_title: preview_title.as_deref(),
                 terminal_cwd: terminal_cwd.as_deref(),
@@ -5271,7 +5449,19 @@ impl Runtime {
     /// every popup, so a modal that is up owns the layer outright, and the
     /// picker is closed the moment the dialog opens.
     fn refresh_overlay(&mut self) -> bool {
-        let mut layers = if let Some(layout) = self.settings_layout() {
+        // One clock for the whole build, for the reason `tab_trailers` reads one:
+        // the drawing and the tween that fades it must not disagree about what
+        // time it is, and two `Instant::now()` calls in one frame can.
+        let now = Instant::now();
+        // Before anything is built, because every layer below is a function of
+        // state and this is the state that the pointer, the tree and the window
+        // all move.
+        self.sync_drop_preview(now);
+        // Lowest of everything the overlay carries: `z-index` 24 and 25 against a
+        // menu's 30. It is a drawing on the layout rather than a surface over the
+        // window, and a dialog that is somehow up during a drag must cover it.
+        let mut layers = self.dock_overlay_layers(now);
+        layers.extend(if let Some(layout) = self.settings_layout() {
             settings::build(&layout, self.settings.hover(), self.theme_mode)
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the prompt floats over a
@@ -5287,7 +5477,7 @@ impl Runtime {
             )
         } else {
             Vec::new()
-        };
+        });
         // Last, and therefore on top of every one of them: `z-index: 60` against
         // the menu's `30` (mock-up 1207). A tip is the only surface in this
         // window that is never covered, because it is the only one whose whole
@@ -5307,6 +5497,206 @@ impl Runtime {
         layers.extend(self.drag_ghost_layer());
         let layers = self.settings_marks.resolve_overlay(layers);
         self.renderer.set_modal_overlay(layers)
+    }
+
+    /// **K124/N157 — the pane's stand-in in the strip**, and the slot it takes.
+    ///
+    /// `showDropPreview` (mock-up 6507-6546), which dresses the stand-in as the
+    /// tab the pane *would become* — its own mark, its own short name — rather
+    /// than as a blank gap. That is the whole reason the ghost goes transparent
+    /// over the strip ([`DropLanding::shows_itself`]): the thing under the
+    /// pointer and the thing in the slot would otherwise be two labels saying one
+    /// name, and only one of them is saying where.
+    ///
+    /// It wears no pin, no `×` and no pane badge, and none of that is suppressed
+    /// here: a stand-in is never the active tab and never hovered, and the strip
+    /// already draws those three only for tabs that are. What it does say is
+    /// [`seats::TabContent::landing`] at full strength, and that is a reuse rather
+    /// than a coincidence — `.drop-preview` and `@keyframes tab-land`'s `from`
+    /// are the same two declarations in the mock-up, an accent wash at 9% behind
+    /// an inset accent ring at 45%. The slot the drop will fill and the tab that
+    /// has just filled it are the same picture, which is what makes the landing
+    /// read as the thing you were dragging coming to rest.
+    fn strip_stand_in(&self) -> Option<(usize, seats::TabContent)> {
+        let drag = self.drag?;
+        let DropLanding::StripExtract { slot } = drag.landing? else {
+            return None;
+        };
+        let DragSource::Pane(seat) = drag.source else {
+            return None;
+        };
+        let kind = self.seats.tree().find_seat(seat)?.kind;
+        let cwd = self
+            .session
+            .working_directory()
+            .map(|path| path.to_string_lossy().into_owned());
+        let title = self
+            .preview_image
+            .as_ref()
+            .map(|preview| preview.title().to_owned());
+        Some((
+            slot.min(self.tabs.len()),
+            seats::TabContent {
+                title: seats::seat_short_caption(kind, title.as_deref(), cwd.as_deref()).to_owned(),
+                // A pane torn into its own tab holds exactly one pane, and the
+                // badge is for tabs that hold more than one (A2/C27). Zero rather
+                // than one only because the count is of a tab that does not exist
+                // yet; both answers draw nothing, and zero is the honest one.
+                pane_count: 0,
+                ..seats::TabContent::default()
+            },
+        ))
+    }
+
+    /// Bring the dock drawing up to date with the pointer, the tree and the
+    /// window — M155's plan, its cache, and the fade.
+    ///
+    /// Called from [`Runtime::refresh_overlay`], which is the one choke point
+    /// every repaint already passes through, so a resize, a DPI change or a theme
+    /// switch re-plans without any of them having to know that a drag is in
+    /// flight.
+    fn sync_drop_preview(&mut self, now: Instant) {
+        let motion = self.motion;
+        let Some(inputs) = self.plan_inputs() else {
+            self.retire_drop_preview(now, motion);
+            return;
+        };
+        if self
+            .drop_preview
+            .as_ref()
+            .is_none_or(|shown| shown.inputs != inputs)
+        {
+            let Some(plan) = self.plan_for(&inputs) else {
+                // A landing whose plan cannot be built is not a landing that can
+                // be drawn. It is not a refusal either — a refusal is a plan that
+                // came out too small, and this is the aim naming a seat the tree
+                // no longer has. The honest picture of a question with no answer
+                // is no picture.
+                self.retire_drop_preview(now, motion);
+                return;
+            };
+            // The fade carries across, so moving between zones does not restart
+            // it: the box was already up, and the answer changing is a *snap*
+            // (M148), never a second arrival.
+            let reveal = self.drop_preview.as_ref().map_or_else(
+                || RevealTween::over(DOCK_PREVIEW_FADE),
+                |shown| shown.reveal,
+            );
+            self.drop_preview = Some(DropPreview {
+                inputs,
+                plan,
+                reveal,
+            });
+        }
+        if let Some(shown) = self.drop_preview.as_mut() {
+            shown.reveal.retarget(1.0, now, motion);
+        }
+    }
+
+    /// Take the dock drawing down — `hidePreview()` (mock-up 6355-6367).
+    ///
+    /// It fades rather than vanishing, and it is kept alive for exactly as long
+    /// as that takes: the mock-up removes `.show` and leaves the element in the
+    /// document for its 100ms, which is what this state is standing in for. Once
+    /// the box is gone the plan goes with it, because a plan nobody is drawing is
+    /// an answer to a question nobody is asking.
+    fn retire_drop_preview(&mut self, now: Instant, motion: Motion) {
+        let Some(shown) = self.drop_preview.as_mut() else {
+            return;
+        };
+        shown.reveal.retarget(0.0, now, motion);
+        let (reveal, moving) = shown.reveal.sample(now, motion);
+        if !moving && reveal <= 0.0 {
+            self.drop_preview = None;
+        }
+    }
+
+    /// What the plan on screen must be a function of, or `None` when there is no
+    /// dock to draw.
+    fn plan_inputs(&self) -> Option<PlanInputs> {
+        let drag = self.drag?;
+        let landing = drag.landing?;
+        // The strip's two landings draw themselves in the strip (K124: "the
+        // preview in the strip is the ghost now"), so there is no dock box for
+        // them and never was one to fade.
+        landing.layout_aim()?;
+        let cargo = match drag.source {
+            DragSource::Pane(_) => None,
+            DragSource::Tab(id) => Some(
+                self.tabs
+                    .iter()
+                    .find(|candidate| candidate.id == id)?
+                    .seats
+                    .tree()
+                    .clone(),
+            ),
+        };
+        Some(PlanInputs {
+            landing,
+            source: drag.source,
+            tree: self.seats.tree().clone(),
+            cargo,
+            viewport: self.seat_viewport,
+            scale_ppm: seats::scale_ppm(self.renderer.metrics().dpi_milli().get()),
+        })
+    }
+
+    /// Run the plan (M155/M156).
+    fn plan_for(&self, inputs: &PlanInputs) -> Option<seats::DropPlan> {
+        let aim = inputs.landing.layout_aim()?;
+        let cargo = match (&inputs.cargo, inputs.source) {
+            // M156① — a tab arrives as its whole layout.
+            (Some(tree), _) => seats::DropCargo::Layout(tree),
+            // M156② — a pane arrives as the seat it already is, fixed column and
+            // all.
+            (None, DragSource::Pane(seat)) => seats::DropCargo::Pane(seat),
+            (None, DragSource::Tab(_)) => return None,
+        };
+        self.seats
+            .plan_drop(&self.seat_metrics(), inputs.viewport, aim, cargo)
+    }
+
+    /// The dock drawing's layers: the destinations, then the box over them.
+    ///
+    /// Under every menu and every tip, because the mock-up puts them there
+    /// (`#dock-shift` 24 and `#dock-preview` 25 against `.combo-menu`'s 30 and
+    /// `.tip`'s 60) — this is a drawing *on* the layout, not a surface floating
+    /// over the window.
+    fn dock_overlay_layers(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+        let Some(shown) = self.drop_preview.as_ref() else {
+            return Vec::new();
+        };
+        let reveal = shown.reveal.sample(now, self.motion).0;
+        if reveal <= 0.0 {
+            return Vec::new();
+        }
+        let overlay = seats::dock_overlay(
+            &shown.plan,
+            &self.seat_layout,
+            self.layout_host_rect(),
+            shown.inputs.landing.aimed_at(),
+            // A refused box carries no word: what it says is said by being
+            // dashed and empty, and "Swap panes" printed inside an outline that
+            // means "this will not happen" is the box arguing with itself.
+            if shown.plan.fits() {
+                shown.inputs.landing.caption(shown.inputs.source)
+            } else {
+                ""
+            },
+            self.renderer.metrics().scale_factor as f32,
+        );
+        let Some(overlay) = overlay else {
+            return Vec::new();
+        };
+        let mut layers = seats::build_dock_overlay(
+            &overlay,
+            self.renderer.metrics().scale_factor as f32,
+            bt_render::chrome_palette(),
+        );
+        for layer in &mut layers {
+            layer.opacity = reveal;
+        }
+        layers
     }
 
     /// The ghost's own layer, or nothing when nothing is in the hand (J114-J116).
@@ -6572,6 +6962,16 @@ impl Runtime {
             self.last_drawn_chevron = Some(turning);
             owes_frame = true;
         }
+        // The dock box's fade settles its debt on the same terms as the pin's:
+        // the opacity that would be *drawn*, quantised to the 1/255 a layer's
+        // alpha resolves to, against the one that was. It is read here rather
+        // than inside the overlay build because a debt has to be noticed by the
+        // thing that decides whether to build at all.
+        let faded = self.drawn_dock_reveal(now, motion);
+        if self.last_drawn_dock_reveal != faded {
+            self.last_drawn_dock_reveal = faded;
+            owes_frame = true;
+        }
         if !owes_frame {
             return Ok(());
         }
@@ -6609,7 +7009,24 @@ impl Runtime {
         // and, once the arrow lands, must stop being woken. Under reduced
         // motion this is never true: the turn has no frames to ask for.
         let chevron_turning = self.chevron_turn.sample(now, motion).1;
-        (tabs_moving || chevron_turning).then(|| now + STRIP_ANIMATION_FRAME)
+        // The dock box's fade is the one animation in this window that can be
+        // running while the pointer is still: a drag that comes to rest over open
+        // air still has 100ms of fade to finish, and nothing else would wake the
+        // loop to draw it.
+        let dock_fading = self
+            .drop_preview
+            .as_ref()
+            .is_some_and(|shown| shown.reveal.sample(now, motion).1);
+        (tabs_moving || chevron_turning || dock_fading).then(|| now + STRIP_ANIMATION_FRAME)
+    }
+
+    /// The dock box's opacity as the overlay would draw it, quantised to the
+    /// 1/255 a layer's alpha resolves to — `None` when there is no box.
+    fn drawn_dock_reveal(&self, now: Instant, motion: Motion) -> Option<u8> {
+        self.drop_preview.as_ref().map(|shown| {
+            let (reveal, _) = shown.reveal.sample(now, motion);
+            (reveal.clamp(0.0, 1.0) * 255.0).round() as u8
+        })
     }
 
     /// What every tab hangs off its trailing end, in strip order.
@@ -10626,7 +11043,12 @@ fn solve_seats(
     seats: &seats::Seats,
     renderer: &Renderer,
     render_physical: PhysicalSize<u32>,
-) -> (SeatLayout, Option<seats::FitOverflow>, SeatViewport) {
+) -> (
+    SeatLayout,
+    Option<seats::FitOverflow>,
+    SeatViewport,
+    LogicalRect,
+) {
     let dpi_milli = renderer.metrics().dpi_milli().get();
     let metrics = seats::seat_metrics(dpi_milli);
     let viewport = seats::logical_viewport(
@@ -10648,7 +11070,11 @@ fn solve_seats(
         render_physical.width.max(1),
         render_physical.height.max(1),
     ));
-    (layout, overflow, terminal)
+    // The viewport travels out beside the layout it produced, so a drop plan
+    // measured against that layout is measured against the very rectangle it was
+    // solved into rather than against one recomputed from the same inputs and
+    // hoped to agree (A12, T228).
+    (layout, overflow, terminal, viewport)
 }
 
 /// A caret rectangle the frame produced, moved from the terminal seat's
@@ -16097,5 +16523,218 @@ mod tests {
             );
         }
         assert_eq!(release_verdict(None), DragRelease::Home);
+    }
+
+    // ── U6: the plan, its cache, and the word in the box (M148, M155, L137) ──
+
+    fn inputs_of(landing: DropLanding, source: DragSource) -> PlanInputs {
+        PlanInputs {
+            landing,
+            source,
+            tree: LayoutNode::seat(bt_layout::Seat::new(
+                bt_layout::SeatId(1),
+                bt_layout::SeatKind::Terminal,
+            )),
+            cargo: None,
+            viewport: LogicalRect::from_px(1600, 900),
+            scale_ppm: 1_000_000,
+        }
+    }
+
+    /// **The cache is over a computation, and its key is every input the
+    /// computation has.**
+    ///
+    /// "Re-plan only when the landing moves" is the behaviour, but the landing is
+    /// not the whole question: a window resized under a still pointer, or a DPI
+    /// change mid-drag, changes the layout the plan describes without the pointer
+    /// moving at all. Keying on the landing alone leaves the promise on screen
+    /// describing a layout that no longer exists — a stale promise is exactly what
+    /// M148 is about, arrived at from the other direction.
+    #[test]
+    fn the_plan_stands_while_its_question_does_and_falls_when_anything_moves() {
+        let pane = DragSource::Pane(bt_layout::SeatId(1));
+        let landing = DropLanding::SeatEdge {
+            target: bt_layout::SeatId(2),
+            edge: seats::DropEdge::Right,
+        };
+        let base = inputs_of(landing, pane);
+        assert_eq!(base, inputs_of(landing, pane), "the same question, twice");
+
+        let moved_zone = inputs_of(
+            DropLanding::SeatEdge {
+                target: bt_layout::SeatId(2),
+                edge: seats::DropEdge::Left,
+            },
+            pane,
+        );
+        assert_ne!(
+            base, moved_zone,
+            "the other side of the same pane is a new plan"
+        );
+
+        let mut resized = inputs_of(landing, pane);
+        resized.viewport = LogicalRect::from_px(1200, 900);
+        assert_ne!(
+            base, resized,
+            "a resize re-plans without the pointer moving"
+        );
+
+        let mut rescaled = inputs_of(landing, pane);
+        rescaled.scale_ppm = 1_500_000;
+        assert_ne!(base, rescaled, "and so does a DPI change");
+
+        let mut edited = inputs_of(landing, pane);
+        edited.tree = LayoutNode::split(
+            bt_layout::SplitId(1),
+            Axis::Row,
+            LayoutNode::seat(bt_layout::Seat::new(
+                bt_layout::SeatId(1),
+                bt_layout::SeatKind::Terminal,
+            )),
+            LayoutNode::seat(bt_layout::Seat::new(
+                bt_layout::SeatId(2),
+                bt_layout::SeatKind::Terminal,
+            )),
+        );
+        assert_ne!(base, edited, "a tree that changed under the drag re-plans");
+
+        let carried = inputs_of(landing, DragSource::Tab(TabId(7)));
+        assert_ne!(
+            base, carried,
+            "the same zone means a different thing depending on what is in the hand"
+        );
+    }
+
+    /// **L137 — the centre says its name, and nothing else does.**
+    ///
+    /// The centre's box is the same rectangle an edge's is; a pane swaps payloads
+    /// with the target and a tab takes its place outright, and the geometry cannot
+    /// tell you which. Every other zone answers with nothing, because its shape
+    /// has already spoken.
+    #[test]
+    fn only_the_centre_says_a_word_and_it_depends_on_the_hand() {
+        let target = bt_layout::SeatId(2);
+        let pane = DragSource::Pane(bt_layout::SeatId(1));
+        let tab = DragSource::Tab(TabId(1));
+        assert_eq!(
+            DropLanding::SeatCentre { target }.caption(pane),
+            "Swap panes"
+        );
+        assert_eq!(
+            DropLanding::SeatCentre { target }.caption(tab),
+            "Replace pane"
+        );
+        for landing in [
+            DropLanding::SeatEdge {
+                target,
+                edge: seats::DropEdge::Right,
+            },
+            DropLanding::RootRim {
+                edge: seats::DropEdge::Top,
+            },
+            DropLanding::StripExtract { slot: 0 },
+            DropLanding::StripReorder { slot: 0 },
+        ] {
+            assert_eq!(
+                landing.caption(pane),
+                "",
+                "{landing:?} draws its own meaning"
+            );
+            assert_eq!(landing.caption(tab), "");
+        }
+    }
+
+    /// A landing's aim is the one it was read off — and the strip's two never had
+    /// one, which is what keeps the dock box off the strip entirely.
+    #[test]
+    fn a_landings_aim_is_the_aim_it_came_from() {
+        let seat = bt_layout::SeatId(4);
+        for aim in [
+            seats::LayoutAim::Rim(seats::DropEdge::Bottom),
+            seats::LayoutAim::SeatEdge(seat, seats::DropEdge::Left),
+            seats::LayoutAim::SeatCentre(seat),
+        ] {
+            let landing = landing_for_aim(DragSource::Tab(TabId(1)), aim)
+                .expect("a tab may land on any of them");
+            assert_eq!(landing.layout_aim(), Some(aim));
+        }
+        assert_eq!(DropLanding::StripExtract { slot: 2 }.layout_aim(), None);
+        assert_eq!(DropLanding::StripReorder { slot: 2 }.layout_aim(), None);
+    }
+
+    /// **The box is a state, and under reduced motion it is nothing else.**
+    ///
+    /// The mock-up gives `#dock-preview` one transition and one only — `opacity
+    /// .1s` — and the geometry transitions beside it are unreachable by
+    /// construction: the box's rectangle is a function of the promise
+    /// (`zone:fits`), so any move of the box is a change of the promise, and
+    /// `promise()` puts `.snap` on before the new geometry lands. A glide could
+    /// only run while the answer stayed the same and the box moved anyway, which
+    /// within one drag cannot happen. So the box snaps, always — which is M148
+    /// satisfied by an implementation that has no way to lag.
+    ///
+    /// What is left is the fade, and this is its span and its reduced-motion
+    /// answer. The 160ms next door is the pin's; borrowing it would be the wrong
+    /// number arrived at silently.
+    #[test]
+    fn the_dock_box_fades_over_its_own_hundred_milliseconds_and_not_at_all_reduced() {
+        assert_eq!(
+            DOCK_PREVIEW_FADE,
+            Duration::from_millis(100),
+            "`transition: opacity .1s ease`"
+        );
+        assert_ne!(
+            DOCK_PREVIEW_FADE,
+            Duration::from_millis(bt_render::WINDOW_TAB_PIN_REVEAL_MS),
+            "the dock box does not fade on the pin's clock"
+        );
+
+        let now = Instant::now();
+        let mut reduced = RevealTween::over(DOCK_PREVIEW_FADE);
+        reduced.retarget(1.0, now, Motion::Reduced);
+        assert_eq!(
+            reduced.sample(now, Motion::Reduced),
+            (1.0, false),
+            "reduced motion makes the box a state: it is there, and nothing moved"
+        );
+
+        let mut full = RevealTween::over(DOCK_PREVIEW_FADE);
+        full.retarget(1.0, now, Motion::Full);
+        let (opening, moving) = full.sample(now + Duration::from_millis(20), Motion::Full);
+        assert!(
+            moving && opening > 0.0 && opening < 1.0,
+            "mid-fade: {opening}"
+        );
+        assert_eq!(
+            full.sample(now + DOCK_PREVIEW_FADE, Motion::Full),
+            (1.0, false),
+            "and it is done at its own span, not before and not after"
+        );
+    }
+
+    /// **M147 — only the aimed-at pane can be traced**, and the rim has none.
+    #[test]
+    fn a_refusal_points_at_a_pane_only_when_the_gesture_had_one() {
+        let seat = bt_layout::SeatId(3);
+        assert_eq!(
+            DropLanding::SeatEdge {
+                target: seat,
+                edge: seats::DropEdge::Top,
+            }
+            .aimed_at(),
+            Some(seat)
+        );
+        assert_eq!(
+            DropLanding::SeatCentre { target: seat }.aimed_at(),
+            Some(seat)
+        );
+        assert_eq!(
+            DropLanding::RootRim {
+                edge: seats::DropEdge::Top,
+            }
+            .aimed_at(),
+            None,
+            "the rim asked to divide the whole layout, so there is no pane to name"
+        );
     }
 }

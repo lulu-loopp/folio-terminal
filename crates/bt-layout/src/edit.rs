@@ -65,13 +65,22 @@ impl FocusSet {
 /// rows are exactly the ones a red gate wants to point at.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Edit {
-    /// Split a seat at one of its edges, putting `new_seat` on the leading or
+    /// Split a seat at one of its edges, putting `arriving` on the leading or
     /// trailing side. `F` = the run the target seat is in, along `dir`.
+    ///
+    /// `arriving` is a whole subtree rather than one seat, and it has to be:
+    /// a tab dropped onto a pane brings its *entire* layout, and previewing or
+    /// committing that as a single anonymous leaf gets the geometry wrong twice
+    /// over. [`rebalance_run`] divides a run by column count — `run_demand` of
+    /// the arriving subtree, not `1` — so a three-column tab joining a
+    /// two-column run must be worth three columns at the moment the ratio is
+    /// decided, and the fit judgement downstream has to see the real leaves
+    /// rather than one box standing in for them.
     SplitSeat {
         target: SeatId,
         dir: Axis,
         leading: bool,
-        new_seat: Seat,
+        arriving: LayoutNode,
         split_id: SplitId,
     },
     /// Close a seat; its sibling is promoted. `F` = the run the promoted subtree
@@ -83,11 +92,30 @@ pub enum Edit {
     /// holding the shares of a set they are no longer in.
     CloseSeat { target: SeatId },
     /// A drop on the window's own rim: split the whole tree. `F` = the root run.
+    ///
+    /// `arriving` is a subtree for the same reason [`Edit::SplitSeat`]'s is.
     RootRimDrop {
         dir: Axis,
         leading: bool,
-        new_seat: Seat,
+        arriving: LayoutNode,
         split_id: SplitId,
+    },
+    /// Put a subtree in a seat's place, leaving everything around it alone.
+    /// `F` = `∅`.
+    ///
+    /// §3.3's `replaceLeafIn`: the row that says a leaf's slot can receive a
+    /// whole layout without the run it sits in being re-divided. A centre drop
+    /// from the tab strip is its one caller — the target leaves for the strip
+    /// and the arriving tab takes the slot it vacated — and taking a slot moves
+    /// no boxes, which is exactly what an empty focus set says.
+    ///
+    /// It is emphatically *not* [`Edit::CenterSwap`] with one side thrown away.
+    /// A swap trades two payloads and both seats keep their places; this one
+    /// substitutes, so the arriving side may be a whole tree and the leaving
+    /// side goes somewhere this crate does not model.
+    ReplaceSeat {
+        target: SeatId,
+        arriving: LayoutNode,
     },
     /// Land the preview seat at its fixed address (§1.3, three tiers).
     LandPreview { seat: Seat, split_id: SplitId },
@@ -189,7 +217,7 @@ fn apply_inner(
             target,
             dir,
             leading,
-            new_seat,
+            arriving,
             split_id,
         } => {
             let path = path_to_seat(tree, *target).ok_or(EditError::UnknownSeat(*target))?;
@@ -199,7 +227,7 @@ fn apply_inner(
                 &path,
                 *dir,
                 *leading,
-                new_seat.clone(),
+                arriving.clone(),
                 *split_id,
             );
             Ok(balance_run_containing(next, &path, *dir))
@@ -208,12 +236,25 @@ fn apply_inner(
         Edit::RootRimDrop {
             dir,
             leading,
-            new_seat,
+            arriving,
             split_id,
         } => {
             let mut next = tree.clone();
-            insert_split_at(&mut next, &[], *dir, *leading, new_seat.clone(), *split_id);
+            insert_split_at(&mut next, &[], *dir, *leading, arriving.clone(), *split_id);
             Ok(balance_run_containing(next, &[], *dir))
+        }
+
+        Edit::ReplaceSeat { target, arriving } => {
+            let path = path_to_seat(tree, *target).ok_or(EditError::UnknownSeat(*target))?;
+            let mut next = tree.clone();
+            // The path came from this very tree, so the slot is there.
+            if let Some(slot) = node_at_mut(&mut next, &path) {
+                *slot = arriving.clone();
+            }
+            Ok(EditOutcome {
+                tree: next,
+                focus_set: FocusSet::empty(),
+            })
         }
 
         Edit::CloseSeat { target } => close_seat(tree, *target),
@@ -234,19 +275,18 @@ fn apply_inner(
     }
 }
 
-/// Replace the subtree at `path` with a split holding it and `new_seat`.
+/// Replace the subtree at `path` with a split holding it and `arriving`.
 fn insert_split_at(
     tree: &mut LayoutNode,
     path: &[Side],
     dir: Axis,
     leading: bool,
-    new_seat: Seat,
+    arriving: LayoutNode,
     split_id: SplitId,
 ) {
     // The path came from this very tree, so the slot is there.
     if let Some(slot) = node_at_mut(tree, path) {
         let existing = slot.clone();
-        let arriving = LayoutNode::seat(new_seat);
         *slot = if leading {
             LayoutNode::split(split_id, dir, arriving, existing)
         } else {
@@ -393,7 +433,7 @@ fn land_preview(
         &tail,
         Axis::Row,
         tail_is_files_column,
-        seat.clone(),
+        LayoutNode::seat(seat.clone()),
         split_id,
     );
     Ok(balance_run_containing(next, &tail, Axis::Row))

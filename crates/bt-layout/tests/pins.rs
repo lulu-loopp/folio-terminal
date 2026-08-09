@@ -132,7 +132,7 @@ fn the_drop_preview_and_the_drop_agree_rect_for_rect() {
         target: SeatId(3),
         dir: Axis::Row,
         leading: false,
-        new_seat: Seat::new(SeatId(4), SeatKind::Terminal),
+        arriving: LayoutNode::seat(Seat::new(SeatId(4), SeatKind::Terminal)),
         split_id: SplitId(9),
     };
 
@@ -154,6 +154,107 @@ fn the_drop_preview_and_the_drop_agree_rect_for_rect() {
     assert_eq!(extent_px(&commit_rects, 1, Axis::Row), 269);
 }
 
+#[test]
+fn an_arriving_subtree_is_worth_the_columns_it_actually_has() {
+    // A tab dropped onto a pane brings its whole layout, and the run it joins is
+    // divided by column count. Two columns arriving beside two columns is a run
+    // of four equal columns — count the arrival as one anonymous box and the
+    // newcomers come out half the width of the seats they landed beside.
+    let tree = row(1, term(1), term(2));
+    let out = apply(
+        &tree,
+        &m(),
+        &Edit::SplitSeat {
+            target: SeatId(2),
+            dir: Axis::Row,
+            leading: false,
+            arriving: row(50, term(10), term(11)),
+            split_id: SplitId(9),
+        },
+    )
+    .expect("splitting a seat is always structurally possible");
+
+    let rects = solved(&out.tree, viewport(1203, 700), 1);
+    let widths: Vec<i64> = [1, 2, 10, 11]
+        .into_iter()
+        .map(|id| extent_px(&rects, id, Axis::Row))
+        .collect();
+    // 1203 less three dividers is 1200, four ways. The columns are not required
+    // to be bit-identical — a run is a chain of nested splits and ppm rounding
+    // lands on a pixel boundary differently at each depth — but they are
+    // required to be the *same column*, which one pixel of slack says and a
+    // subtree counted as one box (which would give 400/200/100/100) does not.
+    let (lo, hi) = (*widths.iter().min().unwrap(), *widths.iter().max().unwrap());
+    assert!(
+        hi - lo <= 1 && (299..=301).contains(&lo),
+        "four columns, four shares: {widths:?}"
+    );
+
+    // The same drop with one seat arriving divides the same run three ways, which
+    // is what makes the assertion above a statement about the *subtree* rather
+    // than about the viewport.
+    let lone = apply(
+        &tree,
+        &m(),
+        &Edit::SplitSeat {
+            target: SeatId(2),
+            dir: Axis::Row,
+            leading: false,
+            arriving: term(10),
+            split_id: SplitId(9),
+        },
+    )
+    .expect("splitting a seat is always structurally possible");
+    let lone = solved(&lone.tree, viewport(1203, 700), 1);
+    assert_eq!(extent_px(&lone, 10, Axis::Row), 400);
+}
+
+#[test]
+fn replacing_a_seat_rewrites_no_ratio_and_takes_exactly_its_place() {
+    // §3.3's `replaceLeafIn`: a slot can receive a whole layout without the run
+    // it sits in being re-divided. Taking a seat's place moves no boxes, so `F`
+    // is empty and the arrival's footprint is the departed seat's rectangle to
+    // the pixel.
+    let tree = row(1, term(1), row(2, term(2), term(3)));
+    let view = viewport(1200, 800);
+    let before = solved(&tree, view, 1);
+    let vacated = before.get(SeatId(3)).unwrap().rect.unwrap();
+
+    let out = apply(
+        &tree,
+        &m(),
+        &Edit::ReplaceSeat {
+            target: SeatId(3),
+            arriving: col(50, term(10), term(11)),
+        },
+    )
+    .expect("the target is in the tree");
+
+    assert!(out.focus_set.is_empty(), "a replace re-divides nothing");
+    assert!(necessity_holds(&tree, &out.tree, &out.focus_set));
+    assert_eq!(tree.ratios(), {
+        let mut kept = out.tree.ratios();
+        kept.retain(|(id, _)| *id != SplitId(50));
+        kept
+    });
+
+    let after = solved(&out.tree, view, 1);
+    assert_eq!(
+        after.get(SeatId(1)).unwrap().rect,
+        before.get(SeatId(1)).unwrap().rect,
+        "a replace moves nobody"
+    );
+    assert_eq!(
+        after.get(SeatId(2)).unwrap().rect,
+        before.get(SeatId(2)).unwrap().rect,
+    );
+    let arrived = [SeatId(10), SeatId(11)].map(|id| after.get(id).unwrap().rect.unwrap());
+    assert_eq!(arrived[0].left, vacated.left);
+    assert_eq!(arrived[0].top, vacated.top);
+    assert_eq!(arrived[1].right, vacated.right);
+    assert_eq!(arrived[1].bottom, vacated.bottom);
+}
+
 // --------------------------------------------------- §3.3 the focus set F(E) --
 
 #[test]
@@ -168,7 +269,7 @@ fn opening_a_seat_rebalances_only_its_own_run() {
             target: SeatId(1),
             dir: Axis::Row,
             leading: false,
-            new_seat: Seat::new(SeatId(5), SeatKind::Terminal),
+            arriving: LayoutNode::seat(Seat::new(SeatId(5), SeatKind::Terminal)),
             split_id: SplitId(9),
         },
     )
@@ -213,7 +314,7 @@ fn opening_a_seat_rebalances_only_its_own_run() {
             target: SeatId(1),
             dir: Axis::Row,
             leading: false,
-            new_seat: Seat::new(SeatId(5), SeatKind::Terminal),
+            arriving: LayoutNode::seat(Seat::new(SeatId(5), SeatKind::Terminal)),
             split_id: SplitId(8),
         },
     )
@@ -240,7 +341,7 @@ fn closing_a_seat_rebalances_only_the_run_it_left() {
             target: SeatId(1),
             dir: Axis::Row,
             leading: false,
-            new_seat: Seat::new(SeatId(6), SeatKind::Terminal),
+            arriving: LayoutNode::seat(Seat::new(SeatId(6), SeatKind::Terminal)),
             split_id: SplitId(9),
         },
     )
@@ -762,7 +863,7 @@ fn a_saved_layout_reloads_to_the_same_rects() {
             target: SeatId(2),
             dir: Axis::Row,
             leading: false,
-            new_seat: Seat::new(SeatId(3), SeatKind::Terminal),
+            arriving: LayoutNode::seat(Seat::new(SeatId(3), SeatKind::Terminal)),
             split_id: SplitId(2),
         },
     )
