@@ -3531,15 +3531,20 @@ impl Runtime {
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
             .with_title(DEFAULT_PROFILE_TITLE)
+            // Approximate on purpose: winit sizes by client area and the frame
+            // installed below turns the client area into the whole outer rect, so
+            // the exact rectangle can only be set once that frame exists. What
+            // this opening size is for is landing the window on the right monitor
+            // at the right DPI, which is what the exact one is then scaled by.
             .with_inner_size(
                 restored
-                    .map(|(_, size)| size)
+                    .map(|placement| placement.size)
                     .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT)),
             )
             // Do not expose the system class brush while the first swapchain image is pending.
             .with_visible(false);
-        let attributes = match restored {
-            Some((position, _)) => attributes.with_position(position),
+        let attributes = match restored.and_then(|placement| placement.position) {
+            Some(position) => attributes.with_position(position),
             None => attributes,
         };
         let window = Arc::new(
@@ -3563,9 +3568,22 @@ impl Runtime {
         let math_context_menu = bt_platform::MathContextMenu::new(hwnd)
             .map_err(|error| anyhow!(error))
             .context("install deferred formula context menu")?;
+        // Only now, with the self-drawn frame owning WM_NCCALCSIZE, does "the
+        // window's rectangle" mean one thing instead of two. Restate the geometry
+        // as that one rectangle: what winit built is the saved size plus a native
+        // frame margin (26x71 physical at 192 DPI) that this window does not
+        // wear, and left alone it would be saved, re-inflated and re-saved on
+        // every restart. The window is still hidden, so this costs no flicker.
+        let opened_at = dpi_snapshot(&window)?;
+        bt_platform::set_window_outer_rect(
+            hwnd,
+            startup_window_rect(restored, opened_at.rect, opened_at.authoritative_scale),
+        )
+        .map_err(|error| anyhow!(error))
+        .context("restore the window's outer rectangle")?;
         let window_time = phase_started.elapsed();
-        let physical = window.inner_size();
         let startup_dpi = dpi_snapshot(&window)?;
+        let physical = window.inner_size();
         let startup_scale_factor = startup_dpi.authoritative_scale;
         let phase_started = Instant::now();
         let mut renderer = pollster::block_on(Renderer::new(
@@ -3748,7 +3766,7 @@ impl Runtime {
             window_min_inner_size: None,
         };
         runtime.refresh_work_area();
-        runtime.apply_window_min_inner_size();
+        runtime.apply_window_min_inner_size()?;
         runtime.window.set_title(&runtime.display_title());
         runtime.refresh_chrome();
         if trace_startup {
@@ -3775,6 +3793,14 @@ impl Runtime {
         // A hidden surface can either accept the clear or report Occluded. In the latter case
         // redraw() republishes the frame; the second call presents immediately after ShowWindow.
         runtime.redraw()?;
+        // Maximize before the window is shown, not after: `SW_MAXIMIZE` reveals a
+        // hidden window itself, so this is one transition into the state the
+        // session recorded rather than a normal-sized window that jumps. The
+        // normal rectangle set above survives as the placement Windows restores
+        // the window to when the user unmaximizes it.
+        if restored.is_some_and(|placement| placement.maximized) {
+            runtime.window.set_maximized(true);
+        }
         runtime.window.set_visible(true);
         runtime.window_shown = true;
         // Showing a hidden Win32 window can synchronously settle it onto a different monitor.
@@ -3838,7 +3864,7 @@ impl Runtime {
             TabSeed::of_profile(profile),
         )?;
         self.tabs.push(tab);
-        self.apply_window_min_inner_size();
+        self.apply_window_min_inner_size()?;
         self.activate_tab(self.tabs.len() - 1, true)
     }
 
@@ -3981,7 +4007,7 @@ impl Runtime {
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
         self.tabs.push(tab);
-        self.apply_window_min_inner_size();
+        self.apply_window_min_inner_size()?;
         self.activate_tab(self.tabs.len() - 1, true)
     }
 
@@ -4053,7 +4079,7 @@ impl Runtime {
                 pty.shutdown().context("shut down the placeholder shell")?;
             }
         }
-        self.apply_window_min_inner_size();
+        self.apply_window_min_inner_size()?;
         let landing = first_revived.saturating_sub(usize::from(placeholder.is_some()));
         self.activate_tab(landing.min(self.tabs.len() - 1), true)
     }
@@ -4106,7 +4132,7 @@ impl Runtime {
                         .context("shut down closed tab child process")?;
                 }
                 self.active_tab = active_tab;
-                self.apply_window_min_inner_size();
+                self.apply_window_min_inner_size()?;
                 if was_active {
                     self.activate_tab(active_tab, true)?;
                 } else {
@@ -5036,11 +5062,14 @@ impl Runtime {
     /// Hand the OS the largest minimum any tab tree needs (§2.6.5, L12).
     ///
     /// A native window belongs to every tab, not only the active one. Keeping one aggregate also
-    /// means activation cannot alternate the OS constraint between two trees. Most importantly,
-    /// an unchanged aggregate never reaches winit's Windows setter: winit 0.30 implements that
-    /// setter by requesting the current inner size again, and its non-client adjustment grows a
-    /// self-drawn-frame window when the call is repeated.
-    fn apply_window_min_inner_size(&mut self) {
+    /// means activation cannot alternate the OS constraint between two trees.
+    ///
+    /// The constraint goes to the frame rather than to `Window::set_min_inner_size`: winit 0.30
+    /// implements that setter by re-requesting the current inner size, and re-requesting runs
+    /// `AdjustWindowRectExForDpi`, which adds a native frame margin this self-drawn window does
+    /// not wear. Every call grew the window by that margin. `CustomWindowFrame` states the same
+    /// minimum through `WM_GETMINMAXINFO` instead, which asks for no resize at all.
+    fn apply_window_min_inner_size(&mut self) -> Result<()> {
         let metrics = self.seat_metrics();
         let minimum = aggregate_window_minimum(self.tabs.iter().map(|tab| {
             tab.seats
@@ -5048,11 +5077,14 @@ impl Runtime {
                 .map(|size| (size.width.floor_px().max(1), size.height.floor_px().max(1)))
         }));
         if !window_minimum_changed(&mut self.window_min_inner_size, minimum) {
-            return;
+            return Ok(());
         }
-        self.window.set_min_inner_size(
-            minimum.map(|(width, height)| LogicalSize::new(width as f64, height as f64)),
-        );
+        self.custom_window_frame
+            .set_min_client_size(
+                minimum.map(|(width, height)| (width.max(0) as u32, height.max(0) as u32)),
+            )
+            .map_err(|error| anyhow!(error))
+            .context("apply the window's minimum client size")
     }
 
     /// The durable form of everything this window would want back after a
@@ -5061,24 +5093,29 @@ impl Runtime {
     fn session_snapshot(&self) -> SessionV1 {
         let mut session = self.session_store.loaded().clone();
         let scale = self.renderer.metrics().scale_factor.max(f64::MIN_POSITIVE);
-        let inner = self.window.inner_size();
-        let position = self
-            .window
-            .outer_position()
-            .map(|p| (p.x, p.y))
-            .unwrap_or((session.window.bounds.x, session.window.bounds.y));
+        let maximized = self.window.is_maximized();
+        // The window's *outer* rect, which the self-drawn frame has made the same
+        // rectangle as its client area — the one thing `startup_window_rect` can
+        // hand back to Win32 without anything in between adjusting it.
+        //
+        // A maximized window is skipped rather than recorded: its rectangle is the
+        // monitor's, not the user's, and writing it would leave the size the user
+        // actually chose nowhere to be found — the next unmaximize, and the next
+        // start, would both adopt a screen-sized "normal" window. The last
+        // rectangle written while normal stands until the window is normal again.
+        let bounds = Some(())
+            .filter(|()| !maximized)
+            .and_then(|()| window_hwnd(&self.window).ok())
+            .and_then(|hwnd| bt_platform::get_window_rect(hwnd).ok())
+            .map(|rect| persisted_window_bounds(rect, scale))
+            .unwrap_or(session.window.bounds);
         session.schema_version = SESSION_SCHEMA_VERSION;
         session.theme = session_theme_mode(self.theme_mode);
         session.cursor_style = session_cursor_style(current_cursor_style());
         session.window = WindowStateV1 {
-            bounds: WindowBoundsV1 {
-                x: (f64::from(position.0) / scale).round() as i32,
-                y: (f64::from(position.1) / scale).round() as i32,
-                width: (f64::from(inner.width) / scale).round().max(1.0) as u32,
-                height: (f64::from(inner.height) / scale).round().max(1.0) as u32,
-            },
+            bounds,
             dpi: self.renderer.metrics().dpi_milli().get(),
-            maximized: self.window.is_maximized(),
+            maximized,
             monitor_id: session.window.monitor_id.clone(),
         };
         session.tabs = self
@@ -5188,7 +5225,7 @@ impl Runtime {
         }
         self.seat_pointer = seats::ChromePointer::default();
         self.divider_drag = None;
-        self.apply_window_min_inner_size();
+        self.apply_window_min_inner_size()?;
         self.commit_seat_geometry()
     }
 
@@ -7604,7 +7641,7 @@ impl Runtime {
                 // the concession chain gives it the room by itself. Keyboard
                 // focus does not move; v1 keeps that on the terminal.
                 if self.seats.set_focus(seat) {
-                    self.apply_window_min_inner_size();
+                    self.apply_window_min_inner_size()?;
                     self.commit_seat_geometry()?;
                 }
             }
@@ -8530,7 +8567,7 @@ impl Runtime {
             // extent is rewritten on this path, and `resolve_seat_layout` writes
             // none because `solve` is pure.
             self.refresh_work_area();
-            self.apply_window_min_inner_size();
+            self.apply_window_min_inner_size()?;
             let next_grid = self.resolve_seat_layout(render_physical);
             self.schedule_grid_change(
                 next_grid,
@@ -9555,7 +9592,19 @@ fn terminal_pty_physical(renderer: &Renderer, window: PhysicalSize<u32>) -> Phys
     PhysicalSize::new(seat.width, seat.height)
 }
 
-/// Where a restored window should open, or `None` to let the OS decide.
+/// What the session file asks the next window to open as.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RestoredPlacement {
+    /// Logical size to reopen at. Always honoured, because a size is never
+    /// off-screen.
+    size: LogicalSize<f64>,
+    /// Logical top-left, or `None` when no monitor this machine currently has
+    /// can see the recorded rectangle and the OS should choose the spot instead.
+    position: Option<LogicalPosition<f64>>,
+    maximized: bool,
+}
+
+/// Where a restored window should open, or `None` on a first run.
 ///
 /// docs/M2-persistence-schema-v1.md §3.1: hitting the recorded monitor and the
 /// recorded logical coordinates is best effort, but "does not crash, does not
@@ -9565,7 +9614,7 @@ fn terminal_pty_physical(renderer: &Renderer, window: PhysicalSize<u32>) -> Phys
 fn restore_window_placement(
     event_loop: &ActiveEventLoop,
     session: &SessionV1,
-) -> Option<(LogicalPosition<f64>, LogicalSize<f64>)> {
+) -> Option<RestoredPlacement> {
     // An empty tab list is the first run: there is nothing to restore, and the
     // product's opening size stands.
     if session.tabs.is_empty() {
@@ -9591,7 +9640,71 @@ fn restore_window_placement(
             && position.x + size.width > left
             && position.y + size.height > top
     });
-    Some((position, size)).filter(|_| visible)
+    Some(RestoredPlacement {
+        size,
+        position: Some(position).filter(|_| visible),
+        maximized: session.window.maximized,
+    })
+}
+
+/// The physical outer rectangle a window must be given at startup.
+///
+/// Both halves of the round trip name the same rectangle — the window's *outer*
+/// rect, the one `GetWindowRect` reports — so restoring is nothing but the
+/// logical-to-physical direction of [`persisted_window_bounds`]. `opened_at`
+/// supplies the corner for the two cases that have no recorded one: a first run,
+/// and a rectangle whose monitor is gone.
+fn startup_window_rect(
+    placement: Option<RestoredPlacement>,
+    opened_at: bt_platform::WindowRect,
+    scale: f64,
+) -> bt_platform::WindowRect {
+    let scale = scale.max(f64::MIN_POSITIVE);
+    let size = placement
+        .map(|placement| placement.size)
+        .unwrap_or(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT));
+    let (left, top) = placement
+        .and_then(|placement| placement.position)
+        .map(|position| {
+            (
+                physical_px(position.x, scale),
+                physical_px(position.y, scale),
+            )
+        })
+        .unwrap_or((opened_at.left, opened_at.top));
+    bt_platform::WindowRect {
+        left,
+        top,
+        right: left.saturating_add(physical_px(size.width, scale).max(1)),
+        bottom: top.saturating_add(physical_px(size.height, scale).max(1)),
+    }
+}
+
+/// One physical-pixel coordinate from one logical one, saturating rather than
+/// wrapping on the absurd values a hand-edited session file can hold.
+fn physical_px(logical: f64, scale: f64) -> i32 {
+    (logical * scale)
+        .round()
+        .clamp(-2_147_483_648.0, 2_147_483_647.0) as i32
+}
+
+/// The logical rectangle the session file records, from the physical outer rect
+/// Win32 reports. The inverse of [`startup_window_rect`]'s scaling: for every
+/// scale factor Windows can report (never below 1.0), rounding out to physical
+/// and back in lands on the same logical numbers, so a window nobody touched is
+/// written back byte for byte on every restart.
+fn persisted_window_bounds(rect: bt_platform::WindowRect, scale: f64) -> WindowBoundsV1 {
+    let scale = scale.max(f64::MIN_POSITIVE);
+    WindowBoundsV1 {
+        x: (f64::from(rect.left) / scale).round() as i32,
+        y: (f64::from(rect.top) / scale).round() as i32,
+        width: (f64::from(rect.right.saturating_sub(rect.left)) / scale)
+            .round()
+            .max(1.0) as u32,
+        height: (f64::from(rect.bottom.saturating_sub(rect.top)) / scale)
+            .round()
+            .max(1.0) as u32,
+    }
 }
 
 fn pty_size(grid: GridSize, physical: PhysicalSize<u32>) -> PtySize {
@@ -11074,6 +11187,150 @@ mod tests {
                 "tab switch {switch} changed the window inner size"
             );
         }
+    }
+
+    /// Every DPI Windows can report, from 100% to 300%, including the quarter
+    /// steps the display settings offer and the awkward ones a fractional
+    /// scaling setting produces.
+    const WINDOWS_SCALES: [f64; 8] = [1.0, 1.25, 1.4, 1.5, 1.75, 2.0, 2.5, 3.0];
+
+    fn placement(bounds: WindowBoundsV1, maximized: bool) -> RestoredPlacement {
+        RestoredPlacement {
+            size: LogicalSize::new(f64::from(bounds.width), f64::from(bounds.height)),
+            position: Some(LogicalPosition::new(
+                f64::from(bounds.x),
+                f64::from(bounds.y),
+            )),
+            maximized,
+        }
+    }
+
+    /// The bug this pins: the window grew by one native frame margin — 26x71
+    /// physical at 192 DPI — on every single start, because it was saved as an
+    /// outer rect and restored as a client size, and winit adds
+    /// `AdjustWindowRectExForDpi` to the second. Restart is a fixed point or the
+    /// window walks off the screen in a fortnight.
+    #[test]
+    fn a_window_nobody_touched_is_restored_and_re_saved_byte_for_byte() {
+        // Somewhere the OS would have put a window that had no saved position.
+        let elsewhere = bt_platform::WindowRect {
+            left: 100,
+            top: 100,
+            right: 900,
+            bottom: 700,
+        };
+        for scale in WINDOWS_SCALES {
+            for bounds in [
+                WindowBoundsV1 {
+                    x: 0,
+                    y: 0,
+                    width: 960,
+                    height: 600,
+                },
+                // The odd extents and the negative origin of a window parked on a
+                // secondary monitor left of the primary one.
+                WindowBoundsV1 {
+                    x: -1128,
+                    y: 66,
+                    width: 987,
+                    height: 583,
+                },
+                WindowBoundsV1 {
+                    x: 1,
+                    y: -3,
+                    width: 1,
+                    height: 1,
+                },
+            ] {
+                let rect = startup_window_rect(Some(placement(bounds, false)), elsewhere, scale);
+                assert_eq!(
+                    persisted_window_bounds(rect, scale),
+                    bounds,
+                    "scale {scale} lost {bounds:?} across one restart"
+                );
+                // And it stays a fixed point under repetition, which is the shape
+                // the bug actually had: a margin added once is invisible, added
+                // fifty times it walks the window off the screen.
+                let mut generation = bounds;
+                for restart in 0..50 {
+                    let rect =
+                        startup_window_rect(Some(placement(generation, false)), elsewhere, scale);
+                    generation = persisted_window_bounds(rect, scale);
+                    assert_eq!(
+                        generation, bounds,
+                        "scale {scale} drifted from {bounds:?} by restart {restart}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The restored rectangle is the saved one scaled, and nothing else. Stated
+    /// against the exact margin that used to be added, at the DPI it was measured
+    /// at: `AdjustWindowRectExForDpi(WS_OVERLAPPEDWINDOW, 192)` is 26x71.
+    #[test]
+    fn restoring_adds_no_native_frame_margin() {
+        let saved = WindowBoundsV1 {
+            x: 74,
+            y: 74,
+            width: 960,
+            height: 600,
+        };
+        let rect = startup_window_rect(
+            Some(placement(saved, false)),
+            bt_platform::WindowRect {
+                left: 0,
+                top: 0,
+                right: 1,
+                bottom: 1,
+            },
+            2.0,
+        );
+        assert_eq!(rect.right - rect.left, 1920);
+        assert_eq!(rect.bottom - rect.top, 1200);
+        assert_eq!((rect.left, rect.top), (148, 148));
+    }
+
+    /// §3.1's fallback, in its own words: a rectangle no monitor can see forfeits
+    /// its position, and only its position. A size is never off-screen.
+    #[test]
+    fn a_window_whose_monitor_is_gone_keeps_its_size_where_the_os_opened_it() {
+        let opened_at = bt_platform::WindowRect {
+            left: 40,
+            top: 60,
+            right: 640,
+            bottom: 460,
+        };
+        let orphaned = RestoredPlacement {
+            size: LogicalSize::new(800.0, 500.0),
+            position: None,
+            maximized: false,
+        };
+        let rect = startup_window_rect(Some(orphaned), opened_at, 2.0);
+        assert_eq!((rect.left, rect.top), (40, 60));
+        assert_eq!(
+            (rect.right - rect.left, rect.bottom - rect.top),
+            (1600, 1000)
+        );
+    }
+
+    /// A first run has no rectangle to honour, so the product's opening size is
+    /// the one that is stated exactly — as an outer rect, which under the
+    /// self-drawn frame is what the user sees.
+    #[test]
+    fn a_first_run_opens_at_the_products_own_size() {
+        let opened_at = bt_platform::WindowRect {
+            left: 11,
+            top: 22,
+            right: 33,
+            bottom: 44,
+        };
+        let rect = startup_window_rect(None, opened_at, 2.0);
+        assert_eq!((rect.left, rect.top), (11, 22));
+        assert_eq!(
+            (rect.right - rect.left, rect.bottom - rect.top),
+            ((INITIAL_WIDTH * 2.0) as i32, (INITIAL_HEIGHT * 2.0) as i32)
+        );
     }
 
     #[test]

@@ -139,12 +139,12 @@ mod windows_impl {
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
                 GCLP_HBRBACKGROUND, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM,
                 HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
-                HTTOPLEFT, HTTOPRIGHT, IsZoomed, MF_STRING, NCCALCSIZE_PARAMS, PostMessageW,
-                SM_CXFRAME, SM_CXPADDEDBORDER, SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES,
-                SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-                SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW,
-                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_NCCALCSIZE,
-                WM_NCHITTEST,
+                HTTOPLEFT, HTTOPRIGHT, IsZoomed, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS,
+                PostMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SPI_GETCLIENTAREAANIMATION,
+                SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+                SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos,
+                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
+                WM_CLOSE, WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCHITTEST,
             },
         },
     };
@@ -177,14 +177,27 @@ mod windows_impl {
     /// extending the client area through the system caption.
     pub struct CustomWindowFrame {
         hwnd: HWND,
-        tab_strip_right_px: Box<AtomicI32>,
+        state: Box<CustomFrameState>,
+    }
+
+    /// Everything the subclass procedure reads out of the owning
+    /// `CustomWindowFrame`. It is reached through the subclass reference data, so
+    /// it must be a single stable allocation the frame keeps alive.
+    #[derive(Default)]
+    struct CustomFrameState {
+        tab_strip_right_px: AtomicI32,
+        /// Smallest client size the window may be dragged to, in logical pixels,
+        /// or `(0, 0)` for "no minimum". Logical rather than physical so the
+        /// constraint survives a DPI change without anyone recomputing it.
+        min_client_logical_width: AtomicI32,
+        min_client_logical_height: AtomicI32,
     }
 
     impl CustomWindowFrame {
         pub fn install(hwnd: NonZeroIsize) -> Result<Self, String> {
             let hwnd = HWND(hwnd.get() as *mut c_void);
-            let tab_strip_right_px = Box::new(AtomicI32::new(0));
-            let reference_data = (&*tab_strip_right_px as *const AtomicI32) as usize;
+            let state = Box::new(CustomFrameState::default());
+            let reference_data = (&*state as *const CustomFrameState) as usize;
             let installed = unsafe {
                 SetWindowSubclass(
                     hwnd,
@@ -235,15 +248,74 @@ mod windows_impl {
                     std::mem::size_of::<DWM_WINDOW_CORNER_PREFERENCE>() as u32,
                 )
             };
-            Ok(Self {
-                hwnd,
-                tab_strip_right_px,
-            })
+            Ok(Self { hwnd, state })
         }
 
         pub fn set_tab_strip_right_px(&self, tab_strip_right_px: i32) {
-            self.tab_strip_right_px
+            self.state
+                .tab_strip_right_px
                 .store(tab_strip_right_px.max(0), Ordering::Relaxed);
+        }
+
+        /// Constrain how far the window may be resized, in logical pixels of
+        /// *client* area. `None` lifts the constraint.
+        ///
+        /// This is the self-drawn frame's replacement for winit's
+        /// `set_min_inner_size`, and it exists because winit's setter cannot be
+        /// used on a window whose `WM_NCCALCSIZE` has made the client area the
+        /// entire outer rect: winit implements it by re-requesting the current
+        /// inner size, and re-requesting runs `AdjustWindowRectExForDpi`, which
+        /// adds a frame margin this window does not have. The window grew by that
+        /// margin on every call. Owning `WM_GETMINMAXINFO` states the same
+        /// constraint to the same OS with no size request at all.
+        pub fn set_min_client_size(&self, logical: Option<(u32, u32)>) -> Result<(), String> {
+            let (width, height) = logical.unwrap_or((0, 0));
+            let width = i32::try_from(width).unwrap_or(i32::MAX);
+            let height = i32::try_from(height).unwrap_or(i32::MAX);
+            self.state
+                .min_client_logical_width
+                .store(width, Ordering::Relaxed);
+            self.state
+                .min_client_logical_height
+                .store(height, Ordering::Relaxed);
+            if width <= 0 || height <= 0 {
+                return Ok(());
+            }
+            // `WM_GETMINMAXINFO` only governs future sizing, so a window that is
+            // already smaller than a freshly raised minimum has to be grown here.
+            // A maximized window is not user-resizable and its rect belongs to the
+            // monitor, so it is left alone.
+            // SAFETY: `self.hwnd` is the live window this frame is installed on.
+            if unsafe { IsZoomed(self.hwnd) }.as_bool() {
+                return Ok(());
+            }
+            // SAFETY: as above; both queries are read-only and `rect` is
+            // exclusively borrowed for the call.
+            let dpi = unsafe { GetDpiForWindow(self.hwnd) }.max(96);
+            let mut rect = RECT::default();
+            unsafe { GetWindowRect(self.hwnd, &mut rect) }
+                .map_err(|error| format!("GetWindowRect failed: {error}"))?;
+            let current_width = rect.right.saturating_sub(rect.left);
+            let current_height = rect.bottom.saturating_sub(rect.top);
+            let target_width = current_width.max(logical_px_for_dpi(width as u32, dpi));
+            let target_height = current_height.max(logical_px_for_dpi(height as u32, dpi));
+            if target_width == current_width && target_height == current_height {
+                return Ok(());
+            }
+            // SAFETY: `self.hwnd` is live; no insert-after handle is passed, so
+            // the null `hwndinsertafter` is inert under `SWP_NOZORDER`.
+            unsafe {
+                SetWindowPos(
+                    self.hwnd,
+                    None,
+                    0,
+                    0,
+                    target_width,
+                    target_height,
+                    SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                )
+            }
+            .map_err(|error| format!("SetWindowPos(grow to minimum) failed: {error}"))
         }
     }
 
@@ -285,6 +357,30 @@ mod windows_impl {
                 }
                 LRESULT(0)
             }
+            WM_GETMINMAXINFO => {
+                let result = unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+                if lparam.0 == 0 {
+                    return result;
+                }
+                // SAFETY: `CustomWindowFrame` owns this allocation and removes the subclass
+                // before dropping it, so the reference-data pointer is live for every callback.
+                let state = unsafe { &*(reference_data as *const CustomFrameState) };
+                let width = state.min_client_logical_width.load(Ordering::Relaxed);
+                let height = state.min_client_logical_height.load(Ordering::Relaxed);
+                if width <= 0 || height <= 0 {
+                    return result;
+                }
+                let dpi = unsafe { GetDpiForWindow(hwnd) }.max(96);
+                // `ptMinTrackSize` is an *outer* rect bound. Under this frame the
+                // client area is the outer rect, so a minimum client size is that
+                // bound byte for byte, with no non-client margin to add.
+                // SAFETY: for WM_GETMINMAXINFO the OS passes a live, writable
+                // MINMAXINFO in `lparam`, checked non-null above.
+                let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
+                info.ptMinTrackSize.x = logical_px_for_dpi(width as u32, dpi);
+                info.ptMinTrackSize.y = logical_px_for_dpi(height as u32, dpi);
+                result
+            }
             WM_NCHITTEST => {
                 let mut client = RECT::default();
                 if unsafe { GetClientRect(hwnd, &mut client) }.is_err() {
@@ -307,8 +403,9 @@ mod windows_impl {
                 };
                 // SAFETY: `CustomWindowFrame` owns this allocation and removes the subclass
                 // before dropping it, so the reference-data pointer is live for every callback.
-                let tab_strip_right_px =
-                    unsafe { &*(reference_data as *const AtomicI32) }.load(Ordering::Relaxed);
+                let tab_strip_right_px = unsafe { &*(reference_data as *const CustomFrameState) }
+                    .tab_strip_right_px
+                    .load(Ordering::Relaxed);
                 let hit = custom_frame_hit_test(
                     CustomFrameMetrics {
                         width: client.right.saturating_sub(client.left),
@@ -919,6 +1016,32 @@ mod windows_impl {
         })
     }
 
+    /// Place the window's *outer* rectangle exactly, in physical screen pixels.
+    ///
+    /// The counterpart of [`get_window_rect`], and the only sizing call that is
+    /// meaningful once [`CustomWindowFrame`] is installed: winit sizes by client
+    /// area and derives the outer rect with `AdjustWindowRectExForDpi`, but this
+    /// window's `WM_NCCALCSIZE` has made the two the same rectangle, so that
+    /// derivation adds a frame margin the window does not wear. Passing the outer
+    /// rect straight through is what makes `GetWindowRect` -> save -> restore ->
+    /// `GetWindowRect` an identity.
+    pub fn set_window_outer_rect(hwnd: NonZeroIsize, rect: WindowRect) -> Result<(), String> {
+        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle. No
+        // insert-after handle is passed, which `SWP_NOZORDER` makes inert.
+        unsafe {
+            SetWindowPos(
+                HWND(hwnd.get() as *mut c_void),
+                None,
+                rect.left,
+                rect.top,
+                rect.right.saturating_sub(rect.left).max(1),
+                rect.bottom.saturating_sub(rect.top).max(1),
+                SWP_NOZORDER | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|error| format!("SetWindowPos(restore window rect) failed: {error}"))
+    }
+
     /// The work area — the monitor minus the taskbar and other appbars — of the
     /// display this window sits on, in physical pixels.
     ///
@@ -1077,7 +1200,7 @@ pub use windows_impl::{
     CustomWindowFrame, ImeSystemCaret, MathContextMenu, client_area_animation_enabled,
     clipboard_text, get_dpi_for_window, get_window_rect, get_work_area,
     install_window_class_background, open_local_file, request_window_close, set_clipboard_text,
-    shell_execute, wheel_scroll_amount,
+    set_window_outer_rect, shell_execute, wheel_scroll_amount,
 };
 
 #[cfg(test)]
