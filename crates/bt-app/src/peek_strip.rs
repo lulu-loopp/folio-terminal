@@ -607,6 +607,7 @@ pub fn build(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
+        clip: None,
     };
 
     for (cell, leaf) in layout.cells.iter().zip(leaves) {

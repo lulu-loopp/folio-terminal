@@ -489,6 +489,7 @@ pub fn build(
             letter_spacing_em: SECTION_LABEL_TRACKING_EM,
             weight: ChromeLabelWeight::SemiBold,
             tabular_numerals: false,
+            clip: None,
         });
     }
 
@@ -588,6 +589,7 @@ fn push_row(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
+        clip: None,
     });
     if let Some(hint) = &row.hint {
         labels.push(ChromeLabel {
@@ -609,6 +611,7 @@ fn push_row(
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
     }
 }

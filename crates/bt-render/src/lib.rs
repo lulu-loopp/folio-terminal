@@ -654,6 +654,8 @@ struct PreparedOverlayLayer {
 /// viewport to the next one.
 struct PreparedSeat {
     seat: SeatViewport,
+    /// The scissor for this seat — see [`SeatFrame::clip`].
+    clip: SeatViewport,
     focused: bool,
     /// Which entry of `seat_slots` holds this seat's prepared glyph batches.
     slot: usize,
@@ -705,6 +707,22 @@ pub struct PeekImageOverlay {
 #[derive(Clone)]
 pub struct PreviewImage {
     pub seat: SeatViewport,
+    /// The box the picture may appear in — the scissor to [`Self::seat`]'s
+    /// viewport, and equal to it at rest.
+    ///
+    /// The same pair, with the same meaning and for the same reason, as
+    /// [`SeatFrame::clip`] beside a terminal's: `seat` is where the picture was
+    /// laid out and where its top-left lands, `clip` is the box it is allowed to
+    /// be seen in. They part company for exactly one reason, and it is U8's pane
+    /// FLIP — a preview pane mid-flight is drawn at its final *size* from the
+    /// corner it left, and cropped by the animating box on its way to the corner
+    /// the solver gave it.
+    ///
+    /// Without it a preview seat's chrome glides while its picture sits at the
+    /// destination, which is the pane visibly coming apart: the head arrives a
+    /// fifth of a second after the image it belongs to. Landing a preview *is* a
+    /// structural edit, so that is on screen the first time anyone opens one.
+    pub clip: SeatViewport,
     pub key: String,
     pub rgba: Arc<[u8]>,
     /// Texture dimensions. During a live resize these remain the last clear raster.
@@ -1805,7 +1823,39 @@ impl SeatViewport {
 pub struct SeatFrame<'a> {
     /// Where this leaf's body lands in the swapchain, from `solve` (red line
     /// L10: the renderer never invents it).
+    ///
+    /// This is where the contents were *laid out* and where their top-left
+    /// lands: the pass viewport, and the glyphon `Resolution` the grid's pixels
+    /// are normalized by. Its extent is therefore the size the grid was reflowed
+    /// to, and moving it never reflows anything.
     pub seat: SeatViewport,
+    /// The box those contents are allowed to *appear* in — the pass scissor.
+    ///
+    /// At rest it is [`Self::seat`], and then every value below is the one that
+    /// was there when one rectangle drove both calls: the same argument
+    /// [`SeatViewport`]'s own doc makes for `N = 1`, about values rather than
+    /// about a branch that skips the new code.
+    ///
+    /// They part company for exactly one reason, and it is U8's pane FLIP. The
+    /// mock-up animates a pane with `transform: scale(s)` on the box and
+    /// `scale(1/s)` on an inner wrapper (6584-6586), because in CSS a transform
+    /// is the only way to move a box that is already laid out — the
+    /// counter-scale is there to *undo* the stretch the outer scale would
+    /// otherwise put on the text. Composed, the pair says: contents laid out at
+    /// the final size, placed at the animating box's top-left, clipped by the
+    /// pane's `overflow: hidden`. Native has that composition directly, which is
+    /// this pair of rectangles, and so nothing here is ever scaled — not a
+    /// glyph, not a quad, not a viewport. Transcribing the CSS literally by
+    /// scaling this crate's viewport would reflow the grid every frame of the
+    /// animation, which is the exact stretch the counter-scale was invented to
+    /// cancel.
+    ///
+    /// Must be clamped inside the surface and never empty: the scissor is
+    /// validated against the attachment, while the viewport above legitimately
+    /// hangs off its edge — a pane growing leftward is laid out at its final
+    /// width from its old corner, so its right edge is past the window's until
+    /// the flight lands.
+    pub clip: SeatViewport,
     pub frame: &'a ViewportFrame,
     /// Whether this is the seat holding keyboard focus.
     ///
@@ -1833,8 +1883,28 @@ pub struct ChromeQuad {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChromeLabel {
     pub text: String,
-    /// The box the text is laid out in and clipped to, `[left, top, right, bottom]`.
+    /// The box the text is laid out in, `[left, top, right, bottom]`.
+    ///
+    /// Laying out is the whole of its job now. It used to be clipped to as well
+    /// — one rectangle doing two things, which cost nothing while the two were
+    /// always the same box. U8's pane FLIP is the first caller for which they
+    /// differ: a pane mid-flight is drawn at its final *size* through a clip box
+    /// that is still the size it left, so the caption is laid out in the box the
+    /// solver gave it and shown through a narrower one. Intersecting this rect
+    /// instead of adding [`Self::clip`] beside it would re-do the layout inside
+    /// the smaller box — a centred body notice would re-centre itself on the
+    /// visible sliver and slide as the pane grew, and a right-aligned control
+    /// would walk inward — which is the stretching the counter-scale exists to
+    /// prevent, moved from the glyphs into their placement.
     pub rect: [f32; 4],
+    /// The box the text is *clipped* to — glyphon's `TextArea.bounds`.
+    ///
+    /// `None` means "clipped to [`Self::rect`]", which is what every label that
+    /// is not inside a moving pane wants and is the value that was there before
+    /// this field existed. Set to `Some` only where the two genuinely part
+    /// company, and always as an intersection *with* `rect`: a clip wider than
+    /// the layout box would let a long title escape the head it belongs to.
+    pub clip: Option<[f32; 4]>,
     pub font_size_px: f32,
     pub color: [u8; 3],
     /// Right-align inside `rect` rather than left-align. The `x` affordance of a
@@ -2786,6 +2856,7 @@ impl Renderer {
             (None, None) => false,
             (Some(current), Some(next)) => {
                 current.seat != next.seat
+                    || current.clip != next.clip
                     || current.key != next.key
                     || current.width_px != next.width_px
                     || current.height_px != next.height_px
@@ -2795,6 +2866,30 @@ impl Renderer {
             _ => true,
         };
         self.preview_image = image;
+        changed
+    }
+
+    /// **U8 — move the preview seat's picture to where its pane is drawn this
+    /// frame.** Returns whether the pair changed.
+    ///
+    /// A second door beside [`Self::set_preview_image`] because it answers a
+    /// different question at a different rate. The *content* — the raster, its
+    /// key, the extent it was fitted to — changes when the layout commits or the
+    /// scale worker delivers, which is a handful of times per preview; the pair
+    /// of rectangles changes on every frame of a 200ms flight. Routing the flight
+    /// through `set_preview_image` would have the caller rebuild a whole
+    /// `PreviewImage` sixty times a second, `Arc` clone and key string included,
+    /// in order to move two integers.
+    ///
+    /// Nothing at all when there is no picture: a placement is a fact about an
+    /// image, and there is no empty image to hold one.
+    pub fn place_preview_image(&mut self, seat: SeatViewport, clip: SeatViewport) -> bool {
+        let Some(image) = self.preview_image.as_mut() else {
+            return false;
+        };
+        let changed = image.seat != seat || image.clip != clip;
+        image.seat = seat;
+        image.clip = clip;
         changed
     }
 
@@ -2937,6 +3032,10 @@ impl Renderer {
         self.present_seats(
             &[SeatFrame {
                 seat: self.seat,
+                // Nothing animates on this path — it is the single-seat wrapper
+                // — so the box the contents appear in is the box they were laid
+                // out in, and the two calls below take the values they always did.
+                clip: self.seat,
                 frame,
                 focused: true,
             }],
@@ -3134,6 +3233,14 @@ impl Renderer {
             }
             prepared.push(PreparedSeat {
                 seat: entry.seat,
+                // Clamped here rather than trusted, and only this one of the
+                // pair: `seat` is the solver's own answer travelling under a
+                // translation that keeps both of its ends on the surface, while
+                // `clip` is what the scissor is validated against and a scissor
+                // outside the attachment is a device error rather than a
+                // clipped-away pixel. `clamped_to` never returns an empty
+                // rectangle, which is the other half of that validation.
+                clip: entry.clip.clamped_to(self.config.width, self.config.height),
                 focused: entry.focused,
                 slot: index,
                 rect_buffer,
@@ -3366,7 +3473,11 @@ impl Renderer {
                     0.0,
                     1.0,
                 );
-                pass.set_scissor_rect(seat.seat.x, seat.seat.y, seat.seat.width, seat.seat.height);
+                // Viewport from `seat`, scissor from `clip`. The two are equal
+                // at rest — for `N = 1` they are both the whole surface — and
+                // differ only while a pane is mid-FLIP, where the difference is
+                // precisely the mock-up's counter-scale (see [`SeatFrame::clip`]).
+                pass.set_scissor_rect(seat.clip.x, seat.clip.y, seat.clip.width, seat.clip.height);
                 let slot = &self.seat_slots[seat.slot];
                 if seat.rect_count > 0 {
                     pass.set_pipeline(&self.rect_pipeline);
@@ -3469,9 +3580,13 @@ impl Renderer {
             }
             // Preview content is above that seat's body chrome, but its viewport excludes the title
             // bar, so the filename and existing close affordance remain visible.
-            if let (Some(seat), Some(vertex_buffer)) =
+            if let (Some((seat, clip)), Some(vertex_buffer)) =
                 (preview_seat, preview_vertex_buffer.as_ref())
             {
+                // U8 — the viewport is where the picture was laid out and the
+                // scissor is the box it may appear in, exactly as a terminal
+                // seat's pair is. The two are the same rectangle at rest, so a
+                // preview that is not in flight issues the calls it always did.
                 pass.set_viewport(
                     seat.x as f32,
                     seat.y as f32,
@@ -3480,7 +3595,7 @@ impl Renderer {
                     0.0,
                     1.0,
                 );
-                pass.set_scissor_rect(seat.x, seat.y, seat.width, seat.height);
+                pass.set_scissor_rect(clip.x, clip.y, clip.width, clip.height);
                 pass.set_pipeline(&self.math_pipeline);
                 pass.set_vertex_buffer(0, vertex_buffer.slice(..));
                 for draw in &preview_draws {
@@ -3943,7 +4058,19 @@ impl Renderer {
         (draws, vertices)
     }
 
-    fn prepare_preview_draws(&mut self) -> (Option<SeatViewport>, Vec<MathDraw>, Vec<MathVertex>) {
+    /// The preview seat's picture: its viewport, the box it may appear in, and
+    /// the tiles.
+    ///
+    /// The pair travels together for the reason [`SeatFrame`] carries both — they
+    /// are computed from one sample of one clock by the caller, and a renderer
+    /// holding only the viewport would have to invent the crop.
+    fn prepare_preview_draws(
+        &mut self,
+    ) -> (
+        Option<(SeatViewport, SeatViewport)>,
+        Vec<MathDraw>,
+        Vec<MathVertex>,
+    ) {
         let Some(image) = self.preview_image.clone() else {
             return (None, Vec::new(), Vec::new());
         };
@@ -3966,7 +4093,7 @@ impl Renderer {
                 .map(|tile| (tile.x_px, tile.y_px, tile.width_px, tile.height_px))
                 .collect::<Vec<_>>()
         }) else {
-            return (Some(image.seat), Vec::new(), Vec::new());
+            return (Some((image.seat, image.clip)), Vec::new(), Vec::new());
         };
         let left_inset = (image.seat.width.saturating_sub(image.display_width_px) / 2) as f32;
         let top_inset = (image.seat.height.saturating_sub(image.display_height_px) / 2) as f32;
@@ -3999,7 +4126,7 @@ impl Renderer {
                 first_vertex,
             });
         }
-        (Some(image.seat), draws, vertices)
+        (Some((image.seat, image.clip)), draws, vertices)
     }
 
     fn math_block_geometry(
@@ -4817,15 +4944,20 @@ fn shape_chrome_labels(
                 .expect("a non-empty chrome label shapes into at least one run");
             let [r, g, b] = label.color;
             let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+            // The layout above read `rect`; only the *bounds* read `clip`, and
+            // they fall back to `rect` when nothing asked for a narrower one —
+            // so a label with no clip is shaped, placed and cropped with exactly
+            // the four numbers it was cropped with before the field existed.
+            let clip = label.clip.unwrap_or(label.rect);
             ChromeTextLayout {
                 buffer,
                 left,
                 top: baseline - baseline_in_buffer,
                 bounds: TextBounds {
-                    left: label.rect[0].floor() as i32,
-                    top: label.rect[1].floor() as i32,
-                    right: label.rect[2].ceil() as i32,
-                    bottom: label.rect[3].ceil() as i32,
+                    left: clip[0].floor() as i32,
+                    top: clip[1].floor() as i32,
+                    right: clip[2].ceil() as i32,
+                    bottom: clip[3].ceil() as i32,
                 },
                 color: Color::rgba(r, g, b, a),
             }
@@ -9862,6 +9994,7 @@ mod tests {
             letter_spacing_em: 0.0,
             weight,
             tabular_numerals,
+            clip: None,
         };
         let layouts = shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7, 1.0);
         layouts[0]
@@ -10047,6 +10180,7 @@ mod tests {
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         };
         let layouts = shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
         let run = layouts[0]
@@ -10122,6 +10256,7 @@ mod tests {
                 letter_spacing_em: 0.0,
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
+                clip: None,
             };
             let rect_centre = (label.rect[1] + label.rect[3]) / 2.0;
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
@@ -10158,6 +10293,7 @@ mod tests {
                 letter_spacing_em: 0.0,
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
+                clip: None,
             };
             let rect_centre = (label.rect[1] + label.rect[3]) / 2.0;
             let cap_centre = cap_band_centre(&mut font_system, cap_height_ratio, &label);
@@ -10195,6 +10331,7 @@ mod tests {
                 letter_spacing_em: 0.0,
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
+                clip: None,
             };
             let layouts =
                 shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0);
@@ -10237,6 +10374,7 @@ mod tests {
                 letter_spacing_em: spacing,
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
+                clip: None,
             };
             shape_chrome_labels(font_system, std::slice::from_ref(&label), 0.7, 1.0)[0]
                 .buffer
@@ -10415,6 +10553,7 @@ mod tests {
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         };
         let opaque =
             shape_chrome_labels(&mut font_system, std::slice::from_ref(&label), 0.7, 1.0)[0].color;

@@ -722,6 +722,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::SemiBold,
         tabular_numerals: false,
+        clip: None,
     });
 
     for (text, rect) in &layout.sub {
@@ -735,6 +736,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
     }
 
@@ -760,6 +762,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
         // The cwd can be squeezed to nothing by a long name and a badge; when it
         // is, it is not drawn at all rather than drawn as a lone ellipsis.
@@ -775,6 +778,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
                 letter_spacing_em: 0.0,
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
+                clip: None,
             });
         }
         if let (Some(rect), Some(text)) = (row.badge_rect, row.badge_text.as_ref()) {
@@ -794,6 +798,7 @@ pub fn build(layout: &RestoreLayout, hover: Option<RestoreTarget>) -> Vec<Overla
                 letter_spacing_em: 0.0,
                 weight: ChromeLabelWeight::SemiBold,
                 tabular_numerals: true,
+                clip: None,
             });
         }
     }
@@ -897,6 +902,7 @@ fn push_button(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
+        clip: None,
     });
 }
 

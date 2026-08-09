@@ -107,6 +107,9 @@ pub struct Seats {
     focus: SeatId,
     next_seat: u64,
     next_split: u64,
+    /// How many times a leaf has been added, removed, moved or replaced — see
+    /// [`Seats::structure_revision`].
+    structure_revision: u64,
 }
 
 impl Seats {
@@ -157,6 +160,10 @@ impl Seats {
                 focus: id,
                 next_seat: 2,
                 next_split: 1,
+                // A tree that has just been stood up has no history to glide
+                // from, so it starts where a caller that has never animated
+                // anything also starts. See [`Self::structure_revision`].
+                structure_revision: 0,
             },
             id,
         )
@@ -164,6 +171,40 @@ impl Seats {
 
     pub fn tree(&self) -> &LayoutNode {
         &self.tree
+    }
+
+    /// **U8 — how many times this tab's *shape* has changed.**
+    ///
+    /// The gate on the pane FLIP, and it exists because "the layout re-solved"
+    /// is the wrong question. Every layout-mutating path in `bt-app` converges
+    /// on one commit, and a divider drag, a focus change, a DPI change, a window
+    /// resize and a concession-ladder step all re-solve and all move rectangles.
+    /// None of them is a pane arriving, leaving or changing places, and none of
+    /// them may animate: a divider drag animated would put a 200ms tail on a
+    /// gesture the pointer is already driving frame by frame, and a focus change
+    /// animated would make clicking into a pane a thing that takes a fifth of a
+    /// second to finish moving.
+    ///
+    /// This counter is bumped by exactly the edits the mock-up routes through
+    /// `renderWithPaneFlip` — its split (3493, 3514), its close (3556, 3577), its
+    /// drop commit (5854, 5863) and its tear-out and merge (7265, 7309) — and by
+    /// nothing else. The excluded set is exactly the mock-up's plain `render()`
+    /// calls, which is where its own divider drag and its focus changes live.
+    ///
+    /// `Edit::CenterSwap` is in the animating set even though it moves no
+    /// rectangle at all: the mock-up calls `renderWithPaneFlip` there too (3544),
+    /// P178 then measures a zero displacement for every pane and skips all of
+    /// them, and the outcome is a swap with no animation — reached by the rule
+    /// rather than by an exception to it. Special-casing it out here would be a
+    /// second opinion about which edits are structural, held in the one place
+    /// that could disagree with the first.
+    ///
+    /// A `u64` that only ever counts up, and compared rather than subtracted:
+    /// the caller's question is "is this a different shape from the one I last
+    /// animated", not "how many edits happened", so a wrap that will not arrive
+    /// in this universe is not a case anyone has to write.
+    pub fn structure_revision(&self) -> u64 {
+        self.structure_revision
     }
 
     pub fn terminal(&self) -> SeatId {
@@ -223,6 +264,8 @@ impl Seats {
                 self.tree = outcome.tree;
                 self.next_seat += 1;
                 self.next_split += 1;
+                // A leaf arrived: the shape changed (U8).
+                self.structure_revision += 1;
                 Some(arriving)
             }
             Err(_) => None,
@@ -328,6 +371,9 @@ impl Seats {
                         self.tree = outcome.tree;
                         self.next_seat += 1;
                         self.next_split += 1;
+                        // A leaf arrived — the preview is a pane like any other,
+                        // and the terminal beside it narrows to make room (U8).
+                        self.structure_revision += 1;
                         true
                     }
                     Err(_) => false,
@@ -347,6 +393,11 @@ impl Seats {
         match apply(&self.tree, metrics, &Edit::CloseSeat { target: seat }) {
             Ok(outcome) => {
                 self.tree = outcome.tree;
+                // A leaf left and its sibling was promoted into the space (U8).
+                // This is also the tear-out's own bump: `tear_out` computes the
+                // staying tree without mutating anything, and the gesture's
+                // commit installs it by calling exactly this verb.
+                self.structure_revision += 1;
                 // `terminal` names a seat that has to still exist: it is what
                 // focus falls back to, and what a caller with no seat in hand
                 // asks for. Closing the one it named repoints it at the first
@@ -640,6 +691,12 @@ impl Seats {
         self.next_seat = plan.next_seat;
         self.next_split = plan.next_split;
         self.focus = focus;
+        // Every drop is structural (U8): an edge or a rim cuts a new slot, a
+        // replace swaps a subtree in, and a centre swap trades two payloads.
+        // The last of those moves no rectangle, and it is counted anyway — see
+        // [`Self::structure_revision`] for why that is the rule working rather
+        // than the rule being wrong.
+        self.structure_revision += 1;
         Some(focus)
     }
 
@@ -2674,6 +2731,8 @@ pub fn build_chrome_with_preview(
             fit_overflow: None,
             profile_menu_open: false,
             chevron_turn: 0.0,
+            pane_motion: PaneMotionFrame::default(),
+            resizing_cards: None,
         },
     )
 }
@@ -2879,6 +2938,80 @@ pub struct ChromeContent<'a> {
     /// reaches this module — see [`TabContent::offset`] and
     /// [`TabContent::landing`]. Nothing in here knows what time it is.
     pub chevron_turn: f32,
+    /// **U8 — what each pane is drawn through this frame.**
+    ///
+    /// Empty on every frame nothing is in flight, which is every frame except
+    /// the 200ms after a structural edit. See [`PaneMotionFrame`].
+    pub pane_motion: PaneMotionFrame<'a>,
+    /// **B22 — which split's panes wear cards this frame, and how far in.**
+    ///
+    /// Not derived from [`ChromePointer::dragging`], and the difference is the
+    /// whole of B22. `.pane { transition: margin .1s ease, border-radius .1s
+    /// ease }` (mock-up 1464) keeps drawing for 100ms *after* `.slot.resizing`
+    /// comes off, so the cards outlive the grab; while the divider's own colour
+    /// and its grip have no transition at all and go out with the button. One
+    /// field for two lifetimes would make the cards snap out or the accent line
+    /// linger, depending on which won.
+    pub resizing_cards: Option<ResizingCards>,
+}
+
+/// **B22 — the split whose panes are drawn as inset cards, and how far the
+/// 100ms transition has run.**
+///
+/// **Sampled, because this module does not know what time it is** — the same
+/// invariant [`PaneMotionFrame`] records, and for the same reason. What arrives
+/// here is a fraction; the clock that produced it is `bt-app`'s.
+///
+/// **The divider itself is not in here, and must never be.** U2's ruling stands
+/// untouched: a divider drag re-solves the layout in real time and the boundary
+/// stays glued to the pointer on every frame. What B22 eases is the *card
+/// inset* — how far each pane pulls in from its own edges — and nothing else.
+/// A reader coming back to this must not be able to mistake it for permission
+/// to animate the drag: ease the boundary and the seam lags the hand by a tenth
+/// of a second, which is the one thing a resize may never do.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResizingCards {
+    pub split: SplitId,
+    /// 0.0 flush, 1.0 fully inset — CSS's own computed value for the
+    /// transitioned properties, as a fraction of the declaration's `5px` and
+    /// `8px`.
+    pub inset: f32,
+}
+
+/// The transform each pane wears right now, already sampled.
+///
+/// A slice of pairs and not a map, for the reason red line L8 gives about the
+/// solver's own output: every value in here is geometry, and geometry that
+/// depends on a hash container's iteration order is geometry nobody chose. It is
+/// short — the panes of one tab are single digits — so the linear scan in
+/// [`Self::of`] is the whole lookup and a `BTreeMap` would buy an ordering the
+/// caller's own `Vec` already has.
+///
+/// **Sampled, because this module does not know what time it is.** Every
+/// animated value that reaches here arrives as a number rather than as a tween
+/// — [`TabContent::offset`], [`TabContent::landing`], [`ChromeContent::chevron_turn`]
+/// — and a pane's transform is the same fact one dimension up. Handing over the
+/// `PaneMotion` itself would put a clock in the one file that has an invariant
+/// against holding one, and would let two seats in a single chrome build read
+/// two different instants.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PaneMotionFrame<'a> {
+    transforms: &'a [(SeatId, crate::PaneTransform)],
+}
+
+impl<'a> PaneMotionFrame<'a> {
+    pub fn new(transforms: &'a [(SeatId, crate::PaneTransform)]) -> Self {
+        Self { transforms }
+    }
+
+    /// What `seat` is drawn through — the identity for a pane that is not
+    /// moving, and for one this frame has never heard of.
+    fn of(&self, seat: SeatId) -> crate::PaneTransform {
+        self.transforms
+            .iter()
+            .find(|(id, _)| *id == seat)
+            .map_or(crate::PaneTransform::IDENTITY, |(_, transform)| *transform)
+    }
 }
 
 /// Build chrome for every runtime tab while the pane layer still follows the active tab's solve.
@@ -2901,6 +3034,8 @@ pub fn build_chrome_for_tabs(
         fit_overflow,
         profile_menu_open,
         chevron_turn,
+        pane_motion,
+        resizing_cards: carded,
     } = content;
     // Each seat is asked about *itself*. Written as a closure beside the two
     // call sites rather than inlined at each, so the collapsed bar and the pane
@@ -2933,20 +3068,58 @@ pub fn build_chrome_for_tabs(
         },
         (&mut quads, &mut labels, &mut sprites),
     );
+    // **U8 — the pane's own chrome is built into these and then clipped.**
+    //
+    // Declared once outside the loop and cleared per pane, so a flight costs no
+    // allocation per frame per pane. Everything a seat contributes lands here
+    // first and reaches the real lists only through [`clip_pane_chrome`], which
+    // is the one place the animating box is applied — a piece pushed straight
+    // into `quads` would be a piece that escapes the clip.
+    let mut pane_quads = Vec::new();
+    let mut pane_labels = Vec::new();
+    let mut pane_sprites = Vec::new();
     for placement in &layout.rects {
         let Some(device) = placement.device_rect else {
             continue;
         };
-        let rect = [
+        let solved = [
             device.left as f32,
             device.top as f32,
             device.right as f32,
             device.bottom as f32,
         ];
+        // **U8, R3 — the counter-scale, written as the one thing it composes to.**
+        //
+        // `rect` is the pane's contents at their *final* size, placed at the
+        // animating box's top-left; `clip` is the animating box itself. The
+        // mock-up needs two transforms to say this — `scale(s)` on the pane and
+        // `scale(1/s)` on an inner wrapper (6584-6586) — because in CSS a
+        // transform is the only way to move a box that is already laid out, and
+        // the counter-scale exists solely to *undo* the stretch the outer scale
+        // put on the text. Multiply the pair out and what is left is: laid out
+        // at the destination size, drawn from the animating corner, cropped by
+        // `overflow: hidden`. Nothing is scaled here — not a glyph, not a quad —
+        // and a literal transcription of the CSS, which would scale the
+        // rectangles this loop builds, is exactly what the counter-scale is
+        // there to cancel.
+        //
+        // Both are the solved rectangle when nothing is in flight, and then
+        // every expression below is the one that was there before U8.
+        let transform = pane_motion.of(placement.id);
+        let rect = [
+            solved[0] + transform.dx,
+            solved[1] + transform.dy,
+            solved[2] + transform.dx,
+            solved[3] + transform.dy,
+        ];
+        let clip = transform.applied_to(solved);
+        pane_quads.clear();
+        pane_labels.clear();
+        pane_sprites.clear();
         match placement.presentation {
             Presentation::Collapsed(_) => {
                 let hovered = pointer.hover == Some(ChromeTarget::CollapseBar(placement.id));
-                quads.push(ChromeQuad {
+                pane_quads.push(ChromeQuad {
                     rect,
                     color: if hovered {
                         palette.collapse_bar_hover
@@ -2960,14 +3133,16 @@ pub fn build_chrome_for_tabs(
                     placement.kind,
                     placement.presentation,
                     seat_short_caption(placement.kind, preview_title, terminal_name(placement.id)),
-                    &mut labels,
-                    &mut sprites,
+                    &mut pane_labels,
+                    &mut pane_sprites,
                 );
             }
-            Presentation::Full => {
-                if !seats.seat_wears_head(placement.kind) {
-                    continue;
-                }
+            // A pane that wears no head contributes nothing but still passes
+            // through the clip below, which is a no-op on an empty pane. Written
+            // as a guard rather than the `continue` that was here, because the
+            // loop now owes the flush at its foot: an early exit past it would
+            // be a pane whose chrome was built and never handed over.
+            Presentation::Full if seats.seat_wears_head(placement.kind) => {
                 // `* { box-sizing: border-box }` (mock-up line 77) rules the
                 // arithmetic here: `.panehead { height: 28px; border-bottom: 1px }`
                 // is twenty-eight rows *including* the hairline, not twenty-eight
@@ -2978,12 +3153,12 @@ pub fn build_chrome_for_tabs(
                 let head_bottom = head.head[3];
                 let title_bottom = head.content_bottom;
                 if placement.id != seats.terminal() {
-                    quads.push(ChromeQuad {
+                    pane_quads.push(ChromeQuad {
                         rect: [rect[0], head_bottom, rect[2], rect[3]],
                         color: palette.seat_body,
                     });
                 }
-                quads.push(ChromeQuad {
+                pane_quads.push(ChromeQuad {
                     rect: [rect[0], rect[1], rect[2], title_bottom],
                     color: palette.pane_head,
                 });
@@ -2992,7 +3167,7 @@ pub fn build_chrome_for_tabs(
                 // drawn below `head_bottom` it would paint over the terminal's
                 // own first row, which is the bug this reading fixes.
                 if title_bottom < head_bottom {
-                    quads.push(ChromeQuad {
+                    pane_quads.push(ChromeQuad {
                         rect: [rect[0], title_bottom, rect[2], head_bottom],
                         color: palette.pane_head_edge,
                     });
@@ -3004,7 +3179,7 @@ pub fn build_chrome_for_tabs(
                 let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
                 let focused = placement.id == seats.focus();
                 let (mark, _, mark_color) = pane_mark(placement.kind, palette);
-                sprites.push(ChromeSprite::new(mark, head.mark, mark_color).with_opacity(
+                pane_sprites.push(ChromeSprite::new(mark, head.mark, mark_color).with_opacity(
                     // `.pane:not(.focused) .panehead .ticon { opacity: .5 }`
                     // (mock-up 1645-1647). Opacity and not a paler ink,
                     // because the mark is often the profile square, which
@@ -3019,7 +3194,7 @@ pub fn build_chrome_for_tabs(
                         PANE_MARK_UNFOCUSED_OPACITY
                     },
                 ));
-                labels.push(ChromeLabel {
+                pane_labels.push(ChromeLabel {
                     text: seat_caption(placement.kind, preview_title, terminal_name(placement.id))
                         .to_owned(),
                     rect: head.title,
@@ -3044,6 +3219,7 @@ pub fn build_chrome_for_tabs(
                         ChromeLabelWeight::Regular
                     },
                     tabular_numerals: false,
+                    clip: None,
                 });
                 // `.panehead .pane-close { visibility: hidden }` with
                 // `.pane:hover .pane-close { visibility: visible }` (mock-up
@@ -3065,7 +3241,7 @@ pub fn build_chrome_for_tabs(
                         // `.panehead .pane-close:hover { background: var(--active) }`
                         // at `border-radius: 4px`, over the one ground a pane
                         // head has.
-                        sprites.push(ChromeSprite::new(
+                        pane_sprites.push(ChromeSprite::new(
                             ChromeMark::ControlPill {
                                 radius_px: (SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX * scale)
                                     .round()
@@ -3078,7 +3254,7 @@ pub fn build_chrome_for_tabs(
                     let glyph = (SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX * scale).round().max(1.0);
                     let glyph_left = ((close[0] + close[2] - glyph) / 2.0).round();
                     let glyph_top = ((close[1] + close[3] - glyph) / 2.0).round();
-                    sprites.push(ChromeSprite::new(
+                    pane_sprites.push(ChromeSprite::new(
                         ChromeMark::PaneClose,
                         [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
                         // `color: var(--ink3)` at rest, `--ink` under the
@@ -3107,7 +3283,7 @@ pub fn build_chrome_for_tabs(
                     // A state notice, not content: quiet ink, centred in the
                     // body, so an empty pane reads as an invitation and a
                     // failure reads as a note rather than a wall of alarm.
-                    labels.push(ChromeLabel {
+                    pane_labels.push(ChromeLabel {
                         text: message.to_owned(),
                         rect: [
                             rect[0] + pad,
@@ -3124,10 +3300,17 @@ pub fn build_chrome_for_tabs(
                         letter_spacing_em: 0.0,
                         weight: ChromeLabelWeight::Regular,
                         tabular_numerals: false,
+                        clip: None,
                     });
                 }
             }
+            Presentation::Full => {}
         }
+        clip_pane_chrome(
+            clip,
+            (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
+            (&mut quads, &mut labels, &mut sprites),
+        );
     }
     if let Some(overflow) = fit_overflow {
         let row = [
@@ -3157,16 +3340,49 @@ pub fn build_chrome_for_tabs(
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
     }
     let slots = seats.split_slots(layout);
     // F63, and it is drawn before the dividers so the accent line and its grip
     // stay on top of the gap they are opening.
-    if let Some(split) = pointer.dragging
-        && let Some(slot) = slots.iter().find(|slot| slot.id == split)
+    //
+    // **B22 — read off `carded` and never off `pointer.dragging`.** The cards
+    // have a 100ms transition and the divider has none, so for the tenth of a
+    // second after the button comes up the cards are still running down around a
+    // split nobody is holding. A split that has since left the tree finds no slot
+    // here and draws nothing, which is the honest answer: there is no rectangle
+    // left to inset.
+    if let Some(cards) = carded
+        && let Some((margin, radius)) = resizing_card_inset(scale, cards.inset)
+        && let Some(slot) = slots.iter().find(|slot| slot.id == cards.split)
     {
-        resizing_cards(layout, *slot, scale, palette, &mut quads, &mut sprites);
+        resizing_cards(
+            layout,
+            *slot,
+            (margin, radius),
+            palette,
+            &mut quads,
+            &mut sprites,
+        );
     }
+    // **U8, R4 — a divider does not FLIP.**
+    //
+    // The mock-up's `snapshotPanes` queries `#termhost .pane` and nothing else
+    // (6556-6561). A `.divider` is a *sibling* of the panes, not one of them, so
+    // it is never measured, never given a transform, and simply appears at its
+    // new boundary the moment the layout changes — while the panes either side
+    // glide over the next 200ms to meet it. That reads as the seam being the
+    // thing that moved and the rooms following it, which is what a split is.
+    //
+    // Animating the bands with the panes is the obvious "fix" and it is the
+    // wrong one twice over: a band is a hairline on a boundary two panes share,
+    // so there is no single before-rect to FLIP it from when the two panes
+    // either side came from different places, and a divider drawn mid-flight at
+    // an interpolated position would be a divider the hit test does not agree
+    // with — the pointer would grab air. The same argument holds for
+    // `resizing_cards` and the split slots above: all three are read off the
+    // *solved* rectangles, deliberately, and none of them is a pane.
     for slot in &slots {
         let dragging = pointer.dragging == Some(slot.id);
         // E53: while any other gesture owns the pointer, a divider says nothing.
@@ -3202,6 +3418,94 @@ pub fn build_chrome_for_tabs(
         }
     }
     (quads, labels, sprites)
+}
+
+/// The overlap of two `[left, top, right, bottom]` boxes, or `None` when they do
+/// not overlap at all.
+///
+/// Written so that a box already inside the other comes back *unchanged*: `max`
+/// of two equal floats is one of them, bit for bit, and so is `min`. That is
+/// what makes [`clip_pane_chrome`] a no-op at rest rather than a rounding pass
+/// everything quietly goes through.
+pub fn box_intersection(a: [f32; 4], b: [f32; 4]) -> Option<[f32; 4]> {
+    let out = [
+        a[0].max(b[0]),
+        a[1].max(b[1]),
+        a[2].min(b[2]),
+        a[3].min(b[3]),
+    ];
+    (out[2] > out[0] && out[3] > out[1]).then_some(out)
+}
+
+/// Whether `rect` lies wholly inside `clip`.
+fn box_contains(clip: [f32; 4], rect: [f32; 4]) -> bool {
+    rect[0] >= clip[0] && rect[1] >= clip[1] && rect[2] <= clip[2] && rect[3] <= clip[3]
+}
+
+/// **U8 — one pane's chrome, cropped to the box it is being drawn through.**
+///
+/// `overflow: hidden` on `.pane`, in the three primitives this renderer has.
+/// The pane's pieces were all built from its *content* rectangle — final size,
+/// animating corner — and this is where the animating box gets its say.
+///
+/// At rest `clip` is the solved rectangle the pieces were built from, every
+/// intersection returns its input untouched, and every sprite passes the
+/// containment test, so the three lists come out value for value what they were
+/// before U8 existed. That is an argument about values and not about a branch
+/// that skips this call: there is no such branch, and a pane at rest walks the
+/// same code a pane in flight does.
+///
+/// **Quads** intersect. A flat fill is the one primitive that can be cropped
+/// exactly, and a quad that crops to nothing is dropped rather than pushed as an
+/// empty rectangle nobody would draw.
+///
+/// **Labels** get a [`ChromeLabel::clip`] and keep their `rect`. The two used to
+/// be one box because they always agreed; intersecting the `rect` instead would
+/// re-run the label's own layout inside the crop — a centred body notice would
+/// re-centre on whatever sliver is visible and slide sideways as the pane grew,
+/// and the right-aligned control of a title bar would walk inward — which is the
+/// stretch R3 forbids, relocated from the glyphs into their placement.
+///
+/// **Sprites are omitted rather than cropped, and that is a recorded
+/// approximation.** A [`ChromeSprite`] is a raster blit at its own size: the
+/// sprite pipeline puts a cached raster on screen at the box it was rasterized
+/// for and cannot draw part of one — exactly the argument [`resizing_cards`]
+/// already makes about `box-shadow`, and for exactly the same reason. So a mark
+/// that is not wholly inside the box is not drawn at all. What is lost is the
+/// sliver: a pane growing out of a split reveals its `×` all at once, when the
+/// animating box finally reaches the whole control, instead of sliding it in
+/// edge-first over a frame or two. Cropping it would mean a size-keyed raster
+/// per frame of the flight, which misses its cache on every one of them;
+/// hand-cutting the raster would be a different mark wearing this one's name.
+fn clip_pane_chrome(
+    clip: [f32; 4],
+    pane: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+    out: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let (pane_quads, pane_labels, pane_sprites) = pane;
+    let (quads, labels, sprites) = out;
+    quads.extend(pane_quads.drain(..).filter_map(|quad| {
+        box_intersection(quad.rect, clip).map(|rect| ChromeQuad { rect, ..quad })
+    }));
+    labels.extend(pane_labels.drain(..).filter_map(|label| {
+        box_intersection(label.rect, clip).map(|clip| ChromeLabel {
+            clip: Some(clip),
+            ..label
+        })
+    }));
+    sprites.extend(
+        pane_sprites
+            .drain(..)
+            .filter(|sprite| box_contains(clip, sprite.rect)),
+    );
 }
 
 /// `.divider::after` in physical pixels: 3 logical pixels across the band, 28
@@ -3251,6 +3555,37 @@ fn divider_grip(slot: SplitSlot, scale: f32) -> [f32; 4] {
     }
 }
 
+/// **B22 — how far a resizing card has pulled in this frame, in physical
+/// pixels: its margin and its corner radius.**
+///
+/// `.pane { transition: margin .1s ease, border-radius .1s ease, box-shadow .1s
+/// ease }` (mock-up 1464) serving `.slot.resizing .pane { margin: 5px;
+/// border-radius: 8px }` (1465-1470). Two of those three properties are drawn by
+/// this build, they run down one curve together, and so they are computed
+/// together from one `inset` — two call sites sampling the same transition twice
+/// is how a card ends up rounded further than it is inset.
+///
+/// **`None` at rest, and that is the transition's first frame rather than a
+/// special case.** Both numbers are rounded and then floored at one physical
+/// pixel, because a card is a shape and a zero-width shape is not one; scale
+/// them by an `inset` of zero and a flush pane wears a one-pixel hairline of
+/// floor on every side, which is a visible line around every pane that nobody
+/// is resizing. What CSS draws at `margin: 0` is nothing, and nothing is what
+/// this answers.
+#[must_use]
+pub fn resizing_card_inset(scale: f32, inset: f32) -> Option<(f32, f32)> {
+    if inset <= 0.0 {
+        return None;
+    }
+    let margin = (SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX * scale * inset)
+        .round()
+        .max(1.0);
+    let radius = (SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX * scale * inset)
+        .round()
+        .max(1.0);
+    Some((margin, radius))
+}
+
 /// F63: the two panes a divider drag is resizing pull in from their own edges
 /// into slightly smaller rounded cards, and the `--panel` floor shows through.
 ///
@@ -3270,20 +3605,21 @@ fn divider_grip(slot: SplitSlot, scale: f32) -> [f32; 4] {
 /// and the sprite pipeline blits a raster at its own size rather than scaling
 /// one. Recorded rather than approximated: a hand-drawn falloff would be a
 /// different shadow wearing this one's name.
+///
+/// **B22 lives in the two numbers this is handed**, not in the shape it draws.
+/// The mock-up's `transition: margin .1s ease, border-radius .1s ease` (1464) is
+/// a transition on exactly the two properties [`resizing_card_inset`] computes,
+/// so easing them is the whole of it and none of the arithmetic below changes:
+/// the cards drawn a tenth of the way in are the cards that were always drawn,
+/// a tenth of the size.
 fn resizing_cards(
     layout: &SeatLayout,
     slot: SplitSlot,
-    scale: f32,
+    (margin, radius): (f32, f32),
     palette: bt_render::ChromePalette,
     quads: &mut Vec<ChromeQuad>,
     sprites: &mut Vec<ChromeSprite>,
 ) {
-    let margin = (SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX * scale)
-        .round()
-        .max(1.0);
-    let radius = (SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX * scale)
-        .round()
-        .max(1.0);
     for placement in &layout.rects {
         let Some(device) = placement.device_rect else {
             continue;
@@ -3722,6 +4058,7 @@ fn window_chrome(
                         letter_spacing_em: 0.0,
                         weight: ChromeLabelWeight::Regular,
                         tabular_numerals: false,
+                        clip: None,
                     });
                     // The caret last: it is the one thing in the box that has to
                     // be visible over the letters as well as over the fill.
@@ -3806,6 +4143,7 @@ fn window_chrome(
                     // number is centred in a box that does not move, so its
                     // figures must not either.
                     tabular_numerals: true,
+                    clip: None,
                 });
             }
             // ── the pin, in the `×`'s own slot ──
@@ -4163,6 +4501,7 @@ fn collapse_bar_contents(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
+        clip: None,
     });
 }
 
@@ -4391,6 +4730,7 @@ pub(crate) fn build_drag_ghost(
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         }],
         sprites: vec![ChromeSprite::new(mark, layout.mark, mark_color)],
         opacity: 1.0,
@@ -4632,6 +4972,7 @@ pub(crate) fn build_dock_overlay(
             letter_spacing_em: bt_render::DOCK_PREVIEW_LETTER_SPACING_EM,
             weight: ChromeLabelWeight::SemiBold,
             tabular_numerals: false,
+            clip: None,
         }]
     };
     layers.push(crate::marks::OverlayLayer {
@@ -4903,6 +5244,7 @@ impl Seats {
             focus: terminal,
             next_seat,
             next_split,
+            structure_revision: 0,
         })
     }
 }
@@ -6291,6 +6633,8 @@ mod tests {
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
+                    pane_motion: PaneMotionFrame::default(),
+                    resizing_cards: None,
                 },
             );
             let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(3), 0, 0.0);
@@ -6488,6 +6832,8 @@ mod tests {
                 fit_overflow: None,
                 profile_menu_open,
                 chevron_turn,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
             },
         )
     }
@@ -8975,6 +9321,8 @@ mod tests {
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
             },
         )
     }
@@ -9107,6 +9455,8 @@ mod tests {
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
+                    pane_motion: PaneMotionFrame::default(),
+                    resizing_cards: None,
                 },
             );
             let wash = sprites
@@ -9195,6 +9545,8 @@ mod tests {
                     fit_overflow: None,
                     profile_menu_open: false,
                     chevron_turn: 0.0,
+                    pane_motion: PaneMotionFrame::default(),
+                    resizing_cards: None,
                 },
             )
         };
@@ -9312,11 +9664,29 @@ mod tests {
         .expect("a three-leaf tree restores")
     }
 
+    /// A grab whose cards have fully arrived — B22's transition at 1.0, which is
+    /// the state F63's own tests were written against and still describe.
     fn head_chrome(
         seats: &Seats,
         layout: &SeatLayout,
         scale: f32,
         pointer: ChromePointer,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        let cards = pointer
+            .dragging
+            .map(|split| ResizingCards { split, inset: 1.0 });
+        head_chrome_with_cards(seats, layout, scale, pointer, cards)
+    }
+
+    /// The same build with the card transition said out loud — B22's tests need
+    /// a `dragging` that is `None` while the cards are still running down, which
+    /// is exactly the state [`head_chrome`] cannot express.
+    fn head_chrome_with_cards(
+        seats: &Seats,
+        layout: &SeatLayout,
+        scale: f32,
+        pointer: ChromePointer,
+        cards: Option<ResizingCards>,
     ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
         build_chrome_for_tabs(
             seats,
@@ -9344,6 +9714,8 @@ mod tests {
                 fit_overflow: None,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: cards,
             },
         )
     }
@@ -9845,6 +10217,226 @@ mod tests {
                 SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
             );
         }
+    }
+
+    /// PIN — B22. The cards keep drawing after the divider is let go, and draw
+    /// nothing at all before the transition has started.
+    ///
+    /// `.pane { transition: margin .1s ease, … }` (mock-up 1464) is a transition
+    /// on the pane, not on the grab: `.slot.resizing` comes off the instant the
+    /// button does and the margin has a hundred milliseconds left to run. So the
+    /// cards are read off [`ChromeContent::resizing_cards`] and never off
+    /// [`ChromePointer::dragging`], which is exactly the state this builds — a
+    /// pointer holding nothing, with cards half way out.
+    ///
+    /// The other half is the transition's *first* frame. Both drawn numbers are
+    /// rounded and floored at one physical pixel, so scaling them by zero would
+    /// leave every flush pane wearing a one-pixel hairline of floor: a visible
+    /// line around two panes nobody is resizing, which is worse than the snap it
+    /// replaced.
+    #[test]
+    fn resizing_cards_outlive_the_grab_and_draw_nothing_before_the_transition_starts() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let split = seats.split_slots(&layout)[0].id;
+        let palette = chrome_palette();
+        let floor_of = |cards: Option<ResizingCards>| {
+            head_chrome_with_cards(&seats, &layout, 1.0, ChromePointer::default(), cards)
+                .0
+                .into_iter()
+                .filter(|quad| quad.color == palette.termhost && in_the_pane_layer(quad.rect, 1.0))
+                .map(|quad| quad.rect)
+                .collect::<Vec<_>>()
+        };
+
+        assert!(
+            floor_of(Some(ResizingCards { split, inset: 0.0 })).is_empty(),
+            "a card of zero size is not a card, and a hairline of floor around \
+             every pane is not the flush layout the mock-up draws at `margin: 0`"
+        );
+
+        let running_down = floor_of(Some(ResizingCards { split, inset: 0.5 }));
+        assert_eq!(
+            running_down.len(),
+            8,
+            "four sides each, for both panes, with nothing in the hand at all"
+        );
+        for placement in &layout.rects {
+            let rect = device_rect_of(&layout, placement.id);
+            let top = running_down
+                .iter()
+                .find(|band| band[0] >= rect[0] && band[2] <= rect[2] && band[1] == rect[1])
+                .expect("this pane gives at its top");
+            let margin = top[3] - top[1];
+            assert!(
+                margin > 0.0 && margin < SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
+                "half way through the transition the card is half way in, not all \
+                 the way ({margin} against {SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX})"
+            );
+        }
+
+        assert!(
+            floor_of(None).is_empty(),
+            "and with no transition at all the panes sit flush"
+        );
+    }
+
+    /// PIN — B22 and the split that leaves the tree under it.
+    ///
+    /// A divider released and then had its pane closed leaves the transition
+    /// running down around a rectangle that no longer exists. The honest picture
+    /// of that is no card, and the thing that must not happen is a panic: the
+    /// slot lookup is a `find` over the current solve and its `None` is the
+    /// answer rather than an error.
+    #[test]
+    fn a_split_that_left_the_tree_mid_run_down_draws_no_cards_and_does_not_panic() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let palette = chrome_palette();
+        let gone = SplitId(u64::from(u32::MAX));
+        assert!(
+            !seats
+                .split_slots(&layout)
+                .iter()
+                .any(|slot| slot.id == gone),
+            "the split really is not in this solve"
+        );
+        let (quads, _, sprites) = head_chrome_with_cards(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer::default(),
+            Some(ResizingCards {
+                split: gone,
+                inset: 0.5,
+            }),
+        );
+        assert!(
+            !quads
+                .iter()
+                .any(|quad| quad.color == palette.termhost && in_the_pane_layer(quad.rect, 1.0)),
+            "no floor shows through for a split that is not there"
+        );
+        assert!(
+            !sprites
+                .iter()
+                .any(|sprite| matches!(sprite.mark, ChromeMark::CardCorner { .. })),
+            "and no corners either"
+        );
+    }
+
+    /// PIN — U2, and the regression this whole block has to be prevented from
+    /// becoming.
+    ///
+    /// B22 eases the *card inset* and nothing else. The divider's own boundary is
+    /// re-solved from the pointer on every event and drawn exactly where the
+    /// solver put it, on every frame of the card transition — U2's real-time
+    /// layout ruling, which B22 does not touch and must never be read as
+    /// permission to touch. Ease the boundary with the cards and the seam lags
+    /// the hand by a tenth of a second, and this goes red.
+    ///
+    /// Stated as an equality against `split_slots`, because that is the same
+    /// measurement the hit test uses: a band drawn anywhere else is a band the
+    /// pointer would grab air over.
+    #[test]
+    fn the_divider_boundary_is_on_the_pointer_through_every_frame_of_the_card_transition() {
+        let mut seats = three_in_a_row();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1600, 800, 1_000);
+        let palette = chrome_palette();
+        let split = seats.split_slots(&solved(&seats, viewport, &metrics))[0].id;
+
+        // Eleven pointer positions, one per frame of the hundred milliseconds,
+        // each one a real drag of the ratio — which is what a pointer moving
+        // during the transition actually does.
+        for (frame, ppm) in (300_000..=600_000).step_by(30_000).enumerate() {
+            let layout = solved(&seats, viewport, &metrics);
+            let slot = *seats
+                .split_slots(&layout)
+                .iter()
+                .find(|slot| slot.id == split)
+                .expect("the split is in the solve");
+            assert_eq!(
+                seats.drag_divider(
+                    &metrics,
+                    split,
+                    Ratio::clamped_from_ppm(ppm),
+                    slot.slot.extent(slot.dir) - DIVIDER,
+                ),
+                Ok(true),
+                "frame {frame} has to actually move the boundary, or this pin is \
+                 about a refusal instead of about the ruling"
+            );
+            let layout = solved(&seats, viewport, &metrics);
+            let moved = *seats
+                .split_slots(&layout)
+                .iter()
+                .find(|slot| slot.id == split)
+                .expect("the split is still in the solve");
+            let inset = frame as f32 / 10.0;
+            let (quads, _, _) = head_chrome_with_cards(
+                &seats,
+                &layout,
+                1.0,
+                ChromePointer {
+                    dragging: Some(split),
+                    ..ChromePointer::default()
+                },
+                Some(ResizingCards { split, inset }),
+            );
+            assert!(
+                quads
+                    .iter()
+                    .any(|quad| quad.rect == moved.band && quad.color == palette.divider_active),
+                "frame {frame} at inset {inset}: the boundary was drawn at {:?}, \
+                 which is not the solve's {:?} — the seam has been eased and the \
+                 hand is no longer holding it",
+                quads
+                    .iter()
+                    .filter(|quad| quad.color == palette.divider_active)
+                    .map(|quad| quad.rect)
+                    .collect::<Vec<_>>(),
+                moved.band,
+            );
+        }
+    }
+
+    /// PIN — B22's two numbers come off one curve at one scale.
+    ///
+    /// `margin: 5px` and `border-radius: 8px` (mock-up 1466-1467) under one
+    /// `transition` (1464), so one `inset` produces both and neither may be
+    /// sampled separately — a card rounded further than it is inset is a shape
+    /// the declaration cannot express.
+    #[test]
+    fn a_resizing_cards_margin_and_radius_scale_together_off_one_inset() {
+        assert_eq!(resizing_card_inset(1.0, 0.0), None);
+        assert_eq!(resizing_card_inset(2.0, 0.0), None);
+        assert_eq!(
+            resizing_card_inset(1.0, 1.0),
+            Some((
+                SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
+                SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX
+            )),
+            "fully in, the cards are exactly what F63 always drew"
+        );
+        assert_eq!(
+            resizing_card_inset(2.0, 1.0),
+            Some((
+                2.0 * SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
+                2.0 * SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX
+            )),
+            "and both are logical pixels, so both take the device scale"
+        );
+        let (margin, radius) = resizing_card_inset(1.0, 0.5).expect("half way in is still a card");
+        assert!(
+            margin < SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX
+                && radius < SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
+            "half way in is half way in on both channels: {margin}, {radius}"
+        );
     }
 
     /// F63, the other half: only the slot being resized is carded.
@@ -10392,6 +10984,7 @@ mod tests {
             focus: SeatId(1),
             next_seat: count + 1,
             next_split: count,
+            structure_revision: 0,
         }
     }
 
@@ -10486,6 +11079,8 @@ mod tests {
                 fit_overflow,
                 profile_menu_open: false,
                 chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
             },
         );
         ChromeParts {
@@ -10497,6 +11092,274 @@ mod tests {
 
     fn inside(outer: [f32; 4], inner: [f32; 4]) -> bool {
         inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3]
+    }
+
+    /// Chrome for a tree whose panes are being drawn through `transforms` (U8).
+    fn chrome_in_motion(
+        seats: &Seats,
+        layout: &SeatLayout,
+        pointer: ChromePointer,
+        transforms: &[(SeatId, crate::PaneTransform)],
+    ) -> ChromeParts {
+        let tabs = [TabContent {
+            title: "PowerShell".to_owned(),
+            pane_count: seats.pane_count(),
+            ..TabContent::default()
+        }];
+        let (quads, labels, sprites) = build_chrome_for_tabs(
+            seats,
+            layout,
+            1.0,
+            pointer,
+            ChromeContent {
+                tabs: &tabs,
+                active_tab: 0,
+                grabbed: None,
+                strip_preview: None,
+                tab_scroll: 0.0,
+                preview_title: None,
+                terminal_names: &NO_TERMINAL_NAMES,
+                preview_message: None,
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::new(transforms),
+                resizing_cards: None,
+            },
+        );
+        ChromeParts {
+            quads,
+            labels,
+            sprites,
+        }
+    }
+
+    /// A tab of two terminal panes, side by side, at 1x.
+    fn split_pair() -> (Seats, SeatLayout, SeatId, SeatId) {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        let left = seats.terminal();
+        let right = seats
+            .split_terminal(&metrics, left, Axis::Row, false)
+            .expect("a 1600x900 window divides");
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        (seats, layout, left, right)
+    }
+
+    fn device_box(layout: &SeatLayout, seat: SeatId) -> [f32; 4] {
+        let device = layout
+            .get(seat)
+            .and_then(|placement| placement.device_rect)
+            .expect("the seat was placed");
+        [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ]
+    }
+
+    /// PIN — U8. Every transform the identity means the chrome is what it always
+    /// was, value for value.
+    ///
+    /// The gate the whole seam rests on, and it is an argument about *values*
+    /// rather than about a branch that skips the new code: a pane at rest walks
+    /// the same [`clip_pane_chrome`] a pane in flight does, its content rect and
+    /// its clip box are both the solved rectangle, every intersection returns
+    /// its input untouched and every sprite passes the containment test. The
+    /// same shape of argument [`bt_render::SeatViewport`] makes for `N = 1`.
+    ///
+    /// Three assertions and then a fourth that keeps them honest. The labels are
+    /// checked through the box glyphon will actually crop them to, because that
+    /// is the number the new field changes and the one a careless intersection
+    /// of `rect` would move. The last block is the red gate: displace one pane
+    /// and the chrome has to differ, or the three equalities above are pinning a
+    /// function that ignores its argument.
+    #[test]
+    fn identity_pane_transforms_leave_the_chrome_value_for_value_what_it_was() {
+        let (seats, layout, left, right) = split_pair();
+        // The hovered pane is the one that draws its `×`, so both sprite paths —
+        // the head's mark and the close control — are in the lists compared.
+        let pointer = ChromePointer {
+            pane_hover: Some(right),
+            ..ChromePointer::default()
+        };
+        let resting = chrome_in_motion(&seats, &layout, pointer, &[]);
+        let identity = [
+            (left, crate::PaneTransform::IDENTITY),
+            (right, crate::PaneTransform::IDENTITY),
+        ];
+        let stated = chrome_in_motion(&seats, &layout, pointer, &identity);
+
+        assert_eq!(resting.quads, stated.quads);
+        assert_eq!(resting.labels, stated.labels);
+        assert_eq!(resting.sprites, stated.sprites);
+
+        for label in &resting.labels {
+            assert_eq!(
+                label.clip.unwrap_or(label.rect),
+                label.rect,
+                "a label at rest is cropped to the box it is laid out in, which \
+                 is the value that was there before `clip` existed: {label:?}"
+            );
+        }
+        let pane = device_box(&layout, right);
+        assert!(
+            resting
+                .quads
+                .iter()
+                .any(|quad| quad.rect[0] == pane[0] && quad.rect[2] == pane[2]),
+            "the pane's own chrome stands on the solved rectangle {pane:?}"
+        );
+        assert!(
+            resting.sprites.len() >= 3,
+            "two pane marks and a hovered `×` at the very least, or the sprite \
+             half of this pin is vacuous ({})",
+            resting.sprites.len()
+        );
+
+        let displaced = chrome_in_motion(
+            &seats,
+            &layout,
+            pointer,
+            &[(
+                right,
+                crate::PaneTransform {
+                    dx: -120.0,
+                    dy: 0.0,
+                    sx: 1.0,
+                    sy: 1.0,
+                },
+            )],
+        );
+        assert_ne!(
+            resting.quads, displaced.quads,
+            "a real transform has to change the chrome, or the equalities above \
+             are pinning a function that ignores its argument"
+        );
+    }
+
+    /// PIN — U8. A clipped pane's caption keeps the box it is laid out in and
+    /// loses only the box it is shown through.
+    ///
+    /// [`ChromeLabel::rect`] used to do both jobs, which cost nothing while the
+    /// two were always the same rectangle. A pane mid-flight is the first case
+    /// where they differ, and the tempting one-line version — intersect `rect`
+    /// and add no field — re-runs the label's own layout inside the crop: the
+    /// wrap width the shaper is given shrinks, a centred notice re-centres on
+    /// whatever sliver is visible and slides sideways as the pane grows, and a
+    /// right-aligned control walks inward. That is the stretch R3 forbids, moved
+    /// out of the glyphs and into their placement.
+    #[test]
+    fn a_clipped_pane_caption_keeps_its_layout_box_and_loses_only_its_crop() {
+        let (seats, layout, left, _) = split_pair();
+        let resting = chrome_in_motion(&seats, &layout, ChromePointer::default(), &[]);
+        // Half the pane's width, its corner where it is: the box has closed over
+        // the right of the caption.
+        let halved = [(
+            left,
+            crate::PaneTransform {
+                dx: 0.0,
+                dy: 0.0,
+                sx: 0.5,
+                sy: 1.0,
+            },
+        )];
+        let clipped = chrome_in_motion(&seats, &layout, ChromePointer::default(), &halved);
+
+        let pane = device_box(&layout, left);
+        let at_rest = resting
+            .labels
+            .iter()
+            .find(|label| {
+                label.rect[0] > pane[0] && label.rect[2] < pane[2] && label.rect[1] >= pane[1]
+            })
+            .expect("the left pane wears a caption");
+        let now = clipped
+            .labels
+            .iter()
+            .find(|label| label.text == at_rest.text && label.rect == at_rest.rect)
+            .expect("the caption is still drawn, in the box it was laid out in");
+        let crop = now.clip.expect("and it now carries a crop of its own");
+        assert!(
+            crop[2] < now.rect[2],
+            "the crop closes over the caption's right edge ({} against {})",
+            crop[2],
+            now.rect[2]
+        );
+        assert_eq!(
+            [crop[0], crop[1], crop[3]],
+            [now.rect[0], now.rect[1], now.rect[3]],
+            "and nowhere else: the crop is the intersection with the box, not a \
+             second opinion about where the text goes"
+        );
+        assert_eq!(
+            now.rect, at_rest.rect,
+            "the layout box is untouched, so the shaper is handed the same wrap \
+             width and the same alignment it was handed at rest"
+        );
+    }
+
+    /// PIN — U8, R4. A divider does not FLIP.
+    ///
+    /// `snapshotPanes()` queries `#termhost .pane` and nothing else (mock-up
+    /// 6556-6561); a `.divider` is a sibling of the panes, never measured and
+    /// never given a transform. So on the first frame of a split the band is
+    /// already on its new boundary while the panes either side are still back
+    /// where they came from, and what the eye reads is the seam moving and the
+    /// rooms following it.
+    ///
+    /// The test is written as the two halves of that sentence in one frame: the
+    /// band sits on the solved boundary, and the pane quads do not. Transform the
+    /// bands with the panes and the first assertion goes red.
+    #[test]
+    fn a_divider_stays_on_the_solved_boundary_while_the_panes_are_still_travelling() {
+        let (seats, layout, left, right) = split_pair();
+        let band = seats
+            .split_slots(&layout)
+            .first()
+            .expect("a split has a divider")
+            .band;
+        // Both panes still wearing the whole window they came out of: the left
+        // one has not narrowed and the right one has not arrived.
+        let whole = device_box(&layout, left)[0]..device_box(&layout, right)[2];
+        let travelling = [
+            (
+                left,
+                crate::PaneTransform {
+                    dx: 0.0,
+                    dy: 0.0,
+                    sx: (whole.end - whole.start) / (device_box(&layout, left)[2] - whole.start),
+                    sy: 1.0,
+                },
+            ),
+            (
+                right,
+                crate::PaneTransform {
+                    dx: whole.end - device_box(&layout, right)[0],
+                    dy: 0.0,
+                    sx: 1.0,
+                    sy: 1.0,
+                },
+            ),
+        ];
+        let moving = chrome_in_motion(&seats, &layout, ChromePointer::default(), &travelling);
+
+        assert!(
+            moving.quads.iter().any(|quad| quad.rect == band),
+            "the divider band is on the boundary the solver just drew ({band:?}), \
+             not on an interpolated one — it is not a pane and does not FLIP"
+        );
+        let head_top = device_box(&layout, right)[1];
+        assert!(
+            !moving
+                .quads
+                .iter()
+                .any(|quad| quad.rect[1] == head_top
+                    && quad.rect[0] == device_box(&layout, right)[0]),
+            "and the pane beside it has not arrived yet: nothing of the right \
+             pane's chrome stands on its solved left edge on this frame"
+        );
     }
 
     /// T210: a collapsed bar wears the *same* mark component a pane head wears.
@@ -10779,6 +11642,7 @@ mod tests {
             focus: SeatId(1),
             next_seat: 2,
             next_split: 1,
+            structure_revision: 0,
         };
         let lone_layout = solved(&lone, viewport_of(1600, 900, 1_000), &metrics);
         let lone_parts = chrome_of(&lone, &lone_layout, None);
@@ -11532,6 +12396,7 @@ mod drop_plan_tests {
             + 1;
         let next_split = tree.ratios().iter().map(|(id, _)| id.0).max().unwrap_or(0) + 1;
         Seats {
+            structure_revision: 0,
             terminal: SeatId(1),
             focus: SeatId(1),
             tree,

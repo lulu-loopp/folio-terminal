@@ -629,6 +629,7 @@ pub fn build(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
+        clip: None,
     });
 
     let close_hovered = hover == Some(SettingsTarget::Close);
@@ -671,6 +672,7 @@ pub fn build(
             letter_spacing_em: GROUP_LABEL_TRACKING_EM,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
     }
     if let Some(rect) = clipped(layout.row_title, clip) {
@@ -684,6 +686,7 @@ pub fn build(
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
     }
     if let Some(rect) = clipped(layout.row_desc, clip) {
@@ -700,6 +703,7 @@ pub fn build(
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
     }
     if let Some(rect) = clipped(layout.cursor_row_title, clip) {
@@ -713,6 +717,7 @@ pub fn build(
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
     }
     if let Some(rect) = clipped(layout.cursor_row_desc, clip) {
@@ -726,6 +731,7 @@ pub fn build(
             letter_spacing_em: 0.0,
             weight: ChromeLabelWeight::Regular,
             tabular_numerals: false,
+            clip: None,
         });
     }
 
@@ -814,6 +820,7 @@ pub fn build(
                     letter_spacing_em: 0.0,
                     weight: ChromeLabelWeight::Regular,
                     tabular_numerals: false,
+                    clip: None,
                 });
             }
             popup.labels.push(ChromeLabel {
@@ -835,6 +842,7 @@ pub fn build(
                 letter_spacing_em: 0.0,
                 weight: ChromeLabelWeight::Regular,
                 tabular_numerals: false,
+                clip: None,
             });
         }
     }
@@ -902,6 +910,7 @@ fn push_combo(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
+        clip: None,
     });
     labels.push(ChromeLabel {
         text: COMBO_CHEVRON.to_owned(),
@@ -918,6 +927,7 @@ fn push_combo(
         letter_spacing_em: 0.0,
         weight: ChromeLabelWeight::Regular,
         tabular_numerals: false,
+        clip: None,
     });
 }
 

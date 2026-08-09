@@ -772,6 +772,30 @@ struct Runtime {
     /// case rather than a corner one — its tail crawls the last few degrees
     /// over a third of the duration.
     last_drawn_chevron: Option<marks::ChromeMark>,
+    /// **U8 — the active tab's panes, gliding to the boxes the solver just gave
+    /// them.**
+    ///
+    /// Beside [`TabState::seat_layout`]'s window-level twin rather than on the
+    /// tab, and cleared whenever the active tab changes: a FLIP is a difference
+    /// between where a pane *was drawn* and where it belongs, and a tab you were
+    /// not looking at was not drawn at all. Keeping one per tab would mean a tab
+    /// switched away from mid-split resuming its glide, from rectangles nobody
+    /// ever saw, whenever it came back — including minutes later, at a different
+    /// window size.
+    ///
+    /// This is draw-time only (R1). `SeatLayout` stays the truth from frame zero
+    /// for hit-testing, drop planning, the IME cursor area, the window's minimum
+    /// size and the PTY's grid; nothing downstream of `solve` may learn that a
+    /// pane is in flight, and nothing does.
+    pane_motion: PaneMotion,
+    /// Which [`seats::Seats::structure_revision`] [`Self::pane_motion`] was last
+    /// started for.
+    ///
+    /// The gate, and the whole of R5: a commit whose revision matches this one
+    /// re-solved for some reason that is not a pane arriving, leaving or
+    /// changing places — a divider drag, a focus change, a DPI change, a window
+    /// resize, a step of the concession ladder — and leaves the motion alone.
+    pane_motion_revision: u64,
     /// How far the tab strip is scrolled, in physical pixels (A7/A8).
     ///
     /// App state and nothing else: a scroll offset is where you are looking, not
@@ -851,6 +875,29 @@ struct Runtime {
     /// for: one cache serving two lists would evict each on the other's turn.
     settings_marks: marks::ChromeMarkRasters,
     divider_drag: Option<DividerDrag>,
+    /// **B22 — how far F63's resizing cards have pulled in**, and which split
+    /// they belong to.
+    ///
+    /// The fourth user of [`RevealTween`], after the pin's zero-width expansion,
+    /// the dock box's fade and the arriving pane's, and the first one that is
+    /// genuinely *interrupted* in ordinary use: a hand that grabs a divider,
+    /// thinks better of it and lets go within the hundred milliseconds gets a
+    /// reversal from wherever the cards had actually reached, which is what a
+    /// CSS transition interrupted mid-flight does and what `retarget` was written
+    /// to give.
+    ///
+    /// The split is remembered beside it because the cards outlive the grab.
+    /// `divider_drag` is `None` the instant the button comes up, and the cards
+    /// still have their run-down to draw — around a split that nothing is
+    /// holding. Both are kept in step by [`Runtime::sync_resizing_cards`], which
+    /// derives the target from `divider_drag` rather than mirroring it at every
+    /// door a drag can end by.
+    resizing_card_transition: RevealTween,
+    resizing_card_split: Option<SplitId>,
+    /// The card inset as it was last *drawn*, in whole physical pixels — the
+    /// margin and the radius — so the transition owes a present when it moves a
+    /// pixel and not when it moves a thousandth.
+    last_drawn_resizing_card: Option<(f32, f32)>,
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
     session_store: persist::SessionStore,
@@ -3261,6 +3308,804 @@ impl LandTween {
     }
 }
 
+/// `PANE_EASE = "transform .2s cubic-bezier(.2, 0, 0, 1)"` (mock-up 6555).
+///
+/// The pane FLIP and the tab-strip FLIP wear the same curve at different
+/// durations: [`GRAB_EASE`] under both, 200ms here against [`TAB_FLIP`]'s 160ms.
+/// That is the mock-up's own arithmetic (6555 against 6570) and not one number
+/// rounded into the other. The curve is shared because the *character* is
+/// shared — leave immediately, arrive gently — and character is a property of
+/// the gesture rather than of its size. The span is not shared because size is
+/// exactly what differs: a tab is a chip sliding one slot along a row, a pane is
+/// half the window changing shape, and the larger movement needs the longer
+/// span or it reads as a cut. Folding them into one constant makes the strip
+/// sluggish or the split abrupt depending on which number survives.
+const PANE_FLIP: Duration = Duration::from_millis(200);
+
+/// `el.style.transition = "opacity .18s ease"` for a pane that was not there
+/// before (mock-up 6572).
+///
+/// A different curve as well as a different span — the mock-up spells this one
+/// `ease`, which is the [`EASE`] the progress arc already runs on, because the
+/// arriving pane is not FLIPping. It has no rect it came from. The mock-up takes
+/// an early `return` on the next line (6573), so this happens *instead of* the
+/// slide and not as well: inventing a "before" for a pane that did not exist —
+/// its parent's box, say, or a zero-width sliver at the divider — would animate
+/// a history the layout never had, and would make the two panes either side of a
+/// fresh split behave differently for no reason the user could name.
+const PANE_FADE_IN: Duration = Duration::from_millis(180);
+
+/// `.pane { transition: margin .1s ease, border-radius .1s ease, box-shadow .1s
+/// ease }` (mock-up 1464) — B22, the hundred milliseconds F63's cards were
+/// missing.
+///
+/// F63 is already built: grab a divider and the two panes it resizes pull in
+/// from their own edges into slightly smaller rounded cards, with the `--panel`
+/// floor showing through ([`seats::resizing_card_inset`] and the `.slot.resizing
+/// .pane` block at 1465-1470). What was missing is the `transition` on the line
+/// above it, so the cards snapped in on grab and snapped out on release.
+///
+/// **The divider itself stays glued to the pointer, and B22 does not touch
+/// that.** U2's real-time-layout ruling is untouched: a divider drag re-solves
+/// the tree on every pointer event and the boundary is where the hand is, on
+/// every frame. What eases is the card *inset* — how far each pane pulls in from
+/// its own edges — and nothing else. The distinction is worth the sentence
+/// because the two are one gesture on screen and a reader could reasonably take
+/// this constant as permission to ease the drag: ease the boundary and the seam
+/// lags the hand by a tenth of a second, which is the one thing a resize may
+/// never do, and no amount of polish elsewhere buys it back.
+///
+/// A hundred milliseconds on [`EASE`] (CSS `ease`), against the pane FLIP's two
+/// hundred on `cubic-bezier(.2,0,0,1)` — the mock-up's own arithmetic, and both
+/// halves differ deliberately. A card inset is five pixels of chrome answering a
+/// button press; a pane FLIP is half the window changing shape. Borrowing the
+/// FLIP's span here would leave the cards still arriving a tenth of a second
+/// after the pointer had already dragged the seam somewhere else.
+const RESIZING_CARD_TRANSITION: Duration = Duration::from_millis(100);
+
+/// `Math.abs(dx) < .5 && Math.abs(dy) < .5` — the displacement below which a
+/// pane is held not to have moved (mock-up 6580, P178).
+///
+/// Read in *physical* pixels, and that is what makes the number mean what it
+/// says rather than being a tolerance. The solver snaps every seat boundary to a
+/// physical pixel — red line L6, adjacent seats share one integral boundary
+/// value — so a pane's corner can only ever land on a whole device pixel and
+/// there is no legal displacement strictly between zero and one. "Less than half
+/// a pixel" is therefore exactly the test "this edge did not move", with the
+/// half-pixel spent entirely on absorbing the float arithmetic that computed it.
+/// Read in logical pixels instead and the same 0.5 quietly becomes a real
+/// tolerance: at 200% scaling it would swallow a genuine one-physical-pixel
+/// move, and the pane would jump that pixel instead of travelling it.
+const PANE_FLIP_MIN_TRANSLATION: f32 = 0.5;
+
+/// `Math.abs(sx - 1) < .005 && Math.abs(sy - 1) < .005` (mock-up 6580, P178).
+///
+/// A ratio rather than a distance, and it has to be: half a percent of a 30px
+/// preview strip and half a percent of a 3000px terminal are different numbers
+/// of pixels, and it is the proportion that decides whether a resize is visible
+/// as a resize. It is a separate term rather than something the translation
+/// threshold implies, because a pane can keep its top-left corner to the pixel
+/// and still change size — every divider dragged below or to the right of a pane
+/// does precisely that, moving nothing but this.
+const PANE_FLIP_MIN_SCALE: f32 = 0.005;
+
+/// What a mid-FLIP pane is drawn through: `translate(dx, dy) scale(sx, sy)`.
+///
+/// The mock-up writes this into `el.style.transform` and lets the compositor
+/// apply it (6584); here it is applied to the pane's rect before anything is
+/// drawn, which is the same operation one layer down. `transform-origin: top
+/// left` (6581) is what makes that substitution exact: with the origin in the
+/// corner there is no re-centring term, so the transform is a translation of the
+/// corner and a scaling of the extent and composes into a rectangle rather than
+/// needing a matrix. With the CSS default origin — the centre — it would not,
+/// and the pane would have to be laid out through a general affine map for the
+/// sake of an animation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PaneTransform {
+    /// Physical pixels.
+    pub(crate) dx: f32,
+    /// Physical pixels.
+    pub(crate) dy: f32,
+    /// A ratio of the destination extent, not a distance.
+    pub(crate) sx: f32,
+    /// A ratio of the destination extent, not a distance.
+    pub(crate) sy: f32,
+}
+
+impl PaneTransform {
+    /// The transform that changes nothing: what a pane with no tween wears, and
+    /// what every FLIP decays to.
+    pub(crate) const IDENTITY: Self = Self {
+        dx: 0.0,
+        dy: 0.0,
+        sx: 1.0,
+        sy: 1.0,
+    };
+
+    /// `rect` seen through this transform — `[left, top, right, bottom]` in
+    /// physical pixels, in and out.
+    pub(crate) fn applied_to(self, rect: [f32; 4]) -> [f32; 4] {
+        let [left, top, right, bottom] = rect;
+        let (width, height) = (right - left, bottom - top);
+        let (left, top) = (left + self.dx, top + self.dy);
+        [left, top, left + width * self.sx, top + height * self.sy]
+    }
+}
+
+/// A pane sliding and stretching back into the box the solver just gave it.
+///
+/// The two-dimensional twin of [`FlipTween`] above, and the same mechanism for
+/// the same reason: the layout changes first, the pane is put back where it
+/// *was* with a transform, and the transform is released. Nothing about the
+/// solver's answer is animated — only the difference between where a pane is
+/// drawn and where it belongs, which decays to nothing. Animating the layout
+/// instead would mean running the solver on intermediate sizes, which is a
+/// different tab every frame and a grid resize per frame behind it.
+///
+/// It carries four numbers where the strip's carries one because a pane changes
+/// size and a tab does not. A tab only ever slides along its row, so a scalar
+/// offset is the whole of its displacement; a split rewrites two panes' corners
+/// *and* their extents in the same frame, and animating the corner alone would
+/// show each pane arriving at its new position already wearing its new size —
+/// the jump this exists to hide, relocated rather than removed.
+///
+/// (The mock-up counter-scales an inner wrapper so the text is not stretched
+/// while the box is, 6586. That has no equivalent here and needs none: a pane's
+/// contents are rasterized from the grid every frame rather than being a bitmap
+/// the box drags along with it, so there is nothing to undo.)
+#[derive(Clone, Copy, Debug)]
+struct PaneFlip {
+    /// The transform that puts the pane back where it was, decaying to identity.
+    /// Physical pixels for the offsets; ratios for the scales.
+    dx: f32,
+    dy: f32,
+    sx: f32,
+    sy: f32,
+    started: Option<Instant>,
+}
+
+impl PaneFlip {
+    /// The FLIP from the box a pane occupied to the box `now_rect` the solver
+    /// gave it, or `None` when P178 says it did not move.
+    ///
+    /// `before` is a measurement and not a memory — see [`Self::visual_rect`] —
+    /// and both rects are `[left, top, right, bottom]` in physical pixels.
+    ///
+    /// `None` rather than a zero-length tween is the honest answer, and it is
+    /// the answer the mock-up gives too (`return`, 6580): a pane that did not
+    /// move has nothing to draw, so a tween for it would be an entry in the
+    /// collection, a wake-up on the deadline and a frame-debt comparison, all to
+    /// arrive at the box it is already in.
+    fn displace(before: [f32; 4], now_rect: [f32; 4], at: Instant, motion: Motion) -> Option<Self> {
+        let dx = before[0] - now_rect[0];
+        let dy = before[1] - now_rect[1];
+        // `now.width ? b.width / now.width : 1` (6577-6578). A zero-extent
+        // destination is not a scale at all, and dividing by it would put an
+        // infinity into a rect.
+        let ratio = |b: f32, n: f32| if n == 0.0 { 1.0 } else { b / n };
+        let sx = ratio(before[2] - before[0], now_rect[2] - now_rect[0]);
+        let sy = ratio(before[3] - before[1], now_rect[3] - now_rect[1]);
+        if dx.abs() < PANE_FLIP_MIN_TRANSLATION
+            && dy.abs() < PANE_FLIP_MIN_TRANSLATION
+            && (sx - 1.0).abs() < PANE_FLIP_MIN_SCALE
+            && (sy - 1.0).abs() < PANE_FLIP_MIN_SCALE
+        {
+            return None;
+        }
+        Some(Self {
+            dx,
+            dy,
+            sx,
+            sy,
+            // **Ruling**, the same one `FlipTween` records: the mock-up writes
+            // this transition from JavaScript, where no `prefers-reduced-motion`
+            // block can reach it, so its silence is its medium rather than a
+            // decision. Half the window changing shape is what the preference is
+            // about. With no `started`, `sample` reports the terminal state at
+            // once — which for a FLIP is simply the layout, unanimated.
+            started: (motion == Motion::Full).then_some(at),
+        })
+    }
+
+    /// Where the pane actually is at `now`, given the box `layout` the solver
+    /// last gave it.
+    ///
+    /// This is `getBoundingClientRect` — what `snapshotPanes` measures, mock-up
+    /// 6557-6562 — and measuring rather than remembering is the correctness of
+    /// the *second* displacement, not an optimisation. A CSS transition
+    /// interrupted mid-flight restarts from the computed value, so a pane split
+    /// again 80ms into a 200ms flight begins its next journey from the 60% of
+    /// the way it had genuinely travelled. [`FlipTween::displace`] makes exactly
+    /// this argument for the strip's one axis; the only thing that changes here
+    /// is that the live position is a rectangle rather than a number, which is
+    /// why it cannot be folded into the constructor as a delta and has to be
+    /// handed back to the caller to pass in as the next `before`.
+    fn visual_rect(self, layout: [f32; 4], now: Instant, motion: Motion) -> [f32; 4] {
+        self.sample(now, motion).0.applied_to(layout)
+    }
+
+    /// The transform the pane wears at this instant, and whether it is still
+    /// moving.
+    ///
+    /// The interpolation is CSS's, term by term: a translation decays toward
+    /// zero and a scale toward one, both along the same eased fraction. Easing
+    /// the *rect* instead — lerping the four edges from `before` to `now_rect` —
+    /// would look identical for a pure translation and wrong for a resize, since
+    /// a linearly interpolated right edge is not a linearly interpolated width
+    /// once the left edge is moving too.
+    fn sample(self, now: Instant, motion: Motion) -> (PaneTransform, bool) {
+        let Some(started) = self.started.filter(|_| motion == Motion::Full) else {
+            return (PaneTransform::IDENTITY, false);
+        };
+        let elapsed = now.saturating_duration_since(started);
+        if elapsed >= PANE_FLIP {
+            return (PaneTransform::IDENTITY, false);
+        }
+        let progress = elapsed.as_secs_f32() / PANE_FLIP.as_secs_f32();
+        let eased = cubic_bezier(progress, GRAB_EASE);
+        (
+            PaneTransform {
+                dx: self.dx * (1.0 - eased),
+                dy: self.dy * (1.0 - eased),
+                sx: self.sx + (1.0 - self.sx) * eased,
+                sy: self.sy + (1.0 - self.sy) * eased,
+            },
+            true,
+        )
+    }
+}
+
+/// The one thing moving a pane: either it came from somewhere, or it did not
+/// exist.
+///
+/// An enum rather than two optional fields because the mock-up's early `return`
+/// at 6573 makes them exclusive by construction: a pane with a "before" FLIPs
+/// and never fades, a pane without one fades and never FLIPs. Two fields would
+/// admit a third state — sliding *and* fading — that nothing can produce and
+/// every reader would have to rule out.
+#[derive(Clone, Copy, Debug)]
+enum PaneTween {
+    /// A survivor, put back where it was and released.
+    Flip(PaneFlip),
+    /// An arrival, at `opacity 0` and easing up.
+    ///
+    /// The third user of [`RevealTween`], after the pin's width and the dock
+    /// box's fade, and the third time the span-as-a-field pays: all three are
+    /// one declaration easing between two states on CSS `ease`, and the only
+    /// thing that differs is how long the mock-up gives it — 160ms, 100ms, and
+    /// 180ms here. Writing a `PaneFade` type would duplicate `retarget`'s
+    /// turn-around-from-where-you-are rule and its reduced-motion answer for the
+    /// sake of holding a different `Duration`, which is precisely the thing the
+    /// field was made to hold.
+    FadeIn(RevealTween),
+}
+
+impl PaneTween {
+    /// The transform this puts on the pane — identity for a fade, which has no
+    /// geometry of its own.
+    fn transform(self, now: Instant, motion: Motion) -> PaneTransform {
+        match self {
+            Self::Flip(flip) => flip.sample(now, motion).0,
+            Self::FadeIn(_) => PaneTransform::IDENTITY,
+        }
+    }
+
+    /// The opacity this gives the pane — fully opaque for a FLIP, which never
+    /// touches it.
+    fn opacity(self, now: Instant, motion: Motion) -> f32 {
+        match self {
+            Self::Flip(_) => 1.0,
+            Self::FadeIn(fade) => fade.sample(now, motion).0,
+        }
+    }
+
+    /// Where the pane it is animating actually is — see [`PaneFlip::visual_rect`].
+    /// A fading pane is not displaced at all, so what it measures is its own box.
+    fn visual_rect(self, layout: [f32; 4], now: Instant, motion: Motion) -> [f32; 4] {
+        match self {
+            Self::Flip(flip) => flip.visual_rect(layout, now, motion),
+            Self::FadeIn(_) => layout,
+        }
+    }
+
+    fn is_animating(self, now: Instant, motion: Motion) -> bool {
+        match self {
+            Self::Flip(flip) => flip.sample(now, motion).1,
+            Self::FadeIn(fade) => fade.sample(now, motion).1,
+        }
+    }
+}
+
+/// What one pane last had drawn, at the resolution it is drawn at.
+///
+/// The box in whole physical pixels and the opacity in the 1/255 a layer's alpha
+/// resolves to. Quantizing is the whole point: `.2,0,0,1` has a long tail in
+/// which it is crawling through less than a pixel and the rasterized pane is
+/// byte-identical, and comparing the raw floats would owe a present on every
+/// wake-up of the 200ms.
+///
+/// It is the *box* that is recorded rather than the transform, and that is the
+/// one place this departs from [`Runtime::last_drawn_offset`] next door. A tab
+/// only translates, so its offset in whole pixels is what it is drawn at; a pane
+/// also scales, and a scale is a ratio with no resolution of its own — 1.0004
+/// is invisible on a 200px pane and a whole pixel on a 3000px one. The quantum
+/// only exists against the extent it multiplies, so the extent is what gets
+/// quantized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PaneDrawn {
+    box_px: [i32; 4],
+    opacity: u8,
+}
+
+/// One pane's slot in [`PaneMotion`].
+///
+/// Deliberately holds **no rectangle**. A tween is a displacement and not a
+/// destination — every reader of one already has the live solve in hand and
+/// applies the transform to that, which is CSS's own rule that a transform is
+/// expressed relative to whatever box the element is currently laid out in. A
+/// copy stored at [`PaneMotion::begin`] would be a fourth answer to "where is
+/// this pane?", correct only until the window is resized mid-flight, and the one
+/// consumer that read it — the frame-debt sweep — would then be comparing boxes
+/// nobody ever drew.
+#[derive(Clone, Copy, Debug)]
+struct PaneMotionEntry {
+    seat: SeatId,
+    tween: Option<PaneTween>,
+    last_drawn: Option<PaneDrawn>,
+}
+
+/// The live pane animations for one tab.
+///
+/// Stored as a `Vec` in the order the solver handed the seats over, and that is
+/// red line L8 rather than a preference: geometry must not depend on a hash
+/// container's iteration order, and every rect in here is geometry. A
+/// `HashMap<SeatId, _>` would make the frame-debt sweep — and therefore which
+/// frame gets presented — a function of the hasher's seed. Linear scans over it
+/// are not a compromise either: the panes in one tab are single digits, and a
+/// `BTreeMap` at that size buys ordering the layout already provides.
+#[derive(Clone, Debug, Default)]
+struct PaneMotion {
+    panes: Vec<PaneMotionEntry>,
+}
+
+impl PaneMotion {
+    /// Every pane's box as it is *drawn* at `now`, including whatever transform
+    /// is still running — `snapshotPanes` (mock-up 6557-6562).
+    ///
+    /// Taken before the layout changes and handed straight back to [`Self::begin`]
+    /// as its `before`. Splitting it out rather than having `begin` remember the
+    /// previous rects itself is what keeps the mock-up's measurement honest: the
+    /// caller is the one that knows the old [`SeatLayout`], and the transform on
+    /// top of it is this one's.
+    fn snapshot(
+        &self,
+        layout: &[(SeatId, [f32; 4])],
+        now: Instant,
+        motion: Motion,
+    ) -> Vec<(SeatId, [f32; 4])> {
+        layout
+            .iter()
+            .map(|&(seat, rect)| {
+                let visual = self
+                    .entry(seat)
+                    .and_then(|pane| pane.tween)
+                    .map_or(rect, |tween| tween.visual_rect(rect, now, motion));
+                (seat, visual)
+            })
+            .collect()
+    }
+
+    /// Start whatever motion the step from `before` to `after` asks for.
+    ///
+    /// One pass over `after`, because `after` is the layout: a seat with a
+    /// `before` rect FLIPs from it, a seat without one is new and fades in, and
+    /// that split is the mock-up's own `if (!b)` at 6570.
+    ///
+    /// A seat in `before` and not in `after` is dropped, with no exit animation
+    /// at all. That is the mock-up's choice and not an omission here:
+    /// `renderWithPaneFlip` walks the panes that exist *after* the render (6564),
+    /// so the closed pane is already out of the DOM and there is nothing left to
+    /// animate. Only the survivors FLIP. An exit would mean holding a dead
+    /// pane's box on screen for 200ms after its session is gone — the last frame
+    /// of a terminal that no longer exists — composited over the survivors that
+    /// are already expanding through that space, and it would put the closing
+    /// animation in a race with the seat id being reused.
+    ///
+    /// Tweens that have nothing to do are not stored. Under reduced motion that
+    /// is all of them, which is what makes [`Self::deadline`] answer `None` for
+    /// a preference rather than for a timeout.
+    fn begin(
+        &mut self,
+        before: &[(SeatId, [f32; 4])],
+        after: &[(SeatId, [f32; 4])],
+        now: Instant,
+        motion: Motion,
+    ) {
+        let mut next = Vec::with_capacity(after.len());
+        for &(seat, rect) in after {
+            let tween = match before.iter().find(|(id, _)| *id == seat) {
+                Some(&(_, was)) => PaneFlip::displace(was, rect, now, motion).map(PaneTween::Flip),
+                None => {
+                    let mut fade = RevealTween::over(PANE_FADE_IN);
+                    fade.retarget(1.0, now, motion);
+                    Some(PaneTween::FadeIn(fade))
+                }
+            };
+            next.push(PaneMotionEntry {
+                seat,
+                tween: tween.filter(|tween| tween.is_animating(now, motion)),
+                // A survivor keeps its drawn state across the change, and it has
+                // to: the first frame of a FLIP is by construction the box that
+                // was already on screen, so carrying the record forward is what
+                // stops the layout change itself from owing a present that would
+                // draw nothing new.
+                last_drawn: self.entry(seat).and_then(|pane| pane.last_drawn),
+            });
+        }
+        self.panes = next;
+    }
+
+    fn entry(&self, seat: SeatId) -> Option<&PaneMotionEntry> {
+        self.panes.iter().find(|pane| pane.seat == seat)
+    }
+
+    /// The transform `seat` is drawn through — identity for a seat that is not
+    /// moving, and for one this tab has never heard of.
+    fn transform_of(&self, seat: SeatId, now: Instant, motion: Motion) -> PaneTransform {
+        self.entry(seat)
+            .and_then(|pane| pane.tween)
+            .map_or(PaneTransform::IDENTITY, |tween| {
+                tween.transform(now, motion)
+            })
+    }
+
+    /// The opacity `seat` is drawn at. Fully opaque unless it is mid-arrival —
+    /// including for a seat with no entry, because a pane nothing is animating
+    /// is a pane that is simply there.
+    ///
+    /// Read by [`pane_fade_veil_layers`], which is where P177's fade is actually
+    /// drawn, and by [`Self::settle_frame_debt`], which is what makes it owe the
+    /// frames it runs on.
+    fn opacity_of(&self, seat: SeatId, now: Instant, motion: Motion) -> f32 {
+        self.entry(seat)
+            .and_then(|pane| pane.tween)
+            .map_or(1.0, |tween| tween.opacity(now, motion))
+    }
+
+    fn is_animating(&self, now: Instant, motion: Motion) -> bool {
+        self.panes
+            .iter()
+            .filter_map(|pane| pane.tween)
+            .any(|tween| tween.is_animating(now, motion))
+    }
+
+    /// When these panes next need waking, or `None` when none of them is moving.
+    ///
+    /// The same shape and the same `None` as [`Runtime::strip_animation_deadline`],
+    /// for the same reason: it is what lets `about_to_wait` fall back to
+    /// `ControlFlow::Wait` once a split has settled, instead of holding a 60fps
+    /// loop open for a window that is doing nothing.
+    fn deadline(&self, now: Instant, motion: Motion) -> Option<Instant> {
+        self.is_animating(now, motion)
+            .then(|| now + STRIP_ANIMATION_FRAME)
+    }
+
+    /// Drop the tweens that have finished, so a landed pane stops being carried.
+    ///
+    /// Purely hygiene — [`Self::transform_of`] and [`Self::opacity_of`] already
+    /// report a finished tween as identity and 1.0, so this changes nothing
+    /// anybody can see. What it changes is how long a stale `before` can be
+    /// resurrected: a `PaneFlip` that is kept forever is a rect from a layout two
+    /// splits ago sitting in memory next to a seat id that may be reused.
+    fn retire(&mut self, now: Instant, motion: Motion) {
+        for pane in &mut self.panes {
+            if !pane
+                .tween
+                .is_some_and(|tween| tween.is_animating(now, motion))
+            {
+                pane.tween = None;
+            }
+        }
+    }
+
+    /// Whether any pane owes a frame, recording what would be drawn as drawn.
+    ///
+    /// This is [`tab_owes_frame`]'s question asked of a pane, and it is asked
+    /// separately from "is anything moving?" for the reason that predicate
+    /// exists: the two part company on exactly the frame motion *stops*. On that
+    /// frame the FLIP has reached identity and reports itself finished, so a
+    /// draw gated on movement would return before rebuilding and leave the pane
+    /// stranded one eased step short of the box the solver actually gave it —
+    /// a permanent misalignment, not a missed frame of polish, because nothing
+    /// else is coming to correct it.
+    ///
+    /// It settles as it asks, exactly as the strip's loop does: the comparison
+    /// and the record are one operation because two callers disagreeing about
+    /// what was drawn is how a debt gets paid twice or not at all.
+    ///
+    /// **`layout` is the live solve, passed in rather than remembered**, and that
+    /// is the same argument [`PaneMotionEntry`] records one level down. Both draw
+    /// seams apply the running transform to the rectangle the solver gave this
+    /// frame, so a window resized mid-flight moves every pane and the tween
+    /// simply decays onto the new box. A debt settled against a copy taken at
+    /// [`Self::begin`] would compare a pre-resize rectangle to a post-resize one
+    /// and answer for boxes nobody drew — nothing visibly wrong, because the
+    /// drawing never read that copy, but a present that draws nothing new.
+    fn settle_frame_debt(
+        &mut self,
+        layout: &[(SeatId, [f32; 4])],
+        now: Instant,
+        motion: Motion,
+    ) -> bool {
+        let mut owed = false;
+        for pane in &mut self.panes {
+            // A pane the solve no longer places is not drawn, so it owes nothing.
+            // It is not dropped here either: [`Self::begin`] is the sole author of
+            // this list's membership, and a sweep that quietly forgot a seat would
+            // be a second one.
+            let Some(&(_, rect)) = layout.iter().find(|(seat, _)| *seat == pane.seat) else {
+                continue;
+            };
+            let showing = match pane.tween {
+                Some(tween) => PaneDrawn {
+                    box_px: tween
+                        .transform(now, motion)
+                        .applied_to(rect)
+                        .map(|edge| edge.round() as i32),
+                    opacity: (tween.opacity(now, motion).clamp(0.0, 1.0) * 255.0).round() as u8,
+                },
+                None => PaneDrawn {
+                    box_px: rect.map(|edge| edge.round() as i32),
+                    opacity: u8::MAX,
+                },
+            };
+            if tab_owes_frame(pane.last_drawn, showing) {
+                pane.last_drawn = Some(showing);
+                owed = true;
+            }
+        }
+        owed
+    }
+}
+
+/// One terminal pane's two rectangles for one present.
+///
+/// The pair, and never one of them: [`bt_render::SeatFrame`] takes both, they
+/// are computed together from one sample of one clock, and a caller holding only
+/// the viewport would have to invent the box it is allowed to appear in.
+#[derive(Clone, Copy, Debug)]
+struct PaneDraw {
+    seat: SeatId,
+    /// Where the contents were laid out and where their top-left lands.
+    viewport: bt_render::SeatViewport,
+    /// The box they may appear in.
+    clip: bt_render::SeatViewport,
+}
+
+/// **U8, R3 — a mid-FLIP terminal pane's viewport and scissor.**
+///
+/// `body` is what `pane_body_viewport` answered: the pane's content rectangle at
+/// its **final** size, and this function does not change that size — not by a
+/// pixel, not at any point of the flight. The extent comes from the solve and
+/// only the corner comes from the tween, which is R2 made structural rather than
+/// promised: a grid reflow is a function of the extent, so an extent no
+/// animation can touch is a ConPTY resize no animation can cause.
+///
+/// The mock-up gets the same result by composing two transforms — `scale(s)` on
+/// the pane and `scale(1/s)` on an inner wrapper (6584-6586) — because CSS can
+/// only move a laid-out box by transforming it, so the outer scale is
+/// unavoidable and the inner one is there to cancel it. Multiplied out, the pair
+/// says exactly what these two rectangles say. Transcribing the CSS literally —
+/// scaling this crate's viewport by `s` — would reflow the grid on every frame
+/// of the animation and hand ConPTY a resize storm, which is precisely what the
+/// counter-scale exists to prevent.
+///
+/// The viewport can legitimately hang off the surface: a pane growing leftward
+/// out of a closed sibling is laid out at its final width from the corner it
+/// still occupies, so its right edge is past the window's until it lands. That
+/// is legal for a viewport and not for a scissor, which is why only the second
+/// of the pair is clamped, and it is clamped where it is validated.
+///
+/// At rest the transform is the identity, both rectangles are `body`, and every
+/// value the renderer sees is the one that was there before U8.
+fn animated_pane_viewports(
+    body: bt_render::SeatViewport,
+    pane: [f32; 4],
+    transform: PaneTransform,
+) -> (bt_render::SeatViewport, bt_render::SeatViewport) {
+    let viewport = bt_render::SeatViewport {
+        x: (body.x as f32 + transform.dx).round().max(0.0) as u32,
+        y: (body.y as f32 + transform.dy).round().max(0.0) as u32,
+        width: body.width,
+        height: body.height,
+    };
+    let content = [
+        viewport.x as f32,
+        viewport.y as f32,
+        (viewport.x + viewport.width) as f32,
+        (viewport.y + viewport.height) as f32,
+    ];
+    // The animating box, cropped to the content it is cropping. Intersecting
+    // rather than taking the box whole is what makes this equal `body` at rest:
+    // the box is the *whole* pane, head included, and the head is chrome that
+    // this seat does not draw.
+    //
+    // A box that misses its own content entirely is not a state the arithmetic
+    // can reach — the box always contains the corner the content is drawn from —
+    // so the fallback is the content itself rather than an empty rectangle the
+    // scissor would reject.
+    let clip = seats::box_intersection(transform.applied_to(pane), content).unwrap_or(content);
+    let left = clip[0].round().max(0.0);
+    let top = clip[1].round().max(0.0);
+    (
+        viewport,
+        bt_render::SeatViewport {
+            x: left as u32,
+            y: top as u32,
+            width: (clip[2].round() - left).max(1.0) as u32,
+            height: (clip[3].round() - top).max(1.0) as u32,
+        },
+    )
+}
+
+/// **U8 — where the preview seat's picture is fitted, and where it is drawn.**
+///
+/// Three rectangles because the picture is the one thing in this window that is
+/// *resampled* to its box: [`Self::body`] is what it is fitted to and must not
+/// move for the whole flight (R2, one Lanczos scale per commit rather than one
+/// per frame), while [`Self::seat`] and [`Self::clip`] are where this frame puts
+/// it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreviewPlacement {
+    /// The solved body — final size, final corner. What `preview_image_extent`
+    /// fits against.
+    body: bt_render::SeatViewport,
+    /// Where the picture is laid out and where its top-left lands this frame.
+    seat: bt_render::SeatViewport,
+    /// The box it may appear in.
+    clip: bt_render::SeatViewport,
+}
+
+/// **U8 — the preview seat's picture rides its own pane's tween.**
+///
+/// A preview pane is a pane: it FLIPs exactly as its neighbours do, its head
+/// glides with the rest of the chrome, and its picture has to travel with it or
+/// the two arrive a fifth of a second apart — which is the pane visibly coming
+/// apart, and is on screen the first time anyone opens a preview, because
+/// landing one *is* a structural edit.
+///
+/// The pair is [`animated_pane_viewports`]' and not a second sampler beside it.
+/// `preview_body_viewport` delegates to `pane_body_viewport`, so this is
+/// literally the terminal seats' computation applied to one more seat: extent
+/// from the solve, corner from the tween. That equality is what makes R2 hold
+/// here for free — no frame of a flight changes the extent, so no frame of a
+/// flight can re-run the scale worker.
+fn preview_image_placement(
+    seats: &seats::Seats,
+    layout: &SeatLayout,
+    seat: SeatId,
+    scale: f32,
+    transform: PaneTransform,
+) -> Option<PreviewPlacement> {
+    let body = seats::preview_body_viewport(seats, layout, seat, scale)?;
+    let device = layout.get(seat)?.device_rect?;
+    let pane = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    let (placed, clip) = animated_pane_viewports(body, pane, transform);
+    Some(PreviewPlacement {
+        body,
+        seat: placed,
+        clip,
+    })
+}
+
+/// **U8, P177 — the veil an arriving pane fades in from behind.**
+///
+/// `if (!b) { … el.style.transition = "opacity .18s ease"; el.style.opacity = "";
+/// … return; }` (mock-up 6570-6575). A pane with no "before" rectangle does not
+/// FLIP, it fades, and the early `return` on 6573 makes the two *alternatives*
+/// rather than stages: a pane that came from somewhere slides, a pane that did
+/// not exist appears. [`PaneTween::FadeIn`] already models it and
+/// [`PaneMotion::opacity_of`] already answers it; this is the drawing.
+///
+/// **Ruling — the fade is carried by a veil in the ground colour, not by
+/// per-fragment alpha.** The arriving pane is drawn exactly as it is drawn at
+/// rest, and its rectangle is then covered by [`ChromePalette::seat_body`] — the
+/// palette's own "exactly `--termbg`" — at `1 - opacity`, decaying to nothing.
+///
+/// Over the ground that is *exactly* CSS `opacity`: the composite
+/// `termbg·(1-a) + pane·a` is what an element at opacity `a` over a `--termbg`
+/// backdrop produces, and the ground under a pane's box is `--termbg` — it is
+/// the terminal pass's own clear colour, and A1 rules that `--panel` shows only
+/// in the gap a divider drag opens.
+///
+/// The literal thing — a uniform alpha on the pane's own draws — is refused, and
+/// not for effort. A terminal seat's glyph colours live inside its cosmic-text
+/// buffers, and glyphon's `TextArea` carries no uniform alpha multiplier, so a
+/// per-seat opacity would mean rebuilding every glyph buffer on every frame of a
+/// 180ms fade: a text-relayout storm traded for a resize storm, which is the
+/// same bug wearing a different coat, and U8 exists partly to refuse the first
+/// one.
+///
+/// **Where it diverges, stated rather than hidden.** Where a *still-moving
+/// neighbour* is crossing the arriving pane's box, the veil covers that
+/// neighbour too, whereas CSS would blend the arriving pane over it. What that
+/// reads as is "this ground has not settled yet", which is true; what it is not
+/// is a pixel-exact transcription. It is also bounded: a fade lasts 180ms of the
+/// FLIP's 200ms, only a neighbour whose own flight crosses the new pane's box
+/// can be caught by it, and what shows through is the colour that box is about
+/// to be anyway.
+///
+/// One fill per arriving pane, on the seat's own solved rectangle. An arriving
+/// pane does not FLIP, so its box *is* the final rect — checked rather than
+/// assumed, because a veil hung on a moving box would be a hole travelling
+/// across the layout.
+fn pane_fade_veil_layers(
+    motion: &PaneMotion,
+    panes: &[(SeatId, [f32; 4])],
+    now: Instant,
+    preference: Motion,
+    palette: ChromePalette,
+) -> Vec<marks::OverlayLayer> {
+    let quads: Vec<bt_render::OverlayQuad> = panes
+        .iter()
+        .filter_map(|&(seat, rect)| {
+            let alpha = 1.0 - motion.opacity_of(seat, now, preference);
+            if alpha <= 0.0 {
+                return None;
+            }
+            debug_assert_eq!(
+                motion.transform_of(seat, now, preference),
+                PaneTransform::IDENTITY,
+                "a fading pane is never also displaced (mock-up 6573 returns), so \
+                 its veil may be hung on the rectangle the solver gave it"
+            );
+            Some(bt_render::OverlayQuad {
+                rect,
+                color: palette.seat_body,
+                alpha: alpha.clamp(0.0, 1.0),
+            })
+        })
+        .collect();
+    if quads.is_empty() {
+        return Vec::new();
+    }
+    vec![marks::OverlayLayer {
+        quads,
+        ..marks::OverlayLayer::default()
+    }]
+}
+
+/// The overlay's ground floor, in the order it paints: the arriving panes' veil,
+/// then the dock drawing over it, and everything else stacked on top by
+/// [`Runtime::refresh_overlay`].
+///
+/// The veil has to be *in* the overlay at all because the overlay pass is the
+/// only one that runs over the whole window above seat chrome and above chrome
+/// text — a pane's caption is chrome text, and a fade that did not reach it
+/// would be a title arriving at full strength over a body that is not there yet.
+///
+/// And it has to be at the *bottom* of it. The dock drawing is already the
+/// lowest thing the overlay carries (`#dock-shift` 24 and `#dock-preview` 25
+/// against `.combo-menu`'s 30 and `.tip`'s 60), for the reason
+/// [`Runtime::dock_overlay_layers`] gives: it is a drawing *on* the layout
+/// rather than a surface floating over the window. A veil is a drawing on one
+/// pane, which is a step lower still — a menu, a dialog or a tip that is somehow
+/// up while the layout is changing must cover it, because those surfaces are the
+/// window talking to you and the veil is the window rearranging itself.
+fn ground_overlay_layers(
+    veil: Vec<marks::OverlayLayer>,
+    dock: Vec<marks::OverlayLayer>,
+) -> Vec<marks::OverlayLayer> {
+    let mut layers = veil;
+    layers.extend(dock);
+    layers
+}
+
 /// K115 — how far from its slot a grabbed tab is drawn, given where the hand
 /// wants it.
 ///
@@ -5222,6 +6067,10 @@ impl Runtime {
             profile_menu: profiles::ProfileMenu::default(),
             chevron_turn: ChevronTurn::default(),
             last_drawn_chevron: None,
+            pane_motion: PaneMotion::default(),
+            // The window opens on a tree that has never been edited, so the
+            // first commit that *does* edit one is the first thing to animate.
+            pane_motion_revision: 0,
             tab_scroll: 0.0,
             tab_press: None,
             pane_press: None,
@@ -5234,6 +6083,9 @@ impl Runtime {
             rename_blink: CursorBlink::new(Instant::now()),
             settings_marks: marks::ChromeMarkRasters::default(),
             divider_drag: None,
+            resizing_card_transition: RevealTween::over(RESIZING_CARD_TRANSITION),
+            resizing_card_split: None,
+            last_drawn_resizing_card: None,
             work_area: WorkAreaHint::NeverKnown,
             session_store,
             recent,
@@ -5415,6 +6267,17 @@ impl Runtime {
         self.renderer.set_peek_overlay(None);
         self.frame_image_references = FrameImageReferences::default();
         self.underlined_image_reference = None;
+        // **U8 — you do not glide a layout you were not looking at.**
+        //
+        // A FLIP is the difference between where a pane *was drawn* and where it
+        // belongs, and the tab arriving was not drawn: whatever split, close or
+        // drop happened in it happened off screen, possibly minutes ago and
+        // possibly at another window size. Carrying the tween across would open
+        // the tab on rectangles nobody has ever seen and glide them to the ones
+        // the solver has. The revision is adopted rather than reset, so the next
+        // structural edit in *this* tab is the next thing that animates.
+        self.pane_motion = PaneMotion::default();
+        self.pane_motion_revision = self.seats.structure_revision();
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
         let next_grid = self.resolve_seat_layout(render_physical);
         self.schedule_grid_change(
@@ -5687,6 +6550,127 @@ impl Runtime {
             .grid_for_pixels(terminal_seat.width, terminal_seat.height)
     }
 
+    /// Every pane's solved box in physical pixels, in the solver's own order.
+    ///
+    /// The order is `SeatLayout::rects`', which is the in-order walk of the tree
+    /// (D2) — red line L8, and the reason [`PaneMotion`] stores a `Vec` at all:
+    /// every number in here is geometry, and geometry that depends on iteration
+    /// order is geometry nobody chose.
+    ///
+    /// A seat the solver did not place has no box and is simply absent, which is
+    /// the same answer [`PaneMotion::begin`] gives a seat that left the layout.
+    fn pane_rects(&self) -> Vec<(SeatId, [f32; 4])> {
+        self.seat_layout
+            .rects
+            .iter()
+            .filter_map(|placement| {
+                let device = placement.device_rect?;
+                Some((
+                    placement.id,
+                    [
+                        device.left as f32,
+                        device.top as f32,
+                        device.right as f32,
+                        device.bottom as f32,
+                    ],
+                ))
+            })
+            .collect()
+    }
+
+    /// What each pane is drawn through right now, for [`seats::PaneMotionFrame`].
+    ///
+    /// The clock is read once by the caller and handed down, exactly as
+    /// [`Self::tab_trailers`] does for the strip: two seats of one chrome build
+    /// disagreeing about what time it is would be two seats sampled from two
+    /// different frames of the same animation.
+    fn pane_transforms(&self, now: Instant) -> Vec<(SeatId, PaneTransform)> {
+        self.seat_layout
+            .rects
+            .iter()
+            .map(|placement| {
+                (
+                    placement.id,
+                    self.pane_motion
+                        .transform_of(placement.id, now, self.motion),
+                )
+            })
+            .collect()
+    }
+
+    /// **B22 — bring the resizing cards up to date with the hand.**
+    ///
+    /// Derived from [`Runtime::divider_drag`] rather than mirrored into the tween
+    /// at every place a drag starts and ends, and for the reason `refresh_chrome`
+    /// already gives about `body.dragging`: a drag ends by four doors — the
+    /// button coming up, Esc, losing the mouse capture, and the layout being torn
+    /// down under it — and a mirror goes wrong the moment a fifth is added and
+    /// forgets. There is exactly one fact here ("is a divider being held?"), and
+    /// this reads it.
+    ///
+    /// [`RevealTween::retarget`] does the rest: a grab aims the transition at 1.0,
+    /// a release aims it at 0.0, and a reversal mid-flight turns around from where
+    /// the cards actually are rather than from an end they never reached — which
+    /// is what a CSS transition interrupted mid-flight does, and the whole reason
+    /// the same type serves the pin, the dock box and the arriving pane.
+    ///
+    /// The split is dropped in two cases and only two: the run-down has finished,
+    /// or the split is no longer in the solve. The second is not a tidy-up — a
+    /// divider that was released and then had its pane closed leaves a card
+    /// running down around a rectangle that no longer exists, and the honest
+    /// picture of that is no card at all.
+    fn sync_resizing_cards(&mut self, now: Instant) {
+        let motion = self.motion;
+        if let Some(drag) = self.divider_drag {
+            self.resizing_card_split = Some(drag.split);
+            self.resizing_card_transition.retarget(1.0, now, motion);
+            return;
+        }
+        let Some(split) = self.resizing_card_split else {
+            return;
+        };
+        self.resizing_card_transition.retarget(0.0, now, motion);
+        let (inset, moving) = self.resizing_card_transition.sample(now, motion);
+        let still_there = self
+            .seats
+            .split_slots(&self.seat_layout)
+            .iter()
+            .any(|slot| slot.id == split);
+        if (!moving && inset <= 0.0) || !still_there {
+            self.resizing_card_split = None;
+            self.resizing_card_transition = RevealTween::over(RESIZING_CARD_TRANSITION);
+        }
+    }
+
+    /// **B22 — which split wears cards this frame, and how far in**, for
+    /// [`seats::ChromeContent::resizing_cards`].
+    ///
+    /// Sampled here and handed over as a number, exactly as
+    /// [`Runtime::pane_transforms`] hands the pane FLIP over: `seats` has an
+    /// explicit invariant that nothing in it knows what time it is.
+    ///
+    /// `None` at a zero inset rather than `Some(0.0)`, because the two are the
+    /// same picture and only one of them is a fact — see
+    /// [`seats::resizing_card_inset`] for why a card of zero size is not a card.
+    fn resizing_cards_frame(&self, now: Instant) -> Option<seats::ResizingCards> {
+        let split = self.resizing_card_split?;
+        let (inset, _) = self.resizing_card_transition.sample(now, self.motion);
+        (inset > 0.0).then_some(seats::ResizingCards { split, inset })
+    }
+
+    /// The card inset as the chrome would *draw* it — whole physical pixels of
+    /// margin and radius — or `None` when there is no card.
+    ///
+    /// Quantised for the reason the pin's reveal and the dock box's fade are:
+    /// `ease` has a long flat tail in which the transition is crawling through
+    /// less than a pixel and the drawn card is byte-identical, and comparing the
+    /// raw fraction would owe a present on every wake-up of the hundred
+    /// milliseconds.
+    fn drawn_resizing_card(&self, now: Instant) -> Option<(f32, f32)> {
+        let cards = self.resizing_cards_frame(now)?;
+        seats::resizing_card_inset(self.renderer.metrics().scale_factor as f32, cards.inset)
+    }
+
     /// Hand one commit's geometry changes to whoever is listening (T230).
     ///
     /// See [`Runtime::last_layout_events`] for who that is, and is not, today.
@@ -5716,6 +6700,10 @@ impl Runtime {
         // knows how wide a number is — so the measuring happens here, where the
         // renderer is, and the strip is handed the answer rather than a font.
         let now = Instant::now();
+        // B22, before anything is built: the cards are a function of whether a
+        // divider is being held, and this is the one choke point every path that
+        // grabs, releases or cancels one already goes through.
+        self.sync_resizing_cards(now);
         let palette = bt_render::chrome_palette();
         let renaming = self.rename.as_ref().map(|editor| editor.tab);
         // Only a tab drag lifts a tab out of the strip; a pane in the air leaves
@@ -5817,6 +6805,13 @@ impl Runtime {
                 .is_some()
                 .then(|| "Click a dotted path to preview it here".to_owned()),
         };
+        // U8 — sampled here, on the same `now` every other animated value in
+        // this build reads, and handed over as numbers. `seats` has an explicit
+        // invariant that nothing in it knows what time it is, and a `PaneMotion`
+        // passed down whole would be a clock in the one module that must not
+        // hold one.
+        let pane_transforms = self.pane_transforms(now);
+        let resizing_cards = self.resizing_cards_frame(now);
         let (quads, labels, sprites) = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
@@ -5841,6 +6836,8 @@ impl Runtime {
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
                 chevron_turn: self.chevron_turn.sample(now, self.motion).0,
+                pane_motion: seats::PaneMotionFrame::new(&pane_transforms),
+                resizing_cards,
             },
         );
         let icons = self.chrome_marks.resolve(&sprites);
@@ -6445,10 +7442,13 @@ impl Runtime {
         // state and this is the state that the pointer, the tree and the window
         // all move.
         self.sync_drop_preview(now);
-        // Lowest of everything the overlay carries: `z-index` 24 and 25 against a
-        // menu's 30. It is a drawing on the layout rather than a surface over the
-        // window, and a dialog that is somehow up during a drag must cover it.
-        let mut layers = self.dock_overlay_layers(now);
+        // The two lowest things the overlay carries, in their own order: P177's
+        // veil under the dock drawing's `z-index` 24 and 25, both under a menu's
+        // 30. Neither is a surface floating over the window — one is a drawing on
+        // the layout and the other is a drawing on one pane — so a dialog that is
+        // somehow up while either runs must cover it. See [`ground_overlay_layers`].
+        let mut layers =
+            ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now));
         layers.extend(if let Some(layout) = self.settings_layout() {
             settings::build(&layout, self.settings.hover(), self.theme_mode)
         } else if let Some(layout) = self.restore_layout() {
@@ -6676,6 +7676,23 @@ impl Runtime {
             plan.refuse();
         }
         Some(plan)
+    }
+
+    /// **P177 — the veil over every pane that is still arriving**, on the panes
+    /// this tab is actually drawing.
+    ///
+    /// The clock is the one [`Runtime::refresh_overlay`] read for the whole
+    /// build, and the rectangles are the live solve rather than anything the
+    /// tween remembers: an arriving pane's box is whatever the solver says it is
+    /// this frame, including after a window resize that happened mid-fade.
+    fn pane_fade_veils(&self, now: Instant) -> Vec<marks::OverlayLayer> {
+        pane_fade_veil_layers(
+            &self.pane_motion,
+            &self.pane_rects(),
+            now,
+            self.motion,
+            bt_render::chrome_palette(),
+        )
     }
 
     /// The dock drawing's layers: the destinations, then the box over them.
@@ -7365,12 +8382,23 @@ impl Runtime {
             return;
         };
         let scale = self.renderer.metrics().scale_factor as f32;
-        let Some(body) =
-            seats::preview_body_viewport(&self.seats, &self.seat_layout, preview_seat, scale)
-        else {
+        // U8 — fitted against the solve and *placed* through the tween. The two
+        // are the same rectangle at rest and at the end of every flight; while
+        // one is running the picture travels with the head above it. This is one
+        // sample of the clock for one commit; the frames in between are re-placed
+        // by `redraw`, which is the only thing that runs per frame.
+        let Some(placement) = preview_image_placement(
+            &self.seats,
+            &self.seat_layout,
+            preview_seat,
+            scale,
+            self.pane_motion
+                .transform_of(preview_seat, Instant::now(), self.motion),
+        ) else {
             self.renderer.set_preview_image(None);
             return;
         };
+        let body = placement.body;
         let Some(path) = self
             .preview_image
             .as_ref()
@@ -7464,7 +8492,8 @@ impl Runtime {
             // new fitted extent. It may be briefly soft, but the preview never vanishes; quiet-time
             // delivery below replaces it with a one-to-one display raster.
             self.renderer.set_preview_image(Some(PreviewImage {
-                seat: body,
+                seat: placement.seat,
+                clip: placement.clip,
                 key: raster.key.clone(),
                 rgba: Arc::clone(&raster.rgba),
                 width_px: raster.width_px,
@@ -7525,6 +8554,18 @@ impl Runtime {
         self.renderer.set_peek_overlay(None);
         let now = Instant::now();
         self.defer_preview_resample(now);
+        // **U8 — `snapshotPanes()` (mock-up 6557-6562), before the layout moves.**
+        //
+        // What it measures is `getBoundingClientRect`, which is where each pane
+        // *is on screen* — the solved rectangle with whatever transform is still
+        // running already applied. That is what makes a second split 80ms into
+        // the first one's flight start from the 60% of the way the pane had
+        // genuinely travelled, instead of teleporting to a box it never reached.
+        // Taken here rather than inside the re-solve because this is the last
+        // moment `self.seat_layout` still describes what the user can see.
+        let before = self
+            .pane_motion
+            .snapshot(&self.pane_rects(), now, self.motion);
         let next_grid = self.resolve_seat_layout(render_physical);
         // The panes without the keyboard, before the focused one: they take the
         // solver's answer unconditionally, so doing them first keeps the focused
@@ -7539,6 +8580,32 @@ impl Runtime {
             "resize terminal actor for a seat layout change",
         )?;
         let resized_at = trace_started.map(|_| Instant::now());
+        // **U8, R5 — only a structural tree change animates.**
+        //
+        // Every layout-mutating path in this file converges here, and most of
+        // them are not structural: a divider drag steers a ratio, a focus change
+        // feeds W2's concession ladder, a DPI change re-solves the same tree on
+        // a new rectangle. All of them move rectangles; none of them is a pane
+        // arriving, leaving or changing places, so "the layout re-solved" cannot
+        // be the gate and the tree's own revision is.
+        //
+        // Nothing is cancelled on the other branch, and that is CSS's answer as
+        // much as ours: a transform is expressed *relative* to whatever box the
+        // element is currently laid out in, so a flight that is running when the
+        // window is resized keeps its remaining offset and decays onto the new
+        // rectangle. Both draw seams read the transform against the live solve,
+        // which is that behaviour with no extra code.
+        if self.pane_motion_revision != self.seats.structure_revision() {
+            self.pane_motion_revision = self.seats.structure_revision();
+            let after = self.pane_rects();
+            self.pane_motion.begin(&before, &after, now, self.motion);
+            // The chrome `resolve_seat_layout` built a moment ago was built
+            // through the *previous* frame's transforms, because the tweens that
+            // decide it did not exist yet. Rebuilt here rather than by moving
+            // the solve: only a structural commit pays for it, which is once per
+            // split rather than once per divider event.
+            self.refresh_chrome();
+        }
         self.sync_math_layout_key();
         // The grid actually in force, which under the typed-input gate is still the old one. The
         // present gate admits the grid the frame will really carry, never the one merely solved.
@@ -8122,7 +9189,34 @@ impl Runtime {
             self.last_drawn_dock_reveal = faded;
             owes_frame = true;
         }
-        if !owes_frame {
+        // **B22 — the resizing cards' own debt**, on the same terms as the dock
+        // box's: the inset that would be *drawn*, in whole physical pixels,
+        // against the one that was. It is settled here rather than inside the
+        // chrome build because a card running down after the button came up is
+        // the one case where nothing else is asking for the frame — the pointer
+        // has stopped, the layout has stopped, and only this transition is left.
+        let carded = self.drawn_resizing_card(now);
+        if self.last_drawn_resizing_card != carded {
+            self.last_drawn_resizing_card = carded;
+            owes_frame = true;
+        }
+        // **U8 — the panes' own debt, settled as it is asked.**
+        //
+        // Asked separately from "is anything moving?" for the reason
+        // [`tab_owes_frame`] exists: the two part company on exactly the frame
+        // the flight *ends*, where the FLIP has reached identity and reports
+        // itself finished. A draw gated on movement would return before
+        // rebuilding and leave every pane one eased step short of the box the
+        // solver actually gave it — a permanent misalignment, because nothing
+        // else is coming to correct it. `retire` afterwards, so a landed pane
+        // stops carrying a rect from a layout two splits ago.
+        // The live solve, and not a copy the tween took when it started: see
+        // [`PaneMotion::settle_frame_debt`]. A window resized mid-flight moves
+        // every pane, and the debt is about what is *drawn*.
+        let pane_rects = self.pane_rects();
+        let panes_owe = self.pane_motion.settle_frame_debt(&pane_rects, now, motion);
+        self.pane_motion.retire(now, motion);
+        if !owes_frame && !panes_owe {
             return Ok(());
         }
         // The strip decides for itself whether anything visibly moved. An
@@ -8130,7 +9224,15 @@ impl Runtime {
         // a tween rounding to the same thousandth, a breath at the flat top of
         // its curve — still owes the *next* frame, which the deadline below
         // provides, but it does not owe a present now.
-        if !self.refresh_chrome() {
+        //
+        // A pane's debt is *not* answered by that question, and this is the one
+        // place the two differ. The chrome is only half of what a pane FLIP
+        // moves; the other half is the terminal's own viewport, which is built
+        // in `redraw` from the same transform and which `refresh_chrome` knows
+        // nothing about. A flight over a lone-headed pane can leave the chrome
+        // byte-identical while the grid underneath it has to be drawn a hundred
+        // pixels to the left.
+        if !self.refresh_chrome() && !panes_owe {
             return Ok(());
         }
         self.publish_frame(FrameTrigger {
@@ -8167,7 +9269,25 @@ impl Runtime {
             .drop_preview
             .as_ref()
             .is_some_and(|shown| shown.reveal.sample(now, motion).1);
-        (tabs_moving || chevron_turning || dock_fading).then(|| now + STRIP_ANIMATION_FRAME)
+        // B22, and the same argument one line further: the cards keep running
+        // down for a hundred milliseconds after the divider is let go, with the
+        // pointer already still. Nothing else would wake the loop to draw them.
+        let cards_moving = self.resizing_card_transition.sample(now, motion).1;
+        // U8 — the active tab's panes, on the same terms and with the same
+        // `None`: a window whose split has settled asks for no wake-ups at all,
+        // and under reduced motion there was never a tween to ask for one.
+        // Folded in here rather than added as a second deadline at the call site
+        // because it answers the same question — "when does this window next
+        // need waking for an animation?" — and two answers to one question is
+        // how one of them gets forgotten.
+        [
+            (tabs_moving || chevron_turning || dock_fading || cards_moving)
+                .then(|| now + STRIP_ANIMATION_FRAME),
+            self.pane_motion.deadline(now, motion),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// The dock box's opacity as the overlay would draw it, quantised to the
@@ -11782,23 +12902,63 @@ impl Runtime {
         // the same path counted.
         let focused_leaf = self.focused_leaf;
         let scale = self.renderer.metrics().scale_factor as f32;
-        let bodies: Vec<(bt_layout::SeatId, bt_render::SeatViewport)> = self
+        // U8 — one instant for the whole frame, as everywhere else a tween is
+        // read: two panes of one present sampled at two times would be two
+        // frames of the same animation composited together.
+        let now = Instant::now();
+        let motion = self.motion;
+        let bodies: Vec<PaneDraw> = self
             .seats
             .terminals()
             .into_iter()
             .filter_map(|seat| {
-                seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
-                    .map(|body| (seat, body))
+                let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+                let device = self.seat_layout.get(seat)?.device_rect?;
+                let pane = [
+                    device.left as f32,
+                    device.top as f32,
+                    device.right as f32,
+                    device.bottom as f32,
+                ];
+                let (viewport, clip) = animated_pane_viewports(
+                    body,
+                    pane,
+                    self.pane_motion.transform_of(seat, now, motion),
+                );
+                Some(PaneDraw {
+                    seat,
+                    viewport,
+                    clip,
+                })
             })
             .collect();
+        // **U8 — the preview seat's picture, re-placed on every animated frame.**
+        //
+        // Its pane FLIPs with the rest, and the pair of rectangles it is drawn
+        // through is a function of the clock; `refresh_preview_for_layout` runs
+        // once per commit and cannot answer for the frames in between. Only the
+        // placement is touched here — the raster, its key and the extent it was
+        // fitted to belong to the commit, and re-deciding those per frame is the
+        // resample storm R2 exists to forbid.
+        if let Some(preview_seat) = self.seats.preview()
+            && let Some(placement) = preview_image_placement(
+                &self.seats,
+                &self.seat_layout,
+                preview_seat,
+                scale,
+                self.pane_motion.transform_of(preview_seat, now, motion),
+            )
+        {
+            self.renderer
+                .place_preview_image(placement.seat, placement.clip);
+        }
         let active = self.active_tab;
-        let mut unfocused_frames: Vec<(bt_layout::SeatId, bt_render::SeatViewport, ViewportFrame)> =
-            Vec::new();
-        for (seat, body) in &bodies {
-            if *seat == focused_leaf {
+        let mut unfocused_frames: Vec<(PaneDraw, ViewportFrame)> = Vec::new();
+        for pane in &bodies {
+            if pane.seat == focused_leaf {
                 continue;
             }
-            let Some(leaf) = self.tabs[active].sessions.get_mut(seat) else {
+            let Some(leaf) = self.tabs[active].sessions.get_mut(&pane.seat) else {
                 continue;
             };
             leaf.session.refresh_projection(&mut leaf.projection);
@@ -11806,22 +12966,31 @@ impl Runtime {
                 .session
                 .viewport_frame(&mut leaf.projection)
                 .context("project an unfocused pane's grid into a viewport frame")?;
-            unfocused_frames.push((*seat, *body, projected));
+            unfocused_frames.push((*pane, projected));
         }
         let focused_body = bodies
             .iter()
-            .find(|(seat, _)| *seat == focused_leaf)
-            .map(|(_, body)| *body)
-            .unwrap_or_else(|| self.renderer.seat_viewport());
+            .find(|pane| pane.seat == focused_leaf)
+            .copied()
+            .unwrap_or_else(|| {
+                let viewport = self.renderer.seat_viewport();
+                PaneDraw {
+                    seat: focused_leaf,
+                    viewport,
+                    clip: viewport,
+                }
+            });
         let mut seat_frames = Vec::with_capacity(unfocused_frames.len() + 1);
         seat_frames.push(bt_render::SeatFrame {
-            seat: focused_body,
+            seat: focused_body.viewport,
+            clip: focused_body.clip,
             frame: &frame,
             focused: true,
         });
-        for (_, body, projected) in &unfocused_frames {
+        for (pane, projected) in &unfocused_frames {
             seat_frames.push(bt_render::SeatFrame {
-                seat: *body,
+                seat: pane.viewport,
+                clip: pane.clip,
                 frame: projected,
                 focused: false,
             });
@@ -11864,8 +13033,8 @@ impl Runtime {
                 // leaf's copy is `Runtime::last_presented_frame` as well, which
                 // is what the presentation-hold and scroll contracts read.
                 let active = self.active_tab;
-                for (seat, _, projected) in unfocused_frames {
-                    if let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) {
+                for (pane, projected) in unfocused_frames {
+                    if let Some(leaf) = self.tabs[active].sessions.get_mut(&pane.seat) {
                         leaf.last_presented_frame = Some(projected);
                     }
                 }
@@ -18327,6 +19496,1656 @@ mod tests {
         assert_eq!(
             landing.sample(now + Duration::from_millis(200), Motion::Full),
             (0.0, false)
+        );
+    }
+
+    /// PIN — U8. A pane's FLIP starts on the box it left and ends on the box the
+    /// solver gave it, and it travels the whole way in between.
+    ///
+    /// The two ends are the assertions that make it a FLIP rather than a
+    /// decoration: if `e = 0` does not reproduce the *before* rect exactly then
+    /// the first frame of the animation is a jump, which is the one thing the
+    /// technique exists to remove; and if `e = 1` is not the solver's own answer
+    /// then the pane has been left somewhere the layout does not think it is.
+    #[test]
+    fn a_pane_flip_starts_on_the_rect_it_left_and_lands_on_the_one_it_was_given() {
+        let now = Instant::now();
+        let before = [100.0, 50.0, 300.0, 250.0];
+        let after = [200.0, 150.0, 600.0, 550.0];
+        let flip = PaneFlip::displace(before, after, now, Motion::Full)
+            .expect("a pane that halved its corner and doubled its size is displaced");
+
+        let (start, moving) = flip.sample(now, Motion::Full);
+        assert!(moving);
+        let opened = start.applied_to(after);
+        for channel in 0..4 {
+            assert!(
+                (opened[channel] - before[channel]).abs() < 1e-3,
+                "the first frame is the box the pane left, not a jump: {opened:?} vs {before:?}"
+            );
+        }
+
+        // Monotone toward the destination, in the corner and in the extent.
+        let mut last = opened;
+        for step in 1..=20 {
+            let at = now + Duration::from_millis(step * 10);
+            let (transform, _) = flip.sample(at, Motion::Full);
+            let box_now = transform.applied_to(after);
+            assert!(
+                box_now[0] >= last[0] - 1e-3 && box_now[1] >= last[1] - 1e-3,
+                "the corner only ever travels toward its destination: {box_now:?} after {last:?}"
+            );
+            assert!(
+                box_now[2] - box_now[0] >= last[2] - last[0] - 1e-3,
+                "and the pane only ever widens toward its destination"
+            );
+            last = box_now;
+        }
+
+        let (midway, _) = flip.sample(now + PANE_FLIP / 2, Motion::Full);
+        assert!(
+            midway.dx.abs() < 0.15 * 100.0 && midway.dy.abs() < 0.15 * 100.0,
+            "`cubic-bezier(.2, 0, 0, 1)` leaves immediately: half the time is \
+             more than 85% of the distance, which `ease` next door is not \
+             ({midway:?})"
+        );
+
+        assert!(
+            flip.sample(now + PANE_FLIP - Duration::from_millis(1), Motion::Full)
+                .1,
+            "still moving one millisecond short of the end"
+        );
+        let (landed, moving) = flip.sample(now + PANE_FLIP, Motion::Full);
+        assert!(!moving);
+        assert_eq!(
+            landed,
+            PaneTransform::IDENTITY,
+            "at 200ms the pane is simply where the solver put it"
+        );
+        assert_eq!(landed.applied_to(after), after);
+    }
+
+    /// PIN — the two spans the mock-up writes down for a pane, against the
+    /// numbers next door that they get quietly rounded into.
+    #[test]
+    fn a_pane_flips_over_two_hundred_milliseconds_and_arrives_over_a_hundred_and_eighty() {
+        assert_eq!(
+            PANE_FLIP,
+            Duration::from_millis(200),
+            "`PANE_EASE = \"transform .2s cubic-bezier(.2, 0, 0, 1)\"` (mock-up 6555)"
+        );
+        assert_eq!(
+            PANE_FADE_IN,
+            Duration::from_millis(180),
+            "`el.style.transition = \"opacity .18s ease\"` (mock-up 6572)"
+        );
+    }
+
+    /// PIN — the pane FLIP and the tab FLIP share a curve and not a duration.
+    ///
+    /// Two ways this gets "simplified", and they pull opposite ways. Declare a
+    /// second `[0.2, 0.0, 0.0, 1.0]` beside [`GRAB_EASE`] and the two drift the
+    /// day somebody tunes one of them. Fold the durations together and either
+    /// the strip goes sluggish or the split goes abrupt, depending on which
+    /// number survived — the mock-up writes `.2s` at 6555 and `.16s` at 6570 and
+    /// means both.
+    #[test]
+    fn the_pane_flip_and_the_tab_flip_share_a_curve_but_not_a_duration() {
+        let now = Instant::now();
+        let pane = PaneFlip::displace(
+            [100.0, 0.0, 200.0, 100.0],
+            [0.0, 0.0, 100.0, 100.0],
+            now,
+            Motion::Full,
+        )
+        .expect("a hundred physical pixels is a displacement");
+        let mut tab = FlipTween::default();
+        tab.displace(100.0, now, Motion::Full);
+
+        // Same curve means the same fraction of the journey is left at the same
+        // fraction of the span — whatever the spans happen to be.
+        for tenth in 1..10 {
+            let pane_left = pane.sample(now + PANE_FLIP * tenth / 10, Motion::Full).0.dx / 100.0;
+            let tab_left = tab.sample(now + TAB_FLIP * tenth / 10, Motion::Full).0 / 100.0;
+            assert!(
+                (pane_left - tab_left).abs() < 1e-3,
+                "at {tenth}/10 of its own span the pane has {pane_left} left and the \
+                 tab {tab_left} — they are not running the same curve"
+            );
+        }
+        assert_ne!(
+            PANE_FLIP, TAB_FLIP,
+            "a pane is half the window and a tab is a chip in a row; one number \
+             cannot be both"
+        );
+    }
+
+    /// PIN — P178. A pane that barely moved gets no animation at all, and each
+    /// of the four channels alone is enough to earn one.
+    ///
+    /// `if (Math.abs(dx) < .5 && Math.abs(dy) < .5 && Math.abs(sx - 1) < .005 &&
+    /// Math.abs(sy - 1) < .005) return;` (mock-up 6580). Four terms, so four
+    /// assertions: delete any one of them from the condition and exactly one of
+    /// these goes red, which is the only way a conjunction can be pinned.
+    #[test]
+    fn a_pane_that_barely_moved_gets_no_tween_and_each_channel_alone_earns_one() {
+        let now = Instant::now();
+        let seat = [0.0, 0.0, 128.0, 128.0];
+
+        assert!(
+            PaneFlip::displace(seat, seat, now, Motion::Full).is_none(),
+            "a pane the solver did not move is not animated at all"
+        );
+        assert!(
+            PaneFlip::displace([0.49, 0.49, 128.49, 128.49], seat, now, Motion::Full).is_none(),
+            "and neither is one that moved less than half a physical pixel"
+        );
+        assert!(
+            PaneFlip::displace([0.0, 0.0, 128.5, 128.5], seat, now, Motion::Full).is_none(),
+            "nor one whose extent changed by less than half a percent \
+             (128.5/128 = 1.0039)"
+        );
+
+        assert!(
+            PaneFlip::displace([0.5, 0.0, 128.5, 128.0], seat, now, Motion::Full).is_some(),
+            "half a physical pixel of `dx` alone earns the animation — the \
+             solver snaps seat boundaries to whole pixels, so this is the \
+             smallest move there is"
+        );
+        assert!(
+            PaneFlip::displace([0.0, 0.5, 128.0, 128.5], seat, now, Motion::Full).is_some(),
+            "half a physical pixel of `dy` alone earns it"
+        );
+        assert!(
+            PaneFlip::displace([0.0, 0.0, 129.0, 128.0], seat, now, Motion::Full).is_some(),
+            "`sx` alone earns it: 129/128 = 1.0078, past the half-percent, with \
+             the corner untouched"
+        );
+        assert!(
+            PaneFlip::displace([0.0, 0.0, 128.0, 129.0], seat, now, Motion::Full).is_some(),
+            "`sy` alone earns it, likewise"
+        );
+    }
+
+    /// PIN — reduced motion puts a displaced pane where it belongs on the first
+    /// sample, and an arriving one at full opacity.
+    ///
+    /// **Ruling**, and the same one [`reduced_motion_puts_a_displaced_tab_straight_into_its_slot`]
+    /// records: the mock-up writes these transitions from JavaScript, where no
+    /// `prefers-reduced-motion` block can reach them, so its silence is its
+    /// medium rather than a decision. Half the window changing shape is exactly
+    /// what the preference is about.
+    #[test]
+    fn reduced_motion_lands_a_pane_at_once_and_gives_an_arriving_one_no_fade() {
+        let now = Instant::now();
+        let after = [200.0, 150.0, 600.0, 550.0];
+        let flip = PaneFlip::displace([100.0, 50.0, 300.0, 250.0], after, now, Motion::Reduced)
+            .expect("the threshold is about geometry, not about preference");
+        assert_eq!(
+            flip.sample(now, Motion::Reduced),
+            (PaneTransform::IDENTITY, false),
+            "there is no first frame to travel from: the pane is where it belongs"
+        );
+
+        let mut motion = PaneMotion::default();
+        let before = [(SeatId(1), [0.0, 0.0, 100.0, 100.0])];
+        let arriving = [
+            (SeatId(1), [0.0, 0.0, 50.0, 100.0]),
+            (SeatId(2), [50.0, 0.0, 100.0, 100.0]),
+        ];
+        motion.begin(&before, &arriving, now, Motion::Reduced);
+        assert_eq!(
+            motion.opacity_of(SeatId(2), now, Motion::Reduced),
+            1.0,
+            "the new pane is simply there"
+        );
+        assert!(!motion.is_animating(now, Motion::Reduced));
+
+        let mut full = PaneMotion::default();
+        full.begin(&before, &arriving, now, Motion::Full);
+        assert_eq!(
+            full.opacity_of(SeatId(2), now, Motion::Full),
+            0.0,
+            "under Full it starts from nothing"
+        );
+        let opening = full.opacity_of(SeatId(2), now + Duration::from_millis(90), Motion::Full);
+        assert!(opening > 0.0 && opening < 1.0, "mid-fade: {opening}");
+        assert_eq!(
+            full.opacity_of(SeatId(2), now + PANE_FADE_IN, Motion::Full),
+            1.0,
+            "and it is done at its own span, not the FLIP's"
+        );
+        assert_eq!(
+            full.transform_of(SeatId(2), now, Motion::Full),
+            PaneTransform::IDENTITY,
+            "a pane with no history fades *instead of* sliding (mock-up 6573 returns)"
+        );
+    }
+
+    /// PIN — a pane split again mid-flight starts from where it actually is.
+    ///
+    /// `snapshotPanes` measures `getBoundingClientRect` (mock-up 6557-6562),
+    /// which includes the transform still running. Restart from the solver's
+    /// stale rect instead and the pane teleports to a box it never reached
+    /// before beginning its second journey — which is [`FlipTween::displace`]'s
+    /// argument, one dimension up.
+    #[test]
+    fn a_pane_displaced_again_mid_flight_starts_from_where_it_actually_is() {
+        let now = Instant::now();
+        let first = [0.0, 0.0, 100.0, 100.0];
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &[(SeatId(1), [200.0, 0.0, 300.0, 100.0])],
+            &[(SeatId(1), first)],
+            now,
+            Motion::Full,
+        );
+
+        let at = now + Duration::from_millis(80);
+        let live = motion.snapshot(&[(SeatId(1), first)], at, Motion::Full);
+        let [live_left, ..] = live[0].1;
+        assert!(
+            live_left > 1.0,
+            "80ms into a 200ms flight the pane has not arrived ({live_left})"
+        );
+
+        let second = [0.0, 300.0, 100.0, 400.0];
+        motion.begin(&live, &[(SeatId(1), second)], at, Motion::Full);
+        let opened = motion
+            .transform_of(SeatId(1), at, Motion::Full)
+            .applied_to(second);
+        for channel in 0..4 {
+            assert!(
+                (opened[channel] - live[0].1[channel]).abs() < 1e-3,
+                "the second flight opens on the live box {:?}, not on the stale \
+                 layout rect {first:?} — it got {opened:?}",
+                live[0].1
+            );
+        }
+        assert!(
+            (opened[0] - first[0]).abs() > 1.0,
+            "and the stale rect really is a different box, so this test can fail"
+        );
+    }
+
+    /// PIN — a seat that left the layout leaves nothing behind.
+    ///
+    /// The mock-up gives a departing pane no exit animation: `renderWithPaneFlip`
+    /// walks the panes that exist *after* the render (6564), and the closed one
+    /// is already out of the DOM. Only the survivors FLIP.
+    #[test]
+    fn a_seat_that_left_the_layout_leaves_no_tween_behind() {
+        let now = Instant::now();
+        let split = [
+            (SeatId(1), [0.0, 0.0, 50.0, 100.0]),
+            (SeatId(2), [50.0, 0.0, 100.0, 100.0]),
+        ];
+        let whole = [(SeatId(1), [0.0, 0.0, 100.0, 100.0])];
+        let mut motion = PaneMotion::default();
+        motion.begin(&[], &split, now, Motion::Full);
+        assert!(motion.panes.iter().any(|pane| pane.seat == SeatId(2)));
+
+        motion.begin(&split, &whole, now, Motion::Full);
+        assert!(
+            !motion.panes.iter().any(|pane| pane.seat == SeatId(2)),
+            "the departed seat is not carried"
+        );
+        assert_eq!(
+            motion.transform_of(SeatId(2), now, Motion::Full),
+            PaneTransform::IDENTITY
+        );
+        assert_eq!(motion.opacity_of(SeatId(2), now, Motion::Full), 1.0);
+        assert!(
+            motion.is_animating(now, Motion::Full),
+            "the survivor is still expanding into the space"
+        );
+    }
+
+    /// PIN — the pane's frame debt is paid in drawn boxes, so the flight draws
+    /// every step it has and stops the moment it lands.
+    ///
+    /// The failure this stands against is the one [`tab_owes_frame`] was written
+    /// for: "is anything moving?" is the right question for the deadline and the
+    /// wrong one for whether to draw, and the two part company on exactly the
+    /// frame motion stops. Ask the moving question and the pane is left stranded
+    /// one eased step short of the box the solver actually gave it.
+    #[test]
+    fn a_pane_s_frame_debt_is_paid_in_drawn_boxes() {
+        let now = Instant::now();
+        let layout = [(SeatId(1), [0.0, 0.0, 500.0, 500.0])];
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &[(SeatId(1), [400.0, 0.0, 900.0, 500.0])],
+            &layout,
+            now,
+            Motion::Full,
+        );
+
+        assert!(
+            motion.settle_frame_debt(&layout, now, Motion::Full),
+            "nothing of this layout has been drawn yet"
+        );
+        assert!(
+            !motion.settle_frame_debt(&layout, now, Motion::Full),
+            "and asking twice at the same instant does not owe a second present"
+        );
+        assert!(
+            motion.settle_frame_debt(&layout, now + Duration::from_millis(100), Motion::Full),
+            "mid-flight the pane owes a frame"
+        );
+
+        let end = now + PANE_FLIP;
+        assert!(
+            !motion.is_animating(end, Motion::Full),
+            "nothing is moving on the frame the flight ends"
+        );
+        assert!(
+            motion.settle_frame_debt(&layout, end, Motion::Full),
+            "and it still owes that frame — it is the one that puts the pane in \
+             the box the solver gave it"
+        );
+        assert!(
+            !motion.settle_frame_debt(&layout, end + STRIP_ANIMATION_FRAME, Motion::Full),
+            "landed and drawn, it owes nothing"
+        );
+
+        // Finer than a whole physical pixel is finer than anything is drawn at,
+        // so the long tail of `.2,0,0,1` must not owe a present per wake-up.
+        let mut settled = PaneMotion::default();
+        settled.begin(
+            &[(SeatId(1), [400.0, 0.0, 900.0, 500.0])],
+            &layout,
+            now,
+            Motion::Full,
+        );
+        let mut presents = 0_u32;
+        let mut wakes = 0_u32;
+        let mut at = now;
+        loop {
+            let moving = settled.is_animating(at, Motion::Full);
+            if settled.settle_frame_debt(&layout, at, Motion::Full) {
+                presents += 1;
+            }
+            wakes += 1;
+            if !moving {
+                break;
+            }
+            at += STRIP_ANIMATION_FRAME;
+        }
+        assert!(
+            wakes > presents,
+            "every wake-up presented a frame ({presents} of {wakes}) — the debt is \
+             measured on something finer than a pane is drawn at"
+        );
+        assert!(
+            presents >= 5,
+            "only {presents} frames of the flight were drawn — that is a jump \
+             wearing an animation's clothes"
+        );
+    }
+
+    /// PIN — the deadline is `None` when nothing is moving and `Some` while
+    /// something is, on the same terms as [`Runtime::strip_animation_deadline`].
+    ///
+    /// `None` is the important half: it is what lets the loop fall back to
+    /// `ControlFlow::Wait` and the process go genuinely idle once the split has
+    /// settled.
+    #[test]
+    fn the_pane_deadline_asks_for_wake_ups_only_while_something_is_moving() {
+        let now = Instant::now();
+        let mut motion = PaneMotion::default();
+        assert_eq!(
+            motion.deadline(now, Motion::Full),
+            None,
+            "a tab whose panes are all at rest asks for no wake-ups at all"
+        );
+
+        let before = [(SeatId(1), [0.0, 0.0, 100.0, 100.0])];
+        let after = [
+            (SeatId(1), [0.0, 0.0, 50.0, 100.0]),
+            (SeatId(2), [50.0, 0.0, 100.0, 100.0]),
+        ];
+        motion.begin(&before, &after, now, Motion::Full);
+        assert_eq!(
+            motion.deadline(now, Motion::Full),
+            Some(now + STRIP_ANIMATION_FRAME)
+        );
+        assert_eq!(
+            motion.deadline(now + PANE_FADE_IN, Motion::Full),
+            Some(now + PANE_FADE_IN + STRIP_ANIMATION_FRAME),
+            "the fade is done but the FLIP beside it is not"
+        );
+        assert_eq!(
+            motion.deadline(now + PANE_FLIP, Motion::Full),
+            None,
+            "and once the longest of them lands, the loop may sleep"
+        );
+
+        motion.retire(now + PANE_FLIP, Motion::Full);
+        assert!(motion.panes.iter().all(|pane| pane.tween.is_none()));
+
+        let mut reduced = PaneMotion::default();
+        reduced.begin(&before, &after, now, Motion::Reduced);
+        assert_eq!(
+            reduced.deadline(now, Motion::Reduced),
+            None,
+            "reduced motion has no frames to ask for"
+        );
+    }
+
+    /// A tab of two terminal panes and the geometry that made them, at 1x in a
+    /// 1600x900 window.
+    ///
+    /// `leading` decides which side the *arriving* pane takes, and the tests
+    /// below use `true` deliberately: with the new pane on the left, the
+    /// survivor's corner genuinely travels, and a FLIP that only ever changed an
+    /// extent would leave two of the three clauses of the counter-scale untested.
+    fn split_window(leading: bool) -> (seats::Seats, SeatLayout, SeatLayout, SeatId, SeatId) {
+        let metrics = seats::seat_metrics(1_000);
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let mut seats = seats::Seats::lone_terminal();
+        let survivor = seats.terminal();
+        let before = seats.solve(viewport, &metrics).expect("a lone leaf solves");
+        let arriving = seats
+            .split_terminal(&metrics, survivor, bt_layout::Axis::Row, leading)
+            .expect("a 1600x900 window divides");
+        let after = seats.solve(viewport, &metrics).expect("the split solves");
+        (seats, before, after, survivor, arriving)
+    }
+
+    /// Every pane's box in physical pixels, in the solver's own order — the
+    /// shape [`Runtime::pane_rects`] hands [`PaneMotion`].
+    fn pane_rects_of(layout: &SeatLayout) -> Vec<(SeatId, [f32; 4])> {
+        layout
+            .rects
+            .iter()
+            .filter_map(|placement| {
+                let device = placement.device_rect?;
+                Some((
+                    placement.id,
+                    [
+                        device.left as f32,
+                        device.top as f32,
+                        device.right as f32,
+                        device.bottom as f32,
+                    ],
+                ))
+            })
+            .collect()
+    }
+
+    fn pane_box_of(layout: &SeatLayout, seat: SeatId) -> [f32; 4] {
+        pane_rects_of(layout)
+            .into_iter()
+            .find(|(id, _)| *id == seat)
+            .expect("the seat was placed")
+            .1
+    }
+
+    /// PIN — U8, R3. The counter-scale, stated as the three things it composes
+    /// to, in one frame.
+    ///
+    /// The mock-up writes the animation as `scale(s)` on the pane and
+    /// `scale(1/s)` on an inner wrapper (6584-6586), and it needs both because
+    /// in CSS a transform is the only way to move a box that is already laid
+    /// out: the outer scale is the price of the movement and the inner one buys
+    /// back the text it stretched. Multiply the pair out and three separate
+    /// facts fall out, which are the three clauses below —
+    ///
+    /// 1. the pane's **box** on the first frame is the box it left;
+    /// 2. the pane's **content origin** on that frame is the corner it left;
+    /// 3. the pane's **content extent** is already the one the solver just gave
+    ///    it, on that same first frame.
+    ///
+    /// The third is the one that fails a literal transcription of the CSS. Scale
+    /// this crate's viewport by `s` and clauses 1 and 2 still pass — the box and
+    /// the corner are right — while the grid inside it is drawn at the *old*
+    /// width and has to reflow toward the new one over 200ms, which is a resize
+    /// per frame handed to ConPTY (R2) and glyphs that visibly squeeze.
+    #[test]
+    fn the_first_frame_of_a_split_draws_the_old_box_around_contents_already_at_their_new_size() {
+        let now = Instant::now();
+        let (seats, before, after, survivor, _) = split_window(true);
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &pane_rects_of(&before),
+            &pane_rects_of(&after),
+            now,
+            Motion::Full,
+        );
+
+        let was = pane_box_of(&before, survivor);
+        let is = pane_box_of(&after, survivor);
+        assert!(
+            (was[0] - is[0]).abs() > 1.0 && (was[2] - was[0]) > (is[2] - is[0]),
+            "the survivor has to both move and narrow, or this pin proves \
+             nothing: {was:?} -> {is:?}"
+        );
+        let transform = motion.transform_of(survivor, now, Motion::Full);
+
+        // Clause 1 — the box.
+        let box_now = transform.applied_to(is);
+        for channel in 0..4 {
+            assert!(
+                (box_now[channel] - was[channel]).abs() < 1e-3,
+                "the first frame is drawn through the box the pane left: \
+                 {box_now:?} against {was:?}"
+            );
+        }
+
+        let body = seats::pane_body_viewport(&seats, &after, survivor, 1.0)
+            .expect("the survivor has a body");
+        let (viewport, _) = animated_pane_viewports(body, is, transform);
+
+        // Clause 2 — the content's corner.
+        assert_eq!(
+            viewport.x as f32, was[0],
+            "the contents are drawn from the corner the pane left, not from the \
+             one the solver just gave it ({} against {})",
+            viewport.x, is[0]
+        );
+
+        // Clause 3 — the content's extent, and the one a scaled viewport fails.
+        assert_eq!(
+            (viewport.width, viewport.height),
+            (body.width, body.height),
+            "the contents are already at the size the solver gave them on the \
+             very first frame — nothing is ever scaled"
+        );
+        assert!(
+            f32::from(u16::try_from(viewport.width).unwrap_or(u16::MAX)) < was[2] - was[0],
+            "and that size really is different from the box's, so clause 3 is \
+             not restating clause 1"
+        );
+    }
+
+    /// PIN — U8, R3. A pane growing into a closed sibling's space is *clipped*
+    /// into it, never stretched into it.
+    ///
+    /// The complement of the split above and the half where the FLIP is actually
+    /// visible: the survivor's contents are laid out at their final, larger size
+    /// from the corner they still occupy, and the animating box opens over them
+    /// like a curtain. On the first frame the box is strictly smaller than the
+    /// contents — that is the clipping — and by the last both are the rectangle
+    /// the solver gave.
+    ///
+    /// The viewport legitimately hangs off the right of the surface while this
+    /// runs (`x + width` past the window), which is why only the scissor of the
+    /// pair is clamped and why it is clamped where the device validates it.
+    #[test]
+    fn a_pane_growing_out_of_a_closed_sibling_is_clipped_into_the_space_not_stretched_into_it() {
+        let now = Instant::now();
+        let metrics = seats::seat_metrics(1_000);
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let (mut seats, _, split, survivor, arriving) = split_window(true);
+        let before = split;
+        assert!(seats.close_seat(&metrics, arriving), "the left pane closes");
+        let after = seats
+            .solve(viewport, &metrics)
+            .expect("the survivor solves");
+
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &pane_rects_of(&before),
+            &pane_rects_of(&after),
+            now,
+            Motion::Full,
+        );
+        let pane = pane_box_of(&after, survivor);
+        let body = seats::pane_body_viewport(&seats, &after, survivor, 1.0)
+            .expect("the survivor has a body");
+
+        let first =
+            animated_pane_viewports(body, pane, motion.transform_of(survivor, now, Motion::Full));
+        let (content, clip) = first;
+        assert!(
+            clip.width < content.width,
+            "the box the survivor is drawn through is still the narrow one it \
+             had ({} against {} of content)",
+            clip.width,
+            content.width
+        );
+        assert_eq!(
+            content.width, body.width,
+            "while the contents are at their final width from the first frame"
+        );
+        assert!(
+            content.x + content.width > 1600,
+            "and that puts the viewport off the right of a 1600px surface, which \
+             is legal for a viewport and is why the scissor is the clamped one"
+        );
+
+        let (landed_content, landed_clip) = animated_pane_viewports(
+            body,
+            pane,
+            motion.transform_of(survivor, now + PANE_FLIP, Motion::Full),
+        );
+        assert_eq!(
+            landed_content, body,
+            "the flight ends on the solver's answer"
+        );
+        assert_eq!(
+            landed_clip, body,
+            "and the box it is drawn through has opened all the way to it"
+        );
+    }
+
+    /// PIN — U8, R5. Only a structural tree change animates.
+    ///
+    /// Three assertions because there are three cases and they are not variants
+    /// of one: a divider drag steers a ratio, a focus change feeds W2's
+    /// concession ladder, and a split adds a leaf. All three re-solve, and the
+    /// first two move rectangles — which is exactly why "the layout re-solved"
+    /// cannot be the gate, and why the middle assertion carries the search that
+    /// proves a focus change really does move them rather than asserting it.
+    ///
+    /// A gate on `Edit`-ness rather than on displacement is also what makes
+    /// `CenterSwap` come out right: it is counted as structural and then moves
+    /// nothing, so P178 skips every pane and the swap is not animated — reached
+    /// by the rule instead of by an exception carved out of it.
+    #[test]
+    fn a_divider_drag_and_a_focus_change_start_no_pane_tween_and_a_split_starts_one() {
+        let metrics = seats::seat_metrics(1_000);
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let (mut seats, _, split, survivor, arriving) = split_window(true);
+
+        // A split: the shape changed, so the gate fires.
+        assert_eq!(
+            seats.structure_revision(),
+            1,
+            "the split is the one edit here that added a leaf"
+        );
+
+        // A divider drag: rectangles move, the shape does not.
+        let at_rest = seats.structure_revision();
+        let slot = *seats
+            .split_slots(&split)
+            .first()
+            .expect("the split has a divider");
+        let usable = slot.slot.extent(slot.dir) - bt_layout::DIVIDER;
+        assert_eq!(
+            seats.drag_divider(
+                &metrics,
+                slot.id,
+                bt_layout::Ratio::clamped_from_ppm(300_000),
+                usable
+            ),
+            Ok(true),
+            "the drag has to actually write a ratio, or this assertion is about \
+             a refusal instead of about the gate"
+        );
+        let dragged = seats.solve(viewport, &metrics).expect("the drag solves");
+        assert_ne!(
+            pane_box_of(&dragged, survivor),
+            pane_box_of(&split, survivor),
+            "the drag moved the pane's rectangle"
+        );
+        assert_eq!(
+            seats.structure_revision(),
+            at_rest,
+            "and moved no leaf, so nothing animates: a 200ms tail on a gesture \
+             the pointer is already driving frame by frame"
+        );
+
+        // A focus change: rectangles move through the concession ladder, the
+        // shape does not. The width is searched for rather than asserted,
+        // because "focus moves rectangles" is a fact about W2 and about this
+        // build's minimum sizes, not a number this test may invent.
+        let mut narrow = seats::Seats::lone_terminal();
+        let first = narrow.terminal();
+        let second = narrow
+            .split_terminal(&metrics, first, bt_layout::Axis::Row, false)
+            .expect("a wide window divides");
+        let ladder = (200..900).step_by(4).find_map(|width| {
+            let viewport = seats::logical_viewport(width, 600, seats::scale_ppm(1_000));
+            narrow.set_focus(first);
+            let with_first = narrow.solve(viewport, &metrics).ok()?;
+            narrow.set_focus(second);
+            let with_second = narrow.solve(viewport, &metrics).ok()?;
+            (pane_rects_of(&with_first) != pane_rects_of(&with_second)).then_some(width)
+        });
+        let ladder = ladder.expect(
+            "no window width in 200..900 lets focus change the solve — the \
+             concession ladder's input has moved and this assertion is no longer \
+             about what it says it is",
+        );
+        let revision = narrow.structure_revision();
+        let ladder_viewport = seats::logical_viewport(ladder, 600, seats::scale_ppm(1_000));
+        narrow.set_focus(first);
+        let with_first = narrow.solve(ladder_viewport, &metrics).expect("solves");
+        assert!(narrow.set_focus(second), "focus moves");
+        let with_second = narrow.solve(ladder_viewport, &metrics).expect("solves");
+        assert_ne!(
+            pane_rects_of(&with_first),
+            pane_rects_of(&with_second),
+            "at {ladder}px the ladder answers differently for each focus"
+        );
+        assert_eq!(
+            narrow.structure_revision(),
+            revision,
+            "and clicking into a pane must not put a fifth of a second of glide \
+             between the click and the layout settling"
+        );
+
+        // The tear-out's own commit is `close_seat`, which is structural.
+        let before_close = narrow.structure_revision();
+        assert!(narrow.close_seat(&metrics, second));
+        assert_eq!(narrow.structure_revision(), before_close + 1);
+        let _ = arriving;
+    }
+
+    /// PIN — U8, R2. A flight in progress issues **zero** ConPTY resizes.
+    ///
+    /// This is the pin that keeps a resize storm impossible, and it is a pin
+    /// about an extent rather than about a call count: the grid is a function of
+    /// the seat's width and height, `coalesce_pty_resize_on_grid_change` is the
+    /// single gate every solve funnels through, and it schedules nothing when
+    /// the grid it is handed equals the one in force. So the whole of R2 is
+    /// "the animation never changes an extent", and that is what is asserted at
+    /// every frame of the flight below.
+    ///
+    /// B14's counter-scale is why it can be true at all: the contents are laid
+    /// out at their destination size on the animation's *first* frame, so there
+    /// is nothing left to resize on the last. Transcribe the CSS literally —
+    /// scale the viewport — and the extent changes on every one of the twelve
+    /// frames here, each one a grid change, each one a scheduled resize behind
+    /// a 200ms quiet window that the next frame immediately re-arms.
+    #[test]
+    fn an_in_flight_pane_animation_asks_conpty_for_no_resize_at_all() {
+        let now = Instant::now();
+        let metrics = seats::seat_metrics(1_000);
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let (mut seats, _, split, survivor, arriving) = split_window(true);
+        assert!(seats.close_seat(&metrics, arriving));
+        let after = seats
+            .solve(viewport, &metrics)
+            .expect("the survivor solves");
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &pane_rects_of(&split),
+            &pane_rects_of(&after),
+            now,
+            Motion::Full,
+        );
+        let pane = pane_box_of(&after, survivor);
+        let body = seats::pane_body_viewport(&seats, &after, survivor, 1.0)
+            .expect("the survivor has a body");
+
+        // The one resize the *commit* is entitled to, on the final rectangle,
+        // before a single frame of the flight is drawn.
+        let rows_for = |height: u32| ((height.saturating_sub(16)) / 20).max(1) as u16;
+        let settled = grid_of(100, rows_for(body.height));
+        let mut pending = None;
+        let mut current = grid_of(100, rows_for(1));
+        assert!(
+            coalesce_pty_resize_on_grid_change(
+                &mut pending,
+                settled,
+                current,
+                PhysicalSize::new(body.width, body.height),
+                now,
+            ),
+            "the commit itself schedules one resize, on the box the pane landed in"
+        );
+        current = take_due_pty_resize(&mut pending, now + WINDOW_RESIZE_QUIET)
+            .expect("and it is delivered")
+            .grid;
+        assert_eq!(current, settled);
+
+        let mut scheduled = 0_u32;
+        let mut at = now;
+        loop {
+            let moving = motion.is_animating(at, Motion::Full);
+            let (content, _) = animated_pane_viewports(
+                body,
+                pane,
+                motion.transform_of(survivor, at, Motion::Full),
+            );
+            assert_eq!(
+                (content.width, content.height),
+                (body.width, body.height),
+                "the flight changed an extent, which is a grid change wearing an \
+                 animation's clothes"
+            );
+            if coalesce_pty_resize_on_grid_change(
+                &mut pending,
+                grid_of(100, rows_for(content.height)),
+                current,
+                PhysicalSize::new(content.width, content.height),
+                at,
+            ) {
+                scheduled += 1;
+            }
+            if !moving {
+                break;
+            }
+            at += STRIP_ANIMATION_FRAME;
+        }
+        assert_eq!(
+            scheduled, 0,
+            "an in-flight animation scheduled {scheduled} ConPTY resizes; the \
+             contract is exactly one per structural edit, at the commit, on the \
+             final rectangle"
+        );
+        assert!(
+            take_due_pty_resize(&mut pending, at + WINDOW_RESIZE_QUIET).is_none(),
+            "and nothing is left queued behind the quiet window either"
+        );
+    }
+
+    /// PIN — U8. Reduced motion puts every pane on its final rectangle at once,
+    /// owes no frame after the first and asks for no wake-ups.
+    ///
+    /// Verified rather than assumed: "there are no tweens under Reduced" is a
+    /// property of [`PaneFlip::displace`] storing no `started`, and the three
+    /// things that follow from it — identity transform, settled debt, no
+    /// deadline — are each a separate consumer that could have read the clock
+    /// for itself.
+    #[test]
+    fn reduced_motion_lands_every_pane_at_once_and_asks_for_no_frames() {
+        let now = Instant::now();
+        let (seats, before, after, survivor, arriving) = split_window(true);
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &pane_rects_of(&before),
+            &pane_rects_of(&after),
+            now,
+            Motion::Reduced,
+        );
+
+        for seat in [survivor, arriving] {
+            assert_eq!(
+                motion.transform_of(seat, now, Motion::Reduced),
+                PaneTransform::IDENTITY,
+                "seat {seat:?} is simply where the solver put it"
+            );
+        }
+        let pane = pane_box_of(&after, survivor);
+        let body = seats::pane_body_viewport(&seats, &after, survivor, 1.0)
+            .expect("the survivor has a body");
+        let (content, clip) = animated_pane_viewports(
+            body,
+            pane,
+            motion.transform_of(survivor, now, Motion::Reduced),
+        );
+        assert_eq!((content, clip), (body, body));
+
+        assert!(!motion.is_animating(now, Motion::Reduced));
+        assert_eq!(
+            motion.deadline(now, Motion::Reduced),
+            None,
+            "no deadline is asked for, so the loop goes back to `ControlFlow::Wait`"
+        );
+        assert!(
+            motion.settle_frame_debt(&pane_rects_of(&after), now, Motion::Reduced),
+            "the layout it landed on has still never been drawn"
+        );
+        assert!(
+            !motion.settle_frame_debt(
+                &pane_rects_of(&after),
+                now + STRIP_ANIMATION_FRAME,
+                Motion::Reduced
+            ),
+            "and after that one frame it owes nothing at all"
+        );
+    }
+
+    /// PIN — U8. The flight is drawn on every frame it has, including its last,
+    /// and stops asking afterwards.
+    ///
+    /// The two questions kept apart: [`PaneMotion::deadline`] answers "wake me
+    /// again" and [`PaneMotion::settle_frame_debt`] answers "draw this one", and
+    /// they part company on exactly the frame the FLIP reaches identity — where
+    /// nothing is moving any more and the pane has still not been drawn in the
+    /// box the solver gave it. This walks the whole flight at the wake-up
+    /// cadence the loop actually uses and checks both ends.
+    #[test]
+    fn a_pane_flight_requests_a_redraw_on_every_frame_it_has_and_none_after_it_lands() {
+        let now = Instant::now();
+        let (_, before, after, survivor, _) = split_window(true);
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &pane_rects_of(&before),
+            &pane_rects_of(&after),
+            now,
+            Motion::Full,
+        );
+
+        let mut drawn = 0_u32;
+        let mut at = now;
+        loop {
+            let moving = motion.is_animating(at, Motion::Full);
+            let deadline = motion.deadline(at, Motion::Full);
+            assert_eq!(
+                deadline.is_some(),
+                moving,
+                "a wake-up is asked for exactly while something is moving"
+            );
+            if motion.settle_frame_debt(&pane_rects_of(&after), at, Motion::Full) {
+                drawn += 1;
+            }
+            motion.retire(at, Motion::Full);
+            if !moving {
+                break;
+            }
+            at += STRIP_ANIMATION_FRAME;
+        }
+        assert!(
+            drawn >= 5,
+            "only {drawn} frames of a 200ms flight were drawn — that is a jump \
+             wearing an animation's clothes"
+        );
+        // The frame after motion stops is walked too, and it is the one this
+        // loop exists to protect: a debt gated on "is it moving?" would have
+        // returned before it, leaving the pane one eased step short of the box
+        // the solver gave it — a permanent misalignment rather than a missed
+        // frame of polish. What is asserted is the outcome rather than which
+        // frame paid for it, because the curve's long tail legitimately settles
+        // on the final *pixels* a wake-up or two before it settles on the final
+        // floats, and re-presenting identical pixels is a present nobody asked
+        // for.
+        assert_eq!(
+            motion
+                .entry(survivor)
+                .and_then(|pane| pane.last_drawn)
+                .map(|drawn| drawn.box_px),
+            Some(pane_box_of(&after, survivor).map(|edge| edge.round() as i32)),
+            "the flight ends with the pane recorded as drawn in the box the \
+             solver gave it"
+        );
+        assert_eq!(
+            motion.deadline(at, Motion::Full),
+            None,
+            "and once it is drawn the window may go genuinely idle"
+        );
+        assert!(
+            !motion.settle_frame_debt(
+                &pane_rects_of(&after),
+                at + STRIP_ANIMATION_FRAME,
+                Motion::Full
+            ),
+            "landed and drawn, it owes nothing"
+        );
+        assert!(
+            motion.panes.iter().all(|pane| pane.tween.is_none()),
+            "and `retire` has dropped the tweens, so no rect from a layout two \
+             splits ago is carried beside a seat id that may be reused"
+        );
+    }
+
+    /// PIN — U8, P177. The arriving pane's veil is `--termbg` at `1 - opacity`,
+    /// over the arriving pane's own rectangle and over no other.
+    ///
+    /// The ruling this stands on is written out at [`pane_fade_veil_layers`]: the
+    /// fade is a cover in the ground colour rather than a uniform alpha on the
+    /// pane's own draws, because `termbg·(1-a) + pane·a` over a `--termbg` ground
+    /// *is* CSS `opacity`, and because glyphon has no per-`TextArea` alpha to
+    /// carry the literal thing without rebuilding every glyph buffer per frame.
+    ///
+    /// Three things are pinned and each fails a different mistake: the colour
+    /// (a veil in `--panel` would flash the gap colour over a pane that is not
+    /// being resized), the alpha's *direction* (`opacity` instead of
+    /// `1 - opacity` fades the pane out and then snaps it in), and the extent
+    /// (a veil over the survivor as well would dim half the window on every
+    /// split).
+    #[test]
+    fn an_arriving_pane_is_veiled_in_the_ground_colour_at_one_minus_its_opacity() {
+        let now = Instant::now();
+        let palette = bt_render::chrome_palette();
+        let before = [(SeatId(1), [0.0, 0.0, 100.0, 100.0])];
+        let after = [
+            (SeatId(1), [0.0, 0.0, 50.0, 100.0]),
+            (SeatId(2), [50.0, 0.0, 100.0, 100.0]),
+        ];
+        let mut motion = PaneMotion::default();
+        motion.begin(&before, &after, now, Motion::Full);
+
+        let layers = pane_fade_veil_layers(&motion, &after, now, Motion::Full, palette);
+        let [layer] = layers.as_slice() else {
+            panic!("one veil layer while one pane is arriving, got {layers:?}");
+        };
+        let [veil] = layer.quads.as_slice() else {
+            panic!(
+                "one fill, for the one pane that is arriving — the survivor FLIPs \
+                 and the two are alternatives (mock-up 6573): {:?}",
+                layer.quads
+            );
+        };
+        assert_eq!(
+            veil.color, palette.seat_body,
+            "the veil is the ground the pane fades up from — `--termbg`, which is \
+             what is under a pane's box"
+        );
+        assert_ne!(
+            palette.seat_body, palette.title_bar,
+            "and the two really are different colours, so the assertion above can fail"
+        );
+        assert_eq!(
+            veil.alpha, 1.0,
+            "at t=0 the arriving pane is not there at all"
+        );
+        assert_eq!(
+            veil.rect, after[1].1,
+            "over the arriving seat's own solved rectangle"
+        );
+        assert_ne!(
+            after[1].1, after[0].1,
+            "and that rectangle really is not the survivor's"
+        );
+
+        for ms in [30_u64, 90, 150] {
+            let at = now + Duration::from_millis(ms);
+            let layers = pane_fade_veil_layers(&motion, &after, at, Motion::Full, palette);
+            let veil = layers[0].quads[0];
+            let want = 1.0 - motion.opacity_of(SeatId(2), at, Motion::Full);
+            assert!(
+                (veil.alpha - want).abs() < 1e-6,
+                "{ms}ms in the veil is {} where the fade says {want}",
+                veil.alpha
+            );
+            assert!(
+                veil.alpha > 0.0 && veil.alpha < 1.0,
+                "and {ms}ms of a 180ms fade is genuinely mid-way: {}",
+                veil.alpha
+            );
+            assert_eq!(veil.rect, after[1].1);
+        }
+
+        assert!(
+            pane_fade_veil_layers(&motion, &after, now + PANE_FADE_IN, Motion::Full, palette)
+                .is_empty(),
+            "at 180ms the pane is simply there, and an empty layer would still cost \
+             a pass through three channels to draw nothing"
+        );
+    }
+
+    /// PIN — U8, P177. A pane that FLIPs wears no veil, and under reduced motion
+    /// nothing wears one at all.
+    ///
+    /// The first half is the mock-up's early `return` (6573) read as a fact about
+    /// drawing: FLIP and fade are alternatives, so a survivor that is sliding into
+    /// its new box must not also be dimmed on the way. The second is the same
+    /// answer [`RevealTween::retarget`] already gives — under `Reduced` the
+    /// arriving pane is simply *there* — asserted at the drawing rather than
+    /// inferred from the tween, because a veil is a separate consumer that could
+    /// have read the clock for itself.
+    #[test]
+    fn a_flipping_pane_wears_no_veil_and_reduced_motion_hangs_none_at_all() {
+        let now = Instant::now();
+        let palette = bt_render::chrome_palette();
+        let before = [(SeatId(1), [0.0, 0.0, 100.0, 100.0])];
+        let after = [
+            (SeatId(1), [0.0, 0.0, 50.0, 100.0]),
+            (SeatId(2), [50.0, 0.0, 100.0, 100.0]),
+        ];
+
+        let mut full = PaneMotion::default();
+        full.begin(&before, &after, now, Motion::Full);
+        assert!(
+            full.is_animating(now, Motion::Full),
+            "the survivor is mid-FLIP, or this test proves nothing"
+        );
+        let mut at = now;
+        loop {
+            let moving = full.is_animating(at, Motion::Full);
+            for layer in pane_fade_veil_layers(&full, &after, at, Motion::Full, palette) {
+                for veil in layer.quads {
+                    assert_ne!(
+                        veil.rect, after[0].1,
+                        "the survivor is FLIPping and a FLIP is never also a fade"
+                    );
+                }
+            }
+            if !moving {
+                break;
+            }
+            at += STRIP_ANIMATION_FRAME;
+        }
+
+        let mut reduced = PaneMotion::default();
+        reduced.begin(&before, &after, now, Motion::Reduced);
+        for step in 0..16 {
+            let at = now + STRIP_ANIMATION_FRAME * step;
+            assert!(
+                pane_fade_veil_layers(&reduced, &after, at, Motion::Reduced, palette).is_empty(),
+                "reduced motion has no fade to veil, on frame {step}"
+            );
+        }
+    }
+
+    /// PIN — U8, P177. The veil is the bottom-most thing the overlay carries.
+    ///
+    /// The dock drawing is already documented as the lowest layer in the stack
+    /// ([`Runtime::dock_overlay_layers`]), so "under the dock" is "under
+    /// everything": the menus, the restore prompt, the settings dialog, the
+    /// layout peek, the tip and the drag ghost are all stacked after it by
+    /// [`Runtime::refresh_overlay`]. What this fails is the reasonable-looking
+    /// mistake of appending the veil to the stack that is already built, which
+    /// would put a pane's fade over an open dialog.
+    #[test]
+    fn the_arriving_panes_veil_is_the_bottom_most_overlay_layer() {
+        let veil = marks::OverlayLayer {
+            quads: vec![bt_render::OverlayQuad {
+                rect: [0.0, 0.0, 10.0, 10.0],
+                color: bt_render::chrome_palette().seat_body,
+                alpha: 0.5,
+            }],
+            ..marks::OverlayLayer::default()
+        };
+        let dock = vec![marks::OverlayLayer {
+            quads: vec![bt_render::OverlayQuad {
+                rect: [20.0, 20.0, 30.0, 30.0],
+                color: bt_render::chrome_palette().title_bar,
+                alpha: 1.0,
+            }],
+            ..marks::OverlayLayer::default()
+        }];
+
+        let stacked = ground_overlay_layers(vec![veil.clone()], dock.clone());
+        assert_eq!(
+            stacked.first(),
+            Some(&veil),
+            "the veil paints first and is therefore covered by everything after it"
+        );
+        assert_eq!(&stacked[1..], dock.as_slice(), "and the dock is over it");
+        assert_eq!(
+            ground_overlay_layers(Vec::new(), dock.clone()),
+            dock,
+            "with nothing arriving the stack is the one that was there before P177"
+        );
+    }
+
+    /// PIN — U8, P177. A pane that only fades owes a frame on every frame of its
+    /// 180ms and none after.
+    ///
+    /// The fade has no geometry at all — [`PaneTween::FadeIn`] reports the
+    /// identity transform — so the only thing that changes across it is the
+    /// opacity, and this is what pins that [`PaneDrawn`] carries it. Drop the
+    /// opacity from that record and the box never moves, the debt is never owed,
+    /// and the arriving pane is drawn once at nothing and never again: a pane that
+    /// simply does not appear.
+    #[test]
+    fn an_arriving_panes_fade_owes_a_frame_while_it_runs_and_none_after_it_lands() {
+        let now = Instant::now();
+        let arriving = [(SeatId(2), [50.0, 0.0, 100.0, 100.0])];
+        let mut motion = PaneMotion::default();
+        motion.begin(&[], &arriving, now, Motion::Full);
+        assert_eq!(
+            motion.transform_of(SeatId(2), now, Motion::Full),
+            PaneTransform::IDENTITY,
+            "a fade moves no box, so every frame it owes is owed for its opacity"
+        );
+
+        let mut presents = 0_u32;
+        let mut at = now;
+        loop {
+            let moving = motion.is_animating(at, Motion::Full);
+            if motion.settle_frame_debt(&arriving, at, Motion::Full) {
+                presents += 1;
+            }
+            if !moving {
+                break;
+            }
+            at += STRIP_ANIMATION_FRAME;
+        }
+        assert!(
+            presents >= 5,
+            "only {presents} frames of a 180ms fade were drawn — that is an \
+             appearance wearing a fade's clothes"
+        );
+        assert!(
+            !motion.settle_frame_debt(&arriving, at + STRIP_ANIMATION_FRAME, Motion::Full),
+            "and once it is fully there it owes nothing"
+        );
+    }
+
+    /// PIN — B22. The resizing cards pull in over exactly a hundred milliseconds
+    /// on CSS `ease`, and draw nothing at all on the frame the grab lands.
+    ///
+    /// `.pane { transition: margin .1s ease, border-radius .1s ease, box-shadow
+    /// .1s ease }` (mock-up 1464) serving `.slot.resizing .pane { margin: 5px;
+    /// border-radius: 8px }` (1465-1470). Three halves of that declaration are
+    /// load-bearing and each is pinned against the way it gets quietly lost: the
+    /// **span** (borrow the pane FLIP's 200ms and the cards are still arriving
+    /// after the seam has been dragged somewhere else), the **curve** (linear is
+    /// a different gesture — it starts at full speed, which reads as a snap that
+    /// then decelerates), and the **first frame** (both drawn numbers are floored
+    /// at one physical pixel, so a card scaled by zero is a hairline of floor
+    /// around a pane nobody is resizing).
+    #[test]
+    fn a_grabbed_dividers_cards_pull_in_over_a_hundred_milliseconds_on_ease() {
+        let now = Instant::now();
+        let mut cards = RevealTween::over(RESIZING_CARD_TRANSITION);
+        cards.retarget(1.0, now, Motion::Full);
+
+        assert_eq!(
+            cards.sample(now, Motion::Full).0,
+            0.0,
+            "on the frame the button goes down the panes are still flush"
+        );
+        assert_eq!(
+            seats::resizing_card_inset(1.0, cards.sample(now, Motion::Full).0),
+            None,
+            "and nothing is drawn for them — a one-pixel inset is a visible line \
+             around a pane that has not moved"
+        );
+
+        for ms in [20_u64, 50, 80] {
+            let at = now + Duration::from_millis(ms);
+            let (inset, moving) = cards.sample(at, Motion::Full);
+            assert!(moving, "{ms}ms into a 100ms transition it is still running");
+            let want = cubic_bezier(ms as f32 / 100.0, EASE);
+            assert!(
+                (inset - want).abs() < 1e-6,
+                "{ms}ms in the inset is {inset} where CSS `ease` says {want}"
+            );
+            let (margin, radius) =
+                seats::resizing_card_inset(1.0, inset).expect("a running card is a card");
+            assert!(
+                margin <= bt_render::SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX
+                    && radius <= bt_render::SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
+                "and it never overshoots the declaration: {margin}, {radius}"
+            );
+        }
+
+        // `ease` has a long flat tail, so the last frames of the transition round
+        // to the very pixels it lands on — which is why the frame debt is settled
+        // on the *drawn* inset. The frames that are genuinely part way in are the
+        // early ones, and those are asserted rather than the tail.
+        let (margin, radius) = seats::resizing_card_inset(
+            1.0,
+            cards
+                .sample(now + Duration::from_millis(20), Motion::Full)
+                .0,
+        )
+        .expect("a card twenty milliseconds in is a card");
+        assert!(
+            margin < bt_render::SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX
+                && radius < bt_render::SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
+            "twenty milliseconds in the card has not arrived: {margin}, {radius}"
+        );
+
+        let landed = now + RESIZING_CARD_TRANSITION;
+        assert_eq!(
+            cards.sample(landed, Motion::Full),
+            (1.0, false),
+            "a hundred milliseconds is the whole of it, and the loop may sleep"
+        );
+        assert_eq!(
+            seats::resizing_card_inset(1.0, cards.sample(landed, Motion::Full).0),
+            Some((
+                bt_render::SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
+                bt_render::SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX
+            )),
+            "landing on exactly the 5px and 8px F63 always drew"
+        );
+        assert_ne!(
+            RESIZING_CARD_TRANSITION, PANE_FLIP,
+            "a card inset answering a button press and half the window changing \
+             shape cannot be one number"
+        );
+    }
+
+    /// PIN — B22. A grab reversed mid-transition turns around from where the
+    /// cards actually are, not from an end they never reached.
+    ///
+    /// The fourth user of [`RevealTween`] and the first one that is genuinely
+    /// interrupted in ordinary use: a hand that grabs a divider, thinks better of
+    /// it and lets go inside the hundred milliseconds. A CSS transition
+    /// interrupted mid-flight restarts from the computed value, which is what
+    /// `retarget` gives — restart from 1.0 instead and the cards jump *in* the
+    /// rest of the way before running out, which is a flinch rather than a
+    /// reversal.
+    #[test]
+    fn a_card_transition_reversed_mid_flight_turns_around_from_where_it_is() {
+        let now = Instant::now();
+        let mut cards = RevealTween::over(RESIZING_CARD_TRANSITION);
+        cards.retarget(1.0, now, Motion::Full);
+
+        let at = now + Duration::from_millis(40);
+        let (reached, _) = cards.sample(at, Motion::Full);
+        assert!(
+            reached > 0.0 && reached < 1.0,
+            "40ms of 100ms is genuinely mid-flight: {reached}"
+        );
+
+        cards.retarget(0.0, at, Motion::Full);
+        assert!(
+            (cards.sample(at, Motion::Full).0 - reached).abs() < 1e-6,
+            "the reversal opens on the inset the cards had, {reached}, and not on \
+             the 1.0 they were aimed at"
+        );
+        assert!(
+            cards.sample(at + Duration::from_millis(10), Motion::Full).0 < reached,
+            "and runs down from there"
+        );
+        assert_eq!(
+            cards.sample(at + RESIZING_CARD_TRANSITION, Motion::Full),
+            (0.0, false),
+            "reaching flush a hundred milliseconds after the hand opened"
+        );
+    }
+
+    /// PIN — B22 under reduced motion: the cards appear and vanish at once, and
+    /// no frame is owed for either.
+    ///
+    /// Verified rather than assumed. "There is no transition under Reduced" is a
+    /// property of [`RevealTween::retarget`] storing no `started`, and the two
+    /// things that follow from it — the terminal inset on the first sample, and
+    /// a `false` that lets `strip_animation_deadline` answer `None` — are each a
+    /// separate consumer that could have read the clock for itself.
+    #[test]
+    fn reduced_motion_snaps_the_resizing_cards_in_and_out_and_asks_for_no_frames() {
+        let now = Instant::now();
+        let mut cards = RevealTween::over(RESIZING_CARD_TRANSITION);
+
+        cards.retarget(1.0, now, Motion::Reduced);
+        assert_eq!(
+            cards.sample(now, Motion::Reduced),
+            (1.0, false),
+            "the cards are simply there, and nothing is asking to be woken"
+        );
+        assert_eq!(
+            seats::resizing_card_inset(1.0, cards.sample(now, Motion::Reduced).0),
+            Some((
+                bt_render::SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
+                bt_render::SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX
+            )),
+        );
+
+        cards.retarget(0.0, now, Motion::Reduced);
+        assert_eq!(
+            cards.sample(now, Motion::Reduced),
+            (0.0, false),
+            "and simply gone"
+        );
+        assert_eq!(
+            seats::resizing_card_inset(1.0, cards.sample(now, Motion::Reduced).0),
+            None
+        );
+    }
+
+    /// PIN — U8. A preview seat's picture travels with its pane instead of
+    /// waiting at the destination.
+    ///
+    /// The defect this stands against is one commit deep and visible on screen:
+    /// `refresh_preview_for_layout` runs once per commit and used to hand the
+    /// renderer the *solved* body, so a preview pane's head and body glided over
+    /// 200ms while the picture inside them was already at the box it was going
+    /// to. The fix is the treatment seam 2 already got and no other — the same
+    /// [`animated_pane_viewports`] pair, from the same sampler, applied to one
+    /// more seat.
+    ///
+    /// The scenario is a three-pane tab losing its leftmost pane, which is what
+    /// actually moves a preview: the preview's own *arrival* fades rather than
+    /// FLIPs (mock-up 6573), and a fade has the identity transform, so an
+    /// arriving preview could not tell the fixed code from the broken code. What
+    /// moves it is any later structural edit, and closing a pane is the shortest
+    /// one to write.
+    ///
+    /// Three clauses, and the third is the one a naive fix loses: the picture is
+    /// **fitted** to the final body throughout. Fit it to the animating box
+    /// instead and every frame of the flight is a new `preview_image_extent`, a
+    /// new Lanczos target and a scale task per frame — R2's resize storm wearing
+    /// the image pipeline's clothes.
+    #[test]
+    fn a_preview_seats_picture_travels_with_its_pane_rather_than_waiting_at_the_destination() {
+        let now = Instant::now();
+        let metrics = seats::seat_metrics(1_000);
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let mut seats = seats::Seats::lone_terminal();
+        let first = seats.terminal();
+        let second = seats
+            .split_terminal(&metrics, first, bt_layout::Axis::Row, false)
+            .expect("a 1600x900 window divides");
+        assert!(seats.toggle_preview(&metrics), "the preview lands");
+        let preview = seats.preview().expect("and it is in the tree");
+        let before = seats.solve(viewport, &metrics).expect("three panes solve");
+        assert!(
+            seats.close_seat(&metrics, first),
+            "the leftmost pane closes"
+        );
+        let after = seats.solve(viewport, &metrics).expect("two panes solve");
+
+        let was = pane_box_of(&before, preview);
+        let is = pane_box_of(&after, preview);
+        assert!(
+            (was[0] - is[0]).abs() > 1.0,
+            "the preview's own corner has to travel, or this pin proves nothing: \
+             {was:?} -> {is:?}"
+        );
+
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &pane_rects_of(&before),
+            &pane_rects_of(&after),
+            now,
+            Motion::Full,
+        );
+
+        // The terminal beside it is still in the box it had, which is the frame
+        // the picture has to be found in.
+        let survivor = motion
+            .transform_of(second, now, Motion::Full)
+            .applied_to(pane_box_of(&after, second));
+        for channel in 0..4 {
+            assert!(
+                (survivor[channel] - pane_box_of(&before, second)[channel]).abs() < 1e-3,
+                "on the first frame the terminal is still where it was: {survivor:?} \
+                 against {:?}",
+                pane_box_of(&before, second)
+            );
+        }
+
+        let opening = preview_image_placement(
+            &seats,
+            &after,
+            preview,
+            1.0,
+            motion.transform_of(preview, now, Motion::Full),
+        )
+        .expect("the preview has a body");
+        assert_ne!(
+            opening.seat, opening.body,
+            "the picture is not at the corner the solver just gave it"
+        );
+        assert_eq!(
+            opening.seat.x as f32, was[0],
+            "it is at the corner its own tween gives it, which is the one its head \
+             is drawn at this frame"
+        );
+        assert_eq!(
+            (opening.seat.width, opening.seat.height),
+            (opening.body.width, opening.body.height),
+            "and it is fitted to the final body from the very first frame — one \
+             resample per commit, never one per frame"
+        );
+        assert!(
+            opening.clip.width < opening.seat.width || opening.clip.x > opening.seat.x,
+            "while the box it may appear in is still the narrow one it had: {:?} \
+             against {:?}",
+            opening.clip,
+            opening.seat
+        );
+
+        let landed = preview_image_placement(
+            &seats,
+            &after,
+            preview,
+            1.0,
+            motion.transform_of(preview, now + PANE_FLIP, Motion::Full),
+        )
+        .expect("the preview has a body");
+        assert_eq!(
+            (landed.seat, landed.clip),
+            (landed.body, landed.body),
+            "and both converge on the solver's answer"
+        );
+    }
+
+    /// PIN — U8. A window resized mid-flight owes exactly the frames it draws.
+    ///
+    /// The debt is settled against the **live** solve, passed in, and never
+    /// against a copy taken when the tween started. Nothing *drawn* depends on
+    /// this — both seams apply the running transform to whatever rectangle the
+    /// solver gave this frame, which is CSS's own rule that a transform is
+    /// relative to the box the element is currently laid out in — so the whole
+    /// cost of getting it wrong is a present that draws nothing new. That is
+    /// exactly what this counts.
+    ///
+    /// The stale rectangle is not simulated by a mutation: it is the same call
+    /// with the pre-resize layout handed in, which is precisely what a stored
+    /// copy would have been. So the second half is the red gate, and it fails if
+    /// the two ever stop being distinguishable.
+    #[test]
+    fn a_window_resized_mid_flight_owes_exactly_the_frames_it_draws() {
+        let now = Instant::now();
+        let seat = SeatId(1);
+        let before = [(seat, [0.0, 0.0, 700.0, 700.0])];
+        let solved = [(seat, [0.0, 0.0, 500.0, 500.0])];
+        // The same pane after the window was dragged much narrower, mid-flight:
+        // every rectangle is re-solved and the tween decays onto the new one.
+        // A pure shrink is deliberate — with no translation left, the *only*
+        // thing deciding which frames draw something new is the extent the scale
+        // multiplies, which is exactly the term a stored rectangle gets wrong.
+        let resized = [0.0, 0.0, 150.0, 120.0];
+        let live = [(seat, resized)];
+
+        // The frames on which the seams actually put something new on screen:
+        // the running transform over the rectangle the window *now* has.
+        let mut reference = PaneMotion::default();
+        reference.begin(&before, &solved, now, Motion::Full);
+        let mut redraws = Vec::new();
+        let mut last: Option<[i32; 4]> = None;
+        let mut at = now;
+        loop {
+            let moving = reference.is_animating(at, Motion::Full);
+            let showing = reference
+                .transform_of(seat, at, Motion::Full)
+                .applied_to(resized)
+                .map(|edge| edge.round() as i32);
+            redraws.push(last != Some(showing));
+            last = Some(showing);
+            if !moving {
+                break;
+            }
+            at += STRIP_ANIMATION_FRAME;
+        }
+        assert!(
+            redraws.iter().filter(|drew| **drew).count() > 3,
+            "the flight has to draw several distinct boxes, or this counts nothing"
+        );
+
+        let walk = |layout: &[(SeatId, [f32; 4])]| {
+            let mut motion = PaneMotion::default();
+            motion.begin(&before, &solved, now, Motion::Full);
+            let mut owed = Vec::new();
+            let mut at = now;
+            loop {
+                let moving = motion.is_animating(at, Motion::Full);
+                owed.push(motion.settle_frame_debt(layout, at, Motion::Full));
+                if !moving {
+                    break;
+                }
+                at += STRIP_ANIMATION_FRAME;
+            }
+            (owed, motion)
+        };
+
+        let (owed, settled) = walk(&live);
+        assert_eq!(
+            owed, redraws,
+            "a present is owed on exactly the frames something new is drawn — no \
+             frame of the flight is skipped, and none of them pays twice"
+        );
+        assert_eq!(
+            settled
+                .entry(seat)
+                .and_then(|pane| pane.last_drawn)
+                .map(|drawn| drawn.box_px),
+            Some(resized.map(|edge| edge.round() as i32)),
+            "and it ends recorded as drawn in the rectangle the window actually \
+             has, rather than in the one it had when the split happened"
+        );
+
+        // The red gate, and it is not a simulation: handing in the pre-resize
+        // layout *is* what a rectangle stored at `begin` would have been.
+        let (stale, stale_motion) = walk(&before);
+        assert_ne!(
+            stale, redraws,
+            "the pre-resize rectangle really does owe a different set of frames, \
+             so this pin can fail"
+        );
+        assert_ne!(
+            stale_motion
+                .entry(seat)
+                .and_then(|pane| pane.last_drawn)
+                .map(|drawn| drawn.box_px),
+            Some(resized.map(|edge| edge.round() as i32)),
+            "and it really would end up recording a box nobody drew"
+        );
+    }
+
+    /// PIN — U8. Switching tabs clears the motion: you do not glide a layout you
+    /// were not looking at.
+    ///
+    /// The two lines `activate_tab` runs, and both of them matter. Dropping the
+    /// tweens is the obvious half; adopting the arriving tab's own revision is
+    /// the half that is easy to forget, and the red gate at the foot is what
+    /// this pin exists for — leave the revision behind and the first commit in
+    /// the tab you switched to animates a change that happened in a *different*
+    /// tab, from rectangles nobody has ever seen.
+    ///
+    /// (Stated against the state `activate_tab` writes rather than against a
+    /// `Runtime`, which needs a window and a GPU device to exist.)
+    #[test]
+    fn switching_tabs_drops_the_flight_and_adopts_the_arriving_tabs_own_revision() {
+        let now = Instant::now();
+        let (leaving, before, after, survivor, _) = split_window(true);
+        let mut motion = PaneMotion::default();
+        motion.begin(
+            &pane_rects_of(&before),
+            &pane_rects_of(&after),
+            now,
+            Motion::Full,
+        );
+        assert!(
+            motion.is_animating(now, Motion::Full),
+            "the tab being left is mid-flight"
+        );
+        // The arriving tab, which was split twice while nobody was looking.
+        let metrics = seats::seat_metrics(1_000);
+        let mut arriving_tab = seats::Seats::lone_terminal();
+        let root = arriving_tab.terminal();
+        let second = arriving_tab
+            .split_terminal(&metrics, root, bt_layout::Axis::Row, false)
+            .expect("it divides");
+        arriving_tab
+            .split_terminal(&metrics, second, bt_layout::Axis::Col, false)
+            .expect("and divides again");
+
+        // Exactly what `activate_tab` writes.
+        motion = PaneMotion::default();
+        let revision = arriving_tab.structure_revision();
+
+        assert!(!motion.is_animating(now, Motion::Full));
+        assert_eq!(motion.deadline(now, Motion::Full), None);
+        assert_eq!(
+            motion.transform_of(survivor, now, Motion::Full),
+            PaneTransform::IDENTITY,
+            "nothing of the tab you left is still moving"
+        );
+        assert_eq!(
+            revision,
+            arriving_tab.structure_revision(),
+            "the gate is closed on arrival: the next commit in this tab compares \
+             equal and leaves the motion alone"
+        );
+        assert_ne!(
+            leaving.structure_revision(),
+            arriving_tab.structure_revision(),
+            "and the two counters really are different, so carrying the old one \
+             across would have opened the gate on the very next commit"
         );
     }
 
