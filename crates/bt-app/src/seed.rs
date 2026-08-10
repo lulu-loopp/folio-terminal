@@ -251,12 +251,15 @@ pub fn normalize_pins<T>(tabs: &mut [T], is_pinned: impl Fn(&T) -> bool) {
 
 /// Is the pinned-lead invariant currently true?
 ///
-/// Unused by the strip today on purpose: drag-reorder (T5) is the thing that can
-/// break the partition, and this is the sentence it will be held to. Stating it
-/// here rather than in the drag ticket is what stops the two from drifting.
+/// This is the partition F57 has to preserve, and it is now asked rather than
+/// merely written down: `Runtime::tab_trailers` — the one function both the
+/// strip and the rail build their rows from — asserts it every frame, so a write
+/// path that breaks the partition is named on the frame it breaks it.
 ///
-/// This is the partition F57 (drag reorder, T5) has to preserve.
-#[allow(dead_code)]
+/// It was `#[allow(dead_code)]` while it waited for that call site, and the wait
+/// was the cost: the path that actually broke the invariant (N160①'s "pin
+/// follows content", which pins a tab where it stands) shipped and went
+/// unnoticed, because the sentence it would have failed was never spoken.
 #[must_use]
 pub fn pins_are_normalized<T>(tabs: &[T], is_pinned: impl Fn(&T) -> bool) -> bool {
     let pinned = tabs.iter().filter(|tab| is_pinned(tab)).count();

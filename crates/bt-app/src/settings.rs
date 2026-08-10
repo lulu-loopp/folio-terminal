@@ -1443,7 +1443,13 @@ mod tests {
         let gear = f64::from(surface_width - 4.0 * button + button / 2.0);
         let y = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX * scale / 2.0);
         assert_eq!(
-            crate::seats::hit_window_chrome(surface_width, scale, gear, y),
+            crate::seats::hit_window_chrome(
+                surface_width,
+                scale,
+                crate::seats::RailState::default(),
+                gear,
+                y,
+            ),
             Some(crate::seats::ChromeTarget::Settings),
             "the point under test really is the gear"
         );

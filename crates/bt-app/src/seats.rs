@@ -1472,6 +1472,10 @@ pub enum ChromeTarget {
     Minimize,
     Maximize,
     CloseWindow,
+    /// `.panel-toggle` — the button that folds the rail away (mock-up 906-915,
+    /// `#btn-rail`). Only the expanded vertical layout carries one; see
+    /// [`panel_toggle_box`] for the gate and why `collapsed` is not part of it.
+    PanelToggle,
     Tab(usize),
     TabClose(usize),
     /// The pin, which stands in the `×`'s own slot: an unpinned tab's while the
@@ -2783,14 +2787,62 @@ fn tab_width_tier(tab_width: f32, scale: f32) -> TabWidthTier {
     }
 }
 
-/// Physical right edge of the app-owned tab run — everything left of it is the
-/// app's, and everything right of it up to the caption run is window drag.
+/// **Physical right edge of the app's own run in the title bar — everything left
+/// of it is the app's, everything right of it up to the caption run is window
+/// drag.**
+///
+/// This is the single number bt-platform's `WM_NCHITTEST` bridge is given, and
+/// the whole of what it knows about the bar: left of it is `HTCLIENT`, right of
+/// it is `HTCAPTION`. So it has to be the answer for *whatever the bar is
+/// currently wearing*, and the two layouts wear entirely different things.
+///
+/// **Horizontal** — the tab strip runs across the bar, so the app owns up to the
+/// `˅` (or, under scroll, the strip's whole viewport; see
+/// [`tab_strip_right_px`]).
+///
+/// **Vertical** — the tabs have moved down the side and the bar is left holding
+/// the panel toggle and the program's name. Only the toggle is a *control*:
+/// `.apptitle` sits inside `.drag` in the mock-up, which is to say the name is
+/// part of the handle you drag the window by, exactly as a title always has
+/// been. So the app's run ends at the toggle's right edge — and when there is no
+/// toggle (an icon rail) the app owns nothing here at all and the answer is 0.
+///
+/// **The bug this replaced.** The old signature had no layout in it and asked
+/// [`tab_strip_right_px`] unconditionally, so in the vertical layout it went on
+/// describing a tab strip that was no longer in the bar — under enough tabs,
+/// "the app owns its whole run" — and the entire top bar answered `HTCLIENT`.
+/// The window could not be dragged by its own title bar. Same class of mistake
+/// as the one `profile_menu_layout` already carries a comment about: a pure
+/// function of a width and a tab count "goes on answering with a box in the
+/// title bar long after the tabs have moved down the side".
+#[must_use]
+pub fn title_bar_app_run_right_px(
+    width: f32,
+    scale: f32,
+    tab_count: usize,
+    rail: RailState,
+) -> i32 {
+    match rail.layout {
+        TabLayoutMode::Horizontal => tab_strip_right_px(width, scale, tab_count),
+        // Written off the box itself rather than off `12 + 30`, so a toggle that
+        // moves takes its dead zone with it.
+        TabLayoutMode::Vertical => panel_toggle_box(scale, rail)
+            .map_or(0, |toggle| toggle[2].ceil() as i32)
+            .max(0),
+    }
+}
+
+/// Physical right edge of the app-owned tab run in the **horizontal** layout.
 ///
 /// Under scroll the answer is the strip's own right edge rather than the `˅`'s:
 /// a scrolling strip has no slack left in it, every pixel of the run is content,
 /// and the `˅` that used to mark the end of the app's territory is now somewhere
 /// off to the right of the viewport. Reporting the button's edge there would
 /// hand the app's own tabs to the window's drag handler.
+///
+/// Callers outside this module want [`title_bar_app_run_right_px`], which is
+/// this answer for the layout that has a strip and a different one for the
+/// layout that does not.
 pub fn tab_strip_right_px(width: f32, scale: f32, tab_count: usize) -> i32 {
     // Neither the tiers nor the scroll offset move this answer: the tiers change
     // nothing outside a tab's own body, and a strip either scrolls or it does
@@ -2908,12 +2960,18 @@ pub fn hit_chrome(
     None
 }
 
-/// Hit-test the four application-owned boxes at the right edge of the title
-/// bar. The remaining title area is deliberately absent: Win32 owns it through
-/// `HTCAPTION`, not winit client input.
-pub fn hit_window_chrome(width: f32, scale: f32, x: f64, y: f64) -> Option<ChromeTarget> {
+/// Hit-test the application-owned boxes of the title bar. The remaining title
+/// area is deliberately absent: Win32 owns it through `HTCAPTION`, not winit
+/// client input.
+pub fn hit_window_chrome(
+    width: f32,
+    scale: f32,
+    rail: RailState,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
-    window_chrome_boxes(width, scale)
+    window_chrome_boxes(width, scale, rail)
         .into_iter()
         .find(|(_, rect)| contains(*rect, x, y))
         .map(|(target, _)| target)
@@ -2931,8 +2989,33 @@ pub fn hit_window_chrome(width: f32, scale: f32, x: f64, y: f64) -> Option<Chrom
 /// merely what is under the pointer, and a second copy of `width - 4 * button`
 /// is exactly the kind of duplicate that stays right until someone adds a fifth
 /// button.
+///
+/// **The panel toggle joins the run when the bar carries one**, at the head
+/// rather than in the caption group, because that is where it stands: the
+/// mock-up puts it inside `.drag` at the far left and the caption buttons at the
+/// far right. It is listed here for the same reason the gear is — this is the
+/// list of boxes in the title bar that belong to the *app*, and being on it is
+/// what makes a box clickable, tippable, and (via
+/// [`title_bar_app_run_right_px`]) something the window's own drag handler is
+/// told to keep out of.
 #[must_use]
-pub fn window_chrome_boxes(width: f32, scale: f32) -> [(ChromeTarget, [f32; 4]); 4] {
+pub fn window_chrome_boxes(
+    width: f32,
+    scale: f32,
+    rail: RailState,
+) -> Vec<(ChromeTarget, [f32; 4])> {
+    let mut boxes = Vec::with_capacity(5);
+    if let Some(rect) = panel_toggle_box(scale, rail) {
+        boxes.push((ChromeTarget::PanelToggle, rect));
+    }
+    boxes.extend(window_caption_boxes(width, scale));
+    boxes
+}
+
+/// The caption run alone — the four boxes anchored to the window's right edge,
+/// which stand in the same place whatever the tabs are doing.
+#[must_use]
+pub fn window_caption_boxes(width: f32, scale: f32) -> [(ChromeTarget, [f32; 4]); 4] {
     let title = WINDOW_TITLE_BAR_LOGICAL_PX * scale;
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * button).max(0.0);
@@ -3986,7 +4069,7 @@ pub fn build_chrome_for_tabs(
             scroll: tab_scroll,
             profile_menu_open,
             chevron_turn,
-            layout: rail.layout,
+            rail,
         },
         (&mut quads, &mut labels, &mut sprites),
     );
@@ -4754,9 +4837,11 @@ struct TabStrip<'a> {
     scroll: f32,
     profile_menu_open: bool,
     chevron_turn: f32,
-    /// Which axis the list runs on — R1, and the one thing in here that decides
-    /// whether this strip is drawn at all.
-    layout: TabLayoutMode,
+    /// The rail's whole posture — R1. Its `layout` decides whether this strip is
+    /// drawn at all, and the rest of it decides what stands in the bar instead
+    /// when it is not: an expanded rail is offered a `.panel-toggle`, an icon
+    /// rail is not.
+    rail: RailState,
 }
 
 fn window_chrome(
@@ -4770,7 +4855,8 @@ fn window_chrome(
         &mut Vec<ChromeSprite>,
     ),
 ) {
-    let layout = strip.layout;
+    let rail = strip.rail;
+    let layout = rail.layout;
     let (quads, labels, sprites) = output;
     let palette = chrome_palette();
     let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
@@ -4798,11 +4884,47 @@ fn window_chrome(
             window_tab_strip(width, scale, hover, strip, palette, (labels, sprites));
         }
         TabLayoutMode::Vertical => {
-            // `.titlebar .drag { padding-left: 12px; }` — the bar's ordinary
-            // inset, not the horizontal layout's `padding-left: var(--tabr)`,
-            // which exists so a tab's corner can land on the window edge and has
-            // nothing to indent here.
-            let left = (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round();
+            // `.panel-toggle` stands first in `.drag`, and the name begins after
+            // it and its 8px gap. Both read their x from the same box, so the
+            // name cannot come to rest under a button that moved.
+            if let Some(toggle) = panel_toggle_box(scale, rail) {
+                let hovered = hover == Some(ChromeTarget::PanelToggle);
+                // `.panel-toggle:hover { background: var(--hover) }` over a 6px
+                // radius, which is the `+`'s own pill at another size rather than
+                // the caption buttons' square wash: this button is inset in the
+                // bar and rounded, and a full-height rectangle behind it would be
+                // a different shape than the one the mock-up draws.
+                if hovered {
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (WINDOW_PANEL_TOGGLE_RADIUS_LOGICAL_PX * scale)
+                                .round()
+                                .max(1.0) as u32,
+                        },
+                        pixel_snapped(toggle),
+                        palette.caption_hover,
+                    ));
+                }
+                let glyph = (WINDOW_PANEL_TOGGLE_GLYPH_LOGICAL_PX * scale)
+                    .round()
+                    .max(1.0);
+                let glyph_left = ((toggle[0] + toggle[2] - glyph) / 2.0).round();
+                let glyph_top = ((toggle[1] + toggle[3] - glyph) / 2.0).round();
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::Panel,
+                    [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+                    // `color: var(--ink3)` lifting to `var(--ink)` under the
+                    // pointer — the `+`'s pair, not the caption run's: the
+                    // mock-up rests this button one ink lighter than the gear
+                    // beside it, at the same weight as the name it stands next to.
+                    if hovered {
+                        palette.title_text_hover
+                    } else {
+                        palette.title_text_muted
+                    },
+                ));
+            }
+            let left = app_title_left_px(scale, rail);
             labels.push(ChromeLabel {
                 text: "BetterTerminal".to_owned(),
                 // Out to the caption run, so a narrow window crops the name
@@ -4905,7 +5027,7 @@ fn window_tab_strip(
         scroll: tab_scroll,
         profile_menu_open,
         chevron_turn,
-        layout: _,
+        rail: _,
     } = strip;
     let (labels, sprites) = output;
     let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
@@ -5559,6 +5681,68 @@ const RAIL_SHADE_STEPS: usize = 9;
 /// stands in the title bar in the vertical layout and is displaced by the tab
 /// strip in the horizontal one.
 const APP_TITLE_FONT_LOGICAL_PX: f32 = 12.5;
+
+/// `.panel-toggle { width: 30px; height: 26px; border-radius: 6px }` (mock-up
+/// 906-910) — the button that folds the rail away, and the only *control* the
+/// title bar carries outside the caption run.
+const WINDOW_PANEL_TOGGLE_WIDTH_LOGICAL_PX: f32 = 30.0;
+const WINDOW_PANEL_TOGGLE_HEIGHT_LOGICAL_PX: f32 = 26.0;
+const WINDOW_PANEL_TOGGLE_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// `.panel-toggle svg { width: 14px; height: 14px }` (mock-up 915) — the gear's
+/// glyph size rather than the 10px the other caption marks wear, and the
+/// mock-up sets them from the same hand.
+const WINDOW_PANEL_TOGGLE_GLYPH_LOGICAL_PX: f32 = 14.0;
+/// `.titlebar .drag { gap: 8px }` (mock-up 181) — what stands between the
+/// toggle and the name beside it.
+const WINDOW_TITLE_DRAG_GAP_LOGICAL_PX: f32 = 8.0;
+
+/// **The panel toggle's box, or `None` when the bar does not carry one.**
+///
+/// One function answering both "where do I paint it", "what did the pointer
+/// hit" and "where does the app's own chrome end so the window can be dragged"
+/// (R3/A5). Three call sites reading one rectangle is the whole point: the
+/// button that is drawn, the button that is clickable and the button the OS is
+/// told to keep out of are required to be the same button, and they can only be
+/// guaranteed to be by being one expression.
+///
+/// **Gated exactly as the mock-up gates it** (906-913): `display: none` by
+/// default, `flex` under `[data-tabs="vertical"]`, and back to `none` under
+/// `.rail-icons` — *"in icon mode the sidebar is already parked — nothing left
+/// to collapse"*. So a horizontal bar has no toggle at all, and neither does an
+/// icon rail; only the expanded vertical rail offers one.
+///
+/// `collapsed` deliberately does **not** gate it. A button that vanished when
+/// you pressed it would be a button that cannot be pressed back — the toggle
+/// has to survive its own verb, which is why the mock-up hangs `rail-collapsed`
+/// on the rail and never on this.
+#[must_use]
+pub fn panel_toggle_box(scale: f32, rail: RailState) -> Option<[f32; 4]> {
+    if rail.layout != TabLayoutMode::Vertical || rail.mode == RailMode::Icons {
+        return None;
+    }
+    // `.titlebar .drag { padding-left: 12px }` — the same inset the app name
+    // takes in this layout, and the toggle is the first thing in that box.
+    let left = (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round();
+    let width = (WINDOW_PANEL_TOGGLE_WIDTH_LOGICAL_PX * scale).round();
+    let height = (WINDOW_PANEL_TOGGLE_HEIGHT_LOGICAL_PX * scale).round();
+    // `align-items: center` in a 40px bar: the button is shorter than the bar
+    // and rides its middle.
+    let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    let top = ((title - height) * 0.5).round();
+    Some([left, top, left + width, top + height])
+}
+
+/// Where `.apptitle` starts: after the toggle and its gap when there is one,
+/// and at the bar's own inset when there is not.
+///
+/// Written off [`panel_toggle_box`] rather than as a second sum, so the name
+/// cannot come to rest under a button that moved.
+fn app_title_left_px(scale: f32, rail: RailState) -> f32 {
+    match panel_toggle_box(scale, rail) {
+        Some(toggle) => toggle[2] + (WINDOW_TITLE_DRAG_GAP_LOGICAL_PX * scale).round(),
+        None => (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round(),
+    }
+}
 
 /// Everything the rail needs to know about itself — [`TabStrip`] on the other
 /// axis, and deliberately the same shape.
@@ -8606,6 +8790,177 @@ mod tests {
         assert!(fallback.iter().any(|label| label.text == "PowerShell"));
     }
 
+    /// PIN — R1/A5: **`.panel-toggle` is drawn, hit and measured from one box,
+    /// and only the expanded vertical bar has one.**
+    ///
+    /// The mock-up's three-line gate, as three answers (906-913): `display: none`
+    /// by default, `flex` under `[data-tabs="vertical"]`, and back to `none`
+    /// under `.rail-icons` — *"in icon mode the sidebar is already parked —
+    /// nothing left to collapse"*. A horizontal bar must not merely fail to draw
+    /// it; the box has to be absent, or the pointer would find a button nobody
+    /// painted.
+    ///
+    /// The numbers are the mock-up's own: a 30x26 box at the bar's 12px inset,
+    /// centred in a 40px bar, which puts it at `[12, 7, 42, 33]`.
+    ///
+    /// Red gate: drop the `mode == Icons` clause and the icon rail grows a button
+    /// it has nothing to do with; drop the `layout != Vertical` clause and the
+    /// horizontal bar answers `PanelToggle` where its first tab stands.
+    #[test]
+    fn the_panel_toggle_stands_only_on_the_expanded_vertical_bar() {
+        let expanded = RailState {
+            layout: TabLayoutMode::Vertical,
+            mode: RailMode::Expanded,
+            ..RailState::default()
+        };
+        let icons = RailState {
+            mode: RailMode::Icons,
+            ..expanded
+        };
+        let horizontal = RailState::default();
+
+        assert_eq!(
+            panel_toggle_box(1.0, expanded),
+            Some([12.0, 7.0, 42.0, 33.0]),
+            "`.panel-toggle` is 30x26 at the bar's 12px inset, centred in 40px"
+        );
+        assert_eq!(
+            panel_toggle_box(1.0, horizontal),
+            None,
+            "no toggle on a strip"
+        );
+        assert_eq!(
+            panel_toggle_box(1.0, icons),
+            None,
+            "an icon rail is already parked, so there is nothing left to collapse"
+        );
+        // A fold does not take the button away with it — a toggle that vanished
+        // when pressed could never be pressed back.
+        assert_eq!(
+            panel_toggle_box(
+                1.0,
+                RailState {
+                    collapsed: true,
+                    ..expanded
+                }
+            ),
+            Some([12.0, 7.0, 42.0, 33.0]),
+            "the toggle survives its own verb"
+        );
+
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let width = 960.0 * scale;
+            let toggle = panel_toggle_box(scale, expanded).expect("the expanded bar carries one");
+            assert_eq!(
+                window_chrome_boxes(width, scale, expanded).first(),
+                Some(&(ChromeTarget::PanelToggle, toggle)),
+                "it leads the run: `.drag`'s first child, at the far left"
+            );
+            // Drawn, hit and measured from one box.
+            assert_eq!(
+                hit_window_chrome(
+                    width,
+                    scale,
+                    expanded,
+                    f64::from((toggle[0] + toggle[2]) / 2.0),
+                    f64::from((toggle[1] + toggle[3]) / 2.0),
+                ),
+                Some(ChromeTarget::PanelToggle),
+                "{scale}x"
+            );
+            // The horizontal bar does not answer at the same point.
+            assert_ne!(
+                hit_window_chrome(
+                    width,
+                    scale,
+                    horizontal,
+                    f64::from((toggle[0] + toggle[2]) / 2.0),
+                    f64::from((toggle[1] + toggle[3]) / 2.0),
+                ),
+                Some(ChromeTarget::PanelToggle),
+                "a horizontal bar draws no toggle, so it cannot be hit at {scale}x"
+            );
+            assert!(
+                !window_chrome_boxes(width, scale, icons)
+                    .iter()
+                    .any(|(target, _)| *target == ChromeTarget::PanelToggle),
+                "nor does an icon rail at {scale}x"
+            );
+            // A4 — the name stands after the toggle and its 8px gap, and at the
+            // bar's own inset when there is no toggle to stand after.
+            assert_eq!(
+                app_title_left_px(scale, expanded),
+                toggle[2] + (8.0 * scale).round(),
+                "`.apptitle` follows the toggle across `.drag`'s gap at {scale}x"
+            );
+            assert_eq!(
+                app_title_left_px(scale, icons),
+                (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round(),
+                "with no toggle the name takes the bar's own inset at {scale}x"
+            );
+        }
+    }
+
+    /// PIN — R3: **the window's drag boundary answers to the layout, not to a tab
+    /// strip that is no longer in the bar.**
+    ///
+    /// The number under test is the only thing bt-platform's `WM_NCHITTEST`
+    /// bridge knows about the title bar: left of it is `HTCLIENT`, right of it is
+    /// `HTCAPTION`. With the tabs down the side the bar holds one button and a
+    /// label, so the app's run ends at the button — the label is inside `.drag`
+    /// and a title has always been part of the handle.
+    ///
+    /// **Tab count is the witness.** The bug was a horizontal-strip formula asked
+    /// in the vertical layout, and a strip's answer *grows* with the number of
+    /// tabs until it claims the whole run. So the assertion that matters is that
+    /// thirty tabs move this number not at all when the tabs are in the rail —
+    /// under the old code they moved it to nearly the window's width, and the
+    /// entire top bar stopped being draggable.
+    ///
+    /// Red gate: route the vertical arm back through `tab_strip_right_px` and the
+    /// thirty-tab case reports a strip-shaped boundary instead of 42.
+    #[test]
+    fn the_drag_boundary_follows_the_tabs_off_the_title_bar() {
+        let expanded = RailState {
+            layout: TabLayoutMode::Vertical,
+            mode: RailMode::Expanded,
+            ..RailState::default()
+        };
+        let icons = RailState {
+            mode: RailMode::Icons,
+            ..expanded
+        };
+        let horizontal = RailState::default();
+        let (width, scale) = (960.0_f32, 1.0_f32);
+
+        for tabs in [1_usize, 2, 30] {
+            assert_eq!(
+                title_bar_app_run_right_px(width, scale, tabs, expanded),
+                42,
+                "the app owns the toggle and nothing else, whatever {tabs} tabs \
+                 would have done to a strip"
+            );
+            assert_eq!(
+                title_bar_app_run_right_px(width, scale, tabs, icons),
+                0,
+                "an icon rail puts nothing in the bar at all, so all of it drags"
+            );
+            assert_eq!(
+                title_bar_app_run_right_px(width, scale, tabs, horizontal),
+                tab_strip_right_px(width, scale, tabs),
+                "the horizontal bar's answer is unchanged: it really does hold a \
+                 strip"
+            );
+        }
+        // The witness itself: a strip's boundary grows with its tabs, which is
+        // exactly the growth that used to leak into the vertical layout.
+        assert!(
+            tab_strip_right_px(width, scale, 30)
+                > title_bar_app_run_right_px(width, scale, 30, expanded),
+            "a thirty-tab strip claims far more of the bar than the toggle does"
+        );
+    }
+
     /// The caption run's boxes and its hit test are one arithmetic, and this is
     /// what says so: every box answers with its own target when asked at its
     /// centre, and the run tiles the corner with no seam between the buttons.
@@ -8615,9 +8970,18 @@ mod tests {
     /// labelled "Maximize" standing under the close button.
     #[test]
     fn the_caption_boxes_are_the_boxes_the_caption_hit_test_answers_from() {
+        // The horizontal bar, whose whole app-owned run in the caption corner is
+        // these four — the vertical one's fifth box has its own test.
+        let rail = RailState::default();
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let width = 960.0 * scale;
-            let boxes = window_chrome_boxes(width, scale);
+            let boxes = window_caption_boxes(width, scale);
+            assert_eq!(
+                window_chrome_boxes(width, scale, rail),
+                boxes.to_vec(),
+                "a horizontal bar carries no panel toggle, so the run is the \
+                 caption run and nothing else"
+            );
             assert_eq!(
                 boxes.map(|(target, _)| target),
                 [
@@ -8633,6 +8997,7 @@ mod tests {
                     hit_window_chrome(
                         width,
                         scale,
+                        rail,
                         f64::from((rect[0] + rect[2]) / 2.0),
                         f64::from((rect[1] + rect[3]) / 2.0),
                     ),
@@ -8648,12 +9013,12 @@ mod tests {
             }
             assert!((boxes[3].1[2] - width).abs() < 1e-4);
             assert_eq!(
-                hit_window_chrome(width, scale, f64::from(width) - 0.5, 1.0),
+                hit_window_chrome(width, scale, rail, f64::from(width) - 0.5, 1.0),
                 Some(ChromeTarget::CloseWindow)
             );
             // And nothing to the left of the run is the run's.
             assert_eq!(
-                hit_window_chrome(width, scale, f64::from(boxes[0].1[0]) - 1.0, 1.0),
+                hit_window_chrome(width, scale, rail, f64::from(boxes[0].1[0]) - 1.0, 1.0),
                 None
             );
         }

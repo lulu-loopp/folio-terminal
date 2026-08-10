@@ -5185,6 +5185,93 @@ fn strip_insert_slot(raw: usize, pinned: &[bool]) -> usize {
     raw.clamp(lead, pinned.len())
 }
 
+/// **F57's one enforcement point: put the run back in its partition and keep the
+/// active tab naming the tab it named.**
+///
+/// The two clamps above ([`strip_insert_slot`], [`partition_clamped`]) keep an
+/// *arriving* or *moving* tab on its own side of the seam, and they are enough
+/// for every gesture that only changes a position. They are not enough for a
+/// gesture that changes a **flag**: a tab that becomes pinned where it stands is
+/// suddenly a pinned tab behind unpinned ones, and no amount of clamping the
+/// other tabs' movements repairs it, because nothing moved.
+///
+/// There are exactly two such gestures — the pin control ([`Runtime::toggle_pin`])
+/// and N160①'s "pin follows content" ([`absorb_tab_sessions`], which ORs the
+/// source's pin into a target that keeps its slot) — and until this existed only
+/// the first one normalized, inline. That is the whole of the bug this function
+/// was written for: a pinned tab dragged onto an unpinned one left the strip
+/// reading pinned, unpinned, unpinned, **pinned** — the partition broken at the
+/// only place that had no copy of the enforcement.
+///
+/// Sorted rather than rotated because [`seed::normalize_pins`] is documented
+/// stable: both runs keep their relative order, so the repair moves exactly the
+/// tab whose flag changed and tells no other tab where to stand.
+///
+/// The active tab is followed **by identity**. It is stored as a position, and a
+/// position means a different tab after a sort — the same reasoning `move_tab_
+/// with_flip` gives for adjusting rather than re-deriving, arriving at the
+/// opposite mechanism because here the run's *order* changed and not its length.
+/// **The strip's half of a merge: the source leaves, the displaced pane arrives,
+/// and F57 is settled over what is left.**
+///
+/// A free function for the reason [`absorb_tab_into_layout`] and
+/// [`tear_pane_into_tab`] are: this is where the *list* is edited, and a test
+/// that cannot reach it can only re-implement it and then check its own copy.
+/// The bug this was split out for lived exactly here — in the two lines between
+/// the removal and the insertion, on a list no test had ever held.
+///
+/// `index` is the departing tab's slot; `ejected` is the pane a `ReplaceSeat`
+/// landing turned out of the target, which becomes a tab of its own.
+fn absorb_tab_into_strip(
+    tabs: &mut Vec<TabState>,
+    active_tab: &mut usize,
+    index: usize,
+    ejected: Option<TabState>,
+) {
+    tabs.remove(index);
+    if index < *active_tab {
+        *active_tab -= 1;
+    }
+    if let Some(ejected) = ejected {
+        // L139 — the displaced pane takes the slot the source tab is vacating,
+        // clamped behind whatever pinned run the removal has left.
+        let pinned = tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
+        let slot = strip_insert_slot(index, &pinned);
+        tabs.insert(slot, ejected);
+        if slot <= *active_tab {
+            *active_tab += 1;
+        }
+    }
+    // **N160① changed a flag, so the clamp above cannot be the whole answer.**
+    // `absorb_tab_into_layout` may have just pinned the target where it stands,
+    // and a target that does not move cannot be put right by a rule about where
+    // *other* tabs may land. Unconditional rather than asked only when the pin
+    // moved: "is the run still partitioned" is cheaper than the bookkeeping that
+    // would decide whether to ask it, and a condition is one more thing that can
+    // be wrong on a path added later.
+    //
+    // After the ejection rather than before, so both of the list's edits are in
+    // before the invariant is settled — normalizing between them would put the
+    // run right and then insert into the run it had just repaired.
+    settle_pin_partition(tabs, active_tab);
+}
+
+fn settle_pin_partition(tabs: &mut [TabState], active_tab: &mut usize) {
+    if tabs.is_empty() {
+        return;
+    }
+    let active = tabs[(*active_tab).min(tabs.len() - 1)].id;
+    seed::normalize_pins(tabs, |tab| tab.pinned);
+    *active_tab = tabs
+        .iter()
+        .position(|tab| tab.id == active)
+        .unwrap_or((*active_tab).min(tabs.len() - 1));
+    debug_assert!(
+        seed::pins_are_normalized(tabs, |tab| tab.pinned),
+        "F57: the pinned run leads the strip"
+    );
+}
+
 /// **Item 6 — a tab's shells and its Terminal leaves are the same set.**
 ///
 /// The one invariant every gesture in this stage can break and none of them may.
@@ -6916,22 +7003,18 @@ impl Runtime {
 
     /// Pin or unpin, and put the strip back in order.
     ///
-    /// Everything that changes a pin comes through here, so the "pinned lead"
-    /// invariant has one enforcer instead of one per caller (mock-up 4066-4073).
-    /// The active tab is followed by identity across the reorder: it is stored as
-    /// a position, and a position means a different tab after a sort.
+    /// The enforcement itself is [`settle_pin_partition`]'s, which is what makes
+    /// "one enforcer instead of one per caller" true rather than merely claimed:
+    /// this used to normalize inline, and an inline copy is only the enforcer for
+    /// the one path it sits on. It was not the only path — N160① flips a pin too
+    /// (see [`absorb_tab_sessions`]) — and the invariant broke on the path that
+    /// had no copy.
     fn toggle_pin(&mut self, index: usize) -> Result<()> {
         if index >= self.tabs.len() {
             return Ok(());
         }
         self.tabs[index].pinned = !self.tabs[index].pinned;
-        let active = self.tabs[self.active_tab].id;
-        seed::normalize_pins(&mut self.tabs, |tab| tab.pinned);
-        self.active_tab = self
-            .tabs
-            .iter()
-            .position(|tab| tab.id == active)
-            .unwrap_or(self.active_tab.min(self.tabs.len() - 1));
+        settle_pin_partition(&mut self.tabs, &mut self.active_tab);
         self.reveal_tab(self.active_tab);
         self.refresh_chrome();
         self.mark_session_dirty(Instant::now());
@@ -7328,11 +7411,17 @@ impl Runtime {
     fn refresh_chrome(&mut self) -> bool {
         let scale = self.renderer.metrics().scale_factor as f32;
         let (width, _) = self.renderer.presentation_geometry().swapchain_size;
+        // **The window's own drag handler is told what the bar is wearing now.**
+        // With the rail out, the tabs are not in the title bar at all and almost
+        // none of it belongs to the app — asking the horizontal strip's geometry
+        // regardless is what left the whole top bar answering `HTCLIENT`, so the
+        // window could not be dragged by it (R3).
         self.custom_window_frame
-            .set_tab_strip_right_px(seats::tab_strip_right_px(
+            .set_tab_strip_right_px(seats::title_bar_app_run_right_px(
                 width as f32,
                 scale,
                 self.tabs.len(),
+                self.rail,
             ));
         // The badge's box is a function of the number in it, and only the font
         // knows how wide a number is — so the measuring happens here, where the
@@ -7597,12 +7686,16 @@ impl Runtime {
                     "Choose a profile",
                 );
             }
-            for (target, rect) in seats::window_chrome_boxes(width, scale) {
+            for (target, rect) in seats::window_chrome_boxes(width, scale, self.rail) {
                 let text = match target {
                     // The gear, silenced while the dialog it opens is up — the
                     // chevron's rule, for the same reason.
                     seats::ChromeTarget::Settings if self.settings.is_open() => "",
                     seats::ChromeTarget::Settings => "Settings",
+                    // `title="Toggle sidebar"` (mock-up 2270), quoted rather than
+                    // reworded: the tip is the mock-up's own text and it names the
+                    // verb in both directions, which is what a toggle needs.
+                    seats::ChromeTarget::PanelToggle => "Toggle sidebar",
                     seats::ChromeTarget::Minimize => "Minimize",
                     seats::ChromeTarget::Maximize => "Maximize",
                     seats::ChromeTarget::CloseWindow => "Close",
@@ -10199,6 +10292,19 @@ impl Runtime {
     /// about what time it is, and a reveal is a function of time.
     fn tab_trailers(&self, now: Instant) -> Vec<seats::TabTrailer> {
         let motion = self.motion;
+        // **F57 asked at the one place both axes read the run.** The strip and
+        // the rail are two drawings of `self.tabs` and both are built from here,
+        // so a partition broken by any write path — including one written after
+        // this line — is caught on the first frame that tries to draw it, naming
+        // F57 instead of arriving as a screenshot nobody can explain. This is the
+        // sentence `pins_are_normalized` was written to be held to, and it is a
+        // question rather than a repair: the fixing belongs to
+        // [`settle_pin_partition`] at the write, and a read that quietly sorted
+        // would hide the very path that needs finding.
+        debug_assert!(
+            seed::pins_are_normalized(&self.tabs, |tab| tab.pinned),
+            "F57: the pinned run leads the strip"
+        );
         self.tabs
             .iter()
             .map(|tab| seats::TabTrailer {
@@ -11768,7 +11874,7 @@ impl Runtime {
                 position.y,
             ),
         }
-        .or_else(|| seats::hit_window_chrome(width, scale, position.x, position.y))
+        .or_else(|| seats::hit_window_chrome(width, scale, rail, position.x, position.y))
         .or_else(|| {
             seats::hit_chrome(
                 &self.seats,
@@ -12658,20 +12764,10 @@ impl Runtime {
             self.tabs[index].sessions.is_empty(),
             "T226: the absorbed tab is leaving with shells still filed under it"
         );
-        self.tabs.remove(index);
-        if index < self.active_tab {
-            self.active_tab -= 1;
+        if ejected.is_some() {
+            self.next_tab_id += 1;
         }
-        let Some(ejected) = ejected else {
-            return Ok(());
-        };
-        self.next_tab_id += 1;
-        let pinned = self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>();
-        let slot = strip_insert_slot(index, &pinned);
-        self.tabs.insert(slot, ejected);
-        if slot <= self.active_tab {
-            self.active_tab += 1;
-        }
+        absorb_tab_into_strip(&mut self.tabs, &mut self.active_tab, index, ejected);
         Ok(())
     }
 
@@ -13120,6 +13216,7 @@ impl Runtime {
             }
             seats::ChromeTarget::NewTabMenu => self.toggle_profile_menu()?,
             seats::ChromeTarget::Settings => self.toggle_settings_panel()?,
+            seats::ChromeTarget::PanelToggle => self.toggle_rail_collapsed()?,
             seats::ChromeTarget::Minimize => self.window.set_minimized(true),
             seats::ChromeTarget::Maximize => {
                 self.window.set_maximized(!self.window.is_maximized());
@@ -13483,10 +13580,37 @@ impl Runtime {
         self.set_rail_state(next_rail_layout(self.rail))
     }
 
-    /// Put the rail in a posture and pay for it — the one commit path both the
-    /// dev chord and the settings dialog take, so neither can move the rail
-    /// without the panes, the window minimum, the hover and the session file
-    /// following it.
+    /// **`.panel-toggle`'s verb (Q178): fold the rail away, or bring it back.**
+    ///
+    /// R1's real trigger, arriving where the mock-up puts it — `#btn-rail` in the
+    /// title bar (2270). The state it writes has been here since Q178 and the
+    /// geometry has always answered to it (`RailState::collapsed` is read by
+    /// `terminal_inset_logical_px` and by `rail_geometry`); what was missing was
+    /// only something a hand could press.
+    ///
+    /// Through [`Self::set_rail_state`] rather than by assigning the flag,
+    /// because collapsing moves the terminal's left edge exactly as changing the
+    /// mode does, and every consequence of that — re-solving the panes, the
+    /// window's minimum size, the hover under a pointer that did not move — is
+    /// already spelled out there once.
+    ///
+    /// Not persisted, and deliberately: `layout` and `mode` are answers to "where
+    /// do I want my tabs", which is a standing preference, while a fold is
+    /// "give me the room back for a minute". The session schema carries the first
+    /// pair (v5's `tab_layout`/`sidebar_mode`) and has never carried this, so a
+    /// window opens with its rail out, which is also what the mock-up's own
+    /// `state.railCollapsed` does on reload.
+    fn toggle_rail_collapsed(&mut self) -> Result<()> {
+        self.set_rail_state(seats::RailState {
+            collapsed: !self.rail.collapsed,
+            ..self.rail
+        })
+    }
+
+    /// Put the rail in a posture and pay for it — the one commit path the dev
+    /// chord, the settings dialog and the panel toggle take, so none of them can
+    /// move the rail without the panes, the window minimum, the hover and the
+    /// session file following it.
     fn set_rail_state(&mut self, state: seats::RailState) -> Result<()> {
         let moved = (self.rail.layout, self.rail.mode) != (state.layout, state.mode);
         self.rail = state;
@@ -13500,9 +13624,18 @@ impl Runtime {
         // words are away with it. A pointer already standing inside it opens it
         // again on the very next move — which is the trigger doing its job, not
         // this deciding for it.
-        self.rail_open = RevealTween::over(RAIL_TRANSITION);
-        self.rail_text = RevealTween::over(RAIL_TEXT_FADE);
-        self.rail_scroll = 0.0;
+        //
+        // **Only when the posture actually moved.** A rail that is merely being
+        // folded away by `.panel-toggle` is the same rail in the same mode, and
+        // re-parking it would spend the list's scroll position on a gesture that
+        // never claimed to move it — fold and unfold, and the row you were
+        // looking at is gone. "Born parked" is about a rail that has just become
+        // an icon rail; a fold does not make a new one.
+        if moved {
+            self.rail_open = RevealTween::over(RAIL_TRANSITION);
+            self.rail_text = RevealTween::over(RAIL_TEXT_FADE);
+            self.rail_scroll = 0.0;
+        }
         // The inset changed, so every pane's rectangle did. This is the same
         // path a window resize takes, and it has to be taken here: the rail's
         // *mode* moves the terminal's left edge even though the rail's own
@@ -15402,8 +15535,8 @@ const CWD_AS_WHOLE_PATH: CwdRendering = CwdRendering {
     maximum: CWD_MAX_CHARS,
 };
 
-/// The tooltip anchor a window-chrome target answers to, for the four the
-/// caption run is made of.
+/// The tooltip anchor a window-chrome target answers to, for the boxes the title
+/// bar owns: the caption run, and the panel toggle when the bar carries one.
 ///
 /// A function rather than a `From`, because it is deliberately partial: most of
 /// [`seats::ChromeTarget`] names something a click does that nothing hovers for
@@ -15415,6 +15548,7 @@ fn tooltip_anchor_for(target: seats::ChromeTarget) -> Option<tooltip::TooltipAnc
         seats::ChromeTarget::Minimize => Some(tooltip::TooltipAnchorId::Minimize),
         seats::ChromeTarget::Maximize => Some(tooltip::TooltipAnchorId::Maximize),
         seats::ChromeTarget::CloseWindow => Some(tooltip::TooltipAnchorId::CloseWindow),
+        seats::ChromeTarget::PanelToggle => Some(tooltip::TooltipAnchorId::PanelToggle),
         _ => None,
     }
 }
@@ -26127,6 +26261,159 @@ mod tests {
     /// Red gate: delete the D44 block and focus stays on `SRCA`, which is D43's
     /// answer and the wrong one for this landing; drop the `|=` and the pin is
     /// lost with the tab that carried it.
+    /// PIN — R3: **the top bar's hit table, both layouts, end to end.**
+    ///
+    /// The two halves of the drag bug in one place: `seats` decides where the
+    /// app's run ends and `bt_platform` turns that into `HTCLIENT`/`HTCAPTION`,
+    /// and neither half alone can say whether the window can be dragged. Thirty
+    /// tabs, because that is the case that made a strip claim the whole bar — and
+    /// with the tabs in the rail there is no strip in the bar to claim it.
+    ///
+    /// Red gate: feed `seats::tab_strip_right_px` to the vertical row and the
+    /// caption assertions fail — which is precisely the bug, a title bar that
+    /// answers `Client` everywhere and a window that will not move.
+    #[test]
+    fn the_top_bar_drags_beside_the_toggle_when_the_tabs_are_in_the_rail() {
+        use bt_platform::CustomFrameHit;
+        let (width, scale, tabs) = (960.0_f32, 1.0_f32, 30);
+        let vertical = seats::RailState {
+            layout: seats::TabLayoutMode::Vertical,
+            mode: seats::RailMode::Expanded,
+            ..seats::RailState::default()
+        };
+        let horizontal = seats::RailState::default();
+        let frame = |rail| bt_platform::CustomFrameMetrics {
+            width: width as i32,
+            height: 600,
+            title_bar_height: 40,
+            tab_strip_right_px: seats::title_bar_app_run_right_px(width, scale, tabs, rail),
+            caption_button_width: 46,
+            caption_button_count: 4,
+            resize_border: 8,
+            resizable: true,
+        };
+        let hit = |rail, x| bt_platform::custom_frame_hit_test(frame(rail), x, 20);
+
+        // The rail's bar: one button, then handle all the way to the caption run.
+        assert_eq!(
+            hit(vertical, 20),
+            CustomFrameHit::Client,
+            "the toggle itself"
+        );
+        assert_eq!(
+            hit(vertical, 60),
+            CustomFrameHit::Caption,
+            "the name is inside `.drag`, so it drags"
+        );
+        assert_eq!(
+            hit(vertical, 400),
+            CustomFrameHit::Caption,
+            "R3: the empty middle of the bar is what the hand reaches for"
+        );
+        assert_eq!(
+            hit(vertical, 770),
+            CustomFrameHit::Caption,
+            "right up to the caption run"
+        );
+        assert_eq!(hit(vertical, 800), CustomFrameHit::Client, "the gear's run");
+        assert_eq!(
+            bt_platform::custom_frame_hit_test(frame(vertical), 400, 60),
+            CustomFrameHit::Client,
+            "below the bar is the terminal's, in either layout"
+        );
+
+        // The strip's bar: the tabs are app-owned and must not be draggable, which
+        // is the promise the vertical fix may not break.
+        assert_eq!(
+            hit(horizontal, 400),
+            CustomFrameHit::Client,
+            "a thirty-tab strip owns its whole run — handing it to the window's \
+             drag handler is the bug this boundary exists to prevent"
+        );
+        assert_eq!(
+            hit(horizontal, 800),
+            CustomFrameHit::Client,
+            "the gear's run"
+        );
+    }
+
+    /// PIN — **F57 survives N160①: a pin that arrives by merge still leads the
+    /// strip.**
+    ///
+    /// The user's report, as a list. Four tabs, the first one pinned; a pinned
+    /// tab is dragged into the *last* one's layout, so "pin follows content"
+    /// (N160①) pins a tab that does not move. What the strip then read was
+    /// `pinned, unpinned, unpinned, pinned` — the pins at slots 1 and 4 with
+    /// unpinned tabs between them, which is the screenshot exactly.
+    ///
+    /// The two clamps cannot catch this and it is worth saying why: both
+    /// [`strip_insert_slot`] and [`partition_clamped`] rule on where a tab may
+    /// *land*, and here nothing landed. Only a flag changed, on a tab standing
+    /// still, so the repair has to be the one thing neither clamp does — put the
+    /// run back in its partition.
+    ///
+    /// Order is asserted by identity and not merely by flag: a normalization that
+    /// got the partition right by shuffling the two unpinned tabs would satisfy
+    /// `pins_are_normalized` and still be wrong, because `normalize_pins` is
+    /// documented stable and the tabs nobody touched must not move.
+    ///
+    /// Red gate: drop the `settle_pin_partition` call at the foot of
+    /// [`absorb_tab_into_strip`] and the merged tab stays at slot 3 behind two
+    /// unpinned tabs.
+    #[test]
+    fn a_pin_arriving_by_merge_still_leads_the_strip() {
+        // A partitioned strip: two pinned tabs lead, two plain ones follow. The
+        // second pinned tab is the one about to be dragged away.
+        let mut tabs = vec![
+            cross_tab(2, &["ALREADY"]),
+            cross_tab(1, &["SRCA"]),
+            cross_tab(3, &["PLAIN"]),
+            cross_tab(5, &["TARGET"]),
+        ];
+        tabs[0].pinned = true;
+        tabs[1].pinned = true;
+        assert!(
+            seed::pins_are_normalized(&tabs, |tab| tab.pinned),
+            "the strip starts partitioned, so nothing below is an inherited mess"
+        );
+
+        // The target is the tab on screen — the merge's own precondition (K129)
+        // — and it is the last one in the run, which is what leaves the arriving
+        // pin behind an unpinned tab.
+        let (source_index, mut active_tab) = (1, 3);
+        let source_seats = tabs[source_index].seats.clone();
+        let arrived = cross_merge(
+            &source_seats,
+            &mut tabs[active_tab],
+            seats::LayoutAim::SeatEdge(SeatId(1), seats::DropEdge::Right),
+        );
+        let (from, into) = two_tabs_mut(&mut tabs, source_index, active_tab);
+        let ejected = absorb_tab_into_layout(from, into, &arrived, None, TabId(9), cross_solve);
+        assert!(ejected.is_none(), "an edge landing displaces nothing");
+        assert!(
+            tabs[active_tab].pinned,
+            "N160(1) still holds: the pin followed the content"
+        );
+
+        absorb_tab_into_strip(&mut tabs, &mut active_tab, source_index, ejected);
+
+        assert!(
+            seed::pins_are_normalized(&tabs, |tab| tab.pinned),
+            "F57: the pinned run leads the strip"
+        );
+        assert_eq!(
+            tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![TabId(2), TabId(5), TabId(3)],
+            "the newly pinned tab joins the pinned run, and the tab nobody \
+             touched keeps its place behind it"
+        );
+        assert_eq!(
+            tabs[active_tab].id,
+            TabId(5),
+            "the active tab is followed by identity across the reorder, not by index"
+        );
+    }
+
     #[test]
     fn a_merged_tab_keeps_its_own_focused_leaf_and_its_pin() {
         let mut source = cross_tab(1, &["SRCA", "SRCB"]);

@@ -79,6 +79,9 @@ pub enum TooltipAnchorId {
     NewTab,
     NewTabMenu,
     Settings,
+    /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
+    /// puts at the far left of the title bar.
+    PanelToggle,
     Minimize,
     Maximize,
     CloseWindow,
