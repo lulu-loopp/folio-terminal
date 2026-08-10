@@ -538,6 +538,81 @@ pub struct ChromePalette {
     /// The same over a hovered tab — `--hover` over `--panel`, which is the
     /// value [`Self::caption_hover`] already carries.
     pub ring_track_on_hovered_tab: [u8; 3],
+
+    // ── R1: the rail's own surfaces ──
+    //
+    // The rail stands on `--panel`, exactly as the title bar does, so its ground
+    // is [`Self::title_bar`] and needs no field. Most of what it draws is
+    // likewise already here, because the ink and the ground are both the strip's:
+    //
+    // * a row's ink at rest is `--ink2` over `--panel` = [`Self::title_text`];
+    // * the "Tabs" heading and a resting row's `×`/pin are `--ink3` over
+    //   `--panel` = [`Self::title_text_muted`];
+    // * a row's hover fill is `--hover` over `--panel` = [`Self::caption_hover`];
+    // * a hovered row's `×` is `--ink3` over that = already
+    //   [`Self::tab_close_glyph_on_hovered_tab`].
+    //
+    // What is genuinely new is the *active row*, and it is new for a structural
+    // reason rather than an oversight: the horizontal strip's active tab is
+    // `--termbg` — it is shaped to join the terminal — while the rail's active
+    // row never leaves the panel, so it is `--active` over `--panel`. That ground
+    // exists nowhere in the strip, so every ink standing on it is a new mix.
+    /// `.vtab.active { background: var(--active) }` — `--active` over `--panel`.
+    ///
+    /// Numerically [`Self::tab_badge_on_resting_tab`] on both canvases, and a
+    /// separate field for the reason [`Self::termhost`] is separate from
+    /// [`Self::title_bar`]: a badge on a resting tab and the rail's selection are
+    /// two declarations that happen to have been struck from the same pair, and
+    /// either could be re-struck without the other.
+    pub rail_tab_active: [u8; 3],
+    /// `.vtab.active { color: var(--ink) }` over [`Self::rail_tab_active`].
+    ///
+    /// The mock-up also puts this row at `font-weight: 500`, which is not a
+    /// colour and so is not here — but the two are one decision: the active row
+    /// is told apart by weight *and* ink, never by ink alone.
+    pub rail_tab_active_text: [u8; 3],
+    /// `--ink2` over `--hover` over `--panel` — a hovered row's title.
+    ///
+    /// `.vtab:hover` changes only the background; the ink stays `--ink2`. So this
+    /// is the same declaration as [`Self::title_text`] standing on a different
+    /// ground, and on dark the two are 0x9D and 0xA2 — five levels apart, which
+    /// is exactly the kind of drift a single shared field would hide.
+    pub rail_tab_hover_text: [u8; 3],
+    /// `--ink3` over [`Self::rail_tab_active`] — the `×` on the active row.
+    ///
+    /// The rail needs this where the strip never did, and Q174 is why: in the
+    /// strip a narrow active tab is the *only* one that keeps its `×`, but it
+    /// keeps it on `--termbg`. Here every unpinned row wears its `×` at rest,
+    /// including the active one, so the glyph has to be mixed over the selection
+    /// fill as well.
+    pub rail_glyph_on_active_tab: [u8; 3],
+    /// `.pin-seam { background: var(--border) }` over `--panel`.
+    ///
+    /// `--border` and not `--border-soft`: the seam is the one line in the rail
+    /// that has to be *read* rather than merely felt, because in icon mode it is
+    /// the only remaining statement that a row is pinned.
+    pub rail_seam: [u8; 3],
+    /// `.rail { border-right: 1px solid var(--border-soft) }` over `--panel`.
+    ///
+    /// Not [`Self::pane_head_edge`], which is the same `--border-soft` over the
+    /// pane head's `--termbg`: same declaration, different ground, and on light
+    /// they part by a level.
+    pub rail_edge: [u8; 3],
+    /// The shade the open rail casts on the terminal — black at both stops on
+    /// both canvases (`linear-gradient(to right, rgba(0,0,0,α), rgba(0,0,0,0))`).
+    ///
+    /// Kept as a colour plus an alpha rather than pre-composited, for the reason
+    /// [`Self::menu_border`] gives: this gradient falls on whatever the terminal
+    /// happens to be showing, so there is no known surface to mix it over.
+    pub rail_shade: [u8; 3],
+    /// The shade's alpha at its inner stop, in 1/255ths — `.09` on light and
+    /// `.34` on dark.
+    ///
+    /// The dark canvas needs nearly four times the light one because a shadow
+    /// works by darkening, and there is very little headroom left to darken
+    /// `--termbg #1B1B1B` with: the same `.09` that reads as a soft edge on white
+    /// is invisible on night.
+    pub rail_shade_alpha: u8,
 }
 
 /// Chrome over a dark canvas — `design/ui-mockup.html` `body.dark`, with its
@@ -643,6 +718,22 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     ring_track_on_active_tab: [0x2a, 0x2a, 0x2a],
     ring_track_on_resting_tab: [0x33, 0x33, 0x33],
     ring_track_on_hovered_tab: [0x3f, 0x3f, 0x3f],
+    // `--active` (white .09) over `--panel` #252525: 37 + 218×.09 = 56.62.
+    rail_tab_active: [0x39, 0x39, 0x39],
+    // `--ink` (white .87) over that: 56.62 + 198.38×.87 = 229.21.
+    rail_tab_active_text: [0xe5, 0xe5, 0xe5],
+    // `--ink2` (white .55) over `--hover`-over-`--panel` 48.99: + 206.01×.55.
+    rail_tab_hover_text: [0xa2, 0xa2, 0xa2],
+    // `--ink3` (white .38) over the selection fill 56.62: + 198.38×.38 = 132.0.
+    rail_glyph_on_active_tab: [0x84, 0x84, 0x84],
+    // `--border` (white .094) over `--panel`: 37 + 218×.094 = 57.49.
+    rail_seam: [0x39, 0x39, 0x39],
+    // `--border-soft` (white .06) over `--panel`: 37 + 218×.06 = 50.08.
+    rail_edge: [0x32, 0x32, 0x32],
+    // The gradient is black on both canvases; only its alpha is theme-varied.
+    rail_shade: [0x00, 0x00, 0x00],
+    // `.34` of 255.
+    rail_shade_alpha: 87,
 };
 
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
@@ -747,6 +838,23 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     ring_track_on_active_tab: [0xef, 0xef, 0xef],
     ring_track_on_resting_tab: [0xe8, 0xe8, 0xe6],
     ring_track_on_hovered_tab: [0xdd, 0xdd, 0xdc],
+    // `--active` (rgb(55,53,47) at .09) over `--panel` #F7F7F5 — the same pair
+    // `tab_badge_on_resting_tab` is struck from, and the same three bytes.
+    rail_tab_active: [0xe6, 0xe6, 0xe3],
+    // `--ink` #37352F is opaque on this canvas: it composites to itself.
+    rail_tab_active_text: [0x37, 0x35, 0x2f],
+    // `--ink2` (the ink at .65) over `--hover`-over-`--panel` 236.4/236.3/234.1.
+    rail_tab_hover_text: [0x77, 0x75, 0x70],
+    // `--ink3` (the ink at .45) over the selection fill 229.7/229.5/227.2.
+    rail_glyph_on_active_tab: [0x97, 0x96, 0x92],
+    // `--border` (black at .088) over `--panel`: 247×.912 = 225.26, 245×.912.
+    rail_seam: [0xe1, 0xe1, 0xdf],
+    // `--border-soft` (black at .055) over `--panel`: 247×.945 = 233.42.
+    rail_edge: [0xe9, 0xe9, 0xe8],
+    // Black on both canvases; only the alpha differs.
+    rail_shade: [0x00, 0x00, 0x00],
+    // `.09` of 255.
+    rail_shade_alpha: 23,
 };
 
 /// The palette in force, decided by the same background-luma threshold that
@@ -923,6 +1031,140 @@ pub const WINDOW_NEW_TAB_MARGIN_BOTTOM_LOGICAL_PX: f32 = 3.0;
 /// two different widths reads as a mistake rather than as a hierarchy.
 pub const WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX: f32 = 9.0;
 pub const WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 6.0;
+
+// ── R1/R2: the vertical rail (`design/ui-mockup.html` 802-964) ──
+//
+// The rail is the same tab list on the other axis, so almost nothing here is a
+// new *idea* — it is the horizontal strip's furniture at the sizes a 220px
+// column can afford. Where a value is simply the strip's own, it is written as
+// that constant rather than as a second copy of the number, for the reason
+// `WINDOW_TAB_PIN_BOX_LOGICAL_PX` gives: two copies can drift apart while every
+// test that only checked the number still passes.
+
+/// `.rail { width: 220px }` — the rail fully open, and `--railw`'s open value.
+pub const RAIL_WIDTH_LOGICAL_PX: f32 = 220.0;
+/// `--railpark: 46px` — the icon rail's resting width, and the strip of space
+/// the terminal keeps clear in icon mode whatever the rail is currently doing.
+///
+/// Numerically [`WINDOW_CAPTION_BUTTON_LOGICAL_PX`] and deliberately its own
+/// constant: that the parked rail is exactly as wide as a caption button is a
+/// coincidence of two unrelated designs, and tying them would make re-striking
+/// either one silently move the other.
+pub const RAIL_PARK_LOGICAL_PX: f32 = 46.0;
+/// `.rail { padding: 6px 8px 10px }`.
+pub const RAIL_PADDING_TOP_LOGICAL_PX: f32 = 6.0;
+pub const RAIL_PADDING_X_LOGICAL_PX: f32 = 8.0;
+pub const RAIL_PADDING_BOTTOM_LOGICAL_PX: f32 = 10.0;
+/// `.rail { gap: 1px }` — between rows. The strip's own between-tab gap is the
+/// same 1px, so this is written as that constant.
+pub const RAIL_GAP_LOGICAL_PX: f32 = WINDOW_TAB_GAP_BETWEEN_LOGICAL_PX;
+/// `.vtab { height: 30px; flex: none }`.
+///
+/// `flex: none` is the whole of Q172 and the mock-up's own user report: rows
+/// never compress, the LIST scrolls. A rail of thirty tabs is a scroller, not
+/// thirty 10px slivers.
+pub const RAIL_TAB_HEIGHT_LOGICAL_PX: f32 = 30.0;
+/// `.vtab { padding: 0 5px 0 10px }`.
+pub const RAIL_TAB_PADDING_LEFT_LOGICAL_PX: f32 = 10.0;
+pub const RAIL_TAB_PADDING_RIGHT_LOGICAL_PX: f32 = 5.0;
+/// `.vtab { border-radius: 6px }`.
+pub const RAIL_TAB_RADIUS_LOGICAL_PX: f32 = 6.0;
+/// `.vtab { font-size: 13px }` — the strip's own tab font.
+pub const RAIL_TAB_FONT_LOGICAL_PX: f32 = WINDOW_TAB_FONT_LOGICAL_PX;
+/// `.vtab { gap: 8px }` — between the mark, the title and the trailing cluster.
+pub const RAIL_TAB_GAP_LOGICAL_PX: f32 = WINDOW_TAB_GAP_LOGICAL_PX;
+/// The parked rail's horizontal padding on a row (`.window.rail-icons .rail
+/// .vtab { padding-left: 7.5px; padding-right: 7.5px }`).
+///
+/// The mock-up's comment is the specification and the reason: the rail's own 8px
+/// plus this 7.5px puts a 15px mark's centre at exactly 46/2 = 23. **The same
+/// padding holds when open**, so the icon column does not move by one pixel as
+/// the panel slides — which is the entire promise of Q180.
+pub const RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX: f32 = 7.5;
+/// `.rail { border-right: 1px solid … }`.
+///
+/// The rail is `box-sizing: border-box` like everything else in the mock-up, so
+/// this pixel comes out of [`RAIL_WIDTH_LOGICAL_PX`] rather than being added to
+/// it: a 220px rail has a 203px content run, not a 204px one. Measured in the
+/// mock-up itself (220 − 8 − 8 − 1).
+pub const RAIL_BORDER_LOGICAL_PX: f32 = 1.0;
+/// `.rail .label { font-size: 11px }` — the "Tabs" heading.
+pub const RAIL_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
+/// The "Tabs" heading's line box, which its stylesheet leaves at `line-height:
+/// normal` and therefore does not state as a number.
+///
+/// 13px, measured off the mock-up rather than guessed: the label's border box
+/// comes out 23px tall against `padding: 4px 10px 6px`, and 23 − 4 − 6 = 13.
+/// A ratio would have been the wrong thing to store — `normal` is resolved from
+/// the font's own ascent/descent/line-gap, so it is a measurement, not a rule.
+pub const RAIL_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
+/// `.rail .label { letter-spacing: .04em }`, as a fraction of the font size.
+pub const RAIL_LABEL_TRACKING_EM: f32 = 0.04;
+/// `.rail .label { padding: 4px 10px 6px }`.
+pub const RAIL_LABEL_PADDING_TOP_LOGICAL_PX: f32 = 4.0;
+pub const RAIL_LABEL_PADDING_X_LOGICAL_PX: f32 = 10.0;
+pub const RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX: f32 = 6.0;
+/// `.rail-new { gap: 2px; margin-top: 2px }`.
+pub const RAIL_NEW_GAP_LOGICAL_PX: f32 = 2.0;
+pub const RAIL_NEW_MARGIN_TOP_LOGICAL_PX: f32 = 2.0;
+/// `.rail .rail-new { position: sticky; bottom: -10px; padding-bottom: 4px;
+/// margin-bottom: -4px }` (mock-up 818-821) — how far the stuck `+` row's
+/// *visible* top sits above the rail's own bottom edge, over and above its
+/// [`RAIL_TAB_HEIGHT_LOGICAL_PX`].
+///
+/// The 4px is padding the row wears only so that its own `--panel` fill reaches
+/// the rail's edge while the list scrolls underneath it; the negative margin of
+/// the same size gives the space straight back, so the padding costs the flow
+/// nothing. What it does change is where `position: sticky` parks the row: the
+/// element's *border box* bottom is what the sticky constraint pins, so the
+/// 30px the eye sees begins 34px above the edge rather than 30.
+///
+/// `bottom: -10px` is the other half, and it is why the constraint is measured
+/// from the rail's outer bottom rather than from the inside of its
+/// [`RAIL_PADDING_BOTTOM_LOGICAL_PX`]: the negative offset buys the stuck row
+/// permission to sit inside the rail's own 10px foot padding. Without it the
+/// row would park 10px higher and leave a band of bare panel below itself that
+/// the list scrolls through — a gap that only exists while you are scrolling,
+/// which is the worst kind.
+pub const RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX: f32 = 4.0;
+/// `.rail-new .nt-main { height: 30px; padding: 0 10px }` — the `+` row, which
+/// is a tab-shaped row and therefore a tab's height.
+pub const RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX: f32 = 10.0;
+/// `.rail-new .nt-chev { width: 28px; height: 30px }` — the profile picker.
+pub const RAIL_NEW_CHEVRON_BOX_LOGICAL_PX: f32 = 28.0;
+/// `.pin-seam { height: 1px }` — the rule between the pinned run and the rest.
+pub const RAIL_SEAM_THICKNESS_LOGICAL_PX: f32 = 1.0;
+/// `.pin-seam { width: calc(100% - 12px); margin: 5px 6px }` — 6px in from each
+/// side of the rail's content box.
+///
+/// Inset rather than full-bleed, and the mock-up's comment rules why: "a rule
+/// that reaches both walls reads as 'a new section starts here', and this is a
+/// boundary inside one list."
+pub const RAIL_SEAM_INSET_X_LOGICAL_PX: f32 = 6.0;
+/// `.pin-seam { margin: 5px 6px }` — the clear space above and below the rule.
+pub const RAIL_SEAM_MARGIN_Y_LOGICAL_PX: f32 = 5.0;
+/// The shade the open rail casts on the terminal
+/// (`.window.rail-icons .termhost::before { width: 14px }`).
+///
+/// A one-sided gradient and **not** a box-shadow, which is a ruling with a
+/// stated failure behind it: a box-shadow spreads in every direction, so an 18px
+/// blur on a panel whose top edge *is* the title bar's bottom edge paints ~9px
+/// of grey across that join — "the panel drew its own seam against the very
+/// thing it was supposed to be continuous with".
+pub const RAIL_SHADE_WIDTH_LOGICAL_PX: f32 = 14.0;
+/// The rail's open/close transition (`width .18s ease, padding .18s ease,
+/// opacity .18s ease`, and the shade's `left .18s ease`) — P168.
+pub const RAIL_TRANSITION_MS: u64 = 180;
+/// The label/title/badge/`×` fade in icon mode (`opacity .1s ease`) — Q183.
+///
+/// The text fades rather than being removed, so the layout is identical in both
+/// states and the icons never jump; the rail's own overflow does the clipping
+/// while the width animates.
+pub const RAIL_TEXT_FADE_MS: u64 = 100;
+/// `transition-delay: .06s` on the way *open* only — the panel gets a moment to
+/// be wide enough to hold words before the words arrive.
+pub const RAIL_TEXT_FADE_OPEN_DELAY_MS: u64 = 60;
+
 /// A seat title's font size (`.panehead { font-size: 11.5px }`).
 pub const SEAT_TITLE_FONT_LOGICAL_PX: f32 = 11.5;
 /// The inset between a title bar's edge and its first item

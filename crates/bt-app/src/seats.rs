@@ -27,11 +27,21 @@ use bt_layout::{
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
-    ChromeLabel, ChromeLabelWeight, ChromeQuad, OverlayQuad, PANE_HEAD_FILE_MARK_LOGICAL_PX,
-    PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
-    SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
+    ChromeLabel, ChromeLabelWeight, ChromePalette, ChromeQuad, OverlayQuad,
+    PANE_HEAD_FILE_MARK_LOGICAL_PX, PANE_HEAD_FOLDER_MARK_LOGICAL_PX,
+    PANE_HEAD_PROFILE_MARK_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
+    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
+    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_PADDING_TOP_LOGICAL_PX, RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX,
+    RAIL_SEAM_INSET_X_LOGICAL_PX, RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX,
+    RAIL_SHADE_WIDTH_LOGICAL_PX, RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX,
+    RAIL_TAB_HEIGHT_LOGICAL_PX, RAIL_TAB_PADDING_LEFT_LOGICAL_PX,
+    RAIL_TAB_PADDING_RIGHT_LOGICAL_PX, RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX,
+    RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_WIDTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
+    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX, SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX,
     SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX, SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX,
     SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX, SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX,
     SEAT_TITLE_FONT_LOGICAL_PX, SEAT_TITLE_GAP_LOGICAL_PX, SEAT_TITLE_PADDING_LOGICAL_PX,
@@ -1288,22 +1298,61 @@ pub fn seat_metrics(dpi_milli: u32) -> SeatMetrics {
     SeatMetrics::ruled(scale_ppm(dpi_milli))
 }
 
+/// The device column the seats begin on — what the vertical rail takes out of
+/// the terminal's width, in whole physical pixels.
+///
+/// **The one place this conversion happens.** Both [`logical_viewport`] and
+/// [`device_viewport`] take the answer rather than deriving it, and the reason
+/// is the same one [`seats_top_device_px`] is shared: the two are the same fact
+/// seen from either side, and a rail inset that disagreed between them by one
+/// pixel would be a drop zone aimed at a seam. Two `f32` multiplications of one
+/// logical width, rounded independently, are exactly how they would come to
+/// disagree.
+///
+/// Never [`RailState::width_logical_px`] — see
+/// [`RailState::terminal_inset_logical_px`] for Q179 and the reflow it exists to
+/// prevent: an *opening* icon rail is out of flow, so this number does not move
+/// while it opens.
+#[must_use]
+pub fn rail_inset_device_px(state: RailState, scale_ppm: u32) -> u32 {
+    logical_to_device(state.terminal_inset_logical_px(), scale_ppm)
+}
+
 /// The seats viewport rectangle, in logical pixels, for a client area of this
-/// many device pixels. Its top is the lower edge of the 40px window title bar.
+/// many device pixels. Its top is the lower edge of the 40px window title bar,
+/// and its left is whatever the vertical rail is keeping clear
+/// ([`rail_inset_device_px`], and `0` in the horizontal layout that has no rail).
 ///
 /// The rounding here is the exact inverse of the solver's boundary snapping: a
 /// lone leaf's rectangle *is* this viewport, and snapping it back must land on
 /// the original device pixel or the byte-identity gate fails on the first
 /// fractional DPI. It does: the inverse errs by at most half a subpixel, which
 /// re-snaps to under 0.002 device pixels at any scale this product will meet.
-pub fn logical_viewport(width_px: u32, height_px: u32, scale_ppm: u32) -> LogicalRect {
+/// The left edge goes through the very same inverse as the top, so the rail's
+/// own boundary is as sharp as the title bar's.
+pub fn logical_viewport(
+    width_px: u32,
+    height_px: u32,
+    scale_ppm: u32,
+    rail_inset_px: u32,
+) -> LogicalRect {
     let title_px = seats_top_device_px(height_px, scale_ppm);
     LogicalRect::new(
-        LogicalPx::ZERO,
+        device_to_logical(seats_left_device_px(width_px, rail_inset_px), scale_ppm),
         device_to_logical(title_px, scale_ppm),
         device_to_logical(width_px, scale_ppm),
         device_to_logical(height_px, scale_ppm),
     )
+}
+
+/// The device column the seats begin on, never past the right edge of a client
+/// area too narrow to hold the rail.
+///
+/// [`seats_top_device_px`]'s twin on the other axis, and clamped for the same
+/// reason: a window dragged narrower than the rail is a window whose terminal
+/// has no columns left, not one whose viewport turns inside out.
+fn seats_left_device_px(width_px: u32, rail_inset_px: u32) -> u32 {
+    rail_inset_px.min(width_px.saturating_sub(1))
 }
 
 /// The device row the seats begin on: the lower edge of the 40px title bar,
@@ -1327,10 +1376,22 @@ fn seats_top_device_px(height_px: u32, scale_ppm: u32) -> u32 {
 /// from either side: the row the solver's viewport starts on is the row the
 /// pointer enters the layout on, and a drop zone that disagreed with the solver
 /// by one pixel would be a zone that aims at a seam.
+///
+/// `rail_inset_px` is the same argument [`logical_viewport`] is handed, from the
+/// same [`rail_inset_device_px`], and it shares [`seats_left_device_px`] for the
+/// paragraph above's reason on the other axis. The two are twins and have to
+/// stay in lockstep: hit-testing is derived from this rectangle and sizing from
+/// the other, so one pixel of disagreement about where the rail ends aims every
+/// left-edge drop zone into the rail itself.
 #[must_use]
-pub fn device_viewport(width_px: u32, height_px: u32, scale_ppm: u32) -> [f64; 4] {
+pub fn device_viewport(
+    width_px: u32,
+    height_px: u32,
+    scale_ppm: u32,
+    rail_inset_px: u32,
+) -> [f64; 4] {
     [
-        0.0,
+        f64::from(seats_left_device_px(width_px, rail_inset_px)),
         f64::from(seats_top_device_px(height_px, scale_ppm)),
         f64::from(width_px),
         f64::from(height_px),
@@ -2098,6 +2159,490 @@ pub fn insert_index_at(slot_mids: &[f32], pos: f32) -> usize {
         .unwrap_or(slot_mids.len())
 }
 
+// ══ R1/R2: the vertical rail ══
+//
+// The rail is the same tab list on the other axis. Everything it *means* — the
+// four title layers, pin, the mark's dot/ring/breathing, Recent, the tooltip
+// anchor — is the strip's own machinery unchanged; only the geometry turns. So
+// nothing below re-decides what a tab says, and `TabTrailer`/`TabContent` cross
+// the boundary untouched.
+//
+// What genuinely differs is worth stating once, because each is a ruling rather
+// than a consequence of the rotation:
+//
+//  * rows never compress (`.vtab { flex: none }`) — the LIST scrolls. The strip
+//    compresses to a 46px floor and only then scrolls; the rail has room to be
+//    honest, so it never trades legibility for fit at all.
+//  * an unpinned row wears its `×` at rest (Q174). In the strip the `×` is
+//    hover-summoned because there is no room to keep it; here there is, and one
+//    glyph then states one fact — closeable, or protected.
+//  * the pinned seam is drawn (F55/F56) and drawn *only* here (Q187).
+
+/// Which axis the tab list runs on — the mock-up's `data-tabs` attribute.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabLayoutMode {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
+/// How the rail presents itself — the mock-up's `state.railMode`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RailMode {
+    /// The rail stands open at its full width and takes its space out of the
+    /// terminal's, the way a sidebar does.
+    #[default]
+    Expanded,
+    /// The rail parks as a strip of icons and opens *over* the terminal.
+    Icons,
+}
+
+/// Everything about the rail that is a state rather than a measurement.
+///
+/// The two scalars are inputs and not clocks, exactly as `TabTrailer::reveal`
+/// is: this module stays a pure function of the numbers it is handed, and
+/// whoever owns the frame clock owns the easing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RailState {
+    pub layout: TabLayoutMode,
+    pub mode: RailMode,
+    /// `.window.rail-collapsed` — the rail folded away to nothing (Q178).
+    pub collapsed: bool,
+    /// How far the icon rail has opened, `0.0 ..= 1.0`.
+    pub open: f32,
+    /// How far the labels have faded in, `0.0 ..= 1.0` (Q183).
+    ///
+    /// Its own scalar rather than a function of `open`, because the mock-up
+    /// gives it its own shorter clock and a delay on the way open only — the
+    /// panel gets wide enough to hold words *before* the words arrive.
+    pub text_opacity: f32,
+}
+
+impl Default for RailState {
+    fn default() -> Self {
+        Self {
+            layout: TabLayoutMode::default(),
+            mode: RailMode::default(),
+            collapsed: false,
+            open: 0.0,
+            text_opacity: 1.0,
+        }
+    }
+}
+
+impl RailState {
+    /// The mock-up's own combination rule for the `rail-icons` class (Q190).
+    ///
+    /// All three conditions, because the mock-up's comment records what happens
+    /// when the layout check is missing: the class "survived into horizontal
+    /// mode, where the rail is `display: none` but the terminal was still
+    /// keeping its 46px clear — a strip of dead space with nothing in it."
+    #[must_use]
+    pub fn draws_icon_rail(self) -> bool {
+        self.layout == TabLayoutMode::Vertical && self.mode == RailMode::Icons && !self.collapsed
+    }
+
+    /// The rail's own width in logical pixels — `--railw` as it currently
+    /// stands, including its border.
+    #[must_use]
+    pub fn width_logical_px(self) -> f32 {
+        if self.layout != TabLayoutMode::Vertical || self.collapsed {
+            return 0.0;
+        }
+        match self.mode {
+            RailMode::Expanded => RAIL_WIDTH_LOGICAL_PX,
+            RailMode::Icons => {
+                let open = self.open.clamp(0.0, 1.0);
+                RAIL_PARK_LOGICAL_PX + (RAIL_WIDTH_LOGICAL_PX - RAIL_PARK_LOGICAL_PX) * open
+            }
+        }
+    }
+
+    /// The space the terminal keeps clear on its left, in logical pixels.
+    ///
+    /// This is the whole of Q179, and it is deliberately *not*
+    /// [`Self::width_logical_px`]. An expanded rail is in the flow and the
+    /// terminal starts after it. An icon rail is `position: absolute` for its
+    /// entire life and the terminal keeps only `--railpark` clear, whatever the
+    /// rail is currently doing — so opening it reflows nothing.
+    ///
+    /// The mock-up's comment states the failure the absolute positioning is
+    /// there to prevent: leaving the rail in flow while parked and lifting it
+    /// out on open "hands the terminal 46px back at the moment it opens, and
+    /// everything jumps left."
+    #[must_use]
+    pub fn terminal_inset_logical_px(self) -> f32 {
+        if self.layout != TabLayoutMode::Vertical || self.collapsed {
+            return 0.0;
+        }
+        match self.mode {
+            RailMode::Expanded => RAIL_WIDTH_LOGICAL_PX,
+            RailMode::Icons => RAIL_PARK_LOGICAL_PX,
+        }
+    }
+}
+
+/// One row of the rail.
+///
+/// `title` is a `[left, right]` run rather than a box because a row's height is
+/// fixed and its text is vertically centred in it — the pair that varies is the
+/// horizontal one, and it varies with what the row's trailing cluster costs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RailTabGeometry {
+    pub body: [f32; 4],
+    /// The 15px profile-mark slot, which the dot and the progress ring hang off
+    /// exactly as they do in the strip.
+    pub mark: [f32; 4],
+    /// The `×`'s box. `None` only on a pinned row — Q174 keeps it on every
+    /// unpinned one at rest, so unlike the strip there is no width tier that can
+    /// take it away.
+    pub close: Option<[f32; 4]>,
+    /// The pin's box, drawn only on a pinned row.
+    ///
+    /// The strip's hover-revealed pin has no counterpart here: the rail states
+    /// the fact with the `×`'s presence or absence instead, so an unpinned row
+    /// has no pin box at all rather than a zero-width one.
+    pub pin: Option<[f32; 4]>,
+    pub title: [f32; 2],
+    pub trailer: TabTrailer,
+}
+
+/// The rail, solved.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RailGeometry {
+    /// The rail's outer box `[left, top, right, bottom]`.
+    pub body: [f32; 4],
+    pub tabs: Vec<RailTabGeometry>,
+    /// The "Tabs" heading. `None` in icon mode, where the mock-up removes it
+    /// outright rather than fading it: "in icon mode the strip is the rail's
+    /// resting state, and a heading that is invisible half the time is not a
+    /// heading."
+    pub label: Option<[f32; 4]>,
+    /// The rule between the pinned run and the rest (F55/F56).
+    pub seam: Option<[f32; 4]>,
+    /// The `+` row, at `min(flow, stuck)` — `position: sticky` in one number.
+    ///
+    /// Under a short list it stands in ordinary flow one gap below the last row,
+    /// and under a long one it stops at the rail's foot and the list scrolls
+    /// beneath it. Neither alone is the behaviour: pinned always leaves the `+`
+    /// stranded at the bottom of a window holding two tabs, and flowed always
+    /// lets it scroll off the end of a long list.
+    pub new_tab: [f32; 4],
+    /// The `˅` beside the `+`. `None` while parked, where a 28px chevron in a
+    /// 30px strip would squeeze the `+` to nothing (Q181).
+    pub new_tab_menu: Option<[f32; 4]>,
+    /// The hairline facing the terminal. `None` while parked in icon mode: the
+    /// title bar is `--panel` in both layouts, so a parked rail and the bar
+    /// above it are one piece of chrome, and the only edge that needs drawing is
+    /// the one an *open* panel presents to the terminal.
+    pub edge: Option<[f32; 4]>,
+    /// The one-sided shade an open icon rail casts on the terminal (Q182).
+    pub shade: Option<[f32; 4]>,
+    /// The scrolling list's clip box as `[top, bottom]`.
+    pub viewport: [f32; 2],
+    pub max_scroll: f32,
+    /// Echoed back so a caller painting text need not re-derive it.
+    pub text_opacity: f32,
+}
+
+/// The rail's rows, furniture and shade, scrolled by `scroll` physical pixels.
+///
+/// `height` is the whole window's client height; the rail starts at the title
+/// bar's own lower edge in both layouts, because in icon mode it is positioned
+/// `top: var(--titleh)` and in expanded mode it is the first thing in `.body`.
+/// The mock-up says why the two agree: "the shared edge is the whole point, and
+/// a literal 40px here would drift from it."
+///
+/// `pinned_count` rather than a per-row flag, because the seam is a fact about
+/// the *list* — where the pinned run ends — and the rows already carry their own
+/// pin state in `trailers`.
+///
+/// Returns `None` exactly when no rail is on screen: a horizontal layout, or a
+/// collapsed one. That is the same test the caller needs for "does the terminal
+/// give up any width", so there is one answer rather than two.
+#[must_use]
+pub fn rail_geometry(
+    height: f32,
+    scale: f32,
+    trailers: &[TabTrailer],
+    pinned_count: usize,
+    scroll: f32,
+    state: RailState,
+) -> Option<RailGeometry> {
+    let width = state.width_logical_px() * scale;
+    if width <= 0.0 {
+        return None;
+    }
+    let top = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
+    let bottom = height.max(top);
+    let parked = state.draws_icon_rail();
+    // The border is inside the rail's width, not added to it: the mock-up is
+    // `box-sizing: border-box` throughout, so a 220px rail has a 203px content
+    // run. Drawn only when open, so a parked rail keeps no pixel for it either.
+    let border = if parked && state.open < 1.0 {
+        0.0
+    } else {
+        RAIL_BORDER_LOGICAL_PX * scale
+    };
+    let pad_x = RAIL_PADDING_X_LOGICAL_PX * scale;
+    let content_left = pad_x;
+    let content_right = (width - border - pad_x).max(content_left);
+    let gap = RAIL_GAP_LOGICAL_PX * scale;
+    let row_height = (RAIL_TAB_HEIGHT_LOGICAL_PX * scale).round();
+
+    // Q180: the row's own horizontal padding is the *only* thing that differs
+    // between parked and open, and it differs by being frozen rather than by
+    // changing — the same 7.5px holds in both states so the icon column cannot
+    // move as the panel slides.
+    let (pad_left, pad_right) = if parked {
+        let parked_pad = RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX * scale;
+        (parked_pad, parked_pad)
+    } else {
+        (
+            RAIL_TAB_PADDING_LEFT_LOGICAL_PX * scale,
+            RAIL_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
+        )
+    };
+
+    let mut cursor = top + RAIL_PADDING_TOP_LOGICAL_PX * scale;
+    let label = (!parked).then(|| {
+        let label_height = ((RAIL_LABEL_PADDING_TOP_LOGICAL_PX
+            + RAIL_LABEL_LINE_LOGICAL_PX
+            + RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX)
+            * scale)
+            .round();
+        let rect = [content_left, cursor, content_right, cursor + label_height];
+        cursor += label_height + gap;
+        rect
+    });
+
+    // The list scrolls under the heading and the `+`; only the rows move.
+    let list_top = cursor;
+    let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+    let content_gap = RAIL_TAB_GAP_LOGICAL_PX * scale;
+    let close_box = (WINDOW_TAB_CLOSE_BOX_LOGICAL_PX * scale).round();
+    let seam_margin = RAIL_SEAM_MARGIN_Y_LOGICAL_PX * scale;
+    let seam_thickness = (RAIL_SEAM_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
+    let seam_inset = RAIL_SEAM_INSET_X_LOGICAL_PX * scale;
+    // F56: a seam separates two groups or it is not a seam. All-pinned and
+    // none-pinned have nothing to tell apart.
+    let seam_at = (pinned_count > 0 && pinned_count < trailers.len()).then_some(pinned_count);
+
+    let mut row_top = list_top - scroll;
+    let mut seam = None;
+    let mut tabs = Vec::with_capacity(trailers.len());
+    for (index, trailer) in trailers.iter().enumerate() {
+        if seam_at == Some(index) {
+            row_top += seam_margin;
+            seam = Some([
+                content_left + seam_inset,
+                row_top,
+                (content_right - seam_inset).max(content_left + seam_inset),
+                row_top + seam_thickness,
+            ]);
+            row_top += seam_thickness + seam_margin + gap;
+        }
+        let body = [content_left, row_top, content_right, row_top + row_height];
+        let mark_left = content_left + pad_left;
+        let mark_top = row_top + (row_height - mark) / 2.0;
+        let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
+        let glyph_top = row_top + (row_height - close_box) / 2.0;
+        // Q174, and the mirror the mock-up draws: one glyph, one fact. A pinned
+        // row wears its pin and has no `×` in the DOM at all; an unpinned row
+        // wears its `×` always. Neither is hover-summoned, so neither depends on
+        // the pointer.
+        let (close, pin) = {
+            let right = (content_right - pad_right).max(content_left);
+            let slot = [
+                (right - close_box).max(content_left),
+                glyph_top,
+                right,
+                glyph_top + close_box,
+            ];
+            if trailer.pinned {
+                (None, Some(slot))
+            } else {
+                (Some(slot), None)
+            }
+        };
+        let trailing = close
+            .or(pin)
+            .map_or(content_right - pad_right, |slot| slot[0]);
+        let title_left = mark_rect[2] + content_gap;
+        let title_right = (trailing - content_gap).max(title_left);
+        tabs.push(RailTabGeometry {
+            body,
+            mark: mark_rect,
+            close,
+            pin,
+            title: [title_left, title_right],
+            trailer: TabTrailer {
+                pinned: trailer.pinned,
+                reveal: trailer.reveal.clamp(0.0, 1.0),
+            },
+        });
+        row_top += row_height + gap;
+    }
+
+    // `.rail .rail-new { position: sticky; bottom: -10px }` — and `sticky` is
+    // neither "in flow" nor "pinned to the foot", it is **whichever of the two
+    // is higher up the rail**. A short list leaves the `+` sitting directly
+    // under its last row with acres of panel below it; a long one runs out from
+    // under the button and the button stops, and from then on the list scrolls
+    // beneath it. Anchoring it to the foot unconditionally — which this did
+    // until the mock-up was measured in a browser — puts the `+` at the bottom
+    // of a window holding two tabs, a quarter-screen away from the list it
+    // belongs to.
+    //
+    // The stuck position is measured from the rail's *outer* bottom, not from
+    // the inside of its padding, and the row's own height is its border box
+    // rather than the 30px the eye sees: both are
+    // [`RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX`]'s doc, which is where the
+    // `bottom: -10px` and the `padding-bottom: 4px` are reconciled.
+    let new_height = row_height;
+    // `row_top` already carries the trailing gap the loop left after the last
+    // row, so this is "one gap below the last row, plus the block's own margin".
+    let natural_top = row_top + RAIL_NEW_MARGIN_TOP_LOGICAL_PX * scale;
+    let stuck_top = bottom
+        - ((RAIL_TAB_HEIGHT_LOGICAL_PX + RAIL_NEW_STICKY_PADDING_BOTTOM_LOGICAL_PX) * scale)
+            .round();
+    let new_top = natural_top.min(stuck_top);
+    let chevron = if parked && state.open < 1.0 {
+        0.0
+    } else {
+        (RAIL_NEW_CHEVRON_BOX_LOGICAL_PX * scale).round()
+    };
+    let new_gap = RAIL_NEW_GAP_LOGICAL_PX * scale;
+    // The `+` is `flex: 1`, so its left edge — and the `+` inside it — does not
+    // depend on what the chevron is doing. That is precisely why the chevron may
+    // collapse to zero without moving the `+`.
+    let new_main_right = (content_right - chevron - new_gap).max(content_left);
+    let new_tab = [content_left, new_top, new_main_right, new_top + new_height];
+    let new_tab_menu = (chevron > 0.0).then_some([
+        new_main_right + new_gap,
+        new_top,
+        content_right,
+        new_top + new_height,
+    ]);
+
+    // The list's own clip box: from where the rows start to where the sticky
+    // `+` begins, less its top margin.
+    let list_bottom = (new_top - RAIL_NEW_MARGIN_TOP_LOGICAL_PX * scale - gap).max(list_top);
+    let content_height = (row_top - gap) - (list_top - scroll);
+    let max_scroll = (content_height - (list_bottom - list_top)).max(0.0);
+
+    let edge = (border > 0.0).then_some([width - border, top, width, bottom]);
+    // Q182: the shade rides on the terminal, not on the rail, because the rail
+    // clips its own overflow — that is what hides the labels while the width
+    // animates, and it means nothing the rail owns can escape its right edge.
+    // Its left edge is the rail's own width less the strip the terminal already
+    // keeps clear, so at rest it sits exactly on the terminal's left edge and
+    // has nowhere to fall.
+    //
+    // `left: calc(var(--railw) - var(--railpark))` is written against
+    // `.termhost`, whose own box already begins `--railpark` in
+    // (`margin-left: var(--railpark)`, mock-up 845) and which is the
+    // `position: relative` those coordinates are resolved against (1035). So the
+    // window-absolute left is `railpark + (railw - railpark)` — the rail's own
+    // right edge, whatever the rail currently measures. Subtracting the park
+    // *here*, where the numbers are already the window's, applies the offset a
+    // second time and parks the falloff 46px inside the panel, painting a dark
+    // band down the rail's own rows.
+    let shade = (parked && state.open > 0.0).then_some([
+        width,
+        top,
+        width + RAIL_SHADE_WIDTH_LOGICAL_PX * scale,
+        bottom,
+    ]);
+
+    Some(RailGeometry {
+        body: [0.0, top, width, bottom],
+        tabs,
+        label,
+        seam,
+        new_tab,
+        new_tab_menu,
+        edge,
+        shade,
+        viewport: [list_top, list_bottom],
+        max_scroll,
+        text_opacity: state.text_opacity.clamp(0.0, 1.0),
+    })
+}
+
+/// How many tabs the pinned run at the head of the list holds — the
+/// `pinned_count` [`rail_geometry`] and [`hit_rail_chrome`] both want.
+///
+/// One function so the seam the rail *draws* and the rows it *hits* cannot be
+/// told a different boundary. It is a run and not a filter for the reason the
+/// strip keeps pinned tabs at the front in the first place: pinning re-sorts the
+/// list, so "the pinned ones" and "the first N" are the same set, and counting
+/// the run is what makes a stray pinned tab in the middle draw no seam at all
+/// rather than a seam in the wrong place.
+#[must_use]
+pub fn pinned_run_len(trailers: &[TabTrailer]) -> usize {
+    trailers
+        .iter()
+        .position(|trailer| !trailer.pinned)
+        .unwrap_or(trailers.len())
+}
+
+/// The rail's hit test, in the same shape as [`hit_tab_chrome`].
+///
+/// Row order is the strip's own — the trailing glyph before the body — so "the
+/// button is not the row" holds on this axis too.
+///
+/// One argument longer than [`hit_tab_chrome`], and the extra one is
+/// [`RailState`]: a hit test cannot be run against a rail without being told
+/// which rail. Folding the rest into a struct would move the argument list
+/// rather than shorten it, which is the judgement `create_tab_state` already
+/// records for the same lint.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn hit_rail_chrome(
+    height: f32,
+    scale: f32,
+    trailers: &[TabTrailer],
+    pinned_count: usize,
+    scroll: f32,
+    state: RailState,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    let geometry = rail_geometry(height, scale, trailers, pinned_count, scroll, state)?;
+    if !contains(geometry.body, x, y) {
+        return None;
+    }
+    if geometry
+        .new_tab_menu
+        .is_some_and(|menu| contains(menu, x, y))
+    {
+        return Some(ChromeTarget::NewTabMenu);
+    }
+    if contains(geometry.new_tab, x, y) {
+        return Some(ChromeTarget::NewTab);
+    }
+    // Scrolled-off rows are not clickable, for the same reason the strip's are
+    // not: the clip box is the surface, and a row outside it is not on screen.
+    let [list_top, list_bottom] = geometry.viewport;
+    if y < list_top || y >= list_bottom {
+        return None;
+    }
+    for (index, tab) in geometry.tabs.iter().enumerate() {
+        if tab.pin.is_some_and(|pin| contains(pin, x, y)) {
+            return Some(ChromeTarget::TabPin(index));
+        }
+        if tab.close.is_some_and(|close| contains(close, x, y)) {
+            return Some(ChromeTarget::TabClose(index));
+        }
+        if contains(tab.body, x, y) {
+            return Some(ChromeTarget::Tab(index));
+        }
+    }
+    None
+}
+
 /// The mock-up's two measured thresholds, read off the tab's own logical width.
 fn tab_width_tier(tab_width: f32, scale: f32) -> TabWidthTier {
     let logical = tab_width / scale.max(f32::EPSILON);
@@ -2734,6 +3279,10 @@ pub fn build_chrome_with_preview(
             grabbed: None,
             strip_preview: None,
             tab_scroll: 0.0,
+            // The horizontal layout every test in this module that does not say
+            // otherwise is written against.
+            rail: RailState::default(),
+            rail_scroll: 0.0,
             preview_title,
             terminal_names: &NO_TERMINAL_NAMES,
             preview_message,
@@ -2898,6 +3447,16 @@ pub struct ChromeContent<'a> {
     /// How far the strip is scrolled, in physical pixels. Clamped by the
     /// geometry, so a stale value cannot draw a strip past its own content.
     pub tab_scroll: f32,
+    /// **R1/R2 — which axis the tab list runs on, and what the rail is doing.**
+    ///
+    /// The two scalars inside are sampled, like every other animated value that
+    /// reaches this module: this file does not know what time it is, so the
+    /// clocks that produced them are `bt-app`'s. See [`RailState`].
+    pub rail: RailState,
+    /// How far the rail is scrolled, in physical pixels — [`Self::tab_scroll`]'s
+    /// opposite number, and its own field because the two are different lists on
+    /// different axes with different lengths.
+    pub rail_scroll: f32,
     pub preview_title: Option<&'a str>,
     /// What each Terminal seat's own shell is called — C28, per leaf.
     ///
@@ -3046,6 +3605,8 @@ pub fn build_chrome_for_tabs(
         grabbed,
         strip_preview,
         tab_scroll,
+        rail,
+        rail_scroll,
         preview_title,
         terminal_names,
         preview_message,
@@ -3083,6 +3644,7 @@ pub fn build_chrome_for_tabs(
             scroll: tab_scroll,
             profile_menu_open,
             chevron_turn,
+            layout: rail.layout,
         },
         (&mut quads, &mut labels, &mut sprites),
     );
@@ -3499,6 +4061,36 @@ pub fn build_chrome_for_tabs(
             ));
         }
     }
+    // **R1 — the rail last, because `.rail { z-index: 15 }`.**
+    //
+    // Above `.termhost` and therefore above every pane inside it, dividers and
+    // pane heads included. Which is not decoration: an open icon rail is
+    // `position: absolute` and *overlaps* the terminal for 174 of its 220 pixels
+    // (Q179), so a rail painted before the panes would be a panel the panes are
+    // drawn on top of — it would simply vanish the moment it opened. The title
+    // bar keeps its place at the head of the list because the rail begins below
+    // it and the two never meet.
+    let surface_height = layout
+        .rects
+        .iter()
+        .filter_map(|placement| placement.device_rect)
+        .map(|rect| rect.bottom as f32)
+        .fold(1.0, f32::max);
+    rail_chrome(
+        surface_height,
+        scale,
+        pointer.hover,
+        Rail {
+            tabs,
+            active_tab,
+            scroll: rail_scroll,
+            state: rail,
+            profile_menu_open,
+            chevron_turn,
+        },
+        palette,
+        (&mut quads, &mut labels, &mut sprites),
+    );
     (quads, labels, sprites)
 }
 
@@ -3805,6 +4397,9 @@ struct TabStrip<'a> {
     scroll: f32,
     profile_menu_open: bool,
     chevron_turn: f32,
+    /// Which axis the list runs on — R1, and the one thing in here that decides
+    /// whether this strip is drawn at all.
+    layout: TabLayoutMode,
 }
 
 fn window_chrome(
@@ -3818,15 +4413,7 @@ fn window_chrome(
         &mut Vec<ChromeSprite>,
     ),
 ) {
-    let TabStrip {
-        tabs,
-        active_tab,
-        grabbed,
-        strip_preview,
-        scroll: tab_scroll,
-        profile_menu_open,
-        chevron_turn,
-    } = strip;
+    let layout = strip.layout;
     let (quads, labels, sprites) = output;
     let palette = chrome_palette();
     let title = (WINDOW_TITLE_BAR_LOGICAL_PX * scale).round();
@@ -3841,9 +4428,130 @@ fn window_chrome(
         color: palette.title_bar,
     });
 
-    let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let button = WINDOW_CAPTION_BUTTON_LOGICAL_PX * scale;
     let run_left = (width - 4.0 * button).max(0.0);
+    // The two layouts share this bar and split what stands in it. `.tabs-inline`
+    // lives here only in the horizontal one; in the vertical one the tab list is
+    // the rail, and what fills the space it left is the program's own name —
+    // `.apptitle` is `display: none` **only** under `[data-tabs="horizontal"]`
+    // (mock-up 188-189), so it is the bar's resting content and the strip is the
+    // thing that displaces it.
+    match layout {
+        TabLayoutMode::Horizontal => {
+            window_tab_strip(width, scale, hover, strip, palette, (labels, sprites));
+        }
+        TabLayoutMode::Vertical => {
+            // `.titlebar .drag { padding-left: 12px; }` — the bar's ordinary
+            // inset, not the horizontal layout's `padding-left: var(--tabr)`,
+            // which exists so a tab's corner can land on the window edge and has
+            // nothing to indent here.
+            let left = (WINDOW_TAB_PADDING_LEFT_LOGICAL_PX * scale).round();
+            labels.push(ChromeLabel {
+                text: "BetterTerminal".to_owned(),
+                // Out to the caption run, so a narrow window crops the name
+                // rather than running it under the buttons. Vertically centred
+                // in the bar, which every chrome label already is.
+                rect: [left, 0.0, run_left.max(left), title],
+                font_size_px: APP_TITLE_FONT_LOGICAL_PX * scale,
+                // `.apptitle { color: var(--ink3) }` over `--panel`, which is the
+                // ink the `+`/`˅` pair wears on this same bar.
+                color: palette.title_text_muted,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
+    }
+
+    // `.capbtn`: a 46x40 box, a 10px glyph, and 14px for the gear alone.
+    let buttons = [
+        (
+            ChromeTarget::Settings,
+            ChromeMark::Gear,
+            WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
+        ),
+        (
+            ChromeTarget::Minimize,
+            ChromeMark::WindowMinimize,
+            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+        ),
+        (
+            ChromeTarget::Maximize,
+            ChromeMark::WindowMaximize,
+            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+        ),
+        (
+            ChromeTarget::CloseWindow,
+            ChromeMark::WindowClose,
+            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
+        ),
+    ];
+    for (index, (target, mark, glyph_logical_px)) in buttons.into_iter().enumerate() {
+        let left = run_left + index as f32 * button;
+        let rect = [left, 0.0, (left + button).min(width), title];
+        let hovered = hover == Some(target);
+        if hovered {
+            quads.push(ChromeQuad {
+                rect,
+                color: if target == ChromeTarget::CloseWindow {
+                    palette.caption_close_hover
+                } else {
+                    palette.caption_hover
+                },
+            });
+        }
+        let glyph = (glyph_logical_px * scale).round().max(1.0);
+        let glyph_left = ((rect[0] + rect[2]) / 2.0 - glyph / 2.0).round();
+        let glyph_top = (title / 2.0 - glyph / 2.0).round();
+        sprites.push(ChromeSprite::new(
+            mark,
+            [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+            if hovered && target == ChromeTarget::CloseWindow {
+                palette.caption_close_text
+            } else if hovered {
+                palette.title_text_hover
+            } else {
+                palette.title_text
+            },
+        ));
+    }
+}
+
+/// The horizontal tab run, its `+` and its `˅` — everything `.tabs-inline` holds.
+///
+/// Its own function rather than a branch inside [`window_chrome`], because the
+/// two layouts do not share one pixel of it: R1 gives the vertical layout a rail
+/// instead, and the mock-up says so by scoping `.tabs-inline`'s whole existence
+/// to `[data-tabs="horizontal"]` (line 187). A guard around six hundred lines
+/// would have been the same statement made where it is hardest to read.
+///
+/// No [`ChromeQuad`]s come out of it, and that is the strip's own doing rather
+/// than an omission: quads are drawn under every mark, and the active tab's
+/// silhouette *is* a mark, so a flat fill under it would be a fill nobody sees.
+/// Everything the strip lays down is therefore a sprite or a label.
+fn window_tab_strip(
+    width: f32,
+    scale: f32,
+    hover: Option<ChromeTarget>,
+    strip: TabStrip<'_>,
+    palette: ChromePalette,
+    output: (&mut Vec<ChromeLabel>, &mut Vec<ChromeSprite>),
+) {
+    let TabStrip {
+        tabs,
+        active_tab,
+        grabbed,
+        strip_preview,
+        scroll: tab_scroll,
+        profile_menu_open,
+        chevron_turn,
+        layout: _,
+    } = strip;
+    let (labels, sprites) = output;
+    let radius = (WINDOW_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
     let geometry = tab_strip_geometry(width, scale, &trailers, active_tab, tab_scroll);
     let viewport = geometry.viewport;
@@ -4474,58 +5182,572 @@ fn window_chrome(
             },
         ));
     }
+}
 
-    // `.capbtn`: a 46x40 box, a 10px glyph, and 14px for the gear alone.
-    let buttons = [
-        (
-            ChromeTarget::Settings,
-            ChromeMark::Gear,
-            WINDOW_CAPTION_GEAR_GLYPH_LOGICAL_PX,
-        ),
-        (
-            ChromeTarget::Minimize,
-            ChromeMark::WindowMinimize,
-            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
-        ),
-        (
-            ChromeTarget::Maximize,
-            ChromeMark::WindowMaximize,
-            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
-        ),
-        (
-            ChromeTarget::CloseWindow,
-            ChromeMark::WindowClose,
-            WINDOW_CAPTION_GLYPH_LOGICAL_PX,
-        ),
-    ];
-    for (index, (target, mark, glyph_logical_px)) in buttons.into_iter().enumerate() {
-        let left = run_left + index as f32 * button;
-        let rect = [left, 0.0, (left + button).min(width), title];
-        let hovered = hover == Some(target);
-        if hovered {
-            quads.push(ChromeQuad {
-                rect,
-                color: if target == ChromeTarget::CloseWindow {
-                    palette.caption_close_hover
+/// How many strips the rail's one-sided falloff is drawn as.
+///
+/// The mock-up asks for `linear-gradient(to right, rgba(0,0,0,.34), rgba(0,0,0,0))`
+/// and this pipeline has no gradient primitive: a [`ChromeSprite`] carries one
+/// uniform `opacity` over one rectangle. So the ramp is quantised into that many
+/// equal columns, each at the alpha the true gradient holds at its own midpoint —
+/// a staircase, and named as one rather than passed off as the declaration.
+///
+/// Nine, which is the smallest count that keeps every step under 4/255 of alpha
+/// at the dark theme's own `.34` — below the ~1% contrast step an eye can find on
+/// a flat field, and therefore a staircase nobody can count. Fewer reads as
+/// bands; more buys nothing and costs a draw call each.
+const RAIL_SHADE_STEPS: usize = 9;
+
+/// `.apptitle { font-size: 12.5px }` (mock-up 188) — the program's name, which
+/// stands in the title bar in the vertical layout and is displaced by the tab
+/// strip in the horizontal one.
+const APP_TITLE_FONT_LOGICAL_PX: f32 = 12.5;
+
+/// Everything the rail needs to know about itself — [`TabStrip`] on the other
+/// axis, and deliberately the same shape.
+struct Rail<'a> {
+    tabs: &'a [TabContent],
+    active_tab: usize,
+    /// How far the list is scrolled, in physical pixels. Its own number and not
+    /// [`TabStrip::scroll`]: two axes, two lists, two lengths.
+    scroll: f32,
+    state: RailState,
+    profile_menu_open: bool,
+    chevron_turn: f32,
+}
+
+/// An ink faded to `opacity` over the ground it stands on.
+///
+/// The rail's labels fade (Q183) and a [`ChromeLabel`] carries no alpha, for the
+/// reason the tab's `×` records at its own call site: this pipeline composites in
+/// linear light, so a translucent ink cannot be handed to the blender and has to
+/// arrive already mixed over the surface it lands on. Every label the rail draws
+/// stands on one known surface — the rail's own `--panel` ground, or the active
+/// row's fill over it — so the mix is available here, and the fade is that mix
+/// walked from the ground to the ink.
+///
+/// Mixed in sRGB bytes, which is the arithmetic the palette's own composites are
+/// struck with — `title_text_muted` is `#252525 + (255 − 37) × .38 = 120`, and a
+/// runtime fade that used a different space would drift away from the constants
+/// it has to meet at `1.0`. It also happens to be what the browser does with
+/// `opacity` on a page in the default colour space, which is the declaration
+/// being reproduced.
+fn faded(ink: [u8; 3], ground: [u8; 3], opacity: f32) -> [u8; 3] {
+    let opacity = opacity.clamp(0.0, 1.0);
+    let mix = |ink: u8, ground: u8| {
+        (f32::from(ground) + (f32::from(ink) - f32::from(ground)) * opacity).round() as u8
+    };
+    [
+        mix(ink[0], ground[0]),
+        mix(ink[1], ground[1]),
+        mix(ink[2], ground[2]),
+    ]
+}
+
+/// Paint the vertical rail: its ground, its rows, its furniture and the shade it
+/// casts on the terminal.
+///
+/// [`window_tab_strip`]'s counterpart, and it re-uses rather than re-decides.
+/// Every mark a row wears — the profile mark, the status dot, the progress ring,
+/// the breath, the dead session's fade — comes out of [`TabContent::mark`]
+/// through the very same three branches the strip takes, because a tab's state
+/// is a fact about the tab and not about the axis it is drawn on. Forking that
+/// code is how one axis ends up reporting a working shell and the other one not.
+///
+/// Returns nothing when no rail is on screen, which [`rail_geometry`] answers
+/// with `None`: a horizontal layout, or a collapsed one.
+fn rail_chrome(
+    height: f32,
+    scale: f32,
+    hover: Option<ChromeTarget>,
+    rail: Rail<'_>,
+    palette: ChromePalette,
+    output: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    let Rail {
+        tabs,
+        active_tab,
+        scroll,
+        state,
+        profile_menu_open,
+        chevron_turn,
+    } = rail;
+    let (quads, labels, sprites) = output;
+    let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
+    let Some(geometry) = rail_geometry(
+        height,
+        scale,
+        &trailers,
+        pinned_run_len(&trailers),
+        scroll,
+        state,
+    ) else {
+        return;
+    };
+    let ground = palette.title_bar;
+    let text = geometry.text_opacity;
+    // The rail's own `overflow-y: auto` — a row scrolled out of the list's clip
+    // box is not on screen, and is therefore not drawn, exactly as
+    // `within_strip` rules for the other axis. The `+` and the heading are
+    // outside the scroller and answer to no clip at all.
+    let [list_top, list_bottom] = geometry.viewport;
+    let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
+    // A row is clipped by the list rather than hidden by it: half a row at the
+    // foot of the scroller is half a row, so the label's own clip box is the
+    // overlap and its layout box stays the row's. That is exactly the pair
+    // `ChromeLabel::clip` exists for.
+    let clip_to_list = |rect: [f32; 4]| {
+        [
+            rect[0],
+            rect[1].max(list_top),
+            rect[2],
+            rect[3].min(list_bottom),
+        ]
+    };
+
+    // ── the rail's own ground ──
+    //
+    // `.rail { background: var(--panel) }`, the same surface the title bar
+    // above it wears, and that sameness is the point: an open icon rail grows
+    // "straight down out of the title bar instead of floating free of it", so
+    // the two read as one piece of chrome that got wider.
+    quads.push(ChromeQuad {
+        rect: geometry.body,
+        color: ground,
+    });
+    // `border-right: 1px solid var(--border-soft)`, and only when there is one —
+    // a parked rail and the bar above it are one surface, so the only edge that
+    // needs drawing is the one an *open* panel presents to the terminal.
+    if let Some(edge) = geometry.edge {
+        quads.push(ChromeQuad {
+            rect: edge,
+            color: palette.rail_edge,
+        });
+    }
+    // `.pin-seam` (F55/F56) — drawn here and only here (Q187). A quad rather
+    // than a sprite because it lies in the column's own 1px gap, where no row
+    // fill can reach it.
+    if let Some(seam) = geometry.seam {
+        quads.push(ChromeQuad {
+            rect: seam,
+            color: palette.rail_seam,
+        });
+    }
+    // `.rail .label` — "Tabs", at 11px/600 with .04em of tracking. `None` in
+    // icon mode, where the mock-up removes the heading outright rather than
+    // fading it, so it never takes `text_opacity`.
+    if let Some(label) = geometry.label {
+        let pad_x = RAIL_LABEL_PADDING_X_LOGICAL_PX * scale;
+        labels.push(ChromeLabel {
+            rect: [label[0] + pad_x, label[1], label[2] - pad_x, label[3]],
+            text: "Tabs".to_owned(),
+            font_size_px: RAIL_LABEL_FONT_LOGICAL_PX * scale,
+            color: palette.title_text_muted,
+            align_right: false,
+            align_center: false,
+            // `.rail .label { letter-spacing: .04em }`. At 11px, tracked is the
+            // whole difference between a heading and a small sentence — the same
+            // argument the settings dialog's group headings make.
+            letter_spacing_em: RAIL_LABEL_TRACKING_EM,
+            weight: ChromeLabelWeight::SemiBold,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+
+    let row_radius = (RAIL_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
+    let mark_size = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
+    for (index, (row, content)) in geometry.tabs.iter().zip(tabs).enumerate() {
+        if !in_list(row.body) {
+            continue;
+        }
+        let active = index == active_tab;
+        // `.vtab:hover` is one hover, exactly as `.tab:hover` is: a pointer on
+        // the `×` — or on the pin in its slot — is still a pointer on the row.
+        let hovered = hover == Some(ChromeTarget::Tab(index))
+            || hover == Some(ChromeTarget::TabClose(index))
+            || hover == Some(ChromeTarget::TabPin(index));
+        // `.vtab.active { background: var(--active) }` over `.vtab:hover {
+        // background: var(--hover) }`. A rounded fill, so it is a mark and not a
+        // quad — a quad would be drawn under every sprite in the frame, the
+        // row's own mark included.
+        if active || hovered {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::TabBody {
+                    radius_px: row_radius as u32,
+                },
+                clip_to_list(row.body),
+                if active {
+                    palette.rail_tab_active
                 } else {
                     palette.caption_hover
                 },
-            });
+            ));
         }
-        let glyph = (glyph_logical_px * scale).round().max(1.0);
-        let glyph_left = ((rect[0] + rect[2]) / 2.0 - glyph / 2.0).round();
-        let glyph_top = (title / 2.0 - glyph / 2.0).round();
-        sprites.push(ChromeSprite::new(
-            mark,
-            [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
-            if hovered && target == ChromeTarget::CloseWindow {
-                palette.caption_close_text
+        // ── the mark slot, which is the strip's own machinery unchanged ──
+        //
+        // T2's three branches, in the strip's own order and with the strip's own
+        // colours: the ring replaces the mark while there is progress to report,
+        // otherwise the profile mark wears the breath and the dead session's
+        // fade, and the unread dot hangs off the slot's top-right corner either
+        // way. Nothing here re-decides *what* is true — `TabContent::mark` has
+        // already said — so a tab reports the same state on both axes by
+        // construction rather than by two lists of rules agreeing.
+        let mark_rect = clip_to_list(row.mark);
+        if in_list(row.mark) {
+            match content.mark.ring {
+                Some(ring) => {
+                    let stroke =
+                        (WINDOW_TAB_RING_STROKE_LOGICAL_PX * scale).round().max(1.0) as u32;
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ProgressRing {
+                            start_milliturns: 0,
+                            sweep_milliturns: 1000,
+                            stroke_px: stroke,
+                        },
+                        mark_rect,
+                        // The track answers to the surface this row is wearing,
+                        // and the rail has one the strip does not: `--active` is
+                        // the row's selection fill rather than the terminal's
+                        // own canvas, so an active row takes the *hovered* tab's
+                        // pre-composited track — both are `--border` at .7 over
+                        // a neutral wash on `--panel`.
+                        if active || hovered {
+                            palette.ring_track_on_hovered_tab
+                        } else {
+                            palette.ring_track_on_resting_tab
+                        },
+                    ));
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ProgressRing {
+                            start_milliturns: ring.start_milliturns,
+                            sweep_milliturns: ring.sweep_milliturns,
+                            stroke_px: stroke,
+                        },
+                        mark_rect,
+                        ring.arc,
+                    ));
+                }
+                None => {
+                    let mut profile =
+                        ChromeSprite::new(ChromeMark::ProfilePowerShell, mark_rect, palette.accent);
+                    // The breath and the dead fade land on the mark alone —
+                    // never on the dot or the ring, which are other claims — and
+                    // never on `text_opacity`, which is a claim about *words*.
+                    // Q180's whole promise is that the icon column does not move
+                    // or change as the panel slides; a mark that faded with the
+                    // labels would be an icon rail with no icons in it.
+                    profile.opacity = content.mark.opacity;
+                    profile.grayscale = content.mark.grayscale;
+                    sprites.push(profile);
+                }
+            }
+            if let Some(dot_color) = content.mark.dot {
+                let dot = (WINDOW_TAB_STATUS_DOT_LOGICAL_PX * scale).round().max(1.0);
+                let dot_left =
+                    (row.mark[2] - WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX * scale - dot).round();
+                let dot_top = (row.mark[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
+                let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
+                if in_list(dot_rect) {
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (dot / 2.0).round().max(1.0) as u32,
+                        },
+                        clip_to_list(dot_rect),
+                        dot_color,
+                    ));
+                }
+            }
+        }
+        // ── the title ──
+        //
+        // Q183: it fades, it is not removed. The run it lays out in is the same
+        // run in both states — that is what keeps the icons still — so what
+        // changes as the panel parks is this ink and nothing else, and the
+        // rail's own overflow does the cropping meanwhile.
+        if row.title[1] > row.title[0] && text > 0.0 {
+            let ink = if active {
+                palette.rail_tab_active_text
             } else if hovered {
-                palette.title_text_hover
+                palette.rail_tab_hover_text
             } else {
                 palette.title_text
+            };
+            labels.push(ChromeLabel {
+                text: content.title.clone(),
+                rect: [row.title[0], row.body[1], row.title[1], row.body[3]],
+                clip: Some(clip_to_list([
+                    row.title[0],
+                    row.body[1],
+                    row.title[1],
+                    row.body[3],
+                ])),
+                font_size_px: RAIL_TAB_FONT_LOGICAL_PX * scale,
+                // Faded over what this row is actually showing, which for the
+                // active one is its own fill and not the rail's ground: an ink
+                // mixed towards the wrong surface goes grey on its way out
+                // instead of going away.
+                color: faded(
+                    ink,
+                    if active {
+                        palette.rail_tab_active
+                    } else if hovered {
+                        palette.caption_hover
+                    } else {
+                        ground
+                    },
+                    text,
+                ),
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                // `.vtab.active { font-weight: 500 }` — the selected row is the
+                // one thing in the column that is not prose.
+                weight: if active {
+                    ChromeLabelWeight::Medium
+                } else {
+                    ChromeLabelWeight::Regular
+                },
+                tabular_numerals: false,
+            });
+        }
+        // ── the trailing glyph: one of the two, never both, never neither ──
+        //
+        // Q174's mirror. `close` and `pin` share one slot and `rail_geometry`
+        // hands back exactly the one this row wears, so the choice was made
+        // where the geometry was and is not re-made here.
+        let (Some(slot), pinned) = row
+            .close
+            .map_or((row.pin, true), |close| (Some(close), false))
+        else {
+            continue;
+        };
+        if !in_list(slot) {
+            continue;
+        }
+        let glyph_hovered = hover
+            == Some(if pinned {
+                ChromeTarget::TabPin(index)
+            } else {
+                ChromeTarget::TabClose(index)
+            });
+        if glyph_hovered {
+            // `.vtab .close:hover { background: var(--active) }` — the same pill
+            // the strip's `×` wears, over whichever of this rail's two surfaces
+            // the row is showing.
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill {
+                    radius_px: (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale)
+                        .round()
+                        .max(1.0) as u32,
+                },
+                pixel_snapped(clip_to_list(slot)),
+                if active {
+                    palette.tab_close_pill_on_content
+                } else {
+                    palette.tab_close_pill_on_hovered_tab
+                },
+            ));
+        }
+        let glyph_size = ((if pinned {
+            WINDOW_TAB_PIN_GLYPH_LOGICAL_PX
+        } else {
+            WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX
+        }) * scale)
+            .round()
+            .max(1.0);
+        let glyph_left = ((slot[0] + slot[2] - glyph_size) / 2.0).round();
+        let glyph_top = ((slot[1] + slot[3] - glyph_size) / 2.0).round();
+        let glyph_rect = [
+            glyph_left,
+            glyph_top,
+            glyph_left + glyph_size,
+            glyph_top + glyph_size,
+        ];
+        if !in_list(glyph_rect) {
+            continue;
+        }
+        // Q174 again, now as ink: one glyph, one fact, and the fact is stated at
+        // rest. That is why the rail needs `rail_glyph_on_active_tab` where the
+        // strip never did — the strip's `×` only ever appears under the pointer,
+        // so it never had to be legible on a resting selected row.
+        let ink = if glyph_hovered {
+            if active {
+                palette.tab_close_glyph_on_pill_over_active_tab
+            } else {
+                palette.tab_close_glyph_on_pill_over_hovered_tab
+            }
+        } else if active {
+            palette.rail_glyph_on_active_tab
+        } else if hovered {
+            palette.tab_close_glyph_on_hovered_tab
+        } else {
+            palette.title_text_muted
+        };
+        let mut glyph = ChromeSprite::new(
+            if pinned {
+                // Fluent 2's fill axis: filled is the state ("it is pinned"),
+                // and a rail's pin is only ever a state — the offer to pin an
+                // unpinned row is the strip's, made on hover, and this axis says
+                // the same thing with the `×`'s presence instead.
+                ChromeMark::Pin { filled: true }
+            } else {
+                ChromeMark::TabClose
             },
-        ));
+            glyph_rect,
+            ink,
+        );
+        // The `×` fades with the words (mock-up 895-896 lists `.vtab .close`
+        // among them) while the pin does not appear in that list at all — and it
+        // should not: a pinned row is the one thing in a parked rail whose 15px
+        // slot is *already* saying something, and dropping its pin would leave
+        // the icon column claiming every row is alike.
+        if !pinned {
+            glyph.opacity = text;
+        }
+        sprites.push(glyph);
+    }
+
+    // ── `.rail-new`: the `+` with its name, and the `˅` beside it ──
+    let new_hovered = hover == Some(ChromeTarget::NewTab);
+    let menu_hovered = hover == Some(ChromeTarget::NewTabMenu);
+    for (rect, hovered) in [
+        (Some(geometry.new_tab), new_hovered),
+        (geometry.new_tab_menu, menu_hovered),
+    ] {
+        if let Some(rect) = rect.filter(|_| hovered) {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::TabBody {
+                    radius_px: row_radius as u32,
+                },
+                rect,
+                palette.caption_hover,
+            ));
+        }
+    }
+    // "the + rides in the same 15px box a tab's icon does, so the two line up on
+    // their centres rather than on the left edges of differently-sized glyphs"
+    // (mock-up 923-924). So it is placed off the row's own mark slot rather than
+    // centred in the button, which is what makes it hold still while the panel
+    // slides for exactly the reason the rows' marks do.
+    let plus_slot_left = geometry.new_tab[0]
+        + if state.draws_icon_rail() {
+            RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX * scale
+        } else {
+            RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX * scale
+        };
+    let plus = (WINDOW_NEW_TAB_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+    let plus_left = (plus_slot_left + (mark_size - plus) / 2.0).round();
+    let plus_top = ((geometry.new_tab[1] + geometry.new_tab[3] - plus) / 2.0).round();
+    sprites.push(ChromeSprite::new(
+        ChromeMark::Plus,
+        [plus_left, plus_top, plus_left + plus, plus_top + plus],
+        if new_hovered {
+            palette.title_text_hover
+        } else {
+            palette.title_text_muted
+        },
+    ));
+    // `.rail-new .nt-main span` — the words beside the `+`, which fade with
+    // every other word in the rail (mock-up 896).
+    let words_left = plus_slot_left + mark_size + RAIL_TAB_GAP_LOGICAL_PX * scale;
+    if text > 0.0 && words_left < geometry.new_tab[2] {
+        labels.push(ChromeLabel {
+            text: "New tab".to_owned(),
+            rect: [
+                words_left,
+                geometry.new_tab[1],
+                geometry.new_tab[2],
+                geometry.new_tab[3],
+            ],
+            font_size_px: RAIL_TAB_FONT_LOGICAL_PX * scale,
+            // `.rail-new .nt-main { color: var(--ink3) }` — the same muted ink
+            // the `+` in front of it wears, over the same ground.
+            color: faded(
+                if new_hovered {
+                    palette.title_text_hover
+                } else {
+                    palette.title_text_muted
+                },
+                if new_hovered {
+                    palette.caption_hover
+                } else {
+                    ground
+                },
+                text,
+            ),
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+    }
+    if let Some(menu) = geometry.new_tab_menu {
+        let chevron_width = (WINDOW_NEW_TAB_CHEVRON_WIDTH_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+        let chevron_height = (WINDOW_NEW_TAB_CHEVRON_HEIGHT_LOGICAL_PX * scale)
+            .round()
+            .max(1.0);
+        let chevron_left = ((menu[0] + menu[2] - chevron_width) / 2.0).round();
+        let chevron_top = ((menu[1] + menu[3] - chevron_height) / 2.0).round();
+        let mut chevron = ChromeSprite::new(
+            ChromeMark::chevron(chevron_turn),
+            [
+                chevron_left,
+                chevron_top,
+                chevron_left + chevron_width,
+                chevron_top + chevron_height,
+            ],
+            if menu_hovered || profile_menu_open {
+                palette.title_text_hover
+            } else {
+                palette.title_text_muted
+            },
+        );
+        // `.nt-chev` is in the fade list too (mock-up 897): while parked the
+        // chevron's box has already collapsed to nothing, and on the way open
+        // the arrow arrives with the words rather than ahead of them.
+        chevron.opacity = text;
+        sprites.push(chevron);
+    }
+
+    // ── Q182: the shade the open panel casts on the terminal ──
+    //
+    // Last of everything the rail draws, because it is the only part of it that
+    // lands *outside* the rail — and a falloff painted before the pane heads it
+    // falls across would be a shadow under the thing it is cast on.
+    if let Some(shade) = geometry.shade {
+        let steps = RAIL_SHADE_STEPS as f32;
+        let span = shade[2] - shade[0];
+        for step in 0..RAIL_SHADE_STEPS {
+            let left = shade[0] + span * step as f32 / steps;
+            let right = shade[0] + span * (step + 1) as f32 / steps;
+            // The alpha the true ramp holds at this column's midpoint, so the
+            // staircase straddles the gradient rather than sitting under it: a
+            // step sampled at its left edge would make the whole falloff one
+            // half-column too dark.
+            let midpoint = (step as f32 + 0.5) / steps;
+            let mut column = ChromeSprite::new(
+                ChromeMark::Fill,
+                [left.round(), shade[1], right.round(), shade[3]],
+                palette.rail_shade,
+            );
+            // The declaration's own alpha, times how far along the ramp this
+            // column stands, times how far the panel has opened — the mock-up
+            // transitions the shade's `opacity` from 0 alongside its `left`
+            // (`opacity .18s ease`), so a rail one third open casts one third of
+            // the shadow rather than the whole of it in the wrong place.
+            column.opacity =
+                f32::from(palette.rail_shade_alpha) / 255.0 * (1.0 - midpoint) * state.open;
+            sprites.push(column);
+        }
     }
 }
 
@@ -5449,7 +6671,7 @@ mod tests {
     };
 
     fn viewport_of(width: u32, height: u32, dpi_milli: u32) -> LogicalRect {
-        logical_viewport(width, height, scale_ppm(dpi_milli))
+        logical_viewport(width, height, scale_ppm(dpi_milli), 0)
     }
 
     fn seats_surface(width: u32, height: u32, dpi_milli: u32) -> SeatViewport {
@@ -6894,6 +8116,8 @@ mod tests {
                     grabbed: None,
                     strip_preview: None,
                     tab_scroll: 0.0,
+                    rail: RailState::default(),
+                    rail_scroll: 0.0,
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
                     preview_message: None,
@@ -7093,6 +8317,8 @@ mod tests {
                 grabbed: None,
                 strip_preview: None,
                 tab_scroll,
+                rail: RailState::default(),
+                rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 preview_message: None,
@@ -9582,6 +10808,8 @@ mod tests {
                 grabbed,
                 strip_preview: None,
                 tab_scroll: 0.0,
+                rail: RailState::default(),
+                rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 preview_message: None,
@@ -9763,6 +10991,8 @@ mod tests {
                     grabbed: None,
                     strip_preview: None,
                     tab_scroll: 0.0,
+                    rail: RailState::default(),
+                    rail_scroll: 0.0,
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
                     preview_message: None,
@@ -9853,6 +11083,8 @@ mod tests {
                     grabbed: None,
                     strip_preview,
                     tab_scroll: 0.0,
+                    rail: RailState::default(),
+                    rail_scroll: 0.0,
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
                     preview_message: None,
@@ -10048,6 +11280,8 @@ mod tests {
                 grabbed: None,
                 strip_preview: None,
                 tab_scroll: 0.0,
+                rail: RailState::default(),
+                rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 preview_message: None,
@@ -11580,6 +12814,8 @@ mod tests {
                 grabbed: None,
                 strip_preview: None,
                 tab_scroll: 0.0,
+                rail: RailState::default(),
+                rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names,
                 preview_message: None,
@@ -11624,6 +12860,8 @@ mod tests {
                 grabbed: None,
                 strip_preview: None,
                 tab_scroll: 0.0,
+                rail: RailState::default(),
+                rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
                 preview_message: None,
@@ -12328,6 +13566,778 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
+    // R1/R2: the rail's inset and its paint
+    // ---------------------------------------------------------------------
+
+    /// A logical measurement as a float, through the subpixel grid it is
+    /// actually stored on — never a second conversion of its own.
+    fn logical_px_f32(px: LogicalPx) -> f32 {
+        px.subpixels() as f32 / SUBPIXELS_PER_PX as f32
+    }
+
+    /// A 960x600 logical window with the rail in the state given, and everything
+    /// the chrome builder makes of it.
+    fn rail_chrome_of(
+        scale: f32,
+        titles: &[&str],
+        active_tab: usize,
+        state: RailState,
+        hover: Option<ChromeTarget>,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        let tabs = titles
+            .iter()
+            .map(|title| TabContent {
+                title: (*title).to_owned(),
+                pane_count: 1,
+                ..TabContent::default()
+            })
+            .collect::<Vec<_>>();
+        let dpi_milli = (scale * 1_000.0) as u32;
+        let metrics = seat_metrics(dpi_milli);
+        let seats = Seats::lone_terminal();
+        let layout = solved(
+            &seats,
+            viewport_of((960.0 * scale) as u32, (600.0 * scale) as u32, dpi_milli),
+            &metrics,
+        );
+        build_chrome_for_tabs(
+            &seats,
+            &layout,
+            scale,
+            ChromePointer {
+                hover,
+                ..ChromePointer::default()
+            },
+            ChromeContent {
+                tabs: &tabs,
+                active_tab,
+                grabbed: None,
+                strip_preview: None,
+                tab_scroll: 0.0,
+                rail: state,
+                rail_scroll: 0.0,
+                preview_title: None,
+                terminal_names: &NO_TERMINAL_NAMES,
+                preview_message: None,
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        )
+    }
+
+    /// **The load-bearing change: the terminal starts after the rail, and the
+    /// two functions that say so cannot disagree.**
+    ///
+    /// [`logical_viewport`] sizes the shells and [`device_viewport`] is what
+    /// every drop-zone distance is measured from, so one pixel between them is a
+    /// left-edge drop zone that aims into the rail. They are held together by
+    /// taking the same [`rail_inset_device_px`] rather than each multiplying a
+    /// logical width by a scale and rounding it for themselves.
+    ///
+    /// Red gate: hand `device_viewport` `0` while `logical_viewport` gets the
+    /// real inset — the exact shape the bug would take — and the second
+    /// assertion fails at every scale.
+    #[test]
+    fn the_terminal_starts_after_the_rail_and_both_viewports_agree_where() {
+        const W: u32 = 1_600;
+        const H: u32 = 900;
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let dpi_milli = (scale * 1_000.0) as u32;
+            let ppm = scale_ppm(dpi_milli);
+            let bare = logical_viewport(W, H, ppm, 0);
+            assert_eq!(
+                bare.left,
+                LogicalPx::ZERO,
+                "scale {scale}: with no rail the terminal starts at the window's edge"
+            );
+            assert_eq!(device_viewport(W, H, ppm, 0)[0], 0.0);
+
+            for (state, expected_logical) in [
+                (expanded_rail(), RAIL_WIDTH_LOGICAL_PX),
+                // Q179: an *opening* icon rail moves nothing. The inset is the
+                // parked width at every point of the animation, which is what
+                // stops the panes reflowing when you go looking for a tab.
+                (icon_rail(0.0), RAIL_PARK_LOGICAL_PX),
+                (icon_rail(0.5), RAIL_PARK_LOGICAL_PX),
+                (icon_rail(1.0), RAIL_PARK_LOGICAL_PX),
+                (RailState::default(), 0.0),
+            ] {
+                let inset = rail_inset_device_px(state, ppm);
+                let view = logical_viewport(W, H, ppm, inset);
+                let host = device_viewport(W, H, ppm, inset);
+                // The left edge moved by exactly the inset, and by nothing else:
+                // the top, the right and the bottom are the ones the bare
+                // viewport already had.
+                assert_eq!(
+                    view.top, bare.top,
+                    "scale {scale}: the title bar is untouched"
+                );
+                assert_eq!(view.right, bare.right);
+                assert_eq!(view.bottom, bare.bottom);
+                assert!(
+                    (logical_px_f32(view.left) - expected_logical).abs() <= 0.5,
+                    "scale {scale}: the terminal gives up {expected_logical} logical px, \
+                     not {}",
+                    logical_px_f32(view.left)
+                );
+                // And the twin says the same thing about the same edge, in the
+                // pixels the pointer arrives in.
+                assert_eq!(
+                    host[0],
+                    f64::from(inset),
+                    "scale {scale}: the rim starts on the device column the solver was given"
+                );
+                assert_eq!(
+                    host[0],
+                    f64::from(logical_to_device(logical_px_f32(view.left), ppm)),
+                    "scale {scale}: and that column is the solver's own left edge, \
+                     re-snapped — one pixel apart here is a drop zone aimed at a seam"
+                );
+                assert_eq!([host[1], host[2], host[3]], {
+                    let bare_host = device_viewport(W, H, ppm, 0);
+                    [bare_host[1], bare_host[2], bare_host[3]]
+                });
+            }
+        }
+    }
+
+    /// A rail narrower than the window it is in is the only case there is; a
+    /// window narrower than the rail is the one the clamp exists for.
+    ///
+    /// The twin of [`seats_top_device_px`]'s own `min`, and it has to be a twin:
+    /// a viewport whose left ran past its right is not a narrow terminal, it is
+    /// a rectangle inside out, and everything downstream of it would be too.
+    #[test]
+    fn a_window_narrower_than_the_rail_still_leaves_a_viewport_the_right_way_round() {
+        let ppm = scale_ppm(1_000);
+        let inset = rail_inset_device_px(expanded_rail(), ppm);
+        for width in [1_u32, 40, 120, 219, 220, 400] {
+            let view = logical_viewport(width, 600, ppm, inset);
+            let host = device_viewport(width, 600, ppm, inset);
+            assert!(
+                view.left <= view.right,
+                "{width}px wide: the viewport stays the right way round"
+            );
+            assert!(host[0] <= host[2], "{width}px wide: and so does the rim");
+            assert_eq!(
+                host[0],
+                f64::from(logical_to_device(logical_px_f32(view.left), ppm)),
+                "{width}px wide: clamped or not, the twins still agree"
+            );
+        }
+    }
+
+    /// R1: the two layouts share the title bar and split what stands in it.
+    /// `.apptitle` is `display: none` **only** under `[data-tabs="horizontal"]`
+    /// (mock-up 189), so the program's name is the bar's resting content and the
+    /// strip is what displaces it — never both at once.
+    #[test]
+    fn the_title_bar_carries_the_strip_or_the_programs_name_and_never_both() {
+        let titles = ["one", "two"];
+        let (_, horizontal, _) = rail_chrome_of(1.0, &titles, 0, RailState::default(), None);
+        assert!(
+            !horizontal
+                .iter()
+                .any(|label| label.text == "BetterTerminal"),
+            "the strip is standing where the name would be"
+        );
+        assert!(
+            horizontal.iter().any(|label| label.text == "one"),
+            "and the strip's own tabs are drawn"
+        );
+        let (_, vertical, _) = rail_chrome_of(1.0, &titles, 0, expanded_rail(), None);
+        let name = vertical
+            .iter()
+            .find(|label| label.text == "BetterTerminal")
+            .expect("the vertical layout names the program in its title bar");
+        assert_eq!(
+            name.font_size_px, 12.5,
+            "`.apptitle {{ font-size: 12.5px }}`"
+        );
+        assert_eq!(
+            name.color,
+            chrome_palette().title_text_muted,
+            "`--ink3` over `--panel`, the ink the `+`/`˅` pair wears on this bar"
+        );
+        assert_eq!(
+            name.rect[3],
+            (WINDOW_TITLE_BAR_LOGICAL_PX).round(),
+            "in the bar, not below it"
+        );
+    }
+
+    /// The mirror, and the half that is easy to forget: a vertical layout must
+    /// not still be drawing the horizontal strip underneath its rail, and a
+    /// horizontal one must not be drawing a rail off-screen.
+    #[test]
+    fn each_layout_draws_its_own_tab_list_and_not_the_others() {
+        let titles = ["alpha", "beta"];
+        let ground = chrome_palette().title_bar;
+        let rail_ground = |quads: &[ChromeQuad]| {
+            quads
+                .iter()
+                .any(|quad| quad.color == ground && quad.rect[1] >= WINDOW_TITLE_BAR_LOGICAL_PX)
+        };
+        let (horizontal_quads, _, _) = rail_chrome_of(1.0, &titles, 0, RailState::default(), None);
+        assert!(
+            !rail_ground(&horizontal_quads),
+            "a horizontal layout paints nothing below the title bar in `--panel`"
+        );
+        let (vertical_quads, vertical_labels, _) =
+            rail_chrome_of(1.0, &titles, 0, expanded_rail(), None);
+        assert!(
+            rail_ground(&vertical_quads),
+            "a vertical layout stands its rail on the same `--panel` the bar wears"
+        );
+        // The tab titles are drawn once. Two labels saying "alpha" would be the
+        // strip and the rail both claiming the list.
+        assert_eq!(
+            vertical_labels
+                .iter()
+                .filter(|label| label.text == "alpha")
+                .count(),
+            1,
+            "one list, one name"
+        );
+        for label in &vertical_labels {
+            if label.text == "alpha" {
+                assert!(
+                    label.rect[1] >= WINDOW_TITLE_BAR_LOGICAL_PX,
+                    "and it is the rail's copy, below the bar — not the strip's"
+                );
+            }
+        }
+    }
+
+    /// The rail's furniture, against the geometry it was built from: the ground,
+    /// the edge, the heading and the seam each land where `rail_geometry` put
+    /// them, in the ink the palette gives them.
+    #[test]
+    fn the_rail_paints_its_ground_edge_heading_and_seam_where_the_geometry_says() {
+        let palette = chrome_palette();
+        let pinned = TabTrailer {
+            pinned: true,
+            reveal: 0.0,
+        };
+        let tabs = [
+            TabContent {
+                title: "kept".to_owned(),
+                pane_count: 1,
+                trailer: pinned,
+                ..TabContent::default()
+            },
+            TabContent {
+                title: "ordinary".to_owned(),
+                pane_count: 1,
+                ..TabContent::default()
+            },
+        ];
+        let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
+        assert_eq!(pinned_run_len(&trailers), 1, "one pinned, then the rest");
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let seats = Seats::lone_terminal();
+        let layout = solved(&seats, viewport_of(960, 600, dpi_milli), &metrics);
+        let (quads, labels, _) = build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer::default(),
+            ChromeContent {
+                tabs: &tabs,
+                active_tab: 0,
+                grabbed: None,
+                strip_preview: None,
+                tab_scroll: 0.0,
+                rail: expanded_rail(),
+                rail_scroll: 0.0,
+                preview_title: None,
+                terminal_names: &NO_TERMINAL_NAMES,
+                preview_message: None,
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        );
+        let geometry = rail_geometry(600.0, 1.0, &trailers, 1, 0.0, expanded_rail())
+            .expect("an expanded rail is on screen");
+        let quad_at = |rect: [f32; 4]| quads.iter().find(|quad| quad.rect == rect).map(|q| q.color);
+        assert_eq!(
+            quad_at(geometry.body),
+            Some(palette.title_bar),
+            "`.rail {{ background: var(--panel) }}` — the bar's own surface"
+        );
+        assert_eq!(
+            quad_at(geometry.edge.expect("an expanded rail faces the terminal")),
+            Some(palette.rail_edge),
+            "`border-right: 1px solid var(--border-soft)`"
+        );
+        assert_eq!(
+            quad_at(geometry.seam.expect("one pinned of two draws a seam")),
+            Some(palette.rail_seam),
+            "F55/F56, and drawn only here (Q187)"
+        );
+        let label = geometry.label.expect("an expanded rail names its list");
+        let heading = labels
+            .iter()
+            .find(|entry| entry.text == "Tabs")
+            .expect("`.rail .label` says what the column is");
+        assert_eq!(heading.font_size_px, RAIL_LABEL_FONT_LOGICAL_PX);
+        assert_eq!(heading.weight, ChromeLabelWeight::SemiBold);
+        assert_eq!(heading.letter_spacing_em, RAIL_LABEL_TRACKING_EM);
+        assert_eq!(heading.color, palette.title_text_muted);
+        assert_eq!(
+            [heading.rect[1], heading.rect[3]],
+            [label[1], label[3]],
+            "in the box the geometry gave it"
+        );
+        assert_eq!(
+            heading.rect[0] - label[0],
+            RAIL_LABEL_PADDING_X_LOGICAL_PX,
+            "`.rail .label {{ padding: 4px 10px 6px }}`"
+        );
+    }
+
+    /// A row's ink answers to what the row is: `--ink` on the selected one,
+    /// `--ink2` under the pointer, the strip's own resting ink otherwise — and
+    /// the selection carries the weight the mock-up gives it.
+    #[test]
+    fn a_rail_rows_ink_and_weight_say_which_row_you_are_on() {
+        let palette = chrome_palette();
+        let titles = ["first", "second"];
+        let ink_of = |hover: Option<ChromeTarget>, want: &str| {
+            let (_, labels, _) = rail_chrome_of(1.0, &titles, 0, expanded_rail(), hover);
+            labels
+                .iter()
+                .find(|label| label.text == want)
+                .map(|label| (label.color, label.weight))
+                .expect("every row draws its name")
+        };
+        assert_eq!(
+            ink_of(None, "first"),
+            (palette.rail_tab_active_text, ChromeLabelWeight::Medium),
+            "`.vtab.active {{ color: var(--ink); font-weight: 500 }}`"
+        );
+        assert_eq!(
+            ink_of(None, "second"),
+            (palette.title_text, ChromeLabelWeight::Regular),
+            "a resting row wears the strip's own resting ink"
+        );
+        assert_eq!(
+            ink_of(Some(ChromeTarget::Tab(1)), "second").0,
+            palette.rail_tab_hover_text,
+            "`.vtab:hover` steps the ink up without making it the selection"
+        );
+        // One hover, three targets: a pointer on the `×` is a pointer on the row.
+        assert_eq!(
+            ink_of(Some(ChromeTarget::TabClose(1)), "second").0,
+            palette.rail_tab_hover_text,
+            "`.vtab:hover` is one hover — the `×` is inside the row, not beside it"
+        );
+    }
+
+    /// Q174, painted: an unpinned row wears its `×` with no pointer anywhere
+    /// near it, and a pinned one wears a filled pin instead. The active row's
+    /// glyph takes `rail_glyph_on_active_tab`, which is the palette entry the
+    /// rail needs and the strip never did — the strip's `×` only ever appears
+    /// under the pointer, so it never had to be legible on a resting selection.
+    #[test]
+    fn the_rail_wears_one_glyph_per_row_at_rest_and_lights_it_on_the_active_one() {
+        let palette = chrome_palette();
+        let tabs = [
+            TabContent {
+                title: "kept".to_owned(),
+                pane_count: 1,
+                trailer: TabTrailer {
+                    pinned: true,
+                    reveal: 0.0,
+                },
+                ..TabContent::default()
+            },
+            TabContent {
+                title: "ordinary".to_owned(),
+                pane_count: 1,
+                ..TabContent::default()
+            },
+        ];
+        let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
+        let geometry = rail_geometry(600.0, 1.0, &trailers, 1, 0.0, expanded_rail())
+            .expect("a rail is on screen");
+        let dpi_milli = 1_000;
+        let metrics = seat_metrics(dpi_milli);
+        let seats = Seats::lone_terminal();
+        let layout = solved(&seats, viewport_of(960, 600, dpi_milli), &metrics);
+        let (_, _, sprites) = build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer::default(),
+            ChromeContent {
+                tabs: &tabs,
+                active_tab: 0,
+                grabbed: None,
+                strip_preview: None,
+                tab_scroll: 0.0,
+                rail: expanded_rail(),
+                rail_scroll: 0.0,
+                preview_title: None,
+                terminal_names: &NO_TERMINAL_NAMES,
+                preview_message: None,
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        );
+        let inside = |slot: [f32; 4], sprite: &ChromeSprite| {
+            sprite.rect[0] >= slot[0]
+                && sprite.rect[2] <= slot[2]
+                && sprite.rect[1] >= slot[1]
+                && sprite.rect[3] <= slot[3]
+        };
+        let pin_slot = geometry.tabs[0].pin.expect("a pinned row wears its pin");
+        let pin = sprites
+            .iter()
+            .find(|sprite| inside(pin_slot, sprite))
+            .expect("and the pin is drawn");
+        assert_eq!(
+            pin.mark,
+            ChromeMark::Pin { filled: true },
+            "filled is the state — a rail's pin is only ever a state"
+        );
+        assert_eq!(
+            pin.color, palette.rail_glyph_on_active_tab,
+            "on the active row, over `--active` (Q174's own palette entry)"
+        );
+        let close_slot = geometry.tabs[1]
+            .close
+            .expect("an unpinned row wears its `×`");
+        let close = sprites
+            .iter()
+            .find(|sprite| inside(close_slot, sprite))
+            .expect("the `×` is there with no pointer near it — Q174");
+        assert_eq!(close.mark, ChromeMark::TabClose);
+        assert_eq!(
+            close.color, palette.title_text_muted,
+            "a resting row's `×` is `--ink3` over `--panel`"
+        );
+        assert!(
+            geometry.tabs[0].close.is_none() && geometry.tabs[1].pin.is_none(),
+            "one glyph, one fact — never both, never neither"
+        );
+    }
+
+    /// Q183: the words fade and the icons do not, which is the whole promise of
+    /// icon mode. The mark's own opacity is `TabContent::mark`'s business and
+    /// answers to the breath and the dead-session fade — never to the panel.
+    #[test]
+    fn a_parking_rail_fades_its_words_and_leaves_its_icons_alone() {
+        let palette = chrome_palette();
+        let titles = ["one", "two"];
+        let marks_of = |state: RailState| {
+            let (_, labels, sprites) = rail_chrome_of(1.0, &titles, 0, state, None);
+            let profile = sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+                .map(|sprite| (sprite.rect, sprite.opacity))
+                .collect::<Vec<_>>();
+            let words = labels
+                .iter()
+                .find(|label| label.text == "one")
+                .map(|label| label.color);
+            (profile, words)
+        };
+        let (open_marks, open_words) = marks_of(icon_rail(1.0));
+        let (parked_marks, parked_words) = marks_of(icon_rail(0.0));
+        assert_eq!(
+            open_marks, parked_marks,
+            "Q180/Q183: the icon column does not move, and does not fade, as the panel slides"
+        );
+        for (_, opacity) in &open_marks {
+            assert_eq!(
+                *opacity, 1.0,
+                "a mark with nothing to report is at full strength"
+            );
+        }
+        assert_eq!(
+            open_words,
+            Some(palette.rail_tab_active_text),
+            "open, the selected row's name is `--ink` over `--active`"
+        );
+        assert_eq!(
+            parked_words, None,
+            "parked, the ink has reached zero and there is nothing left to draw"
+        );
+        // "Faded to nothing" is not `display: none`, and the difference is the
+        // one Q183 is about: the row's *title run* is unchanged in both states,
+        // so the mark in front of it cannot move. The paint simply stops issuing
+        // a draw for an ink that has arrived at fully transparent.
+        let trailers = [TabTrailer::default(); 2];
+        let run = |state| {
+            rail_geometry(600.0, 1.0, &trailers, 0, 0.0, state)
+                .expect("an icon rail is on screen")
+                .tabs[0]
+                .title
+        };
+        assert_eq!(
+            run(icon_rail(0.0))[0],
+            run(icon_rail(1.0))[0],
+            "the words start in the same column in both states — that, and the mark \
+             in front of them, is what keeps the icons still"
+        );
+        assert!(
+            run(icon_rail(0.0))[1] < run(icon_rail(1.0))[1],
+            "and the far end is the panel's own overflow cropping the run, not the \
+             row being re-laid out"
+        );
+        // Halfway is genuinely between the two rather than at either end, and it
+        // is mixed towards the surface this row actually shows: an ink walked
+        // towards the rail's ground instead of the selected row's fill would go
+        // grey on its way out rather than going away.
+        let (_, half) = marks_of(RailState {
+            text_opacity: 0.5,
+            ..icon_rail(0.5)
+        });
+        let half = half.expect("the row still draws its name mid-fade");
+        assert!(
+            half != palette.rail_tab_active_text && half != palette.rail_tab_active,
+            "mid-fade the ink is on its way, not at either end: {half:?}"
+        );
+        for (channel, drawn) in half.iter().enumerate() {
+            let (ink, ground) = (
+                f32::from(palette.rail_tab_active_text[channel]),
+                f32::from(palette.rail_tab_active[channel]),
+            );
+            assert!(
+                (f32::from(*drawn) - (ground + (ink - ground) * 0.5)).abs() <= 1.0,
+                "channel {channel}: halfway between the row's fill and its ink"
+            );
+        }
+    }
+
+    /// Q182 as it can honestly be drawn: the falloff is a staircase, because a
+    /// [`ChromeSprite`] carries one uniform opacity and this pipeline has no
+    /// gradient primitive. What must survive the quantisation is the shape —
+    /// darkest against the rail, gone by the far edge, and never anywhere near
+    /// the panel's own rows.
+    #[test]
+    fn the_rails_shade_falls_away_from_its_edge_in_even_steps() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let titles = ["one", "two"];
+            let (_, _, sprites) = rail_chrome_of(scale, &titles, 0, icon_rail(1.0), None);
+            let geometry = rail_geometry(
+                (600.0 * scale).round(),
+                scale,
+                &[TabTrailer::default(); 2],
+                0,
+                0.0,
+                icon_rail(1.0),
+            )
+            .expect("an open icon rail is on screen");
+            let shade = geometry.shade.expect("an open icon rail casts a shade");
+            let steps = sprites
+                .iter()
+                .filter(|sprite| {
+                    sprite.mark == ChromeMark::Fill
+                        && sprite.rect[0] >= shade[0].floor()
+                        && sprite.rect[2] <= shade[2].ceil()
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                steps.len() >= 7,
+                "scale {scale}: too few steps and the falloff reads as banding: {}",
+                steps.len()
+            );
+            // Monotonically lighter, left to right, and never darker than the
+            // declaration's own alpha.
+            let ceiling = f32::from(chrome_palette().rail_shade_alpha) / 255.0;
+            let mut previous = f32::INFINITY;
+            for step in &steps {
+                assert!(
+                    step.opacity < previous,
+                    "scale {scale}: each column is lighter than the one before it"
+                );
+                assert!(
+                    step.opacity <= ceiling,
+                    "scale {scale}: and none is darker than the gradient's first stop"
+                );
+                assert_eq!(step.color, chrome_palette().rail_shade);
+                previous = step.opacity;
+            }
+            assert!(
+                steps.last().expect("at least seven").opacity < ceiling * 0.1,
+                "scale {scale}: by the far edge the shade is all but gone"
+            );
+            // And none of it lands on the rail: the whole run starts at the
+            // panel's own right edge, never inside it.
+            for step in &steps {
+                assert!(
+                    step.rect[0] >= geometry.body[2] - 0.5,
+                    "scale {scale}: a column inside the rail is a dark band down its rows"
+                );
+            }
+        }
+    }
+
+    /// A parked rail casts no shade at all, and an expanded one never can: it is
+    /// in the flow, so nothing of it overlaps the terminal to cast one onto.
+    #[test]
+    fn only_an_opening_icon_rail_casts_a_shade() {
+        let titles = ["one"];
+        for (state, why) in [
+            (RailState::default(), "a horizontal layout has no rail"),
+            (expanded_rail(), "an expanded rail overlaps nothing"),
+            (
+                icon_rail(0.0),
+                "a parked rail sits exactly on the terminal's edge",
+            ),
+        ] {
+            let (_, _, sprites) = rail_chrome_of(1.0, &titles, 0, state, None);
+            assert!(
+                !sprites.iter().any(|sprite| sprite.mark == ChromeMark::Fill
+                    && sprite.color == chrome_palette().rail_shade),
+                "{why}, so there is no falloff to draw"
+            );
+        }
+    }
+
+    /// The `+` rides in the same 15px box a row's mark does (mock-up 923-924), so
+    /// the two line up on their centres — and therefore holds as still as the
+    /// icon column does while the panel slides (Q180).
+    #[test]
+    fn the_new_tab_plus_lines_up_with_the_rows_marks_and_holds_still() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let titles = ["one", "two"];
+            let mut centres = Vec::new();
+            for open in [0.0_f32, 0.5, 1.0] {
+                let (_, labels, sprites) = rail_chrome_of(scale, &titles, 0, icon_rail(open), None);
+                let plus = sprites
+                    .iter()
+                    .find(|sprite| sprite.mark == ChromeMark::Plus)
+                    .expect("the rail always offers a new tab");
+                centres.push((plus.rect[0] + plus.rect[2]) / 2.0);
+                let mark = sprites
+                    .iter()
+                    .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+                    .expect("and every row wears its mark");
+                assert!(
+                    ((plus.rect[0] + plus.rect[2]) / 2.0 - (mark.rect[0] + mark.rect[2]) / 2.0)
+                        .abs()
+                        <= 0.5,
+                    "scale {scale}, open {open}: the `+` and a row's mark share one column"
+                );
+                // The words beside it are the ones that come and go.
+                let words = labels.iter().any(|label| label.text == "New tab");
+                assert_eq!(
+                    words,
+                    open > 0.0,
+                    "scale {scale}, open {open}: `.nt-main span` fades with every \
+                     other word in the rail"
+                );
+            }
+            let parked = centres[0];
+            for centre in &centres {
+                assert!(
+                    (centre - parked).abs() <= 0.001,
+                    "scale {scale}: the `+` must not shift as the panel slides"
+                );
+            }
+        }
+    }
+
+    /// **The two hit tests are exclusive by construction, not by the router
+    /// being careful.**
+    ///
+    /// `chrome_target_at` picks one of them off the layout; what makes that safe
+    /// is that the one it did *not* pick would have had nothing to say anyway.
+    /// A rail is `None` in a horizontal layout by [`rail_geometry`]'s own
+    /// contract, and a vertical layout paints no strip — so the same
+    /// `ChromeTarget::Tab(index)` can only ever come from one place, and every
+    /// click handler downstream is untouched by the axis.
+    #[test]
+    fn only_one_of_the_two_tab_lists_can_answer_a_pointer() {
+        let trailers = [TabTrailer::default(); 3];
+        let rail_row = rail_geometry(600.0, 1.0, &trailers, 0, 0.0, expanded_rail())
+            .expect("a vertical layout has a rail")
+            .tabs[1];
+        let centre = |rect: [f32; 4]| {
+            (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            )
+        };
+        let (x, y) = centre(rail_row.body);
+        assert_eq!(
+            hit_rail_chrome(600.0, 1.0, &trailers, 0, 0.0, expanded_rail(), x, y),
+            Some(ChromeTarget::Tab(1)),
+            "the rail names the row the pointer is on, in the index the strip uses"
+        );
+        assert_eq!(
+            hit_rail_chrome(600.0, 1.0, &trailers, 0, 0.0, RailState::default(), x, y),
+            None,
+            "and says nothing at all in a horizontal layout — there is no rail to hit"
+        );
+        // The mirror: the strip's own row, which in a vertical layout is not
+        // drawn and must not be reachable. It is below the title bar in the rail
+        // and inside it in the strip, so the two do not even overlap.
+        let strip_row = tab_strip_geometry(960.0, 1.0, &trailers, 1, 0.0).tabs[1];
+        let (sx, sy) = centre(strip_row.body);
+        assert!(
+            sy < WINDOW_TITLE_BAR_LOGICAL_PX.into(),
+            "the strip lives in the title bar"
+        );
+        assert_eq!(
+            hit_rail_chrome(600.0, 1.0, &trailers, 0, 0.0, expanded_rail(), sx, sy),
+            None,
+            "and the rail begins below it, so a pointer up there is never the rail's"
+        );
+    }
+
+    /// The wheel's clamp, on the axis the rail scrolls: a stale offset cannot
+    /// leave the list parked past its own end, because every read runs it back
+    /// through the geometry that owns the answer.
+    #[test]
+    fn the_rails_scroll_is_clamped_by_the_rows_that_exist_right_now() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let height = 618.0 * scale;
+            let crowded = resting(40);
+            let at = |trailers: &[TabTrailer], scroll: f32| {
+                rail_geometry(height, scale, trailers, 0, scroll, expanded_rail())
+                    .expect("a rail is on screen")
+            };
+            let full = at(&crowded, 0.0);
+            assert!(
+                full.max_scroll > 0.0,
+                "scale {scale}: forty 30px rows do not fit"
+            );
+            // Scrolled to the end, the last row's foot lands on the list's own
+            // bottom — not one pixel past it and not one short.
+            let ended = at(&crowded, full.max_scroll);
+            let last = ended.tabs.last().expect("forty rows");
+            assert!(
+                (last.body[3] - ended.viewport[1]).abs() <= 1.0,
+                "scale {scale}: the end of the travel is the end of the list, \
+                 {} against {}",
+                last.body[3],
+                ended.viewport[1]
+            );
+            // And a list that has since shrunk reports a shorter travel, so the
+            // caller's clamp brings a stale offset back with it.
+            let after_closing = at(&resting(4), 0.0);
+            assert!(
+                after_closing.max_scroll < full.max_scroll,
+                "scale {scale}: closing tabs shortens the travel"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------
     // U10: the layout event broadcast (T230)
     // ---------------------------------------------------------------------
 
@@ -12486,6 +14496,611 @@ mod tests {
         assert!(events.contains(&LayoutEvent::Presentation(SeatId(2))));
         assert!(events.contains(&LayoutEvent::Moved(SeatId(1))));
     }
+
+    // ══ R1/R2: the vertical rail ══
+    //
+    // The expected numbers below are not read off the stylesheet — they are
+    // measured out of the mock-up itself in a browser, which is the only way to
+    // settle the values CSS states indirectly (`line-height: normal`) or as
+    // consequences of `box-sizing: border-box` (the 203px content run inside a
+    // 220px rail). Where a test cites a number, that number was observed.
+
+    /// A rail in its ordinary expanded state.
+    fn expanded_rail() -> RailState {
+        RailState {
+            layout: TabLayoutMode::Vertical,
+            mode: RailMode::Expanded,
+            collapsed: false,
+            open: 0.0,
+            text_opacity: 1.0,
+        }
+    }
+
+    /// An icon rail, `open` of the way open.
+    fn icon_rail(open: f32) -> RailState {
+        RailState {
+            layout: TabLayoutMode::Vertical,
+            mode: RailMode::Icons,
+            collapsed: false,
+            open,
+            text_opacity: open,
+        }
+    }
+
+    fn rail_of(state: RailState, trailers: &[TabTrailer], pinned: usize) -> RailGeometry {
+        rail_geometry(618.0, 1.0, trailers, pinned, 0.0, state).expect("a rail is on screen")
+    }
+
+    /// Q171/Q172: the rail's own box and the column inside it, against the
+    /// mock-up as measured — 220px wide, an 8px inset either side, and a
+    /// content run of 203px because the border is *inside* the width.
+    #[test]
+    fn the_rail_is_two_hundred_and_twenty_wide_with_a_two_hundred_and_three_pixel_run() {
+        let rail = rail_of(expanded_rail(), &resting(3), 0);
+        assert_eq!(
+            rail.body[2] - rail.body[0],
+            220.0,
+            "`.rail {{ width: 220px }}`"
+        );
+        let row = rail.tabs[0];
+        assert_eq!(row.body[0], 8.0, "`.rail {{ padding: … 8px … }}`");
+        assert_eq!(
+            row.body[2] - row.body[0],
+            203.0,
+            "220 less two 8px insets and the 1px border that lives inside the width"
+        );
+        assert_eq!(
+            row.body[3] - row.body[1],
+            30.0,
+            "`.vtab {{ height: 30px }}`"
+        );
+    }
+
+    /// Q177 and Q171's stacking: the heading is 23px tall (4 + 13 + 6, its line
+    /// box measured rather than assumed), and the first row follows one 1px gap
+    /// later — so row 0 starts at 6 + 23 + 1 = 30, exactly where the browser
+    /// puts it.
+    #[test]
+    fn the_tabs_heading_stands_above_the_first_row_by_its_own_box_and_one_gap() {
+        let rail = rail_of(expanded_rail(), &resting(3), 0);
+        let label = rail.label.expect("an expanded rail names its list");
+        let top = WINDOW_TITLE_BAR_LOGICAL_PX;
+        assert_eq!(label[1], top + 6.0, "`.rail {{ padding-top: 6px }}`");
+        assert_eq!(label[3] - label[1], 23.0, "4px + a 13px line box + 6px");
+        assert_eq!(
+            rail.tabs[0].body[1],
+            top + 30.0,
+            "6 + 23 + 1: the heading's box and the column's own 1px gap"
+        );
+        assert_eq!(
+            rail.tabs[1].body[1] - rail.tabs[0].body[1],
+            31.0,
+            "`.vtab {{ height: 30px }}` plus `.rail {{ gap: 1px }}`"
+        );
+    }
+
+    /// Q172: rows never compress. The strip trades width for fit and then
+    /// scrolls; the rail refuses the trade outright, so thirty tabs in a short
+    /// window are thirty 30px rows and a scroller — never thirty slivers.
+    #[test]
+    fn rail_rows_keep_their_height_however_many_tabs_there_are() {
+        for count in [1_usize, 3, 12, 40] {
+            let rail = rail_of(expanded_rail(), &resting(count), 0);
+            for row in &rail.tabs {
+                assert_eq!(
+                    row.body[3] - row.body[1],
+                    30.0,
+                    "`.vtab {{ flex: none }}` — the LIST scrolls, the rows do not compress"
+                );
+            }
+        }
+        let crowded = rail_of(expanded_rail(), &resting(40), 0);
+        assert!(
+            crowded.max_scroll > 0.0,
+            "forty 30px rows do not fit a 618px window, so the list scrolls"
+        );
+    }
+
+    /// Q174, and the mirror it is half of: one glyph, one fact. An unpinned row
+    /// wears its `×` with no pointer anywhere near it; a pinned row wears a pin
+    /// and has no `×` at all, so it cannot be shut by a stray click.
+    #[test]
+    fn an_unpinned_row_wears_its_close_at_rest_and_a_pinned_row_wears_none() {
+        let trailers = [
+            TabTrailer {
+                pinned: true,
+                reveal: 0.0,
+            },
+            TabTrailer::default(),
+        ];
+        let rail = rail_of(expanded_rail(), &trailers, 1);
+        assert!(
+            rail.tabs[0].close.is_none(),
+            "a pinned row has no `×` in the mock-up's DOM at all"
+        );
+        assert!(rail.tabs[0].pin.is_some(), "it wears its pin instead");
+        assert!(
+            rail.tabs[1].close.is_some(),
+            "the rail is wide enough to be honest at rest — Q174"
+        );
+        assert!(
+            rail.tabs[1].pin.is_none(),
+            "and an unpinned row says so by the `×`, not by a second glyph"
+        );
+        // Both glyphs stand in the same slot, so unpinning is where you already
+        // are — the same rule the strip states for its own trailer.
+        assert_eq!(
+            rail.tabs[0].pin.expect("pinned")[0],
+            rail.tabs[1].close.expect("unpinned")[0],
+            "pin and `×` share one column"
+        );
+    }
+
+    /// F55/F56 + Q187: the seam exists only where it separates two groups, is
+    /// inset rather than full-bleed, and costs the column 5px of air on each
+    /// side of its single pixel — 191px wide at x=14, as measured.
+    #[test]
+    fn the_pinned_seam_appears_only_between_two_groups_and_is_inset() {
+        let pinned = TabTrailer {
+            pinned: true,
+            reveal: 0.0,
+        };
+        let mixed = [pinned, TabTrailer::default(), TabTrailer::default()];
+        let rail = rail_of(expanded_rail(), &mixed, 1);
+        let seam = rail.seam.expect("one pinned of three draws a seam");
+        assert_eq!(seam[0], 14.0, "6px in from the rail's own 8px content edge");
+        assert_eq!(
+            seam[2] - seam[0],
+            191.0,
+            "`calc(100% - 12px)` of a 203px run"
+        );
+        assert_eq!(seam[3] - seam[1], 1.0, "`.pin-seam {{ height: 1px }}`");
+        // 5px above and below, and the column's own 1px gaps either side.
+        assert_eq!(
+            seam[1] - rail.tabs[0].body[3],
+            6.0,
+            "one 1px gap then the seam's 5px margin"
+        );
+        assert_eq!(
+            rail.tabs[1].body[1] - seam[3],
+            6.0,
+            "the seam's other 5px margin then the next gap"
+        );
+
+        for (trailers, pinned_count, why) in [
+            (vec![TabTrailer::default(); 3], 0, "none pinned"),
+            (vec![pinned; 3], 3, "all pinned"),
+        ] {
+            assert!(
+                rail_of(expanded_rail(), &trailers, pinned_count)
+                    .seam
+                    .is_none(),
+                "{why}: there are not two groups to tell apart"
+            );
+        }
+    }
+
+    /// Q179 + Q190: the terminal keeps `--railpark` clear in icon mode and
+    /// nothing more, at every point of the animation — which is the whole reason
+    /// the rail is out of flow. An expanded rail, by contrast, is in the flow and
+    /// the terminal starts after all 220px of it.
+    #[test]
+    fn an_opening_icon_rail_never_moves_the_terminal() {
+        for open in [0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+            assert_eq!(
+                icon_rail(open).terminal_inset_logical_px(),
+                46.0,
+                "the terminal keeps only the parked strip clear, however far the rail has opened"
+            );
+        }
+        assert_eq!(
+            expanded_rail().terminal_inset_logical_px(),
+            220.0,
+            "an expanded rail is in the flow and takes its width out of the terminal's"
+        );
+        // Q190's own combination rule, and the dead-space bug behind it.
+        let horizontal = RailState::default();
+        assert_eq!(
+            horizontal.terminal_inset_logical_px(),
+            0.0,
+            "a horizontal layout has no rail, so the terminal keeps nothing clear"
+        );
+        assert!(!horizontal.draws_icon_rail());
+        let collapsed = RailState {
+            collapsed: true,
+            ..icon_rail(1.0)
+        };
+        assert_eq!(
+            collapsed.terminal_inset_logical_px(),
+            0.0,
+            "`rail-icons` must not survive into a collapsed rail — that is 46px of dead space"
+        );
+        assert!(!collapsed.draws_icon_rail());
+    }
+
+    /// Q180, the promise the whole icon mode rests on: the mark's centre lands
+    /// on 46/2 = 23 while parked, and does not move by so much as a subpixel as
+    /// the panel slides open. Measured at 23 in both states in the mock-up.
+    #[test]
+    fn the_parked_icon_column_does_not_move_as_the_rail_opens() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let mut centres = Vec::new();
+            for open in [0.0_f32, 0.3, 0.6, 1.0] {
+                let rail =
+                    rail_geometry(618.0 * scale, scale, &resting(3), 0, 0.0, icon_rail(open))
+                        .expect("an icon rail is on screen");
+                let mark = rail.tabs[0].mark;
+                centres.push((mark[0] + mark[2]) / 2.0);
+            }
+            let parked = centres[0];
+            assert!(
+                (parked - 23.0 * scale).abs() <= 0.5,
+                "parked, the mark's centre is 46/2 (scale {scale}): {parked}"
+            );
+            for centre in &centres {
+                assert!(
+                    (centre - parked).abs() <= 0.001,
+                    "the icon column must not shift as the panel slides (scale {scale})"
+                );
+            }
+        }
+    }
+
+    /// Q181: the chevron collapses to nothing while parked rather than squeezing
+    /// the `+`, and — because `nt-main` is `flex: 1` — the `+` does not move when
+    /// it goes. Open, the pair is 173 + 2 + 28 across a 203px run, as measured.
+    #[test]
+    fn the_profile_chevron_stands_down_while_parked_without_moving_the_plus() {
+        let parked = rail_of(icon_rail(0.0), &resting(2), 0);
+        assert!(
+            parked.new_tab_menu.is_none(),
+            "a 28px chevron does not fit a 46px strip, so it collapses to zero"
+        );
+        let open = rail_of(icon_rail(1.0), &resting(2), 0);
+        let menu = open.new_tab_menu.expect("an open rail offers the picker");
+        assert_eq!(menu[2] - menu[0], 28.0, "`.nt-chev {{ width: 28px }}`");
+        assert_eq!(
+            open.new_tab[2] - open.new_tab[0],
+            173.0,
+            "203 less the chevron and the 2px gap between them"
+        );
+        assert_eq!(
+            parked.new_tab[0], open.new_tab[0],
+            "the `+`'s left edge does not depend on what the chevron is doing"
+        );
+        // Q176: `position: sticky` is not `position: fixed`. Two rows do not
+        // overflow, so the `+` is in ordinary flow directly under the list —
+        // nowhere near the rail's foot, which is where anchoring it to the
+        // bottom unconditionally used to put it.
+        let last = open.tabs.last().expect("two rows");
+        assert_eq!(
+            open.new_tab[1] - last.body[3],
+            3.0,
+            "one 1px column gap then `.rail-new {{ margin-top: 2px }}`"
+        );
+        assert!(
+            open.body[3] - open.new_tab[3] > 400.0,
+            "a two-tab rail leaves the whole foot of the window empty, and the `+` \
+             stays with its list rather than stranding itself at the bottom of it"
+        );
+    }
+
+    /// Q176 as the mock-up actually writes it: `.rail .rail-new { position:
+    /// sticky; bottom: -10px }` — in flow while the list fits, stopped at the
+    /// foot once it does not, and back in flow at the end of the scroll.
+    ///
+    /// The stuck position is `min` rather than a branch on overflow because that
+    /// is what sticky *is*, and because the two agree exactly at the end of the
+    /// travel: a rule written as a branch would have to name the crossing point
+    /// itself, and would then own a second opinion about where the list ends.
+    #[test]
+    fn the_new_tab_row_sticks_to_the_foot_only_once_the_list_overflows() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let height = 618.0 * scale;
+            let rail_of_at = |count: usize, scroll: f32| {
+                rail_geometry(height, scale, &resting(count), 0, scroll, expanded_rail())
+                    .expect("a rail is on screen")
+            };
+            // The stuck line, from the two declarations that set it: the row's
+            // 30px border box plus the 4px of padding it wears so its fill
+            // reaches the edge, measured from the rail's *outer* bottom because
+            // `bottom: -10px` lets it sit inside the foot padding.
+            let stuck = height - ((RAIL_TAB_HEIGHT_LOGICAL_PX + 4.0) * scale).round();
+
+            // ── in flow: three rows do not fill a 618px rail ──
+            let short = rail_of_at(3, 0.0);
+            let last = short.tabs.last().expect("three rows");
+            assert!(
+                (short.new_tab[1] - (last.body[3] + (RAIL_GAP_LOGICAL_PX + 2.0) * scale)).abs()
+                    <= 0.5,
+                "scale {scale}: in flow the `+` follows the last row by a gap and its margin"
+            );
+            assert!(
+                short.new_tab[1] < stuck - 100.0 * scale,
+                "scale {scale}: and it is nowhere near the foot"
+            );
+            assert_eq!(
+                short.max_scroll, 0.0,
+                "scale {scale}: a list that fits does not scroll"
+            );
+
+            // ── stuck: twenty-eight rows overflow, so the button stops ──
+            let long = rail_of_at(28, 0.0);
+            assert!(
+                (long.new_tab[1] - stuck).abs() <= 0.5,
+                "scale {scale}: an overflowing list runs out from under the `+`, \
+                 which stops 30 + 4 above the rail's own bottom edge"
+            );
+            assert!(
+                long.max_scroll > 0.0,
+                "scale {scale}: and the list scrolls beneath it"
+            );
+            assert!(
+                long.tabs.last().expect("28 rows").body[3] > long.new_tab[1],
+                "scale {scale}: the rows genuinely pass under the button — that is \
+                 what makes it worth pinning"
+            );
+
+            // ── back in flow: scrolled past the end, the `+` comes up with the
+            // list rather than hanging in the air below it. A stale scroll is
+            // exactly this case — the caller clamps by re-reading `max_scroll`,
+            // so the frame on which a tab closes hands this function a number
+            // from the layout before it.
+            let over = rail_of_at(28, long.max_scroll + 40.0 * scale);
+            assert!(
+                over.new_tab[1] < stuck - 1.0,
+                "scale {scale}: past the end of the travel the button un-sticks"
+            );
+            let last = over.tabs.last().expect("28 rows");
+            assert!(
+                (over.new_tab[1] - (last.body[3] + (RAIL_GAP_LOGICAL_PX + 2.0) * scale)).abs()
+                    <= 0.5,
+                "scale {scale}: and lands back in flow under its last row"
+            );
+        }
+    }
+
+    /// Q178: collapsed is nothing at all — no width, and therefore no geometry
+    /// and no rail to hit.
+    #[test]
+    fn a_collapsed_rail_draws_nothing() {
+        let collapsed = RailState {
+            collapsed: true,
+            ..expanded_rail()
+        };
+        assert_eq!(collapsed.width_logical_px(), 0.0);
+        assert!(
+            rail_geometry(618.0, 1.0, &resting(3), 0, 0.0, collapsed).is_none(),
+            "a collapsed rail has no box, so there is nothing to draw or click"
+        );
+        assert!(
+            rail_geometry(618.0, 1.0, &resting(3), 0, 0.0, RailState::default()).is_none(),
+            "and neither has a horizontal layout"
+        );
+    }
+
+    /// Q182: the shade is bounded by the terminal it falls on. At rest it has
+    /// nowhere to fall; as the rail opens its left edge tracks
+    /// `--railw - --railpark`, so it slides out from under the parked strip
+    /// rather than appearing on top of it.
+    #[test]
+    fn the_shade_slides_out_of_the_parked_strip_as_the_rail_opens() {
+        assert!(
+            rail_of(icon_rail(0.0), &resting(2), 0).shade.is_none(),
+            "shut, the shade sits exactly on the terminal's edge and is not drawn"
+        );
+        let mut previous = 0.0_f32;
+        for open in [0.25_f32, 0.5, 1.0] {
+            let shade = rail_of(icon_rail(open), &resting(2), 0)
+                .shade
+                .expect("an opening rail casts a shade");
+            assert_eq!(shade[2] - shade[0], 14.0, "a 14px falloff");
+            assert!(
+                shade[0] > previous,
+                "the shade's left edge tracks the rail's own width"
+            );
+            previous = shade[0];
+        }
+        let full = rail_of(icon_rail(1.0), &resting(2), 0)
+            .shade
+            .expect("shade");
+        assert_eq!(
+            full[0], 220.0,
+            "fully open: the rail's own right edge, because a panel casts its \
+             shadow past itself and not across its own rows"
+        );
+        // The invariant behind that number, at every point of the animation and
+        // at every scale: the shade begins where the rail ends. `--termhost` is
+        // already inset by `--railpark`, so the mock-up's `calc(--railw -
+        // --railpark)` is that same edge written in the terminal's coordinates.
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            for open in [0.05_f32, 0.4, 0.8, 1.0] {
+                let rail =
+                    rail_geometry(618.0 * scale, scale, &resting(2), 0, 0.0, icon_rail(open))
+                        .expect("an opening icon rail is on screen");
+                let shade = rail.shade.expect("an opening rail casts a shade");
+                assert_eq!(
+                    shade[0], rail.body[2],
+                    "scale {scale}, open {open}: the falloff starts on the rail's own edge"
+                );
+                assert!(
+                    shade[0] >= RAIL_PARK_LOGICAL_PX * scale,
+                    "and therefore never inside the strip the terminal keeps clear"
+                );
+            }
+        }
+        // An expanded rail is in the flow: nothing overlaps the terminal, so
+        // there is no shade to cast.
+        assert!(rail_of(expanded_rail(), &resting(2), 0).shade.is_none());
+    }
+
+    /// Q179's other half: the edge facing the terminal is drawn only once the
+    /// panel is open. Parked, the rail and the title bar above it are one piece
+    /// of `--panel`, and a hairline there would sever them.
+    #[test]
+    fn only_an_open_rail_draws_the_edge_facing_the_terminal() {
+        assert!(rail_of(icon_rail(0.0), &resting(2), 0).edge.is_none());
+        assert!(rail_of(icon_rail(0.4), &resting(2), 0).edge.is_none());
+        let open = rail_of(icon_rail(1.0), &resting(2), 0);
+        let edge = open.edge.expect("an open rail faces the terminal");
+        assert_eq!(edge[2] - edge[0], 1.0, "one logical pixel");
+        assert_eq!(edge[2], open.body[2], "on the rail's own right edge");
+        assert!(
+            rail_of(expanded_rail(), &resting(2), 0).edge.is_some(),
+            "an expanded rail always presents its edge"
+        );
+    }
+
+    /// Q183: the labels fade, they do not go away — the layout is identical in
+    /// both states, which is what keeps the icons still. So a parked row's title
+    /// run is the same run an open one has; only the opacity differs.
+    #[test]
+    fn icon_mode_fades_the_labels_rather_than_removing_them() {
+        let parked = rail_of(icon_rail(0.0), &resting(2), 0);
+        assert_eq!(parked.text_opacity, 0.0, "parked, the words are invisible");
+        assert!(
+            parked.label.is_none(),
+            "the heading alone is removed outright — a heading invisible half the time is not one"
+        );
+        let row = parked.tabs[0];
+        assert!(
+            row.title[1] >= row.title[0],
+            "the title run still exists and still lays out; the rail's overflow crops it"
+        );
+        assert_eq!(rail_of(icon_rail(1.0), &resting(2), 0).text_opacity, 1.0);
+    }
+
+    /// The hit test answers the same rectangles the paint does, and answers the
+    /// smallest one first: the `×` is not the row, on this axis too.
+    #[test]
+    fn the_rail_hit_test_puts_the_glyph_before_the_row_it_stands_on() {
+        let trailers = [
+            TabTrailer {
+                pinned: true,
+                reveal: 0.0,
+            },
+            TabTrailer::default(),
+        ];
+        let state = expanded_rail();
+        let rail = rail_of(state, &trailers, 1);
+        let hit = |rect: [f32; 4]| {
+            hit_rail_chrome(
+                618.0,
+                1.0,
+                &trailers,
+                1,
+                0.0,
+                state,
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            )
+        };
+        assert_eq!(
+            hit(rail.tabs[0].pin.expect("pin")),
+            Some(ChromeTarget::TabPin(0))
+        );
+        assert_eq!(
+            hit(rail.tabs[1].close.expect("close")),
+            Some(ChromeTarget::TabClose(1))
+        );
+        // The row's own body, sampled at its leading edge where no glyph stands.
+        let body = rail.tabs[1].body;
+        assert_eq!(
+            hit_rail_chrome(
+                618.0,
+                1.0,
+                &trailers,
+                1,
+                0.0,
+                state,
+                f64::from(body[0] + 2.0),
+                f64::from((body[1] + body[3]) / 2.0),
+            ),
+            Some(ChromeTarget::Tab(1))
+        );
+        assert_eq!(hit(rail.new_tab), Some(ChromeTarget::NewTab));
+        assert_eq!(
+            hit(rail.new_tab_menu.expect("menu")),
+            Some(ChromeTarget::NewTabMenu)
+        );
+        // Nothing outside the rail belongs to the rail.
+        assert_eq!(
+            hit_rail_chrome(618.0, 1.0, &trailers, 1, 0.0, state, 400.0, 300.0),
+            None
+        );
+    }
+
+    /// A row scrolled out from under the list's clip box is not there to be
+    /// clicked — the same rule the strip states for its own scrolled tail.
+    #[test]
+    fn rows_scrolled_out_of_the_rail_are_not_clickable() {
+        let trailers = resting(40);
+        let state = expanded_rail();
+        let scrolled = rail_geometry(618.0, 1.0, &trailers, 0, 200.0, state).expect("rail");
+        let first = scrolled.tabs[0].body;
+        assert!(
+            first[3] < scrolled.viewport[0],
+            "row 0 has been scrolled off the top"
+        );
+        assert_eq!(
+            hit_rail_chrome(
+                618.0,
+                1.0,
+                &trailers,
+                0,
+                200.0,
+                state,
+                f64::from(first[0] + 2.0),
+                f64::from((first[1] + first[3]) / 2.0),
+            ),
+            None,
+            "what is cropped away is not there to be clicked"
+        );
+    }
+
+    /// Every rectangle the rail hands out has to survive fractional DPI without
+    /// inverting, and the column has to stay inside the rail at every scale.
+    #[test]
+    fn the_rail_stays_well_formed_at_every_scale() {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            for state in [
+                expanded_rail(),
+                icon_rail(0.0),
+                icon_rail(0.5),
+                icon_rail(1.0),
+            ] {
+                let rail = rail_geometry(618.0 * scale, scale, &resting(4), 2, 0.0, state)
+                    .expect("a rail is on screen");
+                let boxes = rail
+                    .tabs
+                    .iter()
+                    .flat_map(|row| {
+                        [Some(row.body), Some(row.mark), row.close, row.pin]
+                            .into_iter()
+                            .flatten()
+                    })
+                    .chain([Some(rail.new_tab)].into_iter().flatten())
+                    .chain(rail.label)
+                    .chain(rail.seam)
+                    .chain(rail.new_tab_menu)
+                    .chain(rail.edge);
+                for rect in boxes {
+                    assert!(
+                        rect[2] >= rect[0] && rect[3] >= rect[1],
+                        "no rectangle may invert (scale {scale}): {rect:?}"
+                    );
+                    assert!(
+                        rect[0] >= rail.body[0] - 0.001 && rect[2] <= rail.body[2] + 0.001,
+                        "nothing the rail owns escapes its own width (scale {scale}): {rect:?}"
+                    );
+                }
+                assert!(
+                    (rail.body[2] - rail.body[0] - state.width_logical_px() * scale).abs() <= 0.001,
+                    "the drawn width is the stated width (scale {scale})"
+                );
+            }
+        }
+    }
 }
 
 /// U5 — drop-landing geometry (K127-K134), tested against solved rectangles.
@@ -12514,7 +15129,7 @@ mod drop_geometry_tests {
         let ppm = scale_ppm(dpi_milli);
         let layout = solve(
             &tree,
-            logical_viewport(W, H, ppm),
+            logical_viewport(W, H, ppm, 0),
             &metrics,
             SeatId(1),
             LayoutMode::Parallel,
@@ -12524,7 +15139,7 @@ mod drop_geometry_tests {
         let count = tree.seats_in_order().len();
         (
             layout,
-            device_viewport(W, H, ppm),
+            device_viewport(W, H, ppm, 0),
             count,
             dpi_milli as f32 / 1_000.0,
         )
@@ -12827,7 +15442,7 @@ mod drop_geometry_tests {
             let scale = dpi_milli as f32 / 1_000.0;
             let geometry = tab_strip_geometry(W as f32, scale, &[TabTrailer::default()], 0, 0.0);
             let band = strip_band(&geometry, scale);
-            let host = device_viewport(W, H, scale_ppm(dpi_milli));
+            let host = device_viewport(W, H, scale_ppm(dpi_milli), 0);
             assert_eq!(
                 f64::from(band[3]),
                 host[1],
@@ -12920,11 +15535,11 @@ mod drop_plan_tests {
     }
 
     fn view() -> LogicalRect {
-        logical_viewport(W, H, scale_ppm(DPI))
+        logical_viewport(W, H, scale_ppm(DPI), 0)
     }
 
     fn host() -> [f64; 4] {
-        device_viewport(W, H, scale_ppm(DPI))
+        device_viewport(W, H, scale_ppm(DPI), 0)
     }
 
     fn live(seats: &Seats) -> SeatLayout {
@@ -13028,7 +15643,7 @@ mod drop_plan_tests {
     fn a_fourth_column_that_fits_is_not_refused_by_halving_the_third() {
         let seats = window(row(1, row(2, term(1), term(2)), term(3)));
         let metrics = metrics();
-        let view = logical_viewport(1_080, 700, scale_ppm(DPI));
+        let view = logical_viewport(1_080, 700, scale_ppm(DPI), 0);
         let planned = seats
             .plan_drop(
                 &metrics,
@@ -13088,7 +15703,7 @@ mod drop_plan_tests {
     #[test]
     fn a_split_neither_half_can_afford_is_refused() {
         let seats = window(row(1, term(1), term(2)));
-        let narrow = logical_viewport(620, 500, scale_ppm(DPI));
+        let narrow = logical_viewport(620, 500, scale_ppm(DPI), 0);
         let planned = seats
             .plan_drop(
                 &metrics(),
@@ -13460,8 +16075,8 @@ mod drop_plan_tests {
     #[test]
     fn a_refusal_traces_the_pane_it_will_not_cut() {
         let seats = window(row(1, term(1), term(2)));
-        let narrow_view = logical_viewport(620, 500, scale_ppm(DPI));
-        let narrow_host = device_viewport(620, 500, scale_ppm(DPI));
+        let narrow_view = logical_viewport(620, 500, scale_ppm(DPI), 0);
+        let narrow_host = device_viewport(620, 500, scale_ppm(DPI), 0);
         let live = seats
             .solve(narrow_view, &metrics(), SizePolicy::Lawful)
             .expect("two panes fit");
@@ -13508,8 +16123,8 @@ mod drop_plan_tests {
     #[test]
     fn a_refused_rim_traces_the_whole_layout() {
         let seats = window(row(1, term(1), term(2)));
-        let narrow_view = logical_viewport(620, 500, scale_ppm(DPI));
-        let narrow_host = device_viewport(620, 500, scale_ppm(DPI));
+        let narrow_view = logical_viewport(620, 500, scale_ppm(DPI), 0);
+        let narrow_host = device_viewport(620, 500, scale_ppm(DPI), 0);
         let live = seats
             .solve(narrow_view, &metrics(), SizePolicy::Lawful)
             .expect("two panes fit");
@@ -13821,7 +16436,7 @@ mod drop_plan_tests {
     /// layout whose panes are under `MIN_PANE_W`.
     #[test]
     fn a_refused_plan_does_not_land() {
-        let narrow = logical_viewport(560, H, scale_ppm(DPI));
+        let narrow = logical_viewport(560, H, scale_ppm(DPI), 0);
         let mut seats = window(row(1, row(2, term(1), term(2)), term(3)));
         let before = seats.tree().clone();
         let refused = seats

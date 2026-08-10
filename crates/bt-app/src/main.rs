@@ -892,6 +892,51 @@ struct Runtime {
     /// now, so a resize or a closed tab cannot leave the strip parked past its
     /// own end.
     tab_scroll: f32,
+    /// **R1/R2 — which axis the tab list runs on, and what the rail is doing.**
+    ///
+    /// The two scalars inside it are *sampled* every frame from [`Self::rail_open`]
+    /// and [`Self::rail_text`], never written to directly: `seats` has an explicit
+    /// invariant that nothing in it knows what time it is, so the clocks live here
+    /// and what crosses the boundary is a pair of numbers. The same arrangement
+    /// [`TabContent::offset`] and [`ChromeContent::chevron_turn`] already have.
+    ///
+    /// **Not persisted, deliberately and for this ticket only.** The layout is a
+    /// dev toggle today ([`is_rail_layout_toggle_shortcut`]); a restart comes back
+    /// [`seats::TabLayoutMode::Horizontal`] because there is no product verb yet
+    /// that could have *meant* anything else, and a preference written by a
+    /// scaffold chord is a preference nobody chose.
+    rail: seats::RailState,
+    /// How far the rail is scrolled, in physical pixels.
+    ///
+    /// Its own field beside [`Self::tab_scroll`] rather than a shared one, because
+    /// the two are different axes of different lists: the strip scrolls left and
+    /// right through tabs that have been squeezed, the rail scrolls up and down
+    /// through rows that never squeeze at all (Q172). One field would mean that
+    /// turning the layout over carried a distance from the other axis, measured
+    /// against content of a different length.
+    ///
+    /// Unclamped here on the same terms the strip's is: every read runs it back
+    /// through [`seats::rail_geometry`], which clamps it to the rows that exist
+    /// right now.
+    rail_scroll: f32,
+    /// `--railw`'s own transition (`width .18s ease`, P168) — how far the icon
+    /// rail has opened.
+    rail_open: RevealTween,
+    /// The label fade (`opacity .1s ease`, `transition-delay: .06s` on the way
+    /// open) — Q183.
+    ///
+    /// A second tween rather than a function of [`Self::rail_open`], because the
+    /// mock-up gives it its own shorter clock *and* a one-sided delay: the panel
+    /// gets wide enough to hold words before the words arrive, and on the way shut
+    /// the words leave first. One tween sampled twice could express neither.
+    rail_text: RevealTween,
+    /// The rail state the chrome was last built with, quantised to what can
+    /// actually reach the glass — the rail's half of the frame debt.
+    ///
+    /// Quantised for [`TabState::last_drawn_offset`]'s reason: a pixel and a 1/255
+    /// of alpha are the finest differences that can be drawn, and a tween settling
+    /// in the last thousandth of one would otherwise owe a frame forever.
+    last_drawn_rail: Option<(i32, u8)>,
     /// The left press being held on a tab, and what it still owes it (J105).
     ///
     /// One at a time, because a mouse has one left button. It survives the
@@ -3523,6 +3568,22 @@ impl RevealTween {
     /// start so a reversal mid-flight turns around from where it actually is
     /// rather than snapping to an end it never reached.
     fn retarget(&mut self, target: f32, now: Instant, motion: Motion) {
+        self.retarget_after(target, now, motion, Duration::ZERO);
+    }
+
+    /// The same, held back by `delay` before the curve begins.
+    ///
+    /// CSS `transition-delay`, and expressed the way CSS defines it: the value
+    /// stays at its `from` for the delay and *then* eases, rather than easing
+    /// over a longer span. The rail's label fade is the only caller — the delay
+    /// is one-sided there (Q183), so it is an argument at the call site and not
+    /// a field, since a field would have to be cleared again on the way back
+    /// and the way to get that wrong is to forget once.
+    ///
+    /// `saturating_duration_since` is what makes this cost nothing: before the
+    /// delay elapses the sample reads zero progress, which is the `from` and
+    /// "still moving" — exactly the two answers a waiting transition owes.
+    fn retarget_after(&mut self, target: f32, now: Instant, motion: Motion, delay: Duration) {
         if self.to == target {
             return;
         }
@@ -3534,7 +3595,7 @@ impl RevealTween {
             // 359-361), so under Reduced the control is simply *there* or not.
             // Unlike the progress arc, whose motion carries a reading, this one
             // carries nothing but polish.
-            started: (motion == Motion::Full).then_some(now),
+            started: (motion == Motion::Full).then(|| now + delay),
             span: self.span,
         };
     }
@@ -3554,6 +3615,21 @@ impl RevealTween {
         (self.from + (self.to - self.from) * eased, true)
     }
 }
+
+/// `.rail { transition: width .18s ease … }` (mock-up 813) — P168, the panel
+/// sliding open and shut.
+const RAIL_TRANSITION: Duration = Duration::from_millis(bt_render::RAIL_TRANSITION_MS);
+/// The labels' own `opacity .1s ease` (mock-up 897) — Q183.
+const RAIL_TEXT_FADE: Duration = Duration::from_millis(bt_render::RAIL_TEXT_FADE_MS);
+/// `transition-delay: .06s` (mock-up 903), and **on the way open only**.
+///
+/// The asymmetry is the mock-up's: the delay is declared on the `.rail-open`
+/// rule, so it applies to the transition *into* that state and not out of it.
+/// Which is the right way round — a panel has to be wide enough to hold a word
+/// before the word arrives, but on the way shut the word has to leave before the
+/// panel narrows past it, or it is clipped mid-letter on its way out.
+const RAIL_TEXT_FADE_OPEN_DELAY: Duration =
+    Duration::from_millis(bt_render::RAIL_TEXT_FADE_OPEN_DELAY_MS);
 
 /// `.chevbtn svg { transition: transform 140ms cubic-bezier(.2,0,0,1) }` —
 /// the profile picker's arrow turning over (mock-up 415-420).
@@ -5829,12 +5905,15 @@ fn create_tab_state(
     working_directories: &BTreeMap<SeatId, PathBuf>,
     seed: TabSeed,
     policy: SizePolicy,
+    rail: seats::RailState,
 ) -> Result<(TabState, String)> {
     // The new tab's seats are solved into the *current* window, so they answer
     // to whoever owns it. A tab opened while the user is working in a window
-    // they dragged narrow must look like its neighbours — panes, not bars.
+    // they dragged narrow must look like its neighbours — panes, not bars. The
+    // rail is the same argument on the other axis: a tab born while the sidebar
+    // is out gets the width the sidebar left, not the whole window's.
     let (seat_layout, seat_overflow, terminal_seat, _) =
-        solve_seats(&seats, renderer, render_physical, policy);
+        solve_seats(&seats, renderer, render_physical, policy, rail);
     // Captured before `seats` moves into the tab: the seat the tab's identity
     // shell draws into is the key its session is filed under.
     let terminal_seat_id = seats.terminal();
@@ -6434,6 +6513,12 @@ impl Runtime {
                 seed,
                 // Startup: the opening rectangle is the program's own.
                 SizePolicy::Lawful,
+                // And so is the opening layout. The rail is not persisted — a
+                // window always comes back with its tabs across the top,
+                // because the only thing that can currently ask for the other
+                // axis is a dev chord, and a preference a scaffold wrote is a
+                // preference nobody chose.
+                seats::RailState::default(),
             )?;
             tabs.push(tab);
             conpty_sources.push(conpty_source);
@@ -6453,6 +6538,7 @@ impl Runtime {
             &renderer,
             render_physical,
             SizePolicy::Lawful,
+            seats::RailState::default(),
         );
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
@@ -6530,6 +6616,11 @@ impl Runtime {
             // first commit that *does* edit one is the first thing to animate.
             pane_motion_revision: 0,
             tab_scroll: 0.0,
+            rail: seats::RailState::default(),
+            rail_scroll: 0.0,
+            rail_open: RevealTween::over(RAIL_TRANSITION),
+            rail_text: RevealTween::over(RAIL_TEXT_FADE),
+            last_drawn_rail: None,
             tab_press: None,
             pane_press: None,
             drag: None,
@@ -6678,6 +6769,7 @@ impl Runtime {
             &inherited,
             TabSeed::of_profile(profile),
             self.size_policy,
+            self.rail,
         )?;
         self.tabs.push(tab);
         self.apply_window_min_inner_size()?;
@@ -6830,6 +6922,7 @@ impl Runtime {
                 pinned: false,
             },
             self.size_policy,
+            self.rail,
         )?;
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
@@ -6895,6 +6988,7 @@ impl Runtime {
                 &working_directories,
                 seed,
                 self.size_policy,
+                self.rail,
             )?;
             self.tabs.push(revived);
         }
@@ -7012,6 +7106,7 @@ impl Runtime {
             &self.renderer,
             render_physical,
             self.size_policy,
+            self.rail,
         );
         self.seat_viewport = viewport;
         // T230, and the reason the diff is taken *here*: this is the one place a
@@ -7308,6 +7403,11 @@ impl Runtime {
                 grabbed,
                 strip_preview,
                 tab_scroll: self.tab_scroll,
+                // Sampled on this frame's own `now`, like the chevron beside it:
+                // the two scalars are what the rail *looks like* this instant,
+                // and `seats` holds no clock to work them out for itself.
+                rail: self.sampled_rail(now),
+                rail_scroll: self.rail_scroll,
                 preview_title: preview_title.as_deref(),
                 terminal_names: &terminal_names,
                 preview_message: preview_message.as_deref(),
@@ -9691,6 +9791,17 @@ impl Runtime {
             self.last_drawn_chevron = Some(turning);
             owes_frame = true;
         }
+        // R1/P168 — the rail's own debt, on the chevron's exact terms: what would
+        // be *drawn*, not what the tweens hold. The width in whole physical pixels
+        // and the fade in the 1/255 a sprite's alpha resolves to, because those are
+        // the finest differences either can put on the glass, and a tween settling
+        // through the long tail of its ease would otherwise owe a frame for the
+        // whole of it.
+        let drawn_rail = self.drawn_rail(now);
+        if self.last_drawn_rail != Some(drawn_rail) {
+            self.last_drawn_rail = Some(drawn_rail);
+            owes_frame = true;
+        }
         // The dock box's fade settles its debt on the same terms as the pin's:
         // the opacity that would be *drawn*, quantised to the 1/255 a layer's
         // alpha resolves to, against the one that was. It is read here rather
@@ -9785,6 +9896,14 @@ impl Runtime {
         // down for a hundred milliseconds after the divider is let go, with the
         // pointer already still. Nothing else would wake the loop to draw them.
         let cards_moving = self.resizing_card_transition.sample(now, motion).1;
+        // P168, and the same argument again: a rail that has been left behind by
+        // the pointer keeps sliding shut with nothing else in the window moving,
+        // and its labels keep fading for 100ms after that. Under reduced motion
+        // neither is ever true — `RevealTween` reports the target with no frames
+        // asked for — which is what makes `Reduced` a genuinely idle window and
+        // not a fast animation.
+        let rail_moving = self.rail.draws_icon_rail()
+            && (self.rail_open.sample(now, motion).1 || self.rail_text.sample(now, motion).1);
         // U8 — the active tab's panes, on the same terms and with the same
         // `None`: a window whose split has settled asks for no wake-ups at all,
         // and under reduced motion there was never a tween to ask for one.
@@ -9793,13 +9912,34 @@ impl Runtime {
         // need waking for an animation?" — and two answers to one question is
         // how one of them gets forgotten.
         [
-            (tabs_moving || chevron_turning || dock_fading || cards_moving)
+            (tabs_moving || chevron_turning || dock_fading || cards_moving || rail_moving)
                 .then(|| now + STRIP_ANIMATION_FRAME),
             self.pane_motion.deadline(now, motion),
         ]
         .into_iter()
         .flatten()
         .min()
+    }
+
+    /// The rail as the chrome would draw it, quantised to what can reach the
+    /// glass: its width in whole physical pixels, and its label fade in the
+    /// 1/255 a sprite's alpha resolves to.
+    ///
+    /// Read here rather than inside the chrome build for [`Self::drawn_dock_reveal`]'s
+    /// reason: a debt has to be noticed by the thing that decides whether to
+    /// build at all.
+    ///
+    /// Through [`Self::sampled_rail`], so the debt is settled against the very
+    /// state the chrome will be built from. Reading the two tweens again here
+    /// would be a second opinion about the same instant, and the frame it would
+    /// get wrong is the one where they disagree.
+    fn drawn_rail(&self, now: Instant) -> (i32, u8) {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let state = self.sampled_rail(now);
+        (
+            (state.width_logical_px() * scale).round() as i32,
+            (state.text_opacity * 255.0).round() as u8,
+        )
     }
 
     /// The dock box's opacity as the overlay would draw it, quantised to the
@@ -10655,6 +10795,10 @@ impl Runtime {
 
     fn pointer_left(&mut self) -> Result<()> {
         self.pointer_position = None;
+        // R2: a pointer that has left the window is not in the rail, and the rail
+        // has to be told — nothing else will move the pointer again to tell it,
+        // so an open panel would simply stay open over the terminal forever.
+        self.drive_rail_zone(None);
         // Deliberately *not* a drag cancel, and the reason is measurable rather
         // than stylistic: winit takes the Win32 mouse capture on button-down
         // (`capture_mouse`, its `WM_LBUTTONDOWN` arm), so a held drag keeps
@@ -11345,16 +11489,44 @@ impl Runtime {
     /// affordance or a collapsed bar.
     fn chrome_target_at(&self, position: PhysicalPosition<f64>) -> Option<seats::ChromeTarget> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let width = self.renderer.presentation_geometry().swapchain_size.0 as f32;
-        seats::hit_tab_chrome(
-            width,
-            scale,
-            &self.tab_trailers(Instant::now()),
-            self.active_tab,
-            self.tab_scroll,
-            position.x,
-            position.y,
-        )
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (width, height) = (width as f32, height as f32);
+        let now = Instant::now();
+        let (trailers, pinned) = self.rail_list(now);
+        let rail = self.sampled_rail(now);
+        // **R1 — the tab list answers first, on whichever axis it is on.**
+        //
+        // The two are exclusive by construction and not by luck: `hit_rail_chrome`
+        // returns `None` for a horizontal layout and `tab_strip_geometry` draws
+        // nothing in a vertical one, so this is one list asked in one place rather
+        // than two lists racing. It answers *before* `hit_chrome` because an open
+        // icon rail lies over the panes (Q179) — asking the panes first would hand
+        // every click on an open rail to whatever is underneath it.
+        //
+        // Both branches hand back the same `ChromeTarget::Tab/TabClose/TabPin`,
+        // so every click handler downstream — activation, the middle-click close,
+        // the press that becomes a drag — is untouched by the axis.
+        match rail.layout {
+            seats::TabLayoutMode::Vertical => seats::hit_rail_chrome(
+                height,
+                scale,
+                &trailers,
+                pinned,
+                self.rail_scroll,
+                rail,
+                position.x,
+                position.y,
+            ),
+            seats::TabLayoutMode::Horizontal => seats::hit_tab_chrome(
+                width,
+                scale,
+                &trailers,
+                self.active_tab,
+                self.tab_scroll,
+                position.x,
+                position.y,
+            ),
+        }
         .or_else(|| seats::hit_window_chrome(width, scale, position.x, position.y))
         .or_else(|| {
             seats::hit_chrome(
@@ -11368,6 +11540,10 @@ impl Runtime {
     }
 
     fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        // R2's open trigger, asked before the hover is read: opening the rail
+        // changes what the pointer is over, and asking in the other order would
+        // light up a row one frame after the panel that holds it.
+        self.drive_rail_zone(Some(position));
         let hover = self.chrome_target_at(position);
         // `.pane:hover` is a second question about the same pointer, and it has
         // to be asked here rather than derived from `hover`: over a terminal's
@@ -11790,7 +11966,17 @@ impl Runtime {
     fn layout_host_rect(&self) -> [f64; 4] {
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
         let dpi_milli = self.renderer.metrics().dpi_milli().get();
-        seats::device_viewport(width, height, seats::scale_ppm(dpi_milli))
+        let scale_ppm = seats::scale_ppm(dpi_milli);
+        // The same inset `solve_seats` hands `logical_viewport`, through the same
+        // helper: these two are twins, and a rim measured one pixel to the left
+        // of where the solver put the terminal is a left-edge drop zone that aims
+        // into the rail.
+        seats::device_viewport(
+            width,
+            height,
+            scale_ppm,
+            seats::rail_inset_device_px(self.rail, scale_ppm),
+        )
     }
 
     /// Drive a drag one pointer move. Returns whether the pointer was consumed.
@@ -12171,13 +12357,15 @@ impl Runtime {
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
         let renderer = &self.renderer;
         // Copied out before the two-tab borrow: the merged layout lands in this
-        // same window, so it answers to whoever owns this window's size.
+        // same window, so it answers to whoever owns this window's size — and to
+        // whatever the window's rail is currently keeping clear.
         let policy = self.size_policy;
+        let rail = self.rail;
         let (from, into) = two_tabs_mut(&mut self.tabs, index, self.active_tab);
         let ejected =
             absorb_tab_into_layout(from, into, arrived, displaced.as_ref(), id, |seats| {
                 let (layout, overflow, _, _) =
-                    solve_seats(seats, renderer, render_physical, policy);
+                    solve_seats(seats, renderer, render_physical, policy, rail);
                 (layout, overflow)
             });
         debug_assert!(
@@ -12234,6 +12422,7 @@ impl Runtime {
         let source = self.active_tab;
         let motion = self.motion;
         let policy = self.size_policy;
+        let rail = self.rail;
         let torn = tear_pane_into_tab(
             &mut self.tabs[source],
             &metrics,
@@ -12243,7 +12432,7 @@ impl Runtime {
             motion,
             |seats| {
                 let (layout, overflow, _, _) =
-                    solve_seats(seats, renderer, render_physical, policy);
+                    solve_seats(seats, renderer, render_physical, policy, rail);
                 (layout, overflow)
             },
         );
@@ -12886,6 +13075,211 @@ impl Runtime {
         Ok(())
     }
 
+    /// **The rail as it stands this instant** — the stored layout with both of
+    /// its clocks read.
+    ///
+    /// The one place the two tweens become a [`seats::RailState`], so the paint,
+    /// the hit test and the terminal's inset cannot be looking at three different
+    /// moments of the same animation.
+    ///
+    /// Outside icon mode the fade is simply not a rule: the mock-up scopes every
+    /// `opacity` declaration in that list to `.window.rail-icons` (lines 892-903),
+    /// so an expanded rail's words are *there*, full stop, and are not waiting on
+    /// a tween that has no reason to have been started.
+    fn sampled_rail(&self, now: Instant) -> seats::RailState {
+        if !self.rail.draws_icon_rail() {
+            return seats::RailState {
+                open: 1.0,
+                text_opacity: 1.0,
+                ..self.rail
+            };
+        }
+        seats::RailState {
+            open: self.rail_open.sample(now, self.motion).0,
+            text_opacity: self.rail_text.sample(now, self.motion).0,
+            ..self.rail
+        }
+    }
+
+    /// The rail's trailers and the length of its pinned run, together.
+    ///
+    /// One call so the seam the rail draws and the rows it hits are measured from
+    /// one list — [`seats::pinned_run_len`]'s own argument, one level up.
+    fn rail_list(&self, now: Instant) -> (Vec<seats::TabTrailer>, usize) {
+        let trailers = self.tab_trailers(now);
+        let pinned = seats::pinned_run_len(&trailers);
+        (trailers, pinned)
+    }
+
+    /// **R2's open trigger, in the smallest form that is usable.**
+    ///
+    /// The pointer is in the rail's own box, or it is not. That is deliberately
+    /// *not* the mock-up's `evalRailZone`, which opens on a reach band wider than
+    /// the panel and keeps it open over a wider one still — CSS `:hover` "has no
+    /// way to express 'stay open while the pointer is anywhere near', and a zone
+    /// with hysteresis does". **The zone, its `RAIL_REACH`/`RAIL_KEEP` widths and
+    /// the remembered pointer position that lets a resize re-evaluate it without
+    /// a mouse-move are deferred to the sidebar ticket**; what is here is the
+    /// half that can be honest on its own.
+    ///
+    /// It is measured against the width the rail is *aiming* at rather than the
+    /// width it currently has, and that is what keeps it from chattering: a test
+    /// against the animating width would re-decide the question against a
+    /// different boundary on every frame of the answer it just gave.
+    fn drive_rail_zone(&mut self, position: Option<PhysicalPosition<f64>>) {
+        if !self.rail.draws_icon_rail() {
+            return;
+        }
+        let scale = self.renderer.metrics().scale_factor;
+        let aiming_open = self.rail_open.to > 0.5;
+        let target = seats::RailState {
+            open: f32::from(u8::from(aiming_open)),
+            ..self.rail
+        };
+        let width = f64::from(target.width_logical_px()) * scale;
+        // The rail begins at the title bar's lower edge, so a pointer up in the
+        // caption run is not in the rail however far left it is.
+        let top = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX) * scale;
+        let inside = position.is_some_and(|position| position.y >= top && position.x < width);
+        self.aim_rail_at(inside);
+    }
+
+    /// Point both of the rail's clocks at `open`.
+    ///
+    /// The delay is one-sided, which is [`RAIL_TEXT_FADE_OPEN_DELAY`]'s own doc:
+    /// the words wait for the panel on the way out and leave ahead of it on the
+    /// way back. Reduced motion is handled where every other tween handles it —
+    /// inside [`RevealTween`], which under `Motion::Reduced` simply reports the
+    /// target and asks for no frames at all.
+    fn aim_rail_at(&mut self, open: bool) {
+        let target = f32::from(u8::from(open));
+        if self.rail_open.to == target {
+            return;
+        }
+        let now = Instant::now();
+        let motion = self.motion;
+        self.rail_open.retarget(target, now, motion);
+        if open {
+            self.rail_text
+                .retarget_after(target, now, motion, RAIL_TEXT_FADE_OPEN_DELAY);
+        } else {
+            self.rail_text.retarget(target, now, motion);
+        }
+    }
+
+    /// **The dev chord's cycle: horizontal, open sidebar, icon rail, back.**
+    ///
+    /// Scaffolding of exactly the kind [`is_preview_toggle_shortcut`] is, and it
+    /// carries the same debt: R1's real verbs are the `.panel-toggle` button in
+    /// the title bar and the settings switch, and both arrive with their own
+    /// tickets. What this buys meanwhile is the only thing that matters before
+    /// then — being able to *look* at the other axis.
+    fn cycle_rail_layout(&mut self) -> Result<()> {
+        self.rail = next_rail_layout(self.rail);
+        eprintln!(
+            "BT_RAIL layout={:?} mode={:?} inset={}px",
+            self.rail.layout,
+            self.rail.mode,
+            self.rail.terminal_inset_logical_px()
+        );
+        // An icon rail is born parked, whatever the last one was doing, and its
+        // words are away with it. A pointer already standing inside it opens it
+        // again on the very next move — which is the trigger doing its job, not
+        // this deciding for it.
+        self.rail_open = RevealTween::over(RAIL_TRANSITION);
+        self.rail_text = RevealTween::over(RAIL_TEXT_FADE);
+        self.rail_scroll = 0.0;
+        // The inset changed, so every pane's rectangle did. This is the same
+        // path a window resize takes, and it has to be taken here: the rail's
+        // *mode* moves the terminal's left edge even though the rail's own
+        // opening never does (Q179).
+        self.commit_seat_geometry()?;
+        self.apply_window_min_inner_size()?;
+        if let Some(position) = self.pointer_position {
+            self.seat_pointer.hover = self.chrome_target_at(position);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// A wheel notch over the rail, turned into vertical motion.
+    ///
+    /// [`Self::scroll_tab_strip`]'s opposite number, and it takes the same notch
+    /// distance for the same reason: "a notch that changed length depending on
+    /// what it was over is a distance the hand has to relearn at every surface".
+    /// What it does not need is that function's axis translation — the rail is a
+    /// vertical scroller and a vertical wheel already says what it means.
+    fn scroll_rail(&mut self, delta: MouseScrollDelta) -> Result<()> {
+        let now = Instant::now();
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (_, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (trailers, pinned) = self.rail_list(now);
+        let Some(geometry) = seats::rail_geometry(
+            height as f32,
+            scale,
+            &trailers,
+            pinned,
+            self.rail_scroll,
+            self.sampled_rail(now),
+        ) else {
+            return Ok(());
+        };
+        let travel = match delta {
+            MouseScrollDelta::LineDelta(_, y) => {
+                let line = self.projection.cell_height_subpixels().get() as f32
+                    / bt_viewport::SUBPIXELS_PER_PX as f32;
+                let amount =
+                    match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
+                        bt_platform::WheelScrollAmount::Lines(lines) => lines as f32 * line,
+                        // A page of a vertical scroller is a screenful of it.
+                        bt_platform::WheelScrollAmount::Page => {
+                            geometry.viewport[1] - geometry.viewport[0]
+                        }
+                    };
+                y * amount
+            }
+            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        };
+        // Wheel-up reveals what lies above, which is a smaller offset.
+        let scrolled = (self.rail_scroll - travel).clamp(0.0, geometry.max_scroll);
+        if scrolled == self.rail_scroll {
+            return Ok(());
+        }
+        self.rail_scroll = scrolled;
+        // The list moved under a stationary pointer, so what it is over changed
+        // without the pointer having done anything.
+        if let Some(position) = self.pointer_position {
+            self.seat_pointer.hover = self.chrome_target_at(position);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Whether the pointer is over the rail's own box — the wheel's gate.
+    fn rail_contains(&self, position: PhysicalPosition<f64>) -> bool {
+        let now = Instant::now();
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (_, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (trailers, pinned) = self.rail_list(now);
+        seats::rail_geometry(
+            height as f32,
+            scale,
+            &trailers,
+            pinned,
+            self.rail_scroll,
+            self.sampled_rail(now),
+        )
+        .is_some_and(|geometry| {
+            let [left, top, right, bottom] = geometry.body;
+            let (x, y) = (position.x as f32, position.y as f32);
+            x >= left && x < right && y >= top && y < bottom
+        })
+    }
+
     /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
     fn scroll_tab_strip(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let scale = self.renderer.metrics().scale_factor as f32;
@@ -12954,16 +13348,23 @@ impl Runtime {
         // scroller scrolls it; a vertical wheel over a horizontal-only scroller
         // is exactly the case browsers translate into horizontal motion, because
         // most mice have no second axis to offer.
-        if let Some(position) = self.pointer_position
-            && seats::tab_strip_contains(
+        // R1: the same notch, over whichever axis the tab list is on. A rail is
+        // `overflow-y: auto` where the strip is `overflow-x: auto`, and both are
+        // "a wheel over a scroller scrolls it".
+        if let Some(position) = self.pointer_position {
+            if self.rail.layout == seats::TabLayoutMode::Vertical {
+                if self.rail_contains(position) {
+                    return self.scroll_rail(delta);
+                }
+            } else if seats::tab_strip_contains(
                 self.renderer.presentation_geometry().swapchain_size.0 as f32,
                 self.renderer.metrics().scale_factor as f32,
                 self.tabs.len(),
                 position.x,
                 position.y,
-            )
-        {
-            return self.scroll_tab_strip(delta);
+            ) {
+                return self.scroll_tab_strip(delta);
+            }
         }
         // A notch belongs to the pane it is over. With one terminal that is the
         // terminal or nothing, which is what this guard has always said; with a
@@ -13323,6 +13724,15 @@ impl Runtime {
         if let Some(dir) = split_shortcut_direction(&event.logical_key, self.modifiers) {
             if !event.repeat {
                 self.split_focused_terminal(dir)?;
+            }
+            return Ok(());
+        }
+        // Dev-only, and above the PTY encoder for the same reason as its two
+        // neighbours. R1's layout cycle: tabs across the top, tabs down the side,
+        // tabs parked as an icon rail, and back.
+        if is_rail_layout_toggle_shortcut(&event.logical_key, self.modifiers) {
+            if !event.repeat {
+                self.cycle_rail_layout()?;
             }
             return Ok(());
         }
@@ -15212,6 +15622,64 @@ fn split_shortcut_direction(key: &Key, modifiers: ModifiersState) -> Option<Axis
     }
 }
 
+/// **R1's dev-only layout toggle: `Ctrl+Shift+F9`.**
+///
+/// Scaffolding of exactly the kind [`is_preview_toggle_shortcut`] is: R1's real
+/// verbs are the title bar's `.panel-toggle` and the settings switch, and a rail
+/// you cannot reach is a rail nobody can look at.
+///
+/// **Not `Ctrl+Alt+Shift`, and the break with the two chords above is deliberate**
+/// (user ruling). Windows keyboards send `Ctrl+Alt` for AltGr, so on every layout
+/// that has one — German, French, Polish, Portuguese, most of Europe — a chord
+/// carrying both modifiers is a chord the user can arrive at by typing a `@` or a
+/// `{`. The other two placeholders spend that risk on a *character* key, where
+/// the collision at least produces a character; F9 has no AltGr meaning to
+/// collide with, so it takes the shorter chord instead and the risk goes away.
+///
+/// A function key rather than a character, and therefore matched on
+/// [`NamedKey`] rather than on the text a layout produced: `F9` is `F9`
+/// everywhere, so the "match what the layout wrote" discipline that keeps the
+/// character chords honest has nothing to do here. The exact-equality test on the
+/// modifiers is the same one every chord in this file makes.
+fn is_rail_layout_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
+    modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
+        && matches!(key, Key::Named(NamedKey::F9))
+}
+
+/// The next stop on the dev chord's cycle: horizontal, open sidebar, icon rail,
+/// back to horizontal.
+///
+/// A free function so the cycle can be argued about without a window: it is
+/// three ruled transitions and no I/O, and everything `cycle_rail_layout` does
+/// around it — re-solving the panes, resetting the tweens, re-reading the hover
+/// — is a consequence of the answer rather than part of it.
+///
+/// Both scalars come back at their defaults on every step. A rail arriving in
+/// icon mode is parked with its words away, whatever the last one was doing; a
+/// pointer already standing inside it opens it again on the next move, which is
+/// the trigger doing its job rather than this deciding for it.
+fn next_rail_layout(current: seats::RailState) -> seats::RailState {
+    use seats::{RailMode, TabLayoutMode};
+    match (current.layout, current.mode) {
+        (TabLayoutMode::Horizontal, _) => seats::RailState {
+            layout: TabLayoutMode::Vertical,
+            mode: RailMode::Expanded,
+            ..seats::RailState::default()
+        },
+        (TabLayoutMode::Vertical, RailMode::Expanded) => seats::RailState {
+            layout: TabLayoutMode::Vertical,
+            mode: RailMode::Icons,
+            collapsed: false,
+            // Written out rather than taken from `RailState::default()`, whose
+            // `text_opacity` is `1.0` — the right answer for a layout with no
+            // fade rule and the wrong one here. A parked rail's words are away.
+            open: 0.0,
+            text_opacity: 0.0,
+        },
+        (TabLayoutMode::Vertical, RailMode::Icons) => seats::RailState::default(),
+    }
+}
+
 /// Undo close — "that one, now", and the door with the real traffic (N143).
 ///
 /// The exact-equality test on the modifiers is the same discipline the preview
@@ -15273,6 +15741,7 @@ fn solve_seats(
     renderer: &Renderer,
     render_physical: PhysicalSize<u32>,
     policy: SizePolicy,
+    rail: seats::RailState,
 ) -> (
     SeatLayout,
     Option<seats::FitOverflow>,
@@ -15281,10 +15750,16 @@ fn solve_seats(
 ) {
     let dpi_milli = renderer.metrics().dpi_milli().get();
     let metrics = seats::seat_metrics(dpi_milli);
+    let scale_ppm = seats::scale_ppm(dpi_milli);
     let viewport = seats::logical_viewport(
         render_physical.width,
         render_physical.height,
-        seats::scale_ppm(dpi_milli),
+        scale_ppm,
+        // Q179: the *inset*, not the rail's current width. An icon rail is out
+        // of flow for its whole life and the terminal keeps only the parked
+        // strip clear, so this number is constant while the panel slides and
+        // the panes never reflow just because you went looking for a tab.
+        seats::rail_inset_device_px(rail, scale_ppm),
     );
     // Under `Sovereign` the solver has no way to fail, so `fit_what_fits` is
     // unreachable from a window the user sized — which is the ruling: the fold
@@ -20171,6 +20646,179 @@ mod tests {
         assert!(!is_preview_toggle_shortcut(&lower, ModifiersState::empty()));
     }
 
+    /// **R1's dev chord keeps clear of AltGr, which is why it breaks with its
+    /// two neighbours** (user ruling).
+    ///
+    /// Windows sends `Ctrl+Alt` for AltGr, so on every layout that has one a
+    /// `Ctrl+Alt+Shift` chord is a chord the user can arrive at by typing. The
+    /// two placeholders above spend that risk on a character key; this one has a
+    /// function key available and takes `Ctrl+Shift+F9` instead.
+    ///
+    /// Red gate: bind it to `Ctrl+Alt+Shift+F9` and the second assertion fails —
+    /// which is the whole of the ruling, stated as a test.
+    #[test]
+    fn the_rail_toggle_avoids_the_ctrl_alt_chord_that_altgr_can_type() {
+        let f9 = Key::Named(NamedKey::F9);
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert!(is_rail_layout_toggle_shortcut(&f9, ctrl_shift));
+        assert!(
+            !is_rail_layout_toggle_shortcut(&f9, ctrl_shift | ModifiersState::ALT),
+            "Ctrl+Alt is AltGr on a European keyboard, and a dev chord may not \
+             answer to a key that types a `@`"
+        );
+        // The whole chord and nothing looser, exactly as every other binding in
+        // this file insists.
+        for near_miss in [
+            ModifiersState::empty(),
+            ModifiersState::CONTROL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT | ModifiersState::SHIFT,
+        ] {
+            assert!(!is_rail_layout_toggle_shortcut(&f9, near_miss));
+        }
+        // And it is F9 and not a neighbour: F9 has no AltGr meaning to collide
+        // with, which is the property being bought.
+        assert!(!is_rail_layout_toggle_shortcut(
+            &Key::Named(NamedKey::F8),
+            ctrl_shift
+        ));
+        assert!(!is_rail_layout_toggle_shortcut(
+            &Key::Character("f9".into()),
+            ctrl_shift
+        ));
+    }
+
+    /// The cycle is three stops and returns to where it started, and every stop
+    /// arrives with both of the rail's scalars at their defaults.
+    ///
+    /// The second half is the one that would rot silently: a rail that inherited
+    /// the last icon rail's `open: 1.0` would appear already wide with the
+    /// pointer nowhere near it, and would then never close, because the zone
+    /// trigger only fires on a pointer that *moves*.
+    #[test]
+    fn the_dev_chord_walks_horizontal_expanded_icons_and_back() {
+        use seats::{RailMode, TabLayoutMode};
+        let start = seats::RailState::default();
+        assert_eq!(start.layout, TabLayoutMode::Horizontal);
+
+        let expanded = next_rail_layout(start);
+        assert_eq!(expanded.layout, TabLayoutMode::Vertical);
+        assert_eq!(expanded.mode, RailMode::Expanded);
+        assert_eq!(
+            expanded.terminal_inset_logical_px(),
+            bt_render::RAIL_WIDTH_LOGICAL_PX,
+            "an expanded rail is in the flow and takes its width out of the terminal's"
+        );
+
+        let icons = next_rail_layout(expanded);
+        assert_eq!(icons.layout, TabLayoutMode::Vertical);
+        assert_eq!(icons.mode, RailMode::Icons);
+        assert_eq!(icons.open, 0.0, "an icon rail is born parked");
+        assert_eq!(icons.text_opacity, 0.0, "with its words away");
+        assert_eq!(
+            icons.terminal_inset_logical_px(),
+            bt_render::RAIL_PARK_LOGICAL_PX,
+            "Q179: the terminal keeps only the parked strip clear"
+        );
+
+        assert_eq!(
+            next_rail_layout(icons),
+            start,
+            "three stops and back to the tabs across the top"
+        );
+        // A rail mid-animation still walks to the same next stop: the cycle is a
+        // function of the layout, and the scalars are what it resets.
+        let mid = seats::RailState {
+            open: 0.6,
+            text_opacity: 0.3,
+            ..icons
+        };
+        assert_eq!(next_rail_layout(mid), start);
+    }
+
+    /// **Q183's one-sided delay**: on the way open the words wait 60ms for the
+    /// panel to be wide enough to hold them; on the way shut they leave at once.
+    ///
+    /// The mock-up puts `transition-delay: .06s` on the `.rail-open` rule alone
+    /// (line 903), so it applies going *into* that state and not out of it —
+    /// which is the right way round, because a word that lingered while the
+    /// panel narrowed past it would be clipped mid-letter on its way out.
+    ///
+    /// Red gate: hang the delay on both directions and the closing half of this
+    /// fails at 30ms, with the words still at full strength inside a panel that
+    /// has already started to close.
+    #[test]
+    fn the_rails_labels_wait_for_the_panel_on_the_way_out_and_leave_first_on_the_way_back() {
+        let start = Instant::now();
+        let mut text = RevealTween::over(RAIL_TEXT_FADE);
+
+        // ── opening: nothing for 60ms, then a 100ms fade ──
+        text.retarget_after(1.0, start, Motion::Full, RAIL_TEXT_FADE_OPEN_DELAY);
+        for waiting in [0, 30, 59] {
+            let (opacity, moving) =
+                text.sample(start + Duration::from_millis(waiting), Motion::Full);
+            assert_eq!(
+                opacity, 0.0,
+                "{waiting}ms in: the panel is still widening and the words have not started"
+            );
+            assert!(moving, "but the transition is running, and owes its frames");
+        }
+        let (halfway, moving) = text.sample(start + Duration::from_millis(110), Motion::Full);
+        assert!(
+            halfway > 0.0 && halfway < 1.0,
+            "50ms into its own 100ms the fade is halfway up: {halfway}"
+        );
+        assert!(moving);
+        assert_eq!(
+            text.sample(start + Duration::from_millis(160), Motion::Full),
+            (1.0, false),
+            "60 + 100: arrived, and asking for no more frames"
+        );
+
+        // ── closing: no delay at all ──
+        let shut = start + Duration::from_millis(200);
+        text.retarget(0.0, shut, Motion::Full);
+        let (leaving, moving) = text.sample(shut + Duration::from_millis(30), Motion::Full);
+        assert!(
+            leaving < 1.0,
+            "30ms after the pointer left, the words are already going: {leaving}"
+        );
+        assert!(moving);
+        assert_eq!(
+            text.sample(shut + RAIL_TEXT_FADE, Motion::Full),
+            (0.0, false),
+            "and they are gone in their own 100ms, with no delay spent"
+        );
+    }
+
+    /// Reduced motion does not shorten the rail's transitions — it removes them.
+    ///
+    /// The mock-up's `prefers-reduced-motion` block writes `transition: none`,
+    /// and `none` is the terminal value *at once*. The half that matters as much
+    /// is the second return value: a window under `Motion::Reduced` asks for no
+    /// animation frames at all, which is what lets the event loop go genuinely
+    /// idle rather than spinning at 60fps drawing the same pixels.
+    #[test]
+    fn reduced_motion_puts_the_rail_at_its_target_and_asks_for_no_frames() {
+        let start = Instant::now();
+        for (span, delay) in [
+            (RAIL_TRANSITION, Duration::ZERO),
+            (RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY),
+        ] {
+            let mut tween = RevealTween::over(span);
+            tween.retarget_after(1.0, start, Motion::Reduced, delay);
+            for at in [0, 1, 30, 60, 200] {
+                assert_eq!(
+                    tween.sample(start + Duration::from_millis(at), Motion::Reduced),
+                    (1.0, false),
+                    "{at}ms in: `transition: none` is the end state now, and no frame is owed"
+                );
+            }
+            tween.retarget(0.0, start, Motion::Reduced);
+            assert_eq!(tween.sample(start, Motion::Reduced), (0.0, false));
+        }
+    }
+
     #[test]
     fn startup_metrics_must_match_the_authoritative_win32_scale_factor() {
         assert!(ensure_metrics_match_authoritative_scale(1.5, 1.5).is_ok());
@@ -20359,6 +21007,7 @@ mod tests {
             render_physical.width,
             render_physical.height,
             seats::scale_ppm(dpi_milli),
+            0,
         );
         let layout = match seats.solve(viewport, &metrics, SizePolicy::Lawful) {
             Ok(layout) => layout,
@@ -20571,6 +21220,7 @@ mod tests {
             render_physical.width,
             render_physical.height,
             seats::scale_ppm(dpi_milli),
+            0,
         );
         let layout = seats
             .solve(viewport, &metrics, SizePolicy::Lawful)
@@ -22283,7 +22933,7 @@ mod tests {
     /// extent would leave two of the three clauses of the counter-scale untested.
     fn split_window(leading: bool) -> (seats::Seats, SeatLayout, SeatLayout, SeatId, SeatId) {
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
         let mut seats = seats::Seats::lone_terminal();
         let survivor = seats.terminal();
         let before = seats
@@ -22421,7 +23071,7 @@ mod tests {
     fn a_pane_growing_out_of_a_closed_sibling_is_clipped_into_the_space_not_stretched_into_it() {
         let now = Instant::now();
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
         let (mut seats, _, split, survivor, arriving) = split_window(true);
         let before = split;
         assert!(seats.close_seat(&metrics, arriving), "the left pane closes");
@@ -22491,7 +23141,7 @@ mod tests {
     #[test]
     fn a_divider_drag_and_a_focus_change_start_no_pane_tween_and_a_split_starts_one() {
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
         let (mut seats, _, split, survivor, arriving) = split_window(true);
 
         // A split: the shape changed, so the gate fires.
@@ -22544,7 +23194,7 @@ mod tests {
             .split_terminal(&metrics, first, bt_layout::Axis::Row, false)
             .expect("a wide window divides");
         let ladder = (200..900).step_by(4).find_map(|width| {
-            let viewport = seats::logical_viewport(width, 600, seats::scale_ppm(1_000));
+            let viewport = seats::logical_viewport(width, 600, seats::scale_ppm(1_000), 0);
             narrow.set_focus(first);
             let with_first = narrow.solve(viewport, &metrics, SizePolicy::Lawful).ok()?;
             narrow.set_focus(second);
@@ -22557,7 +23207,7 @@ mod tests {
              about what it says it is",
         );
         let revision = narrow.structure_revision();
-        let ladder_viewport = seats::logical_viewport(ladder, 600, seats::scale_ppm(1_000));
+        let ladder_viewport = seats::logical_viewport(ladder, 600, seats::scale_ppm(1_000), 0);
         narrow.set_focus(first);
         let with_first = narrow
             .solve(ladder_viewport, &metrics, SizePolicy::Lawful)
@@ -22605,7 +23255,7 @@ mod tests {
     fn an_in_flight_pane_animation_asks_conpty_for_no_resize_at_all() {
         let now = Instant::now();
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
         let (mut seats, _, split, survivor, arriving) = split_window(true);
         assert!(seats.close_seat(&metrics, arriving));
         let after = seats
@@ -23243,7 +23893,7 @@ mod tests {
     fn a_preview_seats_picture_travels_with_its_pane_rather_than_waiting_at_the_destination() {
         let now = Instant::now();
         let metrics = seats::seat_metrics(1_000);
-        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
+        let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000), 0);
         let mut seats = seats::Seats::lone_terminal();
         let first = seats.terminal();
         let second = seats
@@ -24281,7 +24931,7 @@ mod tests {
     }
 
     fn cross_view() -> LogicalRect {
-        seats::logical_viewport(CROSS_W, CROSS_H, seats::scale_ppm(CROSS_DPI))
+        seats::logical_viewport(CROSS_W, CROSS_H, seats::scale_ppm(CROSS_DPI), 0)
     }
 
     /// The window's contribution, supplied by hand: the real solver against a
