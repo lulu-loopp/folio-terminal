@@ -96,6 +96,7 @@ fn strand_ground_truth() {
         all.iter().copied(),
         DetectionContext::default(),
         opts,
+        None,
     );
     let ends: std::collections::BTreeSet<u64> = frozen.iter().map(|b| b.end.0).collect();
     let starts: std::collections::BTreeSet<u64> = frozen.iter().map(|b| b.start.0).collect();

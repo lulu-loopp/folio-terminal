@@ -326,12 +326,16 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 2,
-        "adding the display-formula switch is the v1→v2 bump (§1.3)"
+        SETTINGS_SCHEMA_VERSION, 3,
+        "adding the display-formula switch was the v1→v2 bump and the inline one the v2→v3 (§1.3)"
     );
     assert!(
         defaults.display_formulas,
         "formulas render by default — the switch exists to turn rendering off"
+    );
+    assert!(
+        defaults.inline_formulas,
+        "inline formulas render by default too; the site gate is what keeps that safe"
     );
 }
 
@@ -340,6 +344,27 @@ fn settings_v1_fixture_migrates_to_v2_preserving_theme_and_rendering_formulas() 
     // §1.3 rule 1 demands a *non-default* fixture: theme_mode is `Dark`, so a
     // migration that dropped or reordered fields could not hide behind the
     // `System` default. The unknown hand-edited key must vanish (ruling 4).
+    let (v2, report) = read_settings(&fixture_path("settings_v2_formulas_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v2.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        v2.theme_mode,
+        ThemeModeV1::Light,
+        "v2→v3 carries the pre-existing theme across untouched"
+    );
+    assert!(
+        !v2.display_formulas,
+        "v2→v3 is structural: it adds a field and must not disturb the sibling \
+         switch this user had deliberately turned off"
+    );
+    assert!(
+        v2.inline_formulas,
+        "the inline switch arrives on. A v2 build never rendered an inline run at \
+         all — the detector was disabled outright — so carrying that absence \
+         forward as `false` would be freezing a missing feature, not preserving a \
+         choice the user had made"
+    );
+
     let (migrated, report) = read_settings(&fixture_path("settings_v1_nondefault.json"));
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
@@ -352,6 +377,11 @@ fn settings_v1_fixture_migrates_to_v2_preserving_theme_and_rendering_formulas() 
         migrated.display_formulas,
         "every pre-v2 settings file was written by a build that always rendered \
          formulas — the migration must preserve that behaviour, not impose a new one"
+    );
+    assert!(
+        migrated.inline_formulas,
+        "a file this old predates the inline switch entirely, so it arrives at the \
+         product default rather than at a preserved behaviour — see migrate_settings_v2_to_v3"
     );
 
     let dir = std::env::temp_dir().join(format!(

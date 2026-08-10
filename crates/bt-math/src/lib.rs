@@ -2,7 +2,7 @@
 
 use std::{num::NonZeroU32, sync::OnceLock, time::Duration};
 
-pub use bt_doc::MathMode;
+pub use bt_doc::{InlineRunPlacement, MathMode};
 use mitex_spec_gen::DEFAULT_SPEC;
 use thiserror::Error;
 use typst_as_lib::{TypstEngine, typst_kit_options::TypstKitFontOptions};
@@ -54,6 +54,9 @@ pub struct MathRaster {
     /// Math baseline measured from the top of the alpha-tight raster.
     pub baseline_px: f32,
     pub render_time: Duration,
+    /// For an inline composite: the runs this image actually contains, and where. Empty for a
+    /// display block and for a single-run engine raster — the compositor fills it in.
+    pub inline_runs: Vec<InlineRunPlacement>,
 }
 
 impl MathRaster {
@@ -339,6 +342,7 @@ fn rasterize_svg(
         descent_px: content_height_px as f32 - baseline_px,
         baseline_px,
         render_time: elapsed,
+        inline_runs: Vec::new(),
     })
 }
 

@@ -130,6 +130,39 @@ pub struct MathHit {
     pub target: MathHitTarget,
 }
 
+/// Which inline run of this placement the pointer is on.
+///
+/// An inline placement is one composite covering a whole line, so the block rectangle alone cannot
+/// say which of two formulas was clicked. The runs' own offsets can, scaled the same way the block
+/// is. A point that lands in the prose *between* two runs still belongs to one of them — it is
+/// inside the block, and the nearest run is the only non-arbitrary answer — so containment is
+/// tried first and proximity settles the rest. Display math has no runs and yields `None`.
+fn inline_run_at(placement: &MathBlockPlacement, block: [f32; 4], x: f32) -> Option<u32> {
+    let scale = placement.artifact.render_scale_milli as f32 / 1000.0;
+    let extent = |run: &bt_viewport::InlineRunPlacement| {
+        let left = block[0] + run.x_px as f32 * scale;
+        (left, left + (run.width_px as f32 * scale).max(1.0))
+    };
+    placement
+        .artifact
+        .inline_runs
+        .iter()
+        .find(|run| {
+            let (left, right) = extent(run);
+            x >= left && x < right
+        })
+        .or_else(|| {
+            placement.artifact.inline_runs.iter().min_by(|left, right| {
+                let distance = |run: &bt_viewport::InlineRunPlacement| {
+                    let (start, end) = extent(run);
+                    (start - x).max(x - end).max(0.0)
+                };
+                distance(left).total_cmp(&distance(right))
+            })
+        })
+        .map(|run| run.run)
+}
+
 #[derive(Clone, Copy, Debug)]
 struct MathBlockGeometry {
     block: [f32; 4],
@@ -2930,7 +2963,11 @@ impl Renderer {
                 return None;
             };
             Some(MathHit {
-                anchor: placement.anchor.clone(),
+                anchor: placement.anchor.with_run(inline_run_at(
+                    placement,
+                    geometry.block,
+                    point[0],
+                )),
                 target,
             })
         })
@@ -7241,11 +7278,13 @@ mod tests {
             // History-anchored: a scrolled-away block is exactly a history block off the top of
             // the pane, and it keeps the fixture free of the live band-top frame invariant.
             anchor: bt_viewport::MathBlockAnchor::History {
+                run: None,
                 start: bt_transcript::TranscriptId(1),
                 end: bt_transcript::TranscriptId(1),
             },
             source: key.to_owned(),
             artifact: bt_viewport::ProjectedMathArtifact {
+                inline_runs: Vec::new(),
                 key: key.to_owned(),
                 end: bt_transcript::TranscriptId(1),
                 rgba: Arc::from(vec![0_u8; resident_bytes]),
@@ -8488,6 +8527,7 @@ mod tests {
             descent_px: 4.0,
             baseline_px: 20.0,
             render_time: std::time::Duration::from_millis(1),
+            inline_runs: Vec::new(),
         };
         let mut completed = 0;
         while let Some(mut task) = session.take_live_worker_task() {

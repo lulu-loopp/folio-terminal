@@ -377,6 +377,7 @@ impl HeadlessOracle {
                 band_start_row,
                 band_end_row,
                 generation,
+                ..
             } = block.anchor
             else {
                 continue;

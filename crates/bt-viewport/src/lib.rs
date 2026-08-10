@@ -20,7 +20,7 @@ use bt_transcript::{
 };
 use bt_unicode::{cluster_width, graphemes};
 
-pub use bt_doc::SUBPIXELS_PER_PX;
+pub use bt_doc::{InlineRunPlacement, SUBPIXELS_PER_PX};
 pub use height_tree::HeightTree;
 
 /// Live display math is never given a lifecycle-specific presentation scale. Projection preserves
@@ -141,6 +141,10 @@ pub struct ProjectedMathArtifact {
     /// Presentation scale for a same-source stale raster. Fresh artifacts use 1000.
     pub render_scale_milli: u32,
     pub source: String,
+    /// For an inline composite: which of the line's `$…$` runs this image contains and where they
+    /// sit inside it, in the same raster-pixel space as `width_px` — so a hit test scales them by
+    /// `render_scale_milli` exactly as it scales the block. Empty for display math.
+    pub inline_runs: Vec<InlineRunPlacement>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -187,11 +191,22 @@ pub struct ProjectedLiveMathArtifact {
     pub artifact: ProjectedMathArtifact,
 }
 
+/// What a math interaction is aimed at.
+///
+/// `run` names one inline `$…$` run of the anchored line, and is what makes a line carrying two
+/// formulas answer two different questions. A placement's own anchor leaves it `None` — the
+/// placement is the whole line's composite — while a hit test fills it in from the pointer, so a
+/// copy resolves to the formula under the cursor rather than to every formula on the row joined by
+/// a separator. Display math has no runs and is always `None`.
+///
+/// Every record lookup keyed on an anchor deliberately ignores it: the run selects *within* a
+/// record, it never selects a record.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum MathBlockAnchor {
     History {
         start: TranscriptId,
         end: TranscriptId,
+        run: Option<u32>,
     },
     Live {
         screen: ScreenId,
@@ -200,7 +215,25 @@ pub enum MathBlockAnchor {
         band_start_row: u32,
         band_end_row: u32,
         generation: GridGeneration,
+        run: Option<u32>,
     },
+}
+
+impl MathBlockAnchor {
+    /// The same anchor pointed at one inline run of its line.
+    pub fn with_run(&self, run: Option<u32>) -> Self {
+        let mut anchor = self.clone();
+        match &mut anchor {
+            Self::History { run: slot, .. } | Self::Live { run: slot, .. } => *slot = run,
+        }
+        anchor
+    }
+
+    pub fn run(&self) -> Option<u32> {
+        match self {
+            Self::History { run, .. } | Self::Live { run, .. } => *run,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1810,6 +1843,7 @@ impl ViewportProjection {
                         math_blocks.push(MathBlockPlacement {
                             start: *id,
                             anchor: MathBlockAnchor::History {
+                                run: None,
                                 start: *id,
                                 end: artifact.end,
                             },
@@ -1907,6 +1941,7 @@ impl ViewportProjection {
                             math_blocks.push(MathBlockPlacement {
                                 start: *id,
                                 anchor: MathBlockAnchor::History {
+                                    run: None,
                                     start: *id,
                                     end: artifact.end,
                                 },
@@ -2125,6 +2160,7 @@ impl ViewportProjection {
                 math_blocks.push(MathBlockPlacement {
                     start: TranscriptId(0),
                     anchor: MathBlockAnchor::Live {
+                        run: None,
                         screen: live_math.screen,
                         start: live_math.start,
                         end: live_math.end,
@@ -3710,6 +3746,7 @@ mod tests {
                 staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
                     key: "offscreen-prefix".to_owned(),
                     end: TranscriptId(0),
                     rgba: Arc::from(vec![255; 4]),
@@ -4278,6 +4315,7 @@ mod tests {
                     staging_prefix: Vec::new(),
                     generation: GridGeneration(1),
                     artifact: ProjectedMathArtifact {
+                        inline_runs: Vec::new(),
                         key: format!("display-x-{band_start_row}-{band_end_row}"),
                         end: TranscriptId(0),
                         rgba: Arc::from(vec![255; 50 * 4]),
@@ -4425,6 +4463,7 @@ mod tests {
                 staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
                     key: "display-x".to_owned(),
                     end: TranscriptId(0),
                     rgba: Arc::from(vec![255; height_px * 4]),
@@ -4562,6 +4601,7 @@ mod tests {
                 staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
                     key: "underlined-heading-formula".to_owned(),
                     end: TranscriptId(0),
                     rgba: Arc::from(vec![255; 54 * 4]),
@@ -4796,6 +4836,7 @@ mod tests {
                 staging_prefix: vec![staging_id],
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
                     key: "sum".to_owned(),
                     end: TranscriptId(0),
                     rgba: Arc::from(vec![255; 40 * 4]),
@@ -4954,6 +4995,7 @@ mod tests {
             staging_prefix: Vec::new(),
             generation,
             artifact: ProjectedMathArtifact {
+                inline_runs: Vec::new(),
                 key: key.to_owned(),
                 end: TranscriptId(0),
                 rgba: Arc::from(vec![255; 50 * 4]),
@@ -5027,6 +5069,7 @@ mod tests {
                 staging_prefix: Vec::new(),
                 generation: GridGeneration(1),
                 artifact: ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
                     key: key.to_owned(),
                     end: TranscriptId(0),
                     rgba: Arc::from(vec![255; height_px as usize * 4]),
@@ -5332,6 +5375,7 @@ mod tests {
             document.finalize_transaction(finalized);
         }
         let artifact = ProjectedMathArtifact {
+            inline_runs: Vec::new(),
             key: "math:test".to_owned(),
             end: ids[2],
             rgba: Arc::from(vec![255; 4]),
@@ -5628,6 +5672,7 @@ mod tests {
             (
                 ids[index],
                 ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
                     key: format!("path-image-{index}"),
                     end: ids[index],
                     rgba: Arc::from(vec![255; 4]),
@@ -6326,6 +6371,7 @@ mod tests {
             projection.sync_math_artifacts([(
                 ids[3],
                 ProjectedMathArtifact {
+                    inline_runs: Vec::new(),
                     key: "north-star-math".to_owned(),
                     end: ids[3],
                     rgba: Arc::from(vec![255; 4]),
@@ -6412,6 +6458,7 @@ mod tests {
             staging_prefix: Vec::new(),
             generation: GridGeneration(1),
             artifact: ProjectedMathArtifact {
+                inline_runs: Vec::new(),
                 key: format!("bottom-follow-{occurrence_id}"),
                 end: TranscriptId(0),
                 rgba: Arc::from(vec![255; 4]),
@@ -6501,6 +6548,7 @@ mod tests {
             visible: true,
         };
         let artifact = |height_subpixels| ProjectedMathArtifact {
+            inline_runs: Vec::new(),
             key: format!("bottom-history-{height_subpixels}"),
             end: ids[2],
             rgba: Arc::from(vec![255; 4]),
@@ -6598,6 +6646,7 @@ mod tests {
         projection.sync_math_artifacts([(
             ids[2],
             ProjectedMathArtifact {
+                inline_runs: Vec::new(),
                 key: "async-history-height".to_owned(),
                 end: ids[2],
                 rgba: Arc::from(vec![255; 4]),

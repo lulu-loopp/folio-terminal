@@ -12,6 +12,26 @@ pub enum MathMode {
     Inline,
 }
 
+/// Where one inline `$…$` run sits inside the composite raster its logical line rendered to.
+///
+/// A line may carry several runs. They are rasterized one at a time and composited into a single
+/// image at per-run x offsets, so the composite alone cannot say which run is which — and three
+/// separate questions need exactly that: which terminal cells to blank, which run the pointer is
+/// over, and which run's LaTeX the copy button puts on the clipboard.
+///
+/// It also records the *outcome*: a run whose raster is wider than its own source cells falls back
+/// to source by itself and is simply absent from this list, leaving its neighbours composited and
+/// its own terminal text untouched.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct InlineRunPlacement {
+    /// Index into the span's `inline_runs`. This is the run's identity: stable across relayout,
+    /// and the value an anchor carries so a copy resolves to one formula rather than the line.
+    pub run: u32,
+    /// Left edge inside the composite raster, in raster pixels.
+    pub x_px: u32,
+    pub width_px: u32,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SourceLifecycle {
     Live,

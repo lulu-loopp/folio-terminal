@@ -80,6 +80,7 @@ fn complete_next_math(session: &mut DualPlaneSession, height_px: u32) {
             descent_px: 0.0,
             baseline_px: height_px as f32,
             render_time: Duration::from_millis(1),
+            inline_runs: Vec::new(),
         })
     ));
 }

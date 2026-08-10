@@ -254,6 +254,13 @@ pub enum SettingsRow {
     /// keep it from sliding up and down the dialog, and being in a group of its
     /// own underneath them serves the same end.
     Formulas,
+    /// The sibling switch for `$…$` runs inside command output, directly under
+    /// the block one it reads as a variant of. Two switches and not one because
+    /// the two carry different risk — a `$$` pair is a whole-line delimiter,
+    /// while a lone `$` is the most overloaded byte a shell prints — so a user
+    /// who wants typeset blocks with every `$` in a log left alone has to be
+    /// able to say exactly that.
+    InlineFormulas,
 }
 
 impl SettingsRow {
@@ -271,7 +278,7 @@ impl SettingsRow {
             }
             // The mock-up files what typesetting does to a block under "Rendered
             // blocks" (2421), beside that group's own Maximum height row.
-            Self::Formulas => SettingsGroup::RenderedBlocks,
+            Self::Formulas | Self::InlineFormulas => SettingsGroup::RenderedBlocks,
         }
     }
 
@@ -281,6 +288,7 @@ impl SettingsRow {
             Self::Theme => "Theme",
             Self::Cursor => "Cursor",
             Self::Formulas => "Display formulas",
+            Self::InlineFormulas => "Inline formulas",
             // Mock-up 2360.
             Self::TabLayout => "Tab layout",
             // Mock-up 2374.
@@ -299,6 +307,11 @@ impl SettingsRow {
             // What Off does and, just as much, what it does not do: the line has
             // to say "source" or a reader will expect the formula to vanish.
             Self::Formulas => "Typeset $$…$$ blocks; off shows the LaTeX source",
+            // Says "in command output" because that limit is the feature, not a
+            // caveat about it: a `$…$` on the prompt or input line is never
+            // typeset, and a user who reads only this line should not go away
+            // expecting one to be.
+            Self::InlineFormulas => "Typeset $…$ in command output; off shows the source",
             // Mock-up 2361.
             Self::TabLayout => "Choose where tabs appear in the window",
             // Mock-up 2375.
@@ -312,7 +325,7 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.len(),
             Self::Cursor => CURSOR_OPTIONS.len(),
-            Self::Formulas => FORMULA_OPTIONS.len(),
+            Self::Formulas | Self::InlineFormulas => FORMULA_OPTIONS.len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
         }
@@ -330,7 +343,9 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.get(index).copied().map(theme_label),
             Self::Cursor => CURSOR_OPTIONS.get(index).copied().map(cursor_label),
-            Self::Formulas => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
+            Self::Formulas | Self::InlineFormulas => {
+                FORMULA_OPTIONS.get(index).copied().map(on_off_label)
+            }
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
         }
@@ -344,6 +359,9 @@ impl SettingsRow {
             Self::Formulas => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.display_formulas),
+            Self::InlineFormulas => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.inline_formulas),
             Self::TabLayout => TAB_LAYOUT_OPTIONS
                 .iter()
                 .position(|it| *it == values.tab_layout),
@@ -375,6 +393,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
         rows.push(SettingsRow::Sidebar);
     }
     rows.push(SettingsRow::Formulas);
+    rows.push(SettingsRow::InlineFormulas);
     rows
 }
 
@@ -390,6 +409,7 @@ pub struct SettingsValues {
     pub tab_layout: TabLayoutMode,
     pub sidebar: RailMode,
     pub display_formulas: bool,
+    pub inline_formulas: bool,
 }
 
 /// Whether the dialog is up, and what is open inside it.
@@ -573,6 +593,16 @@ pub fn cursor_style_requested(target: SettingsTarget) -> Option<CursorStyle> {
 pub fn display_formulas_requested(target: SettingsTarget) -> Option<bool> {
     match target {
         SettingsTarget::Choice(SettingsRow::Formulas, index) => FORMULA_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn inline_formulas_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::InlineFormulas, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
         _ => None,
     }
 }
@@ -1327,6 +1357,7 @@ mod tests {
             tab_layout: TabLayoutMode::Horizontal,
             sidebar: RailMode::Expanded,
             display_formulas: true,
+            inline_formulas: true,
         }
     }
 
@@ -2626,7 +2657,8 @@ mod tests {
                 SettingsRow::Theme,
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
-                SettingsRow::Formulas
+                SettingsRow::Formulas,
+                SettingsRow::InlineFormulas
             ]
         );
         assert_eq!(
@@ -2636,10 +2668,11 @@ mod tests {
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::Sidebar,
-                SettingsRow::Formulas
+                SettingsRow::Formulas,
+                SettingsRow::InlineFormulas
             ],
-            "Sidebar still lands directly under the row it depends on, and \
-             Formulas stays last as the whole of the second group"
+            "Sidebar still lands directly under the row it depends on, and the \
+             two formula rows stay last as the whole of the second group"
         );
     }
 

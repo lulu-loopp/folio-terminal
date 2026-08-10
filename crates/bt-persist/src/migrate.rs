@@ -33,12 +33,37 @@ pub type MigrationStep = fn(Value) -> Value;
 /// Migration table for `settings.json`. v2 adds the display-formula render
 /// switch; every v1 file was written by a build that always drew formulas, so
 /// the step carries that behaviour forward rather than imposing a new one.
-pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[(1, migrate_settings_v1_to_v2)];
+/// v3 adds the inline-formula switch — see [`migrate_settings_v2_to_v3`] for why
+/// that one does *not* carry its predecessor's behaviour forward.
+pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
+    (1, migrate_settings_v1_to_v2),
+    (2, migrate_settings_v2_to_v3),
+];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(2));
         object.insert("display_formulas".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v2 -> v3: the inline-formula switch, defaulted **on** (user ruling).
+///
+/// This deliberately breaks the symmetry with `migrate_settings_v1_to_v2`, and
+/// the difference is worth stating because the two steps look alike. That step
+/// carried a behaviour forward: a v1 user had been watching `$$…$$` blocks get
+/// typeset for as long as they had used the product, and a migration that
+/// silently stopped doing it would be taking something away. There is no such
+/// behaviour to carry here — a v2 build never rendered an inline `$…$` at all,
+/// because the detector was disabled outright pending a sound disambiguator, so
+/// "off" would not be preserving a user's status quo, only freezing an absence.
+/// A feature shipping for the first time takes the product's default, and the
+/// ruling sets that default to on.
+fn migrate_settings_v2_to_v3(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(3));
+        object.insert("inline_formulas".to_owned(), Value::from(true));
     }
     value
 }

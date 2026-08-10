@@ -20,6 +20,7 @@ fn synthetic_raster(width_px: u32, height_px: u32) -> MathRaster {
         descent_px: 4.0,
         baseline_px: height_px as f32 - 4.0,
         render_time: Duration::from_millis(1),
+        inline_runs: Vec::new(),
     }
 }
 

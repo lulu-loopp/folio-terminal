@@ -14,17 +14,17 @@ use std::{
 
 use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
-    DetectionTask, LiveDetectionInput, LiveDetectionSource, LiveDetectionTask,
-    MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine, MathSpan, PlaceholderArtifact,
-    StaleArtifact, advance_detection_context, detect_math_blocks_with_options,
+    DetectionTask, InlineMathRun, InlineMathSite, LiveDetectionInput, LiveDetectionSource,
+    LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine, MathSpan,
+    PlaceholderArtifact, StaleArtifact, advance_detection_context, detect_math_blocks_with_sites,
     frozen_resync_scan_with_options, resolve_detection_task, resolve_live_detection_task,
     resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, ContentAnchor, DecorationIntent, DecorationLifecycle,
-    DetectionRevision, GridGeneration, GridPoint, HistoryDocument, InvalidSourceTransition,
-    LayoutKey, LiveRowRemoval, SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp,
-    ViewGeneration, compare_anchors, content_anchor_between,
+    DetectionRevision, GridGeneration, GridPoint, HistoryDocument, InlineRunPlacement,
+    InvalidSourceTransition, LayoutKey, LiveRowRemoval, SUBPIXELS_PER_PX, ScreenId,
+    SourceLifecycle, VersionStamp, ViewGeneration, compare_anchors, content_anchor_between,
 };
 use bt_math::{MathEngine, MathFailureStage, MathMode, MathRaster, MathRenderError, MathRenderKey};
 use bt_transcript::{
@@ -745,6 +745,7 @@ pub struct DualPlaneSession {
     working: bool,
     published_revision: u64,
     semantic_input_regions: Vec<SemanticInputRegion>,
+    semantic_output_regions: Vec<SemanticOutputRegion>,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
     live_tasks: VecDeque<LiveDetectionTask>,
@@ -770,6 +771,18 @@ pub struct DualPlaneSession {
     /// Unlike `inline_image_bands` this is written by the product: it is a user-facing setting
     /// persisted in `settings.json`, not a ruling frozen into a `const`.
     display_math_bands: bool,
+    /// Whether a proven inline `$…$` run in command output may be typeset (user ruling 2026-08-10,
+    /// the "Inline formulas" switch).
+    ///
+    /// A **detection** policy bit, and that is the whole difference from `display_math_bands` above
+    /// it. The display switch is read where a finished record becomes a viewport artifact, so it
+    /// costs one frame and every record stays in memory ready to be re-armed. This one is read in
+    /// `detection_options`, which is to say by the scanner — so flipping it must invalidate what the
+    /// scanner already decided. A stale scan would otherwise keep answering with the old switch:
+    /// turning inline off would leave existing runs typeset until something unrelated dirtied their
+    /// rows, and turning it on would leave them at source forever. `set_inline_math_bands`
+    /// therefore drives the same `redetect` route a detector change has always used.
+    inline_math_bands: bool,
     inline_image_tasks: VecDeque<InlineImageTask>,
     local_image_path_tasks: VecDeque<InlineImageTask>,
     /// At most one outstanding resample per image occurrence, so the queue is bounded by the
@@ -860,8 +873,12 @@ struct CursorLineSuppression {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ShellIntegrationPhase {
     Prompt,
+    /// Inside `B..C`, carrying the index of the open [`SemanticInputRegion`].
     Input(usize),
-    Output,
+    /// Inside `C..D`, carrying the index of the open [`SemanticOutputRegion`]. The payload mirrors
+    /// `Input`'s for the same reason: the open region's frontier is the cursor, and only the phase
+    /// says which region is the open one.
+    Output(usize),
     Finished,
 }
 
@@ -876,6 +893,45 @@ struct SemanticInputRegion {
     written_rows: BTreeSet<(u64, u32)>,
     /// Exact visible command text captured before a reflow. Coordinates are only a projection;
     /// this content witness is what re-seats the region after the vendor changes physical rows.
+    witness: String,
+}
+
+/// The OSC 133 `C..D` span: content a command *printed*, which is the one site where a lone `$…$`
+/// may be read as mathematics (`InlineMathSite::CommandOutput`).
+///
+/// **A separate vector and a separate struct, deliberately, rather than a `kind` discriminant on
+/// [`SemanticInputRegion`].** Three reasons, in order of weight:
+///
+/// 1. The input regions answer a *withdrawal* question — does this decoration touch what the user
+///    typed, and must therefore be retired — and every existing query (`semantic_input_overlaps*`,
+///    `reconcile_decorations_against_semantic_input`, the `Input(index)` phase payload that indexes
+///    straight into the vector) is written against a homogeneous vector. Interleaving output
+///    regions into it would make every one of those a filtered query, and the requirement here is
+///    that input behaviour stay byte-identical. Separate storage makes that structural instead of
+///    reviewed.
+/// 2. `written_rows` and the end-point back-off it drives (`semantic_input_end_point`) exist for
+///    one B..C-specific hazard: `C` characteristically lands at column 0 of the row where the first
+///    line of *output* begins, so a naive end swallows it. `D` has no such hazard — the half-open
+///    `[C, D)` already excludes a `D` at column 0 — so an output region carrying `written_rows`
+///    would carry a field it must never consult, which is worse than not having it.
+/// 3. The two are opposite in polarity. An input overlap *suppresses*, so `overlap` (any part) is
+///    the right test and erring wide is safe. An output region *permits*, so `covers` (whole
+///    extent) is the right test and erring wide is exactly the failure the disambiguator exists to
+///    prevent. One struct answering both questions would have to carry both tests anyway.
+///
+/// Everything the two genuinely share is shared: anchor registration and therefore the document's
+/// automatic staging/history migration, the cursor frontier for an open region, the witness, and
+/// the reflow re-match (`semantic_witness_rematch`).
+#[derive(Clone, Debug)]
+struct SemanticOutputRegion {
+    screen: ScreenId,
+    start: AnchorId,
+    end: AnchorId,
+    closed: bool,
+    /// Exact visible output text captured before a reflow, read the same way and used for the same
+    /// thing as [`SemanticInputRegion::witness`]. It is bounded by the visible grid — a region
+    /// whose start has already scrolled into history is re-anchored by the document's own
+    /// migration and never re-matched by text.
     witness: String,
 }
 
@@ -899,6 +955,39 @@ fn ordered_semantic_matches(
         .zip(candidates)
         .map(|(region, (start, end))| (*region, *start, *end))
         .collect()
+}
+
+/// Re-seat one family of semantic regions onto the reflowed grid by their content witnesses.
+///
+/// Shared by the `B..C` and `C..D` families and run once per family, never once over both: the
+/// grouping is what makes [`ordered_semantic_matches`] a bijection proof, and mixing two families
+/// whose witnesses could coincide would let a command line claim an output region's match, or the
+/// reverse. Each family therefore counts its own occurrences.
+fn semantic_witness_rematch(
+    logical_text: &str,
+    segments: &[LiveImagePathSegment],
+    regions_by_witness: BTreeMap<String, Vec<usize>>,
+) -> Vec<(usize, GridPoint, GridPoint)> {
+    let mut matches = Vec::new();
+    for (witness, regions) in regions_by_witness {
+        let candidates = logical_text
+            .match_indices(&witness)
+            .filter_map(|(byte_start, _)| {
+                let byte_end = byte_start.saturating_add(witness.len());
+                let start = live_path_point(segments, byte_start, false)?;
+                let end = live_path_point(segments, byte_end, true)?;
+                Some((start, end))
+            })
+            .collect::<Vec<_>>();
+        let ordered = ordered_semantic_matches(&regions, &candidates);
+        if std::env::var_os("BT_SEMANTIC_TRACE").is_some() {
+            eprintln!(
+                "SEMANTIC_ORDERED witness={witness:?} regions={regions:?} candidates={candidates:?} matched={ordered:?}"
+            );
+        }
+        matches.extend(ordered);
+    }
+    matches
 }
 
 impl CursorLineSuppression {
@@ -1013,6 +1102,7 @@ impl DualPlaneSession {
             working: false,
             published_revision: 0,
             semantic_input_regions: Vec::new(),
+            semantic_output_regions: Vec::new(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
@@ -1020,6 +1110,7 @@ impl DualPlaneSession {
             // Formulas render unless the user says otherwise; the app pushes the persisted
             // setting in right after construction.
             display_math_bands: true,
+            inline_math_bands: true,
             inline_image_tasks: VecDeque::new(),
             local_image_path_tasks: VecDeque::new(),
             inline_image_scale_tasks: VecDeque::new(),
@@ -1190,6 +1281,36 @@ impl DualPlaneSession {
         changed
     }
 
+    /// Whether a proven inline `$…$` run in command output is allowed to be typeset.
+    #[must_use]
+    pub fn inline_math_bands(&self) -> bool {
+        self.inline_math_bands
+    }
+
+    /// Point the "Inline formulas" switch at `enabled`, reporting whether that changed anything.
+    ///
+    /// Unlike [`Self::set_display_math_bands`] this **forces a re-detection**, and the asymmetry is
+    /// the point. The display switch is presentation: the scan that proved a `$$` block is still
+    /// true with bands off, so the record is kept and re-armed for free. This switch is read by
+    /// `detection_options`, so it changes what the scanner *concludes* — and a conclusion already
+    /// reached does not revise itself. Without the bump, turning inline off would leave every
+    /// already-detected run typeset until unrelated output happened to dirty its row, and turning
+    /// it on would leave the same rows at source indefinitely.
+    ///
+    /// `redetect` is the established route for exactly this: it retires frozen decorations to
+    /// `DetectorChanged`, drops live decorations and pending handoffs, clears the candidate queue
+    /// and re-arms the rows, then reschedules the artifacts it still holds.
+    pub fn set_inline_math_bands(&mut self, enabled: bool) -> bool {
+        let changed = self.inline_math_bands != enabled;
+        if changed {
+            self.inline_math_bands = enabled;
+            self.redetect(DetectionRevision(
+                self.detection_revision.0.saturating_add(1),
+            ));
+        }
+        changed
+    }
+
     pub fn set_math_layout_options(&mut self, options: MathLayoutOptions) {
         if self.math_layout_options.detect_image_paths && !options.detect_image_paths {
             let retired = self
@@ -1217,6 +1338,7 @@ impl DualPlaneSession {
             reject_claude_code_jump_chip_overlay: self
                 .math_layout_options
                 .reject_claude_code_jump_chip_overlay,
+            inline_formulas: self.inline_math_bands,
         }
     }
 
@@ -1931,6 +2053,7 @@ impl DualPlaneSession {
         self.document
             .capture_rows_transaction(&[], self.grid_generation);
         self.reanchor_semantic_input_regions_after_resize();
+        self.reanchor_semantic_output_regions_after_resize();
         let next_layout = LayoutKey {
             width_cells: columns,
             ..self.layout_key
@@ -2053,6 +2176,7 @@ impl DualPlaneSession {
             // command anchors and their row-write facts in the new generation before a later C
             // marker decides whether its line-start coordinate is end-exclusive.
             self.reanchor_semantic_input_regions_after_resize();
+            self.reanchor_semantic_output_regions_after_resize();
             // The vendor reconcile can shift rows and always bumps the grid generation, which
             // strands the formulas `restore_offscreen_decorations` re-anchored inside `resize_at`
             // one generation behind the frame the app is about to publish. Re-anchor them against
@@ -2291,8 +2415,13 @@ impl DualPlaneSession {
 
         let inputs = self.live_detection_context();
         let initial_context = self.live_initial_detection_context(&inputs);
-        let candidates = live_candidate_rows(&inputs, initial_context.clone(), stable);
-        let context_signature = live_detection_context_signature(&inputs);
+        let candidates = live_candidate_rows(
+            &inputs,
+            initial_context.clone(),
+            stable,
+            self.inline_math_bands,
+        );
+        let context_signature = live_detection_context_signature(&inputs, self.inline_math_bands);
         let cursor_suppression = (!self.shell_integration_is_authoritative(self.live_screen))
             .then(|| self.cursor_line_suppression())
             .flatten();
@@ -2670,6 +2799,8 @@ impl DualPlaneSession {
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
                     self.close_semantic_input_region(region, screen, point);
                 }
+                // A prompt means output ended, whether or not `D` ever arrived.
+                self.close_open_semantic_output_region(screen, point);
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Prompt);
             }
@@ -2678,6 +2809,9 @@ impl DualPlaneSession {
                 if matches!(phase, Some(ShellIntegrationPhase::Input(_))) {
                     return;
                 }
+                // `B` without an intervening `A` or `D` — a shell that skips markers still tells us
+                // here that the command being typed is not output.
+                self.close_open_semantic_output_region(screen, point);
                 let start = self.document.register_anchor(ContentAnchor::Live {
                     screen,
                     point,
@@ -2712,8 +2846,13 @@ impl DualPlaneSession {
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
                     self.close_semantic_input_region(region, screen, point);
                 }
+                // A repeated `C` with no `D` between them closes the stale region before opening
+                // the new one, so at most one output region per screen is ever open and none can
+                // grow past the command it belongs to.
+                self.close_open_semantic_output_region(screen, point);
+                let region = self.open_semantic_output_region(screen, point);
                 self.shell_phases
-                    .insert(screen, ShellIntegrationPhase::Output);
+                    .insert(screen, ShellIntegrationPhase::Output(region));
             }
             ShellIntegrationMarker::CommandFinished { exit_code } => {
                 self.working = false;
@@ -2723,6 +2862,7 @@ impl DualPlaneSession {
                 if let Some(ShellIntegrationPhase::Input(region)) = phase {
                     self.close_semantic_input_region(region, screen, point);
                 }
+                self.close_open_semantic_output_region(screen, point);
                 self.shell_phases
                     .insert(screen, ShellIntegrationPhase::Finished);
             }
@@ -2753,7 +2893,70 @@ impl DualPlaneSession {
         if let Some(region) = self.semantic_input_regions.get_mut(region_index) {
             region.closed = true;
         }
-        self.refresh_semantic_region_witness(region_index, true);
+        self.refresh_semantic_input_witness(region_index, true);
+    }
+
+    /// Open the `C..D` command-output region and return its index.
+    ///
+    /// Both endpoints register at `C` with left affinity, exactly as `B` does: the region is the
+    /// half-open span `[C, D)`, `C` names the first cell the command's output occupies and `D`
+    /// names the first cell past it. There is no counterpart to `semantic_input_end_point`'s
+    /// back-off here — that rule exists because `C` at column 0 would otherwise swallow the row
+    /// where output begins, and `D` at column 0 already contributes none of its row under the same
+    /// half-open reading.
+    fn open_semantic_output_region(&mut self, screen: ScreenId, point: GridPoint) -> usize {
+        let anchor = |session: &mut Self| {
+            session.document.register_anchor(ContentAnchor::Live {
+                screen,
+                point,
+                bias: Bias::Before,
+                generation: session.grid_generation,
+            })
+        };
+        let start = anchor(self);
+        let end = anchor(self);
+        let region = self.semantic_output_regions.len();
+        self.semantic_output_regions.push(SemanticOutputRegion {
+            screen,
+            start,
+            end,
+            closed: false,
+            witness: String::new(),
+        });
+        region
+    }
+
+    /// The open output region on `screen`, of which there is at most one by construction: every
+    /// path that opens one closes the previous first.
+    fn open_semantic_output_region_index(&self, screen: ScreenId) -> Option<usize> {
+        self.semantic_output_regions
+            .iter()
+            .position(|region| region.screen == screen && !region.closed)
+    }
+
+    /// Seal the open output region on `screen` at `point`, if there is one.
+    ///
+    /// Every marker that can end output routes through here — `D` because it says so, `A` and `B`
+    /// because a prompt or a typed command means output ended even when `D` was never emitted.
+    /// Leaving one open instead is the failure mode worth naming: an open region's frontier is the
+    /// cursor, so a region nobody closes eventually claims every row the shell writes, and the
+    /// inline site would go from proven to merely assumed without anything looking wrong.
+    fn close_open_semantic_output_region(&mut self, screen: ScreenId, point: GridPoint) {
+        let Some(index) = self.open_semantic_output_region_index(screen) else {
+            return;
+        };
+        let end = self.semantic_output_regions[index].end;
+        let _ = self.document.replace_anchor(
+            end,
+            ContentAnchor::Live {
+                screen,
+                point,
+                bias: Bias::Before,
+                generation: self.grid_generation,
+            },
+        );
+        self.semantic_output_regions[index].closed = true;
+        self.refresh_semantic_output_witness(index, true);
     }
 
     fn semantic_input_end_point(
@@ -2974,37 +3177,140 @@ impl DualPlaneSession {
             })
     }
 
-    fn refresh_semantic_region_witness(&mut self, region_index: usize, authoritative_close: bool) {
-        let Some(region) = self.semantic_input_regions.get(region_index) else {
-            return;
+    /// Is this whole live extent inside one OSC 133 `C..D` command-output region?
+    ///
+    /// **Coverage, not overlap** — and that is the one place this deliberately departs from
+    /// `semantic_input_overlaps_live` it otherwise mirrors. The input query withdraws a decoration,
+    /// so touching the command anywhere is reason enough and erring wide is safe. This query
+    /// *grants* the right to read a lone `$` as mathematics, so erring wide is the failure itself:
+    /// a row that is half output and half the prompt printed after `D` would otherwise be handed to
+    /// the disambiguator as proven output.
+    ///
+    /// `end` is the exclusive end of the extent, which is what lets a `D` landing exactly at
+    /// end-of-text on the final output row still cover that row.
+    ///
+    /// No shell integration on this screen means no region, and therefore `false`: an unmarked
+    /// screen is `InlineMathSite::Ineligible` in its entirety, which is scheme A's stated price.
+    fn command_output_covers_live(
+        &self,
+        screen: ScreenId,
+        start: GridPoint,
+        end: GridPoint,
+    ) -> bool {
+        if !self.shell_integration_is_authoritative(screen) {
+            return false;
+        }
+        let anchor = |point| ContentAnchor::Live {
+            screen,
+            point,
+            bias: Bias::Before,
+            generation: self.grid_generation,
         };
-        if region.screen != self.live_screen {
-            return;
+        self.command_output_covers(&anchor(start), &anchor(end))
+    }
+
+    /// The same question asked of a frozen line: is the whole line inside a command-output region?
+    ///
+    /// A transcript line already is the WRAPLINE merge, so there is nothing to widen — the extent
+    /// is the line, from its first grapheme to one past its last.
+    fn command_output_covers_history(&self, id: TranscriptId) -> bool {
+        if !self.shell_integration_is_authoritative(ScreenId::Primary) {
+            return false;
+        }
+        let Some(line) = self.document.entries().get(&id).map(|entry| &entry.line) else {
+            return false;
+        };
+        let anchor = |offset| ContentAnchor::History {
+            id,
+            offset,
+            bias: Bias::Before,
+            generation: line.source_generation,
+        };
+        let end = GraphemeOffset(
+            u32::try_from(line.grapheme_boundaries.len().saturating_sub(1)).unwrap_or(u32::MAX),
+        );
+        self.command_output_covers(&anchor(GraphemeOffset(0)), &anchor(end))
+    }
+
+    fn command_output_covers(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
+        self.semantic_output_regions
+            .iter()
+            .enumerate()
+            .any(|(region_index, region)| {
+                let Ok(region_start) = self.document.anchor(region.start) else {
+                    return false;
+                };
+                let region_end = if !region.closed
+                    && region.screen == self.live_screen
+                    && self.shell_phases.get(&region.screen)
+                        == Some(&ShellIntegrationPhase::Output(region_index))
+                {
+                    // An open region's frontier is the cursor, exactly as an open input region's
+                    // is: the cell the cursor stands on has not been printed yet, so the span stays
+                    // half-open there too.
+                    ContentAnchor::Live {
+                        screen: region.screen,
+                        point: {
+                            let cursor = self.terminal.cursor();
+                            GridPoint {
+                                row: cursor.row,
+                                column: cursor.column,
+                            }
+                        },
+                        bias: Bias::Before,
+                        generation: self.grid_generation,
+                    }
+                } else {
+                    let Ok(end) = self.document.anchor(region.end) else {
+                        return false;
+                    };
+                    end.clone()
+                };
+                selection_covers(start, end, region_start, &region_end)
+            })
+    }
+
+    /// The visible text a semantic region currently covers, or `None` when the region cannot be
+    /// read off the live grid at all — a region on the other screen, or one whose endpoints have
+    /// already migrated out of the grid into staging/history, where the document's own anchor
+    /// migration is authoritative and text matching has no business intervening.
+    ///
+    /// Shared verbatim by the input (`B..C`) and output (`C..D`) families: both are half-open spans
+    /// over the same grid, and an open one's frontier is the cursor in both.
+    fn semantic_region_witness(
+        &self,
+        screen: ScreenId,
+        start_anchor: AnchorId,
+        end_anchor: AnchorId,
+        closed: bool,
+    ) -> Option<String> {
+        if screen != self.live_screen {
+            return None;
         }
         let Ok(ContentAnchor::Live {
             screen: start_screen,
             point: start,
             generation: start_generation,
             ..
-        }) = self.document.anchor(region.start)
+        }) = self.document.anchor(start_anchor)
         else {
-            return;
+            return None;
         };
-        if *start_screen != region.screen || *start_generation != self.grid_generation {
-            return;
+        if *start_screen != screen || *start_generation != self.grid_generation {
+            return None;
         }
-        let end = if region.closed {
+        let end = if closed {
             let Ok(ContentAnchor::Live {
                 screen: end_screen,
                 point,
                 generation: end_generation,
                 ..
-            }) = self.document.anchor(region.end)
+            }) = self.document.anchor(end_anchor)
             else {
-                return;
+                return None;
             };
             if end_screen != start_screen || *end_generation != self.grid_generation {
-                return;
+                return None;
             }
             *point
         } else {
@@ -3014,24 +3320,71 @@ impl DualPlaneSession {
                 column: cursor.column,
             }
         };
-        let Some(witness) = self.visible_text_between(*start, end) else {
+        self.visible_text_between(*start, end)
+    }
+
+    fn refresh_semantic_input_witness(&mut self, region_index: usize, authoritative_close: bool) {
+        let Some(region) = self.semantic_input_regions.get(region_index) else {
+            return;
+        };
+        let (screen, start, end, closed) = (region.screen, region.start, region.end, region.closed);
+        let Some(witness) = self.semantic_region_witness(screen, start, end, closed) else {
+            return;
+        };
+        let Some(region) = self.semantic_input_regions.get_mut(region_index) else {
             return;
         };
         // `C` is the one authoritative event that may initialize a closed command witness. After
         // that, coordinates are only a projection carried through reflow: they are permitted to
         // attest to the same bytes, never to replace them with whatever a drifted span happens to
         // cover. This makes a failed verification an honest no-op instead of compounded corruption.
-        if region.closed && !authoritative_close && region.witness != witness {
+        if closed && !authoritative_close && region.witness != witness {
             return;
         }
-        if let Some(region) = self.semantic_input_regions.get_mut(region_index) {
-            region.witness = witness;
+        region.witness = witness;
+    }
+
+    /// The output counterpart, under the identical attestation rule: `D` (or the `A`/`B` that
+    /// stands in for a `D` that never came) initializes the closed witness once, and every later
+    /// refresh may only confirm it.
+    ///
+    /// One thing it does that the input refresh does not: the stored witness is stripped of leading
+    /// and trailing row boundaries. `C` characteristically lands at the *end* of the command line —
+    /// the shell emits it before the newline that starts the output — so the raw span from `C` runs
+    /// through a row boundary before it reaches a single printed character, and a witness beginning
+    /// with `\n` can never be re-seated: `live_path_point` maps bytes to cells and a row separator
+    /// is not a cell, so every candidate match is discarded and the whole group declines.
+    ///
+    /// Trimming is exact rather than approximate, which is why it is done here and not smuggled
+    /// into the shared matcher. A `\n` in this projection is a row boundary and never content, and
+    /// a region contributes nothing to a boundary — so the span from `C` and the span from the
+    /// first printed character cover exactly the same cells. Re-seating to the content is therefore
+    /// not a nudge toward a match, it is the same region stated in coordinates that survive a
+    /// reflow.
+    fn refresh_semantic_output_witness(&mut self, region_index: usize, authoritative_close: bool) {
+        let Some(region) = self.semantic_output_regions.get(region_index) else {
+            return;
+        };
+        let (screen, start, end, closed) = (region.screen, region.start, region.end, region.closed);
+        let Some(witness) = self.semantic_region_witness(screen, start, end, closed) else {
+            return;
+        };
+        let witness = witness.trim_matches('\n').to_owned();
+        let Some(region) = self.semantic_output_regions.get_mut(region_index) else {
+            return;
+        };
+        if closed && !authoritative_close && region.witness != witness {
+            return;
         }
+        region.witness = witness;
     }
 
     fn refresh_semantic_region_witnesses(&mut self) {
         for index in 0..self.semantic_input_regions.len() {
-            self.refresh_semantic_region_witness(index, false);
+            self.refresh_semantic_input_witness(index, false);
+        }
+        for index in 0..self.semantic_output_regions.len() {
+            self.refresh_semantic_output_witness(index, false);
         }
     }
 
@@ -3065,15 +3418,12 @@ impl DualPlaneSession {
         Some(witness)
     }
 
-    fn reanchor_semantic_input_regions_after_resize(&mut self) {
-        if !self
-            .semantic_input_regions
-            .iter()
-            .any(|region| region.screen == self.live_screen)
-        {
-            return;
-        }
-
+    /// The live grid as one logical string plus the row segments that map bytes back to cells.
+    ///
+    /// Soft-wrapped rows are joined without a separator, so a pure width reflow leaves this string
+    /// unchanged — which is precisely what makes a content witness able to find its region again on
+    /// the far side of a resize.
+    fn semantic_reflow_text(&self) -> (String, Vec<LiveImagePathSegment>) {
         let mut logical_text = String::new();
         let mut segments = Vec::new();
         for row in 0..self.live_rows.len() as u32 {
@@ -3093,6 +3443,19 @@ impl DualPlaneSession {
                 logical_text.push('\n');
             }
         }
+        (logical_text, segments)
+    }
+
+    fn reanchor_semantic_input_regions_after_resize(&mut self) {
+        if !self
+            .semantic_input_regions
+            .iter()
+            .any(|region| region.screen == self.live_screen)
+        {
+            return;
+        }
+
+        let (logical_text, segments) = self.semantic_reflow_text();
         let cursor = self.terminal.cursor();
         let cursor_point = GridPoint {
             row: cursor.row,
@@ -3153,25 +3516,7 @@ impl DualPlaneSession {
                 .push(index);
         }
 
-        let mut matches = Vec::new();
-        for (witness, regions) in regions_by_witness {
-            let candidates = logical_text
-                .match_indices(&witness)
-                .filter_map(|(byte_start, _)| {
-                    let byte_end = byte_start.saturating_add(witness.len());
-                    let start = live_path_point(&segments, byte_start, false)?;
-                    let end = live_path_point(&segments, byte_end, true)?;
-                    Some((start, end))
-                })
-                .collect::<Vec<_>>();
-            let ordered = ordered_semantic_matches(&regions, &candidates);
-            if std::env::var_os("BT_SEMANTIC_TRACE").is_some() {
-                eprintln!(
-                    "SEMANTIC_ORDERED witness={witness:?} regions={regions:?} candidates={candidates:?} matched={ordered:?}"
-                );
-            }
-            matches.extend(ordered);
-        }
+        let matches = semantic_witness_rematch(&logical_text, &segments, regions_by_witness);
         for (index, start, end) in matches {
             let region = &self.semantic_input_regions[index];
             let start_anchor = region.start;
@@ -3203,6 +3548,106 @@ impl DualPlaneSession {
             }
         }
         self.reconcile_decorations_against_semantic_input();
+    }
+
+    /// The `C..D` mirror of [`Self::reanchor_semantic_input_regions_after_resize`].
+    ///
+    /// Without it the inline site drifts silently after a drag: the resize rebases every live
+    /// anchor to the new generation but keeps its old row and column, so a region that used to end
+    /// where output ended now ends wherever that coordinate happens to land in the reflowed grid.
+    /// Under-claiming would merely cost a formula; over-claiming hands the *next prompt* to a
+    /// disambiguator that was told a command printed it, which is the exact failure the site gate
+    /// exists to prevent.
+    ///
+    /// The open region needs only its start re-seated — its end is the cursor by definition — and
+    /// gets it from the same cursor fallback the open input region uses when it has no witness yet.
+    fn reanchor_semantic_output_regions_after_resize(&mut self) {
+        if !self
+            .semantic_output_regions
+            .iter()
+            .any(|region| region.screen == self.live_screen)
+        {
+            return;
+        }
+
+        let (logical_text, segments) = self.semantic_reflow_text();
+        let cursor = self.terminal.cursor();
+        let cursor_point = GridPoint {
+            row: cursor.row,
+            column: cursor.column,
+        };
+        let mut regions_by_witness = BTreeMap::<String, Vec<usize>>::new();
+        for index in 0..self.semantic_output_regions.len() {
+            let region = &self.semantic_output_regions[index];
+            if region.screen != self.live_screen {
+                continue;
+            }
+            if region.witness.is_empty() {
+                // An open region with nothing printed yet: collapse it onto the cursor, which is
+                // both its start and its frontier. A closed empty region covered nothing before the
+                // resize and must keep covering nothing, so it is left alone.
+                if !region.closed
+                    && self.shell_phases.get(&self.live_screen)
+                        == Some(&ShellIntegrationPhase::Output(index))
+                {
+                    let (start_anchor, end_anchor) = (region.start, region.end);
+                    let screen = region.screen;
+                    for anchor in [start_anchor, end_anchor] {
+                        let _ = self.document.replace_anchor(
+                            anchor,
+                            ContentAnchor::Live {
+                                screen,
+                                point: cursor_point,
+                                bias: Bias::Before,
+                                generation: self.grid_generation,
+                            },
+                        );
+                    }
+                }
+                continue;
+            }
+            let (
+                Ok(ContentAnchor::Live {
+                    screen: start_screen,
+                    ..
+                }),
+                Ok(ContentAnchor::Live {
+                    screen: end_screen, ..
+                }),
+            ) = (
+                self.document.anchor(region.start),
+                self.document.anchor(region.end),
+            )
+            else {
+                // Already carried by stable transcript/staging identity; the document's own anchor
+                // migration is authoritative there and text matching must not second-guess it.
+                continue;
+            };
+            if start_screen != end_screen || *start_screen != region.screen {
+                continue;
+            }
+            regions_by_witness
+                .entry(region.witness.clone())
+                .or_default()
+                .push(index);
+        }
+
+        let matches = semantic_witness_rematch(&logical_text, &segments, regions_by_witness);
+        for (index, start, end) in matches {
+            let region = &self.semantic_output_regions[index];
+            let (start_anchor, end_anchor, screen) = (region.start, region.end, region.screen);
+            for (anchor, point) in [(start_anchor, start), (end_anchor, end)] {
+                let _ = self.document.replace_anchor(
+                    anchor,
+                    ContentAnchor::Live {
+                        screen,
+                        point,
+                        bias: Bias::Before,
+                        generation: self.grid_generation,
+                    },
+                );
+            }
+        }
     }
 
     fn reconcile_decorations_against_semantic_input(&mut self) {
@@ -3293,19 +3738,33 @@ impl DualPlaneSession {
                         text: entry.line.text.clone(),
                         continues: false,
                         cell_boundaries: frozen_cell_boundaries(&entry.line),
+                        site: inline_math_site(self.command_output_covers_history(*id)),
                     }),
             );
         }
         let grid_inputs = (0..self.live_rows.len()).filter_map(|row| {
             self.terminal.visible_row(row as u32).map(|captured| {
                 let (text, cell_boundaries) = captured_row_text_and_boundaries(&captured);
+                let row = row as u32;
+                // The row's own extent, from its first cell to one past its last. Asking about
+                // exactly the cells this input carries is what keeps the verdict per-row: a row is
+                // command output only if all of it is.
+                let extent_end = GridPoint {
+                    row,
+                    column: cell_boundaries.last().map_or(0, |(_, column)| *column),
+                };
                 LiveDetectionInput {
                     source: LiveDetectionSource::Grid {
-                        row: row as u32,
-                        revision: self.live_rows[row].revision,
+                        row,
+                        revision: self.live_rows[row as usize].revision,
                     },
                     text,
                     continues: captured.continues,
+                    site: inline_math_site(self.command_output_covers_live(
+                        self.live_screen,
+                        GridPoint { row, column: 0 },
+                        extent_end,
+                    )),
                     cell_boundaries,
                 }
             })
@@ -3544,9 +4003,15 @@ impl DualPlaneSession {
             }
         }
         self.live_decorations = preserved;
-        let context_signature = live_detection_context_signature(&current_inputs);
+        let context_signature =
+            live_detection_context_signature(&current_inputs, self.inline_math_bands);
         let stable = vec![true; self.live_rows.len()];
-        let candidate_rows = live_candidate_rows(&current_inputs, current_initial_context, &stable);
+        let candidate_rows = live_candidate_rows(
+            &current_inputs,
+            current_initial_context,
+            &stable,
+            self.inline_math_bands,
+        );
         for record in self.live_decorations.values() {
             for row in record.band_start_row..=record.band_end_row {
                 if let Some(state) = self.live_rows.get_mut(row as usize) {
@@ -3573,12 +4038,17 @@ impl DualPlaneSession {
     ) -> Vec<LiveDetectionTask> {
         if !inputs
             .iter()
-            .any(|input| may_contain_display_math(input.text.trim()))
+            .any(|input| may_contain_math(input.text.trim(), self.inline_math_bands))
         {
             return Vec::new();
         }
         let stable = vec![true; self.live_rows.len()];
-        let candidates = live_candidate_rows(&inputs, initial_context.clone(), &stable);
+        let candidates = live_candidate_rows(
+            &inputs,
+            initial_context.clone(),
+            &stable,
+            self.inline_math_bands,
+        );
         let mut tasks = candidates
             .into_iter()
             .map(|candidate_row| LiveDetectionTask {
@@ -3703,10 +4173,15 @@ impl DualPlaneSession {
         let current_inputs = self.live_detection_context();
         let current_initial_context = self.live_initial_detection_context(&current_inputs);
         let row_mappings = primary_repaint_row_mappings(&snapshot.inputs, &current_inputs);
-        let context_signature = live_detection_context_signature(&current_inputs);
+        let context_signature =
+            live_detection_context_signature(&current_inputs, self.inline_math_bands);
         let stable = vec![true; self.live_rows.len()];
-        let candidate_rows =
-            live_candidate_rows(&current_inputs, current_initial_context.clone(), &stable);
+        let candidate_rows = live_candidate_rows(
+            &current_inputs,
+            current_initial_context.clone(),
+            &stable,
+            self.inline_math_bands,
+        );
 
         let mut preserved = BTreeMap::new();
         let mut occupied = BTreeSet::new();
@@ -4811,11 +5286,12 @@ impl DualPlaneSession {
         if start >= end {
             return;
         }
+        let inline_formulas = self.inline_math_bands;
         let interior: Vec<TranscriptId> = self
             .document
             .entries()
             .range((Bound::Excluded(start), Bound::Excluded(end)))
-            .filter(|(_, entry)| may_contain_display_math(&entry.line.text))
+            .filter(|(_, entry)| may_contain_math(&entry.line.text, inline_formulas))
             .map(|(id, _)| *id)
             .collect();
         for id in interior {
@@ -5039,13 +5515,14 @@ impl DualPlaneSession {
             return live_scheduled;
         }
 
+        let inline_formulas = self.inline_math_bands;
         let mut candidates = visible
             .iter()
             .filter(|id| {
                 self.document
                     .entries()
                     .get(id)
-                    .is_some_and(|entry| may_contain_display_math(&entry.line.text))
+                    .is_some_and(|entry| may_contain_math(&entry.line.text, inline_formulas))
             })
             .copied()
             .collect::<BTreeSet<_>>();
@@ -5063,7 +5540,7 @@ impl DualPlaneSession {
                 .get(id)
                 .and_then(|context| context.required_start(*id))
                 .is_some_and(|start| start <= last_visible);
-            if overlaps_visible && may_contain_display_math(&entry.line.text) {
+            if overlaps_visible && may_contain_math(&entry.line.text, inline_formulas) {
                 candidates.insert(*id);
             }
         }
@@ -5151,19 +5628,26 @@ impl DualPlaneSession {
         Some(output)
     }
 
+    /// The LaTeX this anchor names, ready for the clipboard.
+    ///
+    /// When the anchor carries a run index the answer is that one run's source, not the line's.
+    /// The line's `original_source` for an inline occurrence is every run joined by `"; "` — a
+    /// serviceable label, and not LaTeX anyone can paste; copying `x; y` from a line holding
+    /// `$x$` and `$y$` was the observable form of the anchor having no run identity at all.
     pub fn math_source(&self, anchor: &MathBlockAnchor) -> Option<&str> {
         match anchor {
-            MathBlockAnchor::History { start, end } => self
+            MathBlockAnchor::History { start, end, run } => self
                 .decorations
                 .get(start)
                 .filter(|record| record.block_end == Some(*end))
                 .and_then(|record| record.span.as_ref())
-                .map(|span| span.original_source.as_str()),
+                .and_then(|span| span_source(span, *run)),
             MathBlockAnchor::Live {
                 screen,
                 start,
                 end,
                 generation,
+                run,
                 ..
             } => self
                 .live_decorations
@@ -5174,13 +5658,13 @@ impl DualPlaneSession {
                         && record.end == *end
                         && record.generation == *generation
                 })
-                .map(|record| record.span.original_source.as_str()),
+                .and_then(|record| span_source(&record.span, *run)),
         }
     }
 
     pub fn toggle_math_source(&mut self, anchor: &MathBlockAnchor) -> bool {
         let preference = match anchor {
-            MathBlockAnchor::History { start, end } => {
+            MathBlockAnchor::History { start, end, .. } => {
                 let Some(record) = self
                     .decorations
                     .get_mut(start)
@@ -5233,7 +5717,8 @@ impl DualPlaneSession {
                     anchor,
                     MathBlockAnchor::History {
                         start: anchor_start,
-                        end
+                        end,
+                        ..
                     } if anchor_start == start && record.block_end == Some(*end)
                 )
             });
@@ -5284,7 +5769,7 @@ impl DualPlaneSession {
         let pane_width_px = self.math_pane_width_px();
         let display_left_inset_subpixels = self.display_math_left_inset_subpixels();
         match anchor {
-            MathBlockAnchor::History { start, end } => {
+            MathBlockAnchor::History { start, end, .. } => {
                 let Some(record) = self
                     .decorations
                     .get_mut(start)
@@ -5574,6 +6059,7 @@ impl DualPlaneSession {
             .div_euclid(u64::from(display.width_px).max(1))
             .clamp(1, u64::from(u32::MAX)) as u32;
         Some(ProjectedMathArtifact {
+            inline_runs: Vec::new(),
             key: display.key.clone(),
             end,
             rgba: Arc::clone(&display.rgba),
@@ -5839,6 +6325,7 @@ impl DualPlaneSession {
                     band_start_row,
                     band_end_row,
                     generation,
+                    ..
                 } => {
                     let Some(record) = self.live_decorations.get(&start.row).filter(|record| {
                         record.screen == *screen
@@ -5889,7 +6376,11 @@ impl DualPlaneSession {
             };
             frame.math_blocks.push(MathBlockPlacement {
                 start: *start,
-                anchor: MathBlockAnchor::History { start: *start, end },
+                anchor: MathBlockAnchor::History {
+                    start: *start,
+                    end,
+                    run: None,
+                },
                 source: record
                     .span
                     .as_ref()
@@ -5956,6 +6447,7 @@ impl DualPlaneSession {
             frame.math_blocks.push(MathBlockPlacement {
                 start: TranscriptId(0),
                 anchor: MathBlockAnchor::Live {
+                    run: None,
                     screen: record.screen,
                     start: record.start,
                     end: record.end,
@@ -6008,8 +6500,11 @@ impl DualPlaneSession {
             let Some(entry) = self.document.entries().get(start) else {
                 continue;
             };
+            let rendered_runs = artifact.inline_runs.clone();
             let Some((row, left_column, cells)) =
-                frozen_inline_cells(frame, *start, &entry.line, span)
+                inline_placement_geometry(span, &rendered_runs, |run| {
+                    frozen_inline_run_cells(frame, *start, &entry.line, run)
+                })
             else {
                 continue;
             };
@@ -6029,6 +6524,7 @@ impl DualPlaneSession {
             frame.math_blocks.push(MathBlockPlacement {
                 start: *start,
                 anchor: MathBlockAnchor::History {
+                    run: None,
                     start: *start,
                     end: *start,
                 },
@@ -6075,8 +6571,11 @@ impl DualPlaneSession {
             else {
                 continue;
             };
+            let rendered_runs = artifact.inline_runs.clone();
             let Some((row, left_column, cells)) =
-                live_inline_cells(frame, record.start.row, text, &record.span)
+                inline_placement_geometry(&record.span, &rendered_runs, |run| {
+                    live_inline_run_cells(frame, record.start.row, text, run)
+                })
             else {
                 continue;
             };
@@ -6096,6 +6595,7 @@ impl DualPlaneSession {
             frame.math_blocks.push(MathBlockPlacement {
                 start: TranscriptId(0),
                 anchor: MathBlockAnchor::Live {
+                    run: None,
                     screen: record.screen,
                     start: record.start,
                     end: record.end,
@@ -6143,7 +6643,11 @@ impl DualPlaneSession {
                 continue;
             };
             frame.math_failures.push(MathFailurePlacement {
-                anchor: MathBlockAnchor::History { start: *start, end },
+                anchor: MathBlockAnchor::History {
+                    start: *start,
+                    end,
+                    run: None,
+                },
                 top_subpixels: first.top_subpixels,
                 height_subpixels: last
                     .top_subpixels
@@ -6176,6 +6680,7 @@ impl DualPlaneSession {
             };
             frame.math_failures.push(MathFailurePlacement {
                 anchor: MathBlockAnchor::Live {
+                    run: None,
                     screen: record.screen,
                     start: record.start,
                     end: record.end,
@@ -6199,7 +6704,7 @@ impl DualPlaneSession {
                 && placement.artifact.mode == MathMode::Display
         }) {
             match placement.anchor {
-                MathBlockAnchor::History { start, end } => {
+                MathBlockAnchor::History { start, end, .. } => {
                     rendered_rows.extend((0..drawable_frame_row_count(frame)).filter(|row| {
                         frame_row_history_id(frame, *row).is_some_and(|id| start <= id && id <= end)
                     }));
@@ -7269,7 +7774,7 @@ impl DualPlaneSession {
             .saturating_add(invalidated as u64);
         self.live_decorations = preserved;
 
-        let context_signature = live_detection_context_signature(&inputs);
+        let context_signature = live_detection_context_signature(&inputs, self.inline_math_bands);
         for record in self.live_decorations.values_mut() {
             record.inputs = Arc::clone(&inputs);
             if let Some(state) = self.live_rows.get_mut(record.end.row as usize) {
@@ -7313,6 +7818,9 @@ impl DualPlaneSession {
                         text,
                         continues: captured.continues,
                         cell_boundaries,
+                        // A row-identity probe, never a scan input: `exactly_matches` compares the
+                        // captured text, wrap flag and cell map. The site would be noise here.
+                        site: InlineMathSite::Ineligible,
                     };
                     proven
                         .exactly_matches(&captured)
@@ -7503,11 +8011,17 @@ impl DualPlaneSession {
         // handoff; the normal frozen worker remains the source of truth.
         let block = (expected_end == closing_id.0)
             .then(|| {
-                detect_math_blocks_with_options(
+                detect_math_blocks_with_sites(
                     self.document
                         .entries()
                         .range(candidate_start..=closing_id)
-                        .map(|(id, entry)| (*id, entry.line.text.as_str())),
+                        .map(|(id, entry)| {
+                            (
+                                *id,
+                                entry.line.text.as_str(),
+                                inline_math_site(self.command_output_covers_history(*id)),
+                            )
+                        }),
                     self.detection_options(),
                 )
                 .into_iter()
@@ -7579,7 +8093,7 @@ impl DualPlaneSession {
         let Some(entry) = self.document.entries().get(&id) else {
             return;
         };
-        let may_contain_math = may_contain_display_math(&entry.line.text);
+        let armed_for_math = may_contain_math(&entry.line.text, self.inline_math_bands);
         let versions = VersionStamp {
             source: entry.line.source_generation,
             detection: self.detection_revision,
@@ -7601,7 +8115,7 @@ impl DualPlaneSession {
             .insert(id, DecorationRecord::frozen(versions));
         // Ordinary frozen lines take only the allocation-free delimiter prefilter. A candidate
         // snapshots immutable source here; the worker owns fence/pairing/escape/size detection.
-        if may_contain_math
+        if armed_for_math
             && !self.semantic_input_overlaps_history(id)
             && !self.primary_parked
             && self.resize_epoch.decorations_allowed()
@@ -7864,11 +8378,14 @@ impl DualPlaneSession {
         if self.primary_parked || !self.resize_epoch.decorations_allowed() {
             return;
         }
+        let inline_formulas = self.inline_math_bands;
         let candidates = self
             .document
             .entries()
             .iter()
-            .filter_map(|(id, entry)| may_contain_display_math(&entry.line.text).then_some(*id))
+            .filter_map(|(id, entry)| {
+                may_contain_math(&entry.line.text, inline_formulas).then_some(*id)
+            })
             .collect::<Vec<_>>();
         for id in candidates {
             self.schedule_scan(id);
@@ -7981,6 +8498,7 @@ impl DualPlaneSession {
                 id: *id,
                 text: entry.line.text.clone(),
                 cell_boundaries: frozen_cell_boundaries(&entry.line),
+                site: inline_math_site(self.command_output_covers_history(*id)),
             });
         }
         (inputs.first().is_some_and(|input| input.id == anchor)
@@ -8043,6 +8561,7 @@ impl DualPlaneSession {
                     id: *id,
                     text: entry.line.text.clone(),
                     cell_boundaries: frozen_cell_boundaries(&entry.line),
+                    site: inline_math_site(self.command_output_covers_history(*id)),
                 });
             }
             if inputs.first().is_none_or(|input| input.id != start)
@@ -8059,6 +8578,7 @@ impl DualPlaneSession {
                 id: candidate_id,
                 text: entry.line.text.clone(),
                 cell_boundaries: frozen_cell_boundaries(&entry.line),
+                site: inline_math_site(self.command_output_covers_history(candidate_id)),
             });
         }
         let Some(mut task) = self.decorations.get_mut(&candidate_id).and_then(|record| {
@@ -8313,10 +8833,19 @@ fn render_task_math(
     let terminal_descent_subpixels = cell_height_subpixels
         .max(1)
         .saturating_sub(terminal_baseline_subpixels);
+    // Per-run geometry verdict. A run renders in place when its raster fits the cells its own
+    // source occupies, and falls back to its source text when it does not — by itself, whole. The
+    // rule was always right; applying it to the whole line was not, because one wide formula then
+    // dragged every other formula on that row back to source with it. A rejected run contributes
+    // nothing to the composite and its cells are never cleared, so what stands there is the
+    // terminal text that was already correct.
+    //
+    // An *engine* error is deliberately not per-run: a source that does not compile is a fact
+    // worth telling the user about, and it surfaces as this record's failure reason.
     let mut rendered = Vec::with_capacity(span.inline_runs.len());
     let mut baseline_px = 0_u32;
     let mut render_time = Duration::ZERO;
-    for run in &span.inline_runs {
+    for (index, run) in span.inline_runs.iter().enumerate() {
         let start = usize::try_from(run.byte_start).map_err(|_| MathRenderError::InlineGeometry)?;
         let end = usize::try_from(run.byte_end).map_err(|_| MathRenderError::InlineGeometry)?;
         let (Some(before), Some(delimited)) = (line.get(..start), line.get(start..end)) else {
@@ -8333,21 +8862,24 @@ fn render_task_math(
             terminal_descent_subpixels,
         ) || raster.width_px > available_px.max(1)
         {
-            return Err(MathRenderError::InlineGeometry);
+            continue;
         }
         baseline_px = baseline_px.max(raster.baseline_px.ceil().max(0.0) as u32);
         render_time = render_time.saturating_add(raster.render_time);
         let x = (column as f32 * cell_width_px).round().max(0.0) as u32;
-        rendered.push((x, raster));
+        let run_index = u32::try_from(index).map_err(|_| MathRenderError::InlineGeometry)?;
+        rendered.push((run_index, x, raster));
     }
+    // `max` over an empty set is how "every run fell back" arrives here: the line keeps its source
+    // in full, which is exactly the old whole-line outcome, now reached only when it is true.
     let width_px = rendered
         .iter()
-        .map(|(x, raster)| x.saturating_add(raster.width_px))
+        .map(|(_, x, raster)| x.saturating_add(raster.width_px))
         .max()
         .ok_or(MathRenderError::InlineGeometry)?;
     let height_px = rendered
         .iter()
-        .map(|(_, raster)| {
+        .map(|(_, _, raster)| {
             baseline_px
                 .saturating_sub(raster.baseline_px.ceil().max(0.0) as u32)
                 .saturating_add(raster.height_px)
@@ -8367,7 +8899,8 @@ fn render_task_math(
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or(MathRenderError::InvalidDimensions)?;
     let mut rgba = vec![0_u8; len];
-    for (x, raster) in rendered {
+    let mut inline_runs = Vec::with_capacity(rendered.len());
+    for (run, x, raster) in rendered {
         let y = baseline_px.saturating_sub(raster.baseline_px.ceil().max(0.0) as u32);
         for row in 0..raster.height_px {
             let source_start = row as usize * raster.width_px as usize * 4;
@@ -8376,6 +8909,11 @@ fn render_task_math(
             let target_end = target_start + raster.width_px as usize * 4;
             rgba[target_start..target_end].copy_from_slice(&raster.rgba[source_start..source_end]);
         }
+        inline_runs.push(InlineRunPlacement {
+            run,
+            x_px: x,
+            width_px: raster.width_px,
+        });
     }
     Ok(MathRaster {
         rgba,
@@ -8386,6 +8924,7 @@ fn render_task_math(
         descent_px: height_px.saturating_sub(baseline_px) as f32,
         baseline_px: baseline_px as f32,
         render_time,
+        inline_runs,
     })
 }
 
@@ -8418,6 +8957,7 @@ fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> Placeholder
         mode: task.span.mode,
         rgba: Arc::from(raster.rgba),
         render_time: raster.render_time,
+        inline_runs: raster.inline_runs,
     }
 }
 
@@ -8438,6 +8978,7 @@ fn artifact_from_live_raster(task: &LiveDetectionTask, raster: MathRaster) -> Pl
         mode: task.span.mode,
         rgba: Arc::from(raster.rgba),
         render_time: raster.render_time,
+        inline_runs: raster.inline_runs,
     }
 }
 
@@ -8471,6 +9012,7 @@ fn live_placeholder(task: &LiveDetectionTask) -> PlaceholderArtifact {
         mode: task.span.mode,
         rgba: Arc::from(vec![0; 4]),
         render_time: Duration::ZERO,
+        inline_runs: Vec::new(),
     }
 }
 
@@ -8534,6 +9076,7 @@ fn project_artifact_at_scale(
         .saturating_mul(i64::from(scale_milli))
         / 1000;
     ProjectedMathArtifact {
+        inline_runs: artifact.inline_runs.clone(),
         key: artifact.key.clone(),
         end: artifact.block_end,
         rgba: Arc::clone(&artifact.rgba),
@@ -8861,11 +9404,17 @@ fn size_resolved_live_task_band(task: &mut LiveDetectionTask) {
     }
 }
 
-fn live_detection_context_signature(inputs: &[LiveDetectionInput]) -> u64 {
+/// The identity of everything on this screen a math scan can depend on.
+///
+/// Only rows that could take part in a detection are hashed, so ordinary output churn does not
+/// re-arm every candidate. An inline-capable row has to be in that set once the switch is on: its
+/// text is its own detection input, and a row that changed from `$x^2$` to `$y^2$` while no `$$`
+/// moved would otherwise hash identically and never be re-detected.
+fn live_detection_context_signature(inputs: &[LiveDetectionInput], inline_formulas: bool) -> u64 {
     let mut hasher = DefaultHasher::new();
     for input in inputs {
         let trimmed = input.text.trim();
-        let structural = may_contain_display_math(trimmed)
+        let structural = may_contain_math(trimmed, inline_formulas)
             || trimmed.starts_with("```")
             || trimmed.starts_with("~~~");
         if structural {
@@ -8919,6 +9468,30 @@ fn may_contain_display_math(text: &str) -> bool {
         || text.contains(r"\]")
         || text.contains(r"\begin{")
         || text.contains(r"\end{")
+}
+
+/// Could this line carry an inline `$…$` run? The cheapest structurally honest question.
+///
+/// A run needs a *pair* of delimiters, so one `$` can never make one and a single-dollar line is
+/// not armed — `echo $PATH` and `Cost: $5` cost a two-byte scan and nothing else. Two is where the
+/// pre-filter has to stop being clever: `$5 和 $10` also has two, and deciding that it is currency
+/// rather than mathematics is the disambiguator's job, not a prefilter's.
+///
+/// What keeps the widened candidate set from becoming work on every shell line that mentions
+/// `$PATH` twice is the OSC 133 site gate downstream: `detect_inline_math` returns immediately for
+/// anything that is not command output, so an armed prompt or command-echo line resolves to no
+/// occurrence on the first branch of the scanner and is marked complete. The prefilter buys a scan;
+/// the site gate makes that scan O(1) wherever the answer was always going to be no.
+fn may_contain_inline_math(text: &str) -> bool {
+    text.bytes().filter(|byte| *byte == b'$').take(2).count() == 2
+}
+
+/// The arming pre-filter for math detection: display delimiters always, inline pairs only while
+/// the "Inline formulas" switch is on. With the switch off the scanner is guaranteed to produce no
+/// inline occurrence (`DetectionOptions::inline_formulas`), so arming a row for one would be work
+/// that cannot have an outcome.
+fn may_contain_math(text: &str, inline_formulas: bool) -> bool {
+    may_contain_display_math(text) || (inline_formulas && may_contain_inline_math(text))
 }
 
 fn empty_live_math_span() -> MathSpan {
@@ -9676,6 +10249,7 @@ fn live_candidate_rows(
     inputs: &[LiveDetectionInput],
     mut context: DetectionContext,
     stable: &[bool],
+    inline_formulas: bool,
 ) -> Vec<u32> {
     let mut candidates = Vec::new();
     let mut hidden_code_prefix = context.is_commonmark_code();
@@ -9690,7 +10264,7 @@ fn live_candidate_rows(
             continue;
         }
         if !hidden_code_prefix
-            && may_contain_display_math(&logical_text)
+            && may_contain_math(&logical_text, inline_formulas)
             && let Some(row) = logical_grid_rows
                 .last()
                 .copied()
@@ -9946,89 +10520,128 @@ fn frame_row_for_history(frame: &ViewportFrame, id: TranscriptId) -> Option<u32>
     (0..drawable_frame_row_count(frame)).find(|row| frame_row_history_id(frame, *row) == Some(id))
 }
 
-fn frozen_inline_cells(
+/// Frame cells one frozen `$…$` run occupies, as `(row, left column, cell indices)`.
+///
+/// The run is located by grapheme offset, which is the coordinate the frame's history anchors are
+/// written in — so a wide character's base cell and its spacer both carry an offset inside the run
+/// and both are returned. That is why this path never measures width itself: the frame already
+/// resolved every character to the cells it was drawn in.
+/// One span's copyable source, narrowed to a single inline run when the anchor names one. An index
+/// past the span's runs is a stale anchor and answers nothing rather than answering the wrong run.
+fn span_source(span: &MathSpan, run: Option<u32>) -> Option<&str> {
+    match run {
+        None => Some(span.original_source.as_str()),
+        Some(run) => span
+            .inline_runs
+            .get(run as usize)
+            .map(|run| run.source.as_str()),
+    }
+}
+
+fn frozen_inline_run_cells(
     frame: &ViewportFrame,
     id: TranscriptId,
     line: &FrozenLine,
-    span: &MathSpan,
+    run: &InlineMathRun,
 ) -> Option<(u32, u32, Vec<usize>)> {
     let columns = frame.columns.get() as usize;
+    let start = u32::try_from(
+        line.grapheme_boundaries
+            .binary_search(&run.byte_start)
+            .ok()?,
+    )
+    .ok()?;
+    let end = u32::try_from(line.grapheme_boundaries.binary_search(&run.byte_end).ok()?).ok()?;
     let mut row = None;
     let mut left = u32::MAX;
     let mut cells = Vec::new();
-    for run in &span.inline_runs {
-        let start = u32::try_from(
-            line.grapheme_boundaries
-                .binary_search(&run.byte_start)
-                .ok()?,
-        )
-        .ok()?;
-        let end =
-            u32::try_from(line.grapheme_boundaries.binary_search(&run.byte_end).ok()?).ok()?;
-        let mut found = false;
-        for (index, anchors) in frame
-            .cell_anchors
-            .iter()
-            .take(frame.drawable_rows().saturating_mul(columns))
-            .enumerate()
-        {
-            let ContentAnchor::History {
-                id: anchor_id,
-                offset,
-                ..
-            } = &anchors.start
-            else {
-                continue;
-            };
-            if *anchor_id != id || offset.0 < start || offset.0 >= end {
-                continue;
-            }
-            let cell_row = u32::try_from(index / columns).ok()?;
-            let cell_column = u32::try_from(index % columns).ok()?;
-            if row.is_some_and(|current| current != cell_row) {
-                return None;
-            }
-            row = Some(cell_row);
-            left = left.min(cell_column);
-            cells.push(index);
-            found = true;
+    for (index, anchors) in frame
+        .cell_anchors
+        .iter()
+        .take(frame.drawable_rows().saturating_mul(columns))
+        .enumerate()
+    {
+        let ContentAnchor::History {
+            id: anchor_id,
+            offset,
+            ..
+        } = &anchors.start
+        else {
+            continue;
+        };
+        if *anchor_id != id || offset.0 < start || offset.0 >= end {
+            continue;
         }
-        if !found {
+        let cell_row = u32::try_from(index / columns).ok()?;
+        let cell_column = u32::try_from(index % columns).ok()?;
+        if row.is_some_and(|current| current != cell_row) {
             return None;
         }
+        row = Some(cell_row);
+        left = left.min(cell_column);
+        cells.push(index);
     }
     Some((row?, left, cells))
 }
 
-fn live_inline_cells(
+/// Frame cells one live-grid `$…$` run occupies, as `(row, left column, cell indices)`.
+///
+/// Columns come from `UnicodeWidthStr::width` over the row's own text — the display width, not a
+/// character count — because that is what the grid drew and what `render_task_math` measured the
+/// run's available box with. The two must agree or a CJK line places its formula in the wrong
+/// cells.
+fn live_inline_run_cells(
     frame: &ViewportFrame,
     live_row: u32,
     text: &str,
-    span: &MathSpan,
+    run: &InlineMathRun,
 ) -> Option<(u32, u32, Vec<usize>)> {
     let frame_row = frame
         .row_map
         .iter()
         .position(|mapped| mapped.live_grid_row == Some(live_row))?;
     let columns = frame.columns.get() as usize;
-    let mut left = usize::MAX;
-    let mut cells = Vec::new();
-    for run in &span.inline_runs {
-        let start = usize::try_from(run.byte_start).ok()?;
-        let end = usize::try_from(run.byte_end).ok()?;
-        let start_column = UnicodeWidthStr::width(text.get(..start)?);
-        let end_column = start_column.saturating_add(UnicodeWidthStr::width(text.get(start..end)?));
-        if start_column >= end_column || end_column > columns {
-            return None;
-        }
-        left = left.min(start_column);
-        cells.extend((start_column..end_column).map(|column| frame_row * columns + column));
+    let start = usize::try_from(run.byte_start).ok()?;
+    let end = usize::try_from(run.byte_end).ok()?;
+    let start_column = UnicodeWidthStr::width(text.get(..start)?);
+    let end_column = start_column.saturating_add(UnicodeWidthStr::width(text.get(start..end)?));
+    if start_column >= end_column || end_column > columns {
+        return None;
     }
     Some((
         u32::try_from(frame_row).ok()?,
-        u32::try_from(left).ok()?,
-        cells,
+        u32::try_from(start_column).ok()?,
+        (start_column..end_column)
+            .map(|column| frame_row * columns + column)
+            .collect(),
     ))
+}
+
+/// Assemble one inline occurrence's presentation geometry from its per-run cell lookup.
+///
+/// `rendered` is the artifact's own account of which runs it contains — a run that fell back to
+/// source on width is absent, so its cells are not collected and its terminal text survives
+/// untouched beside its neighbours.
+///
+/// The composite's left edge is run 0's column whether or not run 0 rendered, because that is the
+/// origin `render_task_math` measured every x offset from. A fallen-back leading run leaves
+/// transparent pixels over its own text, which is exactly what should be there.
+fn inline_placement_geometry(
+    span: &MathSpan,
+    rendered: &[InlineRunPlacement],
+    mut run_cells: impl FnMut(&InlineMathRun) -> Option<(u32, u32, Vec<usize>)>,
+) -> Option<(u32, u32, Vec<usize>)> {
+    let (row, left, _) = run_cells(span.inline_runs.first()?)?;
+    let mut cells = Vec::new();
+    for placement in rendered {
+        let run = span.inline_runs.get(placement.run as usize)?;
+        let (run_row, _, run_cell_indices) = run_cells(run)?;
+        if run_row != row {
+            return None;
+        }
+        cells.extend(run_cell_indices);
+    }
+    (!cells.is_empty()).then_some((row, left, cells))
 }
 
 fn frame_row_for_live_range(
@@ -10210,6 +10823,15 @@ fn compare_selection_anchors(
     }
 }
 
+/// The one place a coverage verdict becomes a site. `false` is `Ineligible`, never "probably fine".
+fn inline_math_site(covered_by_command_output: bool) -> InlineMathSite {
+    if covered_by_command_output {
+        InlineMathSite::CommandOutput
+    } else {
+        InlineMathSite::Ineligible
+    }
+}
+
 /// Row-granular projection of the half-open command span `[start, end)`.
 ///
 /// A physical row belongs to the region when any of its cells does, so the end row is included
@@ -10231,6 +10853,24 @@ fn selection_overlaps(
         .is_some_and(|order| order == std::cmp::Ordering::Less)
         && compare_selection_anchors(item_end, selection_start)
             .is_some_and(|order| order == std::cmp::Ordering::Greater)
+}
+
+/// Does `[selection_start, selection_end]` contain the *whole* of `[item_start, item_end]`?
+///
+/// The strict counterpart to [`selection_overlaps`], for the questions where partial contact is not
+/// enough. An incomparable pair — the alternate screen against the primary document namespace —
+/// answers `false`, so a span can no more be covered across a plane boundary than it can overlap
+/// one.
+fn selection_covers(
+    item_start: &ContentAnchor,
+    item_end: &ContentAnchor,
+    selection_start: &ContentAnchor,
+    selection_end: &ContentAnchor,
+) -> bool {
+    compare_selection_anchors(selection_start, item_start)
+        .is_some_and(|order| order != std::cmp::Ordering::Greater)
+        && compare_selection_anchors(item_end, selection_end)
+            .is_some_and(|order| order != std::cmp::Ordering::Greater)
 }
 
 fn trim_copy_line_end(text: &mut String) {
@@ -10302,6 +10942,7 @@ mod tests {
                 },
                 text: (*text).to_owned(),
                 continues: false,
+                site: InlineMathSite::Ineligible,
                 cell_boundaries: std::iter::once((0, 0))
                     .chain(
                         text.char_indices()
@@ -10379,6 +11020,7 @@ mod tests {
                 restore_stripped_environment_newlines: false,
                 restore_stripped_inline_environment_newlines: false,
                 reject_claude_code_jump_chip_overlay: false,
+                inline_formulas: true,
             }
         );
     }
@@ -10633,6 +11275,7 @@ mod tests {
             descent_px: 4.0,
             baseline_px: 12.0,
             render_time: std::time::Duration::from_millis(3),
+            inline_runs: Vec::new(),
         }
     }
 
@@ -10743,6 +11386,7 @@ mod tests {
         let anchor = MathBlockAnchor::History {
             start: failed.0,
             end: failed.1,
+            run: None,
         };
         assert!(session.set_math_hover(Some(&anchor)));
         let mut projection = session.new_projection(session.layout_key());
@@ -15314,6 +15958,7 @@ mod tests {
             text: input_text.clone(),
             continues: false,
             cell_boundaries: ascii_boundaries(&input_text),
+            site: InlineMathSite::Ineligible,
         };
         // The chip overwrote columns 10..35 mid-source: the leaked prefix AND the leaked tail
         // after the chip are cleared, while every chip glyph keeps its text and style. Column 24
@@ -15340,6 +15985,7 @@ mod tests {
             text: chrome_text.to_owned(),
             continues: false,
             cell_boundaries: vec![(0, 0), (u32::try_from(chrome_text.len()).unwrap(), 16)],
+            site: InlineMathSite::Ineligible,
         };
         assert_eq!(proven.source_clear_ranges(&chrome), None);
     }
@@ -20577,6 +21223,567 @@ mod tests {
         assert!(
             !session.typed_shell_input_live(),
             "a closed region releases the gate whether or not its start is still on the grid"
+        );
+    }
+
+    /// The site of the grid row whose text contains `needle`, as the live scan would see it.
+    fn grid_site_of(session: &DualPlaneSession, needle: &str) -> InlineMathSite {
+        let inputs = session.live_detection_context();
+        let matching = inputs
+            .iter()
+            .filter(|input| {
+                matches!(input.source, LiveDetectionSource::Grid { .. })
+                    && input.text.contains(needle)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matching.len(),
+            1,
+            "the fixture must put {needle:?} on exactly one grid row, or the site read below \
+             proves nothing; rows: {:?}",
+            inputs.iter().map(|input| &input.text).collect::<Vec<_>>()
+        );
+        matching[0].site
+    }
+
+    /// Terminal cell metrics an inline formula can actually be placed in: a 24 px line box with a
+    /// 19 px ASCII baseline and 12 px cells. Inline rendering is baseline-anchored and refuses
+    /// outright without a measured baseline, so a session left at the constructor's defaults can
+    /// never produce an inline block whatever the detector proves.
+    fn seat_inline_metrics(session: &mut DualPlaneSession) {
+        session.set_cell_height_subpixels(NonZeroI64::new(24 * SUBPIXELS_PER_PX).unwrap());
+        session.set_cell_width_subpixels(NonZeroI64::new(12 * SUBPIXELS_PER_PX).unwrap());
+        session.set_ascii_baseline_subpixels(NonZeroI64::new(19 * SUBPIXELS_PER_PX).unwrap());
+    }
+
+    /// Resolve and rasterize every queued live math task through the production worker entry, with
+    /// the real engine. Nothing about an inline block can be proven with a synthetic raster: the
+    /// composite's size, its per-run offsets and the per-run width verdict are all things the
+    /// rasterizer decides.
+    fn complete_live_math_for_real(session: &mut DualPlaneSession) -> usize {
+        let engine = MathEngine::new();
+        let mut completed = 0;
+        while let Some(mut task) = session.take_live_worker_task() {
+            let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
+            if session.complete_live_worker_result(task, result) {
+                completed += 1;
+            }
+        }
+        completed
+    }
+
+    fn complete_frozen_math_for_real(session: &mut DualPlaneSession) -> usize {
+        let engine = MathEngine::new();
+        let mut completed = 0;
+        while let Some(mut task) = session.take_worker_task() {
+            let result = render_detection_task(&engine, &mut task, [220, 220, 220]);
+            if session.complete_worker_result(task, result) {
+                completed += 1;
+            }
+        }
+        completed
+    }
+
+    fn rendered_inline_blocks(frame: &ViewportFrame) -> Vec<&bt_viewport::MathBlockPlacement> {
+        frame
+            .math_blocks
+            .iter()
+            .filter(|block| {
+                block.artifact.mode == MathMode::Inline
+                    && block.display == MathBlockDisplay::Rendered
+            })
+            .collect()
+    }
+
+    fn frame_row_text(frame: &ViewportFrame, live_row: u32) -> String {
+        let columns = frame.columns.get() as usize;
+        let row = frame
+            .row_map
+            .iter()
+            .position(|mapped| mapped.live_grid_row == Some(live_row))
+            .expect("the live row is present in the frame");
+        (0..columns)
+            .map(|column| frame.cells[row * columns + column].text.as_str())
+            .collect()
+    }
+
+    /// PIN: a proven inline run reaches the screen.
+    ///
+    /// This is the assertion whose absence let three stacked defects ship green. Every earlier
+    /// inline test stopped at the `InlineMathSite` value — the disambiguator's *input* — while the
+    /// arming predicate never queued the row, the detected span carried no cell segments, and the
+    /// frozen worker asked for no sites. All three are invisible to a site assertion and all three
+    /// are fatal here, because this drives real VT bytes with real OSC 133 markers all the way to
+    /// `frame.math_blocks` and demands a rendered inline block with its source cells blanked.
+    #[test]
+    fn an_inline_run_printed_by_a_command_arrives_on_screen_as_a_rendered_block() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\nenergy $E = mc^2$ here\r\n",
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&session, "energy"),
+            InlineMathSite::CommandOutput,
+            "the fixture must really put the formula inside C..D"
+        );
+
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1,
+            "blocker 1: a row whose only math is `$...$` must be armed as a live candidate"
+        );
+        assert_eq!(
+            complete_live_math_for_real(&mut session),
+            1,
+            "blocker 2: an armed inline row must resolve to an anchored occurrence"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "one rendered inline block, not zero: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(blocks[0].artifact.inline_runs.len(), 1);
+        assert_eq!(blocks[0].artifact.inline_runs[0].run, 0);
+        let text = frame_row_text(&frame, 1);
+        assert!(
+            text.starts_with("energy ") && text.contains("here"),
+            "surrounding prose stays: {text:?}"
+        );
+        assert!(
+            !text.contains('$'),
+            "the rendered run's source delimiters must be cleared from the grid: {text:?}"
+        );
+    }
+
+    /// PIN (blocker 3): the same run keeps its verdict once the line is frozen scrollback.
+    ///
+    /// The frozen worker scans text with no idea where a line sat in the command lifecycle, so
+    /// without the session capturing the site into the task the scan reads every line as
+    /// `Ineligible` and the formula un-typesets itself the moment it leaves the grid.
+    #[test]
+    fn a_frozen_command_output_line_keeps_its_inline_run() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(6));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\nenergy $E = mc^2$ here\r\n",
+                started,
+            )
+            .unwrap();
+        session
+            .feed_at(
+                b"pad\r\npad\r\npad\r\npad\r\npad\r\npad\r\npad\r\n",
+                started,
+            )
+            .unwrap();
+        assert!(
+            session
+                .document
+                .entries()
+                .values()
+                .any(|entry| entry.line.text.contains("energy $E = mc^2$")),
+            "the fixture must actually freeze the formula line into history"
+        );
+
+        assert!(
+            complete_frozen_math_for_real(&mut session) >= 1,
+            "a frozen command-output line carrying `$...$` must produce a resolved frozen task"
+        );
+        let inline = session
+            .decorations
+            .values()
+            .filter(|record| {
+                record
+                    .span
+                    .as_ref()
+                    .is_some_and(|span| span.mode == MathMode::Inline)
+            })
+            .count();
+        assert_eq!(
+            inline, 1,
+            "the frozen scan must carry the captured OSC 133 site, not default to Ineligible"
+        );
+    }
+
+    /// PIN (slice 3): one over-wide run falls back to source alone; its neighbour still renders.
+    ///
+    /// The width rule — render in place if it fits, source if it does not — was correct and
+    /// line-wide. A single dense formula therefore dragged every other formula on the row down with
+    /// it. Both halves are asserted from one fixture so neither a return to the whole-line verdict
+    /// nor a silent half-render of the wide run can pass.
+    #[test]
+    fn an_over_wide_run_falls_back_alone_while_its_neighbour_renders() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(70), nz(8));
+        session.set_cell_height_subpixels(NonZeroI64::new(24 * SUBPIXELS_PER_PX).unwrap());
+        // Narrow cells put the two runs on opposite sides of the width rule. Both render the same
+        // shape at the same size, so the only discriminator is how many cells each run's own source
+        // occupies: the first is spelled with math whitespace (which typesets to nothing and buys
+        // columns), the second is spelled as tightly as it can be. That is exactly the real-screen
+        // situation — a dense formula whose ink outgrows the text it replaces.
+        session.set_cell_width_subpixels(NonZeroI64::new(3 * SUBPIXELS_PER_PX).unwrap());
+        session.set_ascii_baseline_subpixels(NonZeroI64::new(19 * SUBPIXELS_PER_PX).unwrap());
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n\
+                  a $x                    +                    y$ b $m+n$ c\r\n",
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        assert_eq!(complete_live_math_for_real(&mut session), 1);
+
+        let record = session
+            .live_decorations
+            .values()
+            .find(|record| record.span.mode == MathMode::Inline)
+            .expect("the row resolves to an inline occurrence");
+        assert_eq!(record.span.inline_runs.len(), 2, "the fixture has two runs");
+        let artifact = record.artifact.as_ref().expect("the composite rasterized");
+        assert_eq!(
+            artifact.inline_runs.len(),
+            1,
+            "exactly one run fits its own cells; the other falls back by itself: {:?}",
+            artifact.inline_runs
+        );
+        assert_eq!(
+            artifact.inline_runs[0].run, 0,
+            "the run that fits is the one whose source bought room for its raster"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered_inline_blocks(&frame).len(), 1);
+        let text = frame_row_text(&frame, 1);
+        assert!(
+            text.contains("$m+n$"),
+            "the fallen-back run keeps its whole source on the grid: {text:?}"
+        );
+        assert_eq!(
+            text.matches('$').count(),
+            2,
+            "the run that rendered has its own source cells cleared, and only those: {text:?}"
+        );
+    }
+
+    /// The price of blocker 1's widened arming predicate, on the screen designed to be worst for
+    /// it: forty columns-wide rows of shell text where every line carries several `$` and none is
+    /// mathematics.
+    ///
+    /// The widening arms all of them; the OSC 133 site gate then answers "not command output" on
+    /// the scanner's first branch, so each armed row costs a scan that returns immediately. This
+    /// measures that difference against the same screen with the switch off, where no row is armed
+    /// at all — the strictest available baseline. The ceiling is deliberately loose: what it
+    /// forbids is the widening turning a `$`-heavy screen into per-row rendering work, not the
+    /// scan itself getting a few percent slower.
+    #[test]
+    fn arming_every_dollar_row_is_cheap_while_the_site_gate_answers_no() {
+        const ROWS: u32 = 40;
+        const CYCLES: usize = 24;
+
+        let measure = |inline_formulas: bool| {
+            let started = Instant::now();
+            let mut session = DualPlaneSession::new(nz(120), nz(ROWS));
+            seat_inline_metrics(&mut session);
+            session.set_inline_math_bands(inline_formulas);
+            let mut at = started;
+            let mut elapsed = Duration::ZERO;
+            let mut armed = 0usize;
+            let mut resolved = 0usize;
+            for cycle in 0..CYCLES {
+                at += LIVE_MATH_STABLE_INTERVAL;
+                let mut bytes = String::from("\x1b[H");
+                for row in 0..ROWS {
+                    let _ = write!(
+                        bytes,
+                        "PATH=$HOME/bin:$PATH FOO=$BAR:$BAZ cost $5+$10 arg $1 $2 r{row}c{cycle}\r\n"
+                    );
+                }
+                session.feed_at(bytes.as_bytes(), at).unwrap();
+                let begin = Instant::now();
+                session.advance_live_stability(at + LIVE_MATH_STABLE_INTERVAL);
+                elapsed += begin.elapsed();
+                while let Some(task) = session.take_live_worker_task() {
+                    armed += 1;
+                    resolved += usize::from(task.resolved);
+                }
+            }
+            (elapsed, armed, resolved)
+        };
+
+        let (off, off_armed, _) = measure(false);
+        let (on, on_armed, on_resolved) = measure(true);
+        let ratio = on.as_secs_f64() / off.as_secs_f64().max(f64::EPSILON);
+        println!(
+            "INLINE_ARMING rows={ROWS} cycles={CYCLES} off={off:?} armed_off={off_armed} \
+             on={on:?} armed_on={on_armed} resolved_on={on_resolved} ratio={ratio:.2}"
+        );
+        assert_eq!(
+            off_armed, 0,
+            "with the switch off no `$` row may be armed at all"
+        );
+        assert!(
+            on_armed > 0,
+            "the probe must actually exercise the widened predicate"
+        );
+        assert_eq!(
+            on_resolved, 0,
+            "no shell line in this corpus may survive the disambiguator into an occurrence"
+        );
+        assert!(
+            ratio <= 8.0,
+            "arming every `$` row cost {ratio:.2}x the unarmed baseline ({on:?} vs {off:?})"
+        );
+    }
+
+    /// PIN (slice 2): copy resolves to the run under the pointer, not to the line.
+    ///
+    /// `original_source` for a multi-run line is every run joined by "; " — a label, not LaTeX.
+    /// Copying it put `x^2; y^2` on the clipboard, which is neither formula.
+    #[test]
+    fn copying_a_line_with_two_runs_yields_the_run_the_anchor_names() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\nboth $x^2$ and $y^2$ here\r\n",
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1
+        );
+        assert_eq!(complete_live_math_for_real(&mut session), 1);
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let anchor = rendered_inline_blocks(&frame)[0].anchor.clone();
+
+        assert_eq!(
+            session.math_source(&anchor.with_run(Some(0))),
+            Some("x^2"),
+            "the first run copies as itself"
+        );
+        assert_eq!(
+            session.math_source(&anchor.with_run(Some(1))),
+            Some("y^2"),
+            "the second run copies as itself"
+        );
+        assert_eq!(
+            session.math_source(&anchor),
+            Some("x^2; y^2"),
+            "a run-less anchor still answers with the whole line's label"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-10, scheme A): OSC 133 `C..D` is what makes a line eligible for
+    /// inline `$…$`, and nothing else is.
+    ///
+    /// Red gate: the same two dollar signs sit on the *command* line and on the *output* line of one
+    /// fixture, so a plumbing that simply said "eligible" everywhere, or nowhere, could not pass
+    /// both halves. The command line is the harder half — it is on screen, it is inside the shell's
+    /// own markers, and it reads exactly like output to anything that only looks at text.
+    #[test]
+    fn only_the_command_output_region_names_a_live_row_inline_eligible() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(8));
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07echo typed $E=mc^2$\x1b]133;C\x07\r\n\
+                  printed $E=mc^2$\r\n",
+                started,
+            )
+            .unwrap();
+
+        assert_eq!(
+            grid_site_of(&session, "printed"),
+            InlineMathSite::CommandOutput,
+            "a row the command printed is the one site a lone dollar may be mathematics"
+        );
+        assert_eq!(
+            grid_site_of(&session, "typed"),
+            InlineMathSite::Ineligible,
+            "the command line is inside B..C, not C..D — it is not output however much it reads \
+             like it"
+        );
+
+        // `D` seals the region: what the next prompt writes is past its end.
+        session
+            .feed_at(b"\x1b]133;D;0\x07\x1b]133;A\x07PS> after $E=mc^2$", started)
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&session, "printed"),
+            InlineMathSite::CommandOutput,
+            "sealing the region must not retract what it already covered"
+        );
+        assert_eq!(
+            grid_site_of(&session, "after"),
+            InlineMathSite::Ineligible,
+            "the prompt printed after D is not command output"
+        );
+    }
+
+    /// PIN: a screen that has never emitted OSC 133 is `Ineligible` in its entirety.
+    ///
+    /// This is scheme A's stated price and the reason gate A can be trusted: with no integration
+    /// there is no region, so there is nothing to guess about — and a session that guessed would be
+    /// typesetting the user's literal text.
+    #[test]
+    fn a_screen_without_shell_integration_is_inline_ineligible_throughout() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(8));
+        session
+            .feed_at(b"printed $E=mc^2$ with no markers\r\n", started)
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&session, "printed"),
+            InlineMathSite::Ineligible
+        );
+    }
+
+    /// PIN: `A` closes an output region that `D` never closed, and so does the next `B`.
+    ///
+    /// A shell that skips `D` — or a command killed mid-flight — must not leave a region whose
+    /// frontier is the cursor, because such a region silently annexes every row the shell writes
+    /// afterwards, prompt included, and the site would degrade from proven to assumed with nothing
+    /// on screen to show for it.
+    #[test]
+    fn a_prompt_closes_an_output_region_that_never_saw_its_command_finish() {
+        let started = Instant::now();
+        for (what, tail) in [
+            (
+                "a prompt start",
+                b"\x1b]133;A\x07PS> after $E=mc^2$".as_slice(),
+            ),
+            (
+                "a command start",
+                b"\x1b]133;B\x07after $E=mc^2$".as_slice(),
+            ),
+        ] {
+            let mut session = DualPlaneSession::new(nz(40), nz(8));
+            session
+                .feed_at(
+                    b"\x1b]133;A\x07PS> \x1b]133;B\x07run\x1b]133;C\x07\r\nprinted here\r\n",
+                    started,
+                )
+                .unwrap();
+            assert_eq!(
+                grid_site_of(&session, "printed"),
+                InlineMathSite::CommandOutput,
+                "{what}: the fixture must really have an open output region first"
+            );
+
+            session.feed_at(tail, started).unwrap();
+            assert!(
+                session
+                    .open_semantic_output_region_index(ScreenId::Primary)
+                    .is_none(),
+                "{what} must seal the region D never sealed"
+            );
+            assert_eq!(
+                grid_site_of(&session, "after"),
+                InlineMathSite::Ineligible,
+                "{what}: what follows an abandoned command is not that command's output"
+            );
+        }
+    }
+
+    /// PIN: a resize must not move the inline site.
+    ///
+    /// A resize rebases every live anchor into the new generation but keeps its old row and column,
+    /// so without the output regions' own re-anchoring the `C` boundary lands wherever that stale
+    /// coordinate falls in the reflowed grid. The failure is silent in both directions and only one
+    /// of them is harmless: under-claiming costs a formula, over-claiming hands the *prompt* to a
+    /// disambiguator that was told a command printed it.
+    #[test]
+    fn a_reflowing_resize_leaves_the_command_output_site_where_it_was() {
+        let started = Instant::now();
+        // The command wraps at 20 columns and does not at 40, so `C` — which sits at the end of it
+        // — genuinely changes both row and column across the resize. A fixture whose boundary
+        // happens to land on the same coordinates either way passes with the re-anchoring deleted,
+        // which is the trap this comment exists to keep the next editor out of.
+        let mut session = DualPlaneSession::new(nz(20), nz(8));
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07runrunrunrunrunrun\x1b]133;C\x07\r\n\
+                  printed a line\r\n",
+                started,
+            )
+            .unwrap();
+        assert!(
+            session
+                .terminal
+                .visible_row(0)
+                .is_some_and(|row| row.continues),
+            "the fixture must really wrap the command at the narrow width"
+        );
+        assert_eq!(
+            grid_site_of(&session, "printed"),
+            InlineMathSite::CommandOutput
+        );
+
+        session.resize_at(nz(40), nz(8), started).unwrap();
+        assert!(
+            session
+                .terminal
+                .visible_row(0)
+                .is_some_and(|row| !row.continues),
+            "and must really unwrap it at the wide one"
+        );
+        assert_eq!(
+            grid_site_of(&session, "printed"),
+            InlineMathSite::CommandOutput,
+            "the output line is still the same output line at a different width"
+        );
+        assert_eq!(
+            grid_site_of(&session, "runrun"),
+            InlineMathSite::Ineligible,
+            "and the command line above it has not been annexed by the drift"
+        );
+    }
+
+    /// PIN: the switch reaches the scanner, and it reaches it as a *detection* option.
+    #[test]
+    fn the_inline_switch_reaches_the_detector_and_forces_a_rescan() {
+        let mut session = DualPlaneSession::new(nz(40), nz(8));
+        assert!(session.inline_math_bands());
+        assert!(session.detection_options().inline_formulas);
+
+        let before = session.detection_revision;
+        assert!(session.set_inline_math_bands(false));
+        assert!(!session.detection_options().inline_formulas);
+        assert!(
+            session.detection_revision.0 > before.0,
+            "gating detection must invalidate the scan that ran under the old answer"
+        );
+
+        assert!(
+            !session.set_inline_math_bands(false),
+            "an unchanged switch reports no change and costs no revision"
+        );
+        assert_eq!(
+            session.detection_revision.0,
+            before.0 + 1,
+            "and does not bump the revision either"
         );
     }
 

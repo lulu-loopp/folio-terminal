@@ -339,6 +339,7 @@ mod tests {
         frame.math_blocks.push(MathBlockPlacement {
             start: TranscriptId(0),
             anchor: MathBlockAnchor::Live {
+                run: None,
                 screen: ScreenId::Alternate,
                 start: GridPoint { row: 0, column: 0 },
                 end: GridPoint { row: 0, column: 4 },
@@ -348,6 +349,7 @@ mod tests {
             },
             source: "x".to_owned(),
             artifact: ProjectedMathArtifact {
+                inline_runs: Vec::new(),
                 key: "x".to_owned(),
                 end: TranscriptId(0),
                 rgba: Arc::from(vec![255_u8; 4]),

@@ -5952,6 +5952,30 @@ impl TabSeed {
 // Eight, and every one of them is a different question the answer to which
 // cannot be derived from the others: identity, shape, the two rendering
 // facts, the wake channel, the probe bytes, the place, and the seed. Bundling
+/// The two formula switches a new pane must be born obeying.
+///
+/// One struct rather than two `bool` parameters because they would sit adjacent
+/// in every signature that carries them, and adjacent bools of the same type are
+/// a swap that compiles: pass them the wrong way round and inline formulas
+/// silently answer to the display switch, in a builder whole tabs are minted
+/// from. Named fields make that mistake a compile error instead of a bug report.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FormulaSwitches {
+    /// "Display formulas" — presentation only; a proven `$$` raster may be a band.
+    display: bool,
+    /// "Inline formulas" — detection; a lone `$…$` in command output may be typeset.
+    inline: bool,
+}
+
+impl FormulaSwitches {
+    fn from_settings(settings: &bt_persist::SettingsV1) -> Self {
+        Self {
+            display: settings.display_formulas,
+            inline: settings.inline_formulas,
+        }
+    }
+}
+
 /// Spawn one shell for one Terminal leaf, sized to the rectangle it will draw
 /// into.
 ///
@@ -5966,7 +5990,7 @@ fn create_leaf_session(
     wake: OutputWake,
     probe_input: Option<&[u8]>,
     working_directory: Option<PathBuf>,
-    display_formulas: bool,
+    formulas: FormulaSwitches,
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
     let mut pty = if probe_input.is_none() {
@@ -5999,9 +6023,10 @@ fn create_leaf_session(
         detect_image_paths: true,
         ..MathLayoutOptions::default()
     });
-    // A pane born from a split must obey the switch its neighbours already obey,
-    // which is exactly why this builder exists (see above).
-    session.set_display_math_bands(display_formulas);
+    // A pane born from a split must obey the switches its neighbours already
+    // obey, which is exactly why this builder exists (see above).
+    session.set_display_math_bands(formulas.display);
+    session.set_inline_math_bands(formulas.inline);
     session.set_layout_key(LayoutKey {
         width_cells: columns,
         dpi_milli: renderer.metrics().dpi_milli(),
@@ -6070,7 +6095,7 @@ fn create_tab_state(
     seed: TabSeed,
     policy: SizePolicy,
     rail: seats::RailState,
-    display_formulas: bool,
+    formulas: FormulaSwitches,
 ) -> Result<(TabState, String)> {
     // The new tab's seats are solved into the *current* window, so they answer
     // to whoever owns it. A tab opened while the user is working in a window
@@ -6098,7 +6123,7 @@ fn create_tab_state(
             Arc::clone(&wake),
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
             working_directories.get(&seat).cloned(),
-            display_formulas,
+            formulas,
         )?;
         sessions.insert(seat, leaf);
     }
@@ -6693,7 +6718,7 @@ impl Runtime {
                 // axis is a dev chord, and a preference a scaffold wrote is a
                 // preference nobody chose.
                 seats::RailState::default(),
-                settings_store.loaded().display_formulas,
+                FormulaSwitches::from_settings(settings_store.loaded()),
             )?;
             tabs.push(tab);
             conpty_sources.push(conpty_source);
@@ -6947,7 +6972,7 @@ impl Runtime {
             TabSeed::of_profile(profile),
             self.size_policy,
             self.rail,
-            self.settings_store.loaded().display_formulas,
+            FormulaSwitches::from_settings(self.settings_store.loaded()),
         )?;
         self.tabs.push(tab);
         self.apply_window_min_inner_size()?;
@@ -7097,7 +7122,7 @@ impl Runtime {
             },
             self.size_policy,
             self.rail,
-            self.settings_store.loaded().display_formulas,
+            FormulaSwitches::from_settings(self.settings_store.loaded()),
         )?;
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
@@ -7164,7 +7189,7 @@ impl Runtime {
                 seed,
                 self.size_policy,
                 self.rail,
-                self.settings_store.loaded().display_formulas,
+                FormulaSwitches::from_settings(self.settings_store.loaded()),
             )?;
             self.tabs.push(revived);
         }
@@ -8316,6 +8341,7 @@ impl Runtime {
             tab_layout: self.rail.layout,
             sidebar: self.rail.mode,
             display_formulas: self.settings_store.loaded().display_formulas,
+            inline_formulas: self.settings_store.loaded().inline_formulas,
         }
     }
 
@@ -8869,6 +8895,9 @@ impl Runtime {
                 if let Some(enabled) = settings::display_formulas_requested(target) {
                     self.apply_display_formulas(enabled)?;
                 }
+                if let Some(enabled) = settings::inline_formulas_requested(target) {
+                    self.apply_inline_formulas(enabled)?;
+                }
                 // Both rail combos go through the one constructor: the layout
                 // choice keeps the sidebar mode standing and the sidebar choice
                 // keeps the layout standing, and Q190's combination rule inside
@@ -9120,6 +9149,33 @@ impl Runtime {
         Ok(true)
     }
 
+    /// Point the "Inline formulas" switch at `enabled` (user ruling 2026-08-10).
+    ///
+    /// Every shell in every tab and the same immediate write to disk, for the
+    /// same reasons [`Self::apply_display_formulas`] gives. What differs is the
+    /// cost, and it is worth being honest about: this switch gates *detection*,
+    /// so each session re-scans rather than merely re-projecting. That is not an
+    /// oversight — an inline run that is never detected leaves no record behind
+    /// to re-arm, so the alternative to re-scanning is answering with a verdict
+    /// the user just revoked.
+    fn apply_inline_formulas(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.inline_formulas = enabled;
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        for tab in &mut self.tabs {
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.session.set_inline_math_bands(enabled);
+            }
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
     /// The dev-only preview toggle, and everything one costs: the tree changes,
     /// so the window minimum, the terminal's columns, the ConPTY coalescer and
     /// the session file all follow it, in that order.
@@ -9330,15 +9386,8 @@ impl Runtime {
         let wake: OutputWake = Arc::new(move || {
             let _ = proxy.send_event(AppEvent::PtyOutput);
         });
-        let display_formulas = self.settings_store.loaded().display_formulas;
-        let leaf = create_leaf_session(
-            &self.renderer,
-            body,
-            wake,
-            None,
-            inherited,
-            display_formulas,
-        )?;
+        let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
+        let leaf = create_leaf_session(&self.renderer, body, wake, None, inherited, formulas)?;
         self.sessions.insert(arriving, leaf);
         debug_assert!(
             self.sessions_match_terminals(),

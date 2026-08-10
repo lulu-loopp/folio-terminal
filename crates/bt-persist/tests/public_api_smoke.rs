@@ -33,6 +33,7 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
         schema_version: SETTINGS_SCHEMA_VERSION,
         theme_mode: ThemeModeV1::Dark,
         display_formulas: false,
+        inline_formulas: false,
     };
     write_settings_atomic(&path, &settings).unwrap();
 
@@ -47,6 +48,10 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
     );
     assert!(
         on_disk.contains("\"display_formulas\": false"),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"inline_formulas\": false"),
         "written file must be human-readable JSON: {on_disk}"
     );
 }

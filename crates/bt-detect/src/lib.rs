@@ -11,8 +11,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use bt_doc::{DecorationIntent, HistoryDocument};
 pub use bt_doc::{
-    DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint, LayoutKey, MathMode,
-    SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp, ViewGeneration,
+    DecorationLifecycle, DetectionRevision, GridGeneration, GridPoint, InlineRunPlacement,
+    LayoutKey, MathMode, SUBPIXELS_PER_PX, ScreenId, SourceLifecycle, VersionStamp, ViewGeneration,
 };
 use bt_transcript::{SourceGeneration, TranscriptId};
 
@@ -30,6 +30,17 @@ pub struct DetectionOptions {
     /// Reject a display-math candidate containing Claude Code's exact scroll-review overlay text.
     /// Disable this once Claude Code no longer writes that chip into terminal content rows.
     pub reject_claude_code_jump_chip_overlay: bool,
+    /// The user-facing "Inline formulas" switch: may a lone `$…$` run become mathematics at all?
+    ///
+    /// This gates **detection**, and that is the one way it differs from its sibling
+    /// `display_formulas` — which lives in bt-term, not here, because it is presentation-only: with
+    /// display bands off the scanner still pairs `$$`, workers still rasterize, and records still
+    /// hold their artifacts, so flipping it back on re-arms proven formulas from memory with no
+    /// re-scan. Inline has no such downstream state worth preserving. An inline run that is never
+    /// detected produces no record, no task and no raster, so gating it at the scanner costs
+    /// nothing that turning it back on cannot rebuild from the next scan — and it means the switch
+    /// genuinely silences the disambiguator rather than merely hiding its verdict.
+    pub inline_formulas: bool,
 }
 
 impl Default for DetectionOptions {
@@ -38,6 +49,7 @@ impl Default for DetectionOptions {
             restore_stripped_environment_newlines: true,
             restore_stripped_inline_environment_newlines: true,
             reject_claude_code_jump_chip_overlay: true,
+            inline_formulas: true,
         }
     }
 }
@@ -100,6 +112,10 @@ pub struct PlaceholderArtifact {
     pub baseline_subpixels: i64,
     pub mode: MathMode,
     pub render_time: Duration,
+    /// For an inline composite: which of the span's runs this image contains, and where inside it.
+    /// A run that did not fit its own source cells is absent, and its terminal text is what the
+    /// user still sees. Empty for display math and for any placeholder.
+    pub inline_runs: Vec<InlineRunPlacement>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -133,6 +149,13 @@ pub struct DetectionInput {
     pub text: String,
     /// UTF-8 byte boundary to terminal cell-column mappings from the captured logical line.
     pub cell_boundaries: Vec<(u32, u32)>,
+    /// Where this frozen line sat in the shell's command lifecycle, captured from bt-term's OSC 133
+    /// region bookkeeping **when the task was built**. The worker cannot work this out: it holds
+    /// text and nothing else, and a line's site is a fact about the session that owns it. Carrying
+    /// it here is what lets scrollback keep the inline verdict the live grid reached — without it
+    /// the frozen scan passes `None`, every line reads [`InlineMathSite::Ineligible`], and a
+    /// formula un-typesets itself the moment it scrolls off the grid.
+    pub site: InlineMathSite,
 }
 
 /// Compact parser state immediately before a frozen line. The session retains one of these per
@@ -212,6 +235,11 @@ pub struct LiveDetectionInput {
     /// UTF-8 byte boundary to terminal cell-column mappings, including `(0, 0)` and the final
     /// source boundary. These come from captured terminal cells, never Unicode-width inference.
     pub cell_boundaries: Vec<(u32, u32)>,
+    /// Where this physical row sits in the shell's command lifecycle, as bt-term's OSC 133 region
+    /// bookkeeping reports it. Part of the input's identity — a row whose site changed is a row
+    /// whose inline verdict may change, so a cached snapshot comparing equal must mean equal here
+    /// too.
+    pub site: InlineMathSite,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -511,24 +539,62 @@ fn is_math_environment(environment: &str) -> bool {
     )
 }
 
-/// Conservatively detect one or more `$...$` runs on a single logical line. A run needs an
-/// explicit math signal; currency, shell variables and identifier-like code remain native text.
-/// Inline `$...$` detection is DISABLED pending a sound disambiguator (M1.9g).
+/// Where a logical line sits in the shell's command lifecycle, as reported by OSC 133.
 ///
-/// Independent review measured the current heuristic against 18 lines of ordinary terminal text
-/// and found 6 false positives - `PATH=$HOME/bin:$PATH` rendered `HOME/bin:`, `WHERE a=$1 AND
-/// b=$2` rendered `1 AND b=`, `Cost $5+$10` rendered `5+` - because any of `/ + - = >` inside the
-/// candidate counted as a mathematical signal. The suite that passed had selection bias (it only
-/// sampled space-separated currency and `echo`-prefixed lines), and the live oracle passed for the
-/// same accidental reason: its probe began with `echo `.
+/// This is the *structural* half of the inline disambiguator (user ruling 2026-08-10, scheme A).
+/// It is deliberately not something this crate can work out for itself: bt-detect sees text and
+/// nothing else, and the question "was this line printed by a command, or typed at a prompt?" is
+/// answered by the terminal's semantic region bookkeeping in bt-term. Making it a parameter is
+/// what keeps the authority in the one place that actually holds it.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum InlineMathSite {
+    /// Between `133;C` and `133;D` — a line a command *printed*. The only site where a lone `$`
+    /// is allowed to mean mathematics.
+    CommandOutput,
+    /// Anything else: the prompt (`A..B`), the typed command line (`B..C`), the region after
+    /// `133;D`, and — the case that carries the most weight — **every line on a screen that has
+    /// never emitted OSC 133 at all**.
+    ///
+    /// No shell integration therefore means no inline rendering, ever. That is the ruling's price
+    /// and it is worth naming: a `$…$` printed by a session without integration stays source text.
+    /// The alternative is guessing which half of the screen is output, and a terminal that guesses
+    /// wrong renders the user's literal text as mathematics.
+    Ineligible,
+}
+
+/// Conservatively detect one or more `$...$` runs on a single logical line.
+///
+/// The disambiguator has three independent gates, and a run must pass all of them. Any one of
+/// them alone was measured to be insufficient (see the corpus in this module's tests):
+///
+/// * **A — site.** `site` must be [`InlineMathSite::CommandOutput`]. This is the structural gate
+///   and it is checked first because it is the only one that is not about the text at all.
+/// * **D — escapes and code.** `\$` is a literal dollar and never a delimiter (already the
+///   meaning `delimiter_is_escaped` gives it for display math), `$$` belongs to display math and
+///   is skipped here, and a line that is recognisably code — a diff hunk, a dated log line, a
+///   command echo, anything carrying a backtick — is exempt wholesale.
+/// * **content.** The span between the delimiters must read as a *complete* mathematical
+///   expression: it must carry a math signal, it must not be prose, and it must not dangle (see
+///   [`inline_source_is_complete`]).
+///
+/// The history this replaces is worth keeping. An independent review measured the previous
+/// heuristic against 18 lines of ordinary terminal text and found 6 false positives —
+/// `PATH=$HOME/bin:$PATH` rendered `HOME/bin:`, `WHERE a=$1 AND b=$2` rendered `1 AND b=`,
+/// `Cost $5+$10` rendered `5+` — because any of `/ + - = >` inside the candidate counted as a
+/// mathematical signal. Detection was then disabled outright rather than shipped wrong. Note what
+/// the three survivors have in common and what gate actually stops them today: every one is a
+/// *truncated* expression, cut off mid-operator by a second `$` that was never a closing
+/// delimiter. Site alone does not save them — all three occur in genuine command output (a
+/// `cat`-ed profile, a query log, a price list) — which is precisely why the completeness rule
+/// exists alongside gate A rather than instead of it.
 ///
 /// A terminal that renders your literal text has failed as a terminal, and that outranks the
 /// convenience of inline rendering. Display `$$...$$` detection is unaffected: its paired
 /// whole-line delimiters carry orders of magnitude more signal than a lone `$`.
-pub fn detect_inline_math(text: &str) -> Vec<InlineMathRun> {
-    let _ = text;
-    return Vec::new();
-    #[allow(unreachable_code)]
+pub fn detect_inline_math(text: &str, site: InlineMathSite) -> Vec<InlineMathRun> {
+    if site != InlineMathSite::CommandOutput {
+        return Vec::new();
+    }
     if inline_line_is_code_like(text) || text.len() > MAX_MATH_SOURCE_BYTES {
         return Vec::new();
     }
@@ -565,6 +631,8 @@ pub fn detect_inline_math(text: &str) -> Vec<InlineMathRun> {
             && !source.starts_with(char::is_whitespace)
             && !source.ends_with(char::is_whitespace)
             && inline_source_is_math(source)
+            && inline_source_is_complete(source)
+            && !block_body_looks_like_prose(source)
         {
             runs.push(InlineMathRun {
                 byte_start: open as u32,
@@ -625,9 +693,136 @@ fn inline_source_is_math(source: &str) -> bool {
             .any(|character| ('\u{0370}'..='\u{03ff}').contains(&character))
 }
 
-fn inline_group(runs: Vec<InlineMathRun>) -> Option<MathSpan> {
+/// Does this span read as a *whole* mathematical expression, rather than one cut in half?
+///
+/// This is the gate that separates `$a+b$` from the `5+` inside `Cost $5+$10`, and it is the
+/// reason the disambiguator does not have to fall back on "does the line look shell-ish". The two
+/// texts are indistinguishable by *signal* — both are short, both carry an operator, neither is
+/// prose — and they are told apart by grammar instead: `a+b` is a complete expression, `5+` is an
+/// expression with its right operand missing.
+///
+/// That asymmetry is not a coincidence of these examples, it is structural. When a `$` that was
+/// meant as a currency mark or a shell sigil gets paired with the *next* such `$`, the text
+/// captured between them is a fragment of running text that was severed at whatever character
+/// happened to precede the second sigil — and running text severed at an arbitrary point lands on
+/// a dangling operator, an unbalanced bracket or a trailing space far more often than it lands on
+/// something that parses. Real inline math is bounded by delimiters its author chose, so it ends
+/// where the expression ends.
+///
+/// Three conditions, each of which a truncated fragment fails and a real expression does not:
+///
+/// 1. No dangling operator at the tail. Nothing may *end* on a binary operator or relation —
+///    `5+`, `1 AND b=`, `HOME/bin:` all die here.
+/// 2. No dangling operator at the head, with unary `+`/`-` explicitly allowed so `$-x$` survives.
+/// 3. Balanced brackets. `f(x` is not an expression; a fragment cut mid-call is.
+///
+/// Deliberately *not* a LaTeX parse. Parsing proves the fragment is well-formed LaTeX, which `5+`
+/// very nearly is and `1 AND b=` is outright — MiTeX would happily typeset both. Well-formedness
+/// is the wrong question; completeness is the right one.
+fn inline_source_is_complete(source: &str) -> bool {
+    /// Characters that need an operand on *both* sides. A span may neither open nor close on one.
+    const INFIX: [char; 11] = ['+', '*', '/', '=', '<', '>', '^', '_', ',', ';', ':'];
+    /// `-` is infix too, but it is also the unary minus, so it is legal at the head and only
+    /// there. This is the one place the two ends of the span are allowed to disagree.
+    const LEADING_SIGN: [char; 2] = ['+', '-'];
+
+    let first = source.chars().next();
+    let last = source.chars().next_back();
+    let (Some(first), Some(last)) = (first, last) else {
+        return false;
+    };
+    if INFIX.contains(&last) || last == '-' {
+        return false;
+    }
+    if INFIX.contains(&first) && !LEADING_SIGN.contains(&first) {
+        return false;
+    }
+    // A sign is only a sign if something follows it to be signed.
+    if LEADING_SIGN.contains(&first) && source.chars().nth(1).is_none() {
+        return false;
+    }
+    inline_brackets_balance(source)
+}
+
+/// Do `()`, `[]` and `{}` open and close in order across the span?
+///
+/// A LaTeX escape suppresses the very next character, so `\{` is a literal brace and not a group
+/// opener — the same reading `delimiter_is_escaped` gives a `\$`.
+fn inline_brackets_balance(source: &str) -> bool {
+    let mut stack = Vec::new();
+    let mut escaped = false;
+    for character in source.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '(' | '[' | '{' => stack.push(character),
+            ')' => {
+                if stack.pop() != Some('(') {
+                    return false;
+                }
+            }
+            ']' => {
+                if stack.pop() != Some('[') {
+                    return false;
+                }
+            }
+            '}' => {
+                if stack.pop() != Some('{') {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    stack.is_empty()
+}
+
+/// The OSC 133 site of the line at `index`, defaulting the only way a site may ever be defaulted.
+///
+/// A scan with no `sites` slice, or an index the slice does not reach, is a scan whose caller could
+/// not state where the line sits. That is not the same as stating it is command output, and the
+/// disambiguator's whole premise is that the absence of shell integration must cost inline
+/// rendering rather than buy it — so the unknown case resolves to
+/// [`InlineMathSite::Ineligible`] here, once, instead of at every call site.
+fn site_at(sites: Option<&[InlineMathSite]>, index: usize) -> InlineMathSite {
+    sites
+        .and_then(|sites| sites.get(index))
+        .copied()
+        .unwrap_or(InlineMathSite::Ineligible)
+}
+
+/// Gather one line's proven `$…$` runs into a single inline occurrence.
+///
+/// Each run gets its **own** cell segment. The segments are what every downstream mapper works
+/// from — `live_occurrence_segments` and `frozen_occurrence_segments` both walk them, and a span
+/// that arrives with none maps to none and is silently dropped before it can ever be anchored
+/// (the defect this replaces: `cell_segments: Vec::new()`). Per run rather than one segment
+/// spanning first-open to last-close because the runs are separately anchored, separately
+/// rasterized and separately allowed to fall back to source; a segment covering the prose between
+/// two formulas would claim cells no formula owns.
+///
+/// `line` is the logical line the runs were found on, needed only for the provisional cell
+/// columns. Those columns are **dead reckoning**: both mappers overwrite them from the terminal's
+/// captured byte→column table before anything reads them, because only the terminal knows how wide
+/// a character was drawn. The byte offsets are the load-bearing part — they must land on real
+/// grapheme boundaries, which a `$` always does.
+fn inline_group(id: TranscriptId, line: &str, runs: Vec<InlineMathRun>) -> Option<MathSpan> {
     let first = runs.first()?;
     let last = runs.last()?;
+    let cell_segments = runs
+        .iter()
+        .map(|run| MathCellSegment {
+            logical_line: 0,
+            source_line: MathSourceLine::Transcript(id),
+            byte_start: run.byte_start,
+            byte_end: run.byte_end,
+            cell_start: provisional_cell_column(line, run.byte_start),
+            cell_end: provisional_cell_column(line, run.byte_end),
+        })
+        .collect();
     Some(MathSpan {
         byte_start: first.byte_start,
         byte_end: last.byte_end,
@@ -643,9 +838,22 @@ fn inline_group(runs: Vec<InlineMathRun>) -> Option<MathSpan> {
             .join("; "),
         delimiter_kind: DelimiterKind::Dollars,
         mode: MathMode::Inline,
-        cell_segments: Vec::new(),
+        cell_segments,
         inline_runs: runs,
     })
+}
+
+/// Char-count stand-in for a terminal column, matching what [`occurrence`] records for display
+/// math. It is wrong for any wide character — `能` counts one and draws two — and that is
+/// tolerable for exactly one reason: no consumer reads it. Every path from a scanner occurrence to
+/// a placement runs through a mapper that replaces both columns with the terminal's own
+/// `cell_boundaries` entry for the same byte. Left here so the two constructors agree.
+fn provisional_cell_column(line: &str, byte: u32) -> u32 {
+    let byte = usize::try_from(byte).unwrap_or(usize::MAX).min(line.len());
+    let Some(prefix) = line.get(..byte) else {
+        return 0;
+    };
+    u32::try_from(prefix.chars().count()).unwrap_or(u32::MAX)
 }
 
 /// Detect conservative block-level math over already-frozen logical lines. Fences are tracked
@@ -766,6 +974,35 @@ pub fn detect_math_blocks_with_options<'a>(
     scan_math_blocks_in_context_with_options(lines, DetectionContext::default(), options).blocks
 }
 
+/// [`detect_math_blocks_with_options`] for a caller that can state each line's OSC 133 site.
+///
+/// Every other entry point in this module scans lines alone, and a line alone cannot say whether a
+/// command printed it — so they all resolve to [`InlineMathSite::Ineligible`] and detect display
+/// math only. This is the one door inline `$…$` comes through, and it is deliberately narrow:
+/// naming a site is an assertion about the terminal's semantic bookkeeping, and only the terminal
+/// holds that.
+pub fn detect_math_blocks_with_sites<'a>(
+    lines: impl IntoIterator<Item = (TranscriptId, &'a str, InlineMathSite)>,
+    options: DetectionOptions,
+) -> Vec<DetectedMathBlock> {
+    let (lines, sites): (Vec<_>, Vec<_>) = lines
+        .into_iter()
+        .map(|(id, text, site)| ((id, text), site))
+        .unzip();
+    scan_math_blocks_impl(
+        lines,
+        DetectionContext::default(),
+        options,
+        Some(&sites),
+        None,
+        None,
+        None,
+        false,
+        None,
+    )
+    .blocks
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AmbiguousMathBlock {
     pub start: TranscriptId,
@@ -809,6 +1046,7 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
         None,
         None,
         None,
+        None,
         false,
         None,
     )
@@ -828,11 +1066,16 @@ pub fn scan_math_blocks_in_context_with_options<'a>(
 // The single authoritative scanner threads several orthogonal, independently-optional knobs (seam
 // boundary, clip evidence, ownership recorder, frozen resync, final-phase readout); public callers
 // reach it through the small purpose-named wrappers above, never this raw signature.
+///
+/// `sites` is the per-line OSC 133 lifecycle, indexed in parallel with the collected `lines`. It is
+/// the structural half of the inline disambiguator and only bt-term can compute it, so every scan
+/// that does not carry one reads as [`InlineMathSite::Ineligible`] — see [`site_at`].
 #[allow(clippy::too_many_arguments)]
 fn scan_math_blocks_impl<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
     initial_context: DetectionContext,
     options: DetectionOptions,
+    sites: Option<&[InlineMathSite]>,
     live_grid_boundary: Option<usize>,
     clipped_open_index: Option<u32>,
     mut recorder: Option<&mut OwnershipRecorder>,
@@ -1075,7 +1318,12 @@ fn scan_math_blocks_impl<'a>(
             continue;
         }
         if opening.is_none()
-            && let Some(span) = inline_group(detect_inline_math(text))
+            && options.inline_formulas
+            && let Some(span) = inline_group(
+                lines[index].0,
+                text,
+                detect_inline_math(text, site_at(sites, index)),
+            )
         {
             let id = lines[index].0;
             result.blocks.push(DetectedMathBlock {
@@ -1288,6 +1536,10 @@ fn grid_dollars_opens_valid_block(
         lines[index..].iter().copied(),
         DetectionContext::default(),
         options,
+        // A forward display-validity probe, not a detection pass: it asks only whether this `$$`
+        // opens a block that closes. No site means no inline run can enter the answer, which is
+        // exactly the verdict this probe has always produced.
+        None,
         None,
         None,
         None,
@@ -1780,6 +2032,7 @@ pub fn detect_live_math_blocks_in_context<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
     initial_context: DetectionContext,
     options: DetectionOptions,
+    sites: Option<&[InlineMathSite]>,
     live_grid_boundary: Option<usize>,
     clipped_open_index: Option<u32>,
 ) -> Vec<DetectedMathBlock> {
@@ -1787,6 +2040,7 @@ pub fn detect_live_math_blocks_in_context<'a>(
         lines,
         initial_context,
         options,
+        sites,
         live_grid_boundary,
         clipped_open_index,
         None,
@@ -1801,15 +2055,21 @@ pub fn detect_live_math_blocks_in_context<'a>(
 /// `Known` prefix, it applies the shared `phantom_opener_witness` at every candidate closer so an
 /// eaten `$$` opener upstream no longer desynchronises every block below it. Under an `Ambiguous`
 /// prefix the resync is inert (M1.9p): the scan is byte-identical to `detect_math_blocks_in_context`.
+///
+/// `sites` is the per-line OSC 133 lifecycle in scan order, as the session recorded it when the
+/// task was built. `None` keeps the old reading — every line [`InlineMathSite::Ineligible`], so
+/// display math only.
 pub fn detect_frozen_math_blocks_in_context_with_options<'a>(
     lines: impl IntoIterator<Item = (TranscriptId, &'a str)>,
     initial_context: DetectionContext,
     options: DetectionOptions,
+    sites: Option<&[InlineMathSite]>,
 ) -> Vec<DetectedMathBlock> {
     scan_math_blocks_impl(
         lines,
         initial_context,
         options,
+        sites,
         None,
         None,
         None,
@@ -1833,6 +2093,7 @@ pub fn frozen_resync_scan_with_options<'a>(
         lines,
         initial_context,
         options,
+        None,
         None,
         None,
         None,
@@ -1862,6 +2123,7 @@ pub fn live_detection_isolation_gap(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context,
         options,
+        Some(&live_logical_sites(&logical)),
         boundary,
         clipped,
     );
@@ -1883,6 +2145,11 @@ pub fn live_detection_isolation_gap(
         .cloned()
         .collect::<Vec<_>>();
     let grid_logical = live_logical_lines(&grid_inputs);
+    // Sites are deliberately withheld from the isolation re-scan: this gate counts *display*
+    // structure the grid proves in isolation but the full context lost, and a siteless scan yields
+    // exactly that set. Feeding it sites could only add inline blocks, which the full scan may
+    // legitimately suppress under a carried opening — a difference that is not the strand this gate
+    // exists to catch.
     let isolation = detect_math_blocks_in_context_with_options(
         grid_logical
             .iter()
@@ -1929,6 +2196,7 @@ pub fn live_detection_ownership_ledger(
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context,
         options,
+        Some(&live_logical_sites(&logical)),
         boundary,
         clipped,
         Some(&mut recorder),
@@ -2007,12 +2275,20 @@ pub fn resolve_detection_task(task: &mut DetectionTask) -> bool {
     // abandoned by the shared witness rather than shifting every following block's pairing by one.
     // For a clean window the resync is a no-op and the result is byte-identical to the ordinary
     // frozen scan; under an `Ambiguous` prefix (a cap-bounded fallback window) it is inert (M1.9p).
+    // The window's per-line sites travel with the inputs: they were read off the session's OSC 133
+    // regions when this task was built, which is the only moment they are knowable here.
+    let sites = task
+        .inputs
+        .iter()
+        .map(|input| input.site)
+        .collect::<Vec<_>>();
     let detected = detect_frozen_math_blocks_in_context_with_options(
         task.inputs
             .iter()
             .map(|input| (input.id, input.text.as_str())),
         task.initial_context.clone(),
         task.options,
+        Some(&sites),
     )
     .into_iter()
     .find(|block| block.end == task.candidate_id);
@@ -2088,6 +2364,7 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
         logical.iter().map(|line| (line.id, line.text.as_str())),
         task.initial_context.clone(),
         task.options,
+        Some(&live_logical_sites(&logical)),
         live_grid_boundary,
         clipped,
     )
@@ -2118,6 +2395,7 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
         logical.iter().map(|line| (line.id, line.text.as_str())),
         initial_context.clone(),
         options,
+        Some(&live_logical_sites(&logical)),
         live_grid_boundary,
         clipped,
     )
@@ -2258,6 +2536,12 @@ struct LiveLogicalLine {
     id: TranscriptId,
     text: String,
     fragments: Vec<LiveLogicalFragment>,
+    /// The joined line's OSC 133 site. A soft-wrapped line is several physical rows scanned as one
+    /// string, and the disambiguator judges that string whole — so the line is command output only
+    /// when *every* fragment is. The seam is exactly where a region boundary lands (a `C` or `D`
+    /// mid-wrap), and a line straddling one is a line half of which the shell never claimed to have
+    /// printed; conservative there means Ineligible.
+    site: InlineMathSite,
 }
 
 fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
@@ -2272,6 +2556,7 @@ fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
                 id,
                 text: String::new(),
                 fragments: Vec::new(),
+                site: InlineMathSite::CommandOutput,
             });
         }
         let Some(line) = logical.last_mut() else {
@@ -2284,8 +2569,16 @@ fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
             byte_start,
             byte_end: line.text.len(),
         });
+        if input.site != InlineMathSite::CommandOutput {
+            line.site = InlineMathSite::Ineligible;
+        }
     }
     logical
+}
+
+/// The per-logical-line site slice a live scan hands to the scanner, in scanner index order.
+fn live_logical_sites(logical: &[LiveLogicalLine]) -> Vec<InlineMathSite> {
+    logical.iter().map(|line| line.site).collect()
 }
 
 fn live_occurrence_segments(
@@ -2401,6 +2694,7 @@ pub fn render_placeholder(task: &DetectionTask) -> PlaceholderArtifact {
         baseline_subpixels: 0,
         mode: task.span.mode,
         render_time: Duration::ZERO,
+        inline_runs: Vec::new(),
     }
 }
 
@@ -2475,18 +2769,171 @@ mod tests {
         }
     }
 
+    /// Ordinary terminal text that must never be typeset, **stated at the site where it really
+    /// occurs**.
+    ///
+    /// The site column is the point of this table and it is chosen adversarially, not
+    /// conveniently. It would be easy — and dishonest — to file every shell-looking line under
+    /// `Ineligible`, where gate A rejects it before a single character is read, and then report a
+    /// false-positive rate of zero that measured nothing. So each line is filed where it actually
+    /// shows up: a `cat`-ed profile, a query log and a price list are all things a command
+    /// *prints*, so they are `CommandOutput` and have to be stopped on content alone. Only the
+    /// lines that genuinely belong to a prompt or an unmarked screen are filed as `Ineligible`.
+    ///
+    /// The three cases the independent review named as rendering wrongly — `PATH=$HOME/bin:$PATH`
+    /// giving `HOME/bin:`, `WHERE a=$1 AND b=$2` giving `1 AND b=`, `Cost $5+$10` giving `5+` —
+    /// are the first three rows, all at `CommandOutput`.
+    const INLINE_FALSE_POSITIVE_CORPUS: &[(&str, InlineMathSite)] = &[
+        // The named six, at the hardest site.
+        ("PATH=$HOME/bin:$PATH", InlineMathSite::CommandOutput),
+        ("WHERE a=$1 AND b=$2", InlineMathSite::CommandOutput),
+        ("Cost $5+$10", InlineMathSite::CommandOutput),
+        (r"escaped \$x^2\$ stays flat", InlineMathSite::CommandOutput),
+        ("`const x = $value`", InlineMathSite::CommandOutput),
+        ("literal $PATH$ token", InlineMathSite::CommandOutput),
+        // Currency, the single most common lone-dollar in real output.
+        ("$5 和 $10", InlineMathSite::CommandOutput),
+        ("价格是 $5$", InlineMathSite::CommandOutput),
+        (
+            "Total $19.99 or $24.99 with tax",
+            InlineMathSite::CommandOutput,
+        ),
+        ("refund $5 - $3 today", InlineMathSite::CommandOutput),
+        ("tiers $5-$10-$20", InlineMathSite::CommandOutput),
+        // Shell and script text a command printed rather than a user typed.
+        ("awk '{print $1}' report.txt", InlineMathSite::CommandOutput),
+        ("if [ $a -eq $b ]; then", InlineMathSite::CommandOutput),
+        ("usage: run.sh $src $dst", InlineMathSite::CommandOutput),
+        ("export FOO=$BAR:$BAZ", InlineMathSite::CommandOutput),
+        ("$1 $2 $3", InlineMathSite::CommandOutput),
+        ("sed -i 's/$old/$new/g' f", InlineMathSite::CommandOutput),
+        // Structurally exempt line shapes (gate D).
+        ("+ 文档里有 $x^2$", InlineMathSite::CommandOutput),
+        ("2026-07-19 log $x^2$", InlineMathSite::CommandOutput),
+        ("unclosed $x^2", InlineMathSite::CommandOutput),
+        // Gate A's own territory: text that would otherwise pass every content test, sitting
+        // where a lone `$` is not ours to interpret.
+        ("$x^2$", InlineMathSite::Ineligible),
+        (r"$\alpha+\beta$", InlineMathSite::Ineligible),
+        ("echo $PATH", InlineMathSite::Ineligible),
+        ("PS D:\\dev> echo $env:PATH", InlineMathSite::Ineligible),
+    ];
+
+    /// Genuine inline mathematics, which must be typeset when a command printed it.
+    const INLINE_TRUE_POSITIVE_CORPUS: &[&str] = &[
+        "$x$",
+        "$a+b$",
+        r"$f_\theta$",
+        r"$\rho$",
+        "$x^2$",
+        r"$\alpha+\beta$",
+        "$-x$",
+        "$E = mc^2$",
+        r"$\frac{a}{b}$",
+        "能量 $E = mc^2$，并且 $a_1+b_1=c_1$。",
+        r"the loss $\mathcal{L}(\theta)$ fell",
+    ];
+
+    /// **Zero false positives on the corpus.** Not "few" — the ruling that re-enabled inline
+    /// rendering did so on the strength of this number, and a terminal that typesets one line of
+    /// a user's literal output has failed at the job the rendering was a bonus on top of.
     #[test]
-    fn inline_detection_stays_disabled_until_disambiguation_is_sound() {
-        // The machinery below is retained for M1.9g, but must not decorate anything while the
-        // disambiguator lets `PATH=$HOME/bin:$PATH` through. Genuine inline math is therefore
-        // expected to stay source too: silence on both sides is the honest state, and this
-        // assertion is what will fail (loudly, in the right direction) when inline is re-enabled.
+    fn the_inline_false_positive_corpus_is_rendered_natively_at_the_site_it_occurs() {
+        let mut wrong = Vec::new();
+        for (text, site) in INLINE_FALSE_POSITIVE_CORPUS {
+            let runs = detect_inline_math(text, *site);
+            if !runs.is_empty() {
+                let rendered = runs
+                    .iter()
+                    .map(|run| run.source.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                wrong.push(format!("{text:?} at {site:?} would typeset {rendered:?}"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} of {} corpus lines would be typeset:\n  {}",
+            wrong.len(),
+            INLINE_FALSE_POSITIVE_CORPUS.len(),
+            wrong.join("\n  ")
+        );
+    }
+
+    #[test]
+    fn the_inline_true_positive_corpus_is_typeset_in_command_output() {
+        let mut missed = Vec::new();
+        for text in INLINE_TRUE_POSITIVE_CORPUS {
+            if detect_inline_math(text, InlineMathSite::CommandOutput).is_empty() {
+                missed.push(*text);
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "{} of {} genuine formulas went undetected in command output: {missed:?}",
+            missed.len(),
+            INLINE_TRUE_POSITIVE_CORPUS.len()
+        );
+    }
+
+    /// The measured, accepted cost of gate A, kept as an assertion rather than a sentence in a
+    /// report so that it stays true.
+    ///
+    /// Every line of genuine mathematics in the corpus goes undetected outside a command-output
+    /// region — that is the whole of scheme A's price, and it is a *complete* loss on that side,
+    /// not a partial one. A session without shell integration renders no inline formulas at all.
+    /// If a future change makes even one of these detect, the structural guarantee that buys the
+    /// zero above has been broken and this test is where it surfaces.
+    #[test]
+    fn gate_a_costs_every_genuine_formula_printed_outside_a_command_output_region() {
+        for text in INLINE_TRUE_POSITIVE_CORPUS {
+            assert!(
+                detect_inline_math(text, InlineMathSite::Ineligible).is_empty(),
+                "{text:?} must not be typeset without OSC 133 proof that a command printed it"
+            );
+        }
+    }
+
+    /// A line that reaches the scanner without a stated site gets no inline rendering. The
+    /// conservative direction is the only safe default for a question this crate cannot answer.
+    #[test]
+    fn a_scan_that_states_no_site_yields_no_inline_math() {
         let text = "能量 $E = mc^2$，并且 $a_1+b_1=c_1$。";
         assert!(
             detect_math_blocks([(TranscriptId(1), text)]).is_empty(),
-            "inline detection must stay off until its false-positive set is honest"
+            "the site-less entry point must not typeset a lone dollar run"
         );
-        assert!(detect_inline_math(text).is_empty());
+    }
+
+    /// The "Inline formulas" switch is load-bearing, not decorative: with everything else held
+    /// equal — same text, same proven command-output site — `false` must yield nothing.
+    ///
+    /// Stated at the scanner rather than at the viewport because that is where this switch acts.
+    /// Its display sibling hides finished rasters; this one stops the run from ever being a run.
+    #[test]
+    fn the_inline_formulas_switch_decides_whether_a_proven_run_is_detected_at_all() {
+        let text = "能量 $E = mc^2$，并且 $a_1+b_1=c_1$。";
+        let scan = |inline_formulas| {
+            detect_math_blocks_with_sites(
+                [(TranscriptId(1), text, InlineMathSite::CommandOutput)],
+                DetectionOptions {
+                    inline_formulas,
+                    ..DetectionOptions::default()
+                },
+            )
+        };
+        let on = scan(true);
+        assert_eq!(
+            on.len(),
+            1,
+            "command-output inline math must be detected with the switch on"
+        );
+        assert_eq!(on[0].span.mode, MathMode::Inline);
+        assert_eq!(on[0].span.inline_runs.len(), 2);
+        assert!(
+            scan(false).is_empty(),
+            "the same proven run must vanish with the switch off"
+        );
     }
 
     #[test]
@@ -2707,6 +3154,7 @@ mod tests {
                     id: TranscriptId(1),
                     text: text.to_owned(),
                     cell_boundaries: boundaries,
+                    site: InlineMathSite::CommandOutput,
                 }]),
                 DetectionOptions::default(),
             )
@@ -3444,25 +3892,34 @@ abla f",
         assert!(!detected[0].span.render_source.contains("y &= 1\\\\\n"));
     }
 
+    /// The completeness rule, isolated from the rest of the gates.
+    ///
+    /// Every pair here sits at `CommandOutput` with a genuine math signal present, so site and
+    /// signal are both satisfied and the *only* thing separating the two columns is whether the
+    /// span reads as a whole expression. This is the test that fails if someone ever "simplifies"
+    /// `inline_source_is_complete` back into a bag of interesting characters.
     #[test]
-    fn inline_false_positive_set_stays_native() {
-        for text in [
-            "$5 和 $10",
-            "价格是 $5$",
-            "echo $PATH",
-            "echo $1",
-            "literal $PATH$ token",
-            "`const x = $value`",
-            "+ 文档里有 $x^2$",
-            "2026-07-19 log $x^2$",
-            r"escaped \$x^2$",
-            "unclosed $x^2",
+    fn a_severed_expression_is_not_math_but_the_whole_one_beside_it_is() {
+        for (truncated, whole) in [
+            ("a $5+$10", "a $5+x$"),
+            ("q $1 AND b=$2", "q $1 + b=2$"),
+            ("p $HOME/bin:$PATH", "p $HOME/bin$"),
+            ("f $g(x$ y", "f $g(x)$ y"),
+            ("s $a_$b", "s $a_b$"),
         ] {
             assert!(
-                detect_inline_math(text).is_empty(),
-                "unexpected match: {text}"
+                detect_inline_math(truncated, InlineMathSite::CommandOutput).is_empty(),
+                "severed expression must stay native: {truncated}"
+            );
+            assert!(
+                !detect_inline_math(whole, InlineMathSite::CommandOutput).is_empty(),
+                "complete expression must be typeset: {whole}"
             );
         }
+    }
+
+    #[test]
+    fn a_fenced_code_block_is_never_inline_math() {
         assert!(
             detect_math_blocks([
                 (TranscriptId(1), "```text"),
@@ -3497,6 +3954,7 @@ abla f",
                         text: (*text).to_owned(),
                         continues: false,
                         cell_boundaries: scalar_boundaries(text),
+                        site: InlineMathSite::Ineligible,
                     })
                     .collect::<Vec<_>>(),
             ),
@@ -3674,6 +4132,7 @@ abla f",
                 text: (*text).to_owned(),
                 continues: false,
                 cell_boundaries: scalar_boundaries(text),
+                site: InlineMathSite::Ineligible,
             })
             .collect()
     }
@@ -3696,6 +4155,53 @@ abla f",
     fn ledger_of(rows: &[(LiveDetectionSource, &str)], ctx: DetectionContext) -> OwnershipLedger {
         let inputs = boundary_inputs(rows);
         live_detection_ownership_ledger(&inputs, ctx, DetectionOptions::default())
+    }
+
+    /// A soft-wrapped line is scanned as one string, so its site must be the *conjunction* of its
+    /// fragments' — a line half of which the shell never claimed to have printed is not output.
+    ///
+    /// Red gate: the all-output case is asserted alongside, so a rule that simply answered
+    /// `Ineligible` for every wrapped line could not pass.
+    #[test]
+    fn a_wrapped_line_is_command_output_only_when_every_fragment_is() {
+        let wrapped = |sites: [InlineMathSite; 3]| {
+            let inputs = sites
+                .iter()
+                .enumerate()
+                .map(|(row, site)| LiveDetectionInput {
+                    source: LiveDetectionSource::Grid {
+                        row: row as u32,
+                        revision: 1,
+                    },
+                    text: "abc".to_owned(),
+                    // The first two rows soft-wrap into the next, so all three join into one line.
+                    continues: row < 2,
+                    cell_boundaries: scalar_boundaries("abc"),
+                    site: *site,
+                })
+                .collect::<Vec<_>>();
+            let logical = live_logical_lines(&inputs);
+            assert_eq!(
+                logical.len(),
+                1,
+                "the fixture must join into one logical line"
+            );
+            logical[0].site
+        };
+        use InlineMathSite::{CommandOutput, Ineligible};
+        assert_eq!(
+            wrapped([CommandOutput, CommandOutput, CommandOutput]),
+            CommandOutput
+        );
+        for seam in 0..3 {
+            let mut sites = [CommandOutput; 3];
+            sites[seam] = Ineligible;
+            assert_eq!(
+                wrapped(sites),
+                Ineligible,
+                "one ineligible fragment at index {seam} makes the whole joined line ineligible"
+            );
+        }
     }
 
     fn has_reason(ledger: &OwnershipLedger, reason: LegitimateRejection) -> bool {
@@ -3743,6 +4249,7 @@ abla f",
                 .map(|(id, text)| (*id, text.as_str())),
             DetectionContext::default(),
             DetectionOptions::default(),
+            Some(&live_logical_sites(&logical)),
             boundary,
             clipped,
         );
@@ -3788,6 +4295,7 @@ abla f",
                 .map(|(id, text)| (*id, text.as_str())),
             DetectionContext::default(),
             DetectionOptions::default(),
+            Some(&live_logical_sites(&live_logical_lines(&inputs))),
             live_grid_boundary_index(&live_logical_lines(&inputs), &inputs),
             None,
         );
@@ -3936,6 +4444,7 @@ abla f",
             lines,
             DetectionContext::default(),
             DetectionOptions::default(),
+            None,
         );
         assert!(
             resync
@@ -3974,6 +4483,7 @@ abla f",
             lines,
             DetectionContext::ambiguous(),
             DetectionOptions::default(),
+            None,
         );
         let baseline = detect_math_blocks_in_context(lines, DetectionContext::ambiguous());
         assert_eq!(
@@ -3998,6 +4508,7 @@ abla f",
             lines,
             DetectionContext::default(),
             DetectionOptions::default(),
+            None,
         );
         assert!(
             resync
@@ -4021,6 +4532,7 @@ abla f",
             lines,
             DetectionContext::default(),
             DetectionOptions::default(),
+            None,
         );
         assert_eq!(resync.len(), 1, "only the genuine E=mc^2 block resolves");
         assert!(
@@ -4049,6 +4561,7 @@ abla f",
             lines,
             DetectionContext::default(),
             DetectionOptions::default(),
+            None,
         );
         assert_eq!(
             resync.len(),
@@ -4245,6 +4758,7 @@ abla f",
             lines.iter().copied(),
             DetectionContext::default(),
             DetectionOptions::default(),
+            None,
             Some(7),
             None,
         );

@@ -8613,7 +8613,13 @@ mod tests {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         seats.toggle_preview(&metrics);
-        let (width, height) = (1_280u32, 800u32);
+        // Tall enough that all three probe points land *outside* the dialog,
+        // which is the case this pins: a press the panel itself catches already
+        // lands nowhere (`SettingsTarget::Panel => {}`), so it would prove the
+        // scrim nothing. The dialog is top-anchored and grows with its row list,
+        // so this window has to stay ahead of that list — 800px stopped clearing
+        // the divider the moment the second formula row was added.
+        let (width, height) = (1_280u32, 1_200u32);
         let layout = solved(&seats, viewport_of(width, height, 1_000), &metrics);
         let overlay = crate::settings::layout_for_menu(
             width as f32,
