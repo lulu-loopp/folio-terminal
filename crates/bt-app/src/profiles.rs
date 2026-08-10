@@ -279,8 +279,28 @@ fn menu_rows(recent: &[RecentEntry]) -> &[RecentEntry] {
     &recent[..recent.len().min(RECENT_CAPACITY)]
 }
 
-/// The menu hung under `anchor` — the `˅`'s own box, in physical pixels — inside
-/// a surface this wide, showing `recent` under the profiles.
+/// Which way the menu hangs off the button that opened it.
+///
+/// `openProfileMenu` (mock-up 7357-7405) needs no such choice: it writes `top:
+/// a.bottom + 4; left: a.left` off whatever element was clicked, and in a
+/// document that is right for both layouts for free, because both chevrons are
+/// real boxes and a menu below either one has the whole page to fall into.
+///
+/// This window is not a page. Below-and-left of a *rail* button is the rail's
+/// own column — 46px of it while the rail is parked — so the menu would be laid
+/// down the sidebar it was opened from. A vertical strip keeps its free space to
+/// the side, which is the same reason [`crate::peek_strip::PeekSide`] exists and
+/// the same answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuSide {
+    /// Under the button, sharing its left edge. The horizontal strip.
+    Below,
+    /// To the right of the button, aligned with its top. The vertical rail.
+    Beside,
+}
+
+/// The menu hung off `anchor` — the `˅`'s own box, in physical pixels — inside
+/// a surface this big, showing `recent` under the profiles.
 ///
 /// No clock is read here and none is passed: how long ago a seed was closed is
 /// a fact about the moment it is *drawn*, so it belongs to [`build`], and a
@@ -289,7 +309,8 @@ fn menu_rows(recent: &[RecentEntry]) -> &[RecentEntry] {
 #[must_use]
 pub fn layout(
     anchor: [f32; 4],
-    surface_width: f32,
+    side: MenuSide,
+    surface: (f32, f32),
     scale: f32,
     recent: &[RecentEntry],
 ) -> ProfileMenuLayout {
@@ -320,13 +341,34 @@ pub fn layout(
     };
 
     let width = px(MENU_MIN_WIDTH_LOGICAL_PX).round();
-    let top = (anchor[3] + px(MENU_OFFSET_LOGICAL_PX)).round();
-    let left = anchor[0]
-        .min(surface_width - width - px(MENU_EDGE_MARGIN_LOGICAL_PX))
-        .max(0.0)
-        .round();
     let height =
         (2.0 * (border + padding) + item_height * PROFILES.len() as f32 + recent_block).round();
+    let (surface_width, surface_height) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    let (left, top) = match side {
+        // `menu.style.top = a.bottom + 4; menu.style.left = Math.min(a.left,
+        // win.width - mw - 8)` — the mock-up's own two lines.
+        MenuSide::Below => (
+            anchor[0].min(surface_width - width - edge).max(0.0).round(),
+            (anchor[3] + px(MENU_OFFSET_LOGICAL_PX)).round(),
+        ),
+        // The same four pixels turned through a right angle. The rail's `˅`
+        // stands beside its `+` when the panel is open and collapses to nothing
+        // when it is parked (Q181), so the box handed in here is the chevron's
+        // in one state and the `+`'s in the other — and "clear of its right
+        // edge, level with its top" is the one placement that reads the same for
+        // both, because the two share that edge and that top by construction.
+        MenuSide::Beside => (
+            (anchor[2] + px(MENU_OFFSET_LOGICAL_PX))
+                .min(surface_width - width - edge)
+                .max(0.0)
+                .round(),
+            anchor[1]
+                .min(surface_height - height - edge)
+                .max(0.0)
+                .round(),
+        ),
+    };
     let frame = [left, top, left + width, top + height];
 
     let content_left = frame[0] + border + padding;
@@ -752,7 +794,13 @@ mod tests {
     fn the_menu_hangs_under_its_button_at_the_mockup_s_own_width() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let button = anchor(scale);
-            let layout = layout(button, 960.0 * scale, scale, NO_RECENT);
+            let layout = layout(
+                button,
+                MenuSide::Below,
+                (960.0 * scale, 600.0),
+                scale,
+                NO_RECENT,
+            );
             let frame = layout.frame;
             assert_eq!(
                 frame[1],
@@ -771,6 +819,76 @@ mod tests {
             );
             assert_eq!(layout.items.len(), PROFILES.len());
         }
+    }
+
+    /// PIN — beside the rail's button, not under it, and the bug that asked.
+    ///
+    /// A real window in rail mode opened the picker adrift in the middle of the
+    /// terminal, because the anchor was still read out of the *horizontal*
+    /// strip's geometry — a pure function of a width and a trailer list, which
+    /// goes on answering with a box in the title bar long after the tabs have
+    /// moved down the side.
+    ///
+    /// With the rail's own box, "under and left" is still wrong: that is the
+    /// rail's own column, 46px of it while parked. Beside, then, and level with
+    /// the button's top — and, because Q181 collapses the `˅` while the rail is
+    /// parked so the `+` is the anchor there instead, the placement is written
+    /// so those two boxes give the same answer. They share a right edge and a
+    /// top by construction, so the menu does not jump when the panel slides open
+    /// and the chevron comes back.
+    #[test]
+    fn beside_the_rail_the_menu_clears_its_button_rather_than_hanging_down_it() {
+        let scale = 1.0;
+        // A 220px rail's `+` row, and the `˅` that stands at its right end:
+        // `new_tab` is 173 wide, a 2px gap, then a 28px chevron (Q181).
+        let plus = [8.0_f32, 400.0, 181.0, 430.0];
+        let chevron = [183.0_f32, 400.0, 211.0, 430.0];
+
+        let open = layout(chevron, MenuSide::Beside, (1400.0, 900.0), scale, NO_RECENT);
+        assert_eq!(
+            open.frame[0],
+            (chevron[2] + 4.0 * scale).round(),
+            "the menu stands clear of the chevron's right edge, not under it"
+        );
+        assert_eq!(
+            open.frame[1], chevron[1],
+            "and level with its top rather than below its bottom"
+        );
+
+        let parked = layout(plus, MenuSide::Beside, (1400.0, 900.0), scale, NO_RECENT);
+        assert_eq!(
+            parked.frame[1], open.frame[1],
+            "a parked rail anchors on the `+` instead, and the two share a top, \
+             so the menu does not jump as the panel opens"
+        );
+
+        // The `Below` placement is still the strip's own, and still different.
+        let strip = layout(chevron, MenuSide::Below, (1400.0, 900.0), scale, NO_RECENT);
+        assert_eq!(strip.frame[0], chevron[0].round());
+        assert_eq!(strip.frame[1], (chevron[3] + 4.0 * scale).round());
+    }
+
+    /// PIN — a menu beside a button near the window's foot is pushed back up
+    /// rather than hanging out of it. The `Below` placement never needed this —
+    /// it only ever hangs off the title bar — which is why the clamp arrived
+    /// with the rail.
+    #[test]
+    fn a_menu_beside_a_low_button_stays_inside_the_window() {
+        let scale = 1.0;
+        let surface = (1400.0_f32, 500.0_f32);
+        let low = layout(
+            [8.0, 470.0, 211.0, 500.0],
+            MenuSide::Beside,
+            surface,
+            scale,
+            NO_RECENT,
+        );
+        assert!(
+            low.frame[3] <= surface.1 - 8.0 + 0.001,
+            "the menu ran past the window's foot: {:?}",
+            low.frame
+        );
+        assert!(low.frame[1] >= 0.0, "{:?}", low.frame);
     }
 
     /// PIN — the list is what this build can actually launch, and no more.
@@ -794,7 +912,7 @@ mod tests {
     fn the_menu_claims_its_own_box_and_nothing_else() {
         let scale = 1.0;
         let button = anchor(scale);
-        let layout = layout(button, 960.0, scale, NO_RECENT);
+        let layout = layout(button, MenuSide::Below, (960.0, 600.0), scale, NO_RECENT);
         let frame = layout.frame;
         let item = layout.items[0];
         assert_eq!(
@@ -832,7 +950,13 @@ mod tests {
     fn a_menu_opened_near_the_right_edge_stays_inside_the_window() {
         let scale = 1.0;
         let surface = 300.0;
-        let layout = layout([260.0, 9.0, 288.0, 37.0], surface, scale, NO_RECENT);
+        let layout = layout(
+            [260.0, 9.0, 288.0, 37.0],
+            MenuSide::Below,
+            (surface, 600.0),
+            scale,
+            NO_RECENT,
+        );
         let frame = layout.frame;
         assert!(
             frame[2] <= surface - 8.0,
@@ -870,7 +994,13 @@ mod tests {
     #[test]
     fn a_hovered_row_lights_up_and_every_row_wears_its_profile_s_mark() {
         let scale = 1.0;
-        let layout = layout(anchor(scale), 960.0, scale, NO_RECENT);
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            NO_RECENT,
+        );
         let palette = chrome_palette();
         let rest = one_layer(build(&layout, None, NO_RECENT, now()));
         let hover = one_layer(build(&layout, Some(MenuRow::Profile(0)), NO_RECENT, now()));
@@ -967,7 +1097,13 @@ mod tests {
         );
 
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-            let layout = layout(anchor(scale), 960.0 * scale, scale, NO_RECENT);
+            let layout = layout(
+                anchor(scale),
+                MenuSide::Below,
+                (960.0 * scale, 600.0),
+                scale,
+                NO_RECENT,
+            );
             let item = layout.items[0];
             assert_eq!(
                 (item[3] - item[1]).round(),
@@ -996,7 +1132,13 @@ mod tests {
     #[test]
     fn the_default_hint_is_inked_for_a_menu_and_not_for_a_dialog() {
         let scale = 1.0;
-        let layout = layout(anchor(scale), 960.0, scale, NO_RECENT);
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            NO_RECENT,
+        );
         let palette = chrome_palette();
         let layers = build(&layout, None, NO_RECENT, now());
         let labels: Vec<_> = layers.iter().flat_map(|layer| &layer.labels).collect();
@@ -1051,7 +1193,13 @@ mod tests {
     #[test]
     fn an_empty_vault_adds_no_rule_no_heading_and_no_rows() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-            let layout = layout(anchor(scale), 960.0 * scale, scale, NO_RECENT);
+            let layout = layout(
+                anchor(scale),
+                MenuSide::Below,
+                (960.0 * scale, 600.0),
+                scale,
+                NO_RECENT,
+            );
             let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
             assert_eq!(
                 layout.frame[3] - layout.frame[1],
@@ -1087,8 +1235,20 @@ mod tests {
     fn the_recent_section_is_a_rule_a_heading_and_one_row_for_each_seed() {
         let vault = [term("C:\\repo", None, 0), files("D:\\notes", 600)];
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
-            let empty = layout(anchor(scale), 960.0 * scale, scale, NO_RECENT);
-            let full = layout(anchor(scale), 960.0 * scale, scale, &vault);
+            let empty = layout(
+                anchor(scale),
+                MenuSide::Below,
+                (960.0 * scale, 600.0),
+                scale,
+                NO_RECENT,
+            );
+            let full = layout(
+                anchor(scale),
+                MenuSide::Below,
+                (960.0 * scale, 600.0),
+                scale,
+                &vault,
+            );
             assert_eq!(
                 (full.frame[3] - full.frame[1]) - (empty.frame[3] - empty.frame[1]),
                 recent_block(scale, vault.len()),
@@ -1161,7 +1321,13 @@ mod tests {
             term("C:\\b", None, 60),
             files("C:\\c", 120),
         ];
-        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+        );
         let centre = |rect: [f32; 4]| {
             (
                 f64::from((rect[0] + rect[2]) / 2.0),
@@ -1201,7 +1367,13 @@ mod tests {
         let vault: Vec<RecentEntry> = (0..12)
             .map(|index| term(&format!("C:\\p{index}"), None, index * 60))
             .collect();
-        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+        );
         assert_eq!(RECENT_CAPACITY, 8, "the vault's own cap, not a second one");
         assert_eq!(layout.recent.len(), RECENT_CAPACITY);
         assert_eq!(
@@ -1238,7 +1410,13 @@ mod tests {
     fn the_recent_heading_is_uppercase_tracked_and_inked_for_a_menu() {
         let scale = 1.0;
         let vault = [term("C:\\repo", None, 0)];
-        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+        );
         let palette = chrome_palette();
         let layer = one_layer(build(&layout, None, &vault, now()));
         let heading = layer
@@ -1313,7 +1491,7 @@ mod tests {
             term("C:\\Users\\Weiyi\\empty", Some(""), 120),
             files("D:\\Developer\\BetterTerminal\\", 180),
         ];
-        let layout = layout(anchor(1.0), 960.0, 1.0, &vault);
+        let layout = layout(anchor(1.0), MenuSide::Below, (960.0, 600.0), 1.0, &vault);
         let layer = one_layer(build(&layout, None, &vault, now()));
         let drawn: Vec<&str> = layer
             .labels
@@ -1332,7 +1510,13 @@ mod tests {
     fn a_files_seed_wears_the_folder_and_a_terminal_seed_wears_its_profile_s_mark() {
         let scale = 1.0;
         let vault = [files("D:\\notes", 0), term("C:\\repo", None, 3 * 3600)];
-        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+        );
         let palette = chrome_palette();
         let layer = one_layer(build(&layout, None, &vault, now()));
 
@@ -1392,7 +1576,13 @@ mod tests {
     fn hovering_a_recent_row_lights_it_and_leaves_the_profile_above_it_dark() {
         let scale = 1.0;
         let vault = [term("C:\\repo", Some("build"), 0)];
-        let layout = layout(anchor(scale), 960.0, scale, &vault);
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+        );
         let palette = chrome_palette();
         let layer = one_layer(build(&layout, Some(MenuRow::Recent(0)), &vault, now()));
         let row = layout.recent[0];

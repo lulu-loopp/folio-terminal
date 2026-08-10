@@ -933,6 +933,17 @@ struct Runtime {
     /// gets wide enough to hold words before the words arrive, and on the way shut
     /// the words leave first. One tween sampled twice could express neither.
     rail_text: RevealTween,
+    /// The rail as this frame's chrome build drew it, waiting to be stacked.
+    ///
+    /// The rail floats over the panes, so it cannot share their run of the three
+    /// channels — see [`seats::WindowChrome`]. It is built where all the other
+    /// chrome is built, on that build's own `now`, and handed to
+    /// [`Runtime::refresh_overlay`] through here rather than rebuilt down there,
+    /// which would mean a second clock and a rail half a frame out of step with
+    /// the tabs it is showing.
+    ///
+    /// Empty in a horizontal layout, and empty until the first chrome build.
+    rail_chrome: seats::ChromeGroup,
     /// The rail state the chrome was last built with, quantised to what can
     /// actually reach the glass — the rail's half of the frame debt.
     ///
@@ -5243,6 +5254,30 @@ struct PanePress {
 }
 
 impl TabState {
+    /// **K121, re-ruled: letting go of a reorder settles, and settles only.**
+    ///
+    /// The landing wash marks a *hand-over* — the moment a thing that was being
+    /// carried in one surface becomes a real row in another, which is the one
+    /// arrival a user cannot otherwise account for. The mock-up says so by where
+    /// it spends the class: `extractPaneToTab` adds `.landing` to the tab a pane
+    /// just became (3517-3542), and the plain in-strip release, `releaseGrabbed`
+    /// (6672-6685) into `playStripFlip` (6634-6648), never adds it at all.
+    ///
+    /// This build had extended the wash to ordinary reorders as well, on the
+    /// reading that "commit on release" is one event. It is not: a reorder was
+    /// applied live, slot by slot, as the row travelled under your hand (K122) —
+    /// nothing arrives at release, so there is nothing to announce, and a wash
+    /// that fires anyway reads as the row having come from somewhere else. The
+    /// row you dragged already knows where it is; all that is left is the last
+    /// few pixels of travel.
+    ///
+    /// One motion, then, and it is the same [`FlipTween`] a displaced neighbour
+    /// runs — which is the honest statement that the tab you let go of and the
+    /// tabs that got out of its way are doing the same thing.
+    fn settle_into_slot(&mut self, offset: f32, now: Instant, motion: Motion) {
+        self.flip.displace(offset, now, motion);
+    }
+
     /// The reveal as the strip would draw it: quantised to the 1/255 the
     /// sprite's opacity resolves to, which is the finest difference that can
     /// reach the screen.
@@ -6645,6 +6680,7 @@ impl Runtime {
             rail_scroll: 0.0,
             rail_open: RevealTween::over(RAIL_TRANSITION),
             rail_text: RevealTween::over(RAIL_TEXT_FADE),
+            rail_chrome: seats::ChromeGroup::default(),
             last_drawn_rail: None,
             tab_press: None,
             pane_press: None,
@@ -7414,7 +7450,7 @@ impl Runtime {
         // hold one.
         let pane_transforms = self.pane_transforms(now);
         let resizing_cards = self.resizing_cards_frame(now);
-        let (quads, labels, sprites) = seats::build_chrome_for_tabs(
+        let chrome = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
             scale,
@@ -7447,8 +7483,16 @@ impl Runtime {
                 resizing_cards,
             },
         );
-        let icons = self.chrome_marks.resolve(&sprites);
-        let chrome_changed = self.renderer.set_chrome(quads, labels, icons);
+        let seats::WindowChrome { seats, rail } = chrome;
+        let icons = self.chrome_marks.resolve(&seats.sprites);
+        let chrome_changed = self.renderer.set_chrome(seats.quads, seats.labels, icons);
+        // The rail floats over the panes, so it is handed on to the overlay
+        // stack instead of being drawn in the same run as them — see
+        // [`seats::WindowChrome`]. Kept here rather than rebuilt down there
+        // because it is a *product* of this build: everything it needs was
+        // sampled on this frame's `now`, and asking for it again a few lines
+        // later would be asking a second clock.
+        self.rail_chrome = rail;
         // From the same geometry, on the same beat: what the strip draws is what
         // can be tipped, and both are decided here or neither is.
         self.rebuild_tooltip_anchors(scale, width as f32, now);
@@ -7747,15 +7791,38 @@ impl Runtime {
         let motion = self.motion;
         let scale = self.renderer.metrics().scale_factor as f32;
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
-        let geometry = seats::tab_strip_geometry(
-            width as f32,
-            scale,
-            &self.tab_trailers(now),
-            self.active_tab,
-            self.tab_scroll,
-        );
-        let Some(host) = geometry.tabs.get(index).map(|slot| slot.body) else {
-            return Vec::new();
+        // The peek hangs off the row the pointer is on, and *which* geometry
+        // holds that row is the same question `chrome_target_at` already asks
+        // before it can say the pointer is on a row at all. Asking it here too
+        // is what stops the card being placed by the horizontal strip's
+        // arithmetic while the pointer is in the rail: `tab_strip_geometry`
+        // still answers in vertical layout — it is a pure function of a width
+        // and a trailer list, and knows nothing about a rail being on screen —
+        // so it handed back slot 0's box up in the title bar, and the card was
+        // drawn in the window's top-left corner across the rail it belonged to.
+        let (host, side) = match self.rail.layout {
+            seats::TabLayoutMode::Vertical => {
+                let Some(rail) = self.rail_geometry_now(now) else {
+                    return Vec::new();
+                };
+                let Some(row) = rail.tabs.get(index).map(|row| row.body) else {
+                    return Vec::new();
+                };
+                (row, peek_strip::PeekSide::Beside)
+            }
+            seats::TabLayoutMode::Horizontal => {
+                let geometry = seats::tab_strip_geometry(
+                    width as f32,
+                    scale,
+                    &self.tab_trailers(now),
+                    self.active_tab,
+                    self.tab_scroll,
+                );
+                let Some(host) = geometry.tabs.get(index).map(|slot| slot.body) else {
+                    return Vec::new();
+                };
+                (host, peek_strip::PeekSide::Below)
+            }
         };
         let Some(tab) = self.tabs.get(index) else {
             return Vec::new();
@@ -7858,6 +7925,7 @@ impl Runtime {
             &leaves,
             &widths,
             host,
+            side,
             (width as f32, height as f32),
             scale,
         ) else {
@@ -7971,19 +8039,43 @@ impl Runtime {
         if !self.profile_menu.is_open() {
             return None;
         }
+        let now = Instant::now();
         let scale = self.renderer.metrics().scale_factor as f32;
-        let (width, _) = self.renderer.presentation_geometry().swapchain_size;
-        let anchor = seats::tab_strip_geometry(
-            width as f32,
-            scale,
-            &self.tab_trailers(Instant::now()),
-            self.active_tab,
-            self.tab_scroll,
-        )
-        .new_tab_menu;
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        // The button that opened the menu is the button the menu hangs off, and
+        // in a vertical layout that button is in the rail. Reading the
+        // horizontal strip's `˅` regardless is what put the picker adrift in the
+        // middle of the terminal: `tab_strip_geometry` is a pure function of a
+        // width and a trailer list, so it goes on answering with a box in the
+        // title bar long after the tabs have moved down the side.
+        let (anchor, side) = match self.rail.layout {
+            seats::TabLayoutMode::Vertical => {
+                let rail = self.rail_geometry_now(now)?;
+                // Q181: a parked rail has no chevron — 28px of it would leave the
+                // `+` nothing — so the `+` is what the menu hangs off there. The
+                // two share a right edge and a top, so the menu does not jump
+                // when the panel slides open and the chevron reappears.
+                (
+                    rail.new_tab_menu.unwrap_or(rail.new_tab),
+                    profiles::MenuSide::Beside,
+                )
+            }
+            seats::TabLayoutMode::Horizontal => (
+                seats::tab_strip_geometry(
+                    width as f32,
+                    scale,
+                    &self.tab_trailers(now),
+                    self.active_tab,
+                    self.tab_scroll,
+                )
+                .new_tab_menu,
+                profiles::MenuSide::Below,
+            ),
+        };
         Some(profiles::layout(
             anchor,
-            width as f32,
+            side,
+            (width as f32, height as f32),
             scale,
             self.recent.entries(),
         ))
@@ -8126,8 +8218,16 @@ impl Runtime {
         // 30. Neither is a surface floating over the window — one is a drawing on
         // the layout and the other is a drawing on one pane — so a dialog that is
         // somehow up while either runs must cover it. See [`ground_overlay_layers`].
-        let mut layers =
-            ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now));
+        // Lowest of all, because it is the lowest `z-index` the overlay carries:
+        // `.rail { z-index: 15 }` against the dock veil's 24. It is not a
+        // surface floating over the *window* — it is chrome, and every popup
+        // below is entitled to cover it — but it does float over the panes, and
+        // one level up from them is all it ever asked for.
+        let mut layers = self.rail_overlay_layers();
+        layers.extend(ground_overlay_layers(
+            self.pane_fade_veils(now),
+            self.dock_overlay_layers(now),
+        ));
         layers.extend(if let Some(layout) = self.settings_layout() {
             settings::build(&layout, self.settings.hover(), self.settings_values())
         } else if let Some(layout) = self.restore_layout() {
@@ -8164,6 +8264,35 @@ impl Runtime {
         layers.extend(self.drag_ghost_layer());
         let layers = self.settings_marks.resolve_overlay(layers);
         self.renderer.set_modal_overlay(layers)
+    }
+
+    /// The rail's own level of the stack, or nothing when there is no rail.
+    ///
+    /// A straight lift of [`Runtime::rail_chrome`] into the overlay's vocabulary.
+    /// Chrome fills are opaque by construction — every translucent thing the rail
+    /// draws (a hover pill, a landing wash, the shade it casts) is a *sprite*,
+    /// which carries its own opacity — so the alpha here is 1.0 and the lift
+    /// changes not one pixel of what the rail looked like. All it changes is when
+    /// the three channels are drawn, which is the whole of the fix.
+    fn rail_overlay_layers(&self) -> Vec<marks::OverlayLayer> {
+        let rail = &self.rail_chrome;
+        if rail.quads.is_empty() && rail.labels.is_empty() && rail.sprites.is_empty() {
+            return Vec::new();
+        }
+        vec![marks::OverlayLayer {
+            quads: rail
+                .quads
+                .iter()
+                .map(|quad| bt_render::OverlayQuad {
+                    rect: quad.rect,
+                    color: quad.color,
+                    alpha: 1.0,
+                })
+                .collect(),
+            labels: rail.labels.clone(),
+            sprites: rail.sprites.clone(),
+            ..Default::default()
+        }]
     }
 
     /// **K124/N157 — the pane's stand-in in the strip**, and the slot it takes.
@@ -12369,8 +12498,10 @@ impl Runtime {
                 if let (Some(tab), Some(carry)) = (drag.tab(), drag.tab_carry())
                     && let Some(index) = self.tabs.iter().position(|candidate| candidate.id == tab)
                 {
-                    self.tabs[index].flip.displace(carry.offset, now, motion);
-                    self.tabs[index].landing.start(now, motion);
+                    // K121 as re-ruled: the settle and nothing else. See
+                    // [`TabState::settle_into_slot`] for why the wash that used
+                    // to be started here belongs to a hand-over alone.
+                    self.tabs[index].settle_into_slot(carry.offset, now, motion);
                     // The strip's order is the file's order, and a reorder is a
                     // choice the user made rather than a state being explored
                     // (§5.1). A drag that moved nothing decided nothing, and the
@@ -25810,6 +25941,62 @@ mod tests {
             moving && wash > 0.0,
             "the torn-out tab lands with the mock-up's wash still running: \
              {wash} / {moving}"
+        );
+    }
+
+    /// **K121 as re-ruled, both sides of the line in one test.**
+    ///
+    /// The wash belongs to a *hand-over* and to nothing else. A row reordered
+    /// inside its own strip was already put where it is, slot by slot, as it
+    /// travelled (K122); a pane torn out of a layout arrives in a run you were
+    /// not looking at, and is the arrival the wash exists to announce. The
+    /// mock-up spends the class in exactly one place for the same reason —
+    /// `extractPaneToTab` (3517-3542) adds `.landing`, `releaseGrabbed`
+    /// (6672-6685) never does.
+    ///
+    /// Both halves are asserted as *tweens the strip would sample*, not as
+    /// fields that were set, because `sample` is the only question the paint
+    /// layer ever asks; and both name `Motion::Full`, so a reduced-motion zero
+    /// cannot pass the reorder half by accident.
+    ///
+    /// Red gate: put `landing.start` back into `release_drag`'s `Commit` arm and
+    /// the reorder half goes red; take it out of `tear_pane_into_tab` and the
+    /// hand-over half does.
+    #[test]
+    fn a_reorder_settles_where_a_hand_over_washes() {
+        let now = Instant::now();
+
+        let mut reordered = cross_tab(1, &["ALPHA"]);
+        reordered.settle_into_slot(40.0, now, Motion::Full);
+        let (offset, sliding) = reordered.flip.sample(now, Motion::Full);
+        assert!(
+            sliding && offset.abs() > 0.0,
+            "the last few pixels of travel are the whole of a reorder's release: \
+             offset {offset}, sliding {sliding}"
+        );
+        assert_eq!(
+            reordered.landing.sample(now, Motion::Full),
+            (0.0, false),
+            "and no wash rides along with them — a reorder announces nothing \
+             because nothing arrived"
+        );
+
+        let mut source = cross_tab(2, &["ALPHA", "BETA"]);
+        let torn = tear_pane_into_tab(
+            &mut source,
+            &cross_metrics(),
+            SeatId(2),
+            TabId(9),
+            now,
+            Motion::Full,
+            cross_solve,
+        )
+        .expect("a two-pane tab can spare one");
+        let (wash, washing) = torn.landing.sample(now, Motion::Full);
+        assert!(
+            washing && wash > 0.0,
+            "a pane that became a tab crossed a boundary, and that is exactly \
+             what the wash is for: wash {wash}, washing {washing}"
         );
     }
 

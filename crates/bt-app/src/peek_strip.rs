@@ -74,12 +74,36 @@ pub const PEEK_BORDER_LOGICAL_PX: f32 = 1.0;
 /// `padding: 7px` (1725).
 pub const PEEK_PADDING_LOGICAL_PX: f32 = 7.0;
 
-/// How far below the tab the box stands — `r.bottom + 5` (mock-up 6252).
+/// How far off the tab the box stands — `r.bottom + 5` (mock-up 6252).
 ///
 /// One pixel less than the tip's 6, and it is the mock-up's own number rather
 /// than a shared constant, because the two are not the same measurement: the tip
 /// clears a control it is annotating, the peek hangs off the tab it belongs to.
+///
+/// The same five pixels serve both axes: beside a rail row it is the gap from
+/// the row's right edge rather than from its bottom.
 pub const PEEK_OFFSET_LOGICAL_PX: f32 = 5.0;
+
+/// Which way the box hangs off the row it explains.
+///
+/// The mock-up needs no such choice — `showPeek` reads `getBoundingClientRect()`
+/// off whichever element was hovered and always writes `top: r.bottom + 5; left:
+/// r.left`, because in a document that arithmetic was only ever asked about a
+/// tab in a horizontal strip. Asked about a *rail* row it answers badly: "below
+/// and sharing the left edge" puts the card over the next row down and over the
+/// rail itself, which is precisely what a real window showed — the schematic
+/// pinned to the window's top-left corner, lying across the rail.
+///
+/// A vertical strip has its free space to the side, so that is where the card
+/// goes. Stated as a choice the caller makes, because only the caller knows
+/// which way its tabs run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PeekSide {
+    /// Under the tab, sharing its left edge. The horizontal strip.
+    Below,
+    /// To the right of the row, aligned with its top. The vertical rail.
+    Beside,
+}
 
 /// How close the box may come to the window's edge — the `6` in
 /// `Math.max(6, Math.min(…, win.width - pw - 6))` (mock-up 6254).
@@ -486,6 +510,7 @@ pub fn layout(
     leaves: &[PeekLeaf],
     row_title_widths: &[f32],
     host: [f32; 4],
+    side: PeekSide,
     window: (f32, f32),
     scale: f32,
 ) -> Option<PeekLayout> {
@@ -538,14 +563,32 @@ pub fn layout(
     let width = (grid_width + 2.0 * (pad + border)).round();
     let height = (grid_height + list_height + 2.0 * (pad + border)).round();
     let margin = px(PEEK_MARGIN_LOGICAL_PX);
-    // `Math.max(6, Math.min(r.left, win.width - pw - 6))`, in that order: on a
-    // window too narrow to hold the box the `max` wins and the box hangs off
-    // the right rather than off the left, where the tabs are.
-    let left = host[0].min(window.0 - width - margin).max(margin).round();
-    // Below, always. The tip flips above when it runs out of room; this one has
-    // no flip because it has nowhere to flip to — every tab it hangs off lives
-    // in the title bar, and above the title bar is not this window.
-    let top = (host[3] + px(PEEK_OFFSET_LOGICAL_PX)).round();
+    // The clamp is `Math.max(6, Math.min(…, win.size - box - 6))` in that order,
+    // on whichever axis the box is free to slide along: on a window too small to
+    // hold the box the `max` wins and it hangs off the far edge rather than off
+    // the near one, where the tabs are.
+    //
+    // Neither side flips the way the tip does. There is nowhere to flip to: the
+    // strip's tabs live in the title bar and above the title bar is not this
+    // window, and a rail row's other side is the rail.
+    let clamp = |wanted: f32, extent: f32, span: f32| {
+        wanted.min(span - extent - margin).max(margin).round()
+    };
+    let (left, top) = match side {
+        // `top: r.bottom + 5; left: r.left` (mock-up 6252-6254).
+        PeekSide::Below => (
+            clamp(host[0], width, window.0),
+            (host[3] + px(PEEK_OFFSET_LOGICAL_PX)).round(),
+        ),
+        // The same five pixels turned through a right angle: clear of the row's
+        // right edge, and level with its top so the eye can see which row the
+        // card belongs to. The vertical clamp is what keeps a card hung off the
+        // last row of a long rail from hanging out of the window.
+        PeekSide::Beside => (
+            clamp(host[2] + px(PEEK_OFFSET_LOGICAL_PX), width, window.0),
+            clamp(host[1], height, window.1),
+        ),
+    };
     let frame = [left, top, left + width, top + height];
 
     // ── the schematic ──
@@ -1068,12 +1111,94 @@ mod tests {
             &leaves(2),
             &[40.0, 40.0],
             tab,
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
         .expect("a two-pane tab peeks");
         assert!((laid.frame[1] - (tab[3] + PEEK_OFFSET_LOGICAL_PX)).abs() < 0.001);
         assert!((laid.frame[0] - tab[0]).abs() < 0.001);
+    }
+
+    /// The same five pixels beside a rail row, and the bug that asked for them.
+    ///
+    /// A real window in rail mode drew the schematic in its own top-left corner,
+    /// lying across the rail: the placement was still the horizontal strip's
+    /// (`r.bottom + 5`, `r.left`) and the box it was handed was still slot 0's
+    /// up in the title bar. Even given the *right* box — the rail row — that
+    /// arithmetic answers badly, because below a rail row is the next rail row.
+    ///
+    /// Beside, then: clear of the row's right edge by the same 5px, and level
+    /// with its top so it is obvious which row is being explained.
+    #[test]
+    fn beside_a_rail_row_the_peek_clears_its_right_edge_and_shares_its_top() {
+        let tree = split(1, Axis::Row, 500_000, term(1), term(2));
+        // A row of a 220px rail, well down the column.
+        let row = [8.0, 300.0, 212.0, 330.0];
+        let beside = layout(
+            &tree,
+            &leaves(2),
+            &[40.0, 40.0],
+            row,
+            PeekSide::Beside,
+            WINDOW,
+            SCALE,
+        )
+        .expect("a two-pane tab peeks");
+        assert!(
+            (beside.frame[0] - (row[2] + PEEK_OFFSET_LOGICAL_PX)).abs() < 0.001,
+            "the card stands clear of the row's right edge: {:?}",
+            beside.frame
+        );
+        assert!(
+            (beside.frame[1] - row[1]).abs() < 0.001,
+            "and level with its top: {:?}",
+            beside.frame
+        );
+
+        // The two placements are genuinely different answers about one row —
+        // the guard against a `side` that is threaded through and then ignored.
+        let below = layout(
+            &tree,
+            &leaves(2),
+            &[40.0, 40.0],
+            row,
+            PeekSide::Below,
+            WINDOW,
+            SCALE,
+        )
+        .unwrap();
+        assert!(
+            below.frame[0] < beside.frame[0] && below.frame[1] > beside.frame[1],
+            "below is down-and-left of beside: {:?} vs {:?}",
+            below.frame,
+            beside.frame
+        );
+    }
+
+    /// A card hung off the last row of a long rail is pushed back inside rather
+    /// than hanging out of the window — the vertical twin of the horizontal
+    /// strip's `Math.min(…, win.width - pw - 6)`, which the `Below` placement has
+    /// never needed because it only ever hangs off the title bar.
+    #[test]
+    fn a_peek_beside_a_low_row_is_pushed_up_to_six_pixels_and_no_further() {
+        let tree = split(1, Axis::Row, 500_000, term(1), term(2));
+        let low = layout(
+            &tree,
+            &leaves(2),
+            &[40.0, 40.0],
+            [8.0, WINDOW.1 - 30.0, 212.0, WINDOW.1],
+            PeekSide::Beside,
+            WINDOW,
+            SCALE,
+        )
+        .unwrap();
+        assert!(
+            (low.frame[3] - (WINDOW.1 - PEEK_MARGIN_LOGICAL_PX)).abs() < 0.001,
+            "the card stops six pixels short of the window's foot: {:?}",
+            low.frame
+        );
+        assert!(low.frame[1] >= PEEK_MARGIN_LOGICAL_PX, "{:?}", low.frame);
     }
 
     /// The box is a fixed width: a 210px grid in 7px of padding inside a 1px
@@ -1087,6 +1212,7 @@ mod tests {
             &leaves(2),
             &[10.0, 10.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1096,6 +1222,7 @@ mod tests {
             &leaves(2),
             &[400.0, 400.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1127,8 +1254,16 @@ mod tests {
     fn no_name_in_a_peek_is_drawn_outside_the_peek() {
         let tree = split(1, Axis::Row, 500_000, term(1), term(2));
         let long = [900.0, 900.0];
-        let laid = layout(&tree, &leaves(2), &long, host_tab(), WINDOW, SCALE)
-            .expect("a two-pane tab peeks");
+        let laid = layout(
+            &tree,
+            &leaves(2),
+            &long,
+            host_tab(),
+            PeekSide::Below,
+            WINDOW,
+            SCALE,
+        )
+        .expect("a two-pane tab peeks");
         let palette = bt_render::chrome_palette();
         let layers = build(&laid, &leaves(2), &palette, SCALE);
         let frame = laid.frame;
@@ -1165,8 +1300,16 @@ mod tests {
     fn two_panes_with_one_name_both_wear_it() {
         let tree = split(1, Axis::Row, 500_000, term(1), term(2));
         let same = vec![leaf("scratchpad"), leaf("scratchpad")];
-        let laid = layout(&tree, &same, &[70.0, 70.0], host_tab(), WINDOW, SCALE)
-            .expect("a two-pane tab peeks");
+        let laid = layout(
+            &tree,
+            &same,
+            &[70.0, 70.0],
+            host_tab(),
+            PeekSide::Below,
+            WINDOW,
+            SCALE,
+        )
+        .expect("a two-pane tab peeks");
         assert_eq!(
             laid.rows.len(),
             2,
@@ -1196,6 +1339,7 @@ mod tests {
             &leaves(2),
             &[40.0, 40.0],
             [980.0, 6.0, 1000.0, 40.0],
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1211,6 +1355,7 @@ mod tests {
             &leaves(2),
             &[40.0, 40.0],
             [0.0, 6.0, 60.0, 40.0],
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1227,13 +1372,23 @@ mod tests {
     #[test]
     fn the_box_is_as_tall_as_its_grid_plus_however_many_lines_the_names_wrap_to() {
         let tree = split(1, Axis::Row, 500_000, term(1), term(2));
-        let one_line = layout(&tree, &leaves(2), &[20.0, 20.0], host_tab(), WINDOW, SCALE).unwrap();
+        let one_line = layout(
+            &tree,
+            &leaves(2),
+            &[20.0, 20.0],
+            host_tab(),
+            PeekSide::Below,
+            WINDOW,
+            SCALE,
+        )
+        .unwrap();
         // Two names that cannot share a line: each is wider than half the list.
         let two_lines = layout(
             &tree,
             &leaves(2),
             &[180.0, 180.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1258,6 +1413,7 @@ mod tests {
             &leaves(2),
             &[40.0, 40.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1290,6 +1446,7 @@ mod tests {
             &leaves(3),
             &[60.0, 60.0, 60.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1312,7 +1469,16 @@ mod tests {
     #[test]
     fn names_share_a_line_until_the_line_is_full() {
         let tree = split(1, Axis::Row, 500_000, term(1), term(2));
-        let together = layout(&tree, &leaves(2), &[20.0, 20.0], host_tab(), WINDOW, SCALE).unwrap();
+        let together = layout(
+            &tree,
+            &leaves(2),
+            &[20.0, 20.0],
+            host_tab(),
+            PeekSide::Below,
+            WINDOW,
+            SCALE,
+        )
+        .unwrap();
         assert!(
             (together.rows[0].title[1] - together.rows[1].title[1]).abs() < 0.001,
             "two short names share a line"
@@ -1327,6 +1493,7 @@ mod tests {
             &leaves(2),
             &[180.0, 180.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1347,11 +1514,27 @@ mod tests {
     fn a_tree_and_a_name_list_that_disagree_draw_nothing() {
         let tree = split(1, Axis::Row, 500_000, term(1), term(2));
         assert_eq!(
-            layout(&tree, &leaves(3), &[40.0; 3], host_tab(), WINDOW, SCALE),
+            layout(
+                &tree,
+                &leaves(3),
+                &[40.0; 3],
+                host_tab(),
+                PeekSide::Below,
+                WINDOW,
+                SCALE
+            ),
             None
         );
         assert_eq!(
-            layout(&tree, &leaves(2), &[40.0], host_tab(), WINDOW, SCALE),
+            layout(
+                &tree,
+                &leaves(2),
+                &[40.0],
+                host_tab(),
+                PeekSide::Below,
+                WINDOW,
+                SCALE
+            ),
             None,
             "…and the widths have to agree too"
         );
@@ -1366,6 +1549,7 @@ mod tests {
             &leaves(2),
             &[40.0, 40.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1397,6 +1581,7 @@ mod tests {
             &cast,
             &[40.0, 40.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1416,6 +1601,7 @@ mod tests {
             &cast,
             &[40.0, 40.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1454,7 +1640,16 @@ mod tests {
             term(1),
             split(2, Axis::Col, 500_000, term(2), term(3)),
         );
-        let laid = layout(&tree, &cast, &[50.0; 3], host_tab(), WINDOW, SCALE).unwrap();
+        let laid = layout(
+            &tree,
+            &cast,
+            &[50.0; 3],
+            host_tab(),
+            PeekSide::Below,
+            WINDOW,
+            SCALE,
+        )
+        .unwrap();
         let layer = &build(&laid, &cast, &palette, SCALE)[0];
 
         assert_eq!(layer.labels.len(), 6);
@@ -1499,6 +1694,7 @@ mod tests {
             &cast,
             &[40.0, 40.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1539,6 +1735,7 @@ mod tests {
             &cast,
             &[40.0, 40.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1571,6 +1768,7 @@ mod tests {
             &cast,
             &[40.0, 40.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1613,7 +1811,16 @@ mod tests {
             ),
         };
         let widths = vec![40.0; cast.len()];
-        let laid = layout(&tree, cast, &widths, host_tab(), WINDOW, SCALE).expect("a placed peek");
+        let laid = layout(
+            &tree,
+            cast,
+            &widths,
+            host_tab(),
+            PeekSide::Below,
+            WINDOW,
+            SCALE,
+        )
+        .expect("a placed peek");
         let layer = build(&laid, cast, &palette, SCALE).swap_remove(0);
         (laid, layer, palette)
     }
@@ -1872,6 +2079,7 @@ mod tests {
             &cast,
             &[40.0, 40.0],
             host_tab(),
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )
@@ -1928,6 +2136,7 @@ mod tests {
             &leaves(2),
             &[40.0, 40.0],
             tab,
+            PeekSide::Below,
             WINDOW,
             SCALE,
         )

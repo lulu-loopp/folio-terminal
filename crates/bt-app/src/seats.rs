@@ -2528,6 +2528,23 @@ pub fn rail_geometry(
         let mark_top = row_top + (row_height - mark) / 2.0;
         let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
         let glyph_top = row_top + (row_height - close_box) / 2.0;
+        // The title's own left edge, needed *before* the trailer because it is
+        // the trailer's floor. In the mock-up the row is a flex line — mark,
+        // title (`flex: 1; min-width: 0`), panecount, pin, close — and a flex
+        // line that runs out of room shrinks the title to zero and then lets
+        // the trailer **overflow the content box and be clipped**; it never
+        // slides the trailer back over the mark. A parked 46px row is exactly
+        // that case: 8px of rail padding either side and 7.5px of row padding
+        // leave 15px of content, which the mark fills on its own, so the `×`
+        // and the pin have nowhere legal to stand and are clipped away.
+        //
+        // Anchoring the trailer to `content_right` with no floor is what put a
+        // pinned row's pin glyph on top of its own profile mark in the icon
+        // dock, and — worse, because it was invisible — parked an unpinned
+        // row's `×` hit box over the icon, so clicking a tab closed it. Q180
+        // says the icon column does not move; it follows that nothing may be
+        // moved on top of it either.
+        let title_left = mark_rect[2] + content_gap;
         // Q174 is about the `×` and only about the `×`: "the rail is wide enough
         // to be honest at rest", so an unpinned row wears it always rather than
         // on hover (`.vtab:not(.pinned) .close { visibility: visible }`, mock-up
@@ -2541,7 +2558,7 @@ pub fn rail_geometry(
         let (close, pin) = {
             let right = (content_right - pad_right).max(content_left);
             let slot = [
-                (right - close_box).max(content_left),
+                (right - close_box).max(title_left),
                 glyph_top,
                 right,
                 glyph_top + close_box,
@@ -2555,11 +2572,11 @@ pub fn rail_geometry(
                 // empty and dropped below, which is what makes a resting
                 // unpinned row and a pinned one put their badges in the same
                 // column.
-                let pin_right = (slot[0] - tighten).max(content_left);
+                let pin_right = (slot[0] - tighten).max(title_left);
                 (
                     Some(slot),
                     Some([
-                        (pin_right - pin_box * trailer.reveal.clamp(0.0, 1.0)).max(content_left),
+                        (pin_right - pin_box * trailer.reveal.clamp(0.0, 1.0)).max(title_left),
                         glyph_top,
                         pin_right,
                         glyph_top + pin_box,
@@ -2569,7 +2586,6 @@ pub fn rail_geometry(
         };
         let close = close.filter(|rect| rect[2] > rect[0]);
         let pin = pin.filter(|rect| rect[2] > rect[0]);
-        let title_left = mark_rect[2] + content_gap;
         let trailing = trailing_edge_of(
             pin,
             close,
@@ -3552,6 +3568,7 @@ pub fn build_chrome_with_preview(
             resizing_cards: None,
         },
     )
+    .flattened()
 }
 
 /// What one tab in the strip has to say for itself.
@@ -3850,6 +3867,72 @@ impl<'a> PaneMotionFrame<'a> {
     }
 }
 
+/// One run of chrome in the three channels it is drawn in.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ChromeGroup {
+    pub quads: Vec<ChromeQuad>,
+    pub labels: Vec<ChromeLabel>,
+    pub sprites: Vec<ChromeSprite>,
+}
+
+impl ChromeGroup {
+    fn as_output(
+        &mut self,
+    ) -> (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ) {
+        (&mut self.quads, &mut self.labels, &mut self.sprites)
+    }
+}
+
+/// The window's chrome, cut at the one seam the compositor cares about.
+///
+/// **This is the layer stack `OverlayLayer` already documents, applied to the
+/// rail.** Chrome is drawn in three channels with a fixed order inside the pass
+/// — every fill, then every mark, then every glyph — so "pushed later" only ever
+/// wins *within* a channel. R1 leans on that: the rail is painted last so its
+/// fills cover the panes it floats over (`.rail { z-index: 15 }`, and an open
+/// icon rail overlaps the terminal for 174 of its 220 pixels). Being last in the
+/// fill channel was never enough. A pane head's caption is *text*, the text
+/// channel runs after every fill in the same run, and so the path a pane is
+/// showing — `D:\Developer\BetterTerminal` — printed straight through the face
+/// of the rail lying over it, which is what a real window showed.
+///
+/// Splitting the run is the same fix `236de00` made for the settings dialog, for
+/// the same reason and in the same shape: the floating thing gets a stack level
+/// of its own, and *all three* of its channels are drawn after all three of the
+/// level beneath. Culling the seat text that falls under the rail's rectangle
+/// would have hidden this one report and left the next channel — a mark, a
+/// hairline, anything added later — to find the bug again.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WindowChrome {
+    /// Everything that sits *in* the layout: pane heads, dividers, the title
+    /// bar, the horizontal strip.
+    pub seats: ChromeGroup,
+    /// The rail, which floats over it. Empty in a horizontal layout.
+    pub rail: ChromeGroup,
+}
+
+impl WindowChrome {
+    /// The whole window's chrome as one run, in paint order.
+    ///
+    /// The stacking is a fact about how the two runs reach the glass, not about
+    /// what is in them, so a test asking "what does this window draw?" is
+    /// entitled to ask it of the window rather than of each level — and most of
+    /// them are, which is why this is here and why it is `cfg(test)`. The
+    /// renderer never wants the two runs joined: joining them is the bug.
+    #[cfg(test)]
+    #[must_use]
+    pub fn flattened(mut self) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+        self.seats.quads.extend(self.rail.quads);
+        self.seats.labels.extend(self.rail.labels);
+        self.seats.sprites.extend(self.rail.sprites);
+        (self.seats.quads, self.seats.labels, self.seats.sprites)
+    }
+}
+
 /// Build chrome for every runtime tab while the pane layer still follows the active tab's solve.
 pub fn build_chrome_for_tabs(
     seats: &Seats,
@@ -3857,7 +3940,7 @@ pub fn build_chrome_for_tabs(
     scale: f32,
     pointer: ChromePointer,
     content: ChromeContent<'_>,
-) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
+) -> WindowChrome {
     let ChromeContent {
         tabs,
         active_tab,
@@ -4320,7 +4403,7 @@ pub fn build_chrome_for_tabs(
             ));
         }
     }
-    // **R1 — the rail last, because `.rail { z-index: 15 }`.**
+    // **R1 — the rail on a level of its own, because `.rail { z-index: 15 }`.**
     //
     // Above `.termhost` and therefore above every pane inside it, dividers and
     // pane heads included. Which is not decoration: an open icon rail is
@@ -4329,6 +4412,12 @@ pub fn build_chrome_for_tabs(
     // drawn on top of — it would simply vanish the moment it opened. The title
     // bar keeps its place at the head of the list because the rail begins below
     // it and the two never meet.
+    //
+    // Being *last in the list* is what this used to be, and last in the list is
+    // not above: the channels run fill-then-mark-then-text over the whole run,
+    // so a pane head's caption still printed through the rail's face. It goes in
+    // its own group instead — see [`WindowChrome`].
+    let mut rail_group = ChromeGroup::default();
     let surface_height = layout
         .rects
         .iter()
@@ -4350,9 +4439,16 @@ pub fn build_chrome_for_tabs(
             chevron_turn,
         },
         palette,
-        (&mut quads, &mut labels, &mut sprites),
+        rail_group.as_output(),
     );
-    (quads, labels, sprites)
+    WindowChrome {
+        seats: ChromeGroup {
+            quads,
+            labels,
+            sprites,
+        },
+        rail: rail_group,
+    }
 }
 
 /// The overlap of two `[left, top, right, bottom]` boxes, or `None` when they do
@@ -8603,7 +8699,8 @@ mod tests {
                     pane_motion: PaneMotionFrame::default(),
                     resizing_cards: None,
                 },
-            );
+            )
+            .flattened();
             let geometry = tab_strip_geometry(960.0 * scale, scale, &resting(3), 0, 0.0);
             // Compared as sets, because the strip paints the quiet tabs first
             // and the active one last (`.tab.active { z-index: 1 }`), so draw
@@ -8805,6 +8902,7 @@ mod tests {
                 resizing_cards: None,
             },
         )
+        .flattened()
     }
 
     fn strip_titles(count: usize) -> Vec<String> {
@@ -11296,6 +11394,7 @@ mod tests {
                 resizing_cards: None,
             },
         )
+        .flattened()
     }
 
     fn plain_tabs(count: usize) -> Vec<TabContent> {
@@ -11478,7 +11577,8 @@ mod tests {
                     pane_motion: PaneMotionFrame::default(),
                     resizing_cards: None,
                 },
-            );
+            )
+            .flattened();
             let wash = sprites
                 .iter()
                 .position(|sprite| {
@@ -11571,6 +11671,7 @@ mod tests {
                     resizing_cards: None,
                 },
             )
+            .flattened()
         };
         let (_, labels, sprites) = strip(Some(1));
         let wash = sprites
@@ -11768,6 +11869,7 @@ mod tests {
                 resizing_cards: cards,
             },
         )
+        .flattened()
     }
 
     /// Everything below the 40px window title bar — that is, the pane layer.
@@ -13301,7 +13403,8 @@ mod tests {
                 pane_motion: PaneMotionFrame::default(),
                 resizing_cards: None,
             },
-        );
+        )
+        .flattened();
         ChromeParts {
             quads,
             labels,
@@ -13347,7 +13450,8 @@ mod tests {
                 pane_motion: PaneMotionFrame::new(transforms),
                 resizing_cards: None,
             },
-        );
+        )
+        .flattened();
         ChromeParts {
             quads,
             labels,
@@ -14117,6 +14221,7 @@ mod tests {
                 resizing_cards: None,
             },
         )
+        .flattened()
     }
 
     /// **The load-bearing change: the terminal starts after the rail, and the
@@ -14354,7 +14459,8 @@ mod tests {
                 pane_motion: PaneMotionFrame::default(),
                 resizing_cards: None,
             },
-        );
+        )
+        .flattened();
         let geometry = rail_geometry(600.0, 1.0, &trailers, 1, 0.0, expanded_rail())
             .expect("an expanded rail is on screen");
         let quad_at = |rect: [f32; 4]| quads.iter().find(|quad| quad.rect == rect).map(|q| q.color);
@@ -14495,7 +14601,8 @@ mod tests {
                 pane_motion: PaneMotionFrame::default(),
                 resizing_cards: None,
             },
-        );
+        )
+        .flattened();
         let inside = |slot: [f32; 4], sprite: &ChromeSprite| {
             sprite.rect[0] >= slot[0]
                 && sprite.rect[2] <= slot[2]
@@ -15522,6 +15629,185 @@ mod tests {
                     "the icon column must not shift as the panel slides (scale {scale})"
                 );
             }
+        }
+    }
+
+    /// Q180's other half, and a real-machine bug report: the icon column does not
+    /// move, **and nothing is moved on top of it**.
+    ///
+    /// A parked row is 46px wide. Eight pixels of rail padding either side and
+    /// 7.5px of row padding leave a 15px content run, which the profile mark
+    /// fills exactly — so the `×` and the pin have nowhere to stand. The mock-up
+    /// reaches that answer through its flex line: the title is `flex: 1;
+    /// min-width: 0`, it shrinks to zero and no further, and the trailer then
+    /// overflows the content box and is clipped. It never walks backwards over
+    /// the mark.
+    ///
+    /// Anchoring the trailer to the content's right edge with no floor did walk
+    /// it backwards, and both halves of that were visible on a real window: a
+    /// pinned row drew its pin glyph directly over its own PowerShell mark, and
+    /// an unpinned row parked its `×` — invisible at `text_opacity` 0, and fully
+    /// live to the hit test that mirrors this geometry — over the icon you click
+    /// to switch tabs. Closing a tab by selecting it is the worst kind of bug the
+    /// icon dock could have.
+    #[test]
+    fn a_parked_row_keeps_its_trailer_off_its_own_icon() {
+        let pinned = TabTrailer {
+            pinned: true,
+            ..TabTrailer::default()
+        };
+        // A hovered unpinned row is the widest the trailer ever gets: the pin has
+        // fully revealed and the `×` is beside it.
+        let revealed = TabTrailer {
+            pinned: false,
+            reveal: 1.0,
+        };
+        let trailers = [pinned, revealed];
+
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let parked = rail_geometry(618.0 * scale, scale, &trailers, 1, 0.0, icon_rail(0.0))
+                .expect("a parked icon rail is on screen");
+            for (index, row) in parked.tabs.iter().enumerate() {
+                for (name, slot) in [("pin", row.pin), ("close", row.close)] {
+                    let Some(slot) = slot else { continue };
+                    assert!(
+                        slot[0] >= row.mark[2],
+                        "parked, row {index}'s {name} may not reach back over its mark \
+                         (scale {scale}): mark {:?}, {name} {slot:?}",
+                        row.mark
+                    );
+                }
+            }
+        }
+
+        // And the clamp is a floor, not a ban: the open rail is 203px wide and
+        // has room for every one of them, exactly where it always put them.
+        let open = rail_of(icon_rail(1.0), &trailers, 1);
+        assert!(
+            open.tabs[0].pin.is_some(),
+            "an open rail still states a pinned row's pin"
+        );
+        let close = open.tabs[1]
+            .close
+            .expect("an open rail still offers the `×`");
+        let pin = open.tabs[1].pin.expect("a revealed pin is beside it");
+        assert!(
+            pin[0] >= open.tabs[1].mark[2] && close[0] > pin[0],
+            "open, the trailer stands to the right of the mark in its usual order: \
+             mark {:?}, pin {pin:?}, close {close:?}",
+            open.tabs[1].mark
+        );
+    }
+
+    /// **R1, as a stack rather than as a place in a list — the pane caption that
+    /// printed through the rail.**
+    ///
+    /// A real window in icon mode, rail hovered open: the path a pane was showing
+    /// — `D:\Developer\BetterTerminal` — lay across the rail's first row, on top
+    /// of the panel, in full ink. Nothing was mis-positioned. The rail was
+    /// painted last, exactly as R1 asks, and last was not enough: chrome reaches
+    /// the glass in three channels with a fixed order over the whole run, so
+    /// every fill is drawn before any glyph and a caption pushed *earlier* than
+    /// the rail's face still lands *on* it.
+    ///
+    /// This is the disease [`bt_render::OverlayLayer`] was written for, met a
+    /// second time in the channel below it, so it takes the same cure: the rail
+    /// is its own group, and all three of its channels are drawn after all three
+    /// of the panes'.
+    ///
+    /// The test asserts the two halves that make the bug possible and the split
+    /// that answers it: the caption really is under the rail's face (so this is
+    /// an overlap and not a near miss), the rail really does draw in all three
+    /// channels (so no one channel could be special-cased), and no rail product
+    /// is left in the panes' own run.
+    ///
+    /// Red gate: push the rail back into the seat group — R1's old "last in the
+    /// list" — and the last assertion goes red while the window goes wrong.
+    #[test]
+    fn the_rail_is_stacked_over_the_pane_captions_it_lies_across() {
+        let seats = row_of_terminals(2);
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(1600, 900, 1_000), &metrics);
+        let names: BTreeMap<SeatId, String> = seats
+            .terminals()
+            .into_iter()
+            .map(|seat| (seat, r"D:\Developer\BetterTerminal".to_owned()))
+            .collect();
+        let tabs = [TabContent {
+            title: "PowerShell".to_owned(),
+            pane_count: seats.pane_count(),
+            ..TabContent::default()
+        }];
+        let chrome = build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer::default(),
+            ChromeContent {
+                tabs: &tabs,
+                active_tab: 0,
+                grabbed: None,
+                strip_preview: None,
+                tab_scroll: 0.0,
+                // Hovered fully open: this is the state that overlaps, and the
+                // state the report was made in.
+                rail: icon_rail(1.0),
+                rail_scroll: 0.0,
+                preview_title: None,
+                terminal_names: &names,
+                preview_message: None,
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        );
+
+        assert!(
+            !chrome.rail.quads.is_empty()
+                && !chrome.rail.labels.is_empty()
+                && !chrome.rail.sprites.is_empty(),
+            "an open rail draws in all three channels, which is why one of them \
+             cannot be the fix"
+        );
+
+        // The rail's own face — the widest fill it lays down — and a pane
+        // caption that starts inside it. Q179: only 46px are kept clear, so an
+        // open 220px rail lies over 174px of terminal, heads and all.
+        let face = chrome
+            .rail
+            .quads
+            .iter()
+            .map(|quad| quad.rect[2])
+            .fold(0.0_f32, f32::max);
+        assert!(face > RAIL_PARK_LOGICAL_PX, "the rail is open: {face}");
+        let covered = chrome
+            .seats
+            .labels
+            .iter()
+            .find(|label| label.text.contains("BetterTerminal"))
+            .expect("a two-pane tab wears its panes' names over their heads");
+        assert!(
+            covered.rect[0] < face,
+            "the fixture only bites if the caption really does begin under the \
+             rail's face: caption {:?}, rail out to {face}",
+            covered.rect
+        );
+
+        // And the split is total: nothing the rail drew is left in the run the
+        // panes are drawn in, whichever channel it went down.
+        for quad in &chrome.rail.quads {
+            assert!(
+                !chrome.seats.quads.contains(quad),
+                "a rail fill is still in the panes' own run: {quad:?}"
+            );
+        }
+        for label in &chrome.rail.labels {
+            assert!(
+                !chrome.seats.labels.contains(label),
+                "a rail label is still in the panes' own run: {label:?}"
+            );
         }
     }
 
