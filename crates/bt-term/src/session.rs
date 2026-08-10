@@ -1133,6 +1133,23 @@ impl DualPlaneSession {
             .max(1)
     }
 
+    /// Width of the grid in whole pixels — the band a math block is fitted into and scrolled
+    /// within. Both the projection and the scroll clamp measure against this same number.
+    fn math_pane_width_px(&self) -> u32 {
+        self.cell_width_subpixels
+            .get()
+            .saturating_mul(i64::from(self.layout_key.width_cells.get()))
+            .div_euclid(SUBPIXELS_PER_PX)
+            .max(1) as u32
+    }
+
+    fn math_band(&self) -> MathBand {
+        MathBand {
+            pane_width_px: self.math_pane_width_px(),
+            display_left_inset_subpixels: self.display_math_left_inset_subpixels(),
+        }
+    }
+
     pub fn set_ascii_baseline_subpixels(&mut self, ascii_baseline_subpixels: NonZeroI64) {
         self.ascii_baseline_subpixels = Some(ascii_baseline_subpixels);
     }
@@ -5228,12 +5245,7 @@ impl DualPlaneSession {
                     .max(1),
             )
         });
-        let pane_width_px = self
-            .cell_width_subpixels
-            .get()
-            .saturating_mul(i64::from(self.layout_key.width_cells.get()))
-            .div_euclid(SUBPIXELS_PER_PX)
-            .max(1) as u32;
+        let pane_width_px = self.math_pane_width_px();
         let display_left_inset_subpixels = self.display_math_left_inset_subpixels();
         match anchor {
             MathBlockAnchor::History { start, end } => {
@@ -5252,6 +5264,14 @@ impl DualPlaneSession {
                     pane_width_px,
                     artifact.mode,
                     display_left_inset_subpixels,
+                );
+                // Clamp against the scale the block is actually drawn at, fit included, so the
+                // offset stops exactly where the block's right edge does.
+                let scale_milli = math_fit_scale_milli(
+                    artifact.width_px,
+                    available_width_px,
+                    scale_milli,
+                    artifact.mode,
                 );
                 scroll_offsets(
                     &mut record.horizontal_scroll_px,
@@ -5290,6 +5310,12 @@ impl DualPlaneSession {
                     pane_width_px,
                     artifact.mode,
                     display_left_inset_subpixels,
+                );
+                let scale_milli = math_fit_scale_milli(
+                    artifact.width_px,
+                    available_width_px,
+                    scale_milli,
+                    artifact.mode,
                 );
                 let live_options = MathLayoutOptions {
                     block_max_height_px: None,
@@ -5340,7 +5366,13 @@ impl DualPlaneSession {
                         .span
                         .as_ref()
                         .is_some_and(|span| span.mode == MathMode::Display))
-                .then(|| projected_frozen_artifact(record, self.math_vertical_padding_subpixels()))
+                .then(|| {
+                    projected_frozen_artifact(
+                        record,
+                        self.math_band(),
+                        self.math_vertical_padding_subpixels(),
+                    )
+                })
                 .flatten()
                 .map(|artifact| (*id, artifact))
             })
@@ -5385,6 +5417,7 @@ impl DualPlaneSession {
                         projected_live_artifact(
                             record,
                             self.layout_key,
+                            self.math_band(),
                             self.math_vertical_padding_subpixels(),
                         )
                     })
@@ -5788,9 +5821,11 @@ impl DualPlaneSession {
             if !record.show_source {
                 continue;
             }
-            let Some(artifact) =
-                projected_frozen_artifact(record, self.math_vertical_padding_subpixels())
-            else {
+            let Some(artifact) = projected_frozen_artifact(
+                record,
+                self.math_band(),
+                self.math_vertical_padding_subpixels(),
+            ) else {
                 continue;
             };
             let Some(first_row) = frame_row_for_history(frame, *start) else {
@@ -5846,6 +5881,7 @@ impl DualPlaneSession {
             let Some(artifact) = projected_live_artifact(
                 record,
                 self.layout_key,
+                self.math_band(),
                 self.math_vertical_padding_subpixels(),
             ) else {
                 continue;
@@ -5917,9 +5953,11 @@ impl DualPlaneSession {
             if record.show_source || record.failure_reason.is_some() {
                 continue;
             }
-            let Some(artifact) =
-                projected_frozen_artifact(record, self.math_vertical_padding_subpixels())
-            else {
+            let Some(artifact) = projected_frozen_artifact(
+                record,
+                self.math_band(),
+                self.math_vertical_padding_subpixels(),
+            ) else {
                 continue;
             };
             let Some(entry) = self.document.entries().get(start) else {
@@ -5982,6 +6020,7 @@ impl DualPlaneSession {
             let Some(artifact) = projected_live_artifact(
                 record,
                 self.layout_key,
+                self.math_band(),
                 self.math_vertical_padding_subpixels(),
             ) else {
                 continue;
@@ -8439,26 +8478,6 @@ fn is_outer_environment_record(record: &LiveDecorationRecord) -> bool {
         && record.span.original_source.contains(r"\begin{")
 }
 
-fn project_artifact(
-    artifact: &PlaceholderArtifact,
-    rendered_layout: LayoutKey,
-    current_layout: LayoutKey,
-    source: String,
-    vertical_padding_subpixels: i64,
-) -> ProjectedMathArtifact {
-    let scale_milli = layout_scale_milli(rendered_layout, current_layout);
-    project_artifact_at_scale(
-        artifact,
-        scale_milli,
-        source,
-        if artifact.mode == MathMode::Inline {
-            0
-        } else {
-            vertical_padding_subpixels
-        },
-    )
-}
-
 fn project_artifact_at_scale(
     artifact: &PlaceholderArtifact,
     scale_milli: u32,
@@ -8506,28 +8525,21 @@ fn frozen_artifact_and_scale(record: &DecorationRecord) -> Option<(&PlaceholderA
 
 fn projected_frozen_artifact(
     record: &DecorationRecord,
+    band: MathBand,
     vertical_padding_subpixels: i64,
 ) -> Option<ProjectedMathArtifact> {
     let source = record.span.as_ref()?.render_source.clone();
-    if let Some(artifact) = record.artifact.as_ref() {
-        Some(project_artifact(
-            artifact,
-            record.versions.layout,
-            record.versions.layout,
-            source,
-            vertical_padding_subpixels,
-        ))
-    } else {
-        record.stale_artifact.as_ref().map(|stale| {
-            project_artifact(
-                &stale.artifact,
-                stale.rendered_layout,
-                record.versions.layout,
-                source,
-                vertical_padding_subpixels,
-            )
-        })
-    }
+    let (artifact, scale_milli) = frozen_artifact_and_scale(record)?;
+    Some(project_artifact_at_scale(
+        artifact,
+        band.fit_scale_milli(artifact, scale_milli),
+        source,
+        if artifact.mode == MathMode::Inline {
+            0
+        } else {
+            vertical_padding_subpixels
+        },
+    ))
 }
 
 fn live_artifact_and_scale(
@@ -8551,12 +8563,13 @@ fn live_artifact_and_scale(
 fn projected_live_artifact(
     record: &LiveDecorationRecord,
     current_layout: LayoutKey,
+    band: MathBand,
     vertical_padding_subpixels: i64,
 ) -> Option<ProjectedMathArtifact> {
     let (artifact, scale_milli) = live_artifact_and_scale(record, current_layout)?;
     Some(project_artifact_at_scale(
         artifact,
-        scale_milli,
+        band.fit_scale_milli(artifact, scale_milli),
         record.span.render_source.clone(),
         if artifact.mode == MathMode::Inline {
             0
@@ -10030,6 +10043,70 @@ fn scroll_offsets(
     changed
 }
 
+/// The horizontal room a math block has to live in, carried as one value so the projection that
+/// draws a block and the clamp that bounds its scroll are always measuring the same band.
+#[derive(Clone, Copy)]
+struct MathBand {
+    pane_width_px: u32,
+    display_left_inset_subpixels: i64,
+}
+
+impl MathBand {
+    /// The scale this artifact is drawn at: the layout's own scale, reduced when the formula is
+    /// too wide for the band.
+    fn fit_scale_milli(self, artifact: &PlaceholderArtifact, base_scale_milli: u32) -> u32 {
+        math_fit_scale_milli(
+            artifact.width_px,
+            math_block_available_width_px(
+                self.pane_width_px,
+                artifact.mode,
+                self.display_left_inset_subpixels,
+            ),
+            base_scale_milli,
+            artifact.mode,
+        )
+    }
+}
+
+/// How far a display formula may be shrunk to fit its band before shrinking stops helping.
+/// Half size is the limit: these rasters are laid out at device DPI, so halving them lands on
+/// roughly the nominal on-screen size of their point size, and anything beyond that trades
+/// legibility for a saving the horizontal scroll can make instead.
+const MATH_READABLE_FLOOR_MILLI: u32 = 500;
+
+/// Over-wide display math is fitted before it is scrolled: shrink toward the band, stop at the
+/// readable floor, and leave the remainder to the horizontal offset. Display math is never
+/// wrapped, so fitting and scrolling are the only two tools, and they apply in that order.
+///
+/// This is a reduction only — a formula narrower than its band keeps the scale its layout asked
+/// for rather than being magnified to fill the space. The result composes with zoom instead of
+/// replacing it: `base_scale_milli` is the scale the layout already chose, and the fit factor
+/// multiplies into it, so a zoomed-out formula that already fits is left alone.
+///
+/// Both the projection that draws the block and the clamp that bounds its scroll offset must use
+/// this same scale, or the block would be pannable past its own right edge.
+fn math_fit_scale_milli(
+    natural_width_px: u32,
+    available_width_px: u32,
+    base_scale_milli: u32,
+    mode: MathMode,
+) -> u32 {
+    // Inline math sits on a text baseline and owns no band of its own to be fitted into.
+    if mode != MathMode::Display || natural_width_px == 0 || available_width_px == 0 {
+        return base_scale_milli;
+    }
+    let width_at_base =
+        u64::from(natural_width_px).saturating_mul(u64::from(base_scale_milli)) / 1000;
+    if width_at_base <= u64::from(available_width_px) {
+        return base_scale_milli;
+    }
+    let exact_fit_milli = u64::from(available_width_px).saturating_mul(1000) / width_at_base;
+    let factor_milli = (exact_fit_milli as u32).max(MATH_READABLE_FLOOR_MILLI);
+    u32::try_from(u64::from(base_scale_milli).saturating_mul(u64::from(factor_milli)) / 1000)
+        .unwrap_or(base_scale_milli)
+        .max(1)
+}
+
 fn math_block_available_width_px(
     pane_width_px: u32,
     mode: MathMode,
@@ -10776,7 +10853,9 @@ mod tests {
         session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
         let mut task = session.take_worker_task().unwrap();
         assert!(resolve_detection_task(&mut task));
-        assert!(session.complete_worker_result(task, Ok(synthetic_raster(240, 80))));
+        // Narrow enough to fit the band even at the 1.5x DPI this test ends on, so the width-fit
+        // stage stays out of the way and the scales asserted below are purely DPI's doing.
+        assert!(session.complete_worker_result(task, Ok(synthetic_raster(100, 80))));
         let mut projection = session.new_projection(session.layout_key());
         session.viewport_frame(&mut projection).unwrap();
         projection.scroll_to_top();
@@ -10823,7 +10902,9 @@ mod tests {
         session.feed(b"$$x^2$$\r\nnext\r\ntail").unwrap();
         let mut task = session.take_worker_task().unwrap();
         assert!(resolve_detection_task(&mut task));
-        assert!(session.complete_worker_result(task, Ok(synthetic_raster(400, 100))));
+        // Fits the band, so the width-fit stage does not shrink the raster and change the
+        // vertical overflow this test is actually about.
+        assert!(session.complete_worker_result(task, Ok(synthetic_raster(100, 100))));
         let mut projection = session.new_projection(session.layout_key());
         session.viewport_frame(&mut projection).unwrap();
         projection.scroll_to_top();
@@ -12993,7 +13074,7 @@ mod tests {
             .expect("resize and reconcile must preserve the uniquely projected clipped owner");
         assert!(retained.stale_artifact.is_some());
         assert!(
-            projected_live_artifact(retained, session.layout_key, 0).is_some(),
+            projected_live_artifact(retained, session.layout_key, session.math_band(), 0).is_some(),
             "the retained stale raster must remain paintable while relayout is pending"
         );
     }
@@ -20614,5 +20695,136 @@ mod tests {
             .unwrap();
         session.feed(b"\x1b[?1049l").unwrap();
         assert_eq!(session.window_title(), Some("alternate 标题"));
+    }
+}
+
+#[cfg(test)]
+mod math_overflow_tests {
+    use super::*;
+
+    const BAND: u32 = 1000;
+
+    /// A formula that already fits keeps the scale its layout asked for. The fit stage is a
+    /// reduction, never a magnification: nothing is ever blown up to fill the band.
+    #[test]
+    fn a_formula_that_fits_is_never_rescaled() {
+        assert_eq!(
+            math_fit_scale_milli(500, BAND, 1000, MathMode::Display),
+            1000
+        );
+        assert_eq!(
+            math_fit_scale_milli(BAND, BAND, 1000, MathMode::Display),
+            1000
+        );
+    }
+
+    /// Modest overflow is absorbed entirely by shrinking, so the common case never needs a
+    /// scroll gesture at all: twice the band lands exactly on the band.
+    #[test]
+    fn over_wide_display_math_shrinks_toward_the_band() {
+        assert_eq!(
+            math_fit_scale_milli(2000, BAND, 1000, MathMode::Display),
+            500
+        );
+        assert_eq!(
+            math_fit_scale_milli(1250, BAND, 1000, MathMode::Display),
+            800
+        );
+    }
+
+    /// The shrink stops where the glyphs stop being worth reading. A formula ten times the band
+    /// does not become a grey smear; it holds the floor and hands the rest to horizontal scroll.
+    #[test]
+    fn the_readable_floor_stops_the_shrink() {
+        let scale = math_fit_scale_milli(10_000, BAND, 1000, MathMode::Display);
+        assert_eq!(scale, MATH_READABLE_FLOOR_MILLI);
+        assert!(
+            scale * 10_000 / 1000 > BAND,
+            "the floor must leave real overflow for the scroll stage"
+        );
+    }
+
+    /// Fit composes with zoom rather than fighting it. Zoomed out, a formula whose natural width
+    /// exceeds the band may already fit once the zoom scale is applied, and must not shrink again.
+    #[test]
+    fn fit_composes_with_the_zoom_scale() {
+        assert_eq!(
+            math_fit_scale_milli(2000, BAND, 500, MathMode::Display),
+            500
+        );
+        // Still over-wide at half zoom: 4000 * 0.5 = 2000, twice the band, so halve once more.
+        assert_eq!(
+            math_fit_scale_milli(4000, BAND, 500, MathMode::Display),
+            250
+        );
+    }
+
+    /// Inline math sits on a text baseline and owns no band of its own, so the display-math fit
+    /// must never touch it.
+    #[test]
+    fn inline_math_is_never_fit_scaled() {
+        assert_eq!(
+            math_fit_scale_milli(10_000, BAND, 1000, MathMode::Inline),
+            1000
+        );
+    }
+
+    /// Whatever survives the floor is reachable by scrolling, and not one pixel further: the
+    /// offset clamps exactly at the residual overflow so the right edge can be brought flush.
+    #[test]
+    fn residual_overflow_is_scrollable_and_clamped_to_it() {
+        let natural = 10_000;
+        let scale = math_fit_scale_milli(natural, BAND, 1000, MathMode::Display);
+        let residual = natural * scale / 1000 - BAND;
+        let options = MathLayoutOptions::default();
+
+        let mut horizontal = 0;
+        let mut vertical = 0;
+        assert!(scroll_offsets(
+            &mut horizontal,
+            &mut vertical,
+            (natural, 100),
+            scale,
+            BAND,
+            options,
+            i32::MAX,
+            0,
+        ));
+        assert_eq!(
+            horizontal, residual,
+            "scroll must reach the right edge exactly"
+        );
+
+        // Already at the end: a further push changes nothing and reports no change, so the
+        // gesture falls through instead of being silently swallowed forever.
+        assert!(!scroll_offsets(
+            &mut horizontal,
+            &mut vertical,
+            (natural, 100),
+            scale,
+            BAND,
+            options,
+            i32::MAX,
+            0,
+        ));
+    }
+
+    /// With no overflow there is nothing to pan, so the block reports "not scrolled" and the
+    /// wheel event stays intact for the ordinary routes underneath it.
+    #[test]
+    fn a_fitting_formula_never_consumes_the_wheel() {
+        let mut horizontal = 0;
+        let mut vertical = 0;
+        assert!(!scroll_offsets(
+            &mut horizontal,
+            &mut vertical,
+            (500, 100),
+            1000,
+            BAND,
+            MathLayoutOptions::default(),
+            480,
+            0,
+        ));
+        assert_eq!(horizontal, 0);
     }
 }

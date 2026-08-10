@@ -50,9 +50,20 @@ pub use theme::{
     FLOAT_WINDOW_BORDER_LOGICAL_PX, FLOAT_WINDOW_RADIUS_LOGICAL_PX, FLOAT_WINDOW_SHADOW_LOGICAL_PX,
     LIGHT_BACKGROUND_RGB, LIGHT_CHROME, PANE_HEAD_FILE_MARK_LOGICAL_PX,
     PANE_HEAD_FOLDER_MARK_LOGICAL_PX, PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
-    PREVIEW_BODY_INSET_LOGICAL_PX, SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX,
-    SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX, SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX,
-    SEAT_DIVIDER_HIT_LOGICAL_PX, SEAT_DIVIDER_VISUAL_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX,
+    PREVIEW_BODY_INSET_LOGICAL_PX, RAIL_BORDER_LOGICAL_PX, RAIL_GAP_LOGICAL_PX,
+    RAIL_LABEL_FONT_LOGICAL_PX, RAIL_LABEL_LINE_LOGICAL_PX, RAIL_LABEL_PADDING_BOTTOM_LOGICAL_PX,
+    RAIL_LABEL_PADDING_TOP_LOGICAL_PX, RAIL_LABEL_PADDING_X_LOGICAL_PX, RAIL_LABEL_TRACKING_EM,
+    RAIL_NEW_CHEVRON_BOX_LOGICAL_PX, RAIL_NEW_GAP_LOGICAL_PX, RAIL_NEW_MAIN_PADDING_X_LOGICAL_PX,
+    RAIL_NEW_MARGIN_TOP_LOGICAL_PX, RAIL_PADDING_BOTTOM_LOGICAL_PX, RAIL_PADDING_TOP_LOGICAL_PX,
+    RAIL_PADDING_X_LOGICAL_PX, RAIL_PARK_LOGICAL_PX, RAIL_SEAM_INSET_X_LOGICAL_PX,
+    RAIL_SEAM_MARGIN_Y_LOGICAL_PX, RAIL_SEAM_THICKNESS_LOGICAL_PX, RAIL_SHADE_WIDTH_LOGICAL_PX,
+    RAIL_TAB_FONT_LOGICAL_PX, RAIL_TAB_GAP_LOGICAL_PX, RAIL_TAB_HEIGHT_LOGICAL_PX,
+    RAIL_TAB_PADDING_LEFT_LOGICAL_PX, RAIL_TAB_PADDING_RIGHT_LOGICAL_PX,
+    RAIL_TAB_PARKED_PADDING_X_LOGICAL_PX, RAIL_TAB_RADIUS_LOGICAL_PX, RAIL_TEXT_FADE_MS,
+    RAIL_TEXT_FADE_OPEN_DELAY_MS, RAIL_TRANSITION_MS, RAIL_WIDTH_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_LENGTH_LOGICAL_PX, SEAT_DIVIDER_GRIP_RADIUS_LOGICAL_PX,
+    SEAT_DIVIDER_GRIP_THICKNESS_LOGICAL_PX, SEAT_DIVIDER_HIT_LOGICAL_PX,
+    SEAT_DIVIDER_VISUAL_LOGICAL_PX, SEAT_PANE_CLOSE_BOX_LOGICAL_PX,
     SEAT_PANE_CLOSE_GLYPH_LOGICAL_PX, SEAT_PANE_CLOSE_RADIUS_LOGICAL_PX,
     SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX, SEAT_RESIZING_CARD_RADIUS_LOGICAL_PX,
     SEAT_TITLE_BAR_LOGICAL_PX, SEAT_TITLE_EDGE_LOGICAL_PX, SEAT_TITLE_FONT_LOGICAL_PX,
@@ -132,6 +143,83 @@ struct StatusOverlayGeometry {
     rect: [f32; 4],
     first_column: usize,
 }
+/// Width of a math block's overflow fade, in cells — wide enough to read as a soft edge rather
+/// than a drawn border, narrow enough to hide only a character or so of the formula.
+const MATH_OVERFLOW_FADE_CELLS: f32 = 1.5;
+/// The fade never eats more than this share of a narrow band from either side.
+const MATH_OVERFLOW_FADE_MAX_BAND_FRACTION: f32 = 0.25;
+/// Slabs per fade. Enough that the ramp reads as continuous at any cell width.
+const MATH_OVERFLOW_FADE_STEPS: usize = 16;
+
+/// Geometry of a math block's overflow fades: one `(rect, coverage)` slab per ramp step, for
+/// whichever sides still hold content the band is cutting off. Split out from the renderer so the
+/// decision is testable without a GPU, as with the other overlay geometry in this file.
+fn math_overflow_fade_slabs(
+    metrics: CellMetrics,
+    placement: &MathBlockPlacement,
+    geometry: &MathBlockGeometry,
+) -> Vec<([f32; 4], f32)> {
+    if placement.display != MathBlockDisplay::Rendered {
+        return Vec::new();
+    }
+    let [visible_left, top, visible_right, bottom] = geometry.clip;
+    if bottom <= top || visible_right <= visible_left {
+        return Vec::new();
+    }
+    let scaled_width =
+        placement.artifact.width_px as f32 * placement.artifact.render_scale_milli as f32 / 1000.0;
+    let content_left = math_block_left_px(metrics, placement.left_subpixels, true)
+        - placement.horizontal_scroll_px as f32;
+    let content_right = content_left + scaled_width;
+
+    // A pixel of slack: a formula sitting flush against its band is not overflowing it.
+    let hidden_left = content_left < visible_left - 1.0;
+    let hidden_right = content_right > visible_right + 1.0;
+    if !hidden_left && !hidden_right {
+        return Vec::new();
+    }
+    // Never let the two fades meet in the middle of a narrow band and swallow the formula.
+    let width = (metrics.cell_width_px * MATH_OVERFLOW_FADE_CELLS)
+        .min((visible_right - visible_left) * MATH_OVERFLOW_FADE_MAX_BAND_FRACTION);
+    if width <= 0.0 {
+        return Vec::new();
+    }
+
+    let steps = MATH_OVERFLOW_FADE_STEPS;
+    let mut slabs = Vec::with_capacity(steps * 2);
+    for step in 0..steps {
+        let near = step as f32 / steps as f32;
+        let far = (step + 1) as f32 / steps as f32;
+        // Opaque against the cut edge and gone by the inner end, squared so the formula's own
+        // ink stays readable well before the edge instead of greying out evenly.
+        let strength = 1.0 - (near + far) / 2.0;
+        let coverage = strength * strength;
+        if hidden_left {
+            slabs.push((
+                [
+                    visible_left + width * near,
+                    top,
+                    visible_left + width * far,
+                    bottom,
+                ],
+                coverage,
+            ));
+        }
+        if hidden_right {
+            slabs.push((
+                [
+                    visible_right - width * far,
+                    top,
+                    visible_right - width * near,
+                    bottom,
+                ],
+                coverage,
+            ));
+        }
+    }
+    slabs
+}
+
 const PRIMARY_FONT_FAMILY: &str = "Consolas";
 const COLOR_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
 const SEGOE_COLOR_EMOJI_FONT_FAMILY: &str = "Segoe UI Emoji";
@@ -4624,6 +4712,36 @@ impl Renderer {
         rects
     }
 
+    /// A display formula is never wrapped, so one too wide for its band is cut off at the pane
+    /// edge with nothing to say it continues. These fades are that signal: the band dissolves
+    /// into the background on whichever side still holds content. Because each side is
+    /// independent they double as a position readout — both lit is the middle of a long
+    /// formula, one lit is an end, neither is a formula that fits.
+    ///
+    /// Drawn per block rather than as a corner caption because several formulas can share a
+    /// screen, and a cue that marks the exact edge where content continues has to sit on that
+    /// edge. The pane's one status line is already spoken for by scroll state and render
+    /// failures, and could not name which of several blocks it meant.
+    fn math_overflow_fade_rectangles(
+        &self,
+        placement: &MathBlockPlacement,
+        geometry: &MathBlockGeometry,
+    ) -> Vec<RectInstance> {
+        math_overflow_fade_slabs(self.metrics, placement, geometry)
+            .into_iter()
+            .map(|(rect, coverage)| {
+                self.pixel_rect_with_coverage(
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                    background_rgb(),
+                    coverage,
+                )
+            })
+            .collect()
+    }
+
     fn math_overlay_rectangles(&self, frame: &ViewportFrame) -> Vec<RectInstance> {
         let mut rects = Vec::new();
         let ink = foreground_rgb();
@@ -4632,6 +4750,8 @@ impl Renderer {
             let Some(geometry) = self.math_block_geometry(frame, placement) else {
                 continue;
             };
+            // Before the toolbar, so the buttons stay crisp on top of it.
+            rects.extend(self.math_overflow_fade_rectangles(placement, &geometry));
             let (Some(eye), Some(copy)) = (geometry.eye, geometry.copy) else {
                 continue;
             };
@@ -10968,5 +11088,127 @@ mod tests {
             surface_failure_policy(SurfaceFailure::Validation),
             SurfaceFailurePolicy::FatalValidation
         );
+    }
+
+    fn fade_metrics() -> CellMetrics {
+        CellMetrics {
+            cell_width_px: 10.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 8.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 15.0,
+            primary_advance_px: 10.0,
+            primary_cap_height_px: 11.0,
+            primary_cap_center_y_px: 9.0,
+        }
+    }
+
+    /// Band 400px wide starting at the block's own left edge, holding a formula `width_px` wide
+    /// scrolled `scroll_px` from its start.
+    fn fade_case(width_px: u32, scroll_px: u32) -> (MathBlockPlacement, MathBlockGeometry, f32) {
+        let metrics = fade_metrics();
+        let left = math_block_left_px(metrics, 0, true);
+        let right = left + 400.0;
+        let mut placement = test_math_placement("f", 0, 20 * SUBPIXELS_PER_PX, 4);
+        placement.left_subpixels = 0;
+        placement.display = MathBlockDisplay::Rendered;
+        placement.horizontal_scroll_px = scroll_px;
+        placement.artifact.width_px = width_px;
+        placement.artifact.render_scale_milli = 1000;
+        let geometry = MathBlockGeometry {
+            block: [left, 0.0, right, 20.0],
+            clip: [left, 0.0, right, 20.0],
+            eye: None,
+            copy: None,
+        };
+        (placement, geometry, right)
+    }
+
+    /// A formula that fits its band is cut off on neither side, so it gets no fade at all — the
+    /// cue has to mean something, which means it cannot be always on.
+    #[test]
+    fn a_formula_that_fits_its_band_gets_no_fade() {
+        let (placement, geometry, _) = fade_case(390, 0);
+        assert!(math_overflow_fade_slabs(fade_metrics(), &placement, &geometry).is_empty());
+    }
+
+    /// Unscrolled and over-wide: content continues to the right only, so only the right edge
+    /// fades. A fade on the left here would claim there is something behind the start.
+    #[test]
+    fn an_unscrolled_over_wide_formula_fades_only_on_the_right() {
+        let metrics = fade_metrics();
+        let (placement, geometry, right) = fade_case(1200, 0);
+        let slabs = math_overflow_fade_slabs(metrics, &placement, &geometry);
+        assert_eq!(slabs.len(), MATH_OVERFLOW_FADE_STEPS);
+        let fade_width = metrics.cell_width_px * MATH_OVERFLOW_FADE_CELLS;
+        for (rect, _) in &slabs {
+            assert!(
+                rect[0] >= right - fade_width - 0.01 && rect[2] <= right + 0.01,
+                "right fade slab {rect:?} escaped the band's right edge"
+            );
+        }
+    }
+
+    /// Scrolled into the middle of a long formula, both ends are cut off and both fade — which
+    /// is what makes the pair readable as a position rather than a decoration.
+    #[test]
+    fn a_formula_scrolled_to_its_middle_fades_on_both_sides() {
+        let metrics = fade_metrics();
+        let (placement, geometry, _) = fade_case(1200, 400);
+        let slabs = math_overflow_fade_slabs(metrics, &placement, &geometry);
+        assert_eq!(slabs.len(), MATH_OVERFLOW_FADE_STEPS * 2);
+    }
+
+    /// Panned all the way to the end, nothing remains to the right, so that fade goes out and
+    /// only the left one is left burning.
+    #[test]
+    fn a_formula_scrolled_to_its_end_fades_only_on_the_left() {
+        let metrics = fade_metrics();
+        let (placement, geometry, _) = fade_case(1200, 800);
+        let left_edge = math_block_left_px(metrics, 0, true);
+        let slabs = math_overflow_fade_slabs(metrics, &placement, &geometry);
+        assert_eq!(slabs.len(), MATH_OVERFLOW_FADE_STEPS);
+        let fade_width = metrics.cell_width_px * MATH_OVERFLOW_FADE_CELLS;
+        for (rect, _) in &slabs {
+            assert!(
+                rect[0] >= left_edge - 0.01 && rect[2] <= left_edge + fade_width + 0.01,
+                "left fade slab {rect:?} escaped the band's left edge"
+            );
+        }
+    }
+
+    /// The ramp runs the right way round: densest against the cut edge, gone by the inner end.
+    /// Reversed, the fade would read as a bar drawn across the formula.
+    #[test]
+    fn the_fade_is_densest_against_the_cut_edge() {
+        let metrics = fade_metrics();
+        let (placement, geometry, right) = fade_case(1200, 0);
+        let slabs = math_overflow_fade_slabs(metrics, &placement, &geometry);
+        let outermost = slabs
+            .iter()
+            .max_by(|a, b| a.0[2].total_cmp(&b.0[2]))
+            .expect("an over-wide formula must fade");
+        let innermost = slabs
+            .iter()
+            .min_by(|a, b| a.0[0].total_cmp(&b.0[0]))
+            .expect("an over-wide formula must fade");
+        assert!(
+            outermost.1 > innermost.1,
+            "coverage {} at the edge must exceed {} inside it",
+            outermost.1,
+            innermost.1
+        );
+        assert!(outermost.1 <= 1.0 && innermost.1 >= 0.0);
+        assert!((outermost.0[2] - right).abs() <= 0.01);
+    }
+
+    /// Source view is plain text the pane already wraps and scrolls by its own rules; the band
+    /// fade belongs to the rendered raster only.
+    #[test]
+    fn source_view_never_fades() {
+        let (mut placement, geometry, _) = fade_case(1200, 0);
+        placement.display = MathBlockDisplay::Source;
+        assert!(math_overflow_fade_slabs(fade_metrics(), &placement, &geometry).is_empty());
     }
 }

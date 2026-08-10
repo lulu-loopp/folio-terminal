@@ -3255,6 +3255,57 @@ abla f",
         );
     }
 
+    /// The TeX spacing family (`\;` `\,` `\:` `\!`) is a backslash followed by ASCII punctuation,
+    /// which is exactly the shape a CommonMark backslash-unescape eats. Extraction must never be
+    /// the thing that eats it: whatever arrives on the grid reaches the renderer byte-for-byte,
+    /// with the row-separator repair switched on as it is in production. This pins both
+    /// directions — a present backslash is never dropped, and an absent one is never invented,
+    /// because a bare `;` is legitimate math (`f(x; \theta)`) and guessing would be fabrication.
+    #[test]
+    fn tex_spacing_commands_survive_extraction_byte_for_byte() {
+        for body in [
+            r"a \; + \; b",
+            r"a \, b",
+            r"a \: b",
+            r"a \! b",
+            r"\text{死} \; + \; \text{活}",
+            r"f(x; \theta) \Rightarrow y",
+            // The damaged form the user saw, carrying the command that keeps it math at all:
+            // extraction must leave it damaged rather than silently "repairing" it into
+            // something the terminal never received.
+            r"\text{死};+;\text{活}",
+        ] {
+            let single = format!("$${body}$$");
+            let detected = detect_math_blocks([(TranscriptId(1), single.as_str())]);
+            assert_eq!(detected.len(), 1, "{body:?} must detect as one block");
+            assert_eq!(
+                detected[0].span.render_source, body,
+                "single-line extraction altered {body:?}"
+            );
+            // `original_source` is the untouched grid text, delimiters included.
+            assert_eq!(
+                detected[0].span.original_source, single,
+                "single-line original_source altered {body:?}"
+            );
+
+            // Same bytes inside a tabular environment, where the row-separator repair is armed
+            // and actively scanning every backslash it finds.
+            let lines = [r"$$\begin{aligned}", body, r"\end{aligned}$$"];
+            let detected = detect_math_blocks(
+                lines
+                    .iter()
+                    .enumerate()
+                    .map(|(index, line)| (TranscriptId(index as u64 + 1), *line)),
+            );
+            assert_eq!(detected.len(), 1, "{body:?} must detect inside aligned");
+            let expected = format!("\\begin{{aligned}}\n{body}\n\\end{{aligned}}");
+            assert_eq!(
+                detected[0].span.render_source, expected,
+                "aligned extraction altered {body:?}"
+            );
+        }
+    }
+
     #[test]
     fn matrix_and_cases_use_the_same_syntax_recovery_rule() {
         for environment in ["matrix", "cases"] {
