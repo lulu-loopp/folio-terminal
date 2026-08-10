@@ -15,6 +15,9 @@
 #   .\ui-probe.ps1 click -Pid <pid> -X 100 -Y 20               → left click at window+(X,Y) physical px
 #   .\ui-probe.ps1 hover -Pid <pid> -X -160 -Y 20              → park the pointer; negative counts from
 #                                                                the right/bottom edge (the caption run)
+#   .\ui-probe.ps1 drag -Pid <pid> -X 40 -Y 120 -X2 400 -Y2 160 → press at (X,Y), travel, release at
+#                                                                (X2,Y2); this is how a text selection
+#                                                                is made, and the travel is required
 #   .\ui-probe.ps1 close -Pid <pid>
 #
 # Capture is per-monitor-DPI-aware: pixels are 1:1 physical, so cell width can
@@ -33,7 +36,7 @@
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("launch", "type", "key", "capture", "close", "wheel", "resize", "click", "hover")]
+  [ValidateSet("launch", "type", "key", "capture", "close", "wheel", "resize", "click", "hover", "drag")]
   [string]$Cmd,
   [int]$ProcId = 0,
   [string]$Text = "",
@@ -49,6 +52,10 @@ param(
   # gear are addressed without knowing the window's width.
   [int]$X = 0,
   [int]$Y = 0,
+  # drag: the far end of the travel, in the same coordinate system as X/Y.
+  [int]$X2 = 0,
+  [int]$Y2 = 0,
+  [int]$Steps = 12,
   [switch]$TraceDpi
 )
 
@@ -58,6 +65,8 @@ Add-Type @'
 using System;
 using System.Runtime.InteropServices;
 public struct PRECT { public int L, T, R, B; }
+[StructLayout(LayoutKind.Sequential)]
+public struct WPOINT { public int X, Y; }
 [StructLayout(LayoutKind.Sequential)]
 public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
 [StructLayout(LayoutKind.Explicit)]
@@ -86,6 +95,29 @@ public class Probe {
     AttachThreadInput(myThread, fgThread, false);
     System.Threading.Thread.Sleep(300);
     return ok && GetForegroundWindow() == target;
+  }
+  /* The safety law for a POINTER, which is a different law from the one for a
+     keystroke. A keystroke has no address — it lands wherever the foreground is,
+     so foreground is the only thing that can be verified. A click has an address:
+     it lands on whatever window owns that screen pixel. So the honest check is
+     ownership of the point, not who currently holds foreground — and it is the
+     stricter one, because it is what actually decides where the press goes.
+     This also matches what a human does: clicking a background window is how you
+     bring it to the front, and refusing to click until it is already in front
+     makes the probe unable to do the one thing a user does first. */
+  /* WindowFromPoint takes POINT BY VALUE, and on x64 that is one 8-byte
+     register — declaring it as two ints puts y in a register the callee never
+     reads and leaves the high half of x as garbage, so it answers for a point
+     nobody asked about. (Measured: it named `explorer` for a pixel the screen
+     capture proves belongs to the app.) The struct is the signature. */
+  [DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(WPOINT p);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  public static bool PointBelongsTo(int x, int y, int targetPid) {
+    WPOINT p; p.X = x; p.Y = y;
+    IntPtr under = WindowFromPoint(p);
+    if (under == IntPtr.Zero) return false;
+    uint owner; GetWindowThreadProcessId(under, out owner);
+    return owner == (uint)targetPid;
   }
   public const uint KEYEVENTF_UNICODE = 0x0004;
   public const uint KEYEVENTF_KEYUP = 0x0002;
@@ -144,6 +176,24 @@ public class Probe {
   }
   public static void MoveTo(int x, int y) {
     SetCursorPos(x, y);
+    System.Threading.Thread.Sleep(150);
+  }
+  /* A press, a *travelled* path, and a release — the shape a text selection is
+     made of. The intermediate moves are the point: bt-app extends a selection
+     from CursorMoved events while the button is down, so a press at one end and
+     a release at the other with nothing in between selects nothing at all. */
+  public static void Drag(int x1, int y1, int x2, int y2, int steps) {
+    SetCursorPos(x1, y1);
+    System.Threading.Thread.Sleep(150);
+    mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);   // LEFTDOWN
+    System.Threading.Thread.Sleep(80);
+    if (steps < 1) steps = 1;
+    for (int i = 1; i <= steps; i++) {
+      SetCursorPos(x1 + (x2 - x1) * i / steps, y1 + (y2 - y1) * i / steps);
+      System.Threading.Thread.Sleep(40);
+    }
+    System.Threading.Thread.Sleep(80);
+    mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);   // LEFTUP
     System.Threading.Thread.Sleep(150);
   }
   [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr a, int x, int y, int w, int hh, uint f);
@@ -214,6 +264,20 @@ switch ($Cmd) {
     $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
     [Probe]::Click($px, $py)
     "clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (foreground verified)"
+  }
+  "drag" {
+    $h = Get-AppWindow $ProcId
+    [Probe]::BringToFront($h) | Out-Null
+    $r = New-Object PRECT
+    [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+    $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
+    $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+    $qx = if ($X2 -lt 0) { $r.R + $X2 } else { $r.L + $X2 }
+    $qy = if ($Y2 -lt 0) { $r.B + $Y2 } else { $r.T + $Y2 }
+    if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) { throw "REFUSED: ($px, $py) is not over pid=$ProcId — not dragging blind" }
+    if (-not [Probe]::PointBelongsTo($qx, $qy, $ProcId)) { throw "REFUSED: ($qx, $qy) is not over pid=$ProcId — not dragging blind" }
+    [Probe]::Drag($px, $py, $qx, $qy, $Steps)
+    "dragged ($px, $py) -> ($qx, $qy) = window+($X, $Y) -> window+($X2, $Y2) on pid=$ProcId (foreground verified)"
   }
   "hover" {
     $h = Get-AppWindow $ProcId

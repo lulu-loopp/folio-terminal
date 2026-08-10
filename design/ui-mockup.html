@@ -23,8 +23,19 @@
     --ink3: rgba(55,53,47,.45);
     --hover: rgba(55,53,47,.055);
     --active: rgba(55,53,47,.09);
-    --accent: #5E6AD2;
-    --prompt: #5E6AD2;
+    /* accent — user ruling 2026-08-10: cobalt, candidate D. It replaces the
+       #5E6AD2 this shipped with, which was the Linear indigo and had become the
+       tell that a product was styled by an AI rather than for a purpose: the
+       same blue-violet is on half the tools launched this year, so wearing it
+       said "default", not "us". Cobalt keeps the blue the terminal wants and
+       drops the violet cast that carried the association. It is also the
+       stronger colour on both canvases — light rises 4.70 → 5.92 against
+       --termbg, dark 6.01 → 6.42 — so the mark that means "unread" now clears
+       AA at text weight where the indigo only cleared it for large text.
+       Everything else in this palette is untouched by the ruling: the ANSI
+       tables, inks, surfaces and the status four all stand. */
+    --accent: #3059D8;
+    --prompt: #3059D8;
     /* status semantics — every "something happened" colour goes through these
        four, never a literal: failure red, its deepened crest, attention orange
        (bell/awaiting/deny), paused amber. Declared once in :root so both
@@ -53,8 +64,9 @@
     --ink3: rgba(255,255,255,.38);
     --hover: rgba(255,255,255,.055);
     --active: rgba(255,255,255,.09);
-    --accent: #828FFF;
-    --prompt: #828FFF;
+    /* the same 2026-08-10 ruling on the dark canvas: #828FFF → #7A99FF. */
+    --accent: #7A99FF;
+    --prompt: #7A99FF;
     --thumb: rgba(255,255,255,.22);
     --thumb-hover: rgba(255,255,255,.4);
     --termbg: #1B1B1B;
@@ -2137,7 +2149,10 @@
        theme. Follows the profile-mark house rule (see below) — one silhouette,
        one interior gesture, nothing that dies at small sizes. -->
   <symbol id="i-app" viewBox="0 0 48 48">
-    <rect x="2" y="2" width="44" height="44" rx="10.5" fill="#5E6AD2"/>
+    <!-- The literal is the light accent, spelled out rather than var()'d for the
+         "no theme swap" reason above; it still follows the accent ruling, so the
+         2026-08-10 cobalt lands here too (#5E6AD2 → #3059D8). -->
+    <rect x="2" y="2" width="44" height="44" rx="10.5" fill="#3059D8"/>
     <path d="M15 18.5l6 5.5-6 5.5" fill="none" stroke="#fff" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M25.5 29.5h8.5" stroke="#fff" stroke-width="3.2" stroke-linecap="round"/>
   </symbol>

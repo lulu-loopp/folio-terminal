@@ -116,18 +116,25 @@ pub(crate) const DEFAULT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0x26, 0x4f, 0x78];
 /// The mock-up declares no `::selection` — the terminal surface there is a
 /// static mock with nothing selected in it — so this value is derived rather
 /// than copied, and it is derived from inside the mock-up's own palette instead
-/// of imported from another product. `--accent` is #5E6AD2; the one in-terminal
+/// of imported from another product. `--accent` is #3059D8; the one in-terminal
 /// highlight the mock-up does draw, `mark.srch`, is that accent at 30% over
 /// `--termbg`. Selection is the same kind of mark, so it takes the same step:
-/// 30% of #5E6AD2 over the light `--termbg` #FFFFFF, which is 255 − 161×.30,
-/// 255 − 149×.30, 255 − 45×.30 → #CFD2F2.
+/// 30% of #3059D8 over the light `--termbg` #FFFFFF, which is 255 − 207×.30,
+/// 255 − 166×.30, 255 − 39×.30 → #C1CDF3.
 ///
 /// That lands where it should on both counts. Against the reference the eye is
 /// trained on — VS Code Light's #ADD6FF — it is the same weight, dropping the
-/// canvas from luminance 1.0 to .658 where #ADD6FF drops it to .642; and it is
+/// canvas from luminance 1.0 to .615 where #ADD6FF drops it to .642; and it is
 /// accent's own hue rather than a borrowed blue, so the selection reads as this
 /// product's palest surface instead of a guest from another one.
-pub(crate) const LIGHT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0xcf, 0xd2, 0xf2];
+///
+/// Re-derived 2026-08-10 when the accent moved from #5E6AD2 to the cobalt
+/// #3059D8: this is a *shadow* of the accent, not a colour of its own, so it is
+/// recomputed from the ruling rather than kept. It sits one step deeper than the
+/// indigo's #CFD2F2 did (.615 against .658) because cobalt is the darker parent,
+/// and it stays on the pale side of the ink's own luma threshold, which is what
+/// keeps `--ink` #37352F legible on it without an inverted selection foreground.
+pub(crate) const LIGHT_SELECTION_BACKGROUND_RGB: [u8; 3] = [0xc1, 0xcd, 0xf3];
 
 /// The selection fill paired with the canvas it lies on.
 ///
@@ -537,7 +544,7 @@ pub struct ChromePalette {
 /// alpha hairlines pre-composited over the surface each one actually sits on
 /// (our chrome quads are opaque): `--termbg #1B1B1B`, `--panel #252525`,
 /// `--ink/2/3` at .87/.55/.38 white, `--border` at .094 white,
-/// `--accent #828FFF`.
+/// `--accent #7A99FF`.
 pub const DARK_CHROME: ChromePalette = ChromePalette {
     seat_body: [0x1b, 0x1b, 0x1b],
     title_bar: [0x25, 0x25, 0x25],
@@ -562,7 +569,7 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     body_hint_text: [0x75, 0x75, 0x75],
     divider: [0x35, 0x35, 0x35],
     divider_hover: [0x51, 0x51, 0x51],
-    divider_active: [0x82, 0x8f, 0xff],
+    divider_active: [0x7a, 0x99, 0xff],
     collapse_bar: [0x25, 0x25, 0x25],
     collapse_bar_hover: [0x31, 0x31, 0x31],
     caption_hover: [0x31, 0x31, 0x31],
@@ -584,7 +591,7 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // from — makes an unfocused pane title three levels too pale.
     pane_title: [0x72, 0x72, 0x72],
     pane_title_focus: [0xe1, 0xe1, 0xe1],
-    accent: [0x82, 0x8f, 0xff],
+    accent: [0x7a, 0x99, 0xff],
     menu_surface: [0x2a, 0x2a, 0x2a],
     menu_border: [0xff, 0xff, 0xff],
     menu_border_alpha: 24,
@@ -641,7 +648,7 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
 /// Chrome over a light canvas — the mock-up's `:root` defaults, composited the
 /// same way: `--win #FFFFFF`, `--panel #F7F7F5`, `--ink #37352F` at
 /// .65/.45 for the secondary steps, `--border` at .088 black,
-/// `--accent #5E6AD2`.
+/// `--accent #3059D8`.
 pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     seat_body: [0xff, 0xff, 0xff],
     title_bar: [0xf7, 0xf7, 0xf5],
@@ -668,7 +675,7 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     body_hint_text: [0xa5, 0xa4, 0xa1],
     divider: [0xe9, 0xe9, 0xe9],
     divider_hover: [0xc2, 0xc1, 0xbf],
-    divider_active: [0x5e, 0x6a, 0xd2],
+    divider_active: [0x30, 0x59, 0xd8],
     collapse_bar: [0xf7, 0xf7, 0xf5],
     collapse_bar_hover: [0xe9, 0xe9, 0xe8],
     caption_hover: [0xec, 0xec, 0xea],
@@ -686,7 +693,7 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     pane_head_edge: [0xf1, 0xf1, 0xf1],
     pane_title: [0xa5, 0xa4, 0xa1],
     pane_title_focus: [0x37, 0x35, 0x2f],
-    accent: [0x5e, 0x6a, 0xd2],
+    accent: [0x30, 0x59, 0xd8],
     menu_surface: [0xff, 0xff, 0xff],
     menu_border: [0x00, 0x00, 0x00],
     menu_border_alpha: 22,
@@ -1499,7 +1506,7 @@ mod tests {
     /// never one value for both canvases.
     ///
     /// Dark keeps the value it shipped with; light is the mock-up's `--accent`
-    /// #5E6AD2 at the 30% its own in-terminal highlight (`mark.srch`) uses,
+    /// #3059D8 at the 30% its own in-terminal highlight (`mark.srch`) uses,
     /// composited over the light `--termbg` #FFFFFF in sRGB the way every other
     /// translucent-over-known-surface colour in this file is pre-composited.
     #[test]
@@ -1511,7 +1518,7 @@ mod tests {
         );
         assert_eq!(
             selection_background_for_background(LIGHT_BACKGROUND_RGB),
-            [0xcf, 0xd2, 0xf2],
+            [0xc1, 0xcd, 0xf3],
             "the light canvas gets accent's palest face, not the dark navy",
         );
         // The switch is the ink's switch, taken at the same threshold.

@@ -1072,7 +1072,7 @@ mod tests {
             },
             side,
             side,
-            [0x82, 0x8f, 0xff],
+            [0x7a, 0x99, 0xff],
         )
     }
 
@@ -1185,7 +1185,7 @@ mod tests {
     /// would be a second circle to keep in step with the first.
     #[test]
     fn the_unread_dot_is_a_control_pill_rounded_into_a_circle() {
-        let accent = [0x82, 0x8f, 0xff];
+        let accent = [0x7a, 0x99, 0xff];
         let side = 12.0_f32;
         let mut rasters = ChromeMarkRasters::default();
         let icons = rasters.resolve(&[sprite(
@@ -1232,7 +1232,7 @@ mod tests {
     /// the wrong picture.
     #[test]
     fn a_dead_mark_is_desaturated_in_the_raster_and_keyed_apart() {
-        let accent = [0x82, 0x8f, 0xff];
+        let accent = [0x7a, 0x99, 0xff];
         let live = sprite(ChromeMark::ProfilePowerShell, 30.0, 30.0, accent);
         let mut dead = live;
         dead.grayscale = true;
@@ -1268,7 +1268,7 @@ mod tests {
     /// is the assertion that keeps the breath free.
     #[test]
     fn opacity_travels_on_the_icon_and_never_into_the_cache_key() {
-        let accent = [0x82, 0x8f, 0xff];
+        let accent = [0x7a, 0x99, 0xff];
         let full = sprite(ChromeMark::Folder, 26.0, 26.0, accent);
         let mut faded = full;
         faded.opacity = 0.28;
@@ -1378,7 +1378,7 @@ mod tests {
     /// apart from the filled square this pass exists to delete.
     #[test]
     fn every_chrome_mark_rasterizes_to_its_box_with_ink_and_negative_space() {
-        let accent = [0x82, 0x8f, 0xff];
+        let accent = [0x7a, 0x99, 0xff];
         let cases = [
             (ChromeMark::Gear, 14.0_f32),
             (ChromeMark::WindowMinimize, 10.0),
@@ -1445,7 +1445,7 @@ mod tests {
     /// not — the mock-up rules that a mark carries its own colour (`.pmark`).
     #[test]
     fn current_color_marks_take_the_palette_and_a_profile_mark_keeps_its_own() {
-        let accent = [0x82, 0x8f, 0xff];
+        let accent = [0x7a, 0x99, 0xff];
         let mut rasters = ChromeMarkRasters::default();
         let icons = rasters.resolve(&[
             sprite(ChromeMark::Folder, 26.0, 26.0, accent),
@@ -2092,7 +2092,7 @@ mod tests {
     /// end proportionally more than the broad one.
     #[test]
     fn the_pin_carries_its_state_on_the_fill_and_not_the_angle() {
-        let ink = [0x82, 0x8f, 0xff];
+        let ink = [0x7a, 0x99, 0xff];
         let mut rasters = ChromeMarkRasters::default();
         let icons = rasters.resolve(&[
             sprite(ChromeMark::Pin { filled: false }, 32.0, 32.0, ink),

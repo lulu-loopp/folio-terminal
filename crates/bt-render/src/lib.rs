@@ -9251,7 +9251,7 @@ mod tests {
         assert_eq!(set_theme(Theme::Light), ThemeChange::Changed);
         assert_eq!(
             theme::selection_background_rgb(),
-            [0xcf, 0xd2, 0xf2],
+            [0xc1, 0xcd, 0xf3],
             "the switch must reach the selection fill, not only the ink"
         );
         assert!(
@@ -10173,7 +10173,7 @@ mod tests {
     #[test]
     fn a_mark_that_only_changed_opacity_is_a_changed_mark() {
         let icon = |opacity: f32| ChromeIcon {
-            key: "chrome-mark:i-folder:26x26:828fff".to_owned(),
+            key: "chrome-mark:i-folder:26x26:7a99ff".to_owned(),
             rect: [0.0, 0.0, 26.0, 26.0],
             rgba: Arc::from(vec![0_u8; 26 * 26 * 4]),
             width_px: 26,
