@@ -16,7 +16,8 @@ use std::path::PathBuf;
 
 use bt_persist::{
     DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, SessionCursorStyleV1,
-    SessionThemeV1, SessionV1, TabV1, TermLeafV1, read_session, write_session_atomic,
+    SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, TabV1, TermLeafV1,
+    read_session, write_session_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -51,9 +52,11 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
     // Spot-check individual non-default fields end to end, not just an
     // opaque byte comparison — each of these would fail on its own if the
     // corresponding piece of parsing regressed.
-    assert_eq!(session.schema_version, 4);
+    assert_eq!(session.schema_version, 5);
     assert_eq!(session.theme, SessionThemeV1::Dark);
     assert_eq!(session.cursor_style, SessionCursorStyleV1::Bar);
+    assert_eq!(session.tab_layout, SessionTabLayoutV1::Horizontal);
+    assert_eq!(session.sidebar_mode, SessionSidebarModeV1::Expanded);
     assert_eq!(session.active_tab, 1);
     assert_eq!(session.window.dpi, 144);
     assert!(session.window.maximized);
@@ -129,7 +132,7 @@ fn v3_dark_and_light_fixtures_migrate_and_round_trip_without_changing_mode() {
         let (migrated, report, degradation) = read_session(&fixture_path(fixture));
         assert_eq!(report, ReadReport::Loaded);
         assert!(degradation.is_clean());
-        assert_eq!(migrated.schema_version, 4);
+        assert_eq!(migrated.schema_version, 5);
         assert_eq!(migrated.theme, expected_theme);
 
         let dir = std::env::temp_dir().join(format!(
@@ -162,6 +165,50 @@ fn every_cursor_style_round_trips_through_the_public_session_api() {
         let path = dir.join("session.json");
         let session = SessionV1 {
             cursor_style,
+            ..SessionV1::default()
+        };
+        write_session_atomic(&path, &session).unwrap();
+        let (loaded, report, degradation) = read_session(&path);
+        assert_eq!(report, ReadReport::Loaded);
+        assert!(degradation.is_clean());
+        assert_eq!(loaded, session);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn every_tab_layout_round_trips_through_the_public_session_api() {
+    for tab_layout in [SessionTabLayoutV1::Horizontal, SessionTabLayoutV1::Vertical] {
+        let dir = std::env::temp_dir().join(format!(
+            "bt-persist-tab-layout-roundtrip-{}-{tab_layout:?}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.json");
+        let session = SessionV1 {
+            tab_layout,
+            ..SessionV1::default()
+        };
+        write_session_atomic(&path, &session).unwrap();
+        let (loaded, report, degradation) = read_session(&path);
+        assert_eq!(report, ReadReport::Loaded);
+        assert!(degradation.is_clean());
+        assert_eq!(loaded, session);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn every_sidebar_mode_round_trips_through_the_public_session_api() {
+    for sidebar_mode in [SessionSidebarModeV1::Expanded, SessionSidebarModeV1::Icons] {
+        let dir = std::env::temp_dir().join(format!(
+            "bt-persist-sidebar-mode-roundtrip-{}-{sidebar_mode:?}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.json");
+        let session = SessionV1 {
+            sidebar_mode,
             ..SessionV1::default()
         };
         write_session_atomic(&path, &session).unwrap();

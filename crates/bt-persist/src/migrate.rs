@@ -39,6 +39,7 @@ pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (1, migrate_session_v1_to_v2),
     (2, migrate_session_v2_to_v3),
     (3, migrate_session_v3_to_v4),
+    (4, migrate_session_v4_to_v5),
 ];
 
 fn migrate_session_v1_to_v2(mut value: Value) -> Value {
@@ -60,6 +61,15 @@ fn migrate_session_v2_to_v3(mut value: Value) -> Value {
 fn migrate_session_v3_to_v4(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(4));
+    }
+    value
+}
+
+fn migrate_session_v4_to_v5(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(5));
+        object.insert("tab_layout".to_owned(), Value::from("horizontal"));
+        object.insert("sidebar_mode".to_owned(), Value::from("expanded"));
     }
     value
 }
@@ -310,6 +320,33 @@ mod tests {
             assert_eq!(migrated["theme"], json!(theme));
             assert_eq!(migrated["cursor_style"], json!("bar"));
         }
+    }
+
+    #[test]
+    fn real_session_v4_to_v5_migration_adds_the_horizontal_expanded_defaults() {
+        let migrated = migrate_value(
+            json!({
+                "schema_version": 4,
+                "theme": "system",
+                "cursor_style": "underline",
+                "active_tab": 3,
+                "window": {}
+            }),
+            4,
+            5,
+            SESSION_MIGRATIONS,
+        )
+        .unwrap();
+        assert_eq!(migrated["schema_version"], json!(5));
+        assert_eq!(migrated["tab_layout"], json!("horizontal"));
+        assert_eq!(migrated["sidebar_mode"], json!("expanded"));
+        // Rule 3 ("迁移函数只做结构升级"): everything the v4 document already
+        // carried must come through byte-identical, including fields this step
+        // has no opinion about.
+        assert_eq!(migrated["theme"], json!("system"));
+        assert_eq!(migrated["cursor_style"], json!("underline"));
+        assert_eq!(migrated["active_tab"], json!(3));
+        assert_eq!(migrated["window"], json!({}));
     }
 
     #[derive(Debug, Default, PartialEq, Deserialize, Serialize)]

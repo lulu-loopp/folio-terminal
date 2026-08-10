@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::layout::LayoutNodeV1;
 
 /// Current `schema_version` for `session.json`.
-pub const SESSION_SCHEMA_VERSION: u32 = 4;
+pub const SESSION_SCHEMA_VERSION: u32 = 5;
 
 /// Persisted theme mode restored with the session. `System` is resolved by the app against winit's
 /// OS theme; `BT_BG` remains a process diagnostic override and is never persisted as a mode.
@@ -28,6 +28,24 @@ pub enum SessionCursorStyleV1 {
     Underline,
 }
 
+/// Where the tab strip rests: along the top edge, or down the side as a column.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionTabLayoutV1 {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
+/// Resting width of the vertical sidebar: full labels, or collapsed to its icon rail.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionSidebarModeV1 {
+    #[default]
+    Expanded,
+    Icons,
+}
+
 /// `session.json` v1 top-level structure — docs/M2-persistence-schema-v1.md §3.5.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionV1 {
@@ -40,6 +58,14 @@ pub struct SessionV1 {
     /// Added in schema v3; missing values degrade to the historical bar cursor.
     #[serde(default)]
     pub cursor_style: SessionCursorStyleV1,
+    /// Added in schema v5; missing values degrade to the horizontal strip, which is the only
+    /// arrangement that existed before this field.
+    #[serde(default)]
+    pub tab_layout: SessionTabLayoutV1,
+    /// Added in schema v5; missing values degrade to the expanded sidebar, matching every session
+    /// written before the icon rail existed.
+    #[serde(default)]
+    pub sidebar_mode: SessionSidebarModeV1,
     pub window: WindowStateV1,
     pub tabs: Vec<TabV1>,
     pub active_tab: u32,
@@ -52,6 +78,8 @@ impl Default for SessionV1 {
             schema_version: SESSION_SCHEMA_VERSION,
             theme: SessionThemeV1::Dark,
             cursor_style: SessionCursorStyleV1::Bar,
+            tab_layout: SessionTabLayoutV1::Horizontal,
+            sidebar_mode: SessionSidebarModeV1::Expanded,
             window: WindowStateV1::default(),
             tabs: Vec::new(),
             active_tab: 0,
@@ -194,6 +222,8 @@ mod tests {
         assert_eq!(defaults.schema_version, SESSION_SCHEMA_VERSION);
         assert_eq!(defaults.theme, SessionThemeV1::Dark);
         assert_eq!(defaults.cursor_style, SessionCursorStyleV1::Bar);
+        assert_eq!(defaults.tab_layout, SessionTabLayoutV1::Horizontal);
+        assert_eq!(defaults.sidebar_mode, SessionSidebarModeV1::Expanded);
         assert!(defaults.tabs.is_empty());
         assert!(defaults.recent.is_empty());
         assert_eq!(defaults.active_tab, 0);

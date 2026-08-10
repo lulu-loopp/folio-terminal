@@ -31,8 +31,9 @@ use bt_layout::{
 };
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
-    LayoutNodeV1, LeafNodeV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionThemeV1,
-    SessionV1, TabV1, TermLeafV1, ThemeModeV1, WindowBoundsV1, WindowStateV1,
+    LayoutNodeV1, LeafNodeV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1,
+    SessionTabLayoutV1, SessionThemeV1, SessionV1, TabV1, TermLeafV1, ThemeModeV1, WindowBoundsV1,
+    WindowStateV1,
 };
 use bt_pty::{OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PtySession, PtySize};
 use bt_render::{
@@ -4832,13 +4833,19 @@ enum DragCarry {
     Pane,
 }
 
-/// A tab being dragged along the strip (K111, K114-K118).
+/// A tab being dragged along the run it lives in (K111, K114-K118).
 #[derive(Clone, Copy, Debug)]
 struct TabCarry {
-    /// Where inside the tab's own body the pointer took hold, in physical
-    /// pixels. It is what makes the tab hang off the pointer where you picked it
-    /// up instead of jumping its own left edge under the cursor.
-    grab_dx: f64,
+    /// How far into the slot, **along the run's own axis**, the pointer took
+    /// hold — in physical pixels from the slot's leading edge. It is what makes
+    /// the tab hang off the pointer where you picked it up instead of jumping
+    /// its leading edge under the cursor.
+    ///
+    /// R3 made this axis-neutral rather than adding a second field beside it:
+    /// the cross-axis grip is a distance nothing measures, because a tab in the
+    /// strip only travels in `x` and a row in the rail only travels in `y`. One
+    /// number, read against whichever axis [`seats::TabRun`] is on.
+    grab: f32,
     /// The slot the tab held when the drag began. J120 puts it back here.
     origin: usize,
     /// **N163/J107** — the tab that was *showing* when the drag began, which is
@@ -6380,6 +6387,13 @@ impl Runtime {
         let session_store = persist::SessionStore::open();
         let theme_mode = render_theme_mode(session_store.loaded().theme);
         set_cursor_style(render_cursor_style(session_store.loaded().cursor_style));
+        // Through the same constructor the two live routes take, so a restored
+        // rail is byte for byte the rail the user left rather than one assembled
+        // a second way at startup.
+        let rail = rail_state_for(
+            render_tab_layout(session_store.loaded().tab_layout),
+            render_sidebar_mode(session_store.loaded().sidebar_mode),
+        );
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
             .with_title(DEFAULT_PROFILE_TITLE)
@@ -6616,7 +6630,7 @@ impl Runtime {
             // first commit that *does* edit one is the first thing to animate.
             pane_motion_revision: 0,
             tab_scroll: 0.0,
-            rail: seats::RailState::default(),
+            rail,
             rail_scroll: 0.0,
             rail_open: RevealTween::over(RAIL_TRANSITION),
             rail_text: RevealTween::over(RAIL_TEXT_FADE),
@@ -8034,7 +8048,22 @@ impl Runtime {
             height as f32,
             self.renderer.metrics().scale_factor as f32,
             self.settings.menu(),
+            // Read fresh every time rather than cached: the Sidebar row appears
+            // and disappears with the Tab layout combo, and the height, the hit
+            // test and the draw all come off this one call, so all three follow
+            // it in the same frame.
+            &settings::visible_rows(self.rail.layout),
         )
+    }
+
+    /// What every row in the settings dialog currently reads.
+    fn settings_values(&self) -> settings::SettingsValues {
+        settings::SettingsValues {
+            theme: self.theme_mode,
+            cursor: current_cursor_style(),
+            tab_layout: self.rail.layout,
+            sidebar: self.rail.mode,
+        }
     }
 
     /// Rebuild the blended layer over the chrome. Returns whether anything
@@ -8060,7 +8089,7 @@ impl Runtime {
         let mut layers =
             ground_overlay_layers(self.pane_fade_veils(now), self.dock_overlay_layers(now));
         layers.extend(if let Some(layout) = self.settings_layout() {
-            settings::build(&layout, self.settings.hover(), self.theme_mode)
+            settings::build(&layout, self.settings.hover(), self.settings_values())
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the prompt floats over a
             // window that already works, which is the whole reason it is
@@ -8538,30 +8567,31 @@ impl Runtime {
         match settings::hit(layout, position.x, position.y) {
             settings::SettingsTarget::Scrim => self.settings.close(),
             settings::SettingsTarget::Close => self.settings.close(),
-            settings::SettingsTarget::ThemeCombo => {
-                self.settings.toggle_menu(settings::SettingsMenu::Theme);
-            }
-            target @ settings::SettingsTarget::ThemeOption(_) => {
-                self.settings.set_menu_open(false);
+            settings::SettingsTarget::Combo(row) => self.settings.toggle_menu(row),
+            target @ settings::SettingsTarget::Choice(..) => {
+                self.settings.close_menu();
                 if let Some(mode) = settings::theme_requested(target) {
                     self.apply_theme_mode(mode)?;
                 }
-            }
-            settings::SettingsTarget::CursorCombo => {
-                self.settings.toggle_menu(settings::SettingsMenu::Cursor);
-            }
-            target @ settings::SettingsTarget::CursorOption(_) => {
-                self.settings.set_menu_open(false);
                 if let Some(style) = settings::cursor_style_requested(target) {
                     self.apply_cursor_style(style)?;
+                }
+                // Both rail combos go through the one constructor: the layout
+                // choice keeps the sidebar mode standing and the sidebar choice
+                // keeps the layout standing, and Q190's combination rule inside
+                // `RailState` decides what that pair actually puts on screen.
+                if let Some(layout) = settings::tab_layout_requested(target) {
+                    self.set_rail_state(rail_state_for(layout, self.rail.mode))?;
+                }
+                if let Some(mode) = settings::sidebar_mode_requested(target) {
+                    self.set_rail_state(rail_state_for(self.rail.layout, mode))?;
                 }
             }
             // A press on the dialog's own body, or inside the open menu but on
             // none of its items, lands nowhere. It notably does *not* close: the
             // mock-up closes on the scrim and on the `×`, and nothing else.
             settings::SettingsTarget::Panel => {}
-            settings::SettingsTarget::ThemeMenu => {}
-            settings::SettingsTarget::CursorMenu => {}
+            settings::SettingsTarget::Menu(_) => {}
         }
         if let Some(position) = self.pointer_position {
             let hover = self
@@ -8666,6 +8696,8 @@ impl Runtime {
         session.schema_version = SESSION_SCHEMA_VERSION;
         session.theme = session_theme_mode(self.theme_mode);
         session.cursor_style = session_cursor_style(current_cursor_style());
+        session.tab_layout = session_tab_layout(self.rail.layout);
+        session.sidebar_mode = session_sidebar_mode(self.rail.mode);
         session.window = WindowStateV1 {
             bounds,
             dpi: self.renderer.metrics().dpi_milli().get(),
@@ -11686,6 +11718,31 @@ impl Runtime {
         )
     }
 
+    /// **The tab run the drag is happening in, whichever axis it is on** (R3).
+    ///
+    /// The one place the layout mode is read by the drag engine. Everything
+    /// downstream of this — the grip, the carry, the reorder, the tear-out's
+    /// caret, the FLIP deltas — takes a [`seats::TabRun`] and cannot tell which
+    /// surface it got, which is the whole point: the mock-up's `stripEl()`
+    /// (6505) is one function for the same reason.
+    ///
+    /// **`None` is a real answer.** A collapsed rail puts no tab list on screen,
+    /// and with no list there is nothing to drag along and nothing for a torn-out
+    /// pane to be dropped into — so every caller's "there is no run" branch is
+    /// the honest behaviour rather than a failure to handle. The horizontal strip
+    /// has no such state: it is always drawn, even holding one tab.
+    fn tab_run(&self, now: Instant) -> Option<seats::TabRun> {
+        match self.rail.layout {
+            seats::TabLayoutMode::Horizontal => {
+                let scale = self.renderer.metrics().scale_factor as f32;
+                Some(seats::strip_run(&self.strip_geometry(now), scale))
+            }
+            seats::TabLayoutMode::Vertical => {
+                self.rail_geometry_now(now).as_ref().map(seats::rail_run)
+            }
+        }
+    }
+
     /// K111 and J106 — the press has travelled 6px, so it is a drag now.
     ///
     /// The activation is not a side effect: "reordering IS commitment to the
@@ -11707,18 +11764,21 @@ impl Runtime {
         // gesture started, and the one they mean when they aim below the strip.
         let home = self.tabs[self.active_tab].id;
         self.activate_tab(index, false)?;
-        // Re-read the strip: activating may have scrolled it to reveal the tab,
+        // Re-read the run: activating may have scrolled it to reveal the tab,
         // and a grip measured against the old scroll would be wrong by exactly
         // that much.
         let index = self.tab_index(press.tab);
         let now = Instant::now();
-        let Some(slot) = self.strip_geometry(now).tabs.get(index).copied() else {
+        let Some(grab) = self.tab_run(now).and_then(|run| {
+            run.start(index)
+                .map(|start| run.pos(press.latch.origin.x, press.latch.origin.y) - start)
+        }) else {
             return Ok(());
         };
         self.begin_drag(
             DragSource::Tab(press.tab),
             DragCarry::Tab(TabCarry {
-                grab_dx: press.latch.origin.x - f64::from(slot.body[0]),
+                grab,
                 origin: index,
                 offset: 0.0,
                 moved: false,
@@ -11791,21 +11851,21 @@ impl Runtime {
     /// K114/K115 — hold the grabbed tab under the pointer and answer with how far
     /// it now sits from its own slot.
     ///
-    /// One axis, because the strip has one: a tab dragged along it moves in `x`
-    /// and the row it lives in does not move at all. Clamped to the strip's
-    /// viewport, so the tab you are holding cannot be carried out over the
-    /// caption buttons or off the window's left edge.
+    /// One axis, because a tab run has one: the tab travels along it and does not
+    /// move across it at all — `x` in the strip, `y` in the rail (mock-up's
+    /// `trackGrabbed`, 6646-6665). Clamped to the run's own viewport, so the tab
+    /// you are holding cannot be carried out over the caption buttons, off the
+    /// window's left edge, or past the rail's head or foot.
     fn track_grabbed(&self, position: PhysicalPosition<f64>) -> Option<f32> {
         let drag = self.drag?;
         let (tab, carry) = (drag.tab()?, drag.tab_carry()?);
         let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
-        let geometry = self.strip_geometry(Instant::now());
-        let slot = geometry.tabs.get(index)?;
+        let run = self.tab_run(Instant::now())?;
         Some(grabbed_offset(
-            slot.body[0],
-            slot.body[2] - slot.body[0],
-            geometry.viewport,
-            (position.x - carry.grab_dx) as f32,
+            run.start(index)?,
+            run.extent(index)?,
+            run.viewport,
+            run.pos(position.x, position.y) - carry.grab,
         ))
     }
 
@@ -11850,9 +11910,10 @@ impl Runtime {
         position: PhysicalPosition<f64>,
     ) -> Option<DropLanding> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let geometry = self.strip_geometry(Instant::now());
-        if seats::in_strip(&geometry, scale, position.x, position.y) {
-            return self.survey_strip(source, &geometry, position);
+        if let Some(run) = self.tab_run(Instant::now())
+            && run.contains(position.x, position.y)
+        {
+            return self.survey_strip(source, &run, position);
         }
         // K129 — dragging the active tab onto its own layout is meaningless.
         if source == DragSource::Tab(self.tabs[self.active_tab].id) {
@@ -11869,34 +11930,40 @@ impl Runtime {
         landing_for_aim(source, aim)
     }
 
-    /// The strip's arm of [`Runtime::survey_drop`] (K123-K125).
+    /// The tab list's arm of [`Runtime::survey_drop`] (K123-K125), on whichever
+    /// axis it is on.
     ///
-    /// The two sources ask the strip for different things and measure it
+    /// The two sources ask the run for different things and measure it
     /// differently, which is why they are two arms rather than one with a flag.
-    /// A tab in the strip is a *body* sliding along a run and it swaps with a
+    /// A tab already in the run is a *body* sliding along it and it swaps with a
     /// neighbour once it has covered half of it ([`seats::reorder_target`]); a
-    /// pane arriving from the layout has no body in the strip yet, so the only
+    /// pane arriving from the layout has no body in the run yet, so the only
     /// operand is the pointer against the slot midpoints
     /// ([`seats::insert_index_at`], K125).
+    ///
+    /// Neither arm knows which surface it is judging, because a
+    /// [`seats::TabRun`] does not say: the mids, the half and the pointer's
+    /// coordinate all arrive already projected onto the axis that run is on.
     fn survey_strip(
         &self,
         source: DragSource,
-        geometry: &seats::TabStripGeometry,
+        run: &seats::TabRun,
         position: PhysicalPosition<f64>,
     ) -> Option<DropLanding> {
-        let slot_mids = seats::tab_slot_mids(geometry);
+        let slot_mids = run.mids();
         match source {
             DragSource::Tab(tab) => {
                 let index = self.tabs.iter().position(|candidate| candidate.id == tab)?;
-                let slot = geometry.tabs.get(index)?;
+                let half = run.half(index)?;
+                let mid = *slot_mids.get(index)?;
                 let offset = self.track_grabbed(position)?;
                 Some(DropLanding::StripReorder {
                     slot: seats::reorder_target(
                         &slot_mids,
                         &self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>(),
                         index,
-                        slot_mids[index] + offset,
-                        (slot.body[2] - slot.body[0]) / 2.0,
+                        mid + offset,
+                        half,
                     ),
                 })
             }
@@ -11919,7 +11986,7 @@ impl Runtime {
                 self.tear_out_is_hostable(seat)
                     .then(|| DropLanding::StripExtract {
                         slot: strip_insert_slot(
-                            seats::insert_index_at(&slot_mids, position.x as f32),
+                            seats::insert_index_at(&slot_mids, run.pos(position.x, position.y)),
                             &self.tabs.iter().map(|tab| tab.pinned).collect::<Vec<_>>(),
                         ),
                     })
@@ -12065,13 +12132,14 @@ impl Runtime {
         let (Some(tab), Some(mut carry)) = (drag.tab(), drag.tab_carry()) else {
             return Ok(());
         };
-        let scale = self.renderer.metrics().scale_factor as f32;
-        if seats::in_strip(
-            &self.strip_geometry(Instant::now()),
-            scale,
-            position.x,
-            position.y,
-        ) {
+        // A collapsed rail answers no run at all, and that reads correctly here:
+        // with no tab list on screen the pointer is outside it wherever it is,
+        // so the tab slides home and the view flips back exactly as it does for
+        // a pointer over the terminal.
+        if self
+            .tab_run(Instant::now())
+            .is_some_and(|run| run.contains(position.x, position.y))
+        {
             return Ok(());
         }
         if carry.offset != 0.0
@@ -12143,7 +12211,7 @@ impl Runtime {
         }
         let motion = self.motion;
         let active = self.tabs[self.active_tab].id;
-        let before = self.slot_lefts(now);
+        let before = self.slot_starts(now);
         let was = self.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>();
         let tab = self.tabs.remove(from);
         self.tabs.insert(to, tab);
@@ -12151,30 +12219,37 @@ impl Runtime {
         // order changes — the active tab most of all, because its index is what
         // the session file records.
         self.active_tab = self.tab_index(active);
-        let after = self.slot_lefts(now);
+        let after = self.slot_starts(now);
         for (old_index, id) in was.into_iter().enumerate() {
             if skip == Some(id) {
                 continue;
             }
             let new_index = self.tab_index(id);
-            let (Some(old_left), Some(new_left)) = (before.get(old_index), after.get(new_index))
+            let (Some(old_start), Some(new_start)) = (before.get(old_index), after.get(new_index))
             else {
                 continue;
             };
-            let delta = old_left - new_left;
+            let delta = old_start - new_start;
             if delta != 0.0 {
                 self.tabs[new_index].flip.displace(delta, now, motion);
             }
         }
     }
 
-    /// Where every slot's leading edge is, in strip order.
-    fn slot_lefts(&self, now: Instant) -> Vec<f32> {
-        self.strip_geometry(now)
-            .tabs
-            .iter()
-            .map(|tab| tab.body[0])
-            .collect()
+    /// Where every slot begins on the run's own axis, in list order — the left
+    /// edges of the strip, the top edges of the rail.
+    ///
+    /// This is what the FLIP deltas are struck from, and it is why they needed no
+    /// axis of their own: a displacement is one number, and the tween that runs
+    /// it down to nothing never asked which direction it pointed in.
+    fn slot_starts(&self, now: Instant) -> Vec<f32> {
+        self.tab_run(now)
+            .map(|run| {
+                (0..run.slots.len())
+                    .filter_map(|index| run.start(index))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Let go (K118, K121, J120, and the mock-up's commit table at 7202-7231).
@@ -13111,6 +13186,25 @@ impl Runtime {
         (trailers, pinned)
     }
 
+    /// The rail's live geometry — [`Runtime::strip_geometry`]'s opposite number.
+    ///
+    /// `None` exactly when no rail is on screen: a horizontal layout, or a
+    /// collapsed one. That is [`seats::rail_geometry`]'s own answer passed
+    /// through rather than a second reading of the same question.
+    fn rail_geometry_now(&self, now: Instant) -> Option<seats::RailGeometry> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (_, height) = self.renderer.presentation_geometry().swapchain_size;
+        let (trailers, pinned) = self.rail_list(now);
+        seats::rail_geometry(
+            height as f32,
+            scale,
+            &trailers,
+            pinned,
+            self.rail_scroll,
+            self.sampled_rail(now),
+        )
+    }
+
     /// **R2's open trigger, in the smallest form that is usable.**
     ///
     /// The pointer is in the rail's own box, or it is not. That is deliberately
@@ -13175,7 +13269,16 @@ impl Runtime {
     /// tickets. What this buys meanwhile is the only thing that matters before
     /// then — being able to *look* at the other axis.
     fn cycle_rail_layout(&mut self) -> Result<()> {
-        self.rail = next_rail_layout(self.rail);
+        self.set_rail_state(next_rail_layout(self.rail))
+    }
+
+    /// Put the rail in a posture and pay for it — the one commit path both the
+    /// dev chord and the settings dialog take, so neither can move the rail
+    /// without the panes, the window minimum, the hover and the session file
+    /// following it.
+    fn set_rail_state(&mut self, state: seats::RailState) -> Result<()> {
+        let moved = (self.rail.layout, self.rail.mode) != (state.layout, state.mode);
+        self.rail = state;
         eprintln!(
             "BT_RAIL layout={:?} mode={:?} inset={}px",
             self.rail.layout,
@@ -13198,6 +13301,13 @@ impl Runtime {
         if let Some(position) = self.pointer_position {
             self.seat_pointer.hover = self.chrome_target_at(position);
         }
+        // Both halves are layout intent, so they persist exactly as the theme
+        // and the cursor shape do — a window that opened with the tabs across
+        // the top after the user moved them down the side would be the same
+        // broken promise.
+        if moved {
+            self.mark_session_dirty(Instant::now());
+        }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
@@ -13213,17 +13323,7 @@ impl Runtime {
     /// vertical scroller and a vertical wheel already says what it means.
     fn scroll_rail(&mut self, delta: MouseScrollDelta) -> Result<()> {
         let now = Instant::now();
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (_, height) = self.renderer.presentation_geometry().swapchain_size;
-        let (trailers, pinned) = self.rail_list(now);
-        let Some(geometry) = seats::rail_geometry(
-            height as f32,
-            scale,
-            &trailers,
-            pinned,
-            self.rail_scroll,
-            self.sampled_rail(now),
-        ) else {
+        let Some(geometry) = self.rail_geometry_now(now) else {
             return Ok(());
         };
         let travel = match delta {
@@ -13261,23 +13361,8 @@ impl Runtime {
 
     /// Whether the pointer is over the rail's own box — the wheel's gate.
     fn rail_contains(&self, position: PhysicalPosition<f64>) -> bool {
-        let now = Instant::now();
-        let scale = self.renderer.metrics().scale_factor as f32;
-        let (_, height) = self.renderer.presentation_geometry().swapchain_size;
-        let (trailers, pinned) = self.rail_list(now);
-        seats::rail_geometry(
-            height as f32,
-            scale,
-            &trailers,
-            pinned,
-            self.rail_scroll,
-            self.sampled_rail(now),
-        )
-        .is_some_and(|geometry| {
-            let [left, top, right, bottom] = geometry.body;
-            let (x, y) = (position.x as f32, position.y as f32);
-            x >= left && x < right && y >= top && y < bottom
-        })
+        self.rail_geometry_now(Instant::now())
+            .is_some_and(|geometry| seats::rail_run(&geometry).contains(position.x, position.y))
     }
 
     /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
@@ -15528,6 +15613,34 @@ fn session_cursor_style(style: CursorStyle) -> SessionCursorStyleV1 {
     }
 }
 
+fn render_tab_layout(layout: SessionTabLayoutV1) -> seats::TabLayoutMode {
+    match layout {
+        SessionTabLayoutV1::Horizontal => seats::TabLayoutMode::Horizontal,
+        SessionTabLayoutV1::Vertical => seats::TabLayoutMode::Vertical,
+    }
+}
+
+fn session_tab_layout(layout: seats::TabLayoutMode) -> SessionTabLayoutV1 {
+    match layout {
+        seats::TabLayoutMode::Horizontal => SessionTabLayoutV1::Horizontal,
+        seats::TabLayoutMode::Vertical => SessionTabLayoutV1::Vertical,
+    }
+}
+
+fn render_sidebar_mode(mode: SessionSidebarModeV1) -> seats::RailMode {
+    match mode {
+        SessionSidebarModeV1::Expanded => seats::RailMode::Expanded,
+        SessionSidebarModeV1::Icons => seats::RailMode::Icons,
+    }
+}
+
+fn session_sidebar_mode(mode: seats::RailMode) -> SessionSidebarModeV1 {
+    match mode {
+        seats::RailMode::Expanded => SessionSidebarModeV1::Expanded,
+        seats::RailMode::Icons => SessionSidebarModeV1::Icons,
+    }
+}
+
 fn window_hwnd(window: &Window) -> Result<std::num::NonZeroIsize> {
     let handle = window.window_handle().context("get Win32 window handle")?;
     let RawWindowHandle::Win32(handle) = handle.as_raw() else {
@@ -15660,23 +15773,50 @@ fn is_rail_layout_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool 
 /// the trigger doing its job rather than this deciding for it.
 fn next_rail_layout(current: seats::RailState) -> seats::RailState {
     use seats::{RailMode, TabLayoutMode};
-    match (current.layout, current.mode) {
-        (TabLayoutMode::Horizontal, _) => seats::RailState {
-            layout: TabLayoutMode::Vertical,
-            mode: RailMode::Expanded,
-            ..seats::RailState::default()
+    let (layout, mode) = match (current.layout, current.mode) {
+        (TabLayoutMode::Horizontal, _) => (TabLayoutMode::Vertical, RailMode::Expanded),
+        (TabLayoutMode::Vertical, RailMode::Expanded) => (TabLayoutMode::Vertical, RailMode::Icons),
+        (TabLayoutMode::Vertical, RailMode::Icons) => {
+            (TabLayoutMode::Horizontal, RailMode::Expanded)
+        }
+    };
+    rail_state_for(layout, mode)
+}
+
+/// **The one place a chosen (layout, sidebar mode) pair becomes a `RailState`.**
+///
+/// Both routes into the rail go through here — the settings dialog's two combos
+/// and the dev chord above — because the alternative is two copies of what a
+/// rail in a given posture looks like, and the moment they disagree the dialog
+/// shows one thing while the chord leaves another.
+///
+/// The mode is carried into Horizontal rather than reset, which is what the
+/// mock-up's `state.railMode` does: it is a standing preference and the layout
+/// is the thing that decides whether it is *expressed*. Nothing is left on
+/// screen for it — [`seats::RailState::draws_icon_rail`] and
+/// `terminal_inset_logical_px` both answer to the layout first, which is Q190's
+/// combination rule and the reason the mock-up's own 46px strip of dead space
+/// cannot come back.
+///
+/// Both scalars come back at their defaults on every call. A rail arriving in
+/// icon mode is parked with its words away, whatever the last one was doing; a
+/// pointer already standing inside it opens it again on the next move, which is
+/// the trigger doing its job rather than this deciding for it.
+fn rail_state_for(layout: seats::TabLayoutMode, mode: seats::RailMode) -> seats::RailState {
+    seats::RailState {
+        layout,
+        mode,
+        collapsed: false,
+        open: 0.0,
+        // Written out rather than taken from `RailState::default()`, whose
+        // `text_opacity` is `1.0` — the right answer for a rail whose words are
+        // simply there, and the wrong one for a parked icon rail.
+        text_opacity: if layout == seats::TabLayoutMode::Vertical && mode == seats::RailMode::Icons
+        {
+            0.0
+        } else {
+            1.0
         },
-        (TabLayoutMode::Vertical, RailMode::Expanded) => seats::RailState {
-            layout: TabLayoutMode::Vertical,
-            mode: RailMode::Icons,
-            collapsed: false,
-            // Written out rather than taken from `RailState::default()`, whose
-            // `text_opacity` is `1.0` — the right answer for a layout with no
-            // fade rule and the wrong one here. A parked rail's words are away.
-            open: 0.0,
-            text_opacity: 0.0,
-        },
-        (TabLayoutMode::Vertical, RailMode::Icons) => seats::RailState::default(),
     }
 }
 
@@ -18990,7 +19130,10 @@ mod tests {
             "nothing but a picker item asks for a theme"
         );
         assert_eq!(
-            settings::theme_requested(settings::SettingsTarget::ThemeOption(ThemeModeV1::Light)),
+            settings::theme_requested(settings::SettingsTarget::Choice(
+                settings::SettingsRow::Theme,
+                1
+            )),
             Some(ThemeModeV1::Light)
         );
     }
@@ -20736,6 +20879,91 @@ mod tests {
         assert_eq!(next_rail_layout(mid), start);
     }
 
+    /// PIN (R4): the settings dialog and the dev chord are one state machine.
+    ///
+    /// Every stop the chord walks is the state [`rail_state_for`] builds for the
+    /// same pair, so there is exactly one place that says what a rail in a given
+    /// layout and mode looks like. Two copies of that rule is the bug: the
+    /// dialog would show one thing and the chord would leave another.
+    #[test]
+    fn the_settings_path_and_the_dev_chord_reach_the_same_rail_state() {
+        use seats::{RailMode, TabLayoutMode};
+        let start = seats::RailState::default();
+        assert_eq!(
+            start,
+            rail_state_for(TabLayoutMode::Horizontal, RailMode::Expanded)
+        );
+        let expanded = next_rail_layout(start);
+        assert_eq!(
+            expanded,
+            rail_state_for(TabLayoutMode::Vertical, RailMode::Expanded)
+        );
+        let icons = next_rail_layout(expanded);
+        assert_eq!(
+            icons,
+            rail_state_for(TabLayoutMode::Vertical, RailMode::Icons)
+        );
+        assert_eq!(
+            next_rail_layout(icons),
+            rail_state_for(TabLayoutMode::Horizontal, RailMode::Expanded)
+        );
+    }
+
+    /// PIN (Q190 through the settings path): choosing Horizontal clears the rail
+    /// outright — no icon rail on screen and not one pixel of terminal kept
+    /// clear for it.
+    ///
+    /// This is the mock-up's own recorded failure (line 5640-5642): the
+    /// `rail-icons` class "survived into horizontal mode, where the rail is
+    /// `display: none` but the terminal was still keeping its 46px clear — a
+    /// strip of dead space with nothing in it". The sidebar mode is *kept*
+    /// across the switch, exactly as `state.railMode` is, so coming back to
+    /// Vertical brings the rail up in the mode the user last chose; what makes
+    /// the strip go away is the combination rule, not forgetting the mode.
+    #[test]
+    fn choosing_horizontal_leaves_no_rail_and_no_terminal_inset() {
+        use seats::{RailMode, TabLayoutMode};
+        for mode in [RailMode::Expanded, RailMode::Icons] {
+            let railed = rail_state_for(TabLayoutMode::Vertical, mode);
+            assert!(railed.terminal_inset_logical_px() > 0.0);
+            let flat = rail_state_for(TabLayoutMode::Horizontal, mode);
+            assert_eq!(flat.mode, mode, "the sidebar mode is remembered, not reset");
+            assert!(!flat.draws_icon_rail());
+            assert_eq!(
+                flat.terminal_inset_logical_px(),
+                0.0,
+                "no 46px strip of dead space"
+            );
+            assert_eq!(
+                rail_state_for(TabLayoutMode::Vertical, flat.mode),
+                railed,
+                "Vertical brings the rail back in the mode that was chosen"
+            );
+        }
+    }
+
+    /// PIN (schema v5): both new fields go to the file and come back unchanged,
+    /// every value of them.
+    #[test]
+    fn the_tab_layout_and_sidebar_mode_survive_the_round_trip_through_the_session() {
+        use seats::{RailMode, TabLayoutMode};
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            assert_eq!(render_tab_layout(session_tab_layout(layout)), layout);
+        }
+        for persisted in [SessionTabLayoutV1::Horizontal, SessionTabLayoutV1::Vertical] {
+            assert_eq!(session_tab_layout(render_tab_layout(persisted)), persisted);
+        }
+        for mode in [RailMode::Expanded, RailMode::Icons] {
+            assert_eq!(render_sidebar_mode(session_sidebar_mode(mode)), mode);
+        }
+        for persisted in [SessionSidebarModeV1::Expanded, SessionSidebarModeV1::Icons] {
+            assert_eq!(
+                session_sidebar_mode(render_sidebar_mode(persisted)),
+                persisted
+            );
+        }
+    }
+
     /// **Q183's one-sided delay**: on the way open the words wait 60ms for the
     /// panel to be wide enough to hold them; on the way shut they leave at once.
     ///
@@ -22386,6 +22614,84 @@ mod tests {
             grabbed_offset(0.0, 200.0, [0.0, 120.0], 5_000.0),
             0.0,
             "a viewport narrower than the tab keeps the leading edge, not the trailing one"
+        );
+    }
+
+    /// **K115 in the rail: a grabbed row is held inside the list's own viewport
+    /// and cannot be carried out past its top or its foot.**
+    ///
+    /// `grabbed_offset` never knew which axis it was on — it clamps a leading
+    /// edge against a `[start, end]` pair — so what is new here is what the rail
+    /// hands it: the *list's* clip box rather than the window's, and the row's
+    /// height rather than a tab's width. The two bounds are asserted to be
+    /// strictly inside the window, because that is the difference between a row
+    /// stopped by the scroller and a row stopped by the framebuffer — the
+    /// heading is above the first and the `+` row is below the second, and a
+    /// grabbed row that could reach either would be drawn over furniture that is
+    /// not part of the list.
+    ///
+    /// Red gate: project the run on `x` and `start`/`extent` come back as the
+    /// row's left edge and its 203px width, so every clamp below lands on a
+    /// different number.
+    #[test]
+    fn a_grabbed_row_is_held_inside_the_rails_own_viewport() {
+        const HEIGHT: f32 = 618.0;
+        // Enough rows that the list actually overflows: a rail with room to
+        // spare has a viewport its rows never reach, and a clamp nothing tests.
+        let trailers = vec![seats::TabTrailer::default(); 40];
+        let rail = seats::rail_geometry(
+            HEIGHT,
+            1.0,
+            &trailers,
+            0,
+            0.0,
+            seats::RailState {
+                layout: seats::TabLayoutMode::Vertical,
+                mode: seats::RailMode::Expanded,
+                collapsed: false,
+                open: 1.0,
+                text_opacity: 1.0,
+            },
+        )
+        .expect("an expanded rail is on screen");
+        assert!(
+            rail.max_scroll > 0.0,
+            "the list overflows, so it has a foot"
+        );
+        let run = seats::rail_run(&rail);
+        let [top, foot] = run.viewport;
+        assert!(
+            top > 0.0 && foot < HEIGHT,
+            "the clip is the list's own box, not the window's: {:?}",
+            run.viewport
+        );
+        // A row partway down the list rather than the first: the head's own top
+        // edge already sits on the viewport's, so clamping it up is a move that
+        // could be got right by doing nothing.
+        const ROW: usize = 5;
+        let start = run.start(ROW).expect("a row partway down the list");
+        let height = run.extent(ROW).expect("and its height");
+        // Everything is asserted through the row's *drawn* box, which is what
+        // `RailTabGeometry::shifted` will move: the offset is a number nobody
+        // looks at, and the promise is about where the row you can see ends up.
+        let drawn = |offset: f32| {
+            let row = rail.tabs[ROW].shifted(offset);
+            [row.body[1], row.body[3]]
+        };
+        assert_eq!(
+            grabbed_offset(start, height, run.viewport, start + 90.0),
+            90.0,
+            "free of both ends, the offset is simply the distance travelled"
+        );
+        assert_eq!(
+            drawn(grabbed_offset(start, height, run.viewport, -5_000.0)),
+            [top, top + height],
+            "carried up past the head it stops with its top edge on the list's"
+        );
+        assert_eq!(
+            drawn(grabbed_offset(start, height, run.viewport, 5_000.0)),
+            [foot - height, foot],
+            "and carried down past the foot with its bottom edge on that one"
         );
     }
 
@@ -24468,7 +24774,7 @@ mod tests {
             source,
             carry: match source {
                 DragSource::Tab(tab) => DragCarry::Tab(TabCarry {
-                    grab_dx: 0.0,
+                    grab: 0.0,
                     origin: 0,
                     offset: 0.0,
                     moved: false,

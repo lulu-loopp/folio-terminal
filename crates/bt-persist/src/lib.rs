@@ -49,7 +49,8 @@ pub use migrate::{
 pub use sentinel::{ExitState, create_sentinel, probe_sentinel, remove_sentinel};
 pub use session::{
     DegradationReport, RecentEntryV1, RecentSeedV1, SESSION_SCHEMA_VERSION, SessionCursorStyleV1,
-    SessionThemeV1, SessionV1, TabV1, WindowBoundsV1, WindowStateV1,
+    SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, TabV1, WindowBoundsV1,
+    WindowStateV1,
 };
 pub use settings::{SETTINGS_SCHEMA_VERSION, SettingsV1, ThemeModeV1};
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};

@@ -32,6 +32,7 @@ use bt_render::{
 };
 
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
+use crate::seats::{RailMode, TabLayoutMode};
 
 // ── `.settings`, `.overlay` ────────────────────────────────────────────────
 /// `.settings { width: min(480px, 92%) }` — the cap and the share.
@@ -134,6 +135,9 @@ pub const THEME_OPTIONS: [ThemeModeV1; 3] =
     [ThemeModeV1::System, ThemeModeV1::Light, ThemeModeV1::Dark];
 pub const CURSOR_OPTIONS: [CursorStyle; 3] =
     [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline];
+pub const TAB_LAYOUT_OPTIONS: [TabLayoutMode; 2] =
+    [TabLayoutMode::Horizontal, TabLayoutMode::Vertical];
+pub const SIDEBAR_OPTIONS: [RailMode; 2] = [RailMode::Expanded, RailMode::Icons];
 
 /// The label a theme wears in the picker, matching the mock-up's own casing.
 fn theme_label(theme: ThemeModeV1) -> &'static str {
@@ -152,10 +156,139 @@ fn cursor_label(style: CursorStyle) -> &'static str {
     }
 }
 
+fn tab_layout_label(layout: TabLayoutMode) -> &'static str {
+    match layout {
+        TabLayoutMode::Horizontal => "Horizontal",
+        TabLayoutMode::Vertical => "Vertical",
+    }
+}
+
+/// The mock-up spells the icon rail's option out as a sentence (line 2382)
+/// rather than naming the mode: "Icons" alone says what the sidebar becomes and
+/// not that it comes back when you reach for it, which is the half of the
+/// behaviour a user has to know before choosing it.
+fn sidebar_label(mode: RailMode) -> &'static str {
+    match mode {
+        RailMode::Expanded => "Expanded",
+        RailMode::Icons => "Icons, expand on hover",
+    }
+}
+
+/// One line of the dialog's `.content`: a title, a description and a picker.
+///
+/// An enumeration and not a set of named fields, because a row now exists in
+/// four places — the dialog's height, the stack's offsets, the hit test and the
+/// draw — and one of them is *conditional* (see [`visible_rows`]). Named fields
+/// make each of those four teach itself the condition separately, and the first
+/// one that is not taught is a control the user can click but cannot see.
+///
+/// **Order is Theme, Cursor, Tab layout, Sidebar.** The mock-up's binding
+/// constraint is that Sidebar reads as a dependent of Tab layout — its row only
+/// exists while Tab layout is Vertical — so it has to sit immediately under the
+/// row it depends on. Cursor is a row the mock-up does not have at all, so it
+/// keeps the position it already shipped in rather than being moved for a reason
+/// the mock-up never states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SettingsMenu {
+pub enum SettingsRow {
     Theme,
     Cursor,
+    TabLayout,
+    Sidebar,
+}
+
+impl SettingsRow {
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Theme => "Theme",
+            Self::Cursor => "Cursor",
+            // Mock-up 2360.
+            Self::TabLayout => "Tab layout",
+            // Mock-up 2374.
+            Self::Sidebar => "Sidebar",
+        }
+    }
+
+    #[must_use]
+    pub fn description(self) -> &'static str {
+        match self {
+            // The mock-up's own line names a third option this build does not
+            // have; a description that promises what the picker cannot do is a
+            // lie in the one place the user goes to find out what it does.
+            Self::Theme => "Light or dark",
+            Self::Cursor => "Focused cursor shape",
+            // Mock-up 2361.
+            Self::TabLayout => "Choose where tabs appear in the window",
+            // Mock-up 2375.
+            Self::Sidebar => "How the vertical tab sidebar rests",
+        }
+    }
+
+    /// How many items this row's picker holds.
+    #[must_use]
+    pub fn option_count(self) -> usize {
+        match self {
+            Self::Theme => THEME_OPTIONS.len(),
+            Self::Cursor => CURSOR_OPTIONS.len(),
+            Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
+            Self::Sidebar => SIDEBAR_OPTIONS.len(),
+        }
+    }
+
+    /// The word an item wears, or `None` past the end of the row's options.
+    fn option_label(self, index: usize) -> Option<&'static str> {
+        match self {
+            Self::Theme => THEME_OPTIONS.get(index).copied().map(theme_label),
+            Self::Cursor => CURSOR_OPTIONS.get(index).copied().map(cursor_label),
+            Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
+            Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
+        }
+    }
+
+    /// Which of this row's options the app is currently in.
+    fn selected_index(self, values: SettingsValues) -> Option<usize> {
+        match self {
+            Self::Theme => THEME_OPTIONS.iter().position(|it| *it == values.theme),
+            Self::Cursor => CURSOR_OPTIONS.iter().position(|it| *it == values.cursor),
+            Self::TabLayout => TAB_LAYOUT_OPTIONS
+                .iter()
+                .position(|it| *it == values.tab_layout),
+            Self::Sidebar => SIDEBAR_OPTIONS.iter().position(|it| *it == values.sidebar),
+        }
+    }
+}
+
+/// Which rows the dialog holds while the tabs run on this axis.
+///
+/// **The one place the conditional row is stated** (mock-up 5644:
+/// `$("row-railmode").style.display = state.layoutMode === "vertical" ? "" :
+/// "none"`). The height, the stacking, the hit test and the draw all read the
+/// list this returns, so none of them carries a copy of the rule and none of
+/// them can be forgotten when it changes.
+#[must_use]
+pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
+    let mut rows = vec![
+        SettingsRow::Theme,
+        SettingsRow::Cursor,
+        SettingsRow::TabLayout,
+    ];
+    if tab_layout == TabLayoutMode::Vertical {
+        rows.push(SettingsRow::Sidebar);
+    }
+    rows
+}
+
+/// What every row in the dialog currently reads.
+///
+/// Passed in rather than fetched, so `build` is a function of its arguments and
+/// a row's drawn value cannot disagree with the value the caller is about to
+/// persist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SettingsValues {
+    pub theme: ThemeModeV1,
+    pub cursor: CursorStyle,
+    pub tab_layout: TabLayoutMode,
+    pub sidebar: RailMode,
 }
 
 /// Whether the dialog is up, and what is open inside it.
@@ -166,9 +299,9 @@ pub enum SettingsMenu {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SettingsPanel {
     open: bool,
-    /// The theme picker's own menu. Nested state, because Esc unwinds one layer
+    /// Which row's picker is open. Nested state, because Esc unwinds one layer
     /// per press (§7.1.5) and "the menu is open" is the top layer.
-    menu: Option<SettingsMenu>,
+    menu: Option<SettingsRow>,
     hover: Option<SettingsTarget>,
 }
 
@@ -177,7 +310,7 @@ impl SettingsPanel {
         self.open
     }
 
-    pub fn menu(self) -> Option<SettingsMenu> {
+    pub fn menu(self) -> Option<SettingsRow> {
         self.menu
     }
 
@@ -211,12 +344,14 @@ impl SettingsPanel {
         self.hover = None;
     }
 
-    pub fn set_menu_open(&mut self, open: bool) {
-        self.menu = open.then_some(SettingsMenu::Theme);
+    /// Shut whichever picker is open, leaving the dialog up — what choosing an
+    /// item does, and the only direction the runtime ever asks for.
+    pub fn close_menu(&mut self) {
+        self.menu = None;
     }
 
-    pub fn toggle_menu(&mut self, menu: SettingsMenu) {
-        self.menu = (self.menu != Some(menu)).then_some(menu);
+    pub fn toggle_menu(&mut self, row: SettingsRow) {
+        self.menu = (self.menu != Some(row)).then_some(row);
     }
 
     /// Returns whether the hover changed, so a caller can skip a repaint.
@@ -243,13 +378,21 @@ pub enum SettingsTarget {
     /// in particular does not close — the mock-up closes only on the scrim.
     Panel,
     Close,
-    ThemeCombo,
+    /// A row's picker button.
+    Combo(SettingsRow),
     /// The open menu's own body, between or around its items.
-    ThemeMenu,
-    ThemeOption(ThemeModeV1),
-    CursorCombo,
-    CursorMenu,
-    CursorOption(CursorStyle),
+    Menu(SettingsRow),
+    /// One item of a row's open picker, by its index in that row's options.
+    Choice(SettingsRow, usize),
+}
+
+/// One row's three boxes, and which row they belong to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RowLayout {
+    pub row: SettingsRow,
+    pub title: [f32; 4],
+    pub desc: [f32; 4],
+    pub combo: [f32; 4],
 }
 
 /// Every rectangle the overlay draws and hit-tests, in physical pixels of the
@@ -266,17 +409,32 @@ pub struct SettingsLayout {
     /// The `.content` padding box, which is also what content is clipped to.
     content: [f32; 4],
     group_label: [f32; 4],
-    row_title: [f32; 4],
-    row_desc: [f32; 4],
-    combo: [f32; 4],
-    cursor_row_title: [f32; 4],
-    cursor_row_desc: [f32; 4],
-    cursor_combo: [f32; 4],
-    /// The open menu's border box and its items, top to bottom in
-    /// [`THEME_OPTIONS`] order. Empty when the menu is shut.
+    /// The rows the dialog is holding, top to bottom — the list
+    /// [`visible_rows`] handed in, given boxes.
+    rows: Vec<RowLayout>,
+    /// The open menu's border box and its items, top to bottom in its row's own
+    /// option order. Empty when the menu is shut.
     menu: Option<[f32; 4]>,
     items: Vec<[f32; 4]>,
-    menu_kind: Option<SettingsMenu>,
+    menu_kind: Option<SettingsRow>,
+}
+
+impl SettingsLayout {
+    /// Where a row landed, or `None` when the dialog is not holding it.
+    ///
+    /// The `Option` is the whole point and is why this is the only way to ask:
+    /// `rows` is a list whose contents depend on [`visible_rows`], so "where is
+    /// the Sidebar row" has an answer that can be "it is not here". Every
+    /// geometry claim in this module asks through it rather than indexing, which
+    /// is what keeps a pin from silently reading the row below the one it names.
+    ///
+    /// Drawing and hit-testing walk `rows` in order instead — they want every
+    /// row, not a named one — so at the moment the pins are the only callers.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn row(&self, row: SettingsRow) -> Option<&RowLayout> {
+        self.rows.iter().find(|placed| placed.row == row)
+    }
 }
 
 /// The persisted theme mode a press on the overlay asks the process to select,
@@ -288,7 +446,7 @@ pub struct SettingsLayout {
 #[must_use]
 pub fn theme_requested(target: SettingsTarget) -> Option<ThemeModeV1> {
     match target {
-        SettingsTarget::ThemeOption(theme) => Some(theme),
+        SettingsTarget::Choice(SettingsRow::Theme, index) => THEME_OPTIONS.get(index).copied(),
         _ => None,
     }
 }
@@ -296,7 +454,25 @@ pub fn theme_requested(target: SettingsTarget) -> Option<ThemeModeV1> {
 #[must_use]
 pub fn cursor_style_requested(target: SettingsTarget) -> Option<CursorStyle> {
     match target {
-        SettingsTarget::CursorOption(style) => Some(style),
+        SettingsTarget::Choice(SettingsRow::Cursor, index) => CURSOR_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn tab_layout_requested(target: SettingsTarget) -> Option<TabLayoutMode> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::TabLayout, index) => {
+            TAB_LAYOUT_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
+}
+
+#[must_use]
+pub fn sidebar_mode_requested(target: SettingsTarget) -> Option<RailMode> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::Sidebar, index) => SIDEBAR_OPTIONS.get(index).copied(),
         _ => None,
     }
 }
@@ -328,7 +504,8 @@ pub fn layout_for_menu(
     surface_width: f32,
     surface_height: f32,
     scale: f32,
-    menu_kind: Option<SettingsMenu>,
+    menu_kind: Option<SettingsRow>,
+    rows: &[SettingsRow],
 ) -> Option<SettingsLayout> {
     let px = |value: f32| value * scale;
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
@@ -348,7 +525,7 @@ pub fn layout_for_menu(
         + px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX)
         + px(GROUP_LABEL_LINE_LOGICAL_PX)
         + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX)
-        + 2.0 * row_height
+        + rows.len() as f32 * row_height
         + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX);
     let header = px(HEADER_HEIGHT_LOGICAL_PX);
     let height = (2.0 * border + header + content_height)
@@ -407,61 +584,57 @@ pub fn layout_for_menu(
     let row_right = text_right - px(ROW_PADDING_X_LOGICAL_PX);
     let combo_width = px(COMBO_MIN_WIDTH_LOGICAL_PX);
     let combo_height = px(COMBO_HEIGHT_LOGICAL_PX);
-    let combo_top = row_content_top + (row_content_height - combo_height) / 2.0;
-    let combo = [
-        row_right - combo_width,
-        combo_top,
-        row_right,
-        combo_top + combo_height,
-    ];
-    // `.row .text` is `flex: 1` beside a `flex: none` control, one gap apart.
-    let text_column_right = combo[0] - px(ROW_GAP_LOGICAL_PX);
-    let row_title = [
-        row_left,
-        row_content_top,
-        text_column_right,
-        row_content_top + px(ROW_TITLE_LINE_LOGICAL_PX),
-    ];
-    let row_desc = [
-        row_left,
-        row_title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
-        text_column_right,
-        row_title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
-    ];
-    let cursor_row_content_top = row_content_top + row_height;
-    let cursor_combo_top = cursor_row_content_top + (row_content_height - combo_height) / 2.0;
-    let cursor_combo = [
-        row_right - combo_width,
-        cursor_combo_top,
-        row_right,
-        cursor_combo_top + combo_height,
-    ];
-    let cursor_text_column_right = cursor_combo[0] - px(ROW_GAP_LOGICAL_PX);
-    let cursor_row_title = [
-        row_left,
-        cursor_row_content_top,
-        cursor_text_column_right,
-        cursor_row_content_top + px(ROW_TITLE_LINE_LOGICAL_PX),
-    ];
-    let cursor_row_desc = [
-        row_left,
-        cursor_row_title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
-        cursor_text_column_right,
-        cursor_row_title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
-    ];
-    let active_combo = match menu_kind {
-        Some(SettingsMenu::Theme) => combo,
-        Some(SettingsMenu::Cursor) => cursor_combo,
-        None => combo,
-    };
-    let option_count = match menu_kind {
-        Some(SettingsMenu::Cursor) => CURSOR_OPTIONS.len(),
-        _ => THEME_OPTIONS.len(),
-    };
-    let (menu, items) = if menu_kind.is_some() {
-        menu_layout(active_combo, surface_height, scale, border, option_count)
-    } else {
-        (None, Vec::new())
+    // One stack at one pitch. A row's whole geometry is its index times the row
+    // height off the first one, which is why adding or removing a row costs
+    // nothing here beyond the list it is read from.
+    let placed_rows: Vec<RowLayout> = rows
+        .iter()
+        .enumerate()
+        .map(|(index, row)| {
+            let top = row_content_top + index as f32 * row_height;
+            let combo_top = top + (row_content_height - combo_height) / 2.0;
+            let combo = [
+                row_right - combo_width,
+                combo_top,
+                row_right,
+                combo_top + combo_height,
+            ];
+            // `.row .text` is `flex: 1` beside a `flex: none` control, one gap
+            // apart.
+            let text_column_right = combo[0] - px(ROW_GAP_LOGICAL_PX);
+            let title = [
+                row_left,
+                top,
+                text_column_right,
+                top + px(ROW_TITLE_LINE_LOGICAL_PX),
+            ];
+            let desc = [
+                row_left,
+                title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
+                text_column_right,
+                title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
+            ];
+            RowLayout {
+                row: *row,
+                title,
+                desc,
+                combo,
+            }
+        })
+        .collect();
+    // A picker hangs off a row's button, so a picker named for a row the dialog
+    // is not holding has nothing to hang from and is not open. That is not a
+    // guard against the impossible: switching Tab layout to Horizontal takes the
+    // Sidebar row out from under its own open menu.
+    let active = menu_kind.and_then(|row| {
+        placed_rows
+            .iter()
+            .find(|placed| placed.row == row)
+            .map(|placed| (row, placed.combo))
+    });
+    let (menu, items) = match active {
+        Some((row, combo)) => menu_layout(combo, surface_height, scale, border, row.option_count()),
+        None => (None, Vec::new()),
     };
     Some(SettingsLayout {
         scale,
@@ -471,15 +644,10 @@ pub fn layout_for_menu(
         close,
         content,
         group_label,
-        row_title,
-        row_desc,
-        combo,
-        cursor_row_title,
-        cursor_row_desc,
-        cursor_combo,
+        rows: placed_rows,
         menu,
         items,
-        menu_kind,
+        menu_kind: active.map(|(row, _)| row),
     })
 }
 
@@ -532,32 +700,23 @@ fn menu_layout(
 #[must_use]
 pub fn hit(layout: &SettingsLayout, x: f64, y: f64) -> SettingsTarget {
     let (x, y) = (x as f32, y as f32);
-    if let Some(menu) = layout.menu {
+    if let (Some(menu), Some(row)) = (layout.menu, layout.menu_kind) {
         for (index, item) in layout.items.iter().enumerate() {
             if contains(*item, x, y) {
-                return match layout.menu_kind {
-                    Some(SettingsMenu::Cursor) => {
-                        SettingsTarget::CursorOption(CURSOR_OPTIONS[index])
-                    }
-                    _ => SettingsTarget::ThemeOption(THEME_OPTIONS[index]),
-                };
+                return SettingsTarget::Choice(row, index);
             }
         }
         if contains(menu, x, y) {
-            return match layout.menu_kind {
-                Some(SettingsMenu::Cursor) => SettingsTarget::CursorMenu,
-                _ => SettingsTarget::ThemeMenu,
-            };
+            return SettingsTarget::Menu(row);
         }
     }
     if contains(layout.close, x, y) {
         return SettingsTarget::Close;
     }
-    if contains(layout.combo, x, y) {
-        return SettingsTarget::ThemeCombo;
-    }
-    if contains(layout.cursor_combo, x, y) {
-        return SettingsTarget::CursorCombo;
+    for placed in &layout.rows {
+        if contains(placed.combo, x, y) {
+            return SettingsTarget::Combo(placed.row);
+        }
     }
     if contains(layout.frame, x, y) {
         return SettingsTarget::Panel;
@@ -578,7 +737,7 @@ pub fn hit(layout: &SettingsLayout, x: f64, y: f64) -> SettingsTarget {
 pub fn build(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
-    selected: ThemeModeV1,
+    values: SettingsValues,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
@@ -675,85 +834,54 @@ pub fn build(
             clip: None,
         });
     }
-    if let Some(rect) = clipped(layout.row_title, clip) {
-        labels.push(ChromeLabel {
-            text: "Theme".to_owned(),
-            rect,
-            font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
-            color: palette.dialog_title_text,
-            align_right: false,
-            align_center: false,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
+    for placed in &layout.rows {
+        if let Some(rect) = clipped(placed.title, clip) {
+            labels.push(ChromeLabel {
+                text: placed.row.title().to_owned(),
+                rect,
+                font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
+                color: palette.dialog_title_text,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
+        if let Some(rect) = clipped(placed.desc, clip) {
+            labels.push(ChromeLabel {
+                text: placed.row.description().to_owned(),
+                rect,
+                font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
+                color: palette.dialog_muted_text,
+                align_right: false,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
     }
-    if let Some(rect) = clipped(layout.row_desc, clip) {
-        labels.push(ChromeLabel {
-            // The mock-up's own line names a third option this build does not
-            // have; a description that promises what the picker cannot do is a
-            // lie in the one place the user goes to find out what it does.
-            text: "Light or dark".to_owned(),
-            rect,
-            font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
-            color: palette.dialog_muted_text,
-            align_right: false,
-            align_center: false,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
-    }
-    if let Some(rect) = clipped(layout.cursor_row_title, clip) {
-        labels.push(ChromeLabel {
-            text: "Cursor".to_owned(),
-            rect,
-            font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
-            color: palette.dialog_title_text,
-            align_right: false,
-            align_center: false,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
-    }
-    if let Some(rect) = clipped(layout.cursor_row_desc, clip) {
-        labels.push(ChromeLabel {
-            text: "Focused cursor shape".to_owned(),
-            rect,
-            font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
-            color: palette.dialog_muted_text,
-            align_right: false,
-            align_center: false,
-            letter_spacing_em: 0.0,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
-    }
-
-    if let Some(rect) = clipped(layout.combo, clip) {
+    // The buttons after every row's text, so a row's own control cannot be
+    // covered by the *fill* of a later row's — the same channel ordering the
+    // popup's layer exists for, one scale down.
+    for placed in &layout.rows {
+        let Some(rect) = clipped(placed.combo, clip) else {
+            continue;
+        };
+        let value = placed
+            .row
+            .selected_index(values)
+            .and_then(|index| placed.row.option_label(index))
+            .unwrap_or_default();
         push_combo(
             &mut quads,
             &mut labels,
             rect,
-            hover == Some(SettingsTarget::ThemeCombo),
-            theme_label(selected),
-            scale,
-            border,
-            palette,
-        );
-    }
-    if let Some(rect) = clipped(layout.cursor_combo, clip) {
-        push_combo(
-            &mut quads,
-            &mut labels,
-            rect,
-            hover == Some(SettingsTarget::CursorCombo),
-            cursor_label(bt_render::current_cursor_style()),
+            hover == Some(SettingsTarget::Combo(placed.row)),
+            value,
             scale,
             border,
             palette,
@@ -766,7 +894,7 @@ pub fn build(
     // of the control it hangs over are captions, and captions draw after every
     // fill in their layer.
     let mut popup = OverlayLayer::default();
-    if let Some(menu) = layout.menu {
+    if let (Some(menu), Some(row)) = (layout.menu, layout.menu_kind) {
         push_float_window(
             &mut popup.quads,
             menu,
@@ -780,25 +908,11 @@ pub fn build(
             palette.menu_border,
             alpha(palette.menu_border_alpha),
         );
+        let selected = row.selected_index(values);
         for (index, item) in layout.items.iter().enumerate() {
-            let (label, is_selected, is_hovered) = match layout.menu_kind {
-                Some(SettingsMenu::Cursor) => {
-                    let option = CURSOR_OPTIONS[index];
-                    (
-                        cursor_label(option),
-                        option == bt_render::current_cursor_style(),
-                        hover == Some(SettingsTarget::CursorOption(option)),
-                    )
-                }
-                _ => {
-                    let option = THEME_OPTIONS[index];
-                    (
-                        theme_label(option),
-                        option == selected,
-                        hover == Some(SettingsTarget::ThemeOption(option)),
-                    )
-                }
-            };
+            let label = row.option_label(index).unwrap_or_default();
+            let is_selected = selected == Some(index);
+            let is_hovered = hover == Some(SettingsTarget::Choice(row, index));
             if is_hovered {
                 popup.quads.extend(rounded_overlay_fill(
                     *item,
@@ -984,24 +1098,75 @@ mod tests {
     /// claim below is stated against.
     const SURFACE: (f32, f32) = (1280.0, 800.0);
 
+    /// `.row`'s own height at scale 1: `2 * 11` of padding around the taller of
+    /// the two-line text column (16.5 + 1 + 14.5) and the 27.5 control.
+    const ROW_HEIGHT: f32 = 54.0;
+
+    /// The dialog's height at scale 1 for a content box holding `rows` rows:
+    /// two hairlines, the header's `16 + 30 + 10`, and
+    /// `2 + 10 + 13 + 2 + rows * 54 + 18` of content.
+    fn dialog_height(rows: usize) -> f32 {
+        103.0 + ROW_HEIGHT * rows as f32
+    }
+
+    /// The rows a dialog holds with the tabs across the top — the state the app
+    /// opens in, and what every claim below is stated against unless it says
+    /// otherwise.
+    fn flat_rows() -> Vec<SettingsRow> {
+        visible_rows(TabLayoutMode::Horizontal)
+    }
+
+    /// A representative reading for every row, for the tests that are about
+    /// geometry rather than about which value is shown.
+    fn values() -> SettingsValues {
+        SettingsValues {
+            theme: ThemeModeV1::Dark,
+            cursor: CursorStyle::Bar,
+            tab_layout: TabLayoutMode::Horizontal,
+            sidebar: RailMode::Expanded,
+        }
+    }
+
     fn open(scale: f32, menu_open: bool) -> SettingsLayout {
         layout_for_menu(
             (SURFACE.0 * scale).round(),
             (SURFACE.1 * scale).round(),
             scale,
-            menu_open.then_some(SettingsMenu::Theme),
+            menu_open.then_some(SettingsRow::Theme),
+            &flat_rows(),
         )
         .expect("this window can host the dialog")
     }
 
     fn open_cursor(scale: f32) -> SettingsLayout {
+        open_rows(scale, Some(SettingsRow::Cursor), TabLayoutMode::Horizontal)
+    }
+
+    /// The dialog as it stands with the tabs on this axis, with one row's picker
+    /// open or none.
+    fn open_rows(
+        scale: f32,
+        menu: Option<SettingsRow>,
+        tab_layout: TabLayoutMode,
+    ) -> SettingsLayout {
         layout_for_menu(
             SURFACE.0 * scale,
             SURFACE.1 * scale,
             scale,
-            Some(SettingsMenu::Cursor),
+            menu,
+            &visible_rows(tab_layout),
         )
         .expect("the settings dialog fits")
+    }
+
+    /// A row's boxes, which every geometry claim below names rather than
+    /// reaching for a field that no longer exists.
+    fn row_of(placed: &SettingsLayout, row: SettingsRow) -> RowLayout {
+        *placed.row(row).expect("the dialog holds this row")
+    }
+
+    fn combo_of(placed: &SettingsLayout, row: SettingsRow) -> [f32; 4] {
+        row_of(placed, row).combo
     }
 
     fn centre(rect: [f32; 4]) -> (f64, f64) {
@@ -1023,16 +1188,19 @@ mod tests {
     /// `design/ui-mockup.html` puts it — `width: min(480px, 92%)`,
     /// `margin: 54px auto 0`, and a height its own content decides.
     ///
-    /// The 211 is not a guess: it is `1 + 56 + 153 + 1` — two hairlines, the
-    /// header's `16 + 30 + 10`, and a content box of
-    /// `2 + 10 + 13 + 2 + (11 + 32 + 11) + 18` — and the mock-up's own renderer
-    /// reports 211 for a dialog holding this one group and these two rows.
+    /// The height is not a guess: it is `1 + 56 + content + 1` — two hairlines,
+    /// the header's `16 + 30 + 10`, and a content box of
+    /// `2 + 10 + 13 + 2 + rows * (11 + 32 + 11) + 18`. The mock-up's own
+    /// renderer reported 211 for the two rows this dialog first shipped with,
+    /// which is [`dialog_height`] at 2 and the number the formula is anchored on.
     ///
     /// Red gate: every term is load-bearing. Drop the `auto` centring and `left`
     /// moves; drop the 54 and `top` moves; use the row's *border* box (55, which
-    /// is what it measures when it is not the last child) and the height is 158.
+    /// is what it measures when it is not the last child) and every height here
+    /// is one pixel per row too big.
     #[test]
     fn the_dialog_lands_where_the_mock_up_puts_it() {
+        assert_eq!(dialog_height(2), 211.0, "the mock-up's own measurement");
         let placed = open(1.0, false);
         assert_eq!(width(placed.frame), 480.0, "min(480px, 92%) at 1280 wide");
         assert_eq!(placed.frame[1], 54.0, "margin-top: 54px");
@@ -1041,11 +1209,15 @@ mod tests {
             (SURFACE.0 - 480.0) / 2.0,
             "margin-left/right: auto"
         );
-        assert_eq!(height(placed.frame), 211.0, "content decides the height");
+        assert_eq!(
+            height(placed.frame),
+            dialog_height(flat_rows().len()),
+            "content decides the height"
+        );
 
         // The 92% share takes over below 480/0.92 ~= 521.7 logical pixels.
-        let narrow =
-            layout_for_menu(480.0, 800.0, 1.0, None).expect("480 wide still hosts the dialog");
+        let narrow = layout_for_menu(480.0, 800.0, 1.0, None, &flat_rows())
+            .expect("480 wide still hosts the dialog");
         assert_eq!(
             width(narrow.frame),
             (480.0_f32 * DIALOG_WIDTH_RATIO).round(),
@@ -1067,6 +1239,8 @@ mod tests {
     #[test]
     fn every_control_is_the_box_the_stylesheet_gives_it() {
         let placed = open(1.0, false);
+        let theme = row_of(&placed, SettingsRow::Theme);
+        let cursor = row_of(&placed, SettingsRow::Cursor);
         assert_eq!((width(placed.close), height(placed.close)), (30.0, 30.0));
         assert_eq!(
             placed.frame[2] - placed.close[2],
@@ -1080,36 +1254,36 @@ mod tests {
             "padding-top: 16px"
         );
 
-        assert_eq!(width(placed.combo), 118.0, "min-width: 118px");
-        assert_eq!(height(placed.combo), 27.5, "5 + 15.5 + 5 + two borders");
+        assert_eq!(width(theme.combo), 118.0, "min-width: 118px");
+        assert_eq!(height(theme.combo), 27.5, "5 + 15.5 + 5 + two borders");
         assert_eq!(
-            placed.frame[2] - placed.combo[2],
+            placed.frame[2] - theme.combo[2],
             1.0 + CONTENT_PADDING_X_LOGICAL_PX + ROW_PADDING_X_LOGICAL_PX,
             "the control is flush with the row's own right edge"
         );
         assert_eq!(
-            placed.combo[0] - placed.row_title[2],
+            theme.combo[0] - theme.title[2],
             ROW_GAP_LOGICAL_PX,
             ".row gap: 16px between the text column and the control"
         );
         // `align-items: center`: the 27.5 control is centred on the 32 the two
         // stacked lines take, not top-aligned with them.
-        let text_axis = (placed.row_title[1] + placed.row_desc[3]) / 2.0;
-        let combo_axis = (placed.combo[1] + placed.combo[3]) / 2.0;
+        let text_axis = (theme.title[1] + theme.desc[3]) / 2.0;
+        let combo_axis = (theme.combo[1] + theme.combo[3]) / 2.0;
         assert!(
             (text_axis - combo_axis).abs() <= 0.5,
             "the row's items share one axis: {text_axis} vs {combo_axis}"
         );
         assert_eq!(
-            placed.row_desc[1] - placed.row_title[3],
+            theme.desc[1] - theme.title[3],
             ROW_DESC_MARGIN_TOP_LOGICAL_PX,
             ".desc margin-top: 1px"
         );
-        assert_eq!(width(placed.cursor_combo), width(placed.combo));
-        assert_eq!(height(placed.cursor_combo), height(placed.combo));
+        assert_eq!(width(cursor.combo), width(theme.combo));
+        assert_eq!(height(cursor.combo), height(theme.combo));
         assert_eq!(
-            placed.cursor_combo[1] - placed.combo[1],
-            54.0,
+            cursor.combo[1] - theme.combo[1],
+            ROW_HEIGHT,
             "Cursor is the next identical row under Theme"
         );
     }
@@ -1130,13 +1304,18 @@ mod tests {
                     "scale {scale}: {what} is {got}, wanted {want}"
                 );
             };
+            let combo = combo_of(&placed, SettingsRow::Theme);
             near(480.0 * scale, width(placed.frame), "the dialog's width");
-            near(211.0 * scale, height(placed.frame), "the dialog's height");
+            near(
+                dialog_height(flat_rows().len()) * scale,
+                height(placed.frame),
+                "the dialog's height",
+            );
             near(54.0 * scale, placed.frame[1], "the dialog's drop");
             near(30.0 * scale, width(placed.close), "the close button");
             near(30.0 * scale, height(placed.close), "the close button");
-            near(118.0 * scale, width(placed.combo), "the combo");
-            near(27.5 * scale, height(placed.combo), "the combo");
+            near(118.0 * scale, width(combo), "the combo");
+            near(27.5 * scale, height(combo), "the combo");
             let menu = placed.menu.expect("the menu is open");
             near(118.0 * scale, width(menu), "the menu");
             near(
@@ -1223,13 +1402,24 @@ mod tests {
         let placed = open(1.0, true);
         let (x, y) = centre(placed.close);
         assert_eq!(hit(&placed, x, y), SettingsTarget::Close);
-        let (x, y) = centre(placed.combo);
-        assert_eq!(hit(&placed, x, y), SettingsTarget::ThemeCombo);
+        // Every row's button, on a dialog with nothing open over them — with a
+        // picker up the row it hangs over belongs to the picker, which is
+        // `a_press_inside_an_open_picker_never_reaches_the_row_beneath_it`.
+        let shut = open(1.0, false);
+        for placed_row in &shut.rows {
+            let (x, y) = centre(placed_row.combo);
+            assert_eq!(
+                hit(&shut, x, y),
+                SettingsTarget::Combo(placed_row.row),
+                "{:?}'s button must answer for its own row",
+                placed_row.row
+            );
+        }
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
             assert_eq!(
                 hit(&placed, x, y),
-                SettingsTarget::ThemeOption(THEME_OPTIONS[index]),
+                SettingsTarget::Choice(SettingsRow::Theme, index),
                 "item {index} must answer for its own option"
             );
         }
@@ -1237,7 +1427,7 @@ mod tests {
         let menu = placed.menu.expect("the menu is open");
         assert_eq!(
             hit(&placed, f64::from(menu[0] + 1.0), f64::from(menu[1] + 1.0)),
-            SettingsTarget::ThemeMenu
+            SettingsTarget::Menu(SettingsRow::Theme)
         );
         // The header, left of the title, is the dialog and nothing more.
         assert_eq!(
@@ -1279,8 +1469,8 @@ mod tests {
             SettingsTarget::Scrim,
             SettingsTarget::Panel,
             SettingsTarget::Close,
-            SettingsTarget::ThemeCombo,
-            SettingsTarget::ThemeMenu,
+            SettingsTarget::Combo(SettingsRow::Theme),
+            SettingsTarget::Menu(SettingsRow::Theme),
         ] {
             assert_eq!(
                 theme_requested(target),
@@ -1297,17 +1487,17 @@ mod tests {
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
             let target = hit(&placed, x, y);
-            assert_eq!(target, SettingsTarget::CursorOption(CURSOR_OPTIONS[index]));
+            assert_eq!(target, SettingsTarget::Choice(SettingsRow::Cursor, index));
             assert_eq!(cursor_style_requested(target), Some(CURSOR_OPTIONS[index]));
         }
         for target in [
             SettingsTarget::Scrim,
             SettingsTarget::Panel,
             SettingsTarget::Close,
-            SettingsTarget::ThemeCombo,
-            SettingsTarget::ThemeMenu,
-            SettingsTarget::CursorCombo,
-            SettingsTarget::CursorMenu,
+            SettingsTarget::Combo(SettingsRow::Theme),
+            SettingsTarget::Menu(SettingsRow::Theme),
+            SettingsTarget::Combo(SettingsRow::Cursor),
+            SettingsTarget::Menu(SettingsRow::Cursor),
         ] {
             assert_eq!(cursor_style_requested(target), None);
         }
@@ -1316,12 +1506,22 @@ mod tests {
     #[test]
     fn cursor_combo_reuses_theme_combo_geometry_and_menu_craft() {
         let placed = open_cursor(1.0);
-        assert_eq!(width(placed.cursor_combo), width(placed.combo));
-        assert_eq!(height(placed.cursor_combo), height(placed.combo));
-        let (x, y) = centre(placed.cursor_combo);
-        assert_eq!(hit(&placed, x, y), SettingsTarget::CursorCombo);
+        let theme = combo_of(&placed, SettingsRow::Theme);
+        let cursor = combo_of(&placed, SettingsRow::Cursor);
+        assert_eq!(width(cursor), width(theme));
+        assert_eq!(height(cursor), height(theme));
+        assert_eq!(
+            cursor[1] - theme[1],
+            ROW_HEIGHT,
+            "the rows stack exactly one row height apart"
+        );
+        let (x, y) = centre(cursor);
+        assert_eq!(
+            hit(&placed, x, y),
+            SettingsTarget::Combo(SettingsRow::Cursor)
+        );
         assert_eq!(placed.items.len(), 3);
-        let labels = labels_of(&placed, None, ThemeModeV1::Dark);
+        let labels = labels_of(&placed, None, values());
         for label in ["Bar", "Block", "Underline"] {
             assert!(labels.iter().any(|candidate| candidate.text == label));
         }
@@ -1333,21 +1533,23 @@ mod tests {
     #[test]
     fn the_menu_opens_below_and_flips_up_when_it_would_spill() {
         let tall = open(1.0, true);
+        let tall_combo = combo_of(&tall, SettingsRow::Theme);
         let menu = tall.menu.expect("the menu is open");
         assert_eq!(
-            menu[1] - tall.combo[3],
+            menu[1] - tall_combo[3],
             MENU_OFFSET_LOGICAL_PX,
             "top: calc(100% + 4px)"
         );
-        assert_eq!(menu[2], tall.combo[2], "right: 0");
-        assert_eq!(width(menu), width(tall.combo), "min-width: 100%");
+        assert_eq!(menu[2], tall_combo[2], "right: 0");
+        assert_eq!(width(menu), width(tall_combo), "min-width: 100%");
 
         // A window whose bottom is right under the combo leaves no room below.
-        let short = layout_for_menu(1280.0, 200.0, 1.0, Some(SettingsMenu::Theme))
+        let short = layout_for_menu(1280.0, 200.0, 1.0, Some(SettingsRow::Theme), &flat_rows())
             .expect("200 tall still hosts the dialog");
+        let short_combo = combo_of(&short, SettingsRow::Theme);
         let menu = short.menu.expect("the menu is open");
         assert_eq!(
-            short.combo[1] - menu[3],
+            short_combo[1] - menu[3],
             MENU_OFFSET_LOGICAL_PX,
             "flipped up, the same 4px gap sits above the button"
         );
@@ -1367,15 +1569,15 @@ mod tests {
     #[test]
     fn a_window_too_small_to_host_the_dialog_says_so() {
         assert!(
-            layout_for_menu(1280.0, 100.0, 1.0, None).is_none(),
+            layout_for_menu(1280.0, 100.0, 1.0, None, &flat_rows()).is_none(),
             "too short"
         );
         assert!(
-            layout_for_menu(100.0, 800.0, 1.0, None).is_none(),
+            layout_for_menu(100.0, 800.0, 1.0, None, &flat_rows()).is_none(),
             "too narrow"
         );
         assert!(
-            layout_for_menu(1280.0, 800.0, 1.0, None).is_some(),
+            layout_for_menu(1280.0, 800.0, 1.0, None, &flat_rows()).is_some(),
             "a real window"
         );
     }
@@ -1388,7 +1590,7 @@ mod tests {
         let mut panel = SettingsPanel::default();
         assert!(!panel.close_one_layer(), "nothing is open yet");
         panel.toggle();
-        panel.set_menu_open(true);
+        panel.toggle_menu(SettingsRow::Theme);
         assert!(panel.close_one_layer());
         assert!(
             panel.is_open() && panel.menu().is_none(),
@@ -1406,7 +1608,7 @@ mod tests {
         let mut panel = SettingsPanel::default();
         panel.toggle();
         assert!(panel.is_open());
-        panel.set_menu_open(true);
+        panel.toggle_menu(SettingsRow::Theme);
         panel.toggle();
         assert!(!panel.is_open() && panel.menu().is_none());
         panel.toggle();
@@ -1420,9 +1622,9 @@ mod tests {
     fn quads_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
-        selected: ThemeModeV1,
+        values: SettingsValues,
     ) -> Vec<OverlayQuad> {
-        build(placed, hover, selected)
+        build(placed, hover, values)
             .into_iter()
             .flat_map(|layer| layer.quads)
             .collect()
@@ -1431,9 +1633,9 @@ mod tests {
     fn labels_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
-        selected: ThemeModeV1,
+        values: SettingsValues,
     ) -> Vec<ChromeLabel> {
-        build(placed, hover, selected)
+        build(placed, hover, values)
             .into_iter()
             .flat_map(|layer| layer.labels)
             .collect()
@@ -1442,9 +1644,9 @@ mod tests {
     fn sprites_of(
         placed: &SettingsLayout,
         hover: Option<SettingsTarget>,
-        selected: ThemeModeV1,
+        values: SettingsValues,
     ) -> Vec<ChromeSprite> {
-        build(placed, hover, selected)
+        build(placed, hover, values)
             .into_iter()
             .flat_map(|layer| layer.sprites)
             .collect()
@@ -1492,11 +1694,15 @@ mod tests {
     #[test]
     fn an_open_picker_is_the_last_layer_and_carries_nothing_but_itself() {
         let mut covered_row_products = 0;
-        for kind in [SettingsMenu::Theme, SettingsMenu::Cursor] {
-            let placed = layout_for_menu(SURFACE.0, SURFACE.1, 1.0, Some(kind))
-                .expect("this window can host the dialog");
+        for kind in [
+            SettingsRow::Theme,
+            SettingsRow::Cursor,
+            SettingsRow::TabLayout,
+            SettingsRow::Sidebar,
+        ] {
+            let placed = open_rows(1.0, Some(kind), TabLayoutMode::Vertical);
             let menu = placed.menu.expect("the picker is open");
-            let layers = build(&placed, None, ThemeModeV1::Dark);
+            let layers = build(&placed, None, values());
             let popup = popup_layer(&layers);
             assert_eq!(
                 popup,
@@ -1548,10 +1754,9 @@ mod tests {
                 .count();
         }
         // The claim is not vacuous: a picker really does hang over row content
-        // that was on top of it before. The Theme picker is the one that does —
-        // it covers the Cursor row's value and its chevron, which is the pair
-        // the screenshot caught on the popup's face — while the Cursor picker,
-        // opening off the last row, has nothing under it but the scrim.
+        // that was on top of it before. The Theme picker is the one the
+        // screenshot caught — it covers the row below's value and its chevron —
+        // and every picker but the last row's does the same thing now.
         assert!(
             covered_row_products >= 2,
             "no picker overhangs any row's text, so this test proves nothing"
@@ -1571,7 +1776,7 @@ mod tests {
     fn a_press_inside_an_open_picker_never_reaches_the_row_beneath_it() {
         let placed = open(1.0, true);
         let menu = placed.menu.expect("the picker is open");
-        let covered = clipped(placed.cursor_combo, menu)
+        let covered = clipped(combo_of(&placed, SettingsRow::Cursor), menu)
             .expect("the Theme picker hangs over the Cursor row's control");
         let mut swept = 0;
         let mut y = covered[1] + 0.5;
@@ -1582,7 +1787,8 @@ mod tests {
                 assert!(
                     matches!(
                         target,
-                        SettingsTarget::ThemeMenu | SettingsTarget::ThemeOption(_)
+                        SettingsTarget::Menu(SettingsRow::Theme)
+                            | SettingsTarget::Choice(SettingsRow::Theme, _)
                     ),
                     "({x}, {y}) is under the open picker and answered {target:?}"
                 );
@@ -1601,7 +1807,7 @@ mod tests {
     fn the_scrim_is_the_mock_ups_own_alpha_over_the_whole_window() {
         let placed = open(1.0, false);
         let palette = chrome_palette();
-        let scrim = quads_of(&placed, None, ThemeModeV1::Dark)[0];
+        let scrim = quads_of(&placed, None, values())[0];
         assert_eq!(scrim.rect, [0.0, 0.0, SURFACE.0, SURFACE.1]);
         assert_eq!(scrim.color, [0x0f, 0x0f, 0x0f]);
         assert_eq!(scrim.color, palette.modal_scrim);
@@ -1623,7 +1829,7 @@ mod tests {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let placed = open(scale, false);
             let palette = chrome_palette();
-            let quads = quads_of(&placed, None, ThemeModeV1::Dark);
+            let quads = quads_of(&placed, None, values());
             let border_alpha = f32::from(palette.menu_border_alpha) / 255.0;
             let hairline = quads
                 .iter()
@@ -1668,8 +1874,16 @@ mod tests {
     fn the_picker_shows_and_ticks_the_selected_mode() {
         for selected in THEME_OPTIONS {
             let placed = open(1.0, true);
+            let combo = combo_of(&placed, SettingsRow::Theme);
             let palette = chrome_palette();
-            let labels = labels_of(&placed, None, selected);
+            let labels = labels_of(
+                &placed,
+                None,
+                SettingsValues {
+                    theme: selected,
+                    ..values()
+                },
+            );
             let ticks: Vec<_> = labels.iter().filter(|label| label.text == TICK).collect();
             assert_eq!(ticks.len(), 1, "exactly one option is the selected mode");
             assert_eq!(ticks[0].color, palette.accent, "the tick is the accent");
@@ -1678,9 +1892,7 @@ mod tests {
             let on_button = labels
                 .iter()
                 .find(|label| {
-                    label.text == shown
-                        && label.rect[1] >= placed.combo[1]
-                        && label.rect[3] <= placed.combo[3]
+                    label.text == shown && label.rect[1] >= combo[1] && label.rect[3] <= combo[3]
                 })
                 .expect("the button shows the selected mode");
             assert_eq!(on_button.color, palette.dialog_title_text);
@@ -1701,7 +1913,7 @@ mod tests {
         let placed = open(1.0, true);
         let palette = chrome_palette();
         let count = |hover, color| {
-            quads_of(&placed, hover, ThemeModeV1::Dark)
+            quads_of(&placed, hover, values())
                 .iter()
                 .filter(|quad| quad.color == color)
                 .count()
@@ -1716,17 +1928,23 @@ mod tests {
             "the close button takes --hover over --win"
         );
         assert!(
-            count(Some(SettingsTarget::ThemeCombo), palette.dialog_hover) > 0,
+            count(
+                Some(SettingsTarget::Combo(SettingsRow::Theme)),
+                palette.dialog_hover
+            ) > 0,
             "so does the combo button"
         );
         assert_eq!(
-            count(Some(SettingsTarget::ThemeMenu), palette.menu_item_hover),
+            count(
+                Some(SettingsTarget::Menu(SettingsRow::Theme)),
+                palette.menu_item_hover
+            ),
             0,
             "the menu's own body is not an item"
         );
         assert!(
             count(
-                Some(SettingsTarget::ThemeOption(THEME_OPTIONS[0])),
+                Some(SettingsTarget::Choice(SettingsRow::Theme, 0)),
                 palette.menu_item_hover
             ) > 0,
             "an item takes --hover over --menu, which is a different grey"
@@ -1738,7 +1956,7 @@ mod tests {
     #[test]
     fn the_group_heading_is_uppercase_and_tracked() {
         let placed = open(1.0, false);
-        let labels = labels_of(&placed, None, ThemeModeV1::Dark);
+        let labels = labels_of(&placed, None, values());
         let heading = labels
             .iter()
             .find(|label| label.text == "APPEARANCE")
@@ -1755,7 +1973,7 @@ mod tests {
         // heading out letter by letter. A ratio does not carry the DPI scale.
         for scale in [1.0_f32, 2.0] {
             let placed = open(scale, false);
-            let labels = labels_of(&placed, None, ThemeModeV1::Dark);
+            let labels = labels_of(&placed, None, values());
             let heading = labels
                 .iter()
                 .find(|label| label.text == "APPEARANCE")
@@ -1773,7 +1991,7 @@ mod tests {
     #[test]
     fn the_close_affordance_wears_the_mock_ups_own_close_symbol() {
         let placed = open(1.0, true);
-        let sprites = sprites_of(&placed, None, ThemeModeV1::Dark);
+        let sprites = sprites_of(&placed, None, values());
         assert_eq!(sprites.len(), 1);
         assert_eq!(sprites[0].mark, ChromeMark::WindowClose);
         let glyph = sprites[0].rect;
@@ -1784,6 +2002,180 @@ mod tests {
                 <= 0.5,
             "the icon is centred in its 30px button"
         );
+    }
+
+    /// PIN (Q191, mock-up 5644): `$("row-railmode").style.display =
+    /// state.layoutMode === "vertical" ? "" : "none"` — Sidebar is a dependent
+    /// of Tab layout and is not in the dialog at all while the tabs run across
+    /// the top.
+    #[test]
+    fn the_sidebar_row_is_only_in_the_dialog_while_the_tabs_run_down_the_side() {
+        assert_eq!(
+            visible_rows(TabLayoutMode::Horizontal),
+            [
+                SettingsRow::Theme,
+                SettingsRow::Cursor,
+                SettingsRow::TabLayout
+            ]
+        );
+        assert_eq!(
+            visible_rows(TabLayoutMode::Vertical),
+            [
+                SettingsRow::Theme,
+                SettingsRow::Cursor,
+                SettingsRow::TabLayout,
+                SettingsRow::Sidebar
+            ]
+        );
+    }
+
+    /// PIN (Q191): a row that is not in the list is in none of the four places a
+    /// row exists — it costs no height, draws no text, and no point in the
+    /// window answers for its control.
+    ///
+    /// Red gate: the shape this exists to keep out is a row that was taught the
+    /// condition in one place and not the others — a control you can click but
+    /// cannot see, or a gap where a row used to be.
+    #[test]
+    fn a_hidden_sidebar_row_costs_no_height_no_ink_and_no_hit_target() {
+        let flat = open_rows(1.0, None, TabLayoutMode::Horizontal);
+        let railed = open_rows(1.0, None, TabLayoutMode::Vertical);
+        assert!(flat.row(SettingsRow::Sidebar).is_none());
+        assert!(railed.row(SettingsRow::Sidebar).is_some());
+        assert_eq!(
+            height(railed.frame) - height(flat.frame),
+            ROW_HEIGHT,
+            "the dialog is exactly one row shorter without it"
+        );
+
+        let mut y = 0.0_f32;
+        while y < SURFACE.1 {
+            let mut x = 0.0_f32;
+            while x < SURFACE.0 {
+                let target = hit(&flat, f64::from(x), f64::from(y));
+                assert!(
+                    !matches!(
+                        target,
+                        SettingsTarget::Combo(SettingsRow::Sidebar)
+                            | SettingsTarget::Menu(SettingsRow::Sidebar)
+                            | SettingsTarget::Choice(SettingsRow::Sidebar, _)
+                    ),
+                    "({x}, {y}) answers {target:?} for a row the dialog does not have"
+                );
+                x += 3.0;
+            }
+            y += 3.0;
+        }
+
+        let labels = labels_of(&flat, None, values());
+        for absent in [
+            SettingsRow::Sidebar.title(),
+            SettingsRow::Sidebar.description(),
+        ] {
+            assert!(
+                !labels.iter().any(|label| label.text == absent),
+                "{absent:?} is drawn for a row the dialog does not have"
+            );
+        }
+    }
+
+    /// PIN (mock-up geometry): the rows are one stack at one pitch, whatever is
+    /// in it — the generalisation of the claim the Cursor row shipped with, now
+    /// that the list is not two fixed rows any more.
+    #[test]
+    fn rows_stack_one_row_height_apart_whatever_the_visible_list_is() {
+        for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let placed = open_rows(1.0, None, layout);
+            assert_eq!(placed.rows.len(), visible_rows(layout).len());
+            for pair in placed.rows.windows(2) {
+                let (above, below) = (&pair[0], &pair[1]);
+                assert_eq!(
+                    below.combo[1] - above.combo[1],
+                    ROW_HEIGHT,
+                    "{:?} is the next identical row under {:?}",
+                    below.row,
+                    above.row
+                );
+                assert_eq!(width(below.combo), width(above.combo));
+                assert_eq!(height(below.combo), height(above.combo));
+                assert_eq!(below.title[1] - above.title[1], ROW_HEIGHT);
+                assert_eq!(below.desc[1] - above.desc[1], ROW_HEIGHT);
+            }
+        }
+    }
+
+    #[test]
+    fn each_tab_layout_picker_item_maps_to_its_corresponding_set_value() {
+        let placed = open_rows(1.0, Some(SettingsRow::TabLayout), TabLayoutMode::Vertical);
+        assert_eq!(placed.items.len(), TAB_LAYOUT_OPTIONS.len());
+        for (index, item) in placed.items.iter().enumerate() {
+            let (x, y) = centre(*item);
+            let target = hit(&placed, x, y);
+            assert_eq!(
+                target,
+                SettingsTarget::Choice(SettingsRow::TabLayout, index)
+            );
+            assert_eq!(
+                tab_layout_requested(target),
+                Some(TAB_LAYOUT_OPTIONS[index])
+            );
+            assert_eq!(sidebar_mode_requested(target), None);
+            assert_eq!(theme_requested(target), None);
+            assert_eq!(cursor_style_requested(target), None);
+        }
+        for target in [
+            SettingsTarget::Scrim,
+            SettingsTarget::Panel,
+            SettingsTarget::Close,
+            SettingsTarget::Combo(SettingsRow::TabLayout),
+            SettingsTarget::Menu(SettingsRow::TabLayout),
+        ] {
+            assert_eq!(tab_layout_requested(target), None);
+        }
+    }
+
+    #[test]
+    fn each_sidebar_picker_item_maps_to_its_corresponding_set_value() {
+        let placed = open_rows(1.0, Some(SettingsRow::Sidebar), TabLayoutMode::Vertical);
+        assert_eq!(placed.items.len(), SIDEBAR_OPTIONS.len());
+        for (index, item) in placed.items.iter().enumerate() {
+            let (x, y) = centre(*item);
+            let target = hit(&placed, x, y);
+            assert_eq!(target, SettingsTarget::Choice(SettingsRow::Sidebar, index));
+            assert_eq!(sidebar_mode_requested(target), Some(SIDEBAR_OPTIONS[index]));
+            assert_eq!(tab_layout_requested(target), None);
+        }
+        for target in [
+            SettingsTarget::Scrim,
+            SettingsTarget::Panel,
+            SettingsTarget::Close,
+            SettingsTarget::Combo(SettingsRow::Sidebar),
+            SettingsTarget::Menu(SettingsRow::Sidebar),
+        ] {
+            assert_eq!(sidebar_mode_requested(target), None);
+        }
+    }
+
+    /// The two new rows wear the mock-up's own words (lines 2358-2384), and the
+    /// sidebar's second option keeps the sentence the mock-up spells out rather
+    /// than the one-word name of the mode behind it.
+    #[test]
+    fn the_new_rows_wear_the_mock_ups_own_words() {
+        let placed = open_rows(1.0, Some(SettingsRow::Sidebar), TabLayoutMode::Vertical);
+        let labels = labels_of(&placed, None, values());
+        for text in [
+            "Tab layout",
+            "Choose where tabs appear in the window",
+            "Sidebar",
+            "How the vertical tab sidebar rests",
+            "Expanded",
+            "Icons, expand on hover",
+        ] {
+            assert!(
+                labels.iter().any(|label| label.text == text),
+                "{text:?} is the mock-up's own line and is not drawn"
+            );
+        }
     }
 
     /// A fresh panel is shut, with nothing open inside it and nothing hovered.

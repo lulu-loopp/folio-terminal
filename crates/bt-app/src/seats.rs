@@ -2053,24 +2053,6 @@ pub fn tab_scroll_to_reveal(
 /// twenty times pointer noise, and invisible to the hand."
 pub const TAB_REORDER_MARGIN: f32 = 0.1;
 
-/// Where the strip's slots have their centres, in physical pixels.
-///
-/// The reorder judgement is made against *layout* and never against paint, which
-/// is the whole of mock-up 6659-6662: "rects include transforms, and the
-/// neighbours are mid-FLIP for 160ms after every swap, so rects would report
-/// where a tab is flying rather than where its slot is". These are slot centres —
-/// the `offsetLeft` half of that sentence — and they do not move when two tabs
-/// trade places, because `tab_strip_geometry` gives every tab in the run the same
-/// width.
-#[must_use]
-pub fn tab_slot_mids(geometry: &TabStripGeometry) -> Vec<f32> {
-    geometry
-        .tabs
-        .iter()
-        .map(|tab| (tab.body[0] + tab.body[2]) / 2.0)
-        .collect()
-}
-
 /// One step of the reorder judgement: the neighbour the dragged tab has now
 /// covered enough of to trade places with, or `None` while it has not.
 ///
@@ -2305,6 +2287,33 @@ pub struct RailTabGeometry {
     pub pin: Option<[f32; 4]>,
     pub title: [f32; 2],
     pub trailer: TabTrailer,
+}
+
+impl RailTabGeometry {
+    /// The same row drawn `dy` physical pixels down the column —
+    /// [`TabGeometry::shifted`] on the other axis, and for the same reason.
+    ///
+    /// A drag moves a row *visually* and never in layout: the slot this geometry
+    /// describes stays where the row's index puts it, and only the paint is
+    /// displaced. Shifting the whole geometry once, rather than the mark and the
+    /// `×` and the pin each at its own call site, is what keeps a translated row
+    /// internally consistent by construction.
+    ///
+    /// `title` is untouched, and it is the one box here that must be: it is a
+    /// `[left, right]` run rather than a rectangle, so it holds nothing that
+    /// moves on this axis. Its vertical box is taken from `body` at the call
+    /// site, which is exactly what makes the label travel with the row anyway.
+    #[must_use]
+    pub fn shifted(&self, dy: f32) -> Self {
+        let slide = |rect: [f32; 4]| [rect[0], rect[1] + dy, rect[2], rect[3] + dy];
+        Self {
+            body: slide(self.body),
+            mark: slide(self.mark),
+            close: self.close.map(slide),
+            pin: self.pin.map(slide),
+            ..*self
+        }
+    }
 }
 
 /// The rail, solved.
@@ -3177,10 +3186,157 @@ pub fn strip_band(geometry: &TabStripGeometry, scale: f32) -> [f32; 4] {
     ]
 }
 
-/// Whether the pointer is over the strip (K123).
+// ══ R3: the tab run, whichever axis it is on ══
+
+/// **The tab list projected onto its own axis** — the only thing the drag engine
+/// talks to.
+///
+/// R1 stood the tab list up in a column, and the drag arrived at a fork: the
+/// strip's slots are boxes along a row and the rail's are boxes down a column,
+/// yet every judgement made between them — which neighbour have I covered, how
+/// far may I be carried, which slot is the pointer naming — is *one* judgement
+/// made on a different coordinate. Branching on the axis inside each of them
+/// would put the same `if` in six places and make the seventh, whenever it is
+/// added, the one that forgets.
+///
+/// The mock-up settles it with a single indirection and so does this:
+/// `stripEl()` (6505) hands back `#tabstrip` or `#rail` and every caller under
+/// it reads one coordinate off whatever it got —
+/// `state.tabs === "vertical" ? …y : …x` in `insertIndexAt` (6511-6519),
+/// `trackGrabbed` (6646-6665) and `reorderWhileDragging` (6707-6748). Here that
+/// choice is made once, in the two constructors, and nothing above them can ask
+/// which geometry it is holding because nothing above them is told.
+///
+/// What this deliberately is *not* is a second geometry. It borrows the slots
+/// the real solver already placed; it re-decides nothing, so a row cannot be
+/// dragged against a rectangle the rail is not drawing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabRun {
+    /// `Row` for the horizontal strip, `Col` for the rail — the mock-up's
+    /// `data-tabs`, as the axis every length below is measured along.
+    pub axis: Axis,
+    /// Every slot's body rect, in list order.
+    ///
+    /// Whole rectangles rather than the pair of scalars the engine actually
+    /// reads, because the cross-axis edges are what make a slot a *slot*: the
+    /// same list feeds the FLIP deltas, and a caller that wanted the other axis
+    /// would otherwise have to go back to the geometry and find it a second way.
+    pub slots: Vec<[f32; 4]>,
+    /// The surface the pointer must be inside for the run to be the answer
+    /// (K123).
+    ///
+    /// Wider than the slots on both counts and that is the point: the strip's
+    /// band is the whole title bar, so a pointer in the gap above a tab is still
+    /// over the strip, and the rail's is the whole panel, so a pointer in its
+    /// padding is still over the rail.
+    pub viewport: [f32; 2],
+    /// The clip box **along the axis** a grabbed slot is held inside — `[left,
+    /// right]` on the strip, `[top, bottom]` on the rail.
+    ///
+    /// The scroller's box and not the band's: what stops a tab being carried out
+    /// over the caption buttons is the strip's own `overflow-x`, and what stops
+    /// a row being carried out past the rail's foot is the list's `overflow-y`.
+    pub band: [f32; 4],
+}
+
+impl TabRun {
+    /// The pointer's coordinate on this run's axis.
+    #[must_use]
+    pub fn pos(&self, x: f64, y: f64) -> f32 {
+        match self.axis {
+            Axis::Row => x as f32,
+            Axis::Col => y as f32,
+        }
+    }
+
+    /// A slot's leading and trailing edge on the axis.
+    ///
+    /// The one place the axis is read for a rectangle, so every length below —
+    /// the start, the extent, the half and the centre — is the same projection
+    /// rather than four that have to be kept agreeing.
+    fn span(&self, slot: [f32; 4]) -> (f32, f32) {
+        match self.axis {
+            Axis::Row => (slot[0], slot[2]),
+            Axis::Col => (slot[1], slot[3]),
+        }
+    }
+
+    /// Where slot `index` begins on the axis — its left in the strip, its top in
+    /// the rail.
+    #[must_use]
+    pub fn start(&self, index: usize) -> Option<f32> {
+        self.slots.get(index).map(|slot| self.span(*slot).0)
+    }
+
+    /// How long slot `index` is on the axis — its width in the strip, its height
+    /// in the rail.
+    #[must_use]
+    pub fn extent(&self, index: usize) -> Option<f32> {
+        self.slots.get(index).map(|slot| {
+            let (start, end) = self.span(*slot);
+            end - start
+        })
+    }
+
+    /// Half of [`Self::extent`] — [`reorder_step`]'s own operand, named here
+    /// because that is the only thing anybody wants it for.
+    #[must_use]
+    pub fn half(&self, index: usize) -> Option<f32> {
+        self.extent(index).map(|extent| extent / 2.0)
+    }
+
+    /// Every slot's centre on the axis, in list order.
+    ///
+    /// The reorder is judged against *layout* and never against paint, which is
+    /// the whole of mock-up 6659-6662: "rects include transforms, and the
+    /// neighbours are mid-FLIP for 160ms after every swap, so rects would report
+    /// where a tab is flying rather than where its slot is". These are slot
+    /// centres — the `offsetLeft`/`offsetTop` half of that sentence — and they do
+    /// not move when two entries trade places, because neither the strip nor the
+    /// rail lets a slot's size depend on who is standing in it.
+    #[must_use]
+    pub fn mids(&self) -> Vec<f32> {
+        self.slots
+            .iter()
+            .map(|slot| {
+                let (start, end) = self.span(*slot);
+                (start + end) / 2.0
+            })
+            .collect()
+    }
+
+    /// Whether the pointer is over this run's surface (K123).
+    #[must_use]
+    pub fn contains(&self, x: f64, y: f64) -> bool {
+        contains(self.band, x as f32, y as f32)
+    }
+}
+
+/// The horizontal strip as a run.
 #[must_use]
-pub fn in_strip(geometry: &TabStripGeometry, scale: f32, x: f64, y: f64) -> bool {
-    contains(strip_band(geometry, scale), x as f32, y as f32)
+pub fn strip_run(geometry: &TabStripGeometry, scale: f32) -> TabRun {
+    TabRun {
+        axis: Axis::Row,
+        slots: geometry.tabs.iter().map(|tab| tab.body).collect(),
+        band: strip_band(geometry, scale),
+        viewport: geometry.viewport,
+    }
+}
+
+/// The vertical rail as a run.
+///
+/// Takes no `scale`, and that is the difference between the two surfaces rather
+/// than an oversight: the strip's band has to be reconstructed from the title
+/// bar's height because the strip is a run *inside* a bar it does not own, while
+/// the rail is its own box and [`RailGeometry::body`] already is it.
+#[must_use]
+pub fn rail_run(geometry: &RailGeometry) -> TabRun {
+    TabRun {
+        axis: Axis::Col,
+        slots: geometry.tabs.iter().map(|tab| tab.body).collect(),
+        band: geometry.body,
+        viewport: geometry.viewport,
+    }
 }
 
 /// A divider's hit zone: the drawn band widened to something a hand can land
@@ -4083,6 +4239,8 @@ pub fn build_chrome_for_tabs(
         Rail {
             tabs,
             active_tab,
+            grabbed,
+            preview: strip_preview,
             scroll: rail_scroll,
             state: rail,
             profile_menu_open,
@@ -5208,6 +5366,13 @@ const APP_TITLE_FONT_LOGICAL_PX: f32 = 12.5;
 struct Rail<'a> {
     tabs: &'a [TabContent],
     active_tab: usize,
+    /// The row currently riding the pointer — [`TabStrip::grabbed`], and it buys
+    /// the same one thing here: paint order.
+    grabbed: Option<usize>,
+    /// K124's stand-in slot — see [`ChromeContent::strip_preview`], whose field
+    /// this is. Named without the surface because R3 made the stand-in a fact
+    /// about the tab *list*, which in this layout is a column.
+    preview: Option<usize>,
     /// How far the list is scrolled, in physical pixels. Its own number and not
     /// [`TabStrip::scroll`]: two axes, two lists, two lengths.
     scroll: f32,
@@ -5271,6 +5436,8 @@ fn rail_chrome(
     let Rail {
         tabs,
         active_tab,
+        grabbed,
+        preview,
         scroll,
         state,
         profile_menu_open,
@@ -5361,255 +5528,335 @@ fn rail_chrome(
 
     let row_radius = (RAIL_TAB_RADIUS_LOGICAL_PX * scale).round().max(1.0);
     let mark_size = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
-    for (index, (row, content)) in geometry.tabs.iter().zip(tabs).enumerate() {
-        if !in_list(row.body) {
-            continue;
-        }
-        let active = index == active_tab;
-        // `.vtab:hover` is one hover, exactly as `.tab:hover` is: a pointer on
-        // the `×` — or on the pin in its slot — is still a pointer on the row.
-        let hovered = hover == Some(ChromeTarget::Tab(index))
-            || hover == Some(ChromeTarget::TabClose(index))
-            || hover == Some(ChromeTarget::TabPin(index));
-        // `.vtab.active { background: var(--active) }` over `.vtab:hover {
-        // background: var(--hover) }`. A rounded fill, so it is a mark and not a
-        // quad — a quad would be drawn under every sprite in the frame, the
-        // row's own mark included.
-        if active || hovered {
-            sprites.push(ChromeSprite::new(
-                ChromeMark::TabBody {
-                    radius_px: row_radius as u32,
-                },
-                clip_to_list(row.body),
-                if active {
-                    palette.rail_tab_active
-                } else {
-                    palette.caption_hover
-                },
-            ));
-        }
-        // ── the mark slot, which is the strip's own machinery unchanged ──
-        //
-        // T2's three branches, in the strip's own order and with the strip's own
-        // colours: the ring replaces the mark while there is progress to report,
-        // otherwise the profile mark wears the breath and the dead session's
-        // fade, and the unread dot hangs off the slot's top-right corner either
-        // way. Nothing here re-decides *what* is true — `TabContent::mark` has
-        // already said — so a tab reports the same state on both axes by
-        // construction rather than by two lists of rules agreeing.
-        let mark_rect = clip_to_list(row.mark);
-        if in_list(row.mark) {
-            match content.mark.ring {
-                Some(ring) => {
-                    let stroke =
-                        (WINDOW_TAB_RING_STROKE_LOGICAL_PX * scale).round().max(1.0) as u32;
-                    sprites.push(ChromeSprite::new(
-                        ChromeMark::ProgressRing {
-                            start_milliturns: 0,
-                            sweep_milliturns: 1000,
-                            stroke_px: stroke,
-                        },
-                        mark_rect,
-                        // The track answers to the surface this row is wearing,
-                        // and the rail has one the strip does not: `--active` is
-                        // the row's selection fill rather than the terminal's
-                        // own canvas, so an active row takes the *hovered* tab's
-                        // pre-composited track — both are `--border` at .7 over
-                        // a neutral wash on `--panel`.
-                        if active || hovered {
-                            palette.ring_track_on_hovered_tab
-                        } else {
-                            palette.ring_track_on_resting_tab
-                        },
-                    ));
-                    sprites.push(ChromeSprite::new(
-                        ChromeMark::ProgressRing {
-                            start_milliturns: ring.start_milliturns,
-                            sweep_milliturns: ring.sweep_milliturns,
-                            stroke_px: stroke,
-                        },
-                        mark_rect,
-                        ring.arc,
-                    ));
-                }
-                None => {
-                    let mut profile =
-                        ChromeSprite::new(ChromeMark::ProfilePowerShell, mark_rect, palette.accent);
-                    // The breath and the dead fade land on the mark alone —
-                    // never on the dot or the ring, which are other claims — and
-                    // never on `text_opacity`, which is a claim about *words*.
-                    // Q180's whole promise is that the icon column does not move
-                    // or change as the panel slides; a mark that faded with the
-                    // labels would be an icon rail with no icons in it.
-                    profile.opacity = content.mark.opacity;
-                    profile.grayscale = content.mark.grayscale;
-                    sprites.push(profile);
-                }
+    // `.vtab.grabbed { z-index: 20 }` — the row in hand passes *over* the rows
+    // it travels through, and a painter's-algorithm list has no `z-index`, so
+    // the column is laid down in two passes with it last.
+    //
+    // Two passes and not the strip's three: the strip's middle layer exists for
+    // the active tab's concave corners, which overhang its neighbours and get
+    // squared off by anything painted after them (see `layer_of` there). Rows do
+    // not overhang each other — they are separated boxes in a column — so an
+    // active row has nothing to be raised above and a third pass would be
+    // ceremony.
+    for layer in 0..=1u8 {
+        for (index, (slot, content)) in geometry.tabs.iter().zip(tabs).enumerate() {
+            if u8::from(grabbed == Some(index)) != layer {
+                continue;
             }
-            if let Some(dot_color) = content.mark.dot {
-                let dot = (WINDOW_TAB_STATUS_DOT_LOGICAL_PX * scale).round().max(1.0);
-                let dot_left =
-                    (row.mark[2] - WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX * scale - dot).round();
-                let dot_top = (row.mark[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
-                let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
-                if in_list(dot_rect) {
-                    sprites.push(ChromeSprite::new(
-                        ChromeMark::ControlPill {
-                            radius_px: (dot / 2.0).round().max(1.0) as u32,
-                        },
-                        clip_to_list(dot_rect),
-                        dot_color,
-                    ));
-                }
-            }
-        }
-        // ── the title ──
-        //
-        // Q183: it fades, it is not removed. The run it lays out in is the same
-        // run in both states — that is what keeps the icons still — so what
-        // changes as the panel parks is this ink and nothing else, and the
-        // rail's own overflow does the cropping meanwhile.
-        if row.title[1] > row.title[0] && text > 0.0 {
-            let ink = if active {
-                palette.rail_tab_active_text
-            } else if hovered {
-                palette.rail_tab_hover_text
+            // Everything below draws the row where the drag has *put* it, while
+            // every rectangle the rail reasons about stays in the slot the index
+            // gives it. One shift, at the top, so no box inside the row can be left
+            // behind by it — and `in_list` is asked of the shifted body, because
+            // what the scroller crops is what is on screen.
+            let shifted;
+            let row = if content.offset == 0.0 {
+                slot
             } else {
-                palette.title_text
+                shifted = slot.shifted(content.offset);
+                &shifted
             };
-            labels.push(ChromeLabel {
-                text: content.title.clone(),
-                rect: [row.title[0], row.body[1], row.title[1], row.body[3]],
-                clip: Some(clip_to_list([
-                    row.title[0],
-                    row.body[1],
-                    row.title[1],
-                    row.body[3],
-                ])),
-                font_size_px: RAIL_TAB_FONT_LOGICAL_PX * scale,
-                // Faded over what this row is actually showing, which for the
-                // active one is its own fill and not the rail's ground: an ink
-                // mixed towards the wrong surface goes grey on its way out
-                // instead of going away.
-                color: faded(
-                    ink,
+            if !in_list(row.body) {
+                continue;
+            }
+            let active = index == active_tab;
+            // `.vtab:hover` is one hover, exactly as `.tab:hover` is: a pointer on
+            // the `×` — or on the pin in its slot — is still a pointer on the row.
+            let hovered = hover == Some(ChromeTarget::Tab(index))
+                || hover == Some(ChromeTarget::TabClose(index))
+                || hover == Some(ChromeTarget::TabPin(index));
+            // The row in hand, asked of this index rather than inferred from
+            // `active`. Being painted last is only half of `.grabbed`; the other
+            // half is being *opaque*, so it covers what it passes over. A grabbed
+            // row that is neither active nor hovered — which the K126/N163 view-flip
+            // makes reachable, since dragging a background row out of the rail hands
+            // the view back to the row you were on — would otherwise draw no body at
+            // all, and being on top of nothing is being invisible.
+            let grabbed_here = grabbed == Some(index);
+            // `.vtab.active { background: var(--active) }` over `.vtab:hover {
+            // background: var(--hover) }`. A rounded fill, so it is a mark and not a
+            // quad — a quad would be drawn under every sprite in the frame, the
+            // row's own mark included.
+            if active || hovered || grabbed_here {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::TabBody {
+                        radius_px: row_radius as u32,
+                    },
+                    clip_to_list(row.body),
                     if active {
                         palette.rail_tab_active
-                    } else if hovered {
-                        palette.caption_hover
                     } else {
-                        ground
+                        palette.caption_hover
                     },
-                    text,
-                ),
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                // `.vtab.active { font-weight: 500 }` — the selected row is the
-                // one thing in the column that is not prose.
-                weight: if active {
-                    ChromeLabelWeight::Medium
-                } else {
-                    ChromeLabelWeight::Regular
-                },
-                tabular_numerals: false,
-            });
-        }
-        // ── the trailing glyph: one of the two, never both, never neither ──
-        //
-        // Q174's mirror. `close` and `pin` share one slot and `rail_geometry`
-        // hands back exactly the one this row wears, so the choice was made
-        // where the geometry was and is not re-made here.
-        let (Some(slot), pinned) = row
-            .close
-            .map_or((row.pin, true), |close| (Some(close), false))
-        else {
-            continue;
-        };
-        if !in_list(slot) {
-            continue;
-        }
-        let glyph_hovered = hover
-            == Some(if pinned {
-                ChromeTarget::TabPin(index)
-            } else {
-                ChromeTarget::TabClose(index)
-            });
-        if glyph_hovered {
-            // `.vtab .close:hover { background: var(--active) }` — the same pill
-            // the strip's `×` wears, over whichever of this rail's two surfaces
-            // the row is showing.
-            sprites.push(ChromeSprite::new(
-                ChromeMark::ControlPill {
-                    radius_px: (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale)
-                        .round()
-                        .max(1.0) as u32,
-                },
-                pixel_snapped(clip_to_list(slot)),
-                if active {
-                    palette.tab_close_pill_on_content
-                } else {
-                    palette.tab_close_pill_on_hovered_tab
-                },
-            ));
-        }
-        let glyph_size = ((if pinned {
-            WINDOW_TAB_PIN_GLYPH_LOGICAL_PX
-        } else {
-            WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX
-        }) * scale)
-            .round()
-            .max(1.0);
-        let glyph_left = ((slot[0] + slot[2] - glyph_size) / 2.0).round();
-        let glyph_top = ((slot[1] + slot[3] - glyph_size) / 2.0).round();
-        let glyph_rect = [
-            glyph_left,
-            glyph_top,
-            glyph_left + glyph_size,
-            glyph_top + glyph_size,
-        ];
-        if !in_list(glyph_rect) {
-            continue;
-        }
-        // Q174 again, now as ink: one glyph, one fact, and the fact is stated at
-        // rest. That is why the rail needs `rail_glyph_on_active_tab` where the
-        // strip never did — the strip's `×` only ever appears under the pointer,
-        // so it never had to be legible on a resting selected row.
-        let ink = if glyph_hovered {
-            if active {
-                palette.tab_close_glyph_on_pill_over_active_tab
-            } else {
-                palette.tab_close_glyph_on_pill_over_hovered_tab
+                ));
             }
-        } else if active {
-            palette.rail_glyph_on_active_tab
-        } else if hovered {
-            palette.tab_close_glyph_on_hovered_tab
-        } else {
-            palette.title_text_muted
-        };
-        let mut glyph = ChromeSprite::new(
-            if pinned {
-                // Fluent 2's fill axis: filled is the state ("it is pinned"),
-                // and a rail's pin is only ever a state — the offer to pin an
-                // unpinned row is the strip's, made on hover, and this axis says
-                // the same thing with the `×`'s presence instead.
-                ChromeMark::Pin { filled: true }
+            // `@keyframes tab-land` — the wash and the ring a landing row arrives
+            // wearing, on their way to nothing. The strip's own pair, at the rail's
+            // radius: both are the accent at a stated alpha, so both ride as
+            // `opacity` on the accent rather than as pre-composited palette entries,
+            // because the alpha is a function of the clock and a constant cannot be
+            // one.
+            //
+            // K124's stand-in wears the same pair at full strength for as long as it
+            // stands there — the landing held at 1.0 rather than a second pair of
+            // constants, so the slot a torn-out pane aims at and the row that lands
+            // in it cannot drift apart.
+            //
+            // They go down after the row's own fill and before everything inside it,
+            // which is where a `background` and an inset `box-shadow` sit in CSS.
+            let landing = if preview == Some(index) {
+                1.0
             } else {
-                ChromeMark::TabClose
-            },
-            glyph_rect,
-            ink,
-        );
-        // The `×` fades with the words (mock-up 895-896 lists `.vtab .close`
-        // among them) while the pin does not appear in that list at all — and it
-        // should not: a pinned row is the one thing in a parked rail whose 15px
-        // slot is *already* saying something, and dropping its pin would leave
-        // the icon column claiming every row is alike.
-        if !pinned {
-            glyph.opacity = text;
+                content.landing
+            };
+            if landing > 0.0 {
+                let mut wash = ChromeSprite::new(
+                    ChromeMark::TabBody {
+                        radius_px: row_radius as u32,
+                    },
+                    clip_to_list(row.body),
+                    palette.accent,
+                );
+                wash.opacity = TAB_LAND_WASH_ALPHA * landing;
+                sprites.push(wash);
+                let mut ring = ChromeSprite::new(
+                    ChromeMark::TabBodyRing {
+                        radius_px: row_radius as u32,
+                        stroke_px: (TAB_LAND_RING_LOGICAL_PX * scale).round().max(1.0) as u32,
+                    },
+                    clip_to_list(row.body),
+                    palette.accent,
+                );
+                ring.opacity = TAB_LAND_RING_ALPHA * landing;
+                sprites.push(ring);
+            }
+            // ── the mark slot, which is the strip's own machinery unchanged ──
+            //
+            // T2's three branches, in the strip's own order and with the strip's own
+            // colours: the ring replaces the mark while there is progress to report,
+            // otherwise the profile mark wears the breath and the dead session's
+            // fade, and the unread dot hangs off the slot's top-right corner either
+            // way. Nothing here re-decides *what* is true — `TabContent::mark` has
+            // already said — so a tab reports the same state on both axes by
+            // construction rather than by two lists of rules agreeing.
+            let mark_rect = clip_to_list(row.mark);
+            if in_list(row.mark) {
+                match content.mark.ring {
+                    Some(ring) => {
+                        let stroke =
+                            (WINDOW_TAB_RING_STROKE_LOGICAL_PX * scale).round().max(1.0) as u32;
+                        sprites.push(ChromeSprite::new(
+                            ChromeMark::ProgressRing {
+                                start_milliturns: 0,
+                                sweep_milliturns: 1000,
+                                stroke_px: stroke,
+                            },
+                            mark_rect,
+                            // The track answers to the surface this row is wearing,
+                            // and the rail has one the strip does not: `--active` is
+                            // the row's selection fill rather than the terminal's
+                            // own canvas, so an active row takes the *hovered* tab's
+                            // pre-composited track — both are `--border` at .7 over
+                            // a neutral wash on `--panel`.
+                            if active || hovered {
+                                palette.ring_track_on_hovered_tab
+                            } else {
+                                palette.ring_track_on_resting_tab
+                            },
+                        ));
+                        sprites.push(ChromeSprite::new(
+                            ChromeMark::ProgressRing {
+                                start_milliturns: ring.start_milliturns,
+                                sweep_milliturns: ring.sweep_milliturns,
+                                stroke_px: stroke,
+                            },
+                            mark_rect,
+                            ring.arc,
+                        ));
+                    }
+                    None => {
+                        let mut profile = ChromeSprite::new(
+                            ChromeMark::ProfilePowerShell,
+                            mark_rect,
+                            palette.accent,
+                        );
+                        // The breath and the dead fade land on the mark alone —
+                        // never on the dot or the ring, which are other claims — and
+                        // never on `text_opacity`, which is a claim about *words*.
+                        // Q180's whole promise is that the icon column does not move
+                        // or change as the panel slides; a mark that faded with the
+                        // labels would be an icon rail with no icons in it.
+                        profile.opacity = content.mark.opacity;
+                        profile.grayscale = content.mark.grayscale;
+                        sprites.push(profile);
+                    }
+                }
+                if let Some(dot_color) = content.mark.dot {
+                    let dot = (WINDOW_TAB_STATUS_DOT_LOGICAL_PX * scale).round().max(1.0);
+                    let dot_left =
+                        (row.mark[2] - WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX * scale - dot)
+                            .round();
+                    let dot_top =
+                        (row.mark[1] + WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX * scale).round();
+                    let dot_rect = [dot_left, dot_top, dot_left + dot, dot_top + dot];
+                    if in_list(dot_rect) {
+                        sprites.push(ChromeSprite::new(
+                            ChromeMark::ControlPill {
+                                radius_px: (dot / 2.0).round().max(1.0) as u32,
+                            },
+                            clip_to_list(dot_rect),
+                            dot_color,
+                        ));
+                    }
+                }
+            }
+            // ── the title ──
+            //
+            // Q183: it fades, it is not removed. The run it lays out in is the same
+            // run in both states — that is what keeps the icons still — so what
+            // changes as the panel parks is this ink and nothing else, and the
+            // rail's own overflow does the cropping meanwhile.
+            if row.title[1] > row.title[0] && text > 0.0 {
+                let ink = if active {
+                    palette.rail_tab_active_text
+                } else if hovered {
+                    palette.rail_tab_hover_text
+                } else {
+                    palette.title_text
+                };
+                labels.push(ChromeLabel {
+                    text: content.title.clone(),
+                    rect: [row.title[0], row.body[1], row.title[1], row.body[3]],
+                    clip: Some(clip_to_list([
+                        row.title[0],
+                        row.body[1],
+                        row.title[1],
+                        row.body[3],
+                    ])),
+                    font_size_px: RAIL_TAB_FONT_LOGICAL_PX * scale,
+                    // Faded over what this row is actually showing, which for the
+                    // active one is its own fill and not the rail's ground: an ink
+                    // mixed towards the wrong surface goes grey on its way out
+                    // instead of going away.
+                    color: faded(
+                        ink,
+                        if active {
+                            palette.rail_tab_active
+                        } else if hovered {
+                            palette.caption_hover
+                        } else {
+                            ground
+                        },
+                        text,
+                    ),
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    // `.vtab.active { font-weight: 500 }` — the selected row is the
+                    // one thing in the column that is not prose.
+                    weight: if active {
+                        ChromeLabelWeight::Medium
+                    } else {
+                        ChromeLabelWeight::Regular
+                    },
+                    tabular_numerals: false,
+                });
+            }
+            // ── the trailing glyph: one of the two, never both, never neither ──
+            //
+            // Q174's mirror. `close` and `pin` share one slot and `rail_geometry`
+            // hands back exactly the one this row wears, so the choice was made
+            // where the geometry was and is not re-made here.
+            let (Some(slot), pinned) = row
+                .close
+                .map_or((row.pin, true), |close| (Some(close), false))
+            else {
+                continue;
+            };
+            if !in_list(slot) {
+                continue;
+            }
+            let glyph_hovered = hover
+                == Some(if pinned {
+                    ChromeTarget::TabPin(index)
+                } else {
+                    ChromeTarget::TabClose(index)
+                });
+            if glyph_hovered {
+                // `.vtab .close:hover { background: var(--active) }` — the same pill
+                // the strip's `×` wears, over whichever of this rail's two surfaces
+                // the row is showing.
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale)
+                            .round()
+                            .max(1.0) as u32,
+                    },
+                    pixel_snapped(clip_to_list(slot)),
+                    if active {
+                        palette.tab_close_pill_on_content
+                    } else {
+                        palette.tab_close_pill_on_hovered_tab
+                    },
+                ));
+            }
+            let glyph_size = ((if pinned {
+                WINDOW_TAB_PIN_GLYPH_LOGICAL_PX
+            } else {
+                WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX
+            }) * scale)
+                .round()
+                .max(1.0);
+            let glyph_left = ((slot[0] + slot[2] - glyph_size) / 2.0).round();
+            let glyph_top = ((slot[1] + slot[3] - glyph_size) / 2.0).round();
+            let glyph_rect = [
+                glyph_left,
+                glyph_top,
+                glyph_left + glyph_size,
+                glyph_top + glyph_size,
+            ];
+            if !in_list(glyph_rect) {
+                continue;
+            }
+            // Q174 again, now as ink: one glyph, one fact, and the fact is stated at
+            // rest. That is why the rail needs `rail_glyph_on_active_tab` where the
+            // strip never did — the strip's `×` only ever appears under the pointer,
+            // so it never had to be legible on a resting selected row.
+            let ink = if glyph_hovered {
+                if active {
+                    palette.tab_close_glyph_on_pill_over_active_tab
+                } else {
+                    palette.tab_close_glyph_on_pill_over_hovered_tab
+                }
+            } else if active {
+                palette.rail_glyph_on_active_tab
+            } else if hovered {
+                palette.tab_close_glyph_on_hovered_tab
+            } else {
+                palette.title_text_muted
+            };
+            let mut glyph = ChromeSprite::new(
+                if pinned {
+                    // Fluent 2's fill axis: filled is the state ("it is pinned"),
+                    // and a rail's pin is only ever a state — the offer to pin an
+                    // unpinned row is the strip's, made on hover, and this axis says
+                    // the same thing with the `×`'s presence instead.
+                    ChromeMark::Pin { filled: true }
+                } else {
+                    ChromeMark::TabClose
+                },
+                glyph_rect,
+                ink,
+            );
+            // The `×` fades with the words (mock-up 895-896 lists `.vtab .close`
+            // among them) while the pin does not appear in that list at all — and it
+            // should not: a pinned row is the one thing in a parked rail whose 15px
+            // slot is *already* saying something, and dropping its pin would leave
+            // the icon column claiming every row is alike.
+            if !pinned {
+                glyph.opacity = text;
+            }
+            sprites.push(glyph);
         }
-        sprites.push(glyph);
     }
 
     // ── `.rail-new`: the `+` with its name, and the `˅` beside it ──
@@ -7866,8 +8113,14 @@ mod tests {
         seats.toggle_preview(&metrics);
         let (width, height) = (1_280u32, 800u32);
         let layout = solved(&seats, viewport_of(width, height, 1_000), &metrics);
-        let overlay = crate::settings::layout_for_menu(width as f32, height as f32, 1.0, None)
-            .expect("this window hosts the dialog");
+        let overlay = crate::settings::layout_for_menu(
+            width as f32,
+            height as f32,
+            1.0,
+            None,
+            &crate::settings::visible_rows(TabLayoutMode::Horizontal),
+        )
+        .expect("this window hosts the dialog");
 
         let slot = seats
             .split_slots(&layout)
@@ -10719,8 +10972,8 @@ mod tests {
         };
         let before = tab_strip_geometry(960.0, 1.0, &[pinned, open, open], 0, 0.0);
         let after = tab_strip_geometry(960.0, 1.0, &[open, pinned, open], 1, 0.0);
-        let mids = tab_slot_mids(&before);
-        assert_eq!(mids, tab_slot_mids(&after));
+        let mids = strip_run(&before, 1.0).mids();
+        assert_eq!(mids, strip_run(&after, 1.0).mids());
         // And they are the slots' own centres: each one inside the tab it
         // belongs to, one even pitch apart, which is the property the reorder's
         // whole threshold arithmetic rests on.
@@ -13592,6 +13845,21 @@ mod tests {
                 ..TabContent::default()
             })
             .collect::<Vec<_>>();
+        rail_paint_of(scale, &tabs, active_tab, None, None, state, hover)
+    }
+
+    /// The same window, with the drag's own three inputs said out loud: which
+    /// row is in hand, which slot a torn-out pane is standing in, and the
+    /// per-row `offset`/`landing` the tabs carry.
+    fn rail_paint_of(
+        scale: f32,
+        tabs: &[TabContent],
+        active_tab: usize,
+        grabbed: Option<usize>,
+        preview: Option<usize>,
+        state: RailState,
+        hover: Option<ChromeTarget>,
+    ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
         let dpi_milli = (scale * 1_000.0) as u32;
         let metrics = seat_metrics(dpi_milli);
         let seats = Seats::lone_terminal();
@@ -13609,10 +13877,10 @@ mod tests {
                 ..ChromePointer::default()
             },
             ChromeContent {
-                tabs: &tabs,
+                tabs,
                 active_tab,
-                grabbed: None,
-                strip_preview: None,
+                grabbed,
+                strip_preview: preview,
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
@@ -15101,6 +15369,433 @@ mod tests {
             }
         }
     }
+
+    // ══ R3: the drag engine, on whichever axis the list is on ══
+    //
+    // Everything below is the strip's own machinery asked a second time down a
+    // column. The scalar rules are not re-tested here — `reorder_step`'s
+    // hysteresis and `insert_index_at`'s boundary have their own cases up in the
+    // strip's section and neither takes an axis — so what these pin is the
+    // *projection*: that a rail hands those rules `y`, that the strip still
+    // hands them `x`, and that the two cannot be told apart from above.
+
+    /// **The rail's run is measured down the column, the strip's across it** —
+    /// mock-up 6505's `stripEl()` and the `state.tabs === "vertical" ? …y : …x`
+    /// reads underneath it (6511-6519, 6646-6665).
+    ///
+    /// Red gate: let the projection read `x` whatever `axis` says — which is the
+    /// horizontal-only engine R3 started from — and the rail's four mids come
+    /// back as four copies of one number, because every row in a column shares
+    /// its left edge and its width.
+    #[test]
+    fn the_rails_run_is_measured_down_the_column_and_the_strips_across_it() {
+        let rail = rail_of(expanded_rail(), &resting(4), 0);
+        let run = rail_run(&rail);
+        assert_eq!(run.axis, Axis::Col);
+        let mids = run.mids();
+        assert_eq!(mids.len(), 4);
+        for (index, mid) in mids.iter().enumerate() {
+            let body = rail.tabs[index].body;
+            assert_eq!(*mid, (body[1] + body[3]) / 2.0, "a row's centre is its own");
+            assert_eq!(run.start(index), Some(body[1]), "a row begins at its top");
+            assert_eq!(run.extent(index), Some(body[3] - body[1]));
+            assert_eq!(run.half(index), Some((body[3] - body[1]) / 2.0));
+        }
+        assert!(
+            mids.windows(2).all(|pair| pair[0] < pair[1]),
+            "and the column descends: {mids:?}"
+        );
+        assert_eq!(
+            run.pos(37.0, 412.0),
+            412.0,
+            "the rail reads the pointer's y and nothing else"
+        );
+
+        let strip = tab_strip_geometry(1_600.0, 1.0, &resting(4), 0, 0.0);
+        let run = strip_run(&strip, 1.0);
+        assert_eq!(run.axis, Axis::Row);
+        let mids = run.mids();
+        assert!(
+            mids.windows(2).all(|pair| pair[0] < pair[1]),
+            "the strip runs the other way: {mids:?}"
+        );
+        assert_eq!(run.pos(37.0, 412.0), 37.0, "and reads the pointer's x");
+    }
+
+    /// **A row dragged down the rail trades places with the neighbour whose
+    /// centre it has covered** — mock-up 6640-6658 and 6707-6748, with `y` where
+    /// `x` was.
+    ///
+    /// The hysteresis is asserted at its own edge rather than "somewhere past
+    /// the middle": the whole of `TAB_REORDER_MARGIN` is that the threshold is a
+    /// stated fraction of half a slot, and a threshold tested loosely is a
+    /// threshold that can drift to any other number and stay green.
+    ///
+    /// Red gate: project the run on `x` and every mid is equal, so no step ever
+    /// fires and the first assertion's `None` becomes the only answer the rail
+    /// can give.
+    #[test]
+    fn a_row_dragged_down_the_rail_trades_places_with_the_neighbour_it_covered() {
+        let rail = rail_of(expanded_rail(), &resting(4), 0);
+        let run = rail_run(&rail);
+        let mids = run.mids();
+        let half = run.half(0).expect("a row has a height");
+        let unpinned = [false; 4];
+        // `reorder_step` fires once the dragged row's leading edge passes the
+        // neighbour's centre by the margin, so this is the last position that is
+        // still a stay.
+        let fires_at = mids[1] + half * TAB_REORDER_MARGIN - half;
+        assert_eq!(
+            reorder_step(&mids, 0, fires_at, half),
+            None,
+            "on the threshold nothing has moved yet"
+        );
+        assert_eq!(
+            reorder_step(&mids, 0, fires_at + 0.5, half),
+            Some(1),
+            "and half a pixel past it the two trade places"
+        );
+        assert_eq!(
+            reorder_step(
+                &mids,
+                1,
+                mids[0] - half * TAB_REORDER_MARGIN + half - 0.5,
+                half
+            ),
+            Some(0),
+            "the same rule going back up the column"
+        );
+        assert_eq!(
+            reorder_target(&mids, &unpinned, 0, mids[3], half),
+            3,
+            "a fling down the rail lands where it was thrown"
+        );
+        assert_eq!(reorder_target(&mids, &unpinned, 3, mids[0], half), 0);
+    }
+
+    /// **F57 on the other axis: a row dragged across the pinned seam stops at
+    /// it.**
+    ///
+    /// The guard itself is index-based and lives inside `reorder_target`, so
+    /// nothing about it had to be ported. What this pins is that it is still
+    /// *reached* — that the rail feeds it the same pinned list and real column
+    /// centres, so the seam the rail draws (F55/F56) and the seam the drag
+    /// refuses to cross are the same line.
+    #[test]
+    fn a_row_dragged_across_the_pinned_seam_in_the_rail_stops_at_the_boundary() {
+        let mut trailers = resting(4);
+        trailers[0].pinned = true;
+        trailers[1].pinned = true;
+        let rail = rail_of(expanded_rail(), &trailers, 2);
+        assert!(rail.seam.is_some(), "the rail draws the line being tested");
+        let run = rail_run(&rail);
+        let mids = run.mids();
+        let half = run.half(0).expect("a row has a height");
+        let pinned = [true, true, false, false];
+        assert_eq!(
+            reorder_target(&mids, &pinned, 3, mids[0], half),
+            2,
+            "an unpinned row flung at the top of the column stops under the seam"
+        );
+        assert_eq!(
+            reorder_target(&mids, &pinned, 0, mids[3], half),
+            1,
+            "and a pinned one flung at the foot stops above it"
+        );
+        assert_eq!(
+            reorder_target(&mids, &pinned, 0, mids[1], half),
+            1,
+            "inside its own run it reaches the slot it asked for"
+        );
+    }
+
+    /// **K124/K125 in the rail: a pane torn into the column takes the slot the
+    /// pointer's `y` names.**
+    ///
+    /// A pane arriving from the layout has no row in the rail to judge against,
+    /// so the pointer is the only operand there is — and on this axis that is
+    /// its `y`. Red gate: read `x` and every pointer inside the rail answers the
+    /// same slot, which is the caret standing still while the hand moves down
+    /// the column.
+    #[test]
+    fn a_pane_torn_into_the_rail_lands_at_the_slot_the_pointers_y_chooses() {
+        let rail = rail_of(expanded_rail(), &resting(3), 0);
+        let run = rail_run(&rail);
+        let mids = run.mids();
+        let x = f64::from((rail.body[0] + rail.body[2]) / 2.0);
+        let at = |y: f32| insert_index_at(&mids, run.pos(x, f64::from(y)));
+        assert_eq!(at(mids[0] - 1.0), 0, "above the first centre is the head");
+        assert_eq!(at(mids[0] + 1.0), 1);
+        assert_eq!(at(mids[1] + 1.0), 2);
+        assert_eq!(
+            at(mids[2] + 1.0),
+            3,
+            "and below every centre is the foot of the column"
+        );
+        assert!(
+            run.contains(x, f64::from(mids[1])),
+            "K123: the pointer was over the rail's own rectangle to begin with"
+        );
+        assert!(
+            !run.contains(f64::from(rail.body[2]) + 1.0, f64::from(mids[1])),
+            "and a pointer out on the terminal is not"
+        );
+    }
+
+    /// **A rail row carried down the column slides on that axis and no other.**
+    ///
+    /// Red gate: give `RailTabGeometry::shifted` the strip's own arithmetic —
+    /// the `[0]`/`[2]` pair — and a row dragged down the rail walks sideways out
+    /// of the panel instead, taking its mark and its `×` with it.
+    #[test]
+    fn a_rail_row_carried_down_the_column_slides_only_on_that_axis() {
+        let mut trailers = resting(3);
+        trailers[0].pinned = true;
+        let rail = rail_of(expanded_rail(), &trailers, 1);
+        for index in 0..3 {
+            let row = rail.tabs[index];
+            let moved = row.shifted(24.0);
+            let mut boxes = vec![(row.body, moved.body), (row.mark, moved.mark)];
+            boxes.extend(row.close.zip(moved.close));
+            boxes.extend(row.pin.zip(moved.pin));
+            assert_eq!(
+                boxes.len(),
+                3,
+                "every row wears exactly one of the two trailing glyphs (Q174)"
+            );
+            for (before, after) in boxes {
+                assert_eq!(
+                    [after[0], after[2]],
+                    [before[0], before[2]],
+                    "x is untouched on row {index}"
+                );
+                assert_eq!(
+                    [after[1], after[3]],
+                    [before[1] + 24.0, before[3] + 24.0],
+                    "and y carries the whole box on row {index}"
+                );
+            }
+            assert_eq!(
+                moved.title, row.title,
+                "the title is a `[left, right]` run and holds nothing that moves on y"
+            );
+            assert_eq!(row.shifted(0.0), row, "a row that has not moved is the row");
+        }
+    }
+
+    /// **The horizontal pin: the strip's run answers exactly what the engine
+    /// read off the geometry before there was a run at all.**
+    ///
+    /// R3 re-expressed six call sites against `TabRun`, and every one of them
+    /// used to reach into `geometry` itself — `tabs[i].body[0]` for the grip and
+    /// the FLIP deltas, the slots' own centres for the reorder, `viewport` for
+    /// the grabbed clamp, `strip_band` for K123. This asserts the indirection is
+    /// transparent on the axis that already worked, at several tab counts, two
+    /// scroll offsets and three scales, so "horizontal behaviour is unchanged"
+    /// is a proof rather than a hope.
+    ///
+    /// Every expectation here is written out as the arithmetic the engine used
+    /// *before* R3 rather than called out of the module, because an oracle that
+    /// shares an implementation with the thing under test agrees with itself for
+    /// free and would survive both of them being wrong together.
+    #[test]
+    fn the_strips_run_answers_exactly_what_the_old_horizontal_path_did() {
+        for (count, scroll, scale) in [
+            (1usize, 0.0f32, 1.0f32),
+            (4, 0.0, 1.0),
+            (24, 180.0, 1.0),
+            (24, 0.0, 1.5),
+            (7, 40.0, 2.0),
+        ] {
+            let geometry = tab_strip_geometry(1_600.0 * scale, scale, &resting(count), 0, scroll);
+            let run = strip_run(&geometry, scale);
+            let case = format!("{count} tabs, scroll {scroll}, scale {scale}");
+            assert_eq!(
+                run.mids(),
+                geometry
+                    .tabs
+                    .iter()
+                    .map(|tab| (tab.body[0] + tab.body[2]) / 2.0)
+                    .collect::<Vec<_>>(),
+                "the centres the reorder is judged against ({case})"
+            );
+            assert_eq!(
+                run.viewport, geometry.viewport,
+                "the clip a grabbed tab is held inside ({case})"
+            );
+            assert_eq!(
+                run.band,
+                strip_band(&geometry, scale),
+                "K123's rectangle ({case})"
+            );
+            for (index, tab) in geometry.tabs.iter().enumerate() {
+                assert_eq!(
+                    run.start(index),
+                    Some(tab.body[0]),
+                    "the grip and the FLIP delta ({case})"
+                );
+                assert_eq!(run.extent(index), Some(tab.body[2] - tab.body[0]));
+                assert_eq!(
+                    run.half(index),
+                    Some((tab.body[2] - tab.body[0]) / 2.0),
+                    "`reorder_target`'s half-width ({case})"
+                );
+            }
+            assert_eq!(run.start(count), None, "past the end there is no slot");
+            for x in [-10.0f64, 0.0, 1.0, 400.0, 1_500.0, 5_000.0] {
+                for y in [-1.0f64, 0.0, 20.0, 39.0, 40.0, 400.0] {
+                    assert_eq!(
+                        run.contains(x, y),
+                        contains(strip_band(&geometry, scale), x as f32, y as f32),
+                        "K123 at ({x}, {y}) ({case})"
+                    );
+                    assert_eq!(run.pos(x, y), x as f32, "the strip reads x ({case})");
+                }
+            }
+        }
+    }
+
+    /// The rail exactly as [`rail_paint_of`] draws it — the same surface height
+    /// its 960x600 window works out to, so a rectangle asserted against this
+    /// geometry is the rectangle the paint had in front of it.
+    fn painted_rail(trailers: &[TabTrailer]) -> RailGeometry {
+        rail_geometry(600.0, 1.0, trailers, 0, 0.0, expanded_rail())
+            .expect("an expanded rail is on screen")
+    }
+
+    /// Three ordinary rows, the one at `row` carrying whatever the drag has done
+    /// to it.
+    fn dragging_rows(row: usize, offset: f32, landing: f32) -> Vec<TabContent> {
+        ["first", "second", "third"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| TabContent {
+                title: title.to_owned(),
+                pane_count: 1,
+                offset: if index == row { offset } else { 0.0 },
+                landing: if index == row { landing } else { 0.0 },
+                ..TabContent::default()
+            })
+            .collect()
+    }
+
+    /// **A row in hand is drawn where the drag put it, and over what it passes.**
+    ///
+    /// The two halves of `.tab.grabbed { z-index: 20 }` (mock-up 971), which the
+    /// rail could not honour at all before R3: it drew every row in its slot and
+    /// in list order, so a row being dragged sat still under the pointer and
+    /// disappeared behind its neighbours if it had moved.
+    ///
+    /// The z-order is asserted as "after every other row's fill", not as a
+    /// position in the list, because a painter's-algorithm list has no `z-index`
+    /// and last is the only way to be on top.
+    ///
+    /// Red gate: leave `rail_chrome` ignoring `TabContent::offset` and the fill
+    /// comes back in the row's own slot, 40px above where the hand is holding it.
+    #[test]
+    fn a_row_carried_down_the_rail_is_drawn_where_the_hand_holds_it_and_over_its_neighbours() {
+        // Two thirds of a row: far enough that the fill cannot be mistaken for
+        // the slot's own, and inside what `grabbed_offset` would ever hand over,
+        // so this is a state the drag can actually reach.
+        const CARRY: f32 = 20.0;
+        // The **head** row is the one in hand and the **last** is the active
+        // one, which is what makes the z-order assertion below say anything: in
+        // plain list order the grabbed row is painted first of the three, so
+        // "after the active row's fill" can only be true if it was raised.
+        const GRABBED: usize = 0;
+        const ACTIVE: usize = 2;
+        let rail = painted_rail(&resting(3));
+        let (_, _, sprites) = rail_paint_of(
+            1.0,
+            &dragging_rows(GRABBED, CARRY, 0.0),
+            ACTIVE,
+            Some(GRABBED),
+            None,
+            expanded_rail(),
+            None,
+        );
+        let body_at = |rect: [f32; 4]| {
+            sprites.iter().position(|sprite| {
+                sprite.rect == rect && matches!(sprite.mark, ChromeMark::TabBody { .. })
+            })
+        };
+        let carried = rail.tabs[GRABBED].shifted(CARRY);
+        let drawn = body_at(carried.body).expect("the grabbed row draws a body of its own");
+        assert!(
+            body_at(rail.tabs[GRABBED].body).is_none(),
+            "and draws nothing in the slot it has left"
+        );
+        let active = body_at(rail.tabs[ACTIVE].body).expect("`.vtab.active` fills its row");
+        assert!(
+            drawn > active,
+            "the row in hand is laid down last, so it covers what it passes over"
+        );
+        assert!(
+            sprites.iter().any(|sprite| sprite.rect == carried.mark),
+            "and everything inside the row travels with it — one shift, at the top"
+        );
+    }
+
+    /// **A row landing in the rail wears the accent wash and the accent ring** —
+    /// `@keyframes tab-land`, which the strip has drawn since K122 and the rail
+    /// could not draw at all.
+    ///
+    /// K124's stand-in is the same pair held at full strength for as long as it
+    /// stands there, so the slot a torn-out pane is aiming at and the row that
+    /// lands in it cannot drift apart — one rule, two clocks.
+    ///
+    /// Red gate: leave `rail_chrome` ignoring `TabContent::landing` and both
+    /// accent sprites are missing, which is a tear-out into the rail whose
+    /// target is drawn nowhere.
+    #[test]
+    fn a_row_landing_in_the_rail_wears_the_accent_wash_and_its_ring() {
+        let palette = chrome_palette();
+        let rail = painted_rail(&resting(3));
+        let accents = |tabs: &[TabContent], preview: Option<usize>| {
+            let (_, _, sprites) = rail_paint_of(1.0, tabs, 0, None, preview, expanded_rail(), None);
+            sprites
+                .iter()
+                .filter(|sprite| sprite.color == palette.accent && sprite.rect == rail.tabs[1].body)
+                .map(|sprite| (sprite.mark, sprite.opacity))
+                .collect::<Vec<_>>()
+        };
+        let half = accents(&dragging_rows(1, 0.0, 0.5), None);
+        assert_eq!(
+            half,
+            vec![
+                (
+                    ChromeMark::TabBody { radius_px: 6 },
+                    TAB_LAND_WASH_ALPHA * 0.5
+                ),
+                (
+                    ChromeMark::TabBodyRing {
+                        radius_px: 6,
+                        stroke_px: 2
+                    },
+                    TAB_LAND_RING_ALPHA * 0.5
+                ),
+            ],
+            "the wash then the ring, both riding the clock as opacity on the accent"
+        );
+        assert!(
+            accents(&dragging_rows(1, 0.0, 0.0), None).is_empty(),
+            "a row that is not landing wears neither"
+        );
+        assert_eq!(
+            accents(&dragging_rows(1, 0.0, 0.0), Some(1)),
+            vec![
+                (ChromeMark::TabBody { radius_px: 6 }, TAB_LAND_WASH_ALPHA),
+                (
+                    ChromeMark::TabBodyRing {
+                        radius_px: 6,
+                        stroke_px: 2
+                    },
+                    TAB_LAND_RING_ALPHA
+                ),
+            ],
+            "K124's stand-in holds the same pair at full strength"
+        );
+    }
 }
 
 /// U5 — drop-landing geometry (K127-K134), tested against solved rectangles.
@@ -15448,8 +16143,9 @@ mod drop_geometry_tests {
                 host[1],
                 "the strip's floor is the layout's ceiling at {dpi_milli} milli-DPI"
             );
-            assert!(in_strip(&geometry, scale, 10.0, host[1] - 1.0));
-            assert!(!in_strip(&geometry, scale, 10.0, host[1]));
+            let run = strip_run(&geometry, scale);
+            assert!(run.contains(10.0, host[1] - 1.0));
+            assert!(!run.contains(10.0, host[1]));
         }
     }
 

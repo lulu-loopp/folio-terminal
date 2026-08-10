@@ -1,7 +1,9 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "theme": "dark",
   "cursor_style": "bar",
+  "tab_layout": "horizontal",
+  "sidebar_mode": "expanded",
   "window": {
     "bounds": {
       "x": -100,
