@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use bt_layout::{
     Axis, DIVIDER, Edit, EditError, LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize,
     Presentation, Ratio, SUBPIXELS_PER_PX, Seat, SeatId, SeatKind, SeatLayout, SeatMetrics,
-    SplitId, WorkAreaHint, apply, solve, window_min_inner_size,
+    SizePolicy, SplitId, WorkAreaHint, apply, solve, window_min_inner_size,
 };
 use bt_persist::{LayoutNodeV1, LeafNodeV1, SplitDirV1, SplitNodeV1, TermLeafV1};
 use bt_render::{
@@ -447,10 +447,18 @@ impl Seats {
     }
 
     /// Solve this tree into the given viewport.
+    ///
+    /// `policy` says whose rectangle `viewport` is (user ruling 2026-08-08). It
+    /// is a parameter rather than a field on `Seats` for the reason the solver
+    /// keeps it out of its own state: the same tree is solved into the window
+    /// the user is dragging *and* into a hypothetical rectangle a drop is being
+    /// judged against, sometimes in the same frame, and those two want opposite
+    /// answers.
     pub fn solve(
         &self,
         viewport: LogicalRect,
         metrics: &SeatMetrics,
+        policy: SizePolicy,
     ) -> Result<SeatLayout, bt_layout::LayoutError> {
         solve(
             &self.tree,
@@ -458,19 +466,20 @@ impl Seats {
             metrics,
             self.focus,
             LayoutMode::Parallel,
+            policy,
         )
     }
 
-    /// The minimum inner size to hand the OS (§2.6.5, tiny-window §4.2).
-    pub fn min_inner_size(
-        &self,
-        metrics: &SeatMetrics,
-        work_area: WorkAreaHint,
-    ) -> Option<LogicalSize> {
+    /// The minimum inner size to hand the OS.
+    ///
+    /// The technical floor and nothing more — one pane, not this tree's demand
+    /// (user ruling 2026-08-08). It takes `&self` only to sit beside the rest of
+    /// the seat vocabulary; the answer is deliberately the same for every tree,
+    /// which is what stops a four-column tab from deciding how small the user's
+    /// window is allowed to be.
+    pub fn min_inner_size(&self, metrics: &SeatMetrics, work_area: WorkAreaHint) -> LogicalSize {
         window_min_inner_size(
-            &self.tree,
             metrics,
-            self.focus,
             LogicalSize {
                 width: LogicalPx::ZERO,
                 height: LogicalPx::px(WINDOW_TITLE_BAR_LOGICAL_PX as i64),
@@ -598,9 +607,21 @@ impl Seats {
         } else {
             tree.seats_in_order().first()?.id
         };
-        let layout = solve(&tree, viewport, metrics, focus, LayoutMode::Parallel)
-            .ok()
-            .filter(|layout| plan_fits(layout, metrics));
+        // **Lawful, and pointedly so.** A drop is the program deciding where
+        // panes go, not the user deciding how big the window is: the 2026-08-08
+        // ruling moved the minima out of the *window's* way and left them
+        // exactly where they were here. A drop that would put a pane under its
+        // minimum is still refused, and `plan_fits` below still judges it.
+        let layout = solve(
+            &tree,
+            viewport,
+            metrics,
+            focus,
+            LayoutMode::Parallel,
+            SizePolicy::Lawful,
+        )
+        .ok()
+        .filter(|layout| plan_fits(layout, metrics));
         Some(DropPlan {
             tree,
             layout,
@@ -5463,7 +5484,10 @@ mod tests {
         viewport: LogicalRect,
         metrics: &SeatMetrics,
     ) -> (SeatLayout, Option<FitOverflow>) {
-        match seats.solve(viewport, metrics) {
+        // `Lawful`: these are the ladder's own tests, and the ladder is what the
+        // program's layouts get. The hand's side of the 2026-08-08 ruling is
+        // pinned in `bt-layout` and by `a_narrowed_window_shows_panes_not_bars`.
+        match seats.solve(viewport, metrics, SizePolicy::Lawful) {
             Ok(layout) => (layout, None),
             Err(_) => fit_what_fits(seats, viewport, metrics),
         }
@@ -6303,24 +6327,108 @@ mod tests {
         assert_eq!(preview.extent(Axis::Row).floor_px(), 360);
     }
 
-    /// A drag that cannot be satisfied at all is refused outright, with no
-    /// ratio written — §2.4's ordering, which this crate consumes rather than
-    /// re-derives. 500 logical pixels cannot hold 260 + 1 + 360.
+    /// **The ruling, at the seam the app actually uses.** Four terminal columns
+    /// want 1043 logical pixels. Dragged to 400, the user gets four narrow panes
+    /// tiling the window — not a strip of 24px bars, and not the `fit_what_fits`
+    /// error page, which is what the same rectangle produces for the program.
     #[test]
-    fn a_divider_drag_in_a_window_too_small_for_both_seats_is_refused() {
+    fn a_narrowed_window_shows_panes_not_bars() {
+        let metrics = seat_metrics(1_000);
+        let mut seats = Seats::lone_terminal();
+        for _ in 0..3 {
+            let target = seats.terminal();
+            seats
+                .split_terminal(&metrics, target, Axis::Row, false)
+                .expect("a terminal leaf splits");
+        }
+        let narrow = viewport_of(400, 600, 1_000);
+
+        let by_hand = seats
+            .solve(narrow, &metrics, SizePolicy::Sovereign)
+            .expect("the user's own window is never refused");
+        assert_eq!(by_hand.rects.len(), 4);
+        for placement in &by_hand.rects {
+            assert_eq!(
+                placement.presentation,
+                Presentation::Full,
+                "{:?} folded in a window the user sized",
+                placement.id
+            );
+            let rect = placement.rect.expect("every seat is presented");
+            assert!(rect.right > rect.left, "{:?} has no width", placement.id);
+        }
+        // Tiling, exactly: four panes and three dividers are the whole viewport.
+        let widths: i64 = by_hand
+            .presented()
+            .map(|(_, rect)| rect.extent(Axis::Row).subpixels())
+            .sum();
+        assert_eq!(
+            widths + 3 * DIVIDER.subpixels(),
+            narrow.extent(Axis::Row).subpixels(),
+            "a gap here is the seam the ruling forbids"
+        );
+
+        // Same tree, same rectangle, program's authority: 260 for the focus plus
+        // three 24px bars is 335, so L3 fits it by folding — which is exactly
+        // the picture the ruling kept for the program and took from the hand.
+        let by_law = seats
+            .solve(narrow, &metrics, SizePolicy::Lawful)
+            .expect("the ladder reaches 400px by folding");
+        let folded = by_law
+            .rects
+            .iter()
+            .filter(|p| matches!(p.presentation, Presentation::Collapsed(_)))
+            .count();
+        assert_eq!(folded, 3, "the program's own layout still folds");
+
+        // Below the ladder's own floor it is still the honest error, and still
+        // only for the program.
+        let hopeless = viewport_of(300, 600, 1_000);
+        assert!(seats.solve(hopeless, &metrics, SizePolicy::Lawful).is_err());
+        assert!(
+            seats
+                .solve(hopeless, &metrics, SizePolicy::Sovereign)
+                .is_ok()
+        );
+    }
+
+    /// User ruling 2026-08-08. Was
+    /// `a_divider_drag_in_a_window_too_small_for_both_seats_is_refused`: a 499px
+    /// slot cannot hold a 260 terminal beside a 360 preview, and the drag used
+    /// to die under the hand for saying so. The window is the user's, and so is
+    /// the divider in it.
+    #[test]
+    fn a_divider_drag_in_a_window_too_small_for_both_seats_still_follows_the_hand() {
         let metrics = seat_metrics(1_000);
         let mut seats = Seats::lone_terminal();
         seats.toggle_preview(&metrics);
         let viewport = viewport_of(1600, 900, 1_000);
         let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
-        let before = seats.tree().ratios();
         let cramped = LogicalPx::px(499);
-        let result = seats.drag_divider(&metrics, slot.id, Ratio::HALF, cramped);
-        assert_eq!(result, Err(EditError::Refused));
+        let origin = seats.tree().ratios()[0].1;
+        // 260 + 360 wants 620 of a 499px slot, so *every* ratio was infeasible
+        // by the old rule and the divider was dead for the whole gesture.
+        let aimed = Ratio::from_ppm(800_000).unwrap();
         assert_eq!(
-            seats.tree().ratios(),
-            before,
-            "a refusal has zero side effects"
+            seats.drag_divider(&metrics, slot.id, aimed, cramped),
+            Ok(true),
+            "620px of demand in a 499px slot is a narrow pane, not an error"
+        );
+        assert_eq!(
+            seats.tree().ratios()[0].1,
+            aimed,
+            "and it went where it was aimed"
+        );
+
+        // Esc restores through the same edit, from wherever the drag reached.
+        assert_eq!(
+            seats.drag_divider(&metrics, slot.id, origin, cramped),
+            Ok(true)
+        );
+        assert_eq!(
+            seats.tree().ratios()[0].1,
+            origin,
+            "Esc puts the one ratio back"
         );
     }
 
@@ -6487,7 +6595,7 @@ mod tests {
         // collapses and the focus seat is the last to fall.
         let viewport = viewport_of(500, 600, 1_000);
         let layout = seats
-            .solve(viewport, &metrics)
+            .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("L3 must satisfy 500px");
         let preview = seats.preview().unwrap();
         assert!(
@@ -11789,7 +11897,9 @@ mod tests {
         let mut seats = Seats::lone_terminal();
         seats.toggle_preview(&metrics);
         let viewport = viewport_of(500, 600, 1_000);
-        let layout = seats.solve(viewport, &metrics).expect("L3 satisfies 500px");
+        let layout = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("L3 satisfies 500px");
         let preview = seats.preview().unwrap();
         let placement = layout.get(preview).unwrap();
         assert!(
@@ -12079,7 +12189,7 @@ mod tests {
         // 260 + 3 x 24 + 3 = 335. 300 has neither, so the ladder runs out.
         let viewport = viewport_of(300, 240, 1_000);
         assert!(
-            seats.solve(viewport, &metrics).is_err(),
+            seats.solve(viewport, &metrics, SizePolicy::Lawful).is_err(),
             "the scenario has to actually be L4"
         );
         let (layout, overflow) = fit_what_fits(&seats, viewport, &metrics);
@@ -12419,6 +12529,7 @@ mod drop_geometry_tests {
             &metrics,
             SeatId(1),
             LayoutMode::Parallel,
+            SizePolicy::Lawful,
         )
         .expect("the stage layouts all fit");
         let count = tree.seats_in_order().len();
@@ -12828,7 +12939,9 @@ mod drop_plan_tests {
     }
 
     fn live(seats: &Seats) -> SeatLayout {
-        seats.solve(view(), &metrics()).expect("the stages all fit")
+        seats
+            .solve(view(), &metrics(), SizePolicy::Lawful)
+            .expect("the stages all fit")
     }
 
     fn plan(seats: &Seats, aim: LayoutAim, cargo: DropCargo<'_>) -> DropPlan {
@@ -13360,7 +13473,9 @@ mod drop_plan_tests {
         let seats = window(row(1, term(1), term(2)));
         let narrow_view = logical_viewport(620, 500, scale_ppm(DPI));
         let narrow_host = device_viewport(620, 500, scale_ppm(DPI));
-        let live = seats.solve(narrow_view, &metrics()).expect("two panes fit");
+        let live = seats
+            .solve(narrow_view, &metrics(), SizePolicy::Lawful)
+            .expect("two panes fit");
         let planned = seats
             .plan_drop(
                 &metrics(),
@@ -13406,7 +13521,9 @@ mod drop_plan_tests {
         let seats = window(row(1, term(1), term(2)));
         let narrow_view = logical_viewport(620, 500, scale_ppm(DPI));
         let narrow_host = device_viewport(620, 500, scale_ppm(DPI));
-        let live = seats.solve(narrow_view, &metrics()).expect("two panes fit");
+        let live = seats
+            .solve(narrow_view, &metrics(), SizePolicy::Lawful)
+            .expect("two panes fit");
         let planned = seats
             .plan_drop(
                 &metrics(),

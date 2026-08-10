@@ -5,14 +5,14 @@
 //! rewrite, and theorem N — every split outside `F(E)` keeps a bit-identical
 //! ratio — is what turns the wish into an assertion, and an assertion into a gate.
 
+use crate::LogicalPx;
 use crate::demand::{
-    Path, Side, balanced_ratio, demand, fixed_width, node_at, node_at_mut, path_to_seat,
-    run_root_path, run_split_ids,
+    Path, Side, balanced_ratio, fixed_width, node_at, node_at_mut, path_to_seat, run_root_path,
+    run_split_ids,
 };
 use crate::geom::Axis;
 use crate::metrics::SeatMetrics;
 use crate::tree::{LayoutNode, Ratio, Seat, SeatId, SeatKind, SplitId};
-use crate::{LogicalPx, RATIO_DENOM_PPM};
 
 /// The set of splits an edit is allowed to rewrite.
 ///
@@ -167,12 +167,18 @@ pub struct EditOutcome {
 /// Why an edit did not happen.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum EditError {
-    /// The gesture asked for something the constraints already forbid.
+    /// The gesture asked for something that has no answer.
     ///
-    /// §2.4: feasibility is judged *before* the clamp, and an infeasible drag is
-    /// refused with zero side effects. Clamping first and judging afterwards
-    /// writes an unsatisfiable value and lets the next solve "correct" it, which
-    /// dresses a refusal up as a jitter.
+    /// Refused with zero side effects, never with a written-then-corrected
+    /// value: writing something unsatisfiable and letting the next solve tidy it
+    /// up dresses a refusal as a jitter (§2.4).
+    ///
+    /// What survives here after the 2026-08-08 ruling is only the questions with
+    /// no answer at all — a ratio aimed at a fixed slot, a width aimed at a
+    /// subtree that has no single width, the last seat in the tree closing.
+    /// "That would be smaller than the minimum" is no longer among them: it is a
+    /// question with a perfectly good answer, which is the smaller pane the user
+    /// asked for.
     Refused,
     UnknownSeat(SeatId),
     UnknownSplit(SplitId),
@@ -463,16 +469,19 @@ fn drag_divider(
     if fixed_width(a, *dir, metrics).is_some() || fixed_width(b, *dir, metrics).is_some() {
         return Err(EditError::Refused);
     }
-    // The clamp order is not commutative (§2.4): find both floors from subtree
-    // demand, judge feasibility, and only then clamp.
-    let lo = ceil_ppm(demand(a, *dir, metrics), usable).max(1);
-    let hi = RATIO_DENOM_PPM
-        .saturating_sub(ceil_ppm(demand(b, *dir, metrics), usable))
-        .min(RATIO_DENOM_PPM - 1);
-    if lo > hi {
-        return Err(EditError::Refused);
-    }
-    let chosen = Ratio::clamped_from_ppm(requested.ppm().clamp(lo, hi));
+    // No floor from `demand`, and therefore no refusal from it either (user
+    // ruling 2026-08-08). A hand on a divider is the user saying "I want this
+    // proportion"; answering "that pane would be under its minimum" is answering
+    // a question nobody asked, and the old refusal made the divider go dead
+    // under the hand well before the pane got small. The minima have not stopped
+    // meaning anything — they still refuse a *drop* (`plan_fits`) and still run
+    // the concession chain for layouts the program itself chose. They have
+    // stopped overruling a gesture.
+    //
+    // What is left is the ratio's own domain: `(0, 1)` open at both ends, which
+    // the type has always enforced, because a side of exactly zero is something
+    // a close says and never something a proportion says (红线 L4).
+    let chosen = Ratio::clamped_from_ppm(requested.ppm());
     let mut next = tree.clone();
     if let Some(LayoutNode::Split { ratio, .. }) = node_at_mut(&mut next, &path) {
         *ratio = chosen;
@@ -501,26 +510,17 @@ fn drag_fixed_extent(
     // Only a bare fixed leaf has a single width to drag. A fixed subtree that is
     // not one — two files panes stacked, say — is refused honestly rather than
     // written to (§3.4).
-    let (side, other): (Side, &LayoutNode) = match (a.as_ref(), b.as_ref()) {
-        (LayoutNode::Seat(s), _) if is_fixed_leaf(s, metrics) => (Side::A, b),
-        (_, LayoutNode::Seat(s)) if is_fixed_leaf(s, metrics) => (Side::B, a),
+    let side = match (a.as_ref(), b.as_ref()) {
+        (LayoutNode::Seat(s), _) if is_fixed_leaf(s, metrics) => Side::A,
+        (_, LayoutNode::Seat(s)) if is_fixed_leaf(s, metrics) => Side::B,
         _ => return Err(EditError::Refused),
     };
-    let floor = match node_at(tree, &path) {
-        Some(LayoutNode::Split { a, b, .. }) => {
-            let leaf = if side == Side::A { a } else { b };
-            match leaf.as_ref() {
-                LayoutNode::Seat(s) => metrics.min_size(s.kind, Axis::Row),
-                LayoutNode::Split { .. } => return Err(EditError::Refused),
-            }
-        }
-        _ => return Err(EditError::Refused),
-    };
-    let ceiling = usable - demand(other, Axis::Row, metrics);
-    if ceiling < floor {
-        return Err(EditError::Refused);
-    }
-    let width = requested.clamp_to(floor, ceiling);
+    // The slot, and nothing narrower. Same ruling as [`drag_divider`]: the
+    // column's declared floor of 170 is what it would *like* to be, and a hand
+    // that keeps pulling past it is entitled to a narrower column and the
+    // clipped filenames that come with it. What a width may not do is leave the
+    // slot it lives in — that is not a preference, it is arithmetic.
+    let width = requested.clamp_to(LogicalPx::ZERO, usable.max(LogicalPx::ZERO));
     let mut next = tree.clone();
     let mut leaf_path = path.clone();
     leaf_path.push(side);
@@ -536,15 +536,6 @@ fn drag_fixed_extent(
 
 fn is_fixed_leaf(seat: &Seat, metrics: &SeatMetrics) -> bool {
     metrics.extent_class(seat.kind).is_fixed_along(Axis::Row)
-}
-
-fn ceil_ppm(part: LogicalPx, whole: LogicalPx) -> u32 {
-    let (p, w) = (i128::from(part.subpixels()), i128::from(whole.subpixels()));
-    if w <= 0 {
-        return RATIO_DENOM_PPM;
-    }
-    let v = (p * i128::from(RATIO_DENOM_PPM) + w - 1) / w;
-    v.clamp(0, i128::from(RATIO_DENOM_PPM)) as u32
 }
 
 /// The path to a split by id.

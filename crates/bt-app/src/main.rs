@@ -27,7 +27,7 @@ use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
 use bt_layout::{
     Axis, LayoutNode, LogicalRect, MIN_PANE_H, MIN_PANE_W, SeatId, SeatLayout, SeatMetrics,
-    SplitId, WorkAreaHint,
+    SizePolicy, SplitId, WorkAreaHint,
 };
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
@@ -115,28 +115,41 @@ enum AppEvent {
     MathReady,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct TabId(u64);
 
+/// Which shell a unit of decoration work belongs to.
+///
+/// A tab was a sufficient address while a tab was one shell. Since U12 it is a tree of them, and
+/// every record the worker produces — a decoded image, a verified path, a rendered formula — is a
+/// fact about one `DualPlaneSession` and lands in that session's own maps. Addressing the work by
+/// tab alone meant the tab's `Deref`, which is to say the pane holding the keyboard: the panes
+/// beside it queued work that was never collected and received answers that were never theirs.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+struct LeafId {
+    tab: TabId,
+    seat: SeatId,
+}
+
 struct MathWorkerResult {
-    tab_id: TabId,
+    leaf: LeafId,
     completion: DecorationWorkerCompletion,
 }
 
 enum MathWorkerRequest {
     Math {
-        tab_id: TabId,
+        leaf: LeafId,
         task: Box<SessionMathTask>,
         foreground_rgb: [u8; 3],
     },
     InlineImage {
-        tab_id: TabId,
+        leaf: LeafId,
         task: bt_term::InlineImageTask,
     },
     /// Hover-peek decode: read and decode a local image off-thread without touching any
     /// decoration record. The completion routes only to the app-side peek cache, so the band
     /// creation gates (cursor line, semantic input region) are never bypassed.
-    PeekImage { tab_id: TabId, path: PathBuf },
+    PeekImage { leaf: LeafId, path: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -148,15 +161,15 @@ enum ScalePurpose {
 
 enum ScaleWorkerRequest {
     InlineImage {
-        tab_id: TabId,
+        leaf: LeafId,
         task: bt_term::InlineImageScaleTask,
     },
     Peek {
-        tab_id: TabId,
+        leaf: LeafId,
         task: bt_term::InlineImageScaleTask,
     },
     Preview {
-        tab_id: TabId,
+        leaf: LeafId,
         task: bt_term::InlineImageScaleTask,
     },
 }
@@ -178,36 +191,39 @@ impl ScaleWorkerRequest {
         }
     }
 
-    fn tab_id(&self) -> TabId {
+    fn leaf(&self) -> LeafId {
         match self {
-            Self::InlineImage { tab_id, .. }
-            | Self::Peek { tab_id, .. }
-            | Self::Preview { tab_id, .. } => *tab_id,
+            Self::InlineImage { leaf, .. }
+            | Self::Peek { leaf, .. }
+            | Self::Preview { leaf, .. } => *leaf,
         }
     }
 
+    /// Coalescing is per leaf: two panes asking for the same picture at the same size are two
+    /// answers owed, and letting one stand in for the other is how a pane ends up waiting forever
+    /// for a raster that was delivered next door.
     fn same_target(&self, other: &Self) -> bool {
-        self.tab_id() == other.tab_id()
+        self.leaf() == other.leaf()
             && self.purpose() == other.purpose()
             && self.task().content_key == other.task().content_key
     }
 
-    fn completion(self) -> (TabId, DecorationWorkerCompletion) {
+    fn completion(self) -> (LeafId, DecorationWorkerCompletion) {
         match self {
-            Self::InlineImage { tab_id, task } => (
-                tab_id,
+            Self::InlineImage { leaf, task } => (
+                leaf,
                 DecorationWorkerCompletion::ScaleInlineImage {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-            Self::Peek { tab_id, task } => (
-                tab_id,
+            Self::Peek { leaf, task } => (
+                leaf,
                 DecorationWorkerCompletion::PeekScaledImage {
                     scaled: bt_term::scale_inline_image(&task),
                 },
             ),
-            Self::Preview { tab_id, task } => (
-                tab_id,
+            Self::Preview { leaf, task } => (
+                leaf,
                 DecorationWorkerCompletion::PreviewScaledImage {
                     scaled: bt_term::scale_inline_image(&task),
                 },
@@ -315,9 +331,9 @@ impl MathWorker {
             .name("bt-image-scale-worker".to_owned())
             .spawn(move || {
                 run_scale_worker(scale_rx, |request| {
-                    let (tab_id, completion) = request.completion();
+                    let (leaf, completion) = request.completion();
                     if scale_result_tx
-                        .send(MathWorkerResult { tab_id, completion })
+                        .send(MathWorkerResult { leaf, completion })
                         .is_ok()
                     {
                         let _ = scale_proxy.send_event(AppEvent::MathReady);
@@ -333,11 +349,11 @@ impl MathWorker {
                 while let Ok(work) = task_rx.recv() {
                     let completion = match work {
                         MathWorkerRequest::Math {
-                            tab_id,
+                            leaf,
                             task,
                             foreground_rgb,
                         } => (
-                            tab_id,
+                            leaf,
                             match *task {
                                 SessionMathTask::Frozen(mut task) => {
                                     let result =
@@ -360,27 +376,24 @@ impl MathWorker {
                                 }
                             },
                         ),
-                        MathWorkerRequest::InlineImage { tab_id, task } => {
+                        MathWorkerRequest::InlineImage { leaf, task } => {
                             let result = image_decoder.decode(task.clone());
                             (
-                                tab_id,
+                                leaf,
                                 DecorationWorkerCompletion::InlineImage { task, result },
                             )
                         }
-                        MathWorkerRequest::PeekImage { tab_id, path } => {
+                        MathWorkerRequest::PeekImage { leaf, path } => {
                             let result = image_decoder.decode(bt_term::InlineImageTask {
                                 occurrence_id: 0,
                                 source: bt_term::InlineImageSource::LocalPath(path.clone()),
                             });
-                            (
-                                tab_id,
-                                DecorationWorkerCompletion::PeekImage { path, result },
-                            )
+                            (leaf, DecorationWorkerCompletion::PeekImage { path, result })
                         }
                     };
                     if result_tx
                         .send(MathWorkerResult {
-                            tab_id: completion.0,
+                            leaf: completion.0,
                             completion: completion.1,
                         })
                         .is_err()
@@ -418,7 +431,7 @@ fn take_math_worker_notice(notice_pending: &mut bool) -> Option<&'static str> {
 }
 
 fn dispatch_decoration_task(
-    tab_id: TabId,
+    leaf: LeafId,
     task: SessionDecorationTask,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
@@ -426,16 +439,16 @@ fn dispatch_decoration_task(
     match task {
         SessionDecorationTask::Math(task) => tasks
             .send(MathWorkerRequest::Math {
-                tab_id,
+                leaf,
                 task,
                 foreground_rgb: foreground_rgb(),
             })
             .is_ok(),
         SessionDecorationTask::InlineImage(task) => tasks
-            .send(MathWorkerRequest::InlineImage { tab_id, task })
+            .send(MathWorkerRequest::InlineImage { leaf, task })
             .is_ok(),
         SessionDecorationTask::ScaleInlineImage(task) => scale_tasks
-            .send(ScaleWorkerRequest::InlineImage { tab_id, task })
+            .send(ScaleWorkerRequest::InlineImage { leaf, task })
             .is_ok(),
     }
 }
@@ -443,7 +456,7 @@ fn dispatch_decoration_task(
 /// Drain the real session queue into the renderer channel. A dead optional-decoration worker is
 /// a one-way feature downgrade, never a terminal/runtime error.
 fn dispatch_pending_math_tasks(
-    tab_id: TabId,
+    leaf: LeafId,
     session: &mut DualPlaneSession,
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
@@ -454,11 +467,57 @@ fn dispatch_pending_math_tasks(
         return false;
     }
     while let Some(task) = session.take_decoration_worker_task() {
-        if !dispatch_decoration_task(tab_id, task, tasks, scale_tasks) {
+        if !dispatch_decoration_task(leaf, task, tasks, scale_tasks) {
             return disable_math_worker_state(running, notice_pending);
         }
     }
     false
+}
+
+/// The session filed under one seat of one tab, or nothing if that pane has since closed.
+fn leaf_session_mut(
+    tabs: &mut [TabState],
+    index: usize,
+    seat: SeatId,
+) -> Option<&mut DualPlaneSession> {
+    tabs[index]
+        .sessions
+        .get_mut(&seat)
+        .map(|leaf| &mut leaf.session)
+}
+
+/// Collect every pane of the tab on screen, not merely the one holding the keyboard.
+///
+/// A leaf queues its own decoration work as its own bytes are drained — that half was always per
+/// pane. What was not was the collection: dispatching through the tab's `Deref` asked the focused
+/// leaf for its queue and left every other pane's work sitting where it was written. Nothing came
+/// back for those panes, so a file reference in them was never verified, and an unverified
+/// reference wears no resting underline. Hovering the pane opened the file by another road (the
+/// peek), which is why the affordance appeared to be a thing hovering granted rather than a thing
+/// every pane is owed.
+fn dispatch_tab_decoration_tasks(
+    tab: &mut TabState,
+    tasks: &mpsc::Sender<MathWorkerRequest>,
+    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
+    running: &mut bool,
+    notice_pending: &mut bool,
+) -> bool {
+    let tab_id = tab.id;
+    let mut disabled = false;
+    for (seat, leaf) in tab.leaves_mut() {
+        disabled |= dispatch_pending_math_tasks(
+            LeafId {
+                tab: tab_id,
+                seat: *seat,
+            },
+            &mut leaf.session,
+            tasks,
+            scale_tasks,
+            running,
+            notice_pending,
+        );
+    }
+    disabled
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -954,11 +1013,31 @@ struct Runtime {
     /// Persisted user choice, distinct from the resolved renderer theme. Under `BT_BG` the process
     /// colors are locked but this mode is still kept across a diagnostic launch.
     theme_mode: ThemeModeV1,
-    /// The last aggregate minimum handed to winit. On Windows, winit 0.30 re-applies the current
-    /// inner size whenever this setter runs; repeating an unchanged minimum can therefore feed the
-    /// non-client adjustment back into the client size. The outer `Option` distinguishes "never
-    /// applied" from an applied `None` minimum.
-    window_min_inner_size: Option<Option<(i64, i64)>>,
+    /// The last minimum handed to the frame. On Windows, winit 0.30 re-applies the current inner
+    /// size whenever this setter runs; repeating an unchanged minimum can therefore feed the
+    /// non-client adjustment back into the client size. The `Option` distinguishes "never applied"
+    /// from a minimum that has been applied.
+    window_min_inner_size: Option<(i64, i64)>,
+    /// Who chose the rectangle the seats are being solved into (user ruling 2026-08-08).
+    ///
+    /// The one piece of state the ruling needs, and it is a statement about *provenance*, not a
+    /// mode: a minimum is law to the program and advice to the user, so the solver has to be told
+    /// which of the two put the window at the size it is. That cannot be re-derived from the size
+    /// itself — 900x400 means one thing when a hand dragged it there and another when a session
+    /// file asked for it — so it is recorded where the decision happens and passed down from there.
+    ///
+    /// It is emphatically not a flag the solver reads. `Seats::solve` takes it as an argument, and
+    /// the drop planner passes `Lawful` regardless of what this says, because a drop is a program
+    /// decision even while the user's hand is on the mouse.
+    size_policy: SizePolicy,
+    /// The physical client size this process last put the window at.
+    ///
+    /// Windows delivers `Resized` for the program's own rectangles exactly as it does for the
+    /// user's — a window created at a restored size, and the resize that rides along with every
+    /// DPI change, both arrive as the same event a drag produces. Recording what we asked for is
+    /// what lets the two be told apart without guessing, and without a one-shot flag whose
+    /// correctness would depend on winit's delivery order.
+    lawful_client_size: Option<PhysicalSize<u32>>,
 }
 
 fn active_item<T>(items: &[T], active: usize) -> &T {
@@ -992,21 +1071,43 @@ fn two_tabs_mut<T>(items: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
     }
 }
 
-fn aggregate_window_minimum(
-    sizes: impl IntoIterator<Item = Option<(i64, i64)>>,
-) -> Option<(i64, i64)> {
-    sizes
-        .into_iter()
-        .try_fold((1_i64, 1_i64), |(width, height), size| {
-            let (next_width, next_height) = size?;
-            Some((width.max(next_width), height.max(next_height)))
-        })
+/// Who owns the rectangle the seats are about to be solved into (user ruling 2026-08-08).
+///
+/// Judged on **the rectangle the solver actually receives**, never on the `Resized` payload. The
+/// two are not the same number: winit announces a transient outer size during startup — measured
+/// here as an 826x1271 delivery while the window's own inner size was still 800x1200 — and reading
+/// authority off that made a freshly restored session look like a window somebody had dragged.
+/// The presentation rectangle is the one the layout is a function of, so it is the one provenance
+/// has to be a function of too.
+///
+/// Three rules, and they are deliberately not symmetric:
+///
+/// - `None` means the program has a rectangle *pending*: it has just asked the window to be some
+///   size and does not yet know what the OS made of the request. The next rectangle to arrive is
+///   that answer, whatever it turns out to be, and it is the program's. Claiming this way rather
+///   than by recording a size up front is what keeps the rule free of tolerances — the program
+///   never has to predict how Windows will round its own request.
+/// - A rectangle that differs from the claimed one was not asked for by this process, and taking
+///   hold of the window frame is how a user says "this is my size now".
+/// - Sovereignty, once taken, is returned only by another claim — never by a later rectangle that
+///   happens to land back on the claimed size. A hand that drags a window back through its opening
+///   size has not changed its mind about owning it.
+///
+/// Pure, so the rule is pinned by tests rather than by whatever order a given Windows build
+/// chooses to deliver `ScaleFactorChanged` and `Resized` in.
+fn size_authority_for_rectangle(
+    current: SizePolicy,
+    claimed: Option<PhysicalSize<u32>>,
+    rectangle: PhysicalSize<u32>,
+) -> (SizePolicy, Option<PhysicalSize<u32>>) {
+    match claimed {
+        None => (current, Some(rectangle)),
+        Some(claimed) if claimed != rectangle => (SizePolicy::Sovereign, Some(claimed)),
+        Some(claimed) => (current, Some(claimed)),
+    }
 }
 
-fn window_minimum_changed(
-    applied: &mut Option<Option<(i64, i64)>>,
-    next: Option<(i64, i64)>,
-) -> bool {
+fn window_minimum_changed(applied: &mut Option<(i64, i64)>, next: (i64, i64)) -> bool {
     if *applied == Some(next) {
         return false;
     }
@@ -1134,6 +1235,11 @@ impl TabState {
         self.sessions
             .get_mut(&self.focused_leaf)
             .expect("every tab holds a session for its focused leaf")
+    }
+
+    /// Every leaf of this tab, focused one included, in seat order.
+    fn leaves(&self) -> impl Iterator<Item = (&SeatId, &LeafSession)> {
+        self.sessions.iter()
     }
 
     /// Every leaf of this tab, focused one included, in seat order.
@@ -1507,6 +1613,49 @@ fn take_psreadline_resize_reanchor_input(
     std::mem::take(pending)
         .then(|| psreadline_resize_repaint_input(shell_input_region_open))
         .flatten()
+}
+
+/// Carry one solved rectangle to a pane that does not hold the keyboard.
+///
+/// This is the unfocused counterpart of `flush_pending_pty_resize`, and it owes the same four
+/// steps in the same order: the actor reflows, the input-region phase is sampled *before* ConPTY
+/// hears anything, ConPTY is told, and the vendor reconcile closes the request.
+///
+/// The reconcile is the step this path used to omit, and omitting it was not a missing nicety.
+/// `mark_pty_resize_requested_at` is the only caller of `ResizeEpoch::final_request_sent`, and
+/// without a final request the epoch has no quiescence deadline at all — `is_quiescent_at` is
+/// false forever, so `finish_resize_if_quiescent` skips the leaf on every turn of the loop and the
+/// repair debt recorded here can never be paid. Every pane but the focused one therefore kept a
+/// PSReadLine anchor describing a width it no longer had, which is the swallowed and overwritten
+/// first character at the prompt. It also left the epoch permanently active, which withholds
+/// decorations from a pane for the rest of its life.
+fn commit_unfocused_leaf_resize(
+    session: &mut DualPlaneSession,
+    pty: Option<&mut PtySession>,
+    pending_reanchor: &mut bool,
+    next_grid: GridSize,
+    physical: PhysicalSize<u32>,
+    observed_at: Instant,
+) -> Result<()> {
+    session
+        .resize_at(
+            nonzero_u32(next_grid.columns.get()),
+            nonzero_u32(next_grid.rows.get()),
+            observed_at,
+        )
+        .context("resize an unfocused pane's terminal actor for a seat layout change")?;
+    let shell_input_region_open = session.shell_input_region_open();
+    if let Some(pty) = pty {
+        pty.resize(pty_size(next_grid, physical))
+            .context("resize an unfocused pane's ConPTY")?;
+    }
+    replace_psreadline_resize_reanchor_debt(pending_reanchor, shell_input_region_open);
+    session.mark_pty_resize_requested_at(
+        nonzero_u32(next_grid.columns.get()),
+        nonzero_u32(next_grid.rows.get()),
+        observed_at,
+    );
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -5541,9 +5690,13 @@ fn create_tab_state(
     probe_input: Option<&[u8]>,
     working_directories: &BTreeMap<SeatId, PathBuf>,
     seed: TabSeed,
+    policy: SizePolicy,
 ) -> Result<(TabState, String)> {
+    // The new tab's seats are solved into the *current* window, so they answer
+    // to whoever owns it. A tab opened while the user is working in a window
+    // they dragged narrow must look like its neighbours — panes, not bars.
     let (seat_layout, seat_overflow, terminal_seat, _) =
-        solve_seats(&seats, renderer, render_physical);
+        solve_seats(&seats, renderer, render_physical, policy);
     // Captured before `seats` moves into the tab: the seat the tab's identity
     // shell draws into is the key its session is filed under.
     let terminal_seat_id = seats.terminal();
@@ -6141,6 +6294,8 @@ impl Runtime {
                 // now there is one per pane.
                 &working_directories,
                 seed,
+                // Startup: the opening rectangle is the program's own.
+                SizePolicy::Lawful,
             )?;
             tabs.push(tab);
             conpty_sources.push(conpty_source);
@@ -6155,8 +6310,12 @@ impl Runtime {
         // lone restored tab is a tab, and must never be swept away by a later
         // Restore.
         let placeholder_tab = plan.placeholder.then(|| tabs[0].id);
-        let (_, _, terminal_seat, seat_viewport) =
-            solve_seats(&tabs[active_tab].seats, &renderer, render_physical);
+        let (_, _, terminal_seat, seat_viewport) = solve_seats(
+            &tabs[active_tab].seats,
+            &renderer,
+            render_physical,
+            SizePolicy::Lawful,
+        );
         renderer.set_seat_viewport(terminal_seat);
         if trace_startup || trace_resize {
             eprintln!("BT_CONPTY_SOURCE sources={conpty_sources:?}");
@@ -6265,6 +6424,15 @@ impl Runtime {
             placeholder_tab,
             theme_mode,
             window_min_inner_size: None,
+            // The opening rectangle is the program's: either the product's own size or one
+            // `restore_window_placement` chose out of the session file. A session restored into a
+            // window too small for its tree therefore folds — the program put it there, and
+            // folding is the honest picture of "this does not fit". The first drag of the frame
+            // hands it to the user and the folds give way to panes (user ruling 2026-08-08).
+            // `None` is `claim_lawful_layout`'s standing claim, written out: the opening rectangle
+            // has been asked for and not yet answered, and the first one to arrive is it.
+            size_policy: SizePolicy::Lawful,
+            lawful_client_size: None,
         };
         runtime.refresh_work_area();
         runtime.apply_window_min_inner_size()?;
@@ -6371,6 +6539,7 @@ impl Runtime {
             None,
             &inherited,
             TabSeed::of_profile(profile),
+            self.size_policy,
         )?;
         self.tabs.push(tab);
         self.apply_window_min_inner_size()?;
@@ -6522,6 +6691,7 @@ impl Runtime {
                 // it back every time.
                 pinned: false,
             },
+            self.size_policy,
         )?;
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
@@ -6586,6 +6756,7 @@ impl Runtime {
                 None,
                 &working_directories,
                 seed,
+                self.size_policy,
             )?;
             self.tabs.push(revived);
         }
@@ -6691,8 +6862,19 @@ impl Runtime {
     /// The direction is still one-way (red line L10): what comes back out of the
     /// terminal never re-enters here.
     fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) {
-        let (layout, overflow, terminal_seat, viewport) =
-            solve_seats(&self.seats, &self.renderer, render_physical);
+        // Provenance is decided here, at the one place a rectangle becomes a layout, and from the
+        // very number the solver is handed (user ruling 2026-08-08).
+        (self.size_policy, self.lawful_client_size) = size_authority_for_rectangle(
+            self.size_policy,
+            self.lawful_client_size,
+            render_physical,
+        );
+        let (layout, overflow, terminal_seat, viewport) = solve_seats(
+            &self.seats,
+            &self.renderer,
+            render_physical,
+            self.size_policy,
+        );
         self.seat_viewport = viewport;
         // T230, and the reason the diff is taken *here*: this is the one place a
         // solved layout becomes the layout, so it is the one place that can tell
@@ -8178,10 +8360,18 @@ impl Runtime {
         self.work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(width, height));
     }
 
-    /// Hand the OS the largest minimum any tab tree needs (§2.6.5, L12).
+    /// Hand the OS the technical floor — one pane, whatever the tabs contain.
     ///
-    /// A native window belongs to every tab, not only the active one. Keeping one aggregate also
-    /// means activation cannot alternate the OS constraint between two trees.
+    /// **User ruling 2026-08-08.** This used to hand over the largest minimum any tab tree needed,
+    /// so a single four-column tab decided how narrow the user's window was allowed to be, for
+    /// every tab, forever. That aggregate is gone: it was law aimed at the wrong party. The layout
+    /// needs it named have not been repealed, they are enforced where the *program* lays out
+    /// (`SizePolicy::Lawful`), and the window is left to the hand that owns it.
+    ///
+    /// What is left is the floor below which this program does not run — one terminal leaf, the
+    /// same constant `sane_restored_size` refuses a saved rectangle under. It is the same for every
+    /// tab, which is why there is no aggregate any more rather than an aggregate of one value:
+    /// activation cannot alternate a constraint that does not vary.
     ///
     /// The constraint goes to the frame rather than to `Window::set_min_inner_size`: winit 0.30
     /// implements that setter by re-requesting the current inner size, and re-requesting runs
@@ -8190,18 +8380,16 @@ impl Runtime {
     /// minimum through `WM_GETMINMAXINFO` instead, which asks for no resize at all.
     fn apply_window_min_inner_size(&mut self) -> Result<()> {
         let metrics = self.seat_metrics();
-        let minimum = aggregate_window_minimum(self.tabs.iter().map(|tab| {
-            tab.seats
-                .min_inner_size(&metrics, self.work_area)
-                .map(|size| (size.width.floor_px().max(1), size.height.floor_px().max(1)))
-        }));
+        let floor = self.seats.min_inner_size(&metrics, self.work_area);
+        let minimum = (
+            floor.width.floor_px().max(1),
+            floor.height.floor_px().max(1),
+        );
         if !window_minimum_changed(&mut self.window_min_inner_size, minimum) {
             return Ok(());
         }
         self.custom_window_frame
-            .set_min_client_size(
-                minimum.map(|(width, height)| (width.max(0) as u32, height.max(0) as u32)),
-            )
+            .set_min_client_size(Some((minimum.0.max(0) as u32, minimum.1.max(0) as u32)))
             .map_err(|error| anyhow!(error))
             .context("apply the window's minimum client size")
     }
@@ -8647,7 +8835,7 @@ impl Runtime {
                 .math_worker
                 .tasks
                 .send(MathWorkerRequest::PeekImage {
-                    tab_id: self.id,
+                    leaf: self.focused_leaf_id(),
                     path,
                 })
                 .is_ok()
@@ -8717,7 +8905,7 @@ impl Runtime {
             .math_worker
             .scale_tasks
             .send(ScaleWorkerRequest::Preview {
-                tab_id: self.id,
+                leaf: self.focused_leaf_id(),
                 task,
             })
             .is_ok()
@@ -8856,9 +9044,8 @@ impl Runtime {
         let active = self.active_tab;
         let tasks = self.math_worker.tasks.clone();
         let scale_tasks = self.math_worker.scale_tasks.clone();
-        dispatch_pending_math_tasks(
-            self.tabs[active].id,
-            &mut self.tabs[active].session,
+        dispatch_tab_decoration_tasks(
+            &mut self.tabs[active],
             &tasks,
             &scale_tasks,
             &mut self.math_worker_running,
@@ -8892,9 +9079,8 @@ impl Runtime {
             return Ok(false);
         }
         if self.session.schedule_visible_artifacts(&terminal_frame) != 0 {
-            dispatch_pending_math_tasks(
-                self.tabs[active].id,
-                &mut self.tabs[active].session,
+            dispatch_tab_decoration_tasks(
+                &mut self.tabs[active],
                 &tasks,
                 &scale_tasks,
                 &mut self.math_worker_running,
@@ -8973,6 +9159,18 @@ impl Runtime {
         Ok(true)
     }
 
+    /// The address of the shell under the keyboard.
+    ///
+    /// The peek and the preview are window-level affordances whose answers land in app-side
+    /// caches rather than in any session, so the seat they carry only distinguishes one request
+    /// from another; naming the focused leaf keeps that address a real one.
+    fn focused_leaf_id(&self) -> LeafId {
+        LeafId {
+            tab: self.id,
+            seat: self.focused_leaf,
+        }
+    }
+
     fn disable_math_worker(&mut self) -> bool {
         disable_math_worker_state(
             &mut self.math_worker_running,
@@ -8985,20 +9183,27 @@ impl Runtime {
         loop {
             match self.math_worker.results.try_recv() {
                 Ok(completion) => {
-                    let target_index = self.tabs.iter().position(|tab| tab.id == completion.tab_id);
+                    let leaf = completion.leaf;
+                    let target_index = self.tabs.iter().position(|tab| tab.id == leaf.tab);
                     let target_active = target_index == Some(self.active_tab);
+                    // The answer goes back to the shell that asked for it. Since U12 that is a
+                    // seat and not merely a tab: routing through the tab's `Deref` handed every
+                    // pane's work to whichever pane happened to hold the keyboard when it landed.
+                    // A pane closed while its work was in flight simply has no session to take it.
                     changed |= match completion.completion {
                         DecorationWorkerCompletion::Math { task, result } => match *task {
                             SessionMathTask::Frozen(task) => target_index.is_some_and(|index| {
-                                let applied = self.tabs[index]
-                                    .session
-                                    .complete_worker_result(task, result);
+                                let applied = leaf_session_mut(&mut self.tabs, index, leaf.seat)
+                                    .is_some_and(|session| {
+                                        session.complete_worker_result(task, result)
+                                    });
                                 target_active && applied
                             }),
                             SessionMathTask::Live(task) => target_index.is_some_and(|index| {
-                                let applied = self.tabs[index]
-                                    .session
-                                    .complete_live_worker_result(task, result);
+                                let applied = leaf_session_mut(&mut self.tabs, index, leaf.seat)
+                                    .is_some_and(|session| {
+                                        session.complete_live_worker_result(task, result)
+                                    });
                                 target_active && applied
                             }),
                         },
@@ -9007,16 +9212,19 @@ impl Runtime {
                                 self.remember_decode_for_peek(&task, result.as_ref().ok());
                             }
                             target_index.is_some_and(|index| {
-                                let applied = self.tabs[index]
-                                    .session
-                                    .complete_inline_image_result(task, result);
+                                let applied = leaf_session_mut(&mut self.tabs, index, leaf.seat)
+                                    .is_some_and(|session| {
+                                        session.complete_inline_image_result(task, result)
+                                    });
                                 target_active && applied
                             })
                         }
                         DecorationWorkerCompletion::ScaleInlineImage { scaled } => target_index
                             .is_some_and(|index| {
-                                let applied =
-                                    self.tabs[index].session.complete_inline_image_scale(scaled);
+                                let applied = leaf_session_mut(&mut self.tabs, index, leaf.seat)
+                                    .is_some_and(|session| {
+                                        session.complete_inline_image_scale(scaled)
+                                    });
                                 target_active && applied
                             }),
                         DecorationWorkerCompletion::PeekImage { path, result } => {
@@ -9050,9 +9258,8 @@ impl Runtime {
         let active = self.active_tab;
         let tasks = self.math_worker.tasks.clone();
         let scale_tasks = self.math_worker.scale_tasks.clone();
-        dispatch_pending_math_tasks(
-            self.tabs[active].id,
-            &mut self.tabs[active].session,
+        dispatch_tab_decoration_tasks(
+            &mut self.tabs[active],
             &tasks,
             &scale_tasks,
             &mut self.math_worker_running,
@@ -9077,9 +9284,8 @@ impl Runtime {
             let active = self.active_tab;
             let tasks = self.math_worker.tasks.clone();
             let scale_tasks = self.math_worker.scale_tasks.clone();
-            let disabled = dispatch_pending_math_tasks(
-                self.tabs[active].id,
-                &mut self.tabs[active].session,
+            let disabled = dispatch_tab_decoration_tasks(
+                &mut self.tabs[active],
                 &tasks,
                 &scale_tasks,
                 &mut self.math_worker_running,
@@ -9636,22 +9842,15 @@ impl Runtime {
             if next_grid == leaf.grid && next_grid == leaf.conpty_grid {
                 continue;
             }
-            leaf.session
-                .resize(
-                    nonzero_u32(next_grid.columns.get()),
-                    nonzero_u32(next_grid.rows.get()),
-                )
-                .context("resize an unfocused pane's terminal actor for a seat layout change")?;
-            leaf.grid = next_grid;
-            let shell_input_region_open = leaf.session.shell_input_region_open();
-            if let Some(pty) = leaf.pty.as_mut() {
-                pty.resize(pty_size(next_grid, physical))
-                    .context("resize an unfocused pane's ConPTY")?;
-            }
-            replace_psreadline_resize_reanchor_debt(
+            commit_unfocused_leaf_resize(
+                &mut leaf.session,
+                leaf.pty.as_mut(),
                 &mut leaf.pending_psreadline_resize_reanchor,
-                shell_input_region_open,
-            );
+                next_grid,
+                physical,
+                observed_at,
+            )?;
+            leaf.grid = next_grid;
             leaf.conpty_grid = next_grid;
         }
         // A seat the solver could not place has no rectangle, so there is no
@@ -10093,7 +10292,7 @@ impl Runtime {
                         .math_worker
                         .tasks
                         .send(MathWorkerRequest::PeekImage {
-                            tab_id: self.id,
+                            leaf: self.focused_leaf_id(),
                             path,
                         })
                         .is_ok()
@@ -10129,7 +10328,10 @@ impl Runtime {
             .math_worker
             .scale_tasks
             .send(ScaleWorkerRequest::Peek {
-                tab_id: self.id,
+                leaf: LeafId {
+                    tab: self.id,
+                    seat: candidate.seat,
+                },
                 task: peek_scale_task(&target, native_rgba, native_width_px, native_height_px),
             })
             .is_ok()
@@ -11683,10 +11885,14 @@ impl Runtime {
         let id = TabId(self.next_tab_id);
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
         let renderer = &self.renderer;
+        // Copied out before the two-tab borrow: the merged layout lands in this
+        // same window, so it answers to whoever owns this window's size.
+        let policy = self.size_policy;
         let (from, into) = two_tabs_mut(&mut self.tabs, index, self.active_tab);
         let ejected =
             absorb_tab_into_layout(from, into, arrived, displaced.as_ref(), id, |seats| {
-                let (layout, overflow, _, _) = solve_seats(seats, renderer, render_physical);
+                let (layout, overflow, _, _) =
+                    solve_seats(seats, renderer, render_physical, policy);
                 (layout, overflow)
             });
         debug_assert!(
@@ -11742,6 +11948,7 @@ impl Runtime {
         let renderer = &self.renderer;
         let source = self.active_tab;
         let motion = self.motion;
+        let policy = self.size_policy;
         let torn = tear_pane_into_tab(
             &mut self.tabs[source],
             &metrics,
@@ -11750,7 +11957,8 @@ impl Runtime {
             Instant::now(),
             motion,
             |seats| {
-                let (layout, overflow, _, _) = solve_seats(seats, renderer, render_physical);
+                let (layout, overflow, _, _) =
+                    solve_seats(seats, renderer, render_physical, policy);
                 (layout, overflow)
             },
         );
@@ -13012,6 +13220,8 @@ impl Runtime {
         if physical.width == 0 || physical.height == 0 {
             return Ok(());
         }
+        // Before anything solves: a rectangle this process did not ask for is the user's, and
+        // from here on their minima are advice (user ruling 2026-08-08).
         self.defer_preview_resample(Instant::now());
         // Both halves of a visible flyout belong to the viewport that produced them: the anchor is
         // a physical point on the old surface, and the raster was sized to the old pane. A resize
@@ -13068,10 +13278,33 @@ impl Runtime {
         self.redraw()
     }
 
+    /// A scale change hands the layout a *logical* rectangle no hand chose.
+    ///
+    /// The physical window on screen is still the user's and still the size they left it; the
+    /// rectangle the solver works in is not, because it was computed from a scale factor that
+    /// arrived from the system. So the program takes the layout back (user ruling 2026-08-08, DPI
+    /// adjudicated as a program event) and the seats fold rather than turn into slivers. One drag
+    /// of the frame returns it, which is the whole of what "advice" means here.
+    ///
+    /// Claimed *before* the resize below, and with the size that resize will carry, so the
+    /// `Resized` Windows sends alongside every `WM_DPICHANGED` is recognised as this program's own
+    /// rather than read as a hand on the frame.
     fn scale_factor_changed(&mut self) -> Result<()> {
+        self.claim_lawful_layout();
         self.defer_preview_resample(Instant::now());
         self.reconcile_authoritative_dpi("scale-factor-changed")?;
         self.resize(self.window.inner_size())
+    }
+
+    /// The *program* is about to change the rectangle, so the layout it produces is held to the
+    /// minima in full.
+    ///
+    /// Claims the next rectangle sight unseen rather than recording one now: at this point the
+    /// request has been made and the OS has not yet answered it, and predicting the answer is
+    /// exactly the guess this mechanism exists to avoid.
+    fn claim_lawful_layout(&mut self) {
+        self.size_policy = SizePolicy::Lawful;
+        self.lawful_client_size = None;
     }
 
     fn reconcile_authoritative_dpi(&mut self, stage: &'static str) -> Result<bool> {
@@ -13711,10 +13944,15 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
         };
         let startup_deadline =
             startup_poll_delay(runtime.first_text_presented).map(|delay| now + delay);
+        // Every leaf, not every tab's focused leaf: an unfocused pane runs its own resize
+        // transaction and owes its own PSReadLine repair, so its quiescence is its own deadline to
+        // wake for. Reading this through the tab's deref asked only the pane holding the keyboard,
+        // and the panes beside it had to wait for some unrelated event to carry them over the line.
         let resize_finish_deadline = runtime
             .tabs
             .iter()
-            .filter_map(|tab| tab.session.resize_finish_deadline())
+            .flat_map(|tab| tab.leaves())
+            .filter_map(|(_, leaf)| leaf.session.resize_finish_deadline())
             .min();
         let synchronized_update_deadline = runtime
             .tabs
@@ -14577,6 +14815,7 @@ fn solve_seats(
     seats: &seats::Seats,
     renderer: &Renderer,
     render_physical: PhysicalSize<u32>,
+    policy: SizePolicy,
 ) -> (
     SeatLayout,
     Option<seats::FitOverflow>,
@@ -14590,7 +14829,11 @@ fn solve_seats(
         render_physical.height,
         seats::scale_ppm(dpi_milli),
     );
-    let (layout, overflow) = match seats.solve(viewport, &metrics) {
+    // Under `Sovereign` the solver has no way to fail, so `fit_what_fits` is
+    // unreachable from a window the user sized — which is the ruling: the fold
+    // is the program's answer to a rectangle it chose, not an answer anyone
+    // gets for dragging their own window narrow.
+    let (layout, overflow) = match seats.solve(viewport, &metrics, policy) {
         Ok(layout) => (layout, None),
         Err(_) => seats::fit_what_fits(seats, viewport, &metrics),
     };
@@ -16861,25 +17104,109 @@ mod tests {
         assert_eq!(resolved_theme_change(Dark, OsLight), None);
     }
 
+    /// **Whose size is it** (user ruling 2026-08-08), as the three rules that decide it.
+    ///
+    /// Windows delivers the same `Resized` event for a hand on the frame, for a window created at
+    /// a restored size, and for the resize that rides along with a DPI change. Only the first is a
+    /// user saying "this is my size"; getting that wrong either folds a window somebody dragged
+    /// narrow or leaves a restored-too-small session showing slivers.
+    #[test]
+    fn a_resize_is_the_users_unless_the_program_asked_for_it() {
+        let opened = PhysicalSize::new(1600, 900);
+        let dragged = PhysicalSize::new(700, 400);
+
+        // ① Startup, exactly as it really arrives. `Runtime::create` leaves a standing claim and
+        // the first rectangle answers it — whatever the OS made of the request. Repeat deliveries
+        // of that same rectangle change nothing, so a session restored into a window too small for
+        // its tree still folds.
+        let (mut policy, mut claimed) = (SizePolicy::Lawful, None);
+        for _ in 0..3 {
+            (policy, claimed) = size_authority_for_rectangle(policy, claimed, opened);
+        }
+        assert_eq!(
+            claimed,
+            Some(opened),
+            "the pending claim adopted the opening rectangle"
+        );
+        assert_eq!(
+            policy,
+            SizePolicy::Lawful,
+            "a restored session must still fold; startup is not a gesture"
+        );
+
+        // ② A rectangle we did not ask for is a hand on the frame.
+        (policy, claimed) = size_authority_for_rectangle(policy, claimed, dragged);
+        assert_eq!(policy, SizePolicy::Sovereign);
+        assert_eq!(
+            claimed,
+            Some(opened),
+            "the claim is not rewritten by a gesture"
+        );
+
+        // ③ Sovereignty is not handed back by coincidence. Dragging back through the opening size
+        // is not a change of mind about owning the window.
+        let (back, _) = size_authority_for_rectangle(policy, claimed, opened);
+        assert_eq!(
+            back,
+            SizePolicy::Sovereign,
+            "only a claim returns the layout to law"
+        );
+
+        // ④ ...and the claim is `claim_lawful_layout`, whose whole content is the pair below. A
+        // DPI change makes it *before* the new rectangle is known, so the resize Windows sends
+        // alongside `WM_DPICHANGED` is adopted rather than read as a drag — no matter what size it
+        // turns out to be, and no matter how many times it is announced.
+        let (mut policy, mut claimed) = (SizePolicy::Lawful, None);
+        let after_dpi = PhysicalSize::new(1050, 590);
+        for _ in 0..2 {
+            (policy, claimed) = size_authority_for_rectangle(policy, claimed, after_dpi);
+        }
+        assert_eq!((policy, claimed), (SizePolicy::Lawful, Some(after_dpi)));
+
+        // ⑤ The transient that made this rule necessary: winit announced 826x1271 at startup while
+        // the window's own inner size was 800x1200. Judging on the presentation rectangle — the
+        // number the solver is actually handed — never sees it.
+        let (policy, _) = size_authority_for_rectangle(
+            SizePolicy::Lawful,
+            Some(PhysicalSize::new(800, 1200)),
+            PhysicalSize::new(800, 1200),
+        );
+        assert_eq!(policy, SizePolicy::Lawful);
+    }
+
     #[test]
     fn repeated_tab_switches_do_not_feed_window_chrome_back_into_inner_size() {
-        let first = Some((260, 160));
-        let second = Some((520, 240));
-        let aggregate = aggregate_window_minimum([first, second]);
-        assert_eq!(aggregate, Some((520, 240)));
+        // The 2026-08-08 ruling closed this regression at the source: the minimum is the technical
+        // floor, so it is the same number for every tab and there is no aggregate left to
+        // alternate. The guard stays anyway — it is what keeps a *re-applied* minimum from being
+        // handed to the frame at all, and winit's setter is still the setter it was.
+        let metrics = seats::seat_metrics(1_000);
+        let work_area = WorkAreaHint::Known(bt_layout::LogicalSize::px(2560, 1440));
+        let floor = |seats: &seats::Seats| {
+            let size = seats.min_inner_size(&metrics, work_area);
+            (size.width.floor_px().max(1), size.height.floor_px().max(1))
+        };
+        let lone = seats::Seats::lone_terminal();
+        let mut four = seats::Seats::lone_terminal();
+        for _ in 0..3 {
+            let target = four.terminal();
+            four.split_terminal(&metrics, target, Axis::Row, false)
+                .expect("a terminal leaf splits");
+        }
+        assert_eq!(
+            floor(&lone),
+            floor(&four),
+            "four columns do not get to decide how small the window may be"
+        );
 
         let mut applied = None;
-        assert!(window_minimum_changed(&mut applied, aggregate));
+        assert!(window_minimum_changed(&mut applied, floor(&lone)));
         let mut mock_inner_size = PhysicalSize::new(960, 600);
         let stable_inner_size = mock_inner_size;
 
         for switch in 0..32 {
-            let sizes = if switch % 2 == 0 {
-                [first, second]
-            } else {
-                [second, first]
-            };
-            if window_minimum_changed(&mut applied, aggregate_window_minimum(sizes)) {
+            let showing = if switch % 2 == 0 { &lone } else { &four };
+            if window_minimum_changed(&mut applied, floor(showing)) {
                 // Model the winit 0.30 Windows behavior that exposed the regression: every setter
                 // call re-requests the current client size through non-client adjustment.
                 mock_inner_size.height += 40;
@@ -17866,6 +18193,84 @@ mod tests {
         );
     }
 
+    /// The resting dots belong to every pane; only the upgrade belongs to the pointer.
+    ///
+    /// `apply_hover_marks` is the hover half, and both build points run it for `hover_pane` alone
+    /// — `publish_frame_inner` for the focused leaf, `redraw` for the rest. The resting dotted
+    /// underline is projection's, applied inside `viewport_frame` for whichever leaf is being
+    /// built, which is what lets a pane the pointer has never entered still advertise its links.
+    ///
+    /// Both branches are walked here the way `redraw` walks them: project, then offer the hover
+    /// marks only to the pane under the pointer. Move the resting mark into `apply_hover_marks`,
+    /// or gate projection on the hovered leaf, and the quiet pane's link comes out bare.
+    #[test]
+    fn a_pane_the_pointer_never_entered_still_wears_the_resting_link_dots() {
+        let link = b"\x1b]8;;https://actual.example/login\x1b\\docs\x1b]8;;\x1b\\";
+        let pane = || {
+            let mut session =
+                DualPlaneSession::new(NonZeroU32::new(24).unwrap(), NonZeroU32::new(2).unwrap());
+            session.feed(link).unwrap();
+            let projection = session.new_projection(session.layout_key());
+            (session, projection)
+        };
+        let dots = |frame: &ViewportFrame| {
+            frame.cells[..4]
+                .iter()
+                .filter(|cell| {
+                    cell.style
+                        .flags
+                        .contains(bt_transcript::CellFlags::DOTTED_UNDERLINE)
+                })
+                .count()
+        };
+        let solid = |frame: &ViewportFrame| {
+            frame.cells[..4]
+                .iter()
+                .filter(|cell| {
+                    cell.style
+                        .flags
+                        .contains(bt_transcript::CellFlags::UNDERLINE)
+                })
+                .count()
+        };
+
+        // The pane nobody has pointed at: projected, and then left alone.
+        let (quiet_session, mut quiet_projection) = pane();
+        quiet_session.refresh_projection(&mut quiet_projection);
+        let quiet = quiet_session.viewport_frame(&mut quiet_projection).unwrap();
+        assert_eq!(
+            dots(&quiet),
+            4,
+            "a link in a pane the pointer has never entered still wears its resting dots"
+        );
+        assert_eq!(
+            solid(&quiet),
+            0,
+            "and wears nothing the pointer is supposed to have brought"
+        );
+
+        // The pane under the pointer: projected, and then decorated.
+        let (hovered_session, mut hovered_projection) = pane();
+        hovered_session.refresh_projection(&mut hovered_projection);
+        let mut hovered = hovered_session
+            .viewport_frame(&mut hovered_projection)
+            .unwrap();
+        let hit = hovered
+            .hyperlink_at(0, 1)
+            .expect("the link is under the pointer");
+        assert!(hovered.underline_hyperlink(&hit));
+        assert_eq!(
+            solid(&hovered),
+            4,
+            "the pane under the pointer upgrades the same link to a solid underline"
+        );
+        assert_eq!(
+            dots(&hovered),
+            0,
+            "and the upgrade replaces the dots rather than doubling them"
+        );
+    }
+
     struct PtyPresentationHarness {
         session: DualPlaneSession,
         projection: ViewportProjection,
@@ -18485,7 +18890,7 @@ mod tests {
         let mut notice_pending = false;
 
         assert!(dispatch_pending_math_tasks(
-            TabId(1),
+            probe_leaf(),
             &mut session,
             &tasks,
             &scale_tasks,
@@ -18510,7 +18915,7 @@ mod tests {
         assert!(!notice_pending);
         assert_eq!(take_math_worker_notice(&mut notice_pending), None);
         assert!(!dispatch_pending_math_tasks(
-            TabId(1),
+            probe_leaf(),
             &mut session,
             &tasks,
             &scale_tasks,
@@ -18544,14 +18949,14 @@ mod tests {
         for width in 1..=128 {
             sender
                 .send(ScaleWorkerRequest::Preview {
-                    tab_id: TabId(1),
+                    leaf: probe_leaf(),
                     task: scale_task("same-path", width),
                 })
                 .unwrap();
         }
         sender
             .send(ScaleWorkerRequest::Peek {
-                tab_id: TabId(1),
+                leaf: probe_leaf(),
                 task: scale_task("same-path", 17),
             })
             .unwrap();
@@ -18616,13 +19021,13 @@ mod tests {
         let (tasks, task_receiver) = mpsc::channel();
         let (scale_tasks, scale_receiver) = mpsc::channel();
         assert!(dispatch_decoration_task(
-            TabId(1),
+            probe_leaf(),
             SessionDecorationTask::ScaleInlineImage(scale_task("same-path", 128)),
             &tasks,
             &scale_tasks,
         ));
         assert!(dispatch_decoration_task(
-            TabId(1),
+            probe_leaf(),
             SessionDecorationTask::InlineImage(bt_term::InlineImageTask {
                 occurrence_id: 7,
                 source: bt_term::InlineImageSource::LocalPath(PathBuf::from("same-path.png")),
@@ -19033,6 +19438,62 @@ mod tests {
         );
     }
 
+    /// A debt an unfocused pane records has to be a debt it can pay.
+    ///
+    /// `finish_resize_if_quiescent` skips any leaf whose transaction has not gone quiet, and a
+    /// transaction cannot go quiet until a final request has been sent — `quiescence_deadline`
+    /// answers `None` until then, so `is_quiescent_at` is false at every instant there is. Commit
+    /// one unfocused leaf's resize exactly as the layout solve does, then run the clock the way
+    /// the event loop does; the chord has to come out the other side.
+    ///
+    /// Withhold the reconcile from `commit_unfocused_leaf_resize` and this goes red at the
+    /// deadline: that is the shape of the bug, where every pane but the focused one banked a
+    /// repair it would never be allowed to pay and kept a PSReadLine anchor a size out of date.
+    #[test]
+    fn an_unfocused_leaf_resize_reaches_the_quiescence_that_pays_its_reanchor_debt() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24));
+        session
+            .feed_at(b"\x1b]133;A\x07PS> \x1b]133;B\x07", start)
+            .unwrap();
+        assert!(
+            session.shell_input_region_open(),
+            "the fixture has to leave a prompt open, or there is no debt to test"
+        );
+
+        let mut pending = false;
+        commit_unfocused_leaf_resize(
+            &mut session,
+            None,
+            &mut pending,
+            grid_of(60, 24),
+            PhysicalSize::new(480, 600),
+            start,
+        )
+        .unwrap();
+        assert!(pending, "a reflowed open prompt owes one repair");
+
+        let deadline = session.resize_finish_deadline().expect(
+            "an unfocused leaf's committed resize must arm a quiescence deadline, or the debt it \
+             just recorded can never be paid",
+        );
+        assert!(
+            !session
+                .finish_resize_if_quiescent(deadline - Duration::from_millis(1))
+                .unwrap(),
+            "the transaction is still open one millisecond early"
+        );
+        assert!(
+            session.finish_resize_if_quiescent(deadline).unwrap(),
+            "the transaction closes at its own deadline"
+        );
+        assert_eq!(
+            take_psreadline_resize_reanchor_input(&mut pending, session.shell_input_region_open()),
+            Some(PSREADLINE_INVOKE_PROMPT_INPUT),
+            "the pane nobody is watching gets the same anchor repair as the focused one"
+        );
+    }
+
     #[test]
     fn window_resize_coalescer_keeps_only_the_last_size_and_resets_quiet_deadline() {
         let start = Instant::now();
@@ -19076,7 +19537,7 @@ mod tests {
             render_physical.height,
             seats::scale_ppm(dpi_milli),
         );
-        let layout = match seats.solve(viewport, &metrics) {
+        let layout = match seats.solve(viewport, &metrics, SizePolicy::Lawful) {
             Ok(layout) => layout,
             Err(_) => seats::fit_what_fits(seats, viewport, &metrics).0,
         };
@@ -19289,7 +19750,7 @@ mod tests {
             seats::scale_ppm(dpi_milli),
         );
         let layout = seats
-            .solve(viewport, &metrics)
+            .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("a 1600x900 window divides four to one");
         (seats, layout)
     }
@@ -19509,6 +19970,14 @@ mod tests {
 
         fn wake_deadline(&self, now: Instant) -> Option<Instant> {
             pty_resize_wake_deadline(self.pending, self.deferring(), now)
+        }
+    }
+
+    /// One shell's address, for the dispatch probes that only care that work is routed somewhere.
+    fn probe_leaf() -> LeafId {
+        LeafId {
+            tab: TabId(1),
+            seat: SeatId(1),
         }
     }
 
@@ -20994,11 +21463,15 @@ mod tests {
         let viewport = seats::logical_viewport(1600, 900, seats::scale_ppm(1_000));
         let mut seats = seats::Seats::lone_terminal();
         let survivor = seats.terminal();
-        let before = seats.solve(viewport, &metrics).expect("a lone leaf solves");
+        let before = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("a lone leaf solves");
         let arriving = seats
             .split_terminal(&metrics, survivor, bt_layout::Axis::Row, leading)
             .expect("a 1600x900 window divides");
-        let after = seats.solve(viewport, &metrics).expect("the split solves");
+        let after = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("the split solves");
         (seats, before, after, survivor, arriving)
     }
 
@@ -21130,7 +21603,7 @@ mod tests {
         let before = split;
         assert!(seats.close_seat(&metrics, arriving), "the left pane closes");
         let after = seats
-            .solve(viewport, &metrics)
+            .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("the survivor solves");
 
         let mut motion = PaneMotion::default();
@@ -21223,7 +21696,9 @@ mod tests {
             "the drag has to actually write a ratio, or this assertion is about \
              a refusal instead of about the gate"
         );
-        let dragged = seats.solve(viewport, &metrics).expect("the drag solves");
+        let dragged = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("the drag solves");
         assert_ne!(
             pane_box_of(&dragged, survivor),
             pane_box_of(&split, survivor),
@@ -21248,9 +21723,9 @@ mod tests {
         let ladder = (200..900).step_by(4).find_map(|width| {
             let viewport = seats::logical_viewport(width, 600, seats::scale_ppm(1_000));
             narrow.set_focus(first);
-            let with_first = narrow.solve(viewport, &metrics).ok()?;
+            let with_first = narrow.solve(viewport, &metrics, SizePolicy::Lawful).ok()?;
             narrow.set_focus(second);
-            let with_second = narrow.solve(viewport, &metrics).ok()?;
+            let with_second = narrow.solve(viewport, &metrics, SizePolicy::Lawful).ok()?;
             (pane_rects_of(&with_first) != pane_rects_of(&with_second)).then_some(width)
         });
         let ladder = ladder.expect(
@@ -21261,9 +21736,13 @@ mod tests {
         let revision = narrow.structure_revision();
         let ladder_viewport = seats::logical_viewport(ladder, 600, seats::scale_ppm(1_000));
         narrow.set_focus(first);
-        let with_first = narrow.solve(ladder_viewport, &metrics).expect("solves");
+        let with_first = narrow
+            .solve(ladder_viewport, &metrics, SizePolicy::Lawful)
+            .expect("solves");
         assert!(narrow.set_focus(second), "focus moves");
-        let with_second = narrow.solve(ladder_viewport, &metrics).expect("solves");
+        let with_second = narrow
+            .solve(ladder_viewport, &metrics, SizePolicy::Lawful)
+            .expect("solves");
         assert_ne!(
             pane_rects_of(&with_first),
             pane_rects_of(&with_second),
@@ -21307,7 +21786,7 @@ mod tests {
         let (mut seats, _, split, survivor, arriving) = split_window(true);
         assert!(seats.close_seat(&metrics, arriving));
         let after = seats
-            .solve(viewport, &metrics)
+            .solve(viewport, &metrics, SizePolicy::Lawful)
             .expect("the survivor solves");
         let mut motion = PaneMotion::default();
         motion.begin(
@@ -21949,12 +22428,16 @@ mod tests {
             .expect("a 1600x900 window divides");
         assert!(seats.toggle_preview(&metrics), "the preview lands");
         let preview = seats.preview().expect("and it is in the tree");
-        let before = seats.solve(viewport, &metrics).expect("three panes solve");
+        let before = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("three panes solve");
         assert!(
             seats.close_seat(&metrics, first),
             "the leftmost pane closes"
         );
-        let after = seats.solve(viewport, &metrics).expect("two panes solve");
+        let after = seats
+            .solve(viewport, &metrics, SizePolicy::Lawful)
+            .expect("two panes solve");
 
         let was = pane_box_of(&before, preview);
         let is = pane_box_of(&after, preview);
@@ -22983,7 +23466,7 @@ mod tests {
     fn cross_solve(seats: &seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>) {
         (
             seats
-                .solve(cross_view(), &cross_metrics())
+                .solve(cross_view(), &cross_metrics(), SizePolicy::Lawful)
                 .expect("the constructed trees all fit 1600x900"),
             None,
         )
@@ -23082,6 +23565,100 @@ mod tests {
             layout,
             overflow,
         )
+    }
+
+    /// PIN — U12. **Every pane's decoration work is collected, not just the keyboard's.**
+    ///
+    /// A leaf queues its own worker tasks as its own bytes arrive — that half was always per pane.
+    /// Collecting them was not: dispatch went through the tab's `Deref`, asked the focused leaf for
+    /// its queue, and left every other pane's work sitting where it was written. The symptom was
+    /// not a slow pane but a silent one. A file reference wears its resting dotted underline only
+    /// once the worker has *verified* the file, so an unfocused pane's references stayed bare
+    /// forever — until a hover opened the same file by the peek's road and the dots appeared, which
+    /// is what made the affordance look like something hovering granted rather than something every
+    /// pane is owed.
+    ///
+    /// Two shells, both naming a file, only one holding the keyboard. Dispatch the tab and read the
+    /// wire: both seats must be addressed. Route it through `tab.session` again and the unfocused
+    /// seat never appears.
+    #[test]
+    fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
+        let directory = std::env::temp_dir().join("bt-leaf-dispatch-pin");
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("shot.png");
+        std::fs::write(&path, [0u8; 16]).unwrap();
+
+        let mut tab = cross_tab(1, &["one", "two"]);
+        let seats = tab.seats.terminals();
+        assert_eq!(seats.len(), 2, "the fixture is a split tab");
+        let started = Instant::now();
+        for (_, leaf) in tab.leaves_mut() {
+            leaf.session.set_math_layout_options(MathLayoutOptions {
+                detect_image_paths: true,
+                ..MathLayoutOptions::default()
+            });
+            // Wide enough that the absolute path is one unwrapped line for the detector — and
+            // carried through the real transaction, because a resize left open withholds every
+            // decoration for as long as it stays open (`decorations_allowed`).
+            commit_unfocused_leaf_resize(
+                &mut leaf.session,
+                None,
+                &mut leaf.pending_psreadline_resize_reanchor,
+                grid_of(200, 8),
+                PhysicalSize::new(1600, 200),
+                started,
+            )
+            .unwrap();
+            let settled = leaf
+                .session
+                .resize_finish_deadline()
+                .expect("the committed resize arms its own quiescence");
+            leaf.session.finish_resize_if_quiescent(settled).unwrap();
+            leaf.session
+                .feed_at(
+                    format!("[Image: source: \"{}\"]\r\nprompt", path.display()).as_bytes(),
+                    settled,
+                )
+                .unwrap();
+            leaf.session
+                .advance_live_stability(settled + Duration::from_secs(1));
+        }
+
+        let (tasks, requests) = mpsc::channel();
+        let (scale_tasks, _scale_requests) = mpsc::channel();
+        let mut running = true;
+        let mut notice_pending = false;
+        assert!(
+            !dispatch_tab_decoration_tasks(
+                &mut tab,
+                &tasks,
+                &scale_tasks,
+                &mut running,
+                &mut notice_pending,
+            ),
+            "a live worker is not downgraded by an ordinary dispatch"
+        );
+
+        let addressed = requests
+            .try_iter()
+            .map(|request| match request {
+                MathWorkerRequest::Math { leaf, .. }
+                | MathWorkerRequest::InlineImage { leaf, .. }
+                | MathWorkerRequest::PeekImage { leaf, .. } => leaf,
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            addressed,
+            seats
+                .iter()
+                .map(|seat| LeafId {
+                    tab: tab.id,
+                    seat: *seat
+                })
+                .collect::<std::collections::BTreeSet<_>>(),
+            "every pane's file reference reaches the worker under its own seat, so every pane can \
+             earn the resting underline the focused one earns"
+        );
     }
 
     /// PIN — U12. **Every terminal leaf reaches the seat list, every frame.**

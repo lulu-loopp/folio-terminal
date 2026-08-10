@@ -27,7 +27,7 @@
 //!
 //! ```
 //! use bt_layout::{Axis, LayoutMode, LayoutNode, LogicalRect, Seat, SeatId, SeatKind,
-//!                 SeatMetrics, SplitId, solve};
+//!                 SeatMetrics, SizePolicy, SplitId, solve};
 //!
 //! let tree = LayoutNode::split(
 //!     SplitId(1),
@@ -42,6 +42,7 @@
 //!     &metrics,
 //!     SeatId(2),
 //!     LayoutMode::Parallel,
+//!     SizePolicy::Lawful,
 //! )
 //! .expect("1200x800 fits a files column and a terminal");
 //!
@@ -66,7 +67,9 @@ pub use demand::{
 pub use edit::{Edit, EditError, EditOutcome, FocusSet, apply, necessity_holds, path_to_split};
 pub use geom::{Axis, AxisSet, DeviceRect, LogicalPx, LogicalRect, LogicalSize, SUBPIXELS_PER_PX};
 pub use metrics::{KindMetrics, SeatMetrics};
-pub use solve::{LayoutError, LayoutMode, Presentation, SeatLayout, SeatPlacement, solve};
+pub use solve::{
+    LayoutError, LayoutMode, Presentation, SeatLayout, SeatPlacement, SizePolicy, solve,
+};
 pub use tree::{ExtentClass, LayoutNode, Ratio, Seat, SeatId, SeatKind, SplitId};
 pub use window::{WorkAreaHint, window_min_inner_size};
 

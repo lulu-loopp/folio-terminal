@@ -8,10 +8,10 @@
 use bt_layout::{
     Axis, AxisSet, COLLAPSED_EXTENT, DIVIDER, Edit, EditError, FILES_W, FILES_W_MIN, LayoutError,
     LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize, MIN_PANE_H, MIN_PANE_W,
-    MIN_PREVIEW_W, Presentation, Ratio, Seat, SeatId, SeatKind, SeatLayout, SeatMetrics, SplitId,
-    WorkAreaHint, apply, collapse_order, demand, floor_demand, in_order_index, members,
-    necessity_holds, path_to_seat, run_demand, run_root_path_of_seat, run_split_ids, share_ppm,
-    solve, tree_distance, window_min_inner_size,
+    MIN_PREVIEW_W, Presentation, Ratio, Seat, SeatId, SeatKind, SeatLayout, SeatMetrics,
+    SizePolicy, SplitId, WorkAreaHint, apply, collapse_order, demand, floor_demand, in_order_index,
+    members, necessity_holds, path_to_seat, run_demand, run_root_path_of_seat, run_split_ids,
+    share_ppm, solve, tree_distance, window_min_inner_size,
 };
 
 // ---------------------------------------------------------------- fixtures --
@@ -44,8 +44,31 @@ fn viewport(w: i64, h: i64) -> LogicalRect {
     LogicalRect::from_px(w, h)
 }
 
+/// The program's own layouts, where every minimum is law and the whole
+/// concession chain of §2.6.1 is in force.
 fn solved(tree: &LayoutNode, view: LogicalRect, focus: u64) -> SeatLayout {
-    solve(tree, view, &m(), SeatId(focus), LayoutMode::Parallel).expect("layout should be solvable")
+    solve(
+        tree,
+        view,
+        &m(),
+        SeatId(focus),
+        LayoutMode::Parallel,
+        SizePolicy::Lawful,
+    )
+    .expect("layout should be solvable")
+}
+
+/// A rectangle the user's own hand chose, where the same minima are advice.
+fn solved_by_hand(tree: &LayoutNode, view: LogicalRect, focus: u64) -> SeatLayout {
+    solve(
+        tree,
+        view,
+        &m(),
+        SeatId(focus),
+        LayoutMode::Parallel,
+        SizePolicy::Sovereign,
+    )
+    .expect("a rectangle the user chose is never refused")
 }
 
 fn extent_px(layout: &SeatLayout, id: u64, axis: Axis) -> i64 {
@@ -78,10 +101,25 @@ fn row_run(n: u64) -> LayoutNode {
 #[test]
 fn solve_is_a_pure_function_of_its_inputs() {
     let tree = row(1, term(1), col(2, term(2), files(3)));
-    for (w, h) in [(1400, 900), (700, 400), (420, 260), (1, 1)] {
-        let first = solve(&tree, viewport(w, h), &m(), SeatId(1), LayoutMode::Parallel);
-        let second = solve(&tree, viewport(w, h), &m(), SeatId(1), LayoutMode::Parallel);
-        assert_eq!(first, second, "same input must give bit-identical output");
+    // Both policies: the ruling added an input to `solve`, not an escape from D1.
+    for policy in [SizePolicy::Lawful, SizePolicy::Sovereign] {
+        for (w, h) in [(1400, 900), (700, 400), (420, 260), (1, 1)] {
+            let once = |_| {
+                solve(
+                    &tree,
+                    viewport(w, h),
+                    &m(),
+                    SeatId(1),
+                    LayoutMode::Parallel,
+                    policy,
+                )
+            };
+            assert_eq!(
+                once(()),
+                once(()),
+                "same input must give bit-identical output"
+            );
+        }
     }
 }
 
@@ -416,13 +454,14 @@ fn a_dpi_change_rewrites_no_ratio() {
     // A scale change is a similarity transform: the same logical rectangles, and
     // device rectangles that simply scale.
     let view = viewport(1200, 700);
-    let at_100 = solve(&tree, view, &m(), SeatId(1), LayoutMode::Parallel).unwrap();
+    let at_100 = solved(&tree, view, 1);
     let at_200 = solve(
         &tree,
         view,
         &m().with_scale_ppm(2_000_000),
         SeatId(1),
         LayoutMode::Parallel,
+        SizePolicy::Lawful,
     )
     .unwrap();
     assert_eq!(at_100.logical_rects(), at_200.logical_rects());
@@ -533,6 +572,7 @@ fn entering_and_leaving_focus_mode_rewrites_no_ratio() {
         &m(),
         SeatId(1),
         LayoutMode::Focus { stage: SeatId(1) },
+        SizePolicy::Lawful,
     )
     .expect("the stage fits this viewport");
     assert_eq!(staged.get(SeatId(1)).unwrap().rect, Some(view));
@@ -767,8 +807,226 @@ fn the_focus_seat_is_the_last_to_fall_and_then_it_is_an_error() {
         &m(),
         SeatId(1),
         LayoutMode::Parallel,
+        SizePolicy::Lawful,
     );
     assert_eq!(err, Err(LayoutError::Unsatisfiable { axis: Axis::Row }));
+}
+
+// ------------------------- §2.6.6 the two authorities (ruling 2026-08-08) --
+
+/// Every seat is presented at full size, and the row they make tiles the
+/// viewport exactly: one divider between neighbours, first flush left, last
+/// flush right. A gap anywhere in that chain is the "中间夹缝" the ruling names.
+fn assert_tiles_without_a_seam(layout: &SeatLayout, view: LogicalRect, what: &str) {
+    let placed: Vec<_> = layout.presented().collect();
+    assert_eq!(
+        placed.len(),
+        layout.rects.len(),
+        "{what}: a seat went missing"
+    );
+    for (placement, rect) in &placed {
+        assert_eq!(
+            placement.presentation,
+            Presentation::Full,
+            "{what}: {:?} folded",
+            placement.id
+        );
+        assert!(
+            rect.right >= rect.left,
+            "{what}: {:?} inverted",
+            placement.id
+        );
+        assert!(
+            rect.bottom >= rect.top,
+            "{what}: {:?} inverted",
+            placement.id
+        );
+    }
+    assert_eq!(
+        placed[0].1.left, view.left,
+        "{what}: a gap at the leading edge"
+    );
+    assert_eq!(
+        placed.last().unwrap().1.right,
+        view.right,
+        "{what}: a gap at the trailing edge"
+    );
+    for pair in placed.windows(2) {
+        assert_eq!(
+            pair[1].1.left - pair[0].1.right,
+            DIVIDER,
+            "{what}: a seam between two seats"
+        );
+    }
+}
+
+#[test]
+fn a_hand_narrowing_the_window_scales_the_panes_and_folds_nothing() {
+    // Four columns want 1043px. The ruling says the hand may go on past that,
+    // all the way down, and see four narrowing panes rather than a row of bars.
+    let tree = row_run(4);
+    let mut previous = i64::MAX;
+    for w in (40..=1400).rev() {
+        let view = viewport(w, 600);
+        let layout = solved_by_hand(&tree, view, 1);
+        assert_tiles_without_a_seam(&layout, view, &format!("{w}px"));
+        let first = extent_px(&layout, 1, Axis::Row);
+        assert!(
+            first <= previous,
+            "a narrower window gave seat 1 a wider pane: {first} at {w}px after {previous}"
+        );
+        previous = first;
+    }
+
+    // At the bottom the four equal shares are four equal panes: the floors have
+    // relaxed out of the way entirely and the ratios are all that is left.
+    let view = viewport(101, 600);
+    let bottom = solved_by_hand(&tree, view, 1);
+    let widths: Vec<i64> = (1..=4)
+        .map(|id| extent_px(&bottom, id, Axis::Row))
+        .collect();
+    let (lo, hi) = (*widths.iter().min().unwrap(), *widths.iter().max().unwrap());
+    assert!(
+        hi - lo <= 1,
+        "four equal shares should divide a small room equally, got {widths:?}"
+    );
+    // And account for every subpixel: four panes plus three dividers is the
+    // whole room. Summing the floored widths would lose each pane's remainder,
+    // which is exactly the accounting error a seam is made of.
+    let exact: i64 = bottom
+        .presented()
+        .map(|(_, rect)| rect.extent(Axis::Row).subpixels())
+        .sum();
+    assert_eq!(
+        exact + 3 * DIVIDER.subpixels(),
+        view.extent(Axis::Row).subpixels(),
+        "the panes and their dividers are the viewport, exactly"
+    );
+}
+
+#[test]
+fn a_fixed_column_under_the_hand_gives_up_its_floor_too() {
+    // 170 is the files column's floor under law. Under the hand it is a
+    // preference, and a preference does not get to be the last thing standing
+    // while the terminal beside it is crushed.
+    let tree = row(1, files(1), term(2));
+    let wide = solved_by_hand(&tree, viewport(1200, 600), 2);
+    assert_eq!(extent_px(&wide, 1, Axis::Row), FILES_W.floor_px());
+
+    let squeezed = solved_by_hand(&tree, viewport(200, 600), 2);
+    let files_w = extent_px(&squeezed, 1, Axis::Row);
+    assert!(
+        files_w < FILES_W_MIN.floor_px(),
+        "the column should be under its floor at 200px, got {files_w}"
+    );
+    assert!(files_w > 0, "and still a real column, got {files_w}");
+}
+
+#[test]
+fn a_rectangle_the_user_chose_is_never_refused() {
+    let tree = row(1, term(1), row(2, term(2), term(3)));
+    for w in [200, 120, 60, 24, 8, 3, 1] {
+        for h in [400, 120, 40, 8, 1] {
+            let view = viewport(w, h);
+            assert!(
+                solve(
+                    &tree,
+                    view,
+                    &m(),
+                    SeatId(1),
+                    LayoutMode::Parallel,
+                    SizePolicy::Sovereign,
+                )
+                .is_ok(),
+                "{w}x{h} was refused to the hand that made it"
+            );
+            // Focus mode has the same two authorities.
+            assert!(
+                solve(
+                    &tree,
+                    view,
+                    &m(),
+                    SeatId(1),
+                    LayoutMode::Focus { stage: SeatId(1) },
+                    SizePolicy::Sovereign,
+                )
+                .is_ok(),
+                "{w}x{h} was refused a stage"
+            );
+        }
+    }
+    // The same rectangle, asked for by the program, still gets the honest no.
+    assert_eq!(
+        solve(
+            &tree,
+            viewport(60, 40),
+            &m(),
+            SeatId(1),
+            LayoutMode::Parallel,
+            SizePolicy::Lawful,
+        ),
+        Err(LayoutError::Unsatisfiable { axis: Axis::Row })
+    );
+}
+
+#[test]
+fn the_two_authorities_answer_the_same_rectangle_differently() {
+    // One tree, one viewport, two callers. This is the ruling in a single
+    // assertion pair: delete the policy branch in `plan_axis` and one of these
+    // two goes red whichever way the branch is deleted.
+    let tree = row_run(3);
+    let view = viewport(400, 600);
+
+    let lawful = solved(&tree, view, 1);
+    assert!(
+        lawful
+            .rects
+            .iter()
+            .any(|p| matches!(p.presentation, Presentation::Collapsed(_))),
+        "the program's own layout still folds"
+    );
+
+    let sovereign = solved_by_hand(&tree, view, 1);
+    assert!(
+        sovereign
+            .rects
+            .iter()
+            .all(|p| p.presentation == Presentation::Full),
+        "the user's own window does not"
+    );
+    assert_tiles_without_a_seam(&sovereign, view, "400px by hand");
+}
+
+#[test]
+fn a_squeeze_by_hand_and_release_round_trips_to_the_same_rects() {
+    // W1 tree conservation is not a Lawful-only promise. Relaxing the floors is
+    // a presentation decision like collapsing is, and it has to be as reversible.
+    let tree = col(1, row(2, term(1), files(2)), row(3, term(3), term(4)));
+    let roomy = viewport(1400, 900);
+    let before = solved_by_hand(&tree, roomy, 1);
+    let _ = solved_by_hand(&tree, viewport(90, 70), 1);
+    let after = solved_by_hand(&tree, roomy, 1);
+    assert_eq!(before, after, "the squeeze left a trace");
+}
+
+#[test]
+fn no_sovereign_rectangle_is_inverted_even_under_its_own_dividers() {
+    // Eight columns in 20 logical pixels: the seven dividers alone outweigh the
+    // room. The floors relax to nothing and the cuts pile up, which is a legal
+    // picture of an absurd window — but every rectangle still has its near edge
+    // on the correct side of its far edge.
+    let tree = row_run(8);
+    for w in [20, 10, 7, 4, 2, 1] {
+        let view = viewport(w, 30);
+        let layout = solved_by_hand(&tree, view, 1);
+        for (placement, rect) in layout.presented() {
+            assert!(
+                rect.right >= rect.left && rect.bottom >= rect.top,
+                "{:?} inverted at {w}px: {rect:?}",
+                placement.id
+            );
+        }
+    }
 }
 
 #[test]
@@ -796,59 +1054,56 @@ fn the_floor_is_the_focus_seats_own_minimum_plus_one_bar_per_sibling() {
 }
 
 #[test]
-fn the_window_minimum_follows_the_tree_and_never_exceeds_sixty_percent_of_the_workarea() {
-    let tree = row_run(4);
+fn the_window_minimum_is_one_pane_and_never_the_fleets_demand() {
     let chrome = LogicalSize::px(0, 40);
     let metrics = m();
+    let desk = WorkAreaHint::Known(LogicalSize::px(3840, 2160));
 
-    // Follows the tree when there is room for it to.
-    let big = window_min_inner_size(
-        &tree,
-        &metrics,
-        SeatId(1),
-        chrome,
-        WorkAreaHint::Known(LogicalSize::px(3840, 2160)),
-    )
-    .unwrap();
-    assert_eq!(big.width.floor_px(), 4 * 260 + 3, "demand(root) exactly");
+    // The technical floor: one terminal leaf plus chrome, and nothing else.
+    let min = window_min_inner_size(&metrics, chrome, desk);
+    assert_eq!(min.width, MIN_PANE_W);
+    assert_eq!(min.height.floor_px(), MIN_PANE_H.floor_px() + 40);
 
-    // Clamped at 60% when the tree outgrows the monitor: a window that suddenly
-    // refuses to be dragged smaller reads as a freeze.
-    let clamped = window_min_inner_size(
-        &tree,
-        &metrics,
-        SeatId(1),
-        chrome,
-        WorkAreaHint::Known(LogicalSize::px(1600, 900)),
-    )
-    .unwrap();
-    assert_eq!(clamped.width.floor_px(), 960);
-    assert!(clamped.width.floor_px() < 4 * 260 + 3);
-    assert_eq!(clamped.height.floor_px(), MIN_PANE_H.floor_px() + 40);
-
-    // tiny-window §4.2: the 60% ceiling must not become a missing floor. On a
-    // tiny monitor the answer is the honest "folded all the way down, the tree
-    // still needs this much".
-    let tiny = window_min_inner_size(
-        &tree,
-        &metrics,
-        SeatId(1),
-        chrome,
-        WorkAreaHint::Known(LogicalSize::px(400, 400)),
-    )
-    .unwrap();
+    // **The ruling, as one assertion.** Four columns want 1043px and are welcome
+    // to want it; the OS is told 260 all the same, so the hand can keep going and
+    // the panes shrink in proportion behind it. Put the fleet's demand back here
+    // — `demand(root) + chrome`, or a max over every tab's tree — and this line
+    // is the one that goes red.
+    let four = row_run(4);
     assert_eq!(
-        tiny.width,
-        floor_demand(&tree, Axis::Row, &metrics, SeatId(1)),
-        "never below the floor the concession chain can actually reach"
+        demand(&four, Axis::Row, &metrics).floor_px(),
+        4 * 260 + 3,
+        "the demand still exists and is still what Lawful layouts answer to"
     );
-    assert!(tiny.width.floor_px() > 240, "which is above 60% of 400");
+    for tree in [term(1), row_run(2), four, col(9, term(1), files(2))] {
+        let _ = &tree;
+        assert_eq!(
+            window_min_inner_size(&metrics, chrome, desk),
+            min,
+            "the window minimum is not a function of the tree at all"
+        );
+    }
 
-    // §4.4 ruling 2: with no work area ever observed, set no hint at all rather
-    // than lock the window with a guess.
+    // The 60% clamp survives for the case it was written for: a monitor small
+    // enough that even one pane is more than a window should demand.
+    let clamped = window_min_inner_size(
+        &metrics,
+        chrome,
+        WorkAreaHint::Known(LogicalSize::px(400, 300)),
+    );
+    assert_eq!(clamped.width.floor_px(), 240, "60% of 400, below one pane");
     assert_eq!(
-        window_min_inner_size(&tree, &metrics, SeatId(1), chrome, WorkAreaHint::NeverKnown),
-        None
+        clamped.height.floor_px(),
+        160,
+        "the clamp binds per axis: 60% of 300 is 180, and the floor is under it"
+    );
+
+    // No work area ever observed is no longer a reason to set no minimum: the
+    // floor is a constant, and it needs nothing to be trustworthy. Leaving the
+    // window unbounded is exactly the 157x25 rectangle this line refuses.
+    assert_eq!(
+        window_min_inner_size(&metrics, chrome, WorkAreaHint::NeverKnown),
+        min
     );
 }
 
@@ -921,39 +1176,92 @@ fn an_unknown_kind_degrades_per_leaf_into_a_visible_placeholder() {
 
 // ------------------------------------------------------------- §3.4 drags --
 
+/// User ruling 2026-08-08. The name is the overturned pin's own, negated: this
+/// used to be `a_drag_tighter_than_the_minimums_is_refused_with_zero_side_effects`.
 #[test]
-fn a_drag_tighter_than_the_minimums_is_refused_with_zero_side_effects() {
+fn a_drag_tighter_than_the_minimums_is_the_users_to_make() {
     let tree = row(1, term(1), term(2));
-    // 500 usable leaves 240 for the other side of a 260 minimum: infeasible.
-    let refused = apply(
-        &tree,
+    let drag = |requested: u32, usable: i64| {
+        apply(
+            &tree,
+            &m(),
+            &Edit::DragDivider {
+                split: SplitId(1),
+                requested: Ratio::from_ppm(requested).unwrap(),
+                usable: LogicalPx::px(usable),
+            },
+        )
+    };
+
+    // 500 usable leaves 50px for the other side of a 260 minimum. The old rule
+    // called that infeasible and made the divider go dead under the hand; the
+    // ruling calls it a 50px pane, which is what the user asked for.
+    let out = drag(900_000, 500).expect("a hand is not refused for wanting a narrow pane");
+    assert_eq!(ratio_of(&out.tree, 1).ppm(), 900_000, "the ratio asked for");
+    assert_eq!(
+        out.focus_set.splits(),
+        &[SplitId(1)],
+        "L9: one split, no rebalance"
+    );
+
+    // The same on a roomy slot, where the old clamp used to bite at 740_000.
+    let wide = drag(950_000, 1000).expect("always applicable");
+    assert_eq!(
+        ratio_of(&wide.tree, 1).ppm(),
+        950_000,
+        "no demand-derived ceiling is left to clamp against"
+    );
+
+    // What the type still forbids is a side of exactly nothing (红线 L4).
+    let extreme = drag(1, 500).expect("still a legal ratio");
+    assert_eq!(ratio_of(&extreme.tree, 1).ppm(), 1);
+    assert!(ratio_of(&extreme.tree, 1).ppm() > 0);
+
+    // Esc: the restore runs back through the very same edit, so the mechanism
+    // the app relies on has to be applicable at a ratio the drag reached.
+    let back = apply(
+        &out.tree,
         &m(),
         &Edit::DragDivider {
             split: SplitId(1),
-            requested: Ratio::from_ppm(900_000).unwrap(),
+            requested: Ratio::HALF,
             usable: LogicalPx::px(500),
         },
-    );
-    assert_eq!(refused, Err(EditError::Refused));
-
-    // Feasible: clamped into the band, and only that one split is in F.
-    let out = apply(
-        &tree,
-        &m(),
-        &Edit::DragDivider {
-            split: SplitId(1),
-            requested: Ratio::from_ppm(950_000).unwrap(),
-            usable: LogicalPx::px(1000),
-        },
     )
-    .expect("1000 usable leaves both sides their minimum");
-    assert_eq!(out.focus_set.splits(), &[SplitId(1)]);
-    assert_eq!(out.tree.ratios().len(), 1);
-    assert_eq!(
-        ratio_of(&out.tree, 1).ppm(),
-        740_000,
-        "clamped by the other side's demand"
-    );
+    .expect("the origin ratio is restorable from anywhere the drag went");
+    assert_eq!(ratio_of(&back.tree, 1), Ratio::HALF);
+}
+
+/// The program's side of the same coin: a drop is still judged, and still
+/// refused. `plan_fits` lives in `bt-app`, so what this pin holds is the input
+/// it judges — a `Lawful` solve that concedes rather than lies.
+#[test]
+fn a_fixed_column_drag_goes_where_the_hand_goes_but_never_leaves_its_slot() {
+    let tree = row(1, files(1), term(2));
+    let drag = |requested: i64, usable: i64| {
+        apply(
+            &tree,
+            &m(),
+            &Edit::DragFixedExtent {
+                split: SplitId(1),
+                requested: LogicalPx::px(requested),
+                usable: LogicalPx::px(usable),
+            },
+        )
+        .expect("a bare fixed leaf has a width to drag")
+        .tree
+        .find_seat(SeatId(1))
+        .and_then(|s| s.fixed_extent)
+        .expect("the drag wrote a width")
+    };
+
+    // Under FILES_W_MIN, which the old rule floored at 170.
+    assert_eq!(drag(60, 1000), LogicalPx::px(60));
+    // Past the other side's demand, which the old rule capped at usable - 260.
+    assert_eq!(drag(900, 1000), LogicalPx::px(900));
+    // Out of the slot, which is arithmetic rather than preference.
+    assert_eq!(drag(4000, 1000), LogicalPx::px(1000));
+    assert_eq!(drag(-50, 1000), LogicalPx::ZERO);
 }
 
 #[test]
@@ -1016,7 +1324,15 @@ fn adjacent_seats_share_one_boundary_and_a_long_chain_does_not_drift() {
     let tree = row_run(6);
     let metrics = m().with_scale_ppm(1_250_000);
     let view = viewport(1601, 900);
-    let layout = solve(&tree, view, &metrics, SeatId(1), LayoutMode::Parallel).unwrap();
+    let layout = solve(
+        &tree,
+        view,
+        &metrics,
+        SeatId(1),
+        LayoutMode::Parallel,
+        SizePolicy::Lawful,
+    )
+    .unwrap();
 
     let placed: Vec<_> = layout.presented().collect();
     for pair in placed.windows(2) {
@@ -1042,7 +1358,14 @@ fn no_solved_rectangle_is_ever_zero_area() {
     let mut solved_any = false;
     for w in [2000, 1200, 900, 700, 500, 400, 300] {
         for h in [1200, 800, 500, 300, 200, 150] {
-            match solve(&tree, viewport(w, h), &m(), SeatId(1), LayoutMode::Parallel) {
+            match solve(
+                &tree,
+                viewport(w, h),
+                &m(),
+                SeatId(1),
+                LayoutMode::Parallel,
+                SizePolicy::Lawful,
+            ) {
                 Ok(layout) => {
                     solved_any = true;
                     for (placement, rect) in layout.presented() {
