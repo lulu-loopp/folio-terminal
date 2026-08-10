@@ -22055,6 +22055,51 @@ mod tests {
         )
     }
 
+    /// PIN — U12. **Every terminal leaf reaches the seat list, every frame.**
+    ///
+    /// `redraw` builds its `SeatFrame` slice by walking `seats.terminals()`
+    /// through two `filter_map`/`let else` gates — a body viewport, a device
+    /// rectangle, and a session filed under that seat — and a seat that fails
+    /// any of the three is *silently skipped*. A skipped seat is a pane that is
+    /// simply never drawn: no error, no log, a hole in the window. Cheap to
+    /// reintroduce and, as the blank-second-pane bug showed, expensive to find
+    /// from a screenshot, because a pane that is never drawn and a pane that is
+    /// painted over look exactly alike.
+    ///
+    /// Pinned on the three gates rather than on the slice itself, because the
+    /// slice needs a GPU and these do not — and the gates are what a regression
+    /// would break. `cross_tab` builds its tree with the same `SplitSeat` edit
+    /// the split verb runs, so these are a real tab's ids and ratios.
+    #[test]
+    fn every_terminal_leaf_of_a_split_tab_can_be_drawn() {
+        let scale = seats::scale_ppm(CROSS_DPI) as f32 / 1_000_000.0;
+        for panes in 1..=4 {
+            let words: Vec<String> = (0..panes).map(|index| format!("pane {index}")).collect();
+            let texts: Vec<&str> = words.iter().map(String::as_str).collect();
+            let tab = cross_tab(1, &texts);
+            let terminals = tab.seats.terminals();
+            assert_eq!(terminals.len(), panes, "the tree really has {panes} shells");
+            assert!(
+                tab.sessions_match_terminals(),
+                "one shell per terminal leaf, and no leaf without one"
+            );
+            for seat in terminals {
+                assert!(
+                    seats::pane_body_viewport(&tab.seats, &tab.seat_layout, seat, scale).is_some(),
+                    "{seat:?} of a {panes}-pane tab has no body to draw into, so \
+                     `redraw` would skip it and leave a hole in the window"
+                );
+                assert!(
+                    tab.seat_layout
+                        .get(seat)
+                        .and_then(|placement| placement.device_rect)
+                        .is_some(),
+                    "{seat:?} of a {panes}-pane tab has no device rectangle"
+                );
+            }
+        }
+    }
+
     /// `commit_layout_drop`'s two lines that do not need a window: build the
     /// plan the preview drew, adopt exactly it (D4), and answer the renaming.
     fn cross_merge(

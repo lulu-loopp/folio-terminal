@@ -3084,6 +3084,37 @@ pub fn build_chrome_for_tabs(
     // first and reaches the real lists only through [`clip_pane_chrome`], which
     // is the one place the animating box is applied — a piece pushed straight
     // into `quads` would be a piece that escapes the clip.
+    // **F63/B22 — the card inset, resolved once for the whole frame.**
+    //
+    // The mock-up puts the card on the pane itself (`.slot.resizing .pane {
+    // margin: 5px; border-radius: 8px }`, 1465-1468): the *whole* box moves in,
+    // head included, and the `--panel` floor is what the gap reveals. It reaches
+    // the head only as a translation — `.panehead`'s own `height: 28px` and
+    // `padding` are never touched by the resizing state, so the caption keeps
+    // every pixel of its top padding while the box around it shrinks.
+    //
+    // Read here rather than only inside [`resizing_cards`] because both the pane
+    // loop below and the bands that function paints have to agree about where
+    // the card's edge is. They used not to: the pane was drawn at full size and
+    // the bands were laid over its outer margin afterwards, so the top band
+    // painted `--panel` across the head's top padding and the caption read as if
+    // it had been squashed against the ceiling. One answer, two readers.
+    let slots = seats.split_slots(layout);
+    let card_geometry = carded
+        .and_then(|cards| resizing_card_inset(scale, cards.inset).map(|inset| (cards, inset)))
+        .and_then(|(cards, inset)| {
+            slots
+                .iter()
+                .find(|slot| slot.id == cards.split)
+                .map(|slot| (*slot, inset))
+        });
+    // The card this pane is drawn in, or nothing when it is not being resized.
+    let card_rect_of = |id: SeatId, rect: [f32; 4]| -> Option<[f32; 4]> {
+        let (slot, (margin, radius)) = card_geometry?;
+        slot_contains(slot.slot, layout, id)
+            .then(|| resizing_card_rect(rect, margin, radius))
+            .flatten()
+    };
     let mut pane_quads = Vec::new();
     let mut pane_labels = Vec::new();
     let mut pane_sprites = Vec::new();
@@ -3158,17 +3189,50 @@ pub fn build_chrome_for_tabs(
                 // plus one. Rounded once, in `pane_head_geometry`, because
                 // `pane_body_viewport` and the hit test round the same product
                 // and the three must not round apart at a fractional scale.
-                let head = pane_head_geometry(rect, placement.kind, scale);
+                // **F63/B22 — the head rides the card, it is not cropped by it.**
+                //
+                // `box` is the pane's border box for *drawing*: the solved
+                // rectangle at rest, and the card while this pane is being
+                // resized. That is the whole of the mock-up's `margin: 5px`,
+                // which moves the box and leaves `.panehead { height: 28px }`
+                // alone — so the fill below is the same 27-plus-hairline it
+                // always was, and the caption keeps its top padding to the
+                // pixel. Only the corner it starts from moved.
+                //
+                // Deliberately *not* fed to `pane_body_viewport` or to the hit
+                // test, both of which keep reading the solved rectangle: a card
+                // is a hundred-millisecond paint, and R2/R3's rule is that
+                // nothing in flight is geometry. A grid that reflowed on the
+                // transition would hand ConPTY a resize per frame.
+                let head_box = card_rect_of(placement.id, rect).unwrap_or(rect);
+                let head = pane_head_geometry(head_box, placement.kind, scale);
                 let head_bottom = head.head[3];
                 let title_bottom = head.content_bottom;
-                if placement.id != seats.terminal() {
+                // The floor a seat that draws no body of its own stands on.
+                //
+                // Chrome is painted *after* the seat pass, so this quad covers
+                // whatever that pass put down — which is exactly right for a
+                // files column, a preview or a placeholder, and exactly wrong
+                // for a terminal. The test used to be `id != seats.terminal()`,
+                // written when a tab held one shell and that shell's seat was
+                // the only one with a picture to protect. U12 gave every
+                // Terminal leaf its own session, and the singular stayed: the
+                // second terminal of a split was floored over in `--termbg`
+                // (white, on the light theme) the instant its own text was
+                // drawn, which is why it came up blank while the tab's identity
+                // terminal beside it was fine.
+                //
+                // The honest predicate is the kind, not the identity: a seat
+                // gets a floor when it has no body pass of its own, and every
+                // terminal now has one.
+                if placement.kind != SeatKind::Terminal {
                     pane_quads.push(ChromeQuad {
-                        rect: [rect[0], head_bottom, rect[2], rect[3]],
+                        rect: [head_box[0], head_bottom, head_box[2], head_box[3]],
                         color: palette.seat_body,
                     });
                 }
                 pane_quads.push(ChromeQuad {
-                    rect: [rect[0], rect[1], rect[2], title_bottom],
+                    rect: [head_box[0], head_box[1], head_box[2], title_bottom],
                     color: palette.pane_head,
                 });
                 // The hairline that makes the bar a caption rather than a stripe.
@@ -3177,7 +3241,7 @@ pub fn build_chrome_for_tabs(
                 // own first row, which is the bug this reading fixes.
                 if title_bottom < head_bottom {
                     pane_quads.push(ChromeQuad {
-                        rect: [rect[0], title_bottom, rect[2], head_bottom],
+                        rect: [head_box[0], title_bottom, head_box[2], head_bottom],
                         color: palette.pane_head_edge,
                     });
                 }
@@ -3295,12 +3359,12 @@ pub fn build_chrome_for_tabs(
                     pane_labels.push(ChromeLabel {
                         text: message.to_owned(),
                         rect: [
-                            rect[0] + pad,
+                            head_box[0] + pad,
                             // Padded from the *body's* top, which is where the
                             // head's border box ends — not from its fill.
                             head_bottom + pad,
-                            rect[2] - pad,
-                            rect[3] - pad,
+                            head_box[2] - pad,
+                            head_box[3] - pad,
                         ],
                         font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                         color: palette.body_hint_text,
@@ -3352,7 +3416,6 @@ pub fn build_chrome_for_tabs(
             clip: None,
         });
     }
-    let slots = seats.split_slots(layout);
     // F63, and it is drawn before the dividers so the accent line and its grip
     // stay on top of the gap they are opening.
     //
@@ -3362,13 +3425,14 @@ pub fn build_chrome_for_tabs(
     // split nobody is holding. A split that has since left the tree finds no slot
     // here and draws nothing, which is the honest answer: there is no rectangle
     // left to inset.
-    if let Some(cards) = carded
-        && let Some((margin, radius)) = resizing_card_inset(scale, cards.inset)
-        && let Some(slot) = slots.iter().find(|slot| slot.id == cards.split)
-    {
+    //
+    // The slot and the inset were resolved once at the top of this function, for
+    // the pane loop above and for these bands: the head is drawn *inside* the
+    // card, so the bands fill a gap rather than paint over a caption.
+    if let Some((slot, (margin, radius))) = card_geometry {
         resizing_cards(
             layout,
-            *slot,
+            slot,
             (margin, radius),
             palette,
             &mut quads,
@@ -3595,6 +3659,28 @@ pub fn resizing_card_inset(scale: f32, inset: f32) -> Option<(f32, f32)> {
     Some((margin, radius))
 }
 
+/// The box a carded pane is drawn in: `rect` pulled in by `margin` on all four
+/// sides, exactly as `.slot.resizing .pane { margin: 5px }` (mock-up 1466) pulls
+/// the pane's border box in from its slot.
+///
+/// `None` when the result is too small to carry both of its rounds — drawing the
+/// frame anyway would eat the pane rather than inset it — and that answer is
+/// deliberately the *same* answer for everyone who asks. The head is laid out in
+/// this rectangle and the floor bands are painted around it, so a pane that
+/// declined the card must decline it in both places at once: a head that inset
+/// while the bands stayed out (or the reverse) is the seam this function exists
+/// to make unrepresentable.
+#[must_use]
+fn resizing_card_rect(rect: [f32; 4], margin: f32, radius: f32) -> Option<[f32; 4]> {
+    let card = [
+        rect[0] + margin,
+        rect[1] + margin,
+        rect[2] - margin,
+        rect[3] - margin,
+    ];
+    (card[2] - card[0] >= 2.0 * radius && card[3] - card[1] >= 2.0 * radius).then_some(card)
+}
+
 /// F63: the two panes a divider drag is resizing pull in from their own edges
 /// into slightly smaller rounded cards, and the `--panel` floor shows through.
 ///
@@ -3649,17 +3735,11 @@ fn resizing_cards(
         if !slot_contains(slot.slot, layout, placement.id) {
             continue;
         }
-        let card = [
-            rect[0] + margin,
-            rect[1] + margin,
-            rect[2] - margin,
-            rect[3] - margin,
-        ];
-        if card[2] - card[0] < 2.0 * radius || card[3] - card[1] < 2.0 * radius {
-            // Too small to have both of its rounds: drawing the frame anyway
-            // would eat the pane rather than inset it.
+        // The same rectangle the pane's own head was laid out in — see
+        // [`resizing_card_rect`] for why both readings must come from here.
+        let Some(card) = resizing_card_rect(rect, margin, radius) else {
             continue;
-        }
+        };
         let floor = palette.termhost;
         for band in [
             [rect[0], rect[1], rect[2], card[1]],
@@ -3797,6 +3877,18 @@ fn window_chrome(
                 continue;
             }
             let active = index == active_tab;
+            // The tab in hand, asked of this index rather than inferred from
+            // `active`. `.tab.grabbed { z-index: 20 }` (mock-up 971) promises
+            // two things and `layer_of` above only delivers one: the tab is
+            // painted last *and* it is opaque, so it covers what it passes
+            // over. The fill below used to be reachable only through `active`
+            // or `tab_hovered`, and the drag has a path — the K126/N163
+            // view-flip in `leave_strip`, where dragging a background tab out
+            // of the strip hands the view back to the tab you were on — that
+            // leaves the grabbed tab neither. It then drew no body at all, and
+            // being on top of nothing is being invisible: the strip showed
+            // straight through the tab in your hand.
+            let grabbed_here = grabbed == Some(index);
             // Everything below draws the tab where the drag has *put* it, while
             // every rectangle the strip reasons about stays in the slot the
             // index gives it. One shift, at the top, so no box inside the tab
@@ -3824,7 +3916,7 @@ fn window_chrome(
                     skirted,
                     palette.active_tab,
                 ));
-            } else if tab_hovered && within_strip(viewport, tab.body) {
+            } else if (tab_hovered || grabbed_here) && within_strip(viewport, tab.body) {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::TabBody {
                         radius_px: radius as u32,
@@ -9460,6 +9552,53 @@ mod tests {
         );
     }
 
+    /// PIN — the second half of `.tab.grabbed { z-index: 20 }` (mock-up 971).
+    ///
+    /// A z-index promises two things: painted last, **and** opaque enough to be
+    /// worth painting last. The strip delivered only the first: the tab in hand
+    /// was promoted to its own layer but drew no body of its own, borrowing a
+    /// fill from also being the active tab or from sitting under the pointer.
+    /// Neither holds on the K126/N163 path — drag a *background* tab out of the
+    /// strip and `leave_strip` hands the view back to the tab you were on, while
+    /// hover is frozen at whatever the pointer last rested on. The grabbed tab
+    /// then painted nothing at all, and being on top of nothing is being
+    /// invisible: the strip showed straight through the tab in your hand.
+    ///
+    /// So: grabbed, not active, not hovered — and it must still be a solid tab.
+    #[test]
+    fn the_tab_in_hand_is_opaque_even_when_it_is_neither_active_nor_hovered() {
+        let tabs = plain_tabs(3);
+        let (_, _, sprites) = strip_chrome_grabbed(&tabs, 0, Some(2));
+        let bodies: Vec<_> = sprites
+            .iter()
+            .filter(|sprite| {
+                matches!(
+                    sprite.mark,
+                    ChromeMark::ActiveTab { .. } | ChromeMark::TabBody { .. }
+                )
+            })
+            .collect();
+        assert_eq!(
+            bodies.len(),
+            2,
+            "the active tab wears its silhouette and the tab in hand wears a \
+             body of its own — one fill each, and neither borrowed"
+        );
+        let held = bodies
+            .last()
+            .expect("the tab in hand is the last body painted");
+        assert!(
+            matches!(held.mark, ChromeMark::TabBody { .. }),
+            "a grabbed tab that is not the active one takes the ordinary tab \
+             body, which is the fill it would have had under the pointer"
+        );
+        assert_eq!(
+            held.opacity, 1.0,
+            "it covers what it passes over, so it is not a tint"
+        );
+        assert_eq!(held.color, chrome_palette().caption_hover);
+    }
+
     #[test]
     fn picking_a_tab_up_moves_that_tab_and_nothing_else() {
         // K122's other half: the strip does not re-lay out around a tab that is
@@ -9740,6 +9879,32 @@ mod tests {
             ],
         }))
         .expect("a three-leaf tree restores")
+    }
+
+    /// Two terminal leaves side by side — the shape U12 made ordinary and the
+    /// one every "second pane" regression is about.
+    fn two_terminals() -> Seats {
+        Seats::from_persisted(&LayoutNodeV1::Split(SplitNodeV1 {
+            dir: SplitDirV1::Row,
+            ratio: 500_000,
+            children: [term_leaf(), term_leaf()],
+        }))
+        .expect("a two-leaf tree restores")
+    }
+
+    /// Is this point strictly inside this rectangle? Strictly, so a quad that
+    /// merely *abuts* a body — a divider on the seam, a hairline on the brow —
+    /// is not read as covering it.
+    fn covers(rect: [f32; 4], point: [f32; 2]) -> bool {
+        point[0] > rect[0] && point[0] < rect[2] && point[1] > rect[1] && point[1] < rect[3]
+    }
+
+    /// The middle of a pane's body — the place its shell's picture is, and the
+    /// place nothing but that picture may be.
+    fn body_centre(layout: &SeatLayout, seat: SeatId, kind: SeatKind, scale: f32) -> [f32; 2] {
+        let rect = device_rect_of(layout, seat);
+        let head = pane_head_geometry(rect, kind, scale);
+        [(rect[0] + rect[2]) / 2.0, (head.head[3] + rect[3]) / 2.0]
     }
 
     /// A grab whose cards have fully arrived — B22's transition at 1.0, which is
@@ -10359,6 +10524,173 @@ mod tests {
             floor_of(None).is_empty(),
             "and with no transition at all the panes sit flush"
         );
+    }
+
+    /// PIN — U12. **A terminal's body belongs to its shell, and chrome may not
+    /// paint on it.**
+    ///
+    /// The real-machine bug this pins: the body floor was drawn for every pane
+    /// except `seats.terminal()`, the tab's single identity shell. That test was
+    /// written when a tab held exactly one shell, and it survived U12 giving
+    /// every Terminal leaf its own session — so the second pane of a split had
+    /// an opaque `--termbg` quad (white, in the light theme) laid over its
+    /// picture by the chrome pass, which runs *after* the seat pass. The pane
+    /// drew its text perfectly and was painted out microseconds later; every
+    /// unit test passed because none of them composited the two passes.
+    ///
+    /// Stated as "nothing covers the middle of a terminal's body" rather than as
+    /// "the floor quad is absent", because it is the covering that was the bug —
+    /// a future quad of a different colour would be just as fatal.
+    #[test]
+    fn chrome_never_paints_over_a_terminal_that_draws_its_own_body() {
+        let scale = 1.0;
+        let metrics = seat_metrics(1_000);
+        let seats = three_in_a_row();
+        let layout = solved(&seats, viewport_of(1200, 800, 1_000), &metrics);
+        let (quads, _, _) = head_chrome(&seats, &layout, scale, ChromePointer::default());
+        let terminals = seats.terminals();
+        assert_eq!(
+            terminals.len(),
+            3,
+            "three shells, three pictures to protect"
+        );
+        for seat in terminals {
+            let centre = body_centre(&layout, seat, SeatKind::Terminal, scale);
+            for quad in &quads {
+                assert!(
+                    !covers(quad.rect, centre),
+                    "{seat:?}'s body is covered by chrome at {:?} — a pane with a \
+                     shell behind it must reach the glass",
+                    quad.rect
+                );
+            }
+        }
+    }
+
+    /// The other half of the same rule, so the fix cannot be "stop flooring
+    /// anything": a pane with **no** body pass of its own still gets its floor,
+    /// or a files column would show the clear colour and whatever the seat pass
+    /// last left underneath it.
+    #[test]
+    fn a_pane_that_draws_no_body_of_its_own_still_stands_on_its_floor() {
+        let scale = 1.0;
+        let metrics = seat_metrics(1_000);
+        let seats = term_beside_files();
+        let layout = solved(&seats, viewport_of(1200, 800, 1_000), &metrics);
+        let (quads, _, _) = head_chrome(&seats, &layout, scale, ChromePointer::default());
+        let palette = chrome_palette();
+        let files = layout
+            .rects
+            .iter()
+            .find(|placement| placement.kind == SeatKind::Files)
+            .expect("this tree has a files column")
+            .id;
+        let centre = body_centre(&layout, files, SeatKind::Files, scale);
+        assert!(
+            quads
+                .iter()
+                .any(|quad| quad.color == palette.seat_body && covers(quad.rect, centre)),
+            "a files column has no picture of its own and must be floored"
+        );
+    }
+
+    /// PIN — F63/B22. **The card moves the whole pane; it never shortens the
+    /// head.**
+    ///
+    /// `.slot.resizing .pane { margin: 5px }` (mock-up 1465-1466) insets the
+    /// pane's border box and says nothing at all about `.panehead`, whose
+    /// `height: 28px` and padding are untouched by the resizing state — so the
+    /// caption keeps every pixel of its top padding and simply rides the box in.
+    ///
+    /// The bug: the card was drawn as four `--panel` bands laid over the outer
+    /// margin of a pane that had *not* moved, and the top band painted across
+    /// the head's own top padding. The head's arithmetic never changed — which
+    /// is exactly why this has to be pinned on the drawn rectangles rather than
+    /// on `pane_head_geometry`, which was innocent and still is.
+    #[test]
+    fn the_card_moves_the_whole_pane_and_never_shortens_its_head() {
+        let scale = 1.0;
+        let metrics = seat_metrics(1_000);
+        let seats = two_terminals();
+        let layout = solved(&seats, viewport_of(1200, 800, 1_000), &metrics);
+        let split = seats.split_slots(&layout)[0].id;
+        let palette = chrome_palette();
+        // Both panes are terminals, so the only `pane_head`-coloured quad a pane
+        // contributes is its head fill — there is no floor quad to confuse it
+        // with, which is the point of building this tree out of two shells.
+        let heads = |cards: Option<ResizingCards>| {
+            let mut found =
+                head_chrome_with_cards(&seats, &layout, scale, ChromePointer::default(), cards)
+                    .0
+                    .into_iter()
+                    .filter(|quad| {
+                        quad.color == palette.pane_head && in_the_pane_layer(quad.rect, scale)
+                    })
+                    .map(|quad| quad.rect)
+                    .collect::<Vec<_>>();
+            found.sort_by(|a, b| a[0].total_cmp(&b[0]));
+            found
+        };
+        let titles = |cards: Option<ResizingCards>| {
+            let mut found =
+                head_chrome_with_cards(&seats, &layout, scale, ChromePointer::default(), cards)
+                    .1
+                    .into_iter()
+                    .filter(|label| in_the_pane_layer(label.rect, scale))
+                    .map(|label| label.rect)
+                    .collect::<Vec<_>>();
+            found.sort_by(|a, b| a[0].total_cmp(&b[0]));
+            found
+        };
+
+        let rest = heads(None);
+        let carded = heads(Some(ResizingCards { split, inset: 1.0 }));
+        assert_eq!(rest.len(), 2, "one head fill per terminal pane");
+        assert_eq!(carded.len(), rest.len());
+        let margin = SEAT_RESIZING_CARD_MARGIN_LOGICAL_PX * scale;
+        for (flush, card) in rest.iter().zip(&carded) {
+            assert_eq!(
+                card[3] - card[1],
+                flush[3] - flush[1],
+                "the head's fill height is the same 27-plus-hairline in a card as \
+                 it is flush — the card is a margin, not a crop"
+            );
+            assert_eq!(
+                card[1] - flush[1],
+                margin,
+                "and the head's top edge moved in by exactly the card's margin"
+            );
+        }
+
+        let rest_titles = titles(None);
+        let carded_titles = titles(Some(ResizingCards { split, inset: 1.0 }));
+        assert_eq!(rest_titles.len(), 2, "one caption per pane head");
+        assert_eq!(carded_titles.len(), rest_titles.len());
+        for (flush, card) in rest_titles.iter().zip(&carded_titles) {
+            assert_eq!(
+                card[3] - card[1],
+                flush[3] - flush[1],
+                "the caption keeps its own height — the resizing state never \
+                 reaches `.panehead`"
+            );
+            assert_eq!(
+                card[1] - flush[1],
+                margin,
+                "and its top edge moved by exactly the margin, which is the \
+                 whole of what a card does to a caption: the bug was the floor \
+                 painted over the padding above it while it stayed put"
+            );
+            // Horizontally the caption narrows with the box it is in, exactly as
+            // a flex child of a narrower `.panehead` does. That is the card
+            // working, not the card leaking: the *vertical* invariant above is
+            // the one the mock-up's untouched `height`/`padding` promises.
+            assert_eq!(card[0] - flush[0], margin, "the left edge came in too");
+            assert_eq!(
+                (flush[2] - flush[0]) - (card[2] - card[0]),
+                2.0 * margin,
+                "and the box lost a margin at each end"
+            );
+        }
     }
 
     /// PIN — B22 and the split that leaves the tree under it.
