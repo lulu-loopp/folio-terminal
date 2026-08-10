@@ -493,12 +493,21 @@ struct LeafSession {
     conpty_grid: GridSize,
     pending_pty_resize: Option<PendingPtyResize>,
     pending_psreadline_resize_reanchor: bool,
-    /// The revision this leaf's session had reached the last time the user was
-    /// looking at it — the whole of what "unread" is measured against.
+    /// How much this shell has said, counted by [`output_revision`].
     ///
-    /// Per leaf because it is measured against a *session's* revision counter,
-    /// and two shells count their own. The tab's badge is the aggregate of these
-    /// (D34: the tab takes its loudest member's claim), not a separate tally.
+    /// Kept here rather than read off the session because the question is
+    /// bt-app's, not bt-term's: the session counts the frames it published, and
+    /// only the focused pane of the tab on screen ever publishes any. Every leaf
+    /// is drained on every turn, so this is the one counter that moves for a
+    /// shell talking in a pane nobody is watching — which is the only shell an
+    /// unread badge was ever for.
+    output_revision: u64,
+    /// How much of that had reached the glass the last time this leaf's cells
+    /// were painted — the whole of what "unread" is measured against.
+    ///
+    /// Per leaf because output is per shell, and two shells count their own. The
+    /// tab's badge is the aggregate of these (D34: the tab takes its loudest
+    /// member's claim), not a separate tally.
     last_seen_revision: u64,
     /// The frame this leaf last put on the glass.
     ///
@@ -509,6 +518,15 @@ struct LeafSession {
     /// over the right-hand pane be answered by the right-hand pane's cells
     /// instead of by whichever pane happens to hold the keyboard.
     last_presented_frame: Option<ViewportFrame>,
+    /// Every image reference [`Self::last_presented_frame`] draws, as the cells that draw it.
+    ///
+    /// Beside the frame it was scanned from, and per leaf for the same reason the frame is: the
+    /// four pointer verbs — the solid underline, the peek, Ctrl+click, and the tip that reads the
+    /// path — must read the *same* list the paint read (user ruling 2026-08-04), and with a fleet
+    /// on screen "the paint" is the paint of the pane the pointer is in. One list on the window
+    /// could only ever be one pane's, which is how a hover over the pane you are not typing in
+    /// came to be answered from the cells of the pane you are.
+    frame_image_references: FrameImageReferences,
 }
 
 struct TabState {
@@ -688,14 +706,23 @@ struct Runtime {
     /// A boolean is intentional: every commit in one drag replaces the same debt, and only the
     /// final transaction quiescence may pay it.
     hyperlink_hover: HyperlinkHover,
-    /// Every image reference the frame currently on screen draws, as the cells that draw it — the
-    /// session's scan of that frame, kept because the four verbs must read the *same* list the paint
-    /// read (user ruling 2026-08-04). Rescanning on each pointer event would be a second opinion
-    /// about a frame that has not changed; this is the first one, held.
-    frame_image_references: FrameImageReferences,
-    /// The reference the frame on screen was drawn with the solid underline over. Read only to
-    /// decide whether the pointer has moved onto or off a reference and a repaint is therefore owed.
-    underlined_image_reference: Option<bt_term::FrameImageReference>,
+    /// The pane the pointer was last found standing in, or `None` when it is over chrome, over a
+    /// non-terminal pane, or outside the window.
+    ///
+    /// Everything hover *is* belongs to this one pane and to no other: the link's underline and
+    /// its status line, the solid underline under a peekable reference, the image flyout, the
+    /// formula hover. None of them has a focus prerequisite and none of them moves focus — a
+    /// pointer answers about what it is pointing at, and requiring a click first would be the
+    /// window asking to be told something it can already see (user ruling 2026-08-10).
+    ///
+    /// Held rather than re-derived only so a *crossing* can be noticed: the pane the pointer
+    /// enters owes a fresh reference scan, and the pane it left owes a repaint that takes the
+    /// marks back off.
+    hover_pane: Option<SeatId>,
+    /// The pane whose frame on screen was drawn with the solid underline, and the reference it was
+    /// drawn over. Read only to decide whether the pointer has moved onto or off a reference and a
+    /// repaint is therefore owed — which, with several panes, is a question about a pair.
+    underlined_image_reference: Option<(SeatId, bt_term::FrameImageReference)>,
     peek_hover: PeekHover,
     peek_cache: std::collections::HashMap<String, PeekCacheEntry>,
     /// The one display-sized thumbnail the flyout can draw, and the one resample in flight. See
@@ -1177,6 +1204,7 @@ impl LeafSession {
     fn session_facts(&self, tab_is_active: bool) -> SessionFacts {
         SessionFacts {
             status: self.session.status(),
+            output_revision: self.output_revision,
             last_seen_revision: self.last_seen_revision,
             tab_is_active,
         }
@@ -2178,8 +2206,16 @@ impl PeekSubject {
 #[derive(Clone, Debug)]
 struct PeekCandidate {
     subject: PeekSubject,
-    /// Physical pointer position of the most recent observation; the flyout anchors where the
-    /// hover settles, not where it began.
+    /// The pane whose cells the pointer was standing on — the pane that *owns* this picture.
+    ///
+    /// Carried rather than re-derived when the flyout finally shows, because the two moments are
+    /// not the same moment: a decode or a resample is a worker round trip, and the answer re-enters
+    /// through `show_or_request_peek` long after the pointer event that asked. The rectangle is
+    /// looked up from this id at that point, so a pane that has since moved is looked up where it
+    /// is now, and a pane that has since gone shows nothing.
+    seat: SeatId,
+    /// Physical pointer position of the most recent observation, in whole-window coordinates; the
+    /// flyout anchors where the hover settles, not where it began.
     pointer: PhysicalPosition<f64>,
 }
 
@@ -2196,27 +2232,39 @@ struct PeekHover {
 }
 
 impl PeekHover {
-    /// Track the path under the pointer. Returns true when a previously shown flyout must be
-    /// hidden because the pointer left its path span.
+    /// Track the reference under the pointer, and the pane it belongs to. Returns true when a
+    /// previously shown flyout must be hidden because the pointer left its span.
+    ///
+    /// The span is `(subject, pane)` and not the subject alone. One file printed in two panes is
+    /// one picture but two spans: sliding from one to the other has genuinely left the reference
+    /// the flyout was raised over, and treating it as one span would leave that flyout hanging
+    /// beside the pane the pointer is no longer in.
     fn observe(
         &mut self,
-        subject: Option<PeekSubject>,
+        subject: Option<(PeekSubject, SeatId)>,
         pointer: PhysicalPosition<f64>,
         now: Instant,
     ) -> bool {
-        if self.active.is_some()
-            && subject.as_ref() == self.active.as_ref().map(|active| &active.subject)
-        {
+        let same_as = |candidate: &Option<PeekCandidate>| match (candidate, &subject) {
+            (Some(candidate), Some((subject, seat))) => {
+                &candidate.subject == subject && candidate.seat == *seat
+            }
+            _ => false,
+        };
+        if self.active.is_some() && same_as(&self.active) {
             self.candidate = None;
             self.show_at = None;
             return false;
         }
         let active_hidden = self.active.take().is_some();
+        let same_span = same_as(&self.candidate);
         match subject {
-            Some(subject) => {
-                let same_span =
-                    self.candidate.as_ref().map(|candidate| &candidate.subject) == Some(&subject);
-                self.candidate = Some(PeekCandidate { subject, pointer });
+            Some((subject, seat)) => {
+                self.candidate = Some(PeekCandidate {
+                    subject,
+                    seat,
+                    pointer,
+                });
                 if !same_span {
                     self.show_at = Some(now + HYPERLINK_HOVER_DELAY);
                 }
@@ -2386,14 +2434,16 @@ impl PeekThumbnail {
         self.content_key == target.0 && (self.width_px, self.height_px) == (target.1, target.2)
     }
 
-    /// The overlay the renderer draws: display-sized pixels under a display-sized identity, and a
-    /// pointer anchor. This is the only path by which peek pixels reach the GPU.
-    fn overlay(&self, pointer: PhysicalPosition<f64>) -> PeekImageOverlay {
+    /// The overlay the renderer draws: display-sized pixels under a display-sized identity, the
+    /// pane that owns them, and a pointer anchor in whole-window coordinates. This is the only path
+    /// by which peek pixels reach the GPU.
+    fn overlay(&self, seat: SeatViewport, pointer: PhysicalPosition<f64>) -> PeekImageOverlay {
         PeekImageOverlay {
             key: self.key.clone(),
             rgba: Arc::clone(&self.rgba),
             width_px: self.width_px,
             height_px: self.height_px,
+            seat,
             pointer_x: pointer.x as f32,
             pointer_y: pointer.y as f32,
         }
@@ -2445,6 +2495,29 @@ fn peek_cache_key_for_decode(
 /// One hovered cell resolves to at most one reference: the first that covers it. The scan pushes
 /// printed text before link targets, so where a cell carries both — a link whose label spells the
 /// path — the answer is what the pointer is actually standing on. Both name the same file anyway.
+/// The pointer's own marks, put on the frame of the pane the pointer is standing in.
+///
+/// One window, one pointer, and therefore at most one pane wearing these: the hovered link's
+/// underline and the status line that spells its target, and the solid underline under a reference
+/// that has been verified as a picture. Which pane wears them is a question about coordinates and
+/// never about which pane holds the keyboard — this function is called for exactly the pane
+/// `Runtime::hover_pane` names, whether or not that is the focused leaf.
+fn apply_hover_marks(
+    frame: &mut ViewportFrame,
+    hyperlink_hover: &HyperlinkHover,
+    hovered_reference: Option<&bt_term::FrameImageReference>,
+) {
+    if let Some(hyperlink) = hyperlink_hover.underline_target()
+        && frame.underline_hyperlink(hyperlink)
+        && hyperlink_hover.active.is_some()
+    {
+        frame.status_text = hyperlink_hover.status_text(frame.columns.get() as usize);
+    }
+    if let Some(reference) = hovered_reference {
+        frame.underline_cells(&reference.cells, true);
+    }
+}
+
 #[derive(Default)]
 struct FrameImageReferences {
     columns: u32,
@@ -2629,8 +2702,14 @@ impl StatusClaim {
 #[derive(Clone, Copy, Debug)]
 struct SessionFacts {
     status: SessionStatus,
-    /// The revision this session had reached the last time the user was
-    /// actually looking at it.
+    /// How much this shell has said — [`output_revision`]'s count, and the only
+    /// number "unread" is measured against.
+    ///
+    /// Deliberately *not* `status.published_revision`. That one counts frames,
+    /// and frames are published for reasons that have nothing to do with the
+    /// program: a blinking cursor, a repainted chrome, the tab switch itself.
+    output_revision: u64,
+    /// How much of it had reached the glass the last time this leaf was painted.
     last_seen_revision: u64,
     /// Whether the tab holding this session is the one on screen.
     tab_is_active: bool,
@@ -2644,7 +2723,7 @@ impl SessionFacts {
     /// optimisation but the definition — without it the tab you are staring at
     /// wears a dot telling you to look at it.
     fn has_unseen_output(self) -> bool {
-        !self.tab_is_active && self.status.published_revision > self.last_seen_revision
+        !self.tab_is_active && self.output_revision > self.last_seen_revision
     }
 
     /// What this session is claiming right now.
@@ -2682,20 +2761,59 @@ impl SessionFacts {
     }
 }
 
-/// How much of a session the user has seen, one frame on.
+/// How much this shell has *said*, one drain on.
 ///
-/// Watching a tab *is* seeing it, so the tab on screen carries its ledger
-/// forward with every frame it publishes and can never accumulate a backlog.
-/// Every other tab's ledger stands still, and the gap that opens between it and
-/// the session's own revision is exactly what "unread" measures.
+/// This is the number "unread" is measured against, and what it counts is the
+/// only thing a badge asking for attention can honestly mean: **the program
+/// wrote something into this pane.** It is deliberately not the session's
+/// `published_revision`, which counts frames put on the glass — a cursor blink,
+/// a hovered link, a chrome repaint and a tab switch all publish frames while
+/// the shell sits in silence, and every one of them used to read as news.
 ///
-/// This is a rule rather than a line inside the event loop because getting it
-/// wrong is invisible until the user switches tabs: leave it out and suppress
-/// the dot on the active tab instead, and everything looks right until the
-/// moment they leave, when the tab they were reading lights up behind them.
-fn seen_revision(previous_seen: u64, published: u64, tab_is_active: bool) -> u64 {
-    if tab_is_active {
-        published
+/// The one exclusion is a reprint *we* asked for. Between the moment a leaf is
+/// told its new size and the moment its resize transaction goes quiescent, the
+/// bytes coming back are the shell answering our question — a prompt redrawn at
+/// a new width is not the program speaking. Bounding the exemption by the
+/// transaction rather than by a timer is what keeps it from swallowing anything
+/// else: outside that window every byte counts again.
+///
+/// The tradeoff is stated rather than hidden: real output that a background
+/// shell happens to print *inside* its own resize window is not counted, so a
+/// tab that prints only during those few hundred milliseconds keeps a clean
+/// badge. That is the honest price of not lighting every tab on every window
+/// resize, and it is the smaller of the two errors — the exemption is bounded by
+/// a transaction the user themselves started.
+fn output_revision(previous: u64, output_arrived: bool, resize_transaction_open: bool) -> u64 {
+    if output_arrived && !resize_transaction_open {
+        previous.saturating_add(1)
+    } else {
+        previous
+    }
+}
+
+/// How much of a shell the user has seen, one present on.
+///
+/// **Painting is seeing.** The ledger is squared against [`output_revision`] at
+/// the exact moment this leaf's cells go to the glass, and at no other moment —
+/// which makes "seen" a fact about pixels rather than a fact about which tab
+/// held the keyboard.
+///
+/// The rule this replaces was "the active tab's ledger keeps up", advanced once
+/// per event-loop turn. It was wrong in both directions at once. Forward: the
+/// pass ran *after* the switch had already changed the active tab, so anything
+/// published between the previous turn and the switch was stranded behind a tab
+/// that had just gone quiet, and the tab the user had been reading lit up behind
+/// them for output that never existed. Backward: a pane that is on screen but
+/// not holding the keyboard never publishes at all, so a tab could go on saying
+/// nothing while a shell inside it talked.
+///
+/// Both disappear here. A leaf that was painted owes nothing, whichever pane of
+/// whichever tab it is; a leaf that was not painted keeps its backlog, including
+/// output that arrived in the same turn as the switch away and never reached the
+/// glass. That last case is the one worth stating: it is *correctly* unread.
+fn seen_revision(previous_seen: u64, output: u64, leaf_was_painted: bool) -> u64 {
+    if leaf_was_painted {
+        output
     } else {
         previous_seen
     }
@@ -5377,8 +5495,10 @@ fn create_leaf_session(
         conpty_grid: grid,
         pending_pty_resize: None,
         pending_psreadline_resize_reanchor: false,
+        output_revision: 0,
         last_seen_revision: 0,
         last_presented_frame: None,
+        frame_image_references: FrameImageReferences::default(),
     })
 }
 
@@ -5543,8 +5663,25 @@ fn assemble_tab_state(
 /// the tab that absorbed it has whatever claims it already had. Calling
 /// `mark_seen` would clear those too, which is a different sentence.
 fn mark_leaf_seen(leaf: &mut LeafSession) {
-    leaf.last_seen_revision = leaf.session.published_revision();
+    leaf.last_seen_revision = leaf.output_revision;
     leaf.session.clear_attention();
+}
+
+/// This leaf's cells have just gone to the glass.
+///
+/// One function so that the two halves of the present — the pane holding the
+/// keyboard and every pane beside it — cannot answer the question differently.
+/// They are written separately in [`Runtime::redraw`] only because the borrow
+/// checker sees one `&mut` tab and a list taken by value; nothing about the rule
+/// distinguishes them, and a rule that lived in two places is how a sibling pane
+/// ends up owing a debt it paid in plain sight.
+///
+/// Unlike [`mark_leaf_seen`] this retires no latch. A bell that rings while you
+/// are looking is answered by [`attention_is_consumed`], which asks about the
+/// *window's* focus as well — being painted into a window nobody has in front of
+/// them is not hearing it.
+fn mark_leaf_painted(leaf: &mut LeafSession) {
+    leaf.last_seen_revision = seen_revision(leaf.last_seen_revision, leaf.output_revision, true);
 }
 
 /// **Stand a pane up as a tab of its own, carrying its shell across.**
@@ -5822,6 +5959,16 @@ fn drain_leaf_pty(leaf: &mut LeafSession) -> Result<(bool, bool)> {
         }
         changed = true;
     }
+    // The one place a shell is heard to speak. Every leaf of every tab passes
+    // through here on every turn of the loop, which is what lets a pane nobody
+    // is watching keep an honest account of itself — the frame path cannot, and
+    // never could: it runs for the focused pane of the tab on screen and for
+    // nothing else.
+    leaf.output_revision = output_revision(
+        leaf.output_revision,
+        changed,
+        leaf.session.resize_finish_deadline().is_some(),
+    );
     Ok((
         changed,
         leaf.session.window_title() != title_before.as_deref(),
@@ -6061,7 +6208,7 @@ impl Runtime {
             notch_wheel_remainder: 0.0,
             local_wheel_subpixel_remainder: 0.0,
             hyperlink_hover: HyperlinkHover::default(),
-            frame_image_references: FrameImageReferences::default(),
+            hover_pane: None,
             underlined_image_reference: None,
             peek_hover: PeekHover::default(),
             peek_cache: std::collections::HashMap::new(),
@@ -6278,7 +6425,7 @@ impl Runtime {
         self.hyperlink_hover.clear();
         self.peek_hover.clear();
         self.renderer.set_peek_overlay(None);
-        self.frame_image_references = FrameImageReferences::default();
+        self.hover_pane = None;
         self.underlined_image_reference = None;
         // **U8 — you do not glide a layout you were not looking at.**
         //
@@ -6292,13 +6439,8 @@ impl Runtime {
         self.pane_motion = PaneMotion::default();
         self.pane_motion_revision = self.seats.structure_revision();
         let render_physical = presentation_physical_size(self.renderer.presentation_geometry());
-        let next_grid = self.resolve_seat_layout(render_physical);
-        self.schedule_grid_change(
-            next_grid,
-            terminal_pty_physical(&self.renderer, render_physical),
-            Instant::now(),
-            "resize activated tab to its seat layout",
-        )?;
+        self.resolve_seat_layout(render_physical);
+        self.resize_leaves_to_layout(Instant::now(), "resize activated tab to its seat layout")?;
         self.sync_math_layout_key();
         self.window.set_title(&self.display_title());
         self.refresh_chrome();
@@ -6536,13 +6678,18 @@ impl Runtime {
     }
 
     /// Re-solve the tree against the current surface and place the terminal
-    /// seat. Returns the grid the terminal seat's rectangle asks for.
+    /// seat.
     ///
-    /// This is the only place cols/rows are derived from pixels once seats
-    /// exist, and it derives them from the *seat's* rectangle rather than the
-    /// window's. The direction is one-way (red line L10): what comes back out
-    /// of the terminal never re-enters here.
-    fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) -> GridSize {
+    /// It used to also *answer* a grid — the one `seats.terminal()`'s rectangle
+    /// asks for — and every caller handed that answer straight to the focused
+    /// leaf, which is a different leaf as soon as a tab holds two. Deriving
+    /// cols/rows is [`Self::resize_leaves_to_layout`]'s job now, once per leaf
+    /// from that leaf's own body, so there is no single grid for this method to
+    /// return and no way for a caller to give one shell another's width.
+    ///
+    /// The direction is still one-way (red line L10): what comes back out of the
+    /// terminal never re-enters here.
+    fn resolve_seat_layout(&mut self, render_physical: PhysicalSize<u32>) {
         let (layout, overflow, terminal_seat, viewport) =
             solve_seats(&self.seats, &self.renderer, render_physical);
         self.seat_viewport = viewport;
@@ -6558,9 +6705,6 @@ impl Runtime {
         self.renderer.set_seat_viewport(terminal_seat);
         self.refresh_preview_for_layout();
         self.refresh_chrome();
-        self.renderer
-            .metrics()
-            .grid_for_pixels(terminal_seat.width, terminal_seat.height)
     }
 
     /// Every pane's solved box in physical pixels, in the solver's own order.
@@ -8579,19 +8723,10 @@ impl Runtime {
         let before = self
             .pane_motion
             .snapshot(&self.pane_rects(), now, self.motion);
-        let next_grid = self.resolve_seat_layout(render_physical);
-        // The panes without the keyboard, before the focused one: they take the
-        // solver's answer unconditionally, so doing them first keeps the focused
-        // leaf's typed-input gate the last word rather than a thing another
-        // pane's resize could race.
-        self.resize_unfocused_leaves()?;
+        self.resolve_seat_layout(render_physical);
         let solved_at = trace_started.map(|_| Instant::now());
-        self.schedule_grid_change(
-            next_grid,
-            terminal_pty_physical(&self.renderer, render_physical),
-            now,
-            "resize terminal actor for a seat layout change",
-        )?;
+        let next_grid =
+            self.resize_leaves_to_layout(now, "resize terminal actor for a seat layout change")?;
         let resized_at = trace_started.map(|_| Instant::now());
         // **U8, R5 — only a structural tree change animates.**
         //
@@ -8638,9 +8773,13 @@ impl Runtime {
         if synchronous_present {
             self.redraw()?;
         }
-        if let (Some(started), Some(solved), Some(resized), Some(published)) =
-            (trace_started, solved_at, resized_at, published_at)
-        {
+        if let (Some(started), Some(solved), Some(resized), Some(published), Some(next_grid)) = (
+            trace_started,
+            solved_at,
+            resized_at,
+            published_at,
+            next_grid,
+        ) {
             eprintln!(
                 "BT_PERF_TRACE resize_frame solve_us={} actor_us={} publish_us={} redraw_us={} total_us={} queued={} columns={} rows={}",
                 solved.saturating_duration_since(started).as_micros(),
@@ -8656,29 +8795,6 @@ impl Runtime {
             );
         }
         Ok(())
-    }
-
-    /// The pointer, expressed in the terminal seat's own coordinates, or `None`
-    /// when it is not over the terminal seat at all.
-    ///
-    /// Every existing hit test — the grid, math blocks, hyperlinks, the peek
-    /// flyout's anchor — reads through here, so all of them keep working with
-    /// exactly one correction applied in exactly one place.
-    fn terminal_pointer(&self) -> Option<PhysicalPosition<f64>> {
-        let position = self.pointer_position?;
-        let seat = self.renderer.seat_viewport();
-        if !seats::terminal_contains(
-            &self.seat_layout,
-            self.seats.terminal(),
-            position.x,
-            position.y,
-        ) {
-            return None;
-        }
-        Some(PhysicalPosition::new(
-            position.x - f64::from(seat.x),
-            position.y - f64::from(seat.y),
-        ))
     }
 
     fn publish_frame(&mut self, trigger: FrameTrigger) -> Result<()> {
@@ -8743,32 +8859,32 @@ impl Runtime {
                 &mut self.math_worker_notice_pending,
             );
         }
-        if let Some(hyperlink) = self.hyperlink_hover.underline_target()
-            && terminal_frame.underline_hyperlink(hyperlink)
-            && self.hyperlink_hover.active.is_some()
-        {
-            terminal_frame.status_text = self
-                .hyperlink_hover
-                .status_text(terminal_frame.columns.get() as usize);
-        }
         // This frame's own references, scanned once for the whole of this frame's life on screen.
         // The hover upgrade below, the Ctrl+click verb and the peek all read this one list, so no
         // two of them can disagree about where a reference is or whether it is one. The session
         // scanned the same frame once more when it painted the resting dots inside `viewport_frame`;
         // collapsing the two would mean hanging the scan on the session as state, which is the very
         // kind of thing this affordance was rebuilt to be rid of.
-        self.frame_image_references = FrameImageReferences {
+        //
+        // Kept on the leaf rather than on the window, because "this frame" is one pane's frame.
+        let scan = FrameImageReferences {
             columns: terminal_frame.columns.get(),
             references: self.session.frame_image_references(&terminal_frame),
         };
-        // The verified reference under the pointer turns solid, on the same terms the link does:
-        // the underline is the affordance and follows the pointer immediately, while the 300ms
-        // settle belongs to what the hover *reveals* — a tooltip there, a thumbnail here.
-        let hovered_reference = self.hovered_image_reference();
-        if let Some(reference) = hovered_reference.as_ref() {
-            terminal_frame.underline_cells(&reference.cells, true);
+        self.focused_mut().frame_image_references = scan;
+        // The pointer's marks, but only if the pointer is standing in *this* pane. The link's
+        // underline and the verified reference's solid underline both follow the pointer
+        // immediately; only what a hover *reveals* — a tooltip there, a thumbnail here — waits out
+        // the 300ms settle. When the pointer is in another pane, that pane wears them and this one
+        // is left alone, which `redraw` sees to.
+        if self.hover_pane == Some(self.focused_leaf) {
+            let hovered_reference = self.hovered_image_reference();
+            apply_hover_marks(
+                &mut terminal_frame,
+                &self.hyperlink_hover,
+                hovered_reference.as_ref().map(|(_, reference)| reference),
+            );
         }
-        self.underlined_image_reference = hovered_reference;
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
             terminal_frame.status_text = Some(notice.to_owned());
         }
@@ -9118,17 +9234,14 @@ impl Runtime {
         let window_is_focused = self.window_focused;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             let tab_is_active = index == active;
-            // Unread is counted per shell, against that shell's own revision
-            // counter — two panes of one tab each have their own idea of how far
-            // the user has read. The tab's badge is the aggregate of these
-            // (D34), computed where the badge is drawn rather than tallied into
-            // a second place that could drift.
+            // No ledger arithmetic here, and its absence is load-bearing. This
+            // pass runs once per turn of the loop and *after* the turn's tab
+            // switch has already been paid, so a ledger advanced from
+            // `tab_is_active` squares the tab that arrived and strands the tab
+            // that left one revision behind — a permanent dot on a tab whose
+            // shell never spoke. Seeing is painting, and painting is answered
+            // where the painting happens (`Runtime::redraw`).
             for (_, leaf) in tab.leaves_mut() {
-                leaf.last_seen_revision = seen_revision(
-                    leaf.last_seen_revision,
-                    leaf.session.published_revision(),
-                    tab_is_active,
-                );
                 // Watching is consuming: a latch that arrives on the tab the user
                 // is already reading has been answered by the reading. Both latches
                 // go together because `bt-term` retires them together, and because
@@ -9424,33 +9537,52 @@ impl Runtime {
         Ok(())
     }
 
-    /// Carry a new solve to the panes the user is not typing in.
+    /// Carry the current solve to every shell of the active tab — one rectangle
+    /// per leaf, read from one expression.
     ///
-    /// [`Self::schedule_grid_change`] speaks for the focused leaf, where the
-    /// typed-input gate lives. That gate exists to keep a shell that is holding
-    /// a half-typed line from being reflowed under the user's hands — a thing
-    /// that can only be true of the pane with the keyboard. The others have no
-    /// typed input to protect, so their grids follow the solver at once, actor
-    /// then ConPTY, in the order every other resize path uses.
+    /// **The geometry is the same sentence for all of them**: a leaf's grid is
+    /// [`seats::pane_body_viewport`] of *that leaf's* seat, and of nothing else.
+    /// Only the timing differs. [`Self::schedule_grid_change`] speaks for the
+    /// focused leaf, where the typed-input gate and the ConPTY quiet-window
+    /// coalescer live; that gate exists to keep a shell holding a half-typed
+    /// line from being reflowed under the user's hands — a thing that can only
+    /// be true of the pane with the keyboard. The others have no typed input to
+    /// protect, so their grids follow the solver at once, actor then ConPTY, in
+    /// the order every other resize path uses.
     ///
-    /// Without this a split pane keeps the width it was born with: the window
-    /// resizes, the divider moves, and one pane's shell goes on believing it has
-    /// the columns it had at spawn.
-    fn resize_unfocused_leaves(&mut self) -> Result<()> {
-        let focused = self.focused_leaf;
+    /// The focused leaf used to be sized from [`Self::resolve_seat_layout`]'s
+    /// return instead, which is the body of `seats.terminal()` — the tab's
+    /// *primary* seat. That is a stored field naming one fixed leaf; it moves
+    /// only when the leaf it names is closed, and never with focus. In a
+    /// lone-terminal tab it is the focused leaf and the mistake was invisible,
+    /// which is why it survived U12-B. Split the tab and focus the other pane
+    /// and the focused shell was told the primary pane's column count: a narrow
+    /// pane stopped wrapping because its shell believed it was wide, and
+    /// PSReadLine — whose anchor arithmetic trusts the reported buffer width —
+    /// raised "the value must be greater than or equal to zero and less than the
+    /// console's buffer size". Taking focus away appeared to cure it because the
+    /// unfocused carry below was already reading the right rectangle.
+    ///
+    /// Without the unfocused half a split pane keeps the width it was born with:
+    /// the window resizes, the divider moves, and one pane's shell goes on
+    /// believing it has the columns it had at spawn.
+    /// Answers the grid the focused leaf's own rectangle solved to — what the
+    /// perf trace means by "the size this resize frame was about" — or `None`
+    /// when the solver placed no rectangle for it.
+    fn resize_leaves_to_layout(
+        &mut self,
+        observed_at: Instant,
+        context: &'static str,
+    ) -> Result<Option<GridSize>> {
         let scale = self.renderer.metrics().scale_factor as f32;
-        let bodies: Vec<(bt_layout::SeatId, bt_render::SeatViewport)> = self
-            .seats
-            .terminals()
-            .into_iter()
-            .filter(|seat| *seat != focused)
-            .filter_map(|seat| {
-                seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)
-                    .map(|body| (seat, body))
-            })
-            .collect();
+        let plan = leaf_resize_plan(&self.seats, &self.seat_layout, self.focused_leaf, scale);
         let active = self.active_tab;
-        for (seat, body) in bodies {
+        // The panes without the keyboard, before the focused one: they take the
+        // solver's answer unconditionally, so doing them first keeps the focused
+        // leaf's typed-input gate the last word rather than a thing another
+        // pane's resize could race.
+        for target in plan.iter().copied().filter(|target| !target.focused) {
+            let (seat, body) = (target.seat, target.body);
             let next_grid = self
                 .renderer
                 .metrics()
@@ -9480,7 +9612,26 @@ impl Runtime {
             );
             leaf.conpty_grid = next_grid;
         }
-        Ok(())
+        // A seat the solver could not place has no rectangle, so there is no
+        // size to carry and the leaf keeps the one it has until a later solve
+        // places it. Substituting some other rectangle here — the window's, the
+        // primary seat's — is precisely the defect this method was rewritten to
+        // end.
+        let Some(target) = plan.iter().copied().find(|target| target.focused) else {
+            return Ok(None);
+        };
+        let body = target.body;
+        let next_grid = self
+            .renderer
+            .metrics()
+            .grid_for_pixels(body.width, body.height);
+        self.schedule_grid_change(
+            next_grid,
+            PhysicalSize::new(body.width, body.height),
+            observed_at,
+            context,
+        )?;
+        Ok(Some(next_grid))
     }
 
     /// Is a PTY resize deferred right now?
@@ -9606,6 +9757,40 @@ impl Runtime {
             .hit_test_frame(frame, position.x, position.y)
     }
 
+    /// The cell under the pointer as the *mouse protocol* names it: the same hit
+    /// [`Self::frame_hit`] answers, mapped through the live viewport of the frame it was read
+    /// from.
+    ///
+    /// One lookup, deliberately. The translation used to be a second one — the hit taken from the
+    /// pane under the pointer, the frame taken from `Runtime::last_presented_frame` — and two
+    /// lookups can disagree about which pane they mean, or about whether there is a frame at all.
+    /// Both happen on one gesture: `focus_pane_at` empties that window-level slot the instant
+    /// keyboard focus moves, and the press that moved it is still on its way down the router, so
+    /// the very next line went looking for a frame that had just been taken away. Reading the
+    /// frame beside the hit removes the disagreement by construction rather than by testing for
+    /// it — there is no second slot left to be empty.
+    /// The frame the focused pane last drew — the one a selection's anchors must be read from,
+    /// because a selection is set on that pane's own session.
+    ///
+    /// The leaf's own copy, never `Runtime::last_presented_frame`. That window-level mirror is
+    /// presentation bookkeeping (the projection hold, the unchanged-frame skip) and `focus_pane_at`
+    /// empties it the instant keyboard focus moves — while the press that moved it is still on its
+    /// way down the router to the very lines that want a frame. `None` means this pane has not
+    /// drawn yet, which is the same "there are no cells here" [`Self::pane_hit_context`] already
+    /// answers, and the callers already do nothing about.
+    fn focused_frame(&self) -> Option<&ViewportFrame> {
+        self.focused().last_presented_frame.as_ref()
+    }
+
+    fn forwarded_mouse_hit(&self) -> Option<bt_render::GridHit> {
+        let (_, position, frame) = self.pane_hit_context()?;
+        let hit = self
+            .renderer
+            .metrics()
+            .hit_test_frame(frame, position.x, position.y)?;
+        Some(live_viewport_mouse_hit(frame, hit))
+    }
+
     fn math_hit(&self) -> Option<MathHit> {
         let (_, position, frame) = self.pane_hit_context()?;
         self.renderer.math_hit_test(frame, position.x, position.y)
@@ -9618,16 +9803,72 @@ impl Runtime {
         frame.hyperlink_at(hit.row, hit.column)
     }
 
+    /// The pane the pointer is standing in, that pane's own shell, and the cell under the pointer.
+    ///
+    /// The subject of every hover verb below, and deliberately never the focused leaf. A pointer
+    /// answers about what it is pointing at; a hover that first required a click would be the
+    /// window refusing to say what it can already see (user ruling 2026-08-10). Nothing reached
+    /// from here writes focus either — reading is not taking.
+    fn hovered_leaf(&self) -> Option<(SeatId, &LeafSession, bt_render::GridHit)> {
+        let (seat, position, frame) = self.pane_hit_context()?;
+        let hit = self
+            .renderer
+            .metrics()
+            .hit_test_frame(frame, position.x, position.y)?;
+        Some((seat, self.sessions.get(&seat)?, hit))
+    }
+
+    /// Notice the pointer crossing from one pane into another, and pay what the crossing owes.
+    ///
+    /// Returns the pane the pointer is now in. The pane it entered owes a scan of the frame it
+    /// already drew — nothing has published there, so nothing has scanned it, and a hover that
+    /// waited for that pane's next PTY byte to answer would answer late or never on a quiet shell.
+    /// Both panes owe a repaint, which is how the marks move across with the pointer.
+    fn observe_hovered_pane(&mut self) -> Result<Option<SeatId>> {
+        let hovered = self.pane_hit_context().map(|(seat, _, _)| seat);
+        if self.hover_pane == hovered {
+            return Ok(hovered);
+        }
+        self.hover_pane = hovered;
+        if let Some(seat) = hovered {
+            self.rescan_pane_references(seat);
+        }
+        self.repaint_hovered_pane()?;
+        Ok(hovered)
+    }
+
+    /// Re-derive one pane's image references from the frame that pane last drew.
+    ///
+    /// Idempotent and cheap to repeat: it reads a frame that is already in hand and asks that
+    /// pane's own shell what it draws, which is the same question `publish_frame_inner` asks for
+    /// the focused pane on every frame.
+    fn rescan_pane_references(&mut self, seat: SeatId) {
+        let active = self.active_tab;
+        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+            return;
+        };
+        let Some(frame) = leaf.last_presented_frame.as_ref() else {
+            leaf.frame_image_references = FrameImageReferences::default();
+            return;
+        };
+        leaf.frame_image_references = FrameImageReferences {
+            columns: frame.columns.get(),
+            references: leaf.session.frame_image_references(frame),
+        };
+    }
+
     /// The file a Ctrl+click at `hit` may hand to the system viewer (preview matrix §4, "leave this
     /// product"). Never path-*looking* text: the verb has always required that a worker actually
     /// opened and decoded the file, so that a misdetected word cannot launch anything.
     ///
-    /// The cells are the frame's own — the very cells wearing the underline that promised the
-    /// picture — so the verb and the mark cannot reach different text. Verification is the scan's
-    /// `verified` (the decoration worker's record of this file) or the peek's own cache entry, which
-    /// is the same worker and the same decoder reached by hovering rather than by detection.
+    /// The cells are the hovered pane's own — the very cells wearing the underline that promised
+    /// the picture — so the verb and the mark cannot reach different text. Verification is the
+    /// scan's `verified` (the decoration worker's record of this file) or the peek's own cache
+    /// entry, which is the same worker and the same decoder reached by hovering rather than by
+    /// detection.
     fn local_image_path_hit(&self, hit: bt_render::GridHit) -> Option<PathBuf> {
-        let reference = self.frame_image_references.at(hit)?;
+        let (_, leaf, _) = self.hovered_leaf()?;
+        let reference = leaf.frame_image_references.at(hit)?;
         (reference.verified
             || matches!(
                 self.peek_cache
@@ -9637,19 +9878,21 @@ impl Runtime {
         .then(|| reference.path.clone())
     }
 
-    /// The verified image reference the pointer is currently standing on, if any — the cells whose
-    /// resting dots become a solid underline for as long as the pointer is there.
+    /// The verified image reference the pointer is currently standing on, and the pane that draws
+    /// it — the cells whose resting dots become a solid underline for as long as the pointer is
+    /// there.
     ///
-    /// Resolved from the frame's own scan per publish rather than remembered in hover state, because
-    /// it is a pure function of "where is the pointer" and "what does this frame draw there", and
-    /// both can change without a pointer event: a decode landing turns plain text into an underlined
+    /// Resolved from that pane's own scan rather than remembered in hover state, because it is a
+    /// pure function of "where is the pointer" and "what does that pane draw there", and both can
+    /// change without a pointer event: a decode landing turns plain text into an underlined
     /// reference under a pointer that never moved.
-    fn hovered_image_reference(&self) -> Option<bt_term::FrameImageReference> {
-        let hit = self.frame_hit()?;
-        self.frame_image_references
+    fn hovered_image_reference(&self) -> Option<(SeatId, bt_term::FrameImageReference)> {
+        let (seat, leaf, hit) = self.hovered_leaf()?;
+        leaf.frame_image_references
             .at(hit)
             .filter(|reference| reference.verified)
             .cloned()
+            .map(|reference| (seat, reference))
     }
 
     /// Repaint when the pointer has moved onto or off a verified reference, so the solid underline
@@ -9659,9 +9902,25 @@ impl Runtime {
     /// here: `apply_math_results` already republishes when a completion changed session state, and
     /// the compose step asks the session afresh.
     fn refresh_image_reference_underline(&mut self) -> Result<()> {
-        if self.hovered_image_reference() == self.underlined_image_reference {
+        let hovered = self.hovered_image_reference();
+        if hovered == self.underlined_image_reference {
             return Ok(());
         }
+        self.underlined_image_reference = hovered;
+        self.repaint_hovered_pane()
+    }
+
+    /// Put the pane under the pointer — and the pane it just left — back on the glass.
+    ///
+    /// Two doors, because a window with a fleet in it has two ways to redraw a pane. The focused
+    /// leaf reaches the glass by publishing a frame, which is the path every existing contract
+    /// (presentation hold, scroll anchoring, the unchanged-frame skip) is written against. Every
+    /// other pane is re-projected by `redraw` itself, so asking for one is the whole of what it
+    /// takes to move its marks. Asking for both is correct and costs one frame: a pointer leaving
+    /// the focused pane for a neighbour owes marks to the neighbour and owes their removal to the
+    /// pane it left.
+    fn repaint_hovered_pane(&mut self) -> Result<()> {
+        self.window.request_redraw();
         self.publish_interaction_frame()
     }
 
@@ -9682,23 +9941,28 @@ impl Runtime {
     /// The complement of inline admission is checked once, here, before any source is consulted —
     /// a link that happens to lie across a banded content point does not smuggle a second
     /// presentation of it.
-    fn peek_target(&self, hit: bt_render::GridHit) -> Option<PeekSubject> {
-        let anchor = self
+    /// Every question below is asked of the pane the pointer is in — its frame, its scan, its
+    /// shell's admission rule. Asking the focused pane instead is how a hover over the pane you
+    /// are not typing in came to be answered by a cell the pointer is nowhere near.
+    fn peek_target(&self, hit: bt_render::GridHit) -> Option<(PeekSubject, SeatId)> {
+        let (seat, leaf, _) = self.hovered_leaf()?;
+        let anchor = leaf
             .last_presented_frame
             .as_ref()?
             .anchor_at(hit.row, hit.column, Bias::Before)
             .ok()??;
-        if !self.session.peek_admits_at(&anchor) {
+        if !leaf.session.peek_admits_at(&anchor) {
             return None;
         }
-        self.frame_image_references
+        leaf.frame_image_references
             .at(hit)
             .map(|reference| PeekSubject::from_path(reference.path.clone()))
             .or_else(|| {
-                self.session
+                leaf.session
                     .inline_image_payload_peek_at(&anchor)
                     .map(PeekSubject::from_content_key)
             })
+            .map(|subject| (subject, seat))
     }
 
     /// Present a pure peek-overlay change. The overlay lives beside the frame, not inside it, so
@@ -9735,6 +9999,18 @@ impl Runtime {
     fn dismiss_peek(&mut self) -> Result<()> {
         self.peek_hover.clear();
         self.present_peek_overlay(None)
+    }
+
+    /// The rectangle a peek belonging to `seat` is sized against: that pane's *body*, which is the
+    /// same rectangle its grid was drawn into and therefore the same one the 40% cap has always
+    /// meant. `None` once the pane is gone.
+    fn peek_seat_viewport(&self, seat: SeatId) -> Option<bt_render::SeatViewport> {
+        seats::pane_body_viewport(
+            &self.seats,
+            &self.seat_layout,
+            seat,
+            self.renderer.metrics().scale_factor as f32,
+        )
     }
 
     fn activate_peek_if_due(&mut self, now: Instant) -> Result<()> {
@@ -9785,11 +10061,15 @@ impl Runtime {
                     return Ok(());
                 }
             };
-        // The renderer owns the box; a pane too small to host the flyout shows none, and nothing
-        // is resampled for it.
-        let Some((display_width_px, display_height_px)) = self
-            .renderer
-            .peek_thumbnail_extent(native_width_px, native_height_px)
+        // The box is sized against the pane that owns the picture — the pane the pointer was in,
+        // never the pane holding the keyboard. A pane that has gone, or is too small to host the
+        // flyout, shows none, and nothing is resampled for it.
+        let Some(seat) = self.peek_seat_viewport(candidate.seat) else {
+            return Ok(());
+        };
+        let Some((display_width_px, display_height_px)) =
+            self.renderer
+                .peek_thumbnail_extent(seat, native_width_px, native_height_px)
         else {
             return Ok(());
         };
@@ -9797,7 +10077,7 @@ impl Runtime {
         if let Some(thumbnail) = self.peek_thumbnail.as_ref()
             && thumbnail.matches(&target)
         {
-            let overlay = thumbnail.overlay(candidate.pointer);
+            let overlay = thumbnail.overlay(seat, candidate.pointer);
             return self.present_peek_overlay(Some(overlay));
         }
         if self.peek_thumbnail_pending.as_ref() == Some(&target) || !self.math_worker_running {
@@ -9930,7 +10210,7 @@ impl Runtime {
 
     fn activate_hyperlink_hover_if_due(&mut self, now: Instant) -> Result<()> {
         if self.hyperlink_hover.activate_if_due(now) {
-            self.publish_interaction_frame()?;
+            self.repaint_hovered_pane()?;
         }
         Ok(())
     }
@@ -9960,8 +10240,11 @@ impl Runtime {
         if self.math_hover_anchor.is_some() {
             self.math_hover_clear_at = Some(Instant::now() + Duration::from_millis(500));
         }
+        // Whatever pane the pointer was standing in is standing in none now, and owes the removal
+        // of its marks — which, if it was not the focused one, only a redraw can deliver.
+        self.hover_pane = None;
         if hyperlink_changed {
-            self.publish_interaction_frame()?;
+            self.repaint_hovered_pane()?;
         }
         // The pointer is gone, so `hovered_image_reference` now answers `None`: any solid underline
         // still on screen must fall back to its resting dots.
@@ -10001,20 +10284,44 @@ impl Runtime {
         }
     }
 
+    /// The hovered block belongs to the pane the pointer is in, and so does the state that lights
+    /// it: `math_hit` already answers from that pane's frame, and the hover it sets is written to
+    /// that pane's own shell. Writing it to the focused shell instead would darken a block in the
+    /// pane holding the keyboard because the pointer was somewhere else entirely.
     fn update_math_hover(&mut self, now: Instant) -> Result<Option<MathHit>> {
         let hit = self.math_hit();
         if let Some(hit) = hit.as_ref() {
             self.math_hover_clear_at = None;
             if self.math_hover_anchor.as_ref() != Some(&hit.anchor) {
                 self.math_hover_anchor = Some(hit.anchor.clone());
-                if self.session.set_math_hover(Some(&hit.anchor)) {
-                    self.publish_interaction_frame()?;
+                if self.set_hovered_math(Some(hit.anchor.clone())) {
+                    self.repaint_hovered_pane()?;
                 }
             }
         } else if self.math_hover_anchor.is_some() && self.math_hover_clear_at.is_none() {
             self.math_hover_clear_at = Some(now + Duration::from_millis(500));
         }
         Ok(hit)
+    }
+
+    /// Set the hovered formula on the pane the pointer is in, and clear it everywhere else.
+    ///
+    /// One pointer, so at most one shell in the window may believe a block of its is under it. The
+    /// sweep is what makes a pointer *leaving* a pane put that pane's block back, including when it
+    /// left by crossing straight into another pane's block and no clear ever ran.
+    fn set_hovered_math(&mut self, anchor: Option<MathBlockAnchor>) -> bool {
+        let hovered = if anchor.is_some() {
+            self.hover_pane
+        } else {
+            None
+        };
+        let active = self.active_tab;
+        let mut changed = false;
+        for (seat, leaf) in self.tabs[active].leaves_mut() {
+            let wanted = anchor.as_ref().filter(|_| hovered == Some(*seat));
+            changed |= leaf.session.set_math_hover(wanted);
+        }
+        changed
     }
 
     fn clear_math_hover_if_due(&mut self, now: Instant) -> Result<()> {
@@ -10026,8 +10333,8 @@ impl Runtime {
         }
         self.math_hover_clear_at = None;
         self.math_hover_anchor = None;
-        if self.session.set_math_hover(None) {
-            self.publish_interaction_frame()?;
+        if self.set_hovered_math(None) {
+            self.repaint_hovered_pane()?;
         }
         Ok(())
     }
@@ -10140,10 +10447,9 @@ impl Runtime {
             .click_tracker
             .register(hit.row, hit.column, Instant::now());
         let local_image_path = self.local_image_path_hit(hit);
-        let frame = self
-            .last_presented_frame
-            .as_ref()
-            .context("missing frame for mouse hit")?;
+        let Some(frame) = self.focused_frame() else {
+            return Ok(());
+        };
         let hyperlink = frame.hyperlink_at(hit.row, hit.column);
         let open_hyperlink_on_release = self.modifiers.control_key() && hyperlink.is_some();
         let local_image_activation = local_image_activation(
@@ -10211,10 +10517,9 @@ impl Runtime {
         {
             return Ok(());
         }
-        let frame = self
-            .last_presented_frame
-            .as_ref()
-            .context("missing frame for mouse drag")?;
+        let Some(frame) = self.focused_frame() else {
+            return Ok(());
+        };
         let current = match drag.mode {
             SelectionDragMode::Linear => ViewSelection {
                 start: frame
@@ -10340,13 +10645,15 @@ impl Runtime {
             .tooltip_anchor_at(position)
             .filter(|anchor| !self.layout_peek_suppresses(*anchor));
         self.note_tooltip(anchor)?;
-        // Everything below reads the pointer through `terminal_pointer` — one
-        // correction, in one place, applied to hover, peek, selection and
-        // protocol forwarding alike. Outside the seat it answers `None`, which
-        // is exactly what a pointer outside the grid already answered, so the
-        // clearing paths below run unchanged.
-        let local = self.terminal_pointer();
-        let position = local.unwrap_or(position);
+        // Which pane the pointer is in, settled before anything asks a question of it. Everything
+        // below — the formula hover, the link's underline, the reference's underline, the flyout —
+        // is answered by that pane, with no focus prerequisite and no focus side effect: the
+        // window says what it is being pointed at (user ruling 2026-08-10).
+        self.observe_hovered_pane()?;
+        // `position` stays the window's own coordinates from here down. The flyout is a floating
+        // window laid over the surface rather than a tenant of one pane, so its anchor is a point
+        // on the window; translating it into some seat's corner is what used to make a peek raised
+        // in one pane appear beside another.
         let now = Instant::now();
         let math_hit = self.update_math_hover(now)?;
         let hit = self.frame_hit();
@@ -10356,7 +10663,7 @@ impl Runtime {
             })
             .and_then(|hit| self.hyperlink_hit(hit));
         if self.hyperlink_hover.observe(hyperlink, now) {
-            self.publish_interaction_frame()?;
+            self.repaint_hovered_pane()?;
         }
         self.refresh_image_reference_underline()?;
         let peek_path = hit
@@ -10376,11 +10683,9 @@ impl Runtime {
         if matches!(self.mouse_route, Some(MouseRoute::Local(_))) {
             return self.extend_local_selection(hit);
         }
-        let frame = self
-            .last_presented_frame
-            .as_ref()
-            .context("missing frame for forwarded mouse motion")?;
-        let hit = live_viewport_mouse_hit(frame, hit);
+        let Some(hit) = self.forwarded_mouse_hit() else {
+            return Ok(());
+        };
         let modes = self.session.terminal_modes();
         if self.modifiers.shift_key() || modes.mouse_tracking == MouseTracking::Off {
             return Ok(());
@@ -11945,11 +12250,9 @@ impl Runtime {
             return Ok(());
         };
         let modes = self.session.terminal_modes();
-        let frame = self
-            .last_presented_frame
-            .as_ref()
-            .context("missing frame for forwarded mouse hit")?;
-        let forwarded_hit = live_viewport_mouse_hit(frame, hit);
+        let Some(forwarded_hit) = self.forwarded_mouse_hit() else {
+            return Ok(());
+        };
         if let Some(bytes) = route_forwarded_mouse_button(
             &mut self.mouse_route,
             state,
@@ -12218,14 +12521,9 @@ impl Runtime {
             if notches == 0 {
                 return Ok(());
             }
-            let Some(hit) = self.frame_hit() else {
+            let Some(hit) = self.forwarded_mouse_hit() else {
                 return Ok(());
             };
-            let frame = self
-                .last_presented_frame
-                .as_ref()
-                .context("missing frame for forwarded wheel hit")?;
-            let hit = live_viewport_mouse_hit(frame, hit);
             let button = if notches > 0 {
                 input::MouseProtocolButton::WheelUp
             } else {
@@ -12706,17 +13004,16 @@ impl Runtime {
         // solve -> seat rects -> cols/rows -> the existing 200ms ConPTY quiet
         // coalescing -> LayoutKey. §4.2 fixes this order and forbids the reverse
         // (red line L10); the solver itself takes no part in the debounce.
-        let next_grid = self.resolve_seat_layout(render_physical);
+        self.resolve_seat_layout(render_physical);
         let observed_at = Instant::now();
         // A `Resized` that settles back onto the grid ConPTY already has — the common shape of
         // the very first delivery after a clean, same-DPI session restore — must not schedule a
         // real ConPTY resize at all; see `coalesce_pty_resize_on_grid_change`.
-        self.schedule_grid_change(
-            next_grid,
-            terminal_pty_physical(&self.renderer, render_physical),
-            observed_at,
-            "resize terminal actor",
-        )?;
+        //
+        // Every leaf, not just the focused one: an OS resize moves every pane's
+        // rectangle, and a pane whose shell is never told stays at the width it
+        // had before the drag until something else happens to re-solve.
+        self.resize_leaves_to_layout(observed_at, "resize terminal actor")?;
         self.sync_math_layout_key();
         // The grid actually in force, which under the typed-input gate is still the old one.
         self.pending_resize_present = Some(self.grid);
@@ -12779,10 +13076,8 @@ impl Runtime {
             // none because `solve` is pure.
             self.refresh_work_area();
             self.apply_window_min_inner_size()?;
-            let next_grid = self.resolve_seat_layout(render_physical);
-            self.schedule_grid_change(
-                next_grid,
-                terminal_pty_physical(&self.renderer, render_physical),
+            self.resolve_seat_layout(render_physical);
+            self.resize_leaves_to_layout(
                 Instant::now(),
                 "rebuild terminal grid after authoritative DPI correction",
             )?;
@@ -12975,19 +13270,36 @@ impl Runtime {
                 .place_preview_image(placement.seat, placement.clip);
         }
         let active = self.active_tab;
+        // The pointer's marks belong to the pane the pointer is in, focused or not, so an
+        // unfocused pane that is being hovered is projected *and then decorated* — the same two
+        // steps `publish_frame_inner` takes for the focused one. Resolved before the loop because
+        // it is a question about the whole window and the loop holds a leaf.
+        let hovered_reference = self.hovered_image_reference();
+        let hover_pane = self.hover_pane.filter(|seat| *seat != focused_leaf);
         let mut unfocused_frames: Vec<(PaneDraw, ViewportFrame)> = Vec::new();
         for pane in &bodies {
             if pane.seat == focused_leaf {
                 continue;
             }
+            let hyperlink_hover = &self.hyperlink_hover;
             let Some(leaf) = self.tabs[active].sessions.get_mut(&pane.seat) else {
                 continue;
             };
             leaf.session.refresh_projection(&mut leaf.projection);
-            let projected = leaf
+            let mut projected = leaf
                 .session
                 .viewport_frame(&mut leaf.projection)
                 .context("project an unfocused pane's grid into a viewport frame")?;
+            if hover_pane == Some(pane.seat) {
+                apply_hover_marks(
+                    &mut projected,
+                    hyperlink_hover,
+                    hovered_reference
+                        .as_ref()
+                        .filter(|(seat, _)| *seat == pane.seat)
+                        .map(|(_, reference)| reference),
+                );
+            }
             unfocused_frames.push((*pane, projected));
         }
         let focused_body = bodies
@@ -13054,16 +13366,33 @@ impl Runtime {
                 // asked over it can be answered by its own cells. The focused
                 // leaf's copy is `Runtime::last_presented_frame` as well, which
                 // is what the presentation-hold and scroll contracts read.
+                //
+                // And each pane's ledger is squared here, in the same breath and
+                // for the same reason: this is the moment its cells reached the
+                // glass, which is the only moment [`seen_revision`] recognises as
+                // being looked at. Every painted pane, not the focused one —
+                // three panes on screen are three panes the user can read, and a
+                // tab that lit up for a sibling of the pane holding the keyboard
+                // was the bug this pass was written to end.
                 let active = self.active_tab;
                 for (pane, projected) in unfocused_frames {
                     if let Some(leaf) = self.tabs[active].sessions.get_mut(&pane.seat) {
                         leaf.last_presented_frame = Some(projected);
+                        mark_leaf_painted(leaf);
                     }
                 }
                 if let Some(leaf) = self.tabs[active].sessions.get_mut(&focused_leaf) {
                     leaf.last_presented_frame = Some(frame.clone());
+                    mark_leaf_painted(leaf);
                 }
                 self.last_presented_frame = Some(frame);
+                // The pane under the pointer just drew new cells, so the list its pointer verbs
+                // read is re-derived from them. Only that pane: a reference scan answers a
+                // question nobody is asking of the panes the pointer is not in, and the resting
+                // dotted affordance they do wear was painted by the session itself.
+                if let Some(seat) = self.hover_pane.filter(|seat| *seat != focused_leaf) {
+                    self.rescan_pane_references(seat);
+                }
                 self.pending_resize_present = None;
             }
             PresentOutcome::Skipped | PresentOutcome::Reconfigure => {
@@ -14157,6 +14486,44 @@ fn is_reopen_closed_tab_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("t"))
 }
 
+/// One shell's share of a solved layout: the rectangle it is to be sized from,
+/// and whether it is the leaf holding the keyboard.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct LeafResizeTarget {
+    seat: SeatId,
+    body: bt_render::SeatViewport,
+    focused: bool,
+}
+
+/// The whole geometry decision [`Runtime::resize_leaves_to_layout`] makes, with
+/// no renderer and no session in it: seats and a solved layout in, one rectangle
+/// per terminal leaf out.
+///
+/// `focused` enters the answer **only as a flag**. It says which leaf's carry
+/// goes through the typed-input gate and the ConPTY quiet window; it does not
+/// and must not reach any `body`. Sizing a shell is a question about a
+/// rectangle, and which pane holds the keyboard is not one of that rectangle's
+/// inputs — the version of this code that let the two mix is the one that told a
+/// narrow focused pane it had the primary pane's columns.
+fn leaf_resize_plan(
+    seats: &seats::Seats,
+    layout: &SeatLayout,
+    focused: SeatId,
+    scale: f32,
+) -> Vec<LeafResizeTarget> {
+    seats
+        .terminals()
+        .into_iter()
+        .filter_map(|seat| {
+            seats::pane_body_viewport(seats, layout, seat, scale).map(|body| LeafResizeTarget {
+                seat,
+                body,
+                focused: seat == focused,
+            })
+        })
+        .collect()
+}
+
 /// Solve the tree against the current surface, and pick out the terminal seat.
 ///
 /// The whole §4.1 conversion lives here and nowhere else: physical pixels in,
@@ -14213,16 +14580,6 @@ fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorA
         y: area.y.saturating_add_unsigned(seat.y),
         ..area
     }
-}
-
-/// The pixel size ConPTY is told about: the terminal *seat's*, not the window's.
-/// They are the same number for a lone leaf.
-fn terminal_pty_physical(renderer: &Renderer, window: PhysicalSize<u32>) -> PhysicalSize<u32> {
-    let seat = renderer.seat_viewport();
-    if seat.width == 0 || seat.height == 0 {
-        return window;
-    }
-    PhysicalSize::new(seat.width, seat.height)
 }
 
 /// What the session file asks the next window to open as.
@@ -15383,75 +15740,225 @@ mod tests {
 
     // ── T2: the tab strip's state channels ──
 
-    fn facts(status: SessionStatus, last_seen_revision: u64, tab_is_active: bool) -> SessionFacts {
+    /// The facts the strip reads for one shell.
+    ///
+    /// `output_revision` and `last_seen_revision` are handed over separately
+    /// because they are separate facts — what the shell has said, and how much of
+    /// that has been painted — and the status carries neither. See [`quiet`].
+    fn facts_with(
+        status: SessionStatus,
+        output_revision: u64,
+        last_seen_revision: u64,
+        tab_is_active: bool,
+    ) -> SessionFacts {
         SessionFacts {
             status,
+            output_revision,
             last_seen_revision,
             tab_is_active,
         }
     }
 
-    /// A session that has published `revision` frames and is otherwise quiet.
-    fn quiet(revision: u64) -> SessionStatus {
+    /// The ordinary case: nothing latched, nothing running, `output` said and
+    /// `seen` painted.
+    fn facts(output_revision: u64, last_seen_revision: u64, tab_is_active: bool) -> SessionFacts {
+        facts_with(quiet(), output_revision, last_seen_revision, tab_is_active)
+    }
+
+    /// A session with nothing latched and nothing running.
+    ///
+    /// Its `published_revision` is deliberately absurd, and that is the point.
+    /// bt-term counts *frames put on the glass* there, and frames are published
+    /// for a blinking cursor, a repainted chrome and the tab switch itself —
+    /// none of which is a program saying anything. Pinning it to a number no
+    /// ledger can reach means any code that goes back to measuring unread
+    /// against it fails every test in this section at once, instead of passing
+    /// them all because the two numbers happened to be given the same value.
+    fn quiet() -> SessionStatus {
         SessionStatus {
             progress: None,
             bell_latched: false,
             failure_exit_code: None,
             working: false,
-            published_revision: revision,
+            published_revision: u64::MAX,
         }
     }
 
-    /// PIN (T2 J97): the tab on screen keeps its ledger current, so leaving it
+    /// PIN (T2 J97): painting is seeing, so leaving a tab you have been reading
     /// does not retroactively invent unread output.
     ///
     /// Red gate, and the subtlest bug in this whole片. Suppressing the dot on
     /// the active tab is only half the rule — it hides the claim without
     /// answering it. If the ledger itself stops advancing while the tab is
-    /// watched, then every frame the user sat and read piles up behind it, and
+    /// watched, then everything the user sat and read piles up behind it, and
     /// the moment they switch away the tab they *just left* lights up claiming
-    /// to hold output they had been staring at. Watching is seeing, and this is
-    /// where that gets written down.
+    /// to hold output they had been staring at.
     #[test]
-    fn the_watched_tab_keeps_its_ledger_current() {
-        // Watched: the ledger tracks publication as it happens.
+    fn painting_is_seeing_so_a_tab_you_read_owes_nothing_when_you_leave() {
+        // Painted: the ledger takes the whole of what was said.
         assert_eq!(seen_revision(3, 90, true), 90);
-        // Unwatched: it holds still, which is what makes new output count.
+        // Not painted: it holds still, which is what makes new output count.
         assert_eq!(seen_revision(3, 90, false), 3);
 
         // The whole sequence the bug lives in: open a tab, read a while, leave.
-        let mut seen = seen_revision(0, 0, true);
-        for published in 1..=40 {
-            seen = seen_revision(seen, published, true);
+        let mut output = 0;
+        let mut seen = 0;
+        for _ in 0..40 {
+            output = output_revision(output, true, false);
+            seen = seen_revision(seen, output, true);
         }
-        let facts = SessionFacts {
-            status: quiet(40),
-            last_seen_revision: seen,
-            tab_is_active: false,
-        };
+        assert_eq!((output, seen), (40, 40));
         assert!(
-            !facts.has_unseen_output(),
+            !facts(output, seen, false).has_unseen_output(),
             "a tab just switched away from holds nothing unread"
         );
-        // And the very next thing it publishes does count.
-        let facts = SessionFacts {
-            status: quiet(41),
-            last_seen_revision: seen,
-            tab_is_active: false,
-        };
+        // And the very next thing it says does count.
+        let output = output_revision(output, true, false);
         assert!(
-            facts.has_unseen_output(),
+            facts(output, seen, false).has_unseen_output(),
             "output after the switch is unread"
         );
     }
 
+    /// PIN (real-machine bug, 2026-08-10): **a tab whose shell said nothing wears
+    /// nothing, however many frames it published.**
+    ///
+    /// The reported window: a pinned three-pane tab, no new output anywhere, and
+    /// a blue dot on it the instant the user moved to the next tab. The recorded
+    /// ledger at the moment of the switch was `frames=95 seen=94` — the shell had
+    /// been silent for the whole session, and the extra frame was a chrome
+    /// repaint that went out after the turn's last reconciliation and before the
+    /// switch was paid.
+    ///
+    /// Two mutations die here. Count publication instead of output and the
+    /// thirty-six silent frames below become thirty-six units of news; measure
+    /// unread against `status.published_revision` and [`quiet`]'s absurd value
+    /// lights the tab immediately.
+    #[test]
+    fn frames_are_not_output_and_a_silent_tab_stays_silent() {
+        let mut output = 0;
+        let mut seen = 0;
+        for _ in 0..36 {
+            // A blinking cursor, a hovered link, a repainted chrome: the window
+            // publishes, the shell says nothing.
+            output = output_revision(output, false, false);
+            seen = seen_revision(seen, output, true);
+        }
+        assert_eq!(
+            (output, seen),
+            (0, 0),
+            "a frame is not a sentence: nothing was said and nothing is owed"
+        );
+        assert!(!facts(output, seen, false).has_unseen_output());
+        assert_eq!(
+            facts(output, seen, false).claim(),
+            StatusClaim::Silent,
+            "the tab the user just left had nothing to report"
+        );
+    }
+
+    /// PIN: **a shell that speaks behind a tab lights it** — the claim the whole
+    /// badge exists to make.
+    ///
+    /// The counterpart to the test above, and the direction the old rule could
+    /// never satisfy: only the focused pane of the tab on screen ever published a
+    /// frame, so a ledger measured against publication stood still for exactly
+    /// the shells a badge is for. Output is counted where every leaf is drained,
+    /// so a background tab keeps an honest account of itself.
+    #[test]
+    fn a_shell_that_speaks_behind_a_tab_lights_it() {
+        let seen = 7;
+        let output = output_revision(7, true, false);
+        assert_eq!(output, 8);
+        assert!(facts(output, seen, false).has_unseen_output());
+        assert_eq!(facts(output, seen, false).claim(), StatusClaim::Unread);
+        // And it stays lit until those cells are painted — not until some tab
+        // happens to become active, and not on a turn of the loop.
+        assert_eq!(seen_revision(seen, output, false), 7);
+        assert_eq!(seen_revision(seen, output, true), 8);
+    }
+
+    /// PIN: **a reprint we asked for is not the program speaking.**
+    ///
+    /// A leaf told its new size answers with a redrawn prompt, and a badge that
+    /// counted it would light every background tab every time the window
+    /// changed shape. The exemption is bounded by the leaf's own resize
+    /// transaction, so the byte after quiescence counts again — and the price,
+    /// stated in [`output_revision`], is that a shell printing *only* inside its
+    /// own resize window goes unremarked.
+    #[test]
+    fn a_reprint_we_asked_for_is_not_the_program_speaking() {
+        assert_eq!(
+            output_revision(4, true, true),
+            4,
+            "bytes arriving inside the transaction are the echo of our own question"
+        );
+        assert_eq!(
+            facts(output_revision(4, true, true), 4, false).claim(),
+            StatusClaim::Silent
+        );
+        // The transaction closes, and the shell's next word is news again.
+        assert_eq!(output_revision(4, true, false), 5);
+        assert!(facts(5, 4, false).has_unseen_output());
+    }
+
+    /// PIN: **every painted pane is seen, not only the one holding the
+    /// keyboard.**
+    ///
+    /// Three panes on screen are three panes the user is reading. Squaring only
+    /// the focused leaf leaves its siblings holding a backlog they earned while
+    /// in plain sight, and the tab lights up for them the moment it is left.
+    ///
+    /// The second half is the same rule refusing to overreach: a pane that did
+    /// not fit on screen was not painted, so its backlog is real and survives.
+    #[test]
+    fn every_painted_pane_is_seen_not_only_the_one_holding_the_keyboard() {
+        let panes = [(5_u64, 0_u64), (9, 0), (2, 0)];
+        let painted: Vec<u64> = panes
+            .iter()
+            .map(|&(output, seen)| seen_revision(seen, output, true))
+            .collect();
+        assert_eq!(painted, vec![5, 9, 2]);
+        assert_eq!(
+            fleet_claim(
+                panes
+                    .iter()
+                    .zip(&painted)
+                    .map(|(&(output, _), &seen)| facts(output, seen, false))
+            ),
+            StatusClaim::Silent,
+            "a tab every pane of which was on the glass owes nothing when you leave it"
+        );
+        let overflowed = seen_revision(0, 3, false);
+        assert_eq!(overflowed, 0);
+        assert_eq!(
+            fleet_claim([facts(3, overflowed, false)]),
+            StatusClaim::Unread,
+            "a pane that never made it to the glass is honestly unread"
+        );
+    }
+
+    /// PIN: **output that never reached the glass survives the switch.**
+    ///
+    /// The honest converse of the bug being fixed. Bytes drained on the same turn
+    /// the user leaves are in the shell's screen but were never presented, and
+    /// the ledger says so. Squaring a departing tab wholesale — the obvious way
+    /// to kill a stale dot — would swallow exactly this.
+    #[test]
+    fn output_that_never_reached_the_glass_survives_the_switch() {
+        let output = output_revision(0, true, false);
+        let seen = seen_revision(0, output, false);
+        assert_eq!((output, seen), (1, 0));
+        assert_eq!(facts(output, seen, false).claim(), StatusClaim::Unread);
+    }
+
     /// A session whose bell has rung and whose last command failed — the two
     /// latches [`DualPlaneSession::clear_attention`] retires together.
-    fn latched(revision: u64) -> SessionStatus {
+    fn latched() -> SessionStatus {
         SessionStatus {
             bell_latched: true,
             failure_exit_code: Some(1),
-            ..quiet(revision)
+            ..quiet()
         }
     }
 
@@ -15470,14 +15977,9 @@ mod tests {
             status.bell_latched = false;
             status.failure_exit_code = None;
         }
-        SessionFacts {
-            status,
-            // Behind by a mile, so nothing here is hidden by the ledger being
-            // up to date: whatever survives is the attention rule's own doing.
-            last_seen_revision: 0,
-            tab_is_active,
-        }
-        .claim()
+        // Behind by a mile, so nothing here is hidden by the ledger being up to
+        // date: whatever survives is the attention rule's own doing.
+        facts_with(status, 50, 0, tab_is_active).claim()
     }
 
     /// PIN (T2, user ruling — "watching is consuming"): a latch that arrives on
@@ -15492,13 +15994,13 @@ mod tests {
     fn a_latch_arriving_on_the_watched_tab_is_spent_on_arrival() {
         assert!(attention_is_consumed(true, true));
         assert_eq!(
-            claim_after_a_look(latched(50), true, true),
+            claim_after_a_look(latched(), true, true),
             StatusClaim::Silent,
             "the tab in front of the user wears no dot"
         );
         // Both latches go, not just the loud one — a failure read on screen is
         // as read as a bell heard on screen.
-        let mut failed_only = quiet(50);
+        let mut failed_only = quiet();
         failed_only.failure_exit_code = Some(1);
         assert_eq!(
             claim_after_a_look(failed_only, true, true),
@@ -15521,9 +16023,9 @@ mod tests {
         // the active tab whatever the window is doing. So the bell is not
         // merely the loudest surviving claim here — it is the only one this
         // ruling can be about, which is why the ruling is about the bell.
-        let mut bell_only = quiet(50);
+        let mut bell_only = quiet();
         bell_only.bell_latched = true;
-        for status in [latched(50), bell_only] {
+        for status in [latched(), bell_only] {
             assert_eq!(
                 claim_after_a_look(status, true, false),
                 StatusClaim::Bell,
@@ -15533,12 +16035,7 @@ mod tests {
         // And a bell on the *active* tab really can show a dot at all — the
         // active-tab suppression covers unread and failure, never the bell.
         assert_eq!(
-            SessionFacts {
-                status: bell_only,
-                last_seen_revision: 50,
-                tab_is_active: true,
-            }
-            .claim(),
+            facts_with(bell_only, 50, 50, true).claim(),
             StatusClaim::Bell
         );
     }
@@ -15557,7 +16054,7 @@ mod tests {
                 "focus alone consumes nothing on a tab that is not on screen"
             );
             assert_eq!(
-                claim_after_a_look(latched(50), false, window_is_focused),
+                claim_after_a_look(latched(), false, window_is_focused),
                 StatusClaim::Failed,
                 "an unwatched tab keeps its claim whatever the window is doing"
             );
@@ -15782,19 +16279,22 @@ mod tests {
     /// nothing at all.
     #[test]
     fn a_tab_wears_the_loudest_claim_its_fleet_makes() {
-        let mut rang = quiet(9);
+        let mut rang = quiet();
         rang.bell_latched = true;
-        let mut failed = quiet(9);
+        let mut failed = quiet();
         failed.failure_exit_code = Some(1);
 
         // Quiet focused pane, background pane that rang: the tab rings.
         assert_eq!(
-            fleet_claim([facts(quiet(4), 4, false), facts(rang, 4, false)]),
+            fleet_claim([facts(4, 4, false), facts_with(rang, 9, 4, false)]),
             StatusClaim::Bell
         );
         // And the failure outranks the bell wherever in the fleet it sits.
         assert_eq!(
-            fleet_claim([facts(rang, 4, false), facts(failed, 4, false)]),
+            fleet_claim([
+                facts_with(rang, 9, 4, false),
+                facts_with(failed, 9, 4, false)
+            ]),
             StatusClaim::Failed
         );
         // A tab with no shells at all claims nothing rather than panicking. It
@@ -15823,31 +16323,31 @@ mod tests {
     #[test]
     fn a_download_in_one_pane_does_not_silence_its_quiet_siblings_unread() {
         // Leaf A: unseen output *and* a download still running.
-        let mut downloading = quiet(12);
+        let mut downloading = quiet();
         downloading.progress = Some(ProgressState::Normal(40));
         assert_eq!(
-            facts(downloading, 3, false).claim(),
+            facts_with(downloading, 12, 3, false).claim(),
             StatusClaim::Silent,
             "per leaf, the download suppresses this pane's own finished claim"
         );
         // Leaf B: quiet, and holding output nobody has read.
-        assert_eq!(facts(quiet(7), 3, false).claim(), StatusClaim::Unread);
+        assert_eq!(facts(7, 3, false).claim(), StatusClaim::Unread);
 
         assert_eq!(
-            fleet_claim([facts(downloading, 3, false), facts(quiet(7), 3, false)]),
+            fleet_claim([facts_with(downloading, 12, 3, false), facts(7, 3, false)]),
             StatusClaim::Unread,
             "the suppression is per leaf; the aggregation is per tab"
         );
         // Order must not matter: `max` is commutative and the pin says so out
         // loud, because a fold that carried a suppression forward would not be.
         assert_eq!(
-            fleet_claim([facts(quiet(7), 3, false), facts(downloading, 3, false)]),
+            fleet_claim([facts(7, 3, false), facts_with(downloading, 12, 3, false)]),
             StatusClaim::Unread
         );
         // And with no quiet sibling there is genuinely nothing finished to
         // report, so the tab is silent — D35 intact where it does apply.
         assert_eq!(
-            fleet_claim([facts(downloading, 3, false)]),
+            fleet_claim([facts_with(downloading, 12, 3, false)]),
             StatusClaim::Silent
         );
     }
@@ -15861,14 +16361,17 @@ mod tests {
     /// fact — and a wrong one, since nothing has finished.
     #[test]
     fn a_session_still_working_makes_no_finished_claim() {
-        let unseen = quiet(9);
+        let unseen = quiet();
         // Quiet and unseen: the plain unread claim.
-        assert_eq!(facts(unseen, 4, false).claim(), StatusClaim::Unread);
+        assert_eq!(facts_with(unseen, 9, 4, false).claim(), StatusClaim::Unread);
 
         // The same session, still running.
         let mut working = unseen;
         working.working = true;
-        assert_eq!(facts(working, 4, false).claim(), StatusClaim::Silent);
+        assert_eq!(
+            facts_with(working, 9, 4, false).claim(),
+            StatusClaim::Silent
+        );
 
         // The same session, reporting progress — suppressed in every flavour,
         // because every one of them means a run that has not ended.
@@ -15881,7 +16384,7 @@ mod tests {
             let mut in_flight = unseen;
             in_flight.progress = Some(state);
             assert_eq!(
-                facts(in_flight, 4, false).claim(),
+                facts_with(in_flight, 9, 4, false).claim(),
                 StatusClaim::Silent,
                 "{state:?} is work in flight, not a finished claim"
             );
@@ -15890,9 +16393,15 @@ mod tests {
         // A failure is suppressed by the same rule, for the same reason.
         let mut failing = unseen;
         failing.failure_exit_code = Some(1);
-        assert_eq!(facts(failing, 4, false).claim(), StatusClaim::Failed);
+        assert_eq!(
+            facts_with(failing, 9, 4, false).claim(),
+            StatusClaim::Failed
+        );
         failing.progress = Some(ProgressState::Normal(10));
-        assert_eq!(facts(failing, 4, false).claim(), StatusClaim::Silent);
+        assert_eq!(
+            facts_with(failing, 9, 4, false).claim(),
+            StatusClaim::Silent
+        );
     }
 
     /// PIN (T2): the bell is latched, so it survives what suppresses the rest.
@@ -15902,36 +16411,36 @@ mod tests {
     /// looks. This is the one claim the work-in-flight rule does not touch.
     #[test]
     fn the_bell_outlives_the_work_that_followed_it() {
-        let mut ringing = quiet(9);
+        let mut ringing = quiet();
         ringing.bell_latched = true;
         ringing.working = true;
         ringing.progress = Some(ProgressState::Indeterminate);
-        assert_eq!(facts(ringing, 9, false).claim(), StatusClaim::Bell);
+        assert_eq!(facts_with(ringing, 9, 9, false).claim(), StatusClaim::Bell);
         // Even with nothing unread — the bell is not an unread claim.
-        assert_eq!(facts(ringing, 99, false).claim(), StatusClaim::Bell);
+        assert_eq!(facts_with(ringing, 9, 99, false).claim(), StatusClaim::Bell);
     }
 
-    /// PIN (T2 J97): unread is "published since you last looked", and the tab
-    /// you are looking at is never unread.
+    /// PIN (T2 J97): unread is "said since you last saw it", and the tab you are
+    /// looking at is never unread.
     ///
     /// Red gate: without the active-tab clause the tab under the user's eyes
-    /// wears a dot asking them to look at it, because its session publishes a
-    /// frame on every keystroke.
+    /// wears a dot asking them to look at it, in the window between its shell
+    /// speaking and the frame that carries those words being presented.
     #[test]
-    fn unread_is_publication_since_the_last_look_and_never_on_the_active_tab() {
-        // Behind an inactive tab, new frames are unread.
-        assert!(facts(quiet(7), 3, false).has_unseen_output());
+    fn unread_is_what_was_said_since_the_last_look_and_never_on_the_active_tab() {
+        // Behind an inactive tab, new output is unread.
+        assert!(facts(7, 3, false).has_unseen_output());
         // Caught up: nothing new.
-        assert!(!facts(quiet(7), 7, false).has_unseen_output());
-        // The active tab is being watched, so publishing *is* seeing.
-        assert!(!facts(quiet(7), 3, true).has_unseen_output());
-        assert_eq!(facts(quiet(7), 0, true).claim(), StatusClaim::Silent);
+        assert!(!facts(7, 7, false).has_unseen_output());
+        // The active tab is the one being read, whatever its ledger says.
+        assert!(!facts(7, 3, true).has_unseen_output());
+        assert_eq!(facts(7, 0, true).claim(), StatusClaim::Silent);
         // A failure on the active tab makes no dot either — the same clause
         // covers it, because a failure is a kind of unread.
-        let mut failed = quiet(7);
+        let mut failed = quiet();
         failed.failure_exit_code = Some(2);
-        assert_eq!(facts(failed, 0, true).claim(), StatusClaim::Silent);
-        assert_eq!(facts(failed, 0, false).claim(), StatusClaim::Failed);
+        assert_eq!(facts_with(failed, 7, 0, true).claim(), StatusClaim::Silent);
+        assert_eq!(facts_with(failed, 7, 0, false).claim(), StatusClaim::Failed);
     }
 
     /// PIN (T2 D31): the breath is the mock-up's keyframes on the mock-up's
@@ -16701,8 +17210,9 @@ mod tests {
         let mut hover = PeekHover::default();
 
         let subject = PeekSubject::from_path(path.clone());
+        let pane = SeatId(1);
         assert!(!hover.observe(
-            Some(subject.clone()),
+            Some((subject.clone(), pane)),
             PhysicalPosition::new(10.0, 10.0),
             start
         ));
@@ -16714,7 +17224,7 @@ mod tests {
         // Sliding along the same path span refreshes the anchor but keeps the original clock:
         // the flyout settles where the pointer last was, without ever restarting the delay.
         assert!(!hover.observe(
-            Some(subject.clone()),
+            Some((subject.clone(), pane)),
             PhysicalPosition::new(30.0, 12.0),
             start + Duration::from_millis(200)
         ));
@@ -16725,7 +17235,7 @@ mod tests {
         assert_eq!(settled.pointer.x, 30.0);
         // While active, staying on the span neither hides nor re-arms.
         assert!(!hover.observe(
-            Some(subject.clone()),
+            Some((subject.clone(), pane)),
             PhysicalPosition::new(31.0, 12.0),
             start + Duration::from_millis(400)
         ));
@@ -16739,20 +17249,90 @@ mod tests {
         assert!(hover.active.is_none());
     }
 
+    /// PIN — a peek belongs to the pane the pointer was in, and carries it.
+    ///
+    /// Two panes, and the *same file* printed in both — which is what makes the pin bite, because
+    /// subject identity alone cannot tell the two hovers apart. Sliding from one pane's copy to the
+    /// other's has genuinely left the reference the flyout was raised over: the old flyout must go
+    /// down, a fresh settle clock must run, and what settles must name the pane it settled in, so
+    /// the box can be sized and placed against that pane instead of against whichever one happens
+    /// to hold the keyboard.
+    ///
+    /// Drop the seat from the span's identity and every assertion below reverses.
+    #[test]
+    fn one_file_printed_in_two_panes_is_two_hovers_and_each_names_its_own_pane() {
+        let start = Instant::now();
+        let subject = PeekSubject::from_path(PathBuf::from(r"C:\img\shared.png"));
+        let left = SeatId(1);
+        let right = SeatId(2);
+        let mut hover = PeekHover::default();
+
+        assert!(!hover.observe(
+            Some((subject.clone(), left)),
+            PhysicalPosition::new(100.0, 200.0),
+            start
+        ));
+        let settled = hover
+            .activate_if_due(start + Duration::from_millis(300))
+            .expect("the left pane's hover settles");
+        assert_eq!(
+            settled.seat, left,
+            "a settled peek names the pane whose cells the pointer was on",
+        );
+
+        // Straight across into the other pane's copy of the same file.
+        assert!(
+            hover.observe(
+                Some((subject.clone(), right)),
+                PhysicalPosition::new(900.0, 200.0),
+                start + Duration::from_millis(400)
+            ),
+            "leaving the pane takes the flyout down even though the file is the same",
+        );
+        assert!(
+            hover
+                .activate_if_due(start + Duration::from_millis(600))
+                .is_none(),
+            "the second pane's hover runs its own settle clock",
+        );
+        let settled = hover
+            .activate_if_due(start + Duration::from_millis(700))
+            .expect("the right pane's hover settles in its turn");
+        assert_eq!(settled.seat, right);
+        assert_eq!(
+            settled.pointer,
+            PhysicalPosition::new(900.0, 200.0),
+            "the anchor is the window point the hover settled on, untranslated",
+        );
+
+        // And staying inside one pane still slides along one span, as it always did.
+        assert!(!hover.observe(
+            Some((subject, right)),
+            PhysicalPosition::new(920.0, 200.0),
+            start + Duration::from_millis(800)
+        ));
+        assert!(hover.show_at.is_none());
+    }
+
     #[test]
     fn peek_hover_switching_paths_hides_the_old_flyout_and_restarts_the_clock() {
         let start = Instant::now();
         let first = PeekSubject::from_path(PathBuf::from(r"C:\img\a.png"));
         let second = PeekSubject::from_path(PathBuf::from(r"C:\img\b.png"));
         let mut hover = PeekHover::default();
-        hover.observe(Some(first), PhysicalPosition::new(10.0, 10.0), start);
+        let pane = SeatId(1);
+        hover.observe(
+            Some((first, pane)),
+            PhysicalPosition::new(10.0, 10.0),
+            start,
+        );
         assert!(
             hover
                 .activate_if_due(start + Duration::from_millis(300))
                 .is_some()
         );
         let hidden = hover.observe(
-            Some(second.clone()),
+            Some((second.clone(), pane)),
             PhysicalPosition::new(50.0, 10.0),
             start + Duration::from_millis(400),
         );
@@ -16943,7 +17523,15 @@ mod tests {
             native_height_px,
         );
         let thumbnail = PeekThumbnail::from_scaled(bt_term::scale_inline_image(&task));
-        let overlay = thumbnail.overlay(PhysicalPosition::new(120.0, 90.0));
+        let overlay = thumbnail.overlay(
+            bt_render::SeatViewport {
+                x: 0,
+                y: 0,
+                width: 640,
+                height: 480,
+            },
+            PhysicalPosition::new(120.0, 90.0),
+        );
         assert_eq!(
             (overlay.width_px, overlay.height_px),
             (display_width_px, display_height_px),
@@ -18386,6 +18974,165 @@ mod tests {
             take_due_pty_resize(&mut pending, now + WINDOW_RESIZE_QUIET).is_some(),
             "an unconditional coalesce call schedules a resize even for an unchanged grid"
         );
+    }
+
+    /// A tab holding two terminal leaves at a deliberately lopsided ratio, solved
+    /// against a real viewport.
+    ///
+    /// Uneven on purpose: two equal panes would let a mixed-up rectangle answer
+    /// the right number by accident, and the pin below would prove nothing. The
+    /// persisted shape is the one `seats.rs` documents for a row split, which is
+    /// also the only constructor that lets a test choose the ratio.
+    fn solved_lopsided_split(
+        dpi_milli: u32,
+        render_physical: PhysicalSize<u32>,
+    ) -> (seats::Seats, SeatLayout) {
+        let term = || {
+            Box::new(bt_persist::LayoutNodeV1::Leaf(
+                bt_persist::LeafNodeV1::Term(bt_persist::TermLeafV1 {
+                    profile_id: "pwsh.exe".to_owned(),
+                    cwd: String::new(),
+                    manual_name: None,
+                }),
+            ))
+        };
+        let node = bt_persist::LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+            dir: bt_persist::SplitDirV1::Row,
+            ratio: 800_000,
+            children: [term(), term()],
+        });
+        let seats = seats::Seats::from_persisted(&node).expect("the tree carries terminal leaves");
+        let metrics = seats::seat_metrics(dpi_milli);
+        let viewport = seats::logical_viewport(
+            render_physical.width,
+            render_physical.height,
+            seats::scale_ppm(dpi_milli),
+        );
+        let layout = seats
+            .solve(viewport, &metrics)
+            .expect("a 1600x900 window divides four to one");
+        (seats, layout)
+    }
+
+    /// PIN (P0, real-machine): the pane holding the keyboard is sized from **its
+    /// own** body, never from the tab's primary seat.
+    ///
+    /// The reported bug. `resolve_seat_layout` used to answer the grid of
+    /// `seats.terminal()` — a stored field naming one fixed leaf, which moves
+    /// only when that leaf closes and never with focus — and all four callers
+    /// handed that answer to `schedule_grid_change`, which writes through the
+    /// `Runtime -> TabState -> LeafSession` deref chain to the *focused* leaf. A
+    /// lone-terminal tab hid it because the two seats are then the same
+    /// rectangle. Split the tab, focus the narrow pane, and its shell was told
+    /// the wide pane's column count: long lines ran off the right edge instead
+    /// of wrapping, and PSReadLine's anchor arithmetic — which trusts the
+    /// reported buffer width — raised "the value must be greater than or equal
+    /// to zero and less than the console's buffer size".
+    ///
+    /// MUTATION: hand the focused target `pane_body_viewport(.., seats.terminal())`
+    /// — the exact pre-fix source — and the width assertions below go red.
+    #[test]
+    fn the_pane_holding_the_keyboard_is_sized_from_its_own_body_not_the_primary_seat() {
+        let dpi_milli = 1_000;
+        let render_physical = PhysicalSize::new(1600, 900);
+        let scale = dpi_milli as f32 / 1_000.0;
+        let (seats, layout) = solved_lopsided_split(dpi_milli, render_physical);
+
+        let leaves = seats.terminals();
+        assert_eq!(leaves.len(), 2, "the fixture is a two-pane tab");
+        let primary = seats.terminal();
+        let narrow = leaves
+            .iter()
+            .copied()
+            .find(|seat| *seat != primary)
+            .expect("the second leaf is not the primary seat");
+        let primary_body = seats::pane_body_viewport(&seats, &layout, primary, scale)
+            .expect("the solver placed the primary pane");
+        let narrow_body = seats::pane_body_viewport(&seats, &layout, narrow, scale)
+            .expect("the solver placed the second pane");
+        assert!(
+            narrow_body.width * 2 < primary_body.width,
+            "the two panes must differ sharply or this pin proves nothing: \
+             {} against {}",
+            narrow_body.width,
+            primary_body.width
+        );
+
+        // The keyboard is in the narrow pane — the reported case.
+        let plan = leaf_resize_plan(&seats, &layout, narrow, scale);
+        let focused = plan
+            .iter()
+            .copied()
+            .find(|target| target.focused)
+            .expect("the focused leaf is in the plan");
+        assert_eq!(focused.seat, narrow);
+        assert_eq!(
+            focused.body, narrow_body,
+            "the focused pane is sized from its own body"
+        );
+        assert!(
+            focused.body.width < primary_body.width,
+            "the focused narrow pane must not be handed the primary pane's width: \
+             {} against {}",
+            focused.body.width,
+            primary_body.width
+        );
+
+        // Every leaf, focused or not, gets its own rectangle and no other's.
+        for target in &plan {
+            assert_eq!(
+                Some(target.body),
+                seats::pane_body_viewport(&seats, &layout, target.seat, scale),
+                "leaf {:?} is sized from its own pane body",
+                target.seat
+            );
+        }
+    }
+
+    /// PIN: moving the keyboard changes which carry is gated, and no leaf's
+    /// target size.
+    ///
+    /// The other half of the same rule. `focused` is allowed to decide *when* a
+    /// shell hears a new size — the typed-input gate and the 200ms ConPTY quiet
+    /// window both hang off it — and is allowed to decide nothing about *what*
+    /// that size is. Solving the identical layout twice, differing only in which
+    /// leaf holds the keyboard, must produce the identical rectangles; only the
+    /// flag moves. Let focus back into the geometry and this goes red.
+    #[test]
+    fn moving_the_keyboard_changes_which_carry_is_gated_and_no_leaf_target_size() {
+        let dpi_milli = 1_000;
+        let render_physical = PhysicalSize::new(1600, 900);
+        let scale = dpi_milli as f32 / 1_000.0;
+        let (seats, layout) = solved_lopsided_split(dpi_milli, render_physical);
+        let primary = seats.terminal();
+        let narrow = seats
+            .terminals()
+            .into_iter()
+            .find(|seat| *seat != primary)
+            .expect("the second leaf is not the primary seat");
+
+        let with_primary = leaf_resize_plan(&seats, &layout, primary, scale);
+        let with_narrow = leaf_resize_plan(&seats, &layout, narrow, scale);
+
+        let sizes = |plan: &[LeafResizeTarget]| -> Vec<(SeatId, bt_render::SeatViewport)> {
+            plan.iter()
+                .map(|target| (target.seat, target.body))
+                .collect()
+        };
+        assert_eq!(
+            sizes(&with_primary),
+            sizes(&with_narrow),
+            "a focus change re-sizes nothing; it can only re-send"
+        );
+
+        let gated = |plan: &[LeafResizeTarget]| -> Vec<SeatId> {
+            plan.iter()
+                .filter(|target| target.focused)
+                .map(|target| target.seat)
+                .collect()
+        };
+        assert_eq!(gated(&with_primary), vec![primary]);
+        assert_eq!(gated(&with_narrow), vec![narrow]);
     }
 
     /// The scheduling half of `Runtime`, with no GPU in it.
@@ -21994,8 +22741,10 @@ mod tests {
             conpty_grid: grid,
             pending_pty_resize: None,
             pending_psreadline_resize_reanchor: false,
+            output_revision: 0,
             last_seen_revision: 0,
             last_presented_frame: None,
+            frame_image_references: FrameImageReferences::default(),
         }
     }
 
@@ -22379,16 +23128,15 @@ mod tests {
     ///
     /// The merged panes have just become part of the tab on screen, which is the
     /// event `mark_seen` answers, so each migrated leaf gets the same two things
-    /// `TabState::mark_seen` does per leaf: its ledger brought level with the
-    /// session's published revision, and its attention latches retired.
+    /// `TabState::mark_seen` does per leaf: its ledger brought level with what its
+    /// shell has said, and its attention latches retired.
     ///
     /// Both claims are made *real* first rather than asserted against a fresh
-    /// session that never had either. Each source shell publishes a frame
-    /// through the ordinary path (`viewport_frame` then `record_published_frame`,
-    /// which is what the window's own present does) so `published_revision`
-    /// actually moves, and each rings its bell so `bell_latched` is actually set.
-    /// A leaf that arrived unread and clamouring is then a visible failure
-    /// instead of a coincidence.
+    /// session that never had either. Each source shell is given a unit of output
+    /// through the rule that counts it, and left unpainted — which is exactly the
+    /// shape of a leaf drained behind a tab nobody was looking at — and each rings
+    /// its bell so `bell_latched` is actually set. A leaf that arrived unread and
+    /// clamouring is then a visible failure instead of a coincidence.
     ///
     /// Red gate: drop `mark_leaf_seen` from the migration loop and the merged tab
     /// wears a dot and a bell for panes the user is looking straight at.
@@ -22396,19 +23144,14 @@ mod tests {
     fn the_arrived_members_of_a_merge_are_already_seen() {
         let mut source = cross_tab(1, &["SRCA", "SRCB"]);
         for (_, leaf) in source.leaves_mut() {
-            let frame = leaf
-                .session
-                .viewport_frame(&mut leaf.projection)
-                .expect("a frame to publish");
-            leaf.session.record_published_frame(&frame, Instant::now());
+            leaf.output_revision = output_revision(leaf.output_revision, true, false);
             leaf.session
                 .feed(b"\x07")
                 .expect("a bell latches attention");
             leaf.last_seen_revision = 0;
             assert_ne!(
-                leaf.session.published_revision(),
-                0,
-                "the shell has published since it was last seen"
+                leaf.output_revision, 0,
+                "the shell has spoken since it was last seen"
             );
             assert!(leaf.session.status().bell_latched);
         }
@@ -22430,8 +23173,7 @@ mod tests {
         for seat in migrated {
             let leaf = target.sessions.get(&seat).expect("migrated");
             assert_eq!(
-                leaf.last_seen_revision,
-                leaf.session.published_revision(),
+                leaf.last_seen_revision, leaf.output_revision,
                 "{seat:?} arrived still claiming to be unread"
             );
             assert!(
@@ -22439,6 +23181,57 @@ mod tests {
                 "{seat:?} arrived still ringing"
             );
         }
+    }
+
+    /// **The reported bug, over a real multi-pane tab: what the present painted
+    /// is square with what its shells said — every pane of it.**
+    ///
+    /// The window's own present writes each pane's frame into the leaf that drew
+    /// it and squares that leaf's ledger in the same breath; this walks the same
+    /// leaves through the same rule. The first half is the requirement — a tab
+    /// whose every pane reached the glass owes nothing when it is left. The
+    /// second half is the one that failed on the user's machine: paint only the
+    /// pane holding the keyboard and the tab still lights up, for a sibling the
+    /// user had been reading the whole time.
+    ///
+    /// Red gate: drop `mark_leaf_painted` from `Runtime::redraw`'s unfocused loop
+    /// and the second assertion becomes the first.
+    #[test]
+    fn every_pane_the_present_painted_is_square_with_its_shell() {
+        let claim = |tab: &TabState| {
+            fleet_claim(tab.sessions.values().map(|leaf| leaf.session_facts(false)))
+        };
+        let mut tab = cross_tab(1, &["LEFT", "RIGHT"]);
+        for (_, leaf) in tab.leaves_mut() {
+            leaf.output_revision = output_revision(leaf.output_revision, true, false);
+        }
+        assert_eq!(
+            claim(&tab),
+            StatusClaim::Unread,
+            "both shells have spoken and nothing has been painted"
+        );
+
+        // Only the pane holding the keyboard is painted — the old shape of the
+        // rule, and the sibling is still owed.
+        let focused = tab.focused_leaf;
+        mark_leaf_painted(tab.focused_mut());
+        assert_eq!(
+            claim(&tab),
+            StatusClaim::Unread,
+            "a pane on screen but not holding the keyboard is still being read"
+        );
+
+        // The present paints all of them, which is what a present does.
+        for (seat, leaf) in tab.leaves_mut() {
+            if *seat != focused {
+                mark_leaf_painted(leaf);
+            }
+        }
+        assert_eq!(
+            claim(&tab),
+            StatusClaim::Silent,
+            "a tab every pane of which reached the glass owes nothing when you leave it"
+        );
     }
 
     /// **N161/L139/K125 — the displaced pane goes back to the strip carrying its

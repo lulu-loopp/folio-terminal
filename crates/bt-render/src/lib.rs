@@ -656,7 +656,6 @@ struct PreparedSeat {
     seat: SeatViewport,
     /// The scissor for this seat — see [`SeatFrame::clip`].
     clip: SeatViewport,
-    focused: bool,
     /// Which entry of `seat_slots` holds this seat's prepared glyph batches.
     slot: usize,
     rect_buffer: wgpu::Buffer,
@@ -694,8 +693,17 @@ pub struct PeekImageOverlay {
     pub rgba: Arc<[u8]>,
     pub width_px: u32,
     pub height_px: u32,
-    /// Physical-pixel pointer position captured when the hover settled; the flyout anchors to
-    /// this point and stays put rather than chasing further pointer motion.
+    /// The pane that owns the hovered content, as the rectangle that pane's body draws into.
+    ///
+    /// The same double-rect precedent [`PreviewImage`] sets, for the same reason: a transient
+    /// laid out against "the seat" has to say *which* seat, and with a fleet on screen the honest
+    /// answer is the pane the pointer is standing in — never the pane holding the keyboard. It
+    /// decides the flyout's *size* only (§ [`peek_thumbnail_extent`]'s 40%-of-a-pane cap, which is
+    /// also the bound on the resident texture); where the box lands is decided against the window.
+    pub seat: SeatViewport,
+    /// Physical-pixel pointer position captured when the hover settled, in **whole-window**
+    /// coordinates; the flyout anchors to this point and stays put rather than chasing further
+    /// pointer motion.
     pub pointer_x: f32,
     pub pointer_y: f32,
 }
@@ -815,12 +823,32 @@ pub fn peek_thumbnail_extent(
 }
 
 /// Pure flyout placement around the extent above: anchored below-right of the pointer, flipped
-/// above when the bottom lacks room, and clamped horizontally into the pane. Returns `None` when
-/// the window is too small to host the box.
+/// above when the bottom lacks room, and clamped into the window. Returns `None` when the pane
+/// is too small to host the box.
+///
+/// Two rectangles, two jobs, and they are deliberately not the same one.
+///
+/// * The **pane** — the one owning the hovered content — sets the size, because "a flyout is at
+///   most 40% of a pane" is what bounds the texture it uploads.
+/// * The **window** sets where the box may land. A floating window is not a child of the pane it
+///   was raised from: the mock-up's `--menu`/`--border`/`--floatr`/`--shadow` popups are laid over
+///   the whole surface, and a peek raised near a pane edge that clamped itself into that pane
+///   would jump away from the word it belongs to for no reason the user can see. Overhanging the
+///   neighbour is correct and is what the draw order makes visible (the flyout is issued after
+///   every seat and after seat chrome).
+///
+/// Everything the box needs is expressed in whole-window physical pixels, `pointer_*` included,
+/// so what comes back is directly the rectangle on the surface.
+///
+/// `N = 1` is not a special case: a lone terminal leaf's pane *is* the window, both pairs of
+/// extents are the same numbers, and every expression below is the one that was here when a single
+/// viewport drove both.
 #[allow(clippy::too_many_arguments)]
 fn peek_box_layout(
-    viewport_width: f32,
-    viewport_height: f32,
+    pane_width: f32,
+    pane_height: f32,
+    window_width: f32,
+    window_height: f32,
     padding_px: f32,
     scale_factor: f32,
     image_width_px: u32,
@@ -829,8 +857,8 @@ fn peek_box_layout(
     pointer_y: f32,
 ) -> Option<PeekBoxLayout> {
     let (thumb_width_px, thumb_height_px) = peek_thumbnail_extent(
-        viewport_width,
-        viewport_height,
+        pane_width,
+        pane_height,
         padding_px,
         scale_factor,
         image_width_px,
@@ -838,8 +866,8 @@ fn peek_box_layout(
     )?;
     let avail_left = padding_px;
     let avail_top = padding_px;
-    let avail_right = viewport_width - padding_px;
-    let avail_bottom = viewport_height - padding_px;
+    let avail_right = window_width - padding_px;
+    let avail_bottom = window_height - padding_px;
     let thumb_width = thumb_width_px as f32;
     let thumb_height = thumb_height_px as f32;
     let border = peek_border_px(scale_factor);
@@ -1859,10 +1887,12 @@ pub struct SeatFrame<'a> {
     pub frame: &'a ViewportFrame,
     /// Whether this is the seat holding keyboard focus.
     ///
-    /// The window-level transients that are laid out in *seat* coordinates —
-    /// today the peek flyout — belong to exactly one seat, and this is how they
-    /// find it. Without the flag a two-pane tab would draw the flyout twice, once
-    /// per seat, each at a different origin.
+    /// It is what the caret is drawn from. A window nobody is looking at fades
+    /// every caret in it; inside a window that *is* being looked at, exactly one
+    /// pane is being typed into, and the panes beside it are in the same position
+    /// as a whole window that lost focus — so they wear the same faded shape and
+    /// stand outside the blink. Composed, the rule is one conjunction:
+    /// `window_focused && seat.focused`.
     pub focused: bool,
 }
 
@@ -2815,17 +2845,23 @@ impl Renderer {
         changed
     }
 
-    /// The display box this viewport would show a native decode of `image_width_px` x
-    /// `image_height_px` in, or `None` when the pane cannot host the flyout at all. The app asks
-    /// this before a peek so it resamples once, off-thread, to exactly the pixels the flyout draws.
+    /// The display box `seat` would show a native decode of `image_width_px` x `image_height_px`
+    /// in, or `None` when that pane cannot host the flyout at all. The app asks this before a peek
+    /// so it resamples once, off-thread, to exactly the pixels the flyout draws.
+    ///
+    /// `seat` is named by the caller rather than read off `self.seat` for the reason
+    /// [`PeekImageOverlay::seat`] exists: the pane that owns the hovered content is the pane under
+    /// the pointer, and asking the focused pane would size the thumbnail against a rectangle the
+    /// hover has nothing to do with — which, with panes of different sizes, is a different picture.
     pub fn peek_thumbnail_extent(
         &self,
+        seat: SeatViewport,
         image_width_px: u32,
         image_height_px: u32,
     ) -> Option<(u32, u32)> {
         peek_thumbnail_extent(
-            self.seat.width as f32,
-            self.seat.height as f32,
+            seat.width as f32,
+            seat.height as f32,
             self.metrics.padding_px,
             self.metrics.scale_factor as f32,
             image_width_px,
@@ -3173,7 +3209,11 @@ impl Renderer {
                         usage: wgpu::BufferUsages::VERTEX,
                     })
             });
-            let rects = self.rectangles(frame, &math_batch.drawn);
+            let rects = self.rectangles(
+                frame,
+                &math_batch.drawn,
+                self.window_focused && entry.focused,
+            );
             let rect_data = if rects.is_empty() {
                 empty_rect.as_slice()
             } else {
@@ -3241,7 +3281,6 @@ impl Renderer {
                 // clipped-away pixel. `clamped_to` never returns an empty
                 // rectangle, which is the other half of that validation.
                 clip: entry.clip.clamped_to(self.config.width, self.config.height),
-                focused: entry.focused,
                 slot: index,
                 rect_buffer,
                 rect_count: rects.len(),
@@ -3254,8 +3293,10 @@ impl Renderer {
                 math_overlay_count: math_overlays.len(),
             });
         }
-        // Back to the focused seat before anything window-level is prepared: the
-        // peek flyout is laid out in the coordinates of the seat it belongs to.
+        // Back to the focused seat before anything window-level is prepared:
+        // outside this function `self.seat` names the focused seat, and every
+        // seat-relative helper reached from elsewhere — the IME cursor area, a
+        // band's right edge — means that one by it.
         self.seat = focused_seat;
 
         let (peek_rects, peek_draws, peek_vertices) = self.prepare_peek_draws();
@@ -3514,30 +3555,6 @@ impl Renderer {
                     pass.set_vertex_buffer(0, seat.math_overlay_buffer.slice(..));
                     pass.draw(0..6, 0..seat.math_overlay_count as u32);
                 }
-                // The peek flyout is the topmost transient surface inside a
-                // seat: above grid text, bands, the status bar, and math
-                // toolbars. It belongs to the focused seat alone — it was laid
-                // out in that seat's coordinates, and drawing it once per seat
-                // would stamp a copy at every origin.
-                if seat.focused {
-                    if let Some(rect_buffer) = peek_rect_buffer.as_ref() {
-                        pass.set_pipeline(&self.rect_pipeline);
-                        pass.set_vertex_buffer(0, rect_buffer.slice(..));
-                        pass.draw(0..6, 0..peek_rects.len() as u32);
-                    }
-                    if let Some(vertex_buffer) = peek_vertex_buffer.as_ref() {
-                        pass.set_pipeline(&self.math_pipeline);
-                        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-                        for draw in &peek_draws {
-                            if let Some(texture) = self.math_textures.get(&draw.key)
-                                && let Some(tile) = texture.tiles.get(draw.tile_index)
-                            {
-                                pass.set_bind_group(0, &tile.bind_group, &[]);
-                                pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
-                            }
-                        }
-                    }
-                }
             }
             // Seat chrome last, with the pass restored to the whole window: it is
             // the one class of draw that legitimately owns the space between
@@ -3604,6 +3621,43 @@ impl Renderer {
                     {
                         pass.set_bind_group(0, &tile.bind_group, &[]);
                         pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                    }
+                }
+            }
+            // The hover-peek flyout, over every seat, over seat chrome and over a
+            // preview's picture — a floating window is not a child of the pane it
+            // was raised from. Its rectangles are already the window's own, so the
+            // pass is restored to the surface and nothing is translated.
+            //
+            // Drawn here rather than inside the seat loop, which is what made it
+            // the focused pane's tenant: laid out in that pane's coordinates,
+            // scissored to that pane's box, and therefore unable either to answer
+            // a hover in another pane or to overhang the pane it belongs to.
+            if peek_rect_buffer.is_some() || peek_vertex_buffer.is_some() {
+                pass.set_viewport(
+                    0.0,
+                    0.0,
+                    self.config.width as f32,
+                    self.config.height as f32,
+                    0.0,
+                    1.0,
+                );
+                pass.set_scissor_rect(0, 0, self.config.width, self.config.height);
+                if let Some(rect_buffer) = peek_rect_buffer.as_ref() {
+                    pass.set_pipeline(&self.rect_pipeline);
+                    pass.set_vertex_buffer(0, rect_buffer.slice(..));
+                    pass.draw(0..6, 0..peek_rects.len() as u32);
+                }
+                if let Some(vertex_buffer) = peek_vertex_buffer.as_ref() {
+                    pass.set_pipeline(&self.math_pipeline);
+                    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+                    for draw in &peek_draws {
+                        if let Some(texture) = self.math_textures.get(&draw.key)
+                            && let Some(tile) = texture.tiles.get(draw.tile_index)
+                        {
+                            pass.set_bind_group(0, &tile.bind_group, &[]);
+                            pass.draw(draw.first_vertex..draw.first_vertex + 6, 0..1);
+                        }
                     }
                 }
             }
@@ -3884,14 +3938,20 @@ impl Renderer {
 
     /// Build the hover-peek flyout draws: border and background rects for the flat pipeline plus
     /// textured quads through the shared content-keyed texture LRU. Empty when no peek is up,
-    /// when the window cannot host the box, or when the texture upload fails.
+    /// when the owning pane cannot host the box, or when the texture upload fails.
+    ///
+    /// Everything here is in whole-window physical pixels — the pane the hover belongs to is
+    /// consulted for the box's *size* and for nothing else — so the pass draws it with the
+    /// viewport restored to the surface, above every seat and above seat chrome.
     fn prepare_peek_draws(&mut self) -> (Vec<RectInstance>, Vec<MathDraw>, Vec<MathVertex>) {
         let Some(overlay) = self.peek_overlay.clone() else {
             return (Vec::new(), Vec::new(), Vec::new());
         };
         let Some(layout) = peek_box_layout(
-            self.seat.width as f32,
-            self.seat.height as f32,
+            overlay.seat.width as f32,
+            overlay.seat.height as f32,
+            self.config.width as f32,
+            self.config.height as f32,
             self.metrics.padding_px,
             self.metrics.scale_factor as f32,
             overlay.width_px,
@@ -3943,8 +4003,8 @@ impl Renderer {
                 0.0,
                 1.0,
                 1.0,
-                self.seat.width,
-                self.seat.height,
+                self.config.width,
+                self.config.height,
                 1.0,
             ));
             draws.push(MathDraw {
@@ -3973,13 +4033,15 @@ impl Renderer {
         peek_box_fills(layout, chrome_palette(), self.metrics.scale_factor as f32)
             .into_iter()
             .map(|fill| {
-                self.pixel_rect_with_coverage(
-                    fill.rect[0],
-                    fill.rect[1],
-                    fill.rect[2],
-                    fill.rect[3],
+                // Normalized by the surface, not by `self.seat`: the flyout is a floating window
+                // over the whole window, and its rectangles arrive here already in the window's
+                // own pixels.
+                surface_pixel_rect_with_alpha(
+                    fill.rect,
                     fill.color,
                     fill.alpha,
+                    self.config.width,
+                    self.config.height,
                 )
             })
             .collect()
@@ -4369,10 +4431,15 @@ impl Renderer {
         Ok(())
     }
 
+    /// One seat's flat fills. `seat_focused` is that seat's own caret standing:
+    /// the window holds focus *and* this is the pane being typed into. Every other
+    /// pane on screen is, as far as its caret is concerned, in exactly the
+    /// position a window that lost focus is in.
     fn rectangles(
         &self,
         frame: &ViewportFrame,
         drawn_math_blocks: &HashSet<usize>,
+        seat_focused: bool,
     ) -> Vec<RectInstance> {
         let columns = frame.columns.get() as usize;
         let drawable_rows = frame.drawable_rows();
@@ -4431,26 +4498,16 @@ impl Renderer {
                 ));
             }
         }
-        if cursor_quad_visible(
-            frame.cursor.visible,
-            self.window_focused,
+        if let Some(caret) = seat_caret(
+            self.metrics,
+            frame,
+            seat_focused,
             self.cursor_blink_visible,
-        ) && (frame.cursor.row as usize) < drawable_rows
-            && frame.cursor.column < frame.columns.get()
-        {
-            // Losing focus fades the caret's ink; it never redraws it in another shape.
-            let ink = if self.window_focused {
-                cursor_rgb()
-            } else {
-                unfocused_cursor_rgb()
-            };
-            rects.extend(
-                cursor_pixel_bounds(self.metrics, frame, self.window_focused)
-                    .into_iter()
-                    .map(|[left, top, right, bottom]| {
-                        self.pixel_rect(left, top, right, bottom, ink)
-                    }),
-            );
+            current_cursor_style(),
+        ) {
+            rects.extend(caret.bounds.into_iter().map(|[left, top, right, bottom]| {
+                self.pixel_rect(left, top, right, bottom, caret.ink)
+            }));
         }
         for (index, cell) in frame
             .cells
@@ -5358,14 +5415,62 @@ fn cursor_cell_span(frame: &ViewportFrame) -> (usize, usize) {
     }
 }
 
+/// Whether this seat draws a caret quad at all.
+///
+/// `focused` is the caret's own standing — the window holds focus and this is the pane being typed
+/// into — so the blink belongs to exactly one caret on screen. A faded caret is steady rather than
+/// dark half the time: it is already saying "not here", and a second pane blinking out of phase
+/// with the one under the hands reads as two cursors competing for them.
 fn cursor_quad_visible(
     terminal_cursor_visible: bool,
-    window_focused: bool,
+    focused: bool,
     blink_phase_visible: bool,
 ) -> bool {
-    terminal_cursor_visible && (!window_focused || blink_phase_visible)
+    terminal_cursor_visible && (!focused || blink_phase_visible)
 }
 
+/// One seat's caret: the ink it is drawn in, and every rectangle it puts on screen.
+struct SeatCaret {
+    ink: [u8; 3],
+    bounds: Vec<[f32; 4]>,
+}
+
+/// The whole caret decision for one seat, in one place: whether it draws at all, in which ink, and
+/// in which shape. `None` when this seat shows no caret this frame.
+///
+/// `focused` is this seat's *own* standing — the window holds focus and this is the pane being
+/// typed into — and it is deliberately one parameter rather than two. A pane beside the focused
+/// one is, as far as its caret is concerned, in exactly the position a whole window that lost
+/// focus is in: nobody is typing there. So it gets exactly that treatment, and all three of the
+/// answers below move together instead of being three independent rules that could drift apart.
+fn seat_caret(
+    metrics: CellMetrics,
+    frame: &ViewportFrame,
+    focused: bool,
+    blink_phase_visible: bool,
+    style: CursorStyle,
+) -> Option<SeatCaret> {
+    if !cursor_quad_visible(frame.cursor.visible, focused, blink_phase_visible) {
+        return None;
+    }
+    // A caret parked past what this frame actually draws is not on screen, and placing it would be
+    // a rectangle measured from a row the seat has no pixels for.
+    if (frame.cursor.row as usize) >= frame.drawable_rows()
+        || frame.cursor.column >= frame.columns.get()
+    {
+        return None;
+    }
+    Some(SeatCaret {
+        ink: if focused {
+            cursor_rgb()
+        } else {
+            unfocused_cursor_rgb()
+        },
+        bounds: cursor_pixel_bounds_for_style(metrics, frame, focused, style),
+    })
+}
+
+#[cfg(test)]
 fn cursor_pixel_bounds(
     metrics: CellMetrics,
     frame: &ViewportFrame,
@@ -5376,8 +5481,8 @@ fn cursor_pixel_bounds(
 
 /// The caret's rectangles for one explicitly named shape.
 ///
-/// The process-wide shape is read once, at the call site above, so nothing below this line depends
-/// on global state.
+/// The process-wide shape is read once, where the seat's fills are built, so nothing below this
+/// line depends on global state.
 fn cursor_pixel_bounds_for_style(
     metrics: CellMetrics,
     frame: &ViewportFrame,
@@ -6516,7 +6621,10 @@ mod tests {
 
     #[test]
     fn peek_box_layout_places_below_right_without_upscaling() {
-        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 100, 50, 100.0, 100.0).unwrap();
+        let layout = peek_box_layout(
+            1000.0, 800.0, 1000.0, 800.0, 8.0, 1.0, 100, 50, 100.0, 100.0,
+        )
+        .unwrap();
         // 1x thumbnail (no upscale), border 1, inset 6: box is 114x64 at pointer + (12, 18).
         assert_eq!(layout.frame, [112.0, 118.0, 226.0, 182.0]);
         assert_eq!(layout.interior, [113.0, 119.0, 225.0, 181.0]);
@@ -6525,14 +6633,20 @@ mod tests {
 
     #[test]
     fn peek_box_layout_flips_above_a_bottom_pointer() {
-        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 100, 50, 100.0, 780.0).unwrap();
+        let layout = peek_box_layout(
+            1000.0, 800.0, 1000.0, 800.0, 8.0, 1.0, 100, 50, 100.0, 780.0,
+        )
+        .unwrap();
         assert_eq!(layout.frame[1], 780.0 - 18.0 - 64.0);
         assert!(layout.frame[3] <= 792.0);
     }
 
     #[test]
     fn peek_box_layout_caps_large_images_preserving_aspect_and_clamps_horizontally() {
-        let layout = peek_box_layout(1000.0, 800.0, 8.0, 1.0, 4000, 2000, 950.0, 100.0).unwrap();
+        let layout = peek_box_layout(
+            1000.0, 800.0, 1000.0, 800.0, 8.0, 1.0, 4000, 2000, 950.0, 100.0,
+        )
+        .unwrap();
         let width = layout.image[2] - layout.image[0];
         let height = layout.image[3] - layout.image[1];
         assert!(width <= (1000.0 - 16.0) * 0.4 + 1e-3);
@@ -6541,6 +6655,140 @@ mod tests {
         // Pointer near the right edge: the box clamps inside the padded pane.
         assert!(layout.frame[2] <= 992.0 + 1e-3);
         assert!(layout.frame[0] >= 8.0);
+    }
+
+    /// PIN — the flyout belongs to the pane that owns the hovered content, and to the window it
+    /// is drawn over; it belongs to the focused pane in neither sense.
+    ///
+    /// A 1600x900 window carrying three panes side by side — `[0,600)` focused, `[600,1000)`
+    /// hovered, `[1000,1600)` a bystander — with the pointer near the right edge of the middle
+    /// one. Two facts, and swapping the hovered pane's extents back to the focused pane's breaks
+    /// the first while re-clamping the box into its own pane breaks the second:
+    ///
+    /// * the thumbnail is capped at 40% of the *hovered* pane, which at these sizes is visibly
+    ///   smaller than 40% of the focused one;
+    /// * the box lands at the pointer in window coordinates and is allowed to overhang the pane it
+    ///   was raised from, stopping only at the window's own padded edge.
+    #[test]
+    fn a_peek_is_sized_by_the_pane_that_owns_it_and_placed_against_the_window() {
+        const WINDOW: (f32, f32) = (1600.0, 900.0);
+        const HOVERED_PANE: (f32, f32) = (400.0, 900.0);
+        const FOCUSED_PANE: (f32, f32) = (600.0, 900.0);
+        const PADDING: f32 = 8.0;
+        // Near the middle pane's right edge (it ends at x = 1000), so a box clamped into that pane
+        // and a box clamped into the window land in provably different places.
+        const POINTER: (f32, f32) = (980.0, 300.0);
+
+        let layout = peek_box_layout(
+            HOVERED_PANE.0,
+            HOVERED_PANE.1,
+            WINDOW.0,
+            WINDOW.1,
+            PADDING,
+            1.0,
+            400,
+            200,
+            POINTER.0,
+            POINTER.1,
+        )
+        .expect("a 400px-wide pane can host a flyout in a 1600px window");
+
+        let hovered_extent =
+            peek_thumbnail_extent(HOVERED_PANE.0, HOVERED_PANE.1, PADDING, 1.0, 400, 200)
+                .expect("the hovered pane sizes the thumbnail");
+        let focused_extent =
+            peek_thumbnail_extent(FOCUSED_PANE.0, FOCUSED_PANE.1, PADDING, 1.0, 400, 200)
+                .expect("the focused pane would size it differently");
+        assert!(
+            hovered_extent.0 < focused_extent.0,
+            "these two panes must disagree about the cap, or the pin proves nothing: \
+             hovered {hovered_extent:?} focused {focused_extent:?}",
+        );
+        assert_eq!(
+            (
+                layout.image[2] - layout.image[0],
+                layout.image[3] - layout.image[1],
+            ),
+            (hovered_extent.0 as f32, hovered_extent.1 as f32),
+            "the picture is 40% of the pane that owns it, never of the pane holding the keyboard",
+        );
+
+        assert_eq!(
+            layout.frame[0],
+            POINTER.0 + 12.0,
+            "the box is anchored at the pointer in the window's own coordinates",
+        );
+        assert!(
+            layout.frame[2] > 1000.0,
+            "a floating window may overhang the pane it was raised from: {:?}",
+            layout.frame,
+        );
+        assert!(
+            layout.frame[2] <= WINDOW.0 - PADDING + 1e-3 && layout.frame[0] >= PADDING,
+            "and stops at the window's padded edge: {:?}",
+            layout.frame,
+        );
+    }
+
+    /// PIN — inside a focused window, the caret under the hands is the only one that is solid and
+    /// the only one that blinks; every other pane wears the faded form and stands still.
+    ///
+    /// The mutation this exists to catch is the single-tenant one: reading the *window's* focus
+    /// where the *seat's* was meant. Substitute it and an unfocused pane's block refills, takes the
+    /// focused ink, and vanishes on the dark half of the blink.
+    #[test]
+    fn only_the_pane_under_the_hands_blinks_and_the_rest_wear_the_faded_caret() {
+        let metrics = CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 20.0,
+            font_size_px: 16.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 0.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        };
+        let frame = single_cell_cursor_frame(metrics);
+
+        for style in [CursorStyle::Bar, CursorStyle::Block, CursorStyle::Underline] {
+            let lit = seat_caret(metrics, &frame, true, true, style)
+                .expect("the focused pane draws its caret on the lit phase");
+            assert_eq!(lit.ink, cursor_rgb());
+            assert!(
+                seat_caret(metrics, &frame, true, false, style).is_none(),
+                "the focused caret's dark phase draws nothing ({style:?})",
+            );
+
+            let unfocused_lit = seat_caret(metrics, &frame, false, true, style)
+                .expect("an unfocused pane still shows where its caret is");
+            let unfocused_dark = seat_caret(metrics, &frame, false, false, style)
+                .expect("and shows it just as steadily on the other phase");
+            assert_eq!(
+                unfocused_lit.ink,
+                unfocused_cursor_rgb(),
+                "an unfocused pane's caret takes the faded ink ({style:?})",
+            );
+            assert_eq!(
+                unfocused_lit.bounds, unfocused_dark.bounds,
+                "an unfocused pane's caret does not participate in the blink ({style:?})",
+            );
+            assert_ne!(
+                unfocused_lit.ink, lit.ink,
+                "the two panes' carets must be told apart by their ink ({style:?})",
+            );
+        }
+
+        // The block is the one shape whose faded form is geometric, and the hollow it leaves is how
+        // an unfocused pane stops covering its own glyph.
+        let focused_block = seat_caret(metrics, &frame, true, true, CursorStyle::Block).unwrap();
+        let unfocused_block = seat_caret(metrics, &frame, false, true, CursorStyle::Block).unwrap();
+        assert_eq!(focused_block.bounds.len(), 1);
+        assert_eq!(
+            unfocused_block.bounds.len(),
+            4,
+            "an unfocused block hollows out into four strokes",
+        );
     }
 
     /// The alpha one plane of the flyout's chrome puts on one pixel. Draws within
@@ -6567,6 +6815,8 @@ mod tests {
             for dpi_milli in [1000_u32, 1250, 1500, 2000] {
                 let scale = dpi_milli as f32 / 1000.0;
                 let layout = peek_box_layout(
+                    1400.0 * scale,
+                    900.0 * scale,
                     1400.0 * scale,
                     900.0 * scale,
                     8.0 * scale,
@@ -6717,8 +6967,10 @@ mod tests {
 
     #[test]
     fn peek_box_layout_refuses_a_window_too_small_for_the_box() {
-        assert!(peek_box_layout(30.0, 30.0, 8.0, 1.0, 10, 10, 10.0, 10.0).is_none());
-        assert!(peek_box_layout(1000.0, 800.0, 8.0, 1.0, 0, 10, 10.0, 10.0).is_none());
+        assert!(peek_box_layout(30.0, 30.0, 30.0, 30.0, 8.0, 1.0, 10, 10, 10.0, 10.0).is_none());
+        assert!(
+            peek_box_layout(1000.0, 800.0, 1000.0, 800.0, 8.0, 1.0, 0, 10, 10.0, 10.0).is_none()
+        );
     }
 
     /// The flyout must be able to consume the extent it published: resampling to
@@ -6739,6 +6991,8 @@ mod tests {
                 "a display-sized image is already within the cap, so the extent is the identity",
             );
             let layout = peek_box_layout(
+                1000.0,
+                800.0,
                 1000.0,
                 800.0,
                 8.0,
