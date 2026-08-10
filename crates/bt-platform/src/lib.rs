@@ -139,12 +139,13 @@ mod windows_impl {
                 AppendMenuW, CreateCaret, CreatePopupMenu, DestroyCaret, DestroyMenu,
                 GCLP_HBRBACKGROUND, GetClientRect, GetCursorPos, GetWindowRect, HTBOTTOM,
                 HTBOTTOMLEFT, HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP,
-                HTTOPLEFT, HTTOPRIGHT, IsZoomed, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS,
-                PostMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SPI_GETCLIENTAREAANIMATION,
-                SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos, SetClassLongPtrW, SetWindowPos,
-                SystemParametersInfoW, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP,
-                WM_CLOSE, WM_GETMINMAXINFO, WM_NCCALCSIZE, WM_NCHITTEST,
+                HTTOPLEFT, HTTOPRIGHT, IsIconic, IsZoomed, MF_STRING, MINMAXINFO,
+                NCCALCSIZE_PARAMS, PostMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
+                SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SW_SHOWNORMAL,
+                SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+                SetCaretPos, SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, TrackPopupMenu, WM_APP, WM_CLOSE, WM_GETMINMAXINFO, WM_NCCALCSIZE,
+                WM_NCHITTEST,
             },
         },
     };
@@ -1002,6 +1003,28 @@ mod windows_impl {
         }
     }
 
+    /// Whether the window is minimized (iconic).
+    ///
+    /// The companion of the `IsZoomed` test the snapshot already makes, and it
+    /// exists for the same reason: while a window is iconic, `GetWindowRect`
+    /// stops describing the window and starts describing the icon — Windows
+    /// parks the rectangle far off-screen at a token size (`-32000, -32000` in
+    /// the classic shell; a 157x25 rect at `x = -16000` was what this app
+    /// actually recorded). That rectangle is not a place the user ever put the
+    /// window, so nothing may be derived from it.
+    ///
+    /// Deliberately *not* `GetWindowPlacement().rcNormalPosition`, which looks
+    /// like the more direct answer and is a trap: `rcNormalPosition` is stated
+    /// in workspace coordinates, so on any machine with a taskbar it differs
+    /// from `GetWindowRect`'s screen coordinates by the work-area origin. Mixing
+    /// the two would reintroduce exactly the per-restart drift that making this
+    /// module speak one rectangle — the outer rect — was meant to end.
+    pub fn is_window_minimized(hwnd: NonZeroIsize) -> bool {
+        // SAFETY: `hwnd` originates from winit's live Win32WindowHandle.
+        // IsIconic only reads window state and reports false for a bad handle.
+        unsafe { IsIconic(HWND(hwnd.get() as *mut c_void)) }.as_bool()
+    }
+
     pub fn get_window_rect(hwnd: NonZeroIsize) -> Result<WindowRect, String> {
         let mut rect = RECT::default();
         // SAFETY: `hwnd` originates from winit's live Win32WindowHandle and `rect` remains valid
@@ -1199,8 +1222,8 @@ mod windows_impl {
 pub use windows_impl::{
     CustomWindowFrame, ImeSystemCaret, MathContextMenu, client_area_animation_enabled,
     clipboard_text, get_dpi_for_window, get_window_rect, get_work_area,
-    install_window_class_background, open_local_file, request_window_close, set_clipboard_text,
-    set_window_outer_rect, shell_execute, wheel_scroll_amount,
+    install_window_class_background, is_window_minimized, open_local_file, request_window_close,
+    set_clipboard_text, set_window_outer_rect, shell_execute, wheel_scroll_amount,
 };
 
 #[cfg(test)]

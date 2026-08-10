@@ -26,7 +26,8 @@ mod tooltip;
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
 use bt_layout::{
-    Axis, LayoutNode, LogicalRect, SeatId, SeatLayout, SeatMetrics, SplitId, WorkAreaHint,
+    Axis, LayoutNode, LogicalRect, MIN_PANE_H, MIN_PANE_W, SeatId, SeatLayout, SeatMetrics,
+    SplitId, WorkAreaHint,
 };
 use bt_math::{MathEngine, MathRaster, MathRenderError};
 use bt_persist::{
@@ -7325,30 +7326,63 @@ impl Runtime {
         // something the pane itself does not — nor name two panes alike, which is
         // what one cwd for the whole tab did.
         let terminal_names = tab.terminal_names();
+        let palette = bt_render::chrome_palette();
+        // False for every tab a peek can be showing — `peek_strip::eligible`
+        // refuses the active one outright — but asked rather than assumed, so
+        // the claim a leaf makes here is the same fact the strip computes from
+        // the same ledger, arrived at the same way.
+        let tab_is_active = index == self.active_tab;
         let leaves: Vec<peek_strip::PeekLeaf> = tab
             .seats
             .tree()
             .seats_in_order()
             .iter()
-            .map(|seat| peek_strip::PeekLeaf {
-                kind: seat.kind,
-                title: seats::seat_caption(
-                    seat.kind,
-                    preview_title.as_deref(),
-                    terminal_names.get(&seat.id).map(String::as_str),
-                )
-                .to_owned(),
-                focused: seat.id == focus,
-                // Only a terminal has a session that can be working in it, and
-                // only its own session can say so.
-                mark_opacity: mark_opacity(
-                    tab.sessions
-                        .get(&seat.id)
-                        .is_some_and(|leaf| leaf.session.status().working),
-                    false,
-                    elapsed,
-                    motion,
-                ),
+            .map(|seat| {
+                // Only a terminal has a session that can be working, reporting
+                // or unread, and only its own session can say so. This is the
+                // whole of what the peek adds over the tab: the tab wears the
+                // loudest claim of its fleet, and the schematic says which pane
+                // is making it.
+                let session = tab.sessions.get(&seat.id);
+                let status = session.map(|leaf| leaf.session.status());
+                // No tween: a tab's arc eases toward a new reading because it
+                // has somewhere to ease *from*, and that memory is per tab. The
+                // peek has no per-leaf memory to ease from and, being a snapshot
+                // that appears and disappears whole, nothing to ease during — so
+                // it shows the reading itself rather than an approach to it.
+                let ring = status.and_then(|status| status.progress).map(|state| {
+                    let arc = ring_arc(state, None, elapsed, motion, &palette);
+                    seats::TabRing {
+                        arc: arc.color,
+                        start_milliturns: arc.start_milliturns,
+                        sweep_milliturns: arc.sweep_milliturns,
+                    }
+                });
+                peek_strip::PeekLeaf {
+                    kind: seat.kind,
+                    title: seats::seat_caption(
+                        seat.kind,
+                        preview_title.as_deref(),
+                        terminal_names.get(&seat.id).map(String::as_str),
+                    )
+                    .to_owned(),
+                    focused: seat.id == focus,
+                    mark_opacity: mark_opacity(
+                        status.is_some_and(|status| status.working),
+                        // Was hard-coded `false` while a peek leaf had no ring
+                        // to be replaced by. Now that it can have one, the
+                        // breath has to stand down for it exactly as the tab's
+                        // does, or a ring would be drawn pulsing.
+                        ring.is_some(),
+                        elapsed,
+                        motion,
+                    ),
+                    dot: session
+                        .map(|leaf| leaf.session_facts(tab_is_active).claim())
+                        .unwrap_or_default()
+                        .dot_color(&palette),
+                    ring,
+                }
             })
             .collect();
         let tree = tab.seats.tree().clone();
@@ -7370,7 +7404,6 @@ impl Runtime {
         ) else {
             return Vec::new();
         };
-        let palette = bt_render::chrome_palette();
         peek_strip::build(&layout, &leaves, &palette, scale)
     }
 
@@ -8179,22 +8212,31 @@ impl Runtime {
     fn session_snapshot(&self) -> SessionV1 {
         let mut session = self.session_store.loaded().clone();
         let scale = self.renderer.metrics().scale_factor.max(f64::MIN_POSITIVE);
-        let maximized = self.window.is_maximized();
+        let hwnd = window_hwnd(&self.window).ok();
+        let posture = if hwnd.is_some_and(bt_platform::is_window_minimized) {
+            WindowPosture::Minimized
+        } else if self.window.is_maximized() {
+            WindowPosture::Maximized
+        } else {
+            WindowPosture::Normal
+        };
         // The window's *outer* rect, which the self-drawn frame has made the same
         // rectangle as its client area — the one thing `startup_window_rect` can
         // hand back to Win32 without anything in between adjusting it.
         //
-        // A maximized window is skipped rather than recorded: its rectangle is the
-        // monitor's, not the user's, and writing it would leave the size the user
-        // actually chose nowhere to be found — the next unmaximize, and the next
-        // start, would both adopt a screen-sized "normal" window. The last
-        // rectangle written while normal stands until the window is normal again.
-        let bounds = Some(())
-            .filter(|()| !maximized)
-            .and_then(|()| window_hwnd(&self.window).ok())
+        // Measured only while the window is normal, because that is the only
+        // posture whose rectangle is the user's; `recorded_window_placement`
+        // states what the other two record instead.
+        let measured = hwnd
+            .filter(|_| posture == WindowPosture::Normal)
             .and_then(|hwnd| bt_platform::get_window_rect(hwnd).ok())
-            .map(|rect| persisted_window_bounds(rect, scale))
-            .unwrap_or(session.window.bounds);
+            .map(|rect| persisted_window_bounds(rect, scale));
+        let (bounds, maximized) = recorded_window_placement(
+            posture,
+            measured,
+            session.window.bounds,
+            session.window.maximized,
+        );
         session.schema_version = SESSION_SCHEMA_VERSION;
         session.theme = session_theme_mode(self.theme_mode);
         session.cursor_style = session_cursor_style(current_cursor_style());
@@ -14582,6 +14624,69 @@ fn window_ime_cursor_area(seat: SeatViewport, area: ImeCursorArea) -> ImeCursorA
     }
 }
 
+/// What the OS is currently doing with the window, as far as its rectangle is
+/// concerned. The three postures are exhaustive and mutually exclusive: Windows
+/// reports iconic and zoomed separately, and a window that is both is iconic —
+/// its rectangle is the icon's either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WindowPosture {
+    Normal,
+    Maximized,
+    Minimized,
+}
+
+/// The `(bounds, maximized)` pair a snapshot should record.
+///
+/// Only a normal window's rectangle is the user's. The other two postures keep
+/// what was already recorded, for the same reason stated once and applied
+/// twice: a rectangle nobody chose must never displace the one somebody did.
+///
+/// - **Maximized** — the rectangle is the monitor's. Recording it would leave
+///   the size the user actually chose nowhere to be found, and the next
+///   unmaximize *and* the next start would both adopt a screen-sized "normal".
+/// - **Minimized** — the rectangle is the icon's: parked far off-screen at a
+///   token size. Recording it left `x = -16000, 157x25` in the file, and the
+///   next start could not seat the layout in a window that small and exited.
+///   The `maximized` flag is held too, and that is not incidental: `IsZoomed`
+///   answers false for an iconic window even when it will restore maximized, so
+///   trusting it here would quietly forget a maximized window over a minimize.
+fn recorded_window_placement(
+    posture: WindowPosture,
+    measured: Option<WindowBoundsV1>,
+    saved_bounds: WindowBoundsV1,
+    saved_maximized: bool,
+) -> (WindowBoundsV1, bool) {
+    match posture {
+        WindowPosture::Normal => (measured.unwrap_or(saved_bounds), false),
+        WindowPosture::Maximized => (saved_bounds, true),
+        WindowPosture::Minimized => (saved_bounds, saved_maximized),
+    }
+}
+
+/// A saved size, or the product's opening size when the saved one is not a size
+/// a window could have been left at.
+///
+/// The floor is `bt_layout`'s own: a seat's minimum. Below one minimum pane
+/// there is no arrangement of anything to show, so such a rectangle cannot have
+/// come from a window a user was using — it is a damaged file, a hand edit, or
+/// an iconic pseudo-rect that reached the disk. Falling back to the opening size
+/// rather than clamping up to the floor is deliberate: a 260x120 window is
+/// technically survivable and still not something to hand anybody on startup.
+///
+/// This is a *second* line, not the first. Nothing should write such a rectangle
+/// now that `recorded_window_placement` holds the iconic one back; a session file
+/// written by an older build, or by hand, is still owed a start that works.
+/// Startup never fails on a rectangle — a layout that genuinely cannot fit a
+/// legitimate window is L4's fold to answer, not this function's.
+fn sane_restored_size(bounds: WindowBoundsV1) -> LogicalSize<f64> {
+    let floor_width = MIN_PANE_W.floor_px().max(0) as u32;
+    let floor_height = MIN_PANE_H.floor_px().max(0) as u32;
+    if bounds.width < floor_width || bounds.height < floor_height {
+        return LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT);
+    }
+    LogicalSize::new(f64::from(bounds.width), f64::from(bounds.height))
+}
+
 /// What the session file asks the next window to open as.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RestoredPlacement {
@@ -14611,7 +14716,10 @@ fn restore_window_placement(
         return None;
     }
     let bounds = session.window.bounds;
-    let size = LogicalSize::new(f64::from(bounds.width), f64::from(bounds.height));
+    // Corrected before the visibility test below, not after: the test asks
+    // whether *this rectangle* is reachable, and it should be asking about the
+    // rectangle the window will actually open at.
+    let size = sane_restored_size(bounds);
     let position = LogicalPosition::new(f64::from(bounds.x), f64::from(bounds.y));
     let visible = event_loop.available_monitors().any(|monitor| {
         let scale = monitor.scale_factor().max(f64::MIN_POSITIVE);
@@ -16906,6 +17014,178 @@ mod tests {
             (rect.right - rect.left, rect.bottom - rect.top),
             (1600, 1000)
         );
+    }
+
+    /// The rectangle Windows actually reported for this app's window while it was
+    /// minimized, measured on the machine the bug was found on. Nothing about it
+    /// is a place a window was ever put: the origin is far off any monitor and
+    /// the size is the taskbar button's, not the window's.
+    const ICONIC_BOUNDS: WindowBoundsV1 = WindowBoundsV1 {
+        x: -16000,
+        y: -16000,
+        width: 157,
+        height: 25,
+    };
+
+    /// A rectangle a user really did leave a window at.
+    const CHOSEN_BOUNDS: WindowBoundsV1 = WindowBoundsV1 {
+        x: 240,
+        y: 130,
+        width: 1100,
+        height: 720,
+    };
+
+    /// The bug this pins, end to end: minimize, quit while minimized, start
+    /// again. The snapshot recorded the *icon's* rectangle, and the next start
+    /// could not seat three panes in a 157x25 window, so it exited with
+    /// "place a body rectangle for terminal seat SeatId(2) from its own solve"
+    /// instead of opening.
+    ///
+    /// Stated over the two pure halves the real path is made of — what a
+    /// snapshot records, and what a start makes of what it read — so the whole
+    /// round trip is checked without a window.
+    #[test]
+    fn quitting_while_minimized_starts_again_at_the_rectangle_the_user_chose() {
+        let (bounds, maximized) = recorded_window_placement(
+            WindowPosture::Minimized,
+            Some(ICONIC_BOUNDS),
+            CHOSEN_BOUNDS,
+            false,
+        );
+        assert_eq!(
+            bounds, CHOSEN_BOUNDS,
+            "a minimized window wrote the icon's rectangle to the session file"
+        );
+        assert!(!maximized);
+        assert_eq!(
+            sane_restored_size(bounds),
+            LogicalSize::new(
+                f64::from(CHOSEN_BOUNDS.width),
+                f64::from(CHOSEN_BOUNDS.height)
+            ),
+            "the rectangle the user chose was not handed back intact"
+        );
+    }
+
+    /// `IsZoomed` answers false for an iconic window even when it will restore
+    /// maximized, so a snapshot that trusted it would quietly demote a maximized
+    /// window every time it was minimized. The posture holds both facts.
+    #[test]
+    fn minimizing_a_maximized_window_does_not_forget_that_it_was_maximized() {
+        let (bounds, maximized) = recorded_window_placement(
+            WindowPosture::Minimized,
+            Some(ICONIC_BOUNDS),
+            CHOSEN_BOUNDS,
+            true,
+        );
+        assert_eq!(bounds, CHOSEN_BOUNDS);
+        assert!(maximized, "a minimize demoted a maximized window");
+    }
+
+    /// 26f41e1's rule, restated where the new one lives so that extending it to
+    /// a third posture cannot quietly drop it: a maximized window keeps the
+    /// normal rectangle it had, and is still recorded as maximized.
+    #[test]
+    fn a_maximized_window_still_keeps_the_rectangle_it_had_while_normal() {
+        let monitor_sized = WindowBoundsV1 {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        };
+        let (bounds, maximized) = recorded_window_placement(
+            WindowPosture::Maximized,
+            Some(monitor_sized),
+            CHOSEN_BOUNDS,
+            false,
+        );
+        assert_eq!(bounds, CHOSEN_BOUNDS);
+        assert!(maximized);
+    }
+
+    /// The posture that does record: a normal window's rectangle is the user's,
+    /// and it is written exactly. The fallback to what was saved covers only the
+    /// case where the rectangle could not be measured at all.
+    #[test]
+    fn a_normal_window_records_the_rectangle_it_was_measured_at() {
+        let measured = WindowBoundsV1 {
+            x: 12,
+            y: 34,
+            width: 800,
+            height: 600,
+        };
+        assert_eq!(
+            recorded_window_placement(WindowPosture::Normal, Some(measured), CHOSEN_BOUNDS, true),
+            (measured, false)
+        );
+        assert_eq!(
+            recorded_window_placement(WindowPosture::Normal, None, CHOSEN_BOUNDS, true),
+            (CHOSEN_BOUNDS, false),
+            "an unmeasurable window discarded the rectangle it already had"
+        );
+    }
+
+    /// The second line, for a file an older build already damaged or a hand edit
+    /// produced: a size below one seat's own minimum is not a size a window was
+    /// left at, and startup takes the product's opening size instead of failing.
+    #[test]
+    fn a_saved_size_no_window_could_have_had_falls_back_to_the_opening_size() {
+        let opening = LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT);
+        let floor_width = MIN_PANE_W.floor_px() as u32;
+        let floor_height = MIN_PANE_H.floor_px() as u32;
+        for absurd in [
+            ICONIC_BOUNDS,
+            // Zero area, which no window has.
+            WindowBoundsV1 {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            },
+            // One pixel short on each axis in turn — the floor is a floor, not a
+            // neighbourhood.
+            WindowBoundsV1 {
+                x: 0,
+                y: 0,
+                width: floor_width - 1,
+                height: 900,
+            },
+            WindowBoundsV1 {
+                x: 0,
+                y: 0,
+                width: 900,
+                height: floor_height - 1,
+            },
+        ] {
+            assert_eq!(
+                sane_restored_size(absurd),
+                opening,
+                "{absurd:?} was honoured as a window size"
+            );
+        }
+        // And everything a window could actually have been is left alone,
+        // including a window sitting exactly on the floor.
+        for legitimate in [
+            CHOSEN_BOUNDS,
+            WindowBoundsV1 {
+                x: 0,
+                y: 0,
+                width: floor_width,
+                height: floor_height,
+            },
+            WindowBoundsV1 {
+                x: -1128,
+                y: 66,
+                width: 987,
+                height: 583,
+            },
+        ] {
+            assert_eq!(
+                sane_restored_size(legitimate),
+                LogicalSize::new(f64::from(legitimate.width), f64::from(legitimate.height)),
+                "{legitimate:?} was overridden despite being a real window size"
+            );
+        }
     }
 
     /// A first run has no rectangle to honour, so the product's opening size is

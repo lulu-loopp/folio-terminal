@@ -132,6 +132,59 @@ pub const LIST_PADDING_X_LOGICAL_PX: f32 = 2.0;
 /// The `1px` of `.peek-list { padding: 7px 2px 1px }`.
 pub const LIST_PADDING_BOTTOM_LOGICAL_PX: f32 = 1.0;
 
+// ── the status channels, at the peek's own scale ──
+//
+// The peek's mark slots are 9px in the schematic and 11px in the list, against
+// the strip's 15px, so a dot and a ring stated in the strip's absolute pixels
+// would swamp them. They are stated here as *shares of the mark slot they
+// badge*, taken from the strip's own declarations, so the miniature is the same
+// drawing scaled and not a second design: change the tab's numbers and these
+// follow. The two offsets are negative in the strip and stay negative here —
+// the dot is meant to overhang its slot on both axes, which is what makes it
+// read as a badge on the mark rather than a thing standing beside it.
+
+/// `WINDOW_TAB_STATUS_DOT / WINDOW_TAB_MARK` — the dot's side.
+const DOT_SHARE_OF_MARK: f32 =
+    bt_render::WINDOW_TAB_STATUS_DOT_LOGICAL_PX / bt_render::WINDOW_TAB_MARK_LOGICAL_PX;
+/// `WINDOW_TAB_STATUS_DOT_TOP / WINDOW_TAB_MARK` — how far above the slot's top
+/// edge the dot sits.
+const DOT_TOP_SHARE_OF_MARK: f32 =
+    bt_render::WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX / bt_render::WINDOW_TAB_MARK_LOGICAL_PX;
+/// `WINDOW_TAB_STATUS_DOT_RIGHT / WINDOW_TAB_MARK` — how far past the slot's
+/// right edge it hangs.
+const DOT_RIGHT_SHARE_OF_MARK: f32 =
+    bt_render::WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX / bt_render::WINDOW_TAB_MARK_LOGICAL_PX;
+/// `WINDOW_TAB_RING_STROKE / WINDOW_TAB_MARK` — the progress ring's stroke.
+const RING_STROKE_SHARE_OF_MARK: f32 =
+    bt_render::WINDOW_TAB_RING_STROKE_LOGICAL_PX / bt_render::WINDOW_TAB_MARK_LOGICAL_PX;
+
+// The two shape facts the drawing depends on, pinned where they cannot be
+// edited apart from the constants above. Compile-time rather than a test,
+// because both are decidable without running anything — and because a `#[test]`
+// asserting a constant is a test that can only ever pass.
+const _: () = assert!(
+    DOT_TOP_SHARE_OF_MARK < 0.0 && DOT_RIGHT_SHARE_OF_MARK < 0.0,
+    "both offsets are negative, which is what 'the dot overhangs its slot' means"
+);
+const _: () = assert!(
+    DOT_SHARE_OF_MARK > 0.0 && DOT_SHARE_OF_MARK < 1.0,
+    "the badge is a fraction of the slot it badges, never a replacement for it"
+);
+
+/// Where a status dot goes, given the mark slot it badges.
+///
+/// One function for both the schematic's cell and the list's row, because they
+/// are the same badge on two differently sized slots — which is exactly the
+/// thing that would drift if each laid it out itself.
+#[must_use]
+fn status_dot_rect(mark: [f32; 4]) -> [f32; 4] {
+    let slot = mark[2] - mark[0];
+    let side = (slot * DOT_SHARE_OF_MARK).round().max(1.0);
+    let left = (mark[2] - slot * DOT_RIGHT_SHARE_OF_MARK - side).round();
+    let top = (mark[1] + slot * DOT_TOP_SHARE_OF_MARK).round();
+    [left, top, left + side, top + side]
+}
+
 /// The line box every other piece of chrome text is laid out in — the same 1.4
 /// [`crate::tooltip`] borrows, and for the same reason: it is what
 /// `shape_chrome_labels` sizes a buffer to, so a peek row agrees with every
@@ -214,6 +267,18 @@ pub struct PeekLeaf {
     /// The peek does not compute it, because the peek must not have a second
     /// opinion about a breath the strip is already drawing.
     pub mark_opacity: f32,
+    /// This leaf's status dot, or `None` when it has nothing to claim.
+    ///
+    /// Already resolved to a colour by `StatusClaim::dot_color`, so the loudness
+    /// order — failed over bell over unread — is settled by the same `Ord` the
+    /// tab strip's own aggregate is settled by, one ladder for both. What the
+    /// peek adds is only that it asks the question *per leaf*: the tab wears the
+    /// loudest of its fleet, and the whole point of a schematic is to say which
+    /// room the noise is coming from.
+    pub dot: Option<[u8; 3]>,
+    /// The progress this leaf's session is reporting. Like the tab's, it
+    /// *replaces* the mark rather than surrounding it.
+    pub ring: Option<crate::seats::TabRing>,
 }
 
 /// One cell of the schematic: where the leaf sits and what goes in it.
@@ -222,6 +287,9 @@ pub struct PeekCell {
     /// `[left, top, right, bottom]`, physical pixels — the `.mini-leaf` box.
     pub rect: [f32; 4],
     pub mark: [f32; 4],
+    /// The status dot's box, hanging off the mark slot's top-right corner.
+    /// Always computed — whether anything is drawn in it is `PeekLeaf::dot`.
+    pub dot: [f32; 4],
     pub title: [f32; 4],
     pub focused: bool,
 }
@@ -230,6 +298,7 @@ pub struct PeekCell {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PeekRow {
     pub mark: [f32; 4],
+    pub dot: [f32; 4],
     pub title: [f32; 4],
 }
 
@@ -507,14 +576,16 @@ pub fn layout(
         let mark_top = (middle - leaf_mark / 2.0).round();
         let title_top = (middle - leaf_text / 2.0).round();
         let title_left = inner_left + leaf_mark + leaf_gap;
+        let mark = [
+            inner_left,
+            mark_top,
+            inner_left + leaf_mark,
+            mark_top + leaf_mark,
+        ];
         PeekCell {
             rect,
-            mark: [
-                inner_left,
-                mark_top,
-                inner_left + leaf_mark,
-                mark_top + leaf_mark,
-            ],
+            mark,
+            dot: status_dot_rect(mark),
             // Deliberately not clamped to `inner_right`: a cell too narrow for
             // a name yields an inverted box, and the shaper already declines to
             // draw one (`label.rect[2] > label.rect[0]`). Clamping would have
@@ -538,13 +609,15 @@ pub fn layout(
             let mark_top = (line_top + (list_line - list_mark) / 2.0).round();
             let title_top = (line_top + (list_line - list_text) / 2.0).round();
             let title_left = mark_left + list_mark + item_gap;
+            let mark = [
+                mark_left,
+                mark_top,
+                mark_left + list_mark,
+                mark_top + list_mark,
+            ];
             PeekRow {
-                mark: [
-                    mark_left,
-                    mark_top,
-                    mark_left + list_mark,
-                    mark_top + list_mark,
-                ],
+                mark,
+                dot: status_dot_rect(mark),
                 title: [
                     title_left,
                     title_top,
@@ -648,18 +721,12 @@ pub fn build(
             1.0,
         ));
 
-        let (mark, color) = leaf_mark(leaf.kind, palette);
         // `.mini-leaf { overflow: hidden }`, for the one thing that cannot be
         // clipped by a rect: a mark that does not fit its cell is not drawn at
-        // all, rather than drawn across the neighbour's border.
+        // all, rather than drawn across the neighbour's border. The dot goes
+        // with it — a badge on a mark that was not drawn is a badge on nothing.
         if cell.mark[2] <= cell.rect[2] {
-            sprites.push(ChromeSprite {
-                mark,
-                rect: cell.mark,
-                color,
-                opacity: leaf.mark_opacity,
-                grayscale: false,
-            });
+            push_mark_slot(&mut sprites, leaf, cell.mark, cell.dot, palette);
         }
         labels.push(label(
             &leaf.title,
@@ -670,14 +737,7 @@ pub fn build(
     }
 
     for (row, leaf) in layout.rows.iter().zip(leaves) {
-        let (mark, color) = leaf_mark(leaf.kind, palette);
-        sprites.push(ChromeSprite {
-            mark,
-            rect: row.mark,
-            color,
-            opacity: leaf.mark_opacity,
-            grayscale: false,
-        });
+        push_mark_slot(&mut sprites, leaf, row.mark, row.dot, palette);
         // `--ink2` over `--menu` — the ink the tip is written in, because this
         // is the same kind of writing on the same surface.
         labels.push(label(
@@ -694,6 +754,86 @@ pub fn build(
         sprites,
         opacity: 1.0,
     }]
+}
+
+/// Fill one mark slot: the ring if this leaf is reporting progress, its own
+/// mark if not, and the status dot over whichever of the two it was.
+///
+/// One function for the schematic's cell and the list's row, so a leaf can never
+/// be drawn as working in the picture and idle in the names directly beneath it.
+///
+/// Every rule here is the tab strip's, restated at this size rather than
+/// reinvented (`seats::window_chrome`'s mark slot):
+///
+/// - **The ring replaces the mark**, in the same box — a `match`, not two
+///   pushes. While there is progress to report, the slot is for the progress.
+/// - **The dot is additional** and never replaced, because it answers a
+///   different question from the ring: the ring says what this pane is doing,
+///   the dot says what it wants from you.
+/// - **The breath lands on the mark alone.** The dot is pushed at full strength
+///   and the ring carries no opacity, so a fading mark never drags a claim down
+///   with it — and `mark_opacity`'s own contract already flattens the breath to
+///   1.0 whenever a ring has taken the slot, which is why nothing here has to
+///   ask whether the two are fighting.
+fn push_mark_slot(
+    sprites: &mut Vec<ChromeSprite>,
+    leaf: &PeekLeaf,
+    mark_rect: [f32; 4],
+    dot_rect: [f32; 4],
+    palette: &ChromePalette,
+) {
+    match leaf.ring {
+        Some(ring) => {
+            let slot = mark_rect[2] - mark_rect[0];
+            let stroke_px = (slot * RING_STROKE_SHARE_OF_MARK).round().max(1.0) as u32;
+            // The track first, a full turn under the arc. The *resting* tab's
+            // track of the three the palette carries: a peek only ever shows a
+            // tab that is not the active one, and its cells are drawn on the
+            // pane body — the quietest surface of the three, so the track drawn
+            // for the quietest tab is the one that reads correctly on it.
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ProgressRing {
+                    start_milliturns: 0,
+                    sweep_milliturns: 1000,
+                    stroke_px,
+                },
+                mark_rect,
+                palette.ring_track_on_resting_tab,
+            ));
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ProgressRing {
+                    start_milliturns: ring.start_milliturns,
+                    sweep_milliturns: ring.sweep_milliturns,
+                    stroke_px,
+                },
+                mark_rect,
+                ring.arc,
+            ));
+        }
+        None => {
+            let (mark, color) = leaf_mark(leaf.kind, palette);
+            sprites.push(ChromeSprite {
+                mark,
+                rect: mark_rect,
+                color,
+                opacity: leaf.mark_opacity,
+                grayscale: false,
+            });
+        }
+    }
+    if let Some(dot_color) = leaf.dot {
+        let side = dot_rect[2] - dot_rect[0];
+        sprites.push(ChromeSprite::new(
+            // `border-radius: 50%` on a square is a circle, and `ControlPill`
+            // clamps its round to half the short side — the same pill the strip's
+            // dot is, so the two can never round differently.
+            ChromeMark::ControlPill {
+                radius_px: (side / 2.0).round().max(1.0) as u32,
+            },
+            dot_rect,
+            dot_color,
+        ));
+    }
 }
 
 /// The mark a peek leaf wears, and the colour it is drawn in.
@@ -733,12 +873,15 @@ mod tests {
         )
     }
 
+    /// A leaf with nothing to say: no claim, no progress, mark at full strength.
     fn leaf(title: &str) -> PeekLeaf {
         PeekLeaf {
             kind: SeatKind::Terminal,
             title: title.to_owned(),
             focused: false,
             mark_opacity: 1.0,
+            dot: None,
+            ring: None,
         }
     }
 
@@ -1361,6 +1504,271 @@ mod tests {
                 .count(),
             2,
             "and the idle one does not"
+        );
+    }
+
+    // ── L134 — what each mini leaf says about its own session ──────────────
+
+    /// Lay out `cast` over a two-deep tree and paint it, for the status tests
+    /// below — all of which ask "what was drawn for leaf *n*", never "where".
+    fn painted(cast: &[PeekLeaf]) -> (PeekLayout, OverlayLayer, ChromePalette) {
+        let palette = bt_render::chrome_palette();
+        let tree = match cast.len() {
+            2 => split(1, Axis::Row, 500_000, term(1), term(2)),
+            _ => split(
+                1,
+                Axis::Row,
+                500_000,
+                term(1),
+                split(2, Axis::Col, 500_000, term(2), term(3)),
+            ),
+        };
+        let widths = vec![40.0; cast.len()];
+        let laid = layout(&tree, cast, &widths, host_tab(), WINDOW, SCALE).expect("a placed peek");
+        let layer = build(&laid, cast, &palette, SCALE).swap_remove(0);
+        (laid, layer, palette)
+    }
+
+    /// Every sprite drawn inside `rect`, which for a mark slot is the mark and
+    /// whatever badges it.
+    fn sprites_over(layer: &OverlayLayer, rect: [f32; 4]) -> Vec<&crate::marks::ChromeSprite> {
+        layer
+            .sprites
+            .iter()
+            .filter(|sprite| {
+                // The dot deliberately overhangs its slot, so "over this slot"
+                // is an overlap test and not a containment one.
+                sprite.rect[0] < rect[2] + 0.01
+                    && sprite.rect[2] > rect[0] - 0.01
+                    && sprite.rect[1] < rect[3] + 0.01
+                    && sprite.rect[3] > rect[1] - 0.01
+            })
+            .collect()
+    }
+
+    fn is_dot(sprite: &crate::marks::ChromeSprite) -> bool {
+        matches!(sprite.mark, ChromeMark::ControlPill { .. })
+    }
+
+    fn is_ring(sprite: &crate::marks::ChromeSprite) -> bool {
+        matches!(sprite.mark, ChromeMark::ProgressRing { .. })
+    }
+
+    /// The whole point of putting status on the schematic: a tab wears the
+    /// loudest claim of its fleet, and the peek says *which room* is making it.
+    /// A noisy pane must not light up its quiet siblings.
+    #[test]
+    fn each_mini_leaf_wears_its_own_claim_and_the_quiet_ones_wear_none() {
+        let palette = bt_render::chrome_palette();
+        let mut cast = leaves(3);
+        cast[0].dot = crate::StatusClaim::Failed.dot_color(&palette);
+        cast[2].dot = crate::StatusClaim::Unread.dot_color(&palette);
+        let (laid, layer, _) = painted(&cast);
+
+        for (index, expected) in [
+            (0, crate::StatusClaim::Failed.dot_color(&palette)),
+            (1, None),
+            (2, crate::StatusClaim::Unread.dot_color(&palette)),
+        ] {
+            for slot in [laid.cells[index].mark, laid.rows[index].mark] {
+                let dots: Vec<_> = sprites_over(&layer, slot)
+                    .into_iter()
+                    .filter(|sprite| is_dot(sprite))
+                    .collect();
+                match expected {
+                    Some(color) => {
+                        assert_eq!(dots.len(), 1, "leaf {index} draws exactly one dot");
+                        assert_eq!(dots[0].color, color, "leaf {index} wears the wrong claim");
+                    }
+                    None => assert!(
+                        dots.is_empty(),
+                        "leaf {index} has nothing to say and drew a dot anyway"
+                    ),
+                }
+            }
+        }
+    }
+
+    /// The ladder is `StatusClaim`'s own `Ord` — failed over bell over unread —
+    /// and the peek does not get a second opinion about it. What is pinned here
+    /// is that a mini leaf *draws* what that ladder decided, in three colours
+    /// that can actually be told apart.
+    #[test]
+    fn the_mini_leaf_draws_the_colour_its_claim_decided_and_the_three_differ() {
+        let palette = bt_render::chrome_palette();
+        assert!(
+            crate::StatusClaim::Unread < crate::StatusClaim::Bell
+                && crate::StatusClaim::Bell < crate::StatusClaim::Failed,
+            "the loudness order this drawing depends on"
+        );
+        let mut drawn = Vec::new();
+        for claim in [
+            crate::StatusClaim::Unread,
+            crate::StatusClaim::Bell,
+            crate::StatusClaim::Failed,
+        ] {
+            let mut cast = leaves(2);
+            cast[0].dot = claim.dot_color(&palette);
+            let (laid, layer, _) = painted(&cast);
+            let dot = sprites_over(&layer, laid.cells[0].mark)
+                .into_iter()
+                .find(|sprite| is_dot(sprite))
+                .unwrap_or_else(|| panic!("{claim:?} drew no dot"));
+            assert_eq!(
+                Some(dot.color),
+                claim.dot_color(&palette),
+                "{claim:?} was drawn in a colour it did not choose"
+            );
+            drawn.push(dot.color);
+        }
+        assert_ne!(drawn[0], drawn[1]);
+        assert_ne!(drawn[1], drawn[2]);
+        assert_ne!(drawn[0], drawn[2]);
+    }
+
+    /// The strip's `.unreaddot { top: -2px; right: -4px }`, in miniature: the
+    /// badge overhangs its slot on both axes so it reads as a badge *on* the
+    /// mark rather than a thing standing beside it.
+    #[test]
+    fn the_dot_hangs_off_its_marks_top_right_corner_in_both_halves() {
+        let palette = bt_render::chrome_palette();
+        let mut cast = leaves(2);
+        cast[0].dot = crate::StatusClaim::Bell.dot_color(&palette);
+        let (laid, layer, _) = painted(&cast);
+
+        for slot in [laid.cells[0].mark, laid.rows[0].mark] {
+            let dot = sprites_over(&layer, slot)
+                .into_iter()
+                .find(|sprite| is_dot(sprite))
+                .expect("a dot");
+            let side = dot.rect[2] - dot.rect[0];
+            assert!(
+                (side - (dot.rect[3] - dot.rect[1])).abs() < 0.01,
+                "the dot is square"
+            );
+            let slot_side = slot[2] - slot[0];
+            assert!(
+                (side - (slot_side * DOT_SHARE_OF_MARK).round()).abs() < 0.01,
+                "the dot is the strip's own share of a {slot_side}px slot, got {side}"
+            );
+            assert!(dot.rect[2] > slot[2], "it overhangs to the right");
+            assert!(dot.rect[1] < slot[1], "and above");
+            // Small enough to still be a badge rather than a second mark.
+            assert!(side < slot_side, "the badge never outgrows what it badges");
+        }
+    }
+
+    /// The tab's ruling, in miniature: while there is progress to report, the
+    /// slot is for the progress. The mark is *replaced* — the same box, not a
+    /// second sprite beside it — and the dot, which answers a different
+    /// question, survives it.
+    #[test]
+    fn a_progress_ring_replaces_the_mini_leafs_mark_and_the_dot_survives_it() {
+        let palette = bt_render::chrome_palette();
+        let mut cast = leaves(2);
+        cast[0].ring = Some(crate::seats::TabRing {
+            arc: palette.accent,
+            start_milliturns: 0,
+            sweep_milliturns: 400,
+        });
+        cast[0].dot = crate::StatusClaim::Bell.dot_color(&palette);
+        let (laid, layer, _) = painted(&cast);
+
+        let slot = laid.cells[0].mark;
+        let over = sprites_over(&layer, slot);
+        let rings: Vec<_> = over.iter().filter(|s| is_ring(s)).collect();
+        assert_eq!(rings.len(), 2, "a track and an arc");
+        for ring in &rings {
+            assert_eq!(ring.rect, slot, "the ring takes the mark's exact box");
+        }
+        assert!(
+            matches!(
+                rings[0].mark,
+                ChromeMark::ProgressRing {
+                    sweep_milliturns: 1000,
+                    ..
+                }
+            ),
+            "the track is drawn first and is a full turn"
+        );
+        assert_eq!(
+            rings[1].color, palette.accent,
+            "the arc wears its own colour"
+        );
+        assert!(
+            matches!(
+                rings[1].mark,
+                ChromeMark::ProgressRing {
+                    sweep_milliturns: 400,
+                    ..
+                }
+            ),
+            "and reports the reading it was handed"
+        );
+        let (kind_mark, _) = leaf_mark(cast[0].kind, &palette);
+        assert!(
+            !over.iter().any(|s| s.mark == kind_mark),
+            "the leaf's own mark was replaced, not drawn under the ring"
+        );
+        assert_eq!(
+            over.iter().filter(|s| is_dot(s)).count(),
+            1,
+            "the claim outlives the ring that covered the mark"
+        );
+        // The untouched sibling still shows its mark and no ring.
+        let sibling = sprites_over(&layer, laid.cells[1].mark);
+        assert!(sibling.iter().any(|s| s.mark == kind_mark));
+        assert!(!sibling.iter().any(|s| is_ring(s)));
+    }
+
+    /// `seats`' `the_breath_fades_the_mark_and_leaves_the_dot_alone`, asked of
+    /// the miniature: a breath is about the mark, and a claim is not a thing
+    /// that fades in and out.
+    #[test]
+    fn the_breath_fades_the_mini_mark_and_leaves_the_claim_alone() {
+        let palette = bt_render::chrome_palette();
+        let mut cast = leaves(2);
+        cast[0].mark_opacity = 0.42;
+        cast[0].dot = crate::StatusClaim::Failed.dot_color(&palette);
+        let (laid, layer, _) = painted(&cast);
+
+        for slot in [laid.cells[0].mark, laid.rows[0].mark] {
+            let over = sprites_over(&layer, slot);
+            let dot = over.iter().find(|s| is_dot(s)).expect("a dot");
+            assert_eq!(
+                dot.opacity.to_bits(),
+                1.0_f32.to_bits(),
+                "the dot breathed along with the mark"
+            );
+            let mark = over
+                .iter()
+                .find(|s| !is_dot(s))
+                .expect("the leaf's own mark");
+            assert!((mark.opacity - 0.42).abs() < 0.001);
+        }
+    }
+
+    /// The miniature is the strip's drawing scaled, not a second design: every
+    /// share is stated as the strip's own number over the strip's own mark, so
+    /// editing a tab constant moves the peek with it and neither can drift.
+    #[test]
+    fn the_status_channels_keep_the_strips_own_proportions() {
+        let mark = bt_render::WINDOW_TAB_MARK_LOGICAL_PX;
+        assert!(
+            (DOT_SHARE_OF_MARK * mark - bt_render::WINDOW_TAB_STATUS_DOT_LOGICAL_PX).abs() < 0.001
+        );
+        assert!(
+            (DOT_TOP_SHARE_OF_MARK * mark - bt_render::WINDOW_TAB_STATUS_DOT_TOP_LOGICAL_PX).abs()
+                < 0.001
+        );
+        assert!(
+            (DOT_RIGHT_SHARE_OF_MARK * mark - bt_render::WINDOW_TAB_STATUS_DOT_RIGHT_LOGICAL_PX)
+                .abs()
+                < 0.001
+        );
+        assert!(
+            (RING_STROKE_SHARE_OF_MARK * mark - bt_render::WINDOW_TAB_RING_STROKE_LOGICAL_PX).abs()
+                < 0.001
         );
     }
 
