@@ -478,6 +478,27 @@ impl ViewportFrame {
             .and_then(|row| u32::try_from(row).ok())
     }
 
+    /// The visual row a gesture at `y_subpixels` *means*, with points above the
+    /// first drawable row and below the last one pulled to those rows.
+    ///
+    /// [`Self::visual_row_at`] answers "which row is under this point", and its
+    /// `None` is the right answer for a hover: nothing is being pointed at. A
+    /// drag that owns the pointer asks a different question — "which row does
+    /// this gesture mean" — and past the bottom of the frame the answer is the
+    /// last row, which is what dragging past the end of a pane has always
+    /// selected. `None` here means the frame draws no rows at all, so there is
+    /// no row for any answer to name.
+    pub fn clamped_visual_row_at(&self, y_subpixels: i64) -> Option<u32> {
+        let last = u32::try_from(self.drawable_rows().checked_sub(1)?).ok()?;
+        if let Some(row) = self.visual_row_at(y_subpixels) {
+            return Some(row);
+        }
+        if y_subpixels < self.row_map.first()?.top_subpixels {
+            return Some(0);
+        }
+        Some(last)
+    }
+
     pub fn live_point_at(&self, row: u32, column: u32) -> Option<GridPoint> {
         let live_row = self.row_map.get(row as usize)?.live_grid_row?;
         Some(GridPoint {

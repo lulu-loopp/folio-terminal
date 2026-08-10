@@ -1658,9 +1658,15 @@ fn commit_unfocused_leaf_resize(
     Ok(())
 }
 
+/// Who owns the pointer between a press and its release.
+///
+/// The local drag is boxed because it is the only variant with anything in it —
+/// a selection's two anchors, the pressed link and the pressed image path — and a
+/// button byte should not have to be as wide as all of that. There is one of
+/// these in the window at a time, so the allocation is one per gesture.
 #[derive(Clone)]
 enum MouseRoute {
-    Local(SelectionDrag),
+    Local(Box<SelectionDrag>),
     Forward(input::MouseProtocolButton),
     MathBlock,
 }
@@ -1727,6 +1733,11 @@ fn route_forwarded_mouse_button(
 #[derive(Clone)]
 struct SelectionDrag {
     mode: SelectionDragMode,
+    /// The pane the press landed in, and the only pane this gesture will ever
+    /// touch. A selection is set on one shell's session and made of one frame's
+    /// anchors, so the pointer wandering into the pane next door — or onto the
+    /// chrome, or off the window — must still be answered in cells of *this* one.
+    origin_seat: SeatId,
     origin_row: u32,
     origin_column: u32,
     origin: ViewSelection,
@@ -1744,6 +1755,59 @@ enum SelectionDragMode {
 
 fn should_copy_on_select_release(route: Option<&MouseRoute>, single_click: bool) -> bool {
     !single_click && matches!(route, Some(MouseRoute::Local(_)))
+}
+
+/// Whether a press that hit no chrome target reaches no terminal grid, and so is
+/// the seat's to keep rather than the selection machinery's to act on.
+///
+/// A press belongs to **the seat it lands in**. It reaches a grid exactly when
+/// that seat is a terminal leaf this tab holds a shell for — `seat_holds_a_shell`
+/// asks the same `sessions` map [`Runtime::pane_hit_context`] reads, so the press
+/// and the hover agree about what is a terminal by construction. A files column,
+/// a preview body and a placeholder are all seats without shells, and the surface
+/// between panes is no seat at all; none of them has cells for a press to select.
+///
+/// This used to ask [`seats::terminal_contains`] of `seats.terminal()` — the tab's
+/// *primary* seat, a stored field naming one fixed leaf that moves only when the
+/// leaf it names is closed, and never with focus. In a lone-terminal tab that is
+/// the pane you are pressing in and the mistake was invisible. Split the tab and
+/// every press outside the primary pane answered "consumed by chrome", so
+/// `mouse_input` returned before [`Runtime::begin_local_selection`] and only one
+/// pane in the whole window could be dragged over. The pane still *looked* alive
+/// under the press, because D40's `focus_pane_at` runs above this router and had
+/// already moved the focus there — which is precisely why the symptom read as
+/// "selection is broken in this pane" rather than "the press never arrived".
+fn press_reaches_no_grid(
+    layout: &SeatLayout,
+    x: f64,
+    y: f64,
+    seat_holds_a_shell: impl Fn(SeatId) -> bool,
+) -> bool {
+    match seats::pane_at(layout, x, y) {
+        Some(seat) => !seat_holds_a_shell(seat),
+        None => true,
+    }
+}
+
+/// A pointer put inside a pane's body, answered in that body's own coordinates.
+///
+/// This says *which pane's coordinates*, and stops there. Which cell those
+/// coordinates land on — including what a point in the grid's margin or past the
+/// last column means — is [`bt_render::CellMetrics::clamped_hit_test_frame`]'s
+/// answer to give, because that is where the padding, the cell width and the row
+/// map live. Clamping to a cell here would need a second copy of all three.
+///
+/// The box is half-open, the same way [`Runtime::pane_hit_context`] tests it: the
+/// far edges belong to the next pane, so the last point still inside this one is
+/// a unit short of them. A body of no width at all — which no solved pane has —
+/// collapses to its origin rather than inverting the range.
+fn clamp_into_body(body: bt_render::SeatViewport, x: f64, y: f64) -> (f64, f64) {
+    let last_x = f64::from(body.width.saturating_sub(1));
+    let last_y = f64::from(body.height.saturating_sub(1));
+    (
+        (x - f64::from(body.x)).clamp(0.0, last_x),
+        (y - f64::from(body.y)).clamp(0.0, last_y),
+    )
 }
 
 #[derive(Default)]
@@ -9991,11 +10055,22 @@ impl Runtime {
         ))
     }
 
-    fn frame_hit(&self) -> Option<bt_render::GridHit> {
-        let (_, position, frame) = self.pane_hit_context()?;
-        self.renderer
+    /// The pane the pointer is standing in, and the cell of it under the pointer.
+    ///
+    /// One lookup for both halves, for the reason [`Self::forwarded_mouse_hit`]
+    /// records below: a hit and the pane it belongs to that were fetched
+    /// separately can disagree about which pane they mean.
+    fn pane_frame_hit(&self) -> Option<(SeatId, bt_render::GridHit)> {
+        let (seat, position, frame) = self.pane_hit_context()?;
+        let hit = self
+            .renderer
             .metrics()
-            .hit_test_frame(frame, position.x, position.y)
+            .hit_test_frame(frame, position.x, position.y)?;
+        Some((seat, hit))
+    }
+
+    fn frame_hit(&self) -> Option<bt_render::GridHit> {
+        self.pane_frame_hit().map(|(_, hit)| hit)
     }
 
     /// The cell under the pointer as the *mouse protocol* names it: the same hit
@@ -10010,8 +10085,14 @@ impl Runtime {
     /// the very next line went looking for a frame that had just been taken away. Reading the
     /// frame beside the hit removes the disagreement by construction rather than by testing for
     /// it — there is no second slot left to be empty.
-    /// The frame the focused pane last drew — the one a selection's anchors must be read from,
-    /// because a selection is set on that pane's own session.
+    /// The frame one pane last drew — the cells a gesture in that pane is made of,
+    /// and the anchors a selection set on that pane's session must be read from.
+    ///
+    /// Asked by seat rather than of the focused leaf. The two are the same pane
+    /// for the length of a press, because D40 moves the focus into the pane on the
+    /// way down; but "the same by construction" and "the same because of the order
+    /// two other things happen in" are different guarantees, and only the first one
+    /// survives someone reordering the router.
     ///
     /// The leaf's own copy, never `Runtime::last_presented_frame`. That window-level mirror is
     /// presentation bookkeeping (the projection hold, the unchanged-frame skip) and `focus_pane_at`
@@ -10019,8 +10100,44 @@ impl Runtime {
     /// way down the router to the very lines that want a frame. `None` means this pane has not
     /// drawn yet, which is the same "there are no cells here" [`Self::pane_hit_context`] already
     /// answers, and the callers already do nothing about.
-    fn focused_frame(&self) -> Option<&ViewportFrame> {
-        self.focused().last_presented_frame.as_ref()
+    fn pane_frame(&self, seat: SeatId) -> Option<&ViewportFrame> {
+        self.sessions.get(&seat)?.last_presented_frame.as_ref()
+    }
+
+    /// The cell a selection drag that began in `seat` is over, with the pointer
+    /// clamped into that pane's own body.
+    ///
+    /// Once a drag has begun the pointer is free to wander — into the pane next
+    /// door, onto the chrome, past the window's edge — and every one of those
+    /// points still has to name a cell of the *origin* pane, because that is the
+    /// grid whose anchors this selection is made of. Reading the cell from
+    /// whatever pane the pointer happens to be over would apply a neighbour's row
+    /// and column to this pane's frame: a selection nobody asked for, at a place
+    /// nobody pointed at, in a pane the gesture never belonged to.
+    ///
+    /// Clamping rather than refusing is also the terminal convention. Dragging
+    /// below a pane selects to the end of what is there; it does not stop
+    /// selecting at the edge and it does not reach into the pane below.
+    fn drag_hit_in_pane(&self, seat: SeatId) -> Option<bt_render::GridHit> {
+        let position = self.pointer_position?;
+        let frame = self.pane_frame(seat)?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let body = seats::pane_body_viewport(&self.seats, &self.seat_layout, seat, scale)?;
+        let (x, y) = clamp_into_body(body, position.x, position.y);
+        self.renderer.metrics().clamped_hit_test_frame(frame, x, y)
+    }
+
+    /// Set one pane's selection: the pane the gesture belongs to, named outright.
+    ///
+    /// Never through the focused-leaf deref, which answers "whichever pane holds
+    /// the keyboard *now*" — the right pane during a drag only because nothing
+    /// moves focus while a button is held.
+    fn set_pane_view_selection(&mut self, seat: SeatId, selection: Option<ViewSelection>) {
+        let active = self.active_tab;
+        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+            return;
+        };
+        leaf.session.set_view_selection(selection);
     }
 
     fn forwarded_mouse_hit(&self) -> Option<bt_render::GridHit> {
@@ -10621,8 +10738,19 @@ impl Runtime {
     }
 
     fn clear_selection(&mut self) {
-        self.session.set_view_selection(None);
-        self.projection.set_selection(None);
+        self.clear_pane_selection(self.focused_leaf);
+    }
+
+    /// Drop one pane's selection — the pane named, and not whichever holds the
+    /// keyboard. The two differ for a gesture, which belongs to the pane it began
+    /// in for as long as the button is down.
+    fn clear_pane_selection(&mut self, seat: SeatId) {
+        let active = self.active_tab;
+        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
+            return;
+        };
+        leaf.session.set_view_selection(None);
+        leaf.projection.set_selection(None);
     }
 
     fn return_to_live_for_input(&mut self) -> bool {
@@ -10671,9 +10799,17 @@ impl Runtime {
         self.publish_interaction_frame()
     }
 
-    fn copy_selection_on_release(&self) {
+    /// Copy-on-select, from the pane the gesture began in.
+    ///
+    /// The text is that pane's, whatever pane the pointer let go over: it is the
+    /// selection just made that the hand means, and there is only one pane it was
+    /// ever made in.
+    fn copy_selection_on_release(&self, seat: SeatId) {
         let window = Arc::clone(&self.window);
-        write_selection_text(&self.session, true, |text| {
+        let Some(leaf) = self.sessions.get(&seat) else {
+            return;
+        };
+        write_selection_text(&leaf.session, true, |text| {
             write_terminal_clipboard_text(&window, text)
         });
     }
@@ -10685,13 +10821,15 @@ impl Runtime {
         self.publish_interaction_frame()
     }
 
-    fn begin_local_selection(&mut self, hit: bt_render::GridHit) -> Result<()> {
+    /// Begin a selection in the pane the press landed in — `seat`, and not the
+    /// focused leaf, even though D40 has just made them the same pane.
+    fn begin_local_selection(&mut self, seat: SeatId, hit: bt_render::GridHit) -> Result<()> {
         self.dismiss_peek()?;
         let count = self
             .click_tracker
             .register(hit.row, hit.column, Instant::now());
         let local_image_path = self.local_image_path_hit(hit);
-        let Some(frame) = self.focused_frame() else {
+        let Some(frame) = self.pane_frame(seat) else {
             return Ok(());
         };
         let hyperlink = frame.hyperlink_at(hit.row, hit.column);
@@ -10738,33 +10876,54 @@ impl Runtime {
         };
         // A linear press begins a possible drag but owns no selection yet. Only movement creates
         // one, so click-no-drag cannot briefly feed copy-on-select or leave a zero-width selection.
-        self.session.set_view_selection(initial);
-        self.mouse_route = Some(MouseRoute::Local(SelectionDrag {
+        self.set_pane_view_selection(seat, initial);
+        self.mouse_route = Some(MouseRoute::Local(Box::new(SelectionDrag {
             mode,
+            origin_seat: seat,
             origin_row: hit.row,
             origin_column: hit.column,
             origin,
             hyperlink,
             open_hyperlink_on_release,
             local_image_activation,
-        }));
+        })));
         self.publish_interaction_frame()
     }
 
-    fn extend_local_selection(&mut self, hit: bt_render::GridHit) -> Result<()> {
-        let Some(MouseRoute::Local(drag)) = self.mouse_route.as_ref().cloned() else {
+    /// Carry the selection to where the pointer is now, in the pane the drag began
+    /// in and in no other.
+    ///
+    /// The cell is re-read here rather than passed in: the caller knows where the
+    /// pointer is, but only the drag knows which pane's cells that point has to be
+    /// spoken in, and [`Self::drag_hit_in_pane`] is the one place that translation
+    /// is written.
+    fn extend_local_selection(&mut self) -> Result<()> {
+        let Some(MouseRoute::Local(drag)) = self.mouse_route.as_ref() else {
             return Ok(());
         };
-        if matches!(drag.mode, SelectionDragMode::Linear)
-            && hit.row == drag.origin_row
-            && hit.column == drag.origin_column
+        // Copied out field by field rather than by cloning the drag whole: this
+        // runs on every pointer move of a gesture, and the anchors are the only
+        // part of it with anything to clone.
+        let (mode, seat, origin_row, origin_column) = (
+            drag.mode,
+            drag.origin_seat,
+            drag.origin_row,
+            drag.origin_column,
+        );
+        let origin = drag.origin.clone();
+        let Some(hit) = self.drag_hit_in_pane(seat) else {
+            return Ok(());
+        };
+        if matches!(mode, SelectionDragMode::Linear)
+            && hit.row == origin_row
+            && hit.column == origin_column
         {
             return Ok(());
         }
-        let Some(frame) = self.focused_frame() else {
+        let Some(frame) = self.pane_frame(seat) else {
             return Ok(());
         };
-        let current = match drag.mode {
+        let current = match mode {
             SelectionDragMode::Linear => ViewSelection {
                 start: frame
                     .anchor_at(hit.row, hit.column, Bias::Before)
@@ -10784,18 +10943,19 @@ impl Runtime {
                 .context("reject non-rectangular frame during line drag")?
                 .context("line drag hit has no anchor")?,
         };
-        let after_origin = (hit.row, hit.column) >= (drag.origin_row, drag.origin_column);
-        self.session.set_view_selection(Some(if after_origin {
+        let after_origin = (hit.row, hit.column) >= (origin_row, origin_column);
+        let next = if after_origin {
             ViewSelection {
-                start: drag.origin.start,
+                start: origin.start,
                 end: current.end,
             }
         } else {
             ViewSelection {
                 start: current.start,
-                end: drag.origin.end,
+                end: origin.end,
             }
-        }));
+        };
+        self.set_pane_view_selection(seat, Some(next));
         self.publish_interaction_frame()
     }
 
@@ -10918,14 +11078,19 @@ impl Runtime {
         if self.peek_hover.observe(peek_path, position, now) {
             self.present_peek_overlay(None)?;
         }
-        let Some(hit) = hit else {
-            return Ok(());
-        };
         if math_hit.is_some() || matches!(self.mouse_route, Some(MouseRoute::MathBlock)) {
             return Ok(());
         }
+        // Above the "is the pointer over a cell" guard, deliberately: a selection
+        // drag is answered in its *origin* pane's cells, which it has whether or
+        // not the pointer is over a cell of the pane it is currently crossing.
+        // Under the old guard a drag that left its pane simply stopped following
+        // the hand until it came back.
         if matches!(self.mouse_route, Some(MouseRoute::Local(_))) {
-            return self.extend_local_selection(hit);
+            return self.extend_local_selection();
+        }
+        if hit.is_none() {
+            return Ok(());
         }
         let Some(hit) = self.forwarded_mouse_hit() else {
             return Ok(());
@@ -12242,19 +12407,18 @@ impl Runtime {
             self.finish_rename(true)?;
         }
         let Some(target) = target else {
-            // Not on chrome, but possibly not on the terminal either — a press
-            // in a preview's body belongs to that seat and must not reach the
-            // grid underneath it. With a lone leaf there is no other seat for a
-            // press to belong to, so nothing is claimed and every existing path
-            // sees the button exactly as before.
+            // Not on chrome, but possibly not on a terminal either — a press in a
+            // preview's body belongs to that seat and must not reach the grid
+            // underneath it. Asked of the pane the press actually landed in, so
+            // every terminal leaf answers for itself; see [`press_reaches_no_grid`]
+            // for the primary-seat version this replaced and what it cost.
             self.tab_clicks.interrupt();
-            return Ok(!self.seats.is_lone_terminal()
-                && !seats::terminal_contains(
-                    &self.seat_layout,
-                    self.seats.terminal(),
-                    position.x,
-                    position.y,
-                ));
+            return Ok(press_reaches_no_grid(
+                &self.seat_layout,
+                position.x,
+                position.y,
+                |seat| self.sessions.contains_key(&seat),
+            ));
         };
         match target {
             seats::ChromeTarget::Divider(split) => {
@@ -12493,7 +12657,17 @@ impl Runtime {
             }
             return Ok(());
         }
-        let Some(hit) = self.frame_hit() else {
+        // A selection drag already in flight is finished wherever the button comes
+        // up — over the pane next door, over the chrome, past the window's edge.
+        // The pane it began in owns the whole gesture, so nothing here needs the
+        // pointer to be over a cell; under the guard below, a release outside the
+        // pane left the route latched and the next move went on selecting.
+        if state == ElementState::Released
+            && let Some(MouseRoute::Local(drag)) = self.mouse_route.as_ref().cloned()
+        {
+            return self.finish_local_selection(*drag);
+        }
+        let Some((hit_seat, hit)) = self.pane_frame_hit() else {
             return Ok(());
         };
         let Some(protocol_button) = protocol_mouse_button(button) else {
@@ -12518,64 +12692,78 @@ impl Runtime {
             );
         }
         match state {
-            ElementState::Pressed if button == MouseButton::Left => self.begin_local_selection(hit),
-            ElementState::Released => {
-                self.extend_local_selection(hit)?;
-                let release_hyperlink = self.hyperlink_hit(hit);
-                let release_local_image_path = self.local_image_path_hit(hit);
-                let (single_click, hyperlink_to_open, local_image_action) =
-                    if let Some(MouseRoute::Local(SelectionDrag {
-                        mode: SelectionDragMode::Linear,
-                        origin_row,
-                        origin_column,
-                        hyperlink,
-                        open_hyperlink_on_release,
-                        local_image_activation,
-                        ..
-                    })) = self.mouse_route.as_ref()
-                        && (*origin_row, *origin_column) == (hit.row, hit.column)
-                    {
-                        (
-                            true,
-                            open_hyperlink_on_release
-                                .then(|| hyperlink.clone())
-                                .flatten()
-                                .filter(|pressed| release_hyperlink.as_ref() == Some(pressed)),
-                            local_image_activation
-                                .path()
-                                .is_some_and(|pressed| {
-                                    release_local_image_path.as_deref() == Some(pressed)
-                                })
-                                .then(|| local_image_activation.clone()),
-                        )
-                    } else {
-                        (false, None, None)
-                    };
-                let copy_on_select =
-                    should_copy_on_select_release(self.mouse_route.as_ref(), single_click);
-                self.mouse_route = None;
-                if single_click {
-                    self.clear_selection();
-                    self.publish_interaction_frame()?;
-                } else if copy_on_select {
-                    self.copy_selection_on_release();
-                }
-                if let Some(hyperlink) = hyperlink_to_open {
-                    self.activate_hyperlink(hyperlink)?;
-                }
-                if let Some(activation) = local_image_action {
-                    match activation {
-                        LocalImageActivation::None => {}
-                        LocalImageActivation::Preview(path) => self.open_preview_image(path)?,
-                        LocalImageActivation::External(path) => {
-                            self.activate_local_image_path(&path)
-                        }
-                    }
-                }
-                Ok(())
+            ElementState::Pressed if button == MouseButton::Left => {
+                self.begin_local_selection(hit_seat, hit)
             }
             _ => Ok(()),
         }
+    }
+
+    /// Let go of a selection drag: settle its last extent, then spend what the
+    /// press promised — a click's dismissal, a drag's copy, a Ctrl+click's link.
+    ///
+    /// Everything here is asked of `drag.origin_seat`. The release's own cell is
+    /// read only when the button truly came up inside that pane, because every
+    /// question below is "did it come up on the cell it went down on", and a point
+    /// in another pane — or on the chrome — cannot answer that yes. Letting a
+    /// neighbour's cell answer would let a release two panes away read as a click
+    /// on the origin cell and quietly clear the selection the drag just made.
+    fn finish_local_selection(&mut self, drag: SelectionDrag) -> Result<()> {
+        let seat = drag.origin_seat;
+        self.extend_local_selection()?;
+        let release_hit = self
+            .pane_frame_hit()
+            .filter(|(at, _)| *at == seat)
+            .map(|(_, hit)| hit);
+        let release_hyperlink = release_hit.and_then(|hit| self.hyperlink_hit(hit));
+        let release_local_image_path = release_hit.and_then(|hit| self.local_image_path_hit(hit));
+        let SelectionDrag {
+            mode,
+            hyperlink,
+            open_hyperlink_on_release,
+            local_image_activation,
+            origin_row,
+            origin_column,
+            ..
+        } = drag;
+        let (single_click, hyperlink_to_open, local_image_action) =
+            if matches!(mode, SelectionDragMode::Linear)
+                && release_hit
+                    .is_some_and(|hit| (origin_row, origin_column) == (hit.row, hit.column))
+            {
+                (
+                    true,
+                    open_hyperlink_on_release
+                        .then_some(hyperlink)
+                        .flatten()
+                        .filter(|pressed| release_hyperlink.as_ref() == Some(pressed)),
+                    local_image_activation
+                        .path()
+                        .is_some_and(|pressed| release_local_image_path.as_deref() == Some(pressed))
+                        .then(|| local_image_activation.clone()),
+                )
+            } else {
+                (false, None, None)
+            };
+        let copy_on_select = should_copy_on_select_release(self.mouse_route.as_ref(), single_click);
+        self.mouse_route = None;
+        if single_click {
+            self.clear_pane_selection(seat);
+            self.publish_interaction_frame()?;
+        } else if copy_on_select {
+            self.copy_selection_on_release(seat);
+        }
+        if let Some(hyperlink) = hyperlink_to_open {
+            self.activate_hyperlink(hyperlink)?;
+        }
+        if let Some(activation) = local_image_action {
+            match activation {
+                LocalImageActivation::None => {}
+                LocalImageActivation::Preview(path) => self.open_preview_image(path)?,
+                LocalImageActivation::External(path) => self.activate_local_image_path(&path),
+            }
+        }
+        Ok(())
     }
 
     /// A wheel notch over the tab strip, turned into horizontal motion (A7/A8).
@@ -17659,8 +17847,9 @@ mod tests {
 
     fn local_selection_route(mode: SelectionDragMode) -> MouseRoute {
         let hit = hyperlink_hit("https://example.test");
-        MouseRoute::Local(SelectionDrag {
+        MouseRoute::Local(Box::new(SelectionDrag {
             mode,
+            origin_seat: SeatId(1),
             origin_row: 1,
             origin_column: 2,
             origin: ViewSelection {
@@ -17670,7 +17859,7 @@ mod tests {
             hyperlink: None,
             open_hyperlink_on_release: false,
             local_image_activation: LocalImageActivation::None,
-        })
+        }))
     }
 
     /// The gear no longer *is* the theme switch — it opens the surface the
@@ -23704,6 +23893,149 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A press inside *any* pane of a split reaches that pane's grid, so the
+    /// selection gesture begins there.
+    ///
+    /// The bug this pins: the router asked `terminal_contains(seats.terminal())`,
+    /// which is one fixed leaf, and answered "consumed by chrome" for a press in
+    /// every other pane — `begin_local_selection` was never reached and only the
+    /// primary pane in the window could be dragged over.
+    ///
+    /// MUTATION: re-base the predicate on `seats.terminal()`'s rectangle and the
+    /// second and third panes go red, because the red gate below first proves
+    /// their centres are points that rectangle does not contain.
+    #[test]
+    fn a_press_in_any_pane_of_a_split_reaches_that_panes_own_grid() {
+        let seats = cross_seats(3);
+        let (layout, _) = cross_solve(&seats);
+        let shells: std::collections::BTreeSet<SeatId> = seats.terminals().into_iter().collect();
+        let primary = seats.terminal();
+        let rects = pane_rects_of(&layout);
+        assert_eq!(rects.len(), 3, "a three-pane tab places three rectangles");
+
+        let mut outside_the_primary = 0;
+        for (seat, rect) in &rects {
+            let x = f64::from((rect[0] + rect[2]) / 2.0);
+            let y = f64::from((rect[1] + rect[3]) / 2.0);
+            assert!(
+                !press_reaches_no_grid(&layout, x, y, |seat| shells.contains(&seat)),
+                "a press in the middle of {seat:?} must reach that pane's grid"
+            );
+            if *seat != primary {
+                // The red gate: without this the assertion above would pass on a
+                // predicate that simply never refuses anything.
+                assert_ne!(
+                    seats::pane_at(&layout, x, y),
+                    Some(primary),
+                    "{seat:?}'s centre must be a point the primary seat does not \
+                     contain, or the mutation this test guards is unobservable"
+                );
+                outside_the_primary += 1;
+            }
+        }
+        assert_eq!(
+            outside_the_primary, 2,
+            "two of the three panes are not the primary seat"
+        );
+
+        // The clause the old predicate existed for, kept: a seat with no shell
+        // behind it — a preview body — is still the seat's press and not the
+        // grid's, and so is the surface that is no seat at all.
+        let mut with_preview = cross_seats(2);
+        with_preview.toggle_preview(&cross_metrics());
+        let (preview_layout, _) = cross_solve(&with_preview);
+        let preview = with_preview.preview().expect("the preview seat is open");
+        let shells: std::collections::BTreeSet<SeatId> =
+            with_preview.terminals().into_iter().collect();
+        let rect = preview_layout
+            .get(preview)
+            .and_then(|placement| placement.device_rect)
+            .expect("the preview seat has a rectangle");
+        let x = f64::from((rect.left + rect.right) as i32) / 2.0;
+        let y = f64::from((rect.top + rect.bottom) as i32) / 2.0;
+        assert!(
+            press_reaches_no_grid(&preview_layout, x, y, |seat| shells.contains(&seat)),
+            "a press in the preview's body belongs to that seat, not to the grid \
+             underneath it"
+        );
+        assert!(
+            press_reaches_no_grid(&preview_layout, -1.0, -1.0, |seat| shells.contains(&seat)),
+            "a point in no pane at all reaches no grid"
+        );
+    }
+
+    /// A drag is measured from the body of the pane it began in, and stays inside
+    /// that pane however far the pointer travels.
+    ///
+    /// Two claims, both of them the same defect seen from different sides: the
+    /// pane-relative point a cell is looked up with must come from *this* pane's
+    /// body rectangle, and a pointer that has left the pane must still name a cell
+    /// of it rather than one of the neighbour it wandered into.
+    ///
+    /// MUTATION: hand `clamp_into_body` the primary seat's body instead of the
+    /// pane's own — the basis this bug was made of — and the first assertion goes
+    /// red, because the same screen point then answers a different pane-relative
+    /// column entirely (the third assertion measures exactly how far off it is).
+    #[test]
+    fn a_drag_is_measured_from_its_own_panes_body_and_stays_inside_it() {
+        let scale = seats::scale_ppm(CROSS_DPI) as f32 / 1_000_000.0;
+        let seats = cross_seats(2);
+        let (layout, _) = cross_solve(&seats);
+        let terminals = seats.terminals();
+        let (first, second) = (terminals[0], terminals[1]);
+        let body_of = |seat| {
+            seats::pane_body_viewport(&seats, &layout, seat, scale)
+                .expect("both panes of a two-pane tab are placed")
+        };
+        let (first_body, second_body) = (body_of(first), body_of(second));
+        assert_ne!(
+            first_body.x, second_body.x,
+            "a row split puts the two bodies at different origins, which is the \
+             whole reason the basis matters"
+        );
+
+        // A point 37px across and 41px down inside the second pane, in the window's
+        // own coordinates — what `pointer_position` carries.
+        let x = f64::from(second_body.x) + 37.0;
+        let y = f64::from(second_body.y) + 41.0;
+        assert_eq!(
+            clamp_into_body(second_body, x, y),
+            (37.0, 41.0),
+            "the pane the drag began in measures the pointer from its own corner"
+        );
+        assert_eq!(
+            clamp_into_body(first_body, x, y),
+            (f64::from(first_body.width) - 1.0, 41.0),
+            "measured from the primary pane's body the same point is not 37px in \
+             at all — it is past that pane's last column, which is the cell the \
+             old basis would have selected"
+        );
+
+        // The pointer crosses back into the first pane mid-drag: the selection is
+        // clamped to the origin pane's near edge and never reaches into the
+        // neighbour's cells.
+        let back_x = f64::from(first_body.x) + 5.0;
+        let back_y = f64::from(first_body.y) + 5.0;
+        assert_eq!(
+            clamp_into_body(second_body, back_x, back_y).0,
+            0.0,
+            "a drag dragged into the pane next door is held at its own near edge"
+        );
+
+        // Off the bottom of the window entirely: the convention is "select to the
+        // end of what is there", not "stop selecting".
+        assert_eq!(
+            clamp_into_body(second_body, x, 100_000.0),
+            (37.0, f64::from(second_body.height) - 1.0),
+            "a drag past the bottom edge selects to the pane's last row"
+        );
+        assert_eq!(
+            clamp_into_body(second_body, -100_000.0, -100_000.0),
+            (0.0, 0.0),
+            "and past the top-left corner, to its first cell"
+        );
     }
 
     /// `commit_layout_drop`'s two lines that do not need a window: build the

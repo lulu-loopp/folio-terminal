@@ -253,6 +253,30 @@ impl CellMetrics {
             .visual_row_at(y_subpixels)
             .map(|row| GridHit { row, column })
     }
+
+    /// The cell a *gesture* at this point means — the nearest one, never `None`
+    /// for want of a cell exactly underneath.
+    ///
+    /// [`Self::hit_test_frame`]'s `None` is the honest answer to "what is under
+    /// the pointer" for a point on the padding, past the last column, or below
+    /// the last row. A selection drag asks what the gesture means instead, and
+    /// past the end of a row that is the end of the row: a drag pulled to a
+    /// pane's edge must select up to it rather than stop a column short.
+    ///
+    /// The clamping lives here because the answer needs the padding, the cell
+    /// width and the frame's own row map — the caller holding a second copy of
+    /// that geometry to clamp with is exactly the class of bug this avoids.
+    /// `None` only when the frame draws no rows at all.
+    pub fn clamped_hit_test_frame(&self, frame: &ViewportFrame, x: f64, y: f64) -> Option<GridHit> {
+        let column = ((x as f32 - self.padding_px) / self.cell_width_px).floor();
+        let column = if column.is_finite() { column } else { 0.0 };
+        let column = (column.max(0.0) as u32).min(frame.columns.get().saturating_sub(1));
+        let y_subpixels =
+            (f64::from(y as f32 - self.padding_px) * SUBPIXELS_PER_PX as f64).floor() as i64;
+        frame
+            .clamped_visual_row_at(y_subpixels)
+            .map(|row| GridHit { row, column })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -8153,6 +8177,97 @@ mod tests {
             40.0,
             "selection rectangles consume the same frame row prefix"
         );
+    }
+
+    /// A drag pulled past a pane's edges names the cell at that edge, where the
+    /// plain hit test correctly names nothing at all.
+    ///
+    /// The two answers differ over three kinds of point, and every one of them is
+    /// somewhere a selection drag routinely goes: the grid's own margin, the
+    /// slack between the last column and the pane's right edge, and everything
+    /// below the last row. A drag clamped only to the pane's *box* lands on all
+    /// three, is told there is no cell there, and stops following the hand — a
+    /// column short of the end of the line, or a row short of the end of the
+    /// pane.
+    #[test]
+    fn a_gesture_past_the_grids_edges_names_the_edge_cell_where_a_hover_names_nothing() {
+        let metrics = CellMetrics {
+            cell_width_px: 8.0,
+            cell_height_px: 18.0,
+            font_size_px: 14.0,
+            padding_px: 4.0,
+            scale_factor: 1.0,
+            ascii_baseline_px: 12.0,
+            primary_advance_px: 8.0,
+            primary_cap_height_px: 10.0,
+            primary_cap_center_y_px: 5.0,
+        };
+        let frame = ViewportFrame {
+            columns: NonZeroU32::new(3).unwrap(),
+            grid_rows: NonZeroU32::new(2).unwrap(),
+            rows: NonZeroU32::new(2).unwrap(),
+            presentation_offset_subpixels: 0,
+            cells: vec![CapturedCell::plain("x"); 6],
+            cursor: bt_viewport::GridCursor {
+                row: 0,
+                column: 0,
+                visible: true,
+            },
+            cell_anchors: test_cell_anchors(6),
+            row_map: test_row_map_for_metrics(2, metrics),
+            selection_spans: Vec::new(),
+            math_blocks: Vec::new(),
+            math_failures: Vec::new(),
+            status_text: None,
+            viewport_origin: FrameViewportOrigin::Bottom,
+            scroll_offset_rows: 0,
+            layout_key: bt_doc_layout_key(3),
+            view_generation: bt_doc::ViewGeneration(1),
+        };
+        // The grid occupies x 4..28 and y 4..40; a pane holding it is wider and
+        // taller than that, and the rest is margin and slack.
+        let last = GridHit { row: 1, column: 2 };
+
+        // Inside the grid the two agree, which is what keeps this a clamp and not
+        // a second hit test.
+        for (x, y) in [(5.0, 5.0), (13.0, 25.0), (27.0, 39.0)] {
+            assert_eq!(
+                metrics.clamped_hit_test_frame(&frame, x, y),
+                metrics.hit_test_frame(&frame, x, y),
+                "({x}, {y}) is over a cell, so both answer it"
+            );
+        }
+
+        for (what, x, y, expected) in [
+            ("the slack past the last column", 31.0, 39.0, last),
+            ("below the last row", 27.0, 400.0, last),
+            ("past the bottom-right corner", 999.0, 999.0, last),
+            ("the left margin", 0.0, 5.0, GridHit { row: 0, column: 0 }),
+            (
+                "above the first row",
+                5.0,
+                0.0,
+                GridHit { row: 0, column: 0 },
+            ),
+            (
+                "past the top-left corner",
+                -999.0,
+                -999.0,
+                GridHit { row: 0, column: 0 },
+            ),
+        ] {
+            assert_eq!(
+                metrics.hit_test_frame(&frame, x, y),
+                None,
+                "{what} is not over a cell — if it were, this test would be \
+                 measuring nothing"
+            );
+            assert_eq!(
+                metrics.clamped_hit_test_frame(&frame, x, y),
+                Some(expected),
+                "a drag reaching {what} means the cell at that edge"
+            );
+        }
     }
 
     #[test]

@@ -2293,20 +2293,8 @@ pub fn window_chrome_boxes(width: f32, scale: f32) -> [(ChromeTarget, [f32; 4]);
     .expect("four targets make four boxes")
 }
 
-/// Whether this device point lands inside the terminal seat's own rectangle.
-pub fn terminal_contains(layout: &SeatLayout, terminal: SeatId, x: f64, y: f64) -> bool {
-    let Some(Some(device)) = layout.get(terminal).map(|p| p.device_rect) else {
-        return false;
-    };
-    let rect = [
-        device.left as f32,
-        device.top as f32,
-        device.right as f32,
-        device.bottom as f32,
-    ];
-    contains(rect, x as f32, y as f32)
-}
-
+/// Whether this device point lands inside a rectangle, half-open on the far
+/// edges so two rectangles sharing a border cannot both claim the same point.
 fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
     x >= rect[0] && x < rect[2] && y >= rect[1] && y < rect[3]
 }
@@ -6646,7 +6634,7 @@ mod tests {
     /// terminal's own rectangle — are all the scrim's.
     ///
     /// Red gate: each point is first shown to be the thing it claims to be, by
-    /// the very functions the router consults (`hit_chrome`, `terminal_contains`).
+    /// the very functions the router consults (`hit_chrome`, `pane_at`).
     /// Without that half the assertions would pass over any three points at all,
     /// including three that are inside the dialog.
     #[test]
@@ -6694,8 +6682,9 @@ mod tests {
             Some(ChromeTarget::PaneHeader(preview)),
             "the second point really is another seat's head"
         );
-        assert!(
-            terminal_contains(&layout, seats.terminal(), terminal.0, terminal.1),
+        assert_eq!(
+            pane_at(&layout, terminal.0, terminal.1),
+            Some(seats.terminal()),
             "the third point really is inside the terminal"
         );
 
