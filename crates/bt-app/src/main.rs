@@ -901,11 +901,13 @@ struct Runtime {
     /// and what crosses the boundary is a pair of numbers. The same arrangement
     /// [`TabContent::offset`] and [`ChromeContent::chevron_turn`] already have.
     ///
-    /// **Not persisted, deliberately and for this ticket only.** The layout is a
-    /// dev toggle today ([`is_rail_layout_toggle_shortcut`]); a restart comes back
-    /// [`seats::TabLayoutMode::Horizontal`] because there is no product verb yet
-    /// that could have *meant* anything else, and a preference written by a
-    /// scaffold chord is a preference nobody chose.
+    /// **Persisted.** Q191's two settings rows — `Tab layout` and `Sidebar` — are
+    /// the product verbs this field was once waiting for, so the pair is written
+    /// to the session as `tab_layout`/`sidebar_mode` and read back at startup
+    /// (`rail_state_for(render_tab_layout(…), render_sidebar_mode(…))`). The dev
+    /// chord ([`is_rail_layout_toggle_shortcut`]) still exists and commits through
+    /// the *same* [`Self::set_rail_state`] the dialog does — one write path, so a
+    /// preference cannot mean two things depending on which door it came through.
     rail: seats::RailState,
     /// How far the rail is scrolled, in physical pixels.
     ///
@@ -1034,6 +1036,7 @@ struct Runtime {
     /// The last work area that was successfully observed (tiny-window §4.4).
     work_area: WorkAreaHint,
     session_store: persist::SessionStore,
+    settings_store: persist::SettingsStore,
     /// The one store that pin, Recent and undo-close all draw from — kept beside
     /// the tabs rather than inside the session file's mirror so the three doors
     /// read live state, not the last thing that happened to be flushed.
@@ -5813,6 +5816,7 @@ fn create_leaf_session(
     wake: OutputWake,
     probe_input: Option<&[u8]>,
     working_directory: Option<PathBuf>,
+    display_formulas: bool,
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
     let mut pty = if probe_input.is_none() {
@@ -5845,6 +5849,9 @@ fn create_leaf_session(
         detect_image_paths: true,
         ..MathLayoutOptions::default()
     });
+    // A pane born from a split must obey the switch its neighbours already obey,
+    // which is exactly why this builder exists (see above).
+    session.set_display_math_bands(display_formulas);
     session.set_layout_key(LayoutKey {
         width_cells: columns,
         dpi_milli: renderer.metrics().dpi_milli(),
@@ -5913,6 +5920,7 @@ fn create_tab_state(
     seed: TabSeed,
     policy: SizePolicy,
     rail: seats::RailState,
+    display_formulas: bool,
 ) -> Result<(TabState, String)> {
     // The new tab's seats are solved into the *current* window, so they answer
     // to whoever owns it. A tab opened while the user is working in a window
@@ -5940,6 +5948,7 @@ fn create_tab_state(
             Arc::clone(&wake),
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
             working_directories.get(&seat).cloned(),
+            display_formulas,
         )?;
         sessions.insert(seat, leaf);
     }
@@ -6385,6 +6394,7 @@ impl Runtime {
         // be the window's opening bounds rather than a correction applied after
         // the user has already seen it somewhere else.
         let session_store = persist::SessionStore::open();
+        let settings_store = persist::SettingsStore::open();
         let theme_mode = render_theme_mode(session_store.loaded().theme);
         set_cursor_style(render_cursor_style(session_store.loaded().cursor_style));
         // Through the same constructor the two live routes take, so a restored
@@ -6533,6 +6543,7 @@ impl Runtime {
                 // axis is a dev chord, and a preference a scaffold wrote is a
                 // preference nobody chose.
                 seats::RailState::default(),
+                settings_store.loaded().display_formulas,
             )?;
             tabs.push(tab);
             conpty_sources.push(conpty_source);
@@ -6651,6 +6662,7 @@ impl Runtime {
             last_drawn_resizing_card: None,
             work_area: WorkAreaHint::NeverKnown,
             session_store,
+            settings_store,
             recent,
             pending_restore,
             // "It opens BEFORE it asks — like a browser, which lands you on
@@ -6784,6 +6796,7 @@ impl Runtime {
             TabSeed::of_profile(profile),
             self.size_policy,
             self.rail,
+            self.settings_store.loaded().display_formulas,
         )?;
         self.tabs.push(tab);
         self.apply_window_min_inner_size()?;
@@ -6937,6 +6950,7 @@ impl Runtime {
             },
             self.size_policy,
             self.rail,
+            self.settings_store.loaded().display_formulas,
         )?;
         // Appended, which keeps the pinned run intact without a re-sort: a new
         // unpinned tab belongs at the end by construction.
@@ -7003,6 +7017,7 @@ impl Runtime {
                 seed,
                 self.size_policy,
                 self.rail,
+                self.settings_store.loaded().display_formulas,
             )?;
             self.tabs.push(revived);
         }
@@ -7794,7 +7809,17 @@ impl Runtime {
                 });
                 peek_strip::PeekLeaf {
                     kind: seat.kind,
-                    title: seats::seat_caption(
+                    // The short name, and C28's own two lengths are why. A pane
+                    // head has a whole bar and answers "where is this" with the
+                    // place entire; this popup is a 210px thumbnail whose names
+                    // answer "which one is this", which is the question the last
+                    // segment answers. Written with `seat_caption` it printed
+                    // whole paths into a box built for words, and a name wider
+                    // than the box ran straight out over the terminal — the
+                    // fourth reader of `seat_short_caption`, beside the drag
+                    // ghost, the drop preview and a collapsed bar, and a label
+                    // for the same reason all three are.
+                    title: seats::seat_short_caption(
                         seat.kind,
                         preview_title.as_deref(),
                         terminal_names.get(&seat.id).map(String::as_str),
@@ -8038,21 +8063,35 @@ impl Runtime {
     /// Unhostable has to read as shut and not as "open but invisible": an
     /// invisible modal still swallows Esc and every click, and that is a window
     /// nobody can get out of.
-    fn settings_layout(&self) -> Option<settings::SettingsLayout> {
+    /// `&mut` for one reason: the open picker's width is a fact about glyphs, and
+    /// only the font knows it. The measuring happens here, beside the renderer,
+    /// exactly as the peek strip's and the restore prompt's do, and the geometry
+    /// itself stays a pure function of the numbers handed to it.
+    fn settings_layout(&mut self) -> Option<settings::SettingsLayout> {
         if !self.settings.is_open() {
             return None;
         }
         let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let font_px = settings::MENU_ITEM_FONT_LOGICAL_PX * scale;
+        // Only the open row's own options can be drawn, so only they are measured;
+        // a shut picker measures nothing at all.
+        let widest_option = self.settings.menu().map_or(0.0, |row| {
+            row.option_labels()
+                .map(|label| self.renderer.measure_chrome_text(label, font_px))
+                .fold(0.0_f32, f32::max)
+        });
         settings::layout_for_menu(
             width as f32,
             height as f32,
-            self.renderer.metrics().scale_factor as f32,
+            scale,
             self.settings.menu(),
             // Read fresh every time rather than cached: the Sidebar row appears
             // and disappears with the Tab layout combo, and the height, the hit
             // test and the draw all come off this one call, so all three follow
             // it in the same frame.
             &settings::visible_rows(self.rail.layout),
+            widest_option,
         )
     }
 
@@ -8063,6 +8102,7 @@ impl Runtime {
             cursor: current_cursor_style(),
             tab_layout: self.rail.layout,
             sidebar: self.rail.mode,
+            display_formulas: self.settings_store.loaded().display_formulas,
         }
     }
 
@@ -8576,6 +8616,9 @@ impl Runtime {
                 if let Some(style) = settings::cursor_style_requested(target) {
                     self.apply_cursor_style(style)?;
                 }
+                if let Some(enabled) = settings::display_formulas_requested(target) {
+                    self.apply_display_formulas(enabled)?;
+                }
                 // Both rail combos go through the one constructor: the layout
                 // choice keeps the sidebar mode standing and the sidebar choice
                 // keeps the layout standing, and Q190's combination rule inside
@@ -8798,6 +8841,35 @@ impl Runtime {
         Ok(true)
     }
 
+    /// Point the "Display formulas" switch at `enabled` (user ruling 2026-08-10).
+    ///
+    /// Every shell in every tab, for the same reason a DPI change reaches them
+    /// all: this is a fact about how the user wants a terminal to look, not about
+    /// one pane. The sessions keep every detection record they hold — the switch
+    /// only decides whether a proven raster is allowed to become a band — so a
+    /// flip costs one frame and nothing is re-scanned or re-rasterized.
+    ///
+    /// The write is immediate rather than debounced (§1.1): the file exists apart
+    /// from `session.json` precisely so a click in this dialog is on disk before
+    /// the user can close the window on it.
+    fn apply_display_formulas(&mut self, enabled: bool) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.display_formulas = enabled;
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
+        for tab in &mut self.tabs {
+            for (_, leaf) in tab.leaves_mut() {
+                leaf.session.set_display_math_bands(enabled);
+            }
+        }
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
     /// The dev-only preview toggle, and everything one costs: the tree changes,
     /// so the window minimum, the terminal's columns, the ConPTY coalescer and
     /// the session file all follow it, in that order.
@@ -8932,7 +9004,15 @@ impl Runtime {
         let wake: OutputWake = Arc::new(move || {
             let _ = proxy.send_event(AppEvent::PtyOutput);
         });
-        let leaf = create_leaf_session(&self.renderer, body, wake, None, inherited)?;
+        let display_formulas = self.settings_store.loaded().display_formulas;
+        let leaf = create_leaf_session(
+            &self.renderer,
+            body,
+            wake,
+            None,
+            inherited,
+            display_formulas,
+        )?;
         self.sessions.insert(arriving, leaf);
         debug_assert!(
             self.sessions_match_terminals(),

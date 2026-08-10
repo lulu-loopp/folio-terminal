@@ -140,6 +140,19 @@ pub enum ChromeMark {
     /// pill over the surface it lands on, because this pipeline blends in linear
     /// light and the design's does not — see `ChromePalette::tab_close_pill_on_content`.
     ControlPill { radius_px: u32 },
+    /// [`Self::ControlPill`] as a ring drawn *inside* its own edge — what
+    /// [`Self::TabBodyRing`] is to [`Self::TabBody`], on the shape that is round
+    /// on all four corners.
+    ///
+    /// It exists because `@keyframes tab-land`'s inset ring has to follow
+    /// whatever silhouette the row it lands in actually wears, and the rail's is
+    /// not the strip's: `.tab` is `border-radius: var(--tabr) var(--tabr) 0 0`
+    /// and runs into the content plane, while `.vtab { border-radius: 6px }` is
+    /// a closed box in a column. A landing ring borrowed from the strip closes
+    /// across a foot the rail's rows do not have, and leaves two square corners
+    /// under a fill that is round — which is a ring visibly not belonging to the
+    /// thing it is drawn around.
+    ControlPillRing { radius_px: u32, stroke_px: u32 },
     /// One corner of the floor showing around a rounded card: a `radius × radius`
     /// square with a quarter-disc bitten out of it, filled edge to edge.
     ///
@@ -225,6 +238,7 @@ impl ChromeMark {
             Self::TabBody { .. } => "tab-body",
             Self::TabBodyRing { .. } => "tab-body-ring",
             Self::ControlPill { .. } => "control-pill",
+            Self::ControlPillRing { .. } => "control-pill-ring",
             // One id for four orientations, like the chevron's one id for every
             // angle: `mark_key` adds the corner, so the four rasters are four
             // cache slots under one name.
@@ -534,6 +548,10 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     if let ChromeMark::TabBodyRing {
         radius_px,
         stroke_px,
+    }
+    | ChromeMark::ControlPillRing {
+        radius_px,
+        stroke_px,
     } = sprite.mark
     {
         let _ = write!(key, ":r{radius_px}w{stroke_px}");
@@ -643,6 +661,23 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
             (
                 format!("0 0 {width_px} {height_px}"),
                 format!(r#"<path fill="currentColor" d="{path}"/>"#),
+            )
+        }
+        // Stroked and inset by half the stroke, exactly as `TabBodyRing` is and
+        // for the same reason: `stroke-width` centres on the path, so the path
+        // has to be the box pulled in by half of it for the ring to land inside
+        // the edge.
+        ChromeMark::ControlPillRing {
+            radius_px,
+            stroke_px,
+        } => {
+            let inset = f32::from(u16::try_from(stroke_px).ok()?) / 2.0;
+            let path = control_pill_inset_path(width_px, height_px, radius_px, inset)?;
+            (
+                format!("0 0 {width_px} {height_px}"),
+                format!(
+                    r#"<path fill="none" stroke="currentColor" stroke-width="{stroke_px}" d="{path}"/>"#
+                ),
             )
         }
         ChromeMark::CardCorner { radius_px, corner } => {
@@ -868,6 +903,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::TabBody { .. } => 8,
         ChromeMark::TabBodyRing { .. } => 8,
         ChromeMark::ControlPill { .. } => 8,
+        ChromeMark::ControlPillRing { .. } => 8,
         ChromeMark::CardCorner { .. } => 8,
         ChromeMark::Fill => 8,
         ChromeMark::ProgressRing { .. } => 8,
@@ -995,6 +1031,32 @@ fn control_pill_path(width: u32, height: u32, radius: u32) -> Option<String> {
          L{w},{bottom} A{r},{r} 0 0 1 {right},{h} \
          L{r},{h} A{r},{r} 0 0 1 0,{bottom} \
          L0,{r} A{r},{r} 0 0 1 {r},0 Z",
+        right = w - r,
+        bottom = h - r,
+    ))
+}
+
+/// [`control_pill_path`] pulled `inset` pixels in on all four sides.
+///
+/// Unlike [`tab_body_inset_path`] this one closes: the shape it rings has a foot
+/// of its own — `.vtab` is a box in a column, not a tab running into the content
+/// plane — so a ring that stopped short of it would be an open outline drawn
+/// around a closed fill.
+fn control_pill_inset_path(width: u32, height: u32, radius: u32, inset: f32) -> Option<String> {
+    let (l, t) = (inset, inset);
+    let (w, h) = (width as f32 - inset, height as f32 - inset);
+    // The round shrinks with the box exactly as a browser's inset shadow does.
+    let r = (radius as f32 - inset).max(0.0);
+    if r < 0.5 || w - l < 2.0 * r || h - t < 2.0 * r {
+        return None;
+    }
+    Some(format!(
+        "M{left_r},{t} L{right},{t} A{r},{r} 0 0 1 {w},{top_r} \
+         L{w},{bottom} A{r},{r} 0 0 1 {right},{h} \
+         L{left_r},{h} A{r},{r} 0 0 1 {l},{bottom} \
+         L{l},{top_r} A{r},{r} 0 0 1 {left_r},{t} Z",
+        left_r = l + r,
+        top_r = t + r,
         right = w - r,
         bottom = h - r,
     ))
@@ -1649,6 +1711,110 @@ mod tests {
                 "radius {radius}: a rounded corner is not a staircase, saw {partial} partial pixels"
             );
         }
+    }
+
+    /// PIN (Q172/Q175) — the rail's silhouette is round on **all four** corners,
+    /// and the strip's is not. One assertion pair, because the whole bug was
+    /// reaching for the wrong one of the two.
+    ///
+    /// Red gate: this is what a rail row and the rail's `New tab` button were
+    /// drawn with. `.vtab` and `.newtab` are `border-radius: 6px` — a closed box
+    /// in a column — while `.tab` is `var(--tabr) var(--tabr) 0 0`, square-footed
+    /// because a tab runs into the terminal and has no bottom edge. Painted with
+    /// `TabBody`, the rail's fills came out with two square corners under a
+    /// design that rounds them, which at the foot of the panel reads as a button
+    /// somebody cropped — which is exactly how it was reported.
+    #[test]
+    fn the_column_and_the_strip_are_not_the_same_silhouette() {
+        let (side, radius) = (30_u32, 6_u32);
+        let raster = |mark| {
+            let mut rasters = ChromeMarkRasters::default();
+            let icons =
+                rasters.resolve(&[sprite(mark, side as f32, side as f32, [0x33, 0x44, 0x55])]);
+            icons.into_iter().next().expect("a body must rasterize")
+        };
+        let column = raster(ChromeMark::ControlPill { radius_px: radius });
+        let strip = raster(ChromeMark::TabBody { radius_px: radius });
+        for (x, y) in [(0, side - 1), (side - 1, side - 1)] {
+            assert_eq!(
+                alpha_at(&column, x, y),
+                0,
+                "`.vtab {{ border-radius: 6px }}` — the foot is cut away at ({x},{y})"
+            );
+            assert_eq!(
+                alpha_at(&strip, x, y),
+                255,
+                "and `.tab`'s foot is square at ({x},{y}), on purpose — it joins the terminal"
+            );
+        }
+        for (x, y) in [(0, 0), (side - 1, 0)] {
+            assert_eq!(alpha_at(&column, x, y), 0, "both are round at the head");
+            assert_eq!(alpha_at(&strip, x, y), 0);
+        }
+    }
+
+    /// PIN (K121 in the rail) — the landing ring follows the fill it rings.
+    ///
+    /// `@keyframes tab-land` is an *inset* `box-shadow`, so the ring is hollow,
+    /// lands inside its own edge, and — on this axis — closes across a foot the
+    /// strip's ring deliberately leaves open.
+    #[test]
+    fn a_pill_ring_is_hollow_inset_and_closed_all_the_way_round() {
+        let (side, radius, stroke) = (30_u32, 6_u32, 2_u32);
+        let mut rasters = ChromeMarkRasters::default();
+        let icons = rasters.resolve(&[
+            sprite(
+                ChromeMark::ControlPillRing {
+                    radius_px: radius,
+                    stroke_px: stroke,
+                },
+                side as f32,
+                side as f32,
+                [0x33, 0x44, 0x55],
+            ),
+            sprite(
+                ChromeMark::TabBodyRing {
+                    radius_px: radius,
+                    stroke_px: stroke,
+                },
+                side as f32,
+                side as f32,
+                [0x33, 0x44, 0x55],
+            ),
+        ]);
+        let pill = icons.first().expect("a pill ring must rasterize");
+        let tab = icons.get(1).expect("and its square-footed sibling");
+        assert_eq!(
+            alpha_at(pill, side / 2, side / 2),
+            0,
+            "a ring is hollow — `box-shadow: inset 0 0 0 Npx` paints an edge, not a fill"
+        );
+        assert_eq!(
+            alpha_at(pill, side / 2, 0),
+            255,
+            "and it lands inside its own top edge"
+        );
+        assert_eq!(
+            alpha_at(pill, side / 2, side - 1),
+            255,
+            "and closes across the foot, because `.vtab` has one"
+        );
+        assert_eq!(
+            alpha_at(tab, side / 2, side - 1),
+            0,
+            "which is precisely where the strip's ring stops: a tab has no bottom edge, \
+             and a ring closed across that join would draw a line through it"
+        );
+        for (x, y) in [(0, 0), (side - 1, 0), (0, side - 1), (side - 1, side - 1)] {
+            assert_eq!(
+                alpha_at(pill, x, y),
+                0,
+                "the ring's own corner ({x},{y}) is round, like the fill it rings"
+            );
+        }
+        // Two shapes under one id would be one cache slot, and the second ring on
+        // screen would silently wear the first one's pixels.
+        assert_ne!(pill.key, tab.key, "and the two are two rasters, not one");
     }
 
     /// PIN — a pill is **opaque**, and the two radii the chrome uses are two

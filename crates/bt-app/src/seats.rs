@@ -1866,23 +1866,57 @@ fn tab_trailer_box(tab: &TabGeometry) -> Option<[f32; 4]> {
 /// the whole point of the -4px on `.pin.on`, and the mock-up records the bug it
 /// was written for: "the two counts sat 4px apart".
 fn tab_trailing_edge(tab: &TabGeometry, scale: f32) -> f32 {
+    trailing_edge_of(
+        tab.pin,
+        tab.close,
+        // `.tab.tight .pin` / `.tab.squeezed .pin { display: none }` is the one
+        // thing that takes the pin out of the flow, and with it the `.pin +
+        // .close` pair whose -4px this function is about.
+        tab.tier == TabWidthTier::Full,
+        tab.trailer.reveal,
+        tab.body[2] - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
+        scale,
+    )
+}
+
+/// [`tab_trailing_edge`]'s arithmetic, in the plain numbers both axes have.
+///
+/// It is a free function rather than a method because the rail asks it too, and
+/// the mock-up is explicit that the two are one rule and not two: every
+/// declaration this walks is written `.tab X, .vtab X` — the 17px boxes
+/// (lines 348-350), the `.pin + .close` tightening (line 359-360), the zero-width
+/// reveal and its transition (line 364-367). Two transcriptions of one CSS rule
+/// is precisely how a badge ends up 4px off on one axis and not the other, which
+/// is the bug the strip's own doc above records.
+///
+/// `pin_in_flow` is "is there a `.pin` sibling at all", which on the strip is a
+/// width tier and in the rail is always true — rows never compress, so nothing
+/// there can take the pin out of the flow.
+fn trailing_edge_of(
+    pin: Option<[f32; 4]>,
+    close: Option<[f32; 4]>,
+    pin_in_flow: bool,
+    reveal: f32,
+    bare_right: f32,
+    scale: f32,
+) -> f32 {
     let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
     let tightened = gap - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
-    match (tab.pin, tab.close) {
+    match (pin, close) {
         // Pinned: `.pin.on` alone, carrying the -4px that lines it up with the
         // row below it.
         (Some(pin), None) => pin[0] - tightened,
         // Unpinned and open: the gap before the pin has opened by exactly the
         // reveal, because that is how far its -8px margin has run back to 0.
-        (Some(pin), Some(_)) => pin[0] - gap * tab.trailer.reveal,
+        (Some(pin), Some(_)) => pin[0] - gap * reveal,
         // Unpinned and shut: a zero-width `.pin` still standing between the
         // badge and the `×`, which is what leaves the -4px behind.
-        (None, Some(close)) if tab.tier == TabWidthTier::Full => close[0] - tightened,
+        (None, Some(close)) if pin_in_flow => close[0] - tightened,
         // Narrow tiers: no `.pin` in the flow, so the tab's own 8px gap is all
         // that stands before the `×`.
         (None, Some(close)) => close[0] - gap,
-        // Nothing trails at all: the row ends on the tab's own padding.
-        (None, None) => tab.body[2] - WINDOW_TAB_PADDING_RIGHT_LOGICAL_PX * scale,
+        // Nothing trails at all: the row ends on its own padding.
+        (None, None) => bare_right,
     }
 }
 
@@ -1906,14 +1940,46 @@ pub fn tab_badge_rect(
     if pane_count <= 1 || tab.tier == TabWidthTier::Squeezed {
         return None;
     }
-    let trailing = tab_trailing_edge(tab, scale);
+    Some(badge_rect_of(
+        tab.body,
+        tab_trailing_edge(tab, scale),
+        badge_text_width,
+        scale,
+    ))
+}
+
+/// [`tab_trailing_edge`] for a rail row — the same walk down the same cluster,
+/// on the axis where nothing can take the pin out of the flow.
+///
+/// The `(None, None)` arm [`trailing_edge_of`] carries is unreachable here: every
+/// rail row wears a `×` or a pin, which is Q174's mirror stated as a type would
+/// state it if the two axes shared one. `body[2]` is handed over as that arm's
+/// answer because it is the honest one — a row with no cluster ends where its own
+/// box does.
+fn rail_trailing_edge(row: &RailTabGeometry, scale: f32) -> f32 {
+    trailing_edge_of(
+        row.pin,
+        row.close,
+        true,
+        row.trailer.reveal,
+        row.body[2],
+        scale,
+    )
+}
+
+/// [`tab_badge_rect`]'s arithmetic, shared with the rail for the reason
+/// [`trailing_edge_of`] is: `.panecount` is one declaration (mock-up 291-298) and
+/// `.tab.active .panecount, .vtab.active .panecount` is the mock-up saying so in
+/// its own hand. The two axes differ in what takes the badge *away* — a width
+/// tier on the strip, nothing at all in the rail — and in nothing about the box.
+fn badge_rect_of(body: [f32; 4], trailing: f32, badge_text_width: f32, scale: f32) -> [f32; 4] {
     let badge_width = (badge_text_width + 2.0 * WINDOW_TAB_BADGE_PADDING_X_LOGICAL_PX * scale)
         .max(WINDOW_TAB_BADGE_MIN_WIDTH_LOGICAL_PX * scale)
         .round();
     let badge_height = (WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX * scale).round();
     let left = (trailing - badge_width).round();
-    let top = (tab.body[1] + (tab.body[3] - tab.body[1] - badge_height) / 2.0).round();
-    Some([left, top, left + badge_width, top + badge_height])
+    let top = (body[1] + (body[3] - body[1] - badge_height) / 2.0).round();
+    [left, top, left + badge_width, top + badge_height]
 }
 
 /// Where a tab's mark sits, which is also where its title starts.
@@ -2279,11 +2345,15 @@ pub struct RailTabGeometry {
     /// unpinned one at rest, so unlike the strip there is no width tier that can
     /// take it away.
     pub close: Option<[f32; 4]>,
-    /// The pin's box, drawn only on a pinned row.
+    /// The pin's box: at the row's trailing edge when it is pinned, and left of
+    /// the `×` — revealed by hover, zero-width and dropped at rest — when it is
+    /// not.
     ///
-    /// The strip's hover-revealed pin has no counterpart here: the rail states
-    /// the fact with the `×`'s presence or absence instead, so an unpinned row
-    /// has no pin box at all rather than a zero-width one.
+    /// The same pair the strip carries, because the mock-up's trailer is one
+    /// function serving both axes (`tabTrailer`, 4238-4241) and every rule
+    /// dressing it names both (`.tab .pin, .vtab .pin`, 348-367). What Q174
+    /// changes in the rail is the `×`, which stands at rest here instead of
+    /// waiting for the pointer; the offer to pin is hover-revealed on both.
     pub pin: Option<[f32; 4]>,
     pub title: [f32; 2],
     pub trailer: TabTrailer,
@@ -2430,6 +2500,8 @@ pub fn rail_geometry(
     let mark = (WINDOW_TAB_MARK_LOGICAL_PX * scale).round();
     let content_gap = RAIL_TAB_GAP_LOGICAL_PX * scale;
     let close_box = (WINDOW_TAB_CLOSE_BOX_LOGICAL_PX * scale).round();
+    let pin_box = (WINDOW_TAB_PIN_BOX_LOGICAL_PX * scale).round();
+    let tighten = WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
     let seam_margin = RAIL_SEAM_MARGIN_Y_LOGICAL_PX * scale;
     let seam_thickness = (RAIL_SEAM_THICKNESS_LOGICAL_PX * scale).round().max(1.0);
     let seam_inset = RAIL_SEAM_INSET_X_LOGICAL_PX * scale;
@@ -2456,10 +2528,16 @@ pub fn rail_geometry(
         let mark_top = row_top + (row_height - mark) / 2.0;
         let mark_rect = [mark_left, mark_top, mark_left + mark, mark_top + mark];
         let glyph_top = row_top + (row_height - close_box) / 2.0;
-        // Q174, and the mirror the mock-up draws: one glyph, one fact. A pinned
-        // row wears its pin and has no `×` in the DOM at all; an unpinned row
-        // wears its `×` always. Neither is hover-summoned, so neither depends on
-        // the pointer.
+        // Q174 is about the `×` and only about the `×`: "the rail is wide enough
+        // to be honest at rest", so an unpinned row wears it always rather than
+        // on hover (`.vtab:not(.pinned) .close { visibility: visible }`, mock-up
+        // 954-955). It says nothing about the pin, and the mock-up's own trailer
+        // is one function for both axes (`tabTrailer`, 4238-4241): an unpinned
+        // row carries **both** — a hover-revealed `.pin` and then the `×` — and a
+        // pinned row carries the `.pin.on` alone, with no `×` at all. Reading
+        // Q174 as "one glyph, one fact" left the rail with no way to pin
+        // anything, which is a fact the column could state and an action it
+        // could not offer.
         let (close, pin) = {
             let right = (content_right - pad_right).max(content_left);
             let slot = [
@@ -2471,14 +2549,39 @@ pub fn rail_geometry(
             if trailer.pinned {
                 (None, Some(slot))
             } else {
-                (Some(slot), None)
+                // The strip's own zero-width reveal, unchanged: `.tab .pin, .vtab
+                // .pin` is one declaration and so is the `.pin + .close` -4px
+                // that packs the pair (mock-up 348-367). At rest the box is
+                // empty and dropped below, which is what makes a resting
+                // unpinned row and a pinned one put their badges in the same
+                // column.
+                let pin_right = (slot[0] - tighten).max(content_left);
+                (
+                    Some(slot),
+                    Some([
+                        (pin_right - pin_box * trailer.reveal.clamp(0.0, 1.0)).max(content_left),
+                        glyph_top,
+                        pin_right,
+                        glyph_top + pin_box,
+                    ]),
+                )
             }
         };
-        let trailing = close
-            .or(pin)
-            .map_or(content_right - pad_right, |slot| slot[0]);
+        let close = close.filter(|rect| rect[2] > rect[0]);
+        let pin = pin.filter(|rect| rect[2] > rect[0]);
         let title_left = mark_rect[2] + content_gap;
-        let title_right = (trailing - content_gap).max(title_left);
+        let trailing = trailing_edge_of(
+            pin,
+            close,
+            // Nothing in the rail takes the pin out of the flow: rows are
+            // `flex: none` at a fixed 30px and the list scrolls instead of
+            // compressing, so there are no width tiers here to hide it.
+            true,
+            trailer.reveal.clamp(0.0, 1.0),
+            content_right - pad_right,
+            scale,
+        );
+        let title_right = trailing.max(title_left);
         tabs.push(RailTabGeometry {
             body,
             mark: mark_rect,
@@ -5576,9 +5679,17 @@ fn rail_chrome(
             // background: var(--hover) }`. A rounded fill, so it is a mark and not a
             // quad — a quad would be drawn under every sprite in the frame, the
             // row's own mark included.
+            //
+            // `ControlPill` and not the strip's `TabBody`: `.vtab` is
+            // `border-radius: 6px`, one round on all four corners, while
+            // `.tab`'s is `var(--tabr) var(--tabr) 0 0` — square-footed on
+            // purpose, because a tab has no bottom edge and runs into the
+            // terminal. A row in a column has four edges and no such join, so
+            // the strip's silhouette here draws two square corners under a fill
+            // the design rounds.
             if active || hovered || grabbed_here {
                 sprites.push(ChromeSprite::new(
-                    ChromeMark::TabBody {
+                    ChromeMark::ControlPill {
                         radius_px: row_radius as u32,
                     },
                     clip_to_list(row.body),
@@ -5610,7 +5721,7 @@ fn rail_chrome(
             };
             if landing > 0.0 {
                 let mut wash = ChromeSprite::new(
-                    ChromeMark::TabBody {
+                    ChromeMark::ControlPill {
                         radius_px: row_radius as u32,
                     },
                     clip_to_list(row.body),
@@ -5619,7 +5730,7 @@ fn rail_chrome(
                 wash.opacity = TAB_LAND_WASH_ALPHA * landing;
                 sprites.push(wash);
                 let mut ring = ChromeSprite::new(
-                    ChromeMark::TabBodyRing {
+                    ChromeMark::ControlPillRing {
                         radius_px: row_radius as u32,
                         stroke_px: (TAB_LAND_RING_LOGICAL_PX * scale).round().max(1.0) as u32,
                     },
@@ -5709,13 +5820,91 @@ fn rail_chrome(
                     }
                 }
             }
+            // ── `.panecount` ──
+            //
+            // The badge is one declaration for both axes — the mock-up writes
+            // `.tab.active .panecount, .vtab.active .panecount` in one selector
+            // (line 304) and `tabHtml` puts `paneBadge(w)` in both strips — so it
+            // is placed by the strip's own arithmetic against this row's trailing
+            // edge. C28's condition travels with it: above one pane, never at one,
+            // and no room reserved for a badge that is not drawn.
+            //
+            // It fades with the words rather than leaving (mock-up 895-896 lists
+            // `.panecount`), which is Q183's whole rule: the run does not change
+            // between the two states, only the ink in it does.
+            let badge = (content.pane_count > 1).then(|| {
+                badge_rect_of(
+                    row.body,
+                    rail_trailing_edge(row, scale),
+                    content.badge_text_width,
+                    scale,
+                )
+            });
+            if let Some(badge) = badge.filter(|badge| text > 0.0 && in_list(*badge)) {
+                sprites.push(ChromeSprite::new(
+                    ChromeMark::ControlPill {
+                        radius_px: (WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX * scale)
+                            .round()
+                            .max(1.0) as u32,
+                    },
+                    pixel_snapped(clip_to_list(badge)),
+                    // `background: var(--active)` on every row — the same fill the
+                    // `×`'s pill wears, over whichever of the rail's three surfaces
+                    // this row is showing.
+                    if active {
+                        palette.tab_close_pill_on_content
+                    } else if hovered {
+                        palette.tab_close_pill_on_hovered_tab
+                    } else {
+                        palette.tab_badge_on_resting_tab
+                    },
+                ));
+                labels.push(ChromeLabel {
+                    text: content.pane_count.to_string(),
+                    rect: badge,
+                    clip: Some(clip_to_list(badge)),
+                    font_size_px: WINDOW_TAB_BADGE_FONT_LOGICAL_PX * scale,
+                    // `--ink2`, rising to `--ink` on the active row and deliberately
+                    // never to the accent (mock-up line 297): the strip's ruling,
+                    // and the rail is where unread dots live too.
+                    color: faded(
+                        if active {
+                            palette.tab_badge_text_on_active_tab
+                        } else if hovered {
+                            palette.tab_badge_text_on_hovered_tab
+                        } else {
+                            palette.tab_badge_text_on_resting_tab
+                        },
+                        if active {
+                            palette.rail_tab_active
+                        } else if hovered {
+                            palette.caption_hover
+                        } else {
+                            ground
+                        },
+                        text,
+                    ),
+                    align_right: false,
+                    align_center: true,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::SemiBold,
+                    // The badge is the one label in the chrome that is not prose.
+                    tabular_numerals: true,
+                });
+            }
             // ── the title ──
             //
             // Q183: it fades, it is not removed. The run it lays out in is the same
             // run in both states — that is what keeps the icons still — so what
             // changes as the panel parks is this ink and nothing else, and the
             // rail's own overflow does the cropping meanwhile.
-            if row.title[1] > row.title[0] && text > 0.0 {
+            //
+            // It stops one gap short of the badge when there is one, exactly as
+            // `tab_title_box` does on the other axis.
+            let title_right = badge.map_or(row.title[1], |badge| {
+                (badge[0] - RAIL_TAB_GAP_LOGICAL_PX * scale).max(row.title[0])
+            });
+            if title_right > row.title[0] && text > 0.0 {
                 let ink = if active {
                     palette.rail_tab_active_text
                 } else if hovered {
@@ -5725,11 +5914,11 @@ fn rail_chrome(
                 };
                 labels.push(ChromeLabel {
                     text: content.title.clone(),
-                    rect: [row.title[0], row.body[1], row.title[1], row.body[3]],
+                    rect: [row.title[0], row.body[1], title_right, row.body[3]],
                     clip: Some(clip_to_list([
                         row.title[0],
                         row.body[1],
-                        row.title[1],
+                        title_right,
                         row.body[3],
                     ])),
                     font_size_px: RAIL_TAB_FONT_LOGICAL_PX * scale,
@@ -5761,101 +5950,129 @@ fn rail_chrome(
                     tabular_numerals: false,
                 });
             }
-            // ── the trailing glyph: one of the two, never both, never neither ──
+            // ── the trailing cluster: `[pin] [×]`, in the mock-up's own order ──
             //
-            // Q174's mirror. `close` and `pin` share one slot and `rail_geometry`
-            // hands back exactly the one this row wears, so the choice was made
-            // where the geometry was and is not re-made here.
-            let (Some(slot), pinned) = row
-                .close
-                .map_or((row.pin, true), |close| (Some(close), false))
-            else {
-                continue;
-            };
-            if !in_list(slot) {
-                continue;
-            }
-            let glyph_hovered = hover
-                == Some(if pinned {
-                    ChromeTarget::TabPin(index)
-                } else {
-                    ChromeTarget::TabClose(index)
-                });
-            if glyph_hovered {
-                // `.vtab .close:hover { background: var(--active) }` — the same pill
-                // the strip's `×` wears, over whichever of this rail's two surfaces
-                // the row is showing.
-                sprites.push(ChromeSprite::new(
-                    ChromeMark::ControlPill {
-                        radius_px: (WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX * scale)
-                            .round()
-                            .max(1.0) as u32,
-                    },
-                    pixel_snapped(clip_to_list(slot)),
-                    if active {
-                        palette.tab_close_pill_on_content
-                    } else {
-                        palette.tab_close_pill_on_hovered_tab
-                    },
-                ));
-            }
-            let glyph_size = ((if pinned {
-                WINDOW_TAB_PIN_GLYPH_LOGICAL_PX
-            } else {
-                WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX
-            }) * scale)
-                .round()
-                .max(1.0);
-            let glyph_left = ((slot[0] + slot[2] - glyph_size) / 2.0).round();
-            let glyph_top = ((slot[1] + slot[3] - glyph_size) / 2.0).round();
-            let glyph_rect = [
-                glyph_left,
-                glyph_top,
-                glyph_left + glyph_size,
-                glyph_top + glyph_size,
-            ];
-            if !in_list(glyph_rect) {
-                continue;
-            }
-            // Q174 again, now as ink: one glyph, one fact, and the fact is stated at
-            // rest. That is why the rail needs `rail_glyph_on_active_tab` where the
-            // strip never did — the strip's `×` only ever appears under the pointer,
-            // so it never had to be legible on a resting selected row.
-            let ink = if glyph_hovered {
-                if active {
-                    palette.tab_close_glyph_on_pill_over_active_tab
-                } else {
-                    palette.tab_close_glyph_on_pill_over_hovered_tab
+            // `tabTrailer` (4238-4241) is one function for both axes: a pinned row
+            // is the `.pin.on` alone, an unpinned one is a hover-revealed `.pin`
+            // *and* a `×`. `rail_geometry` has already placed whichever boxes this
+            // row actually wears — and dropped the pin's while the reveal holds it
+            // at zero width — so this draws what it was handed and re-decides
+            // nothing.
+            let pinned = row.trailer.pinned;
+            for (slot, is_pin) in [(row.pin, true), (row.close, false)] {
+                let Some(slot) = slot else {
+                    continue;
+                };
+                if !in_list(slot) {
+                    continue;
                 }
-            } else if active {
-                palette.rail_glyph_on_active_tab
-            } else if hovered {
-                palette.tab_close_glyph_on_hovered_tab
-            } else {
-                palette.title_text_muted
-            };
-            let mut glyph = ChromeSprite::new(
-                if pinned {
-                    // Fluent 2's fill axis: filled is the state ("it is pinned"),
-                    // and a rail's pin is only ever a state — the offer to pin an
-                    // unpinned row is the strip's, made on hover, and this axis says
-                    // the same thing with the `×`'s presence instead.
-                    ChromeMark::Pin { filled: true }
+                let glyph_hovered = hover
+                    == Some(if is_pin {
+                        ChromeTarget::TabPin(index)
+                    } else {
+                        ChromeTarget::TabClose(index)
+                    });
+                if glyph_hovered {
+                    // `.vtab .close:hover` and `.vtab .pin:hover` — one
+                    // declaration, `background: var(--active)`, over whichever of
+                    // this rail's two surfaces the row is showing.
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: ((if is_pin {
+                                WINDOW_TAB_PIN_RADIUS_LOGICAL_PX
+                            } else {
+                                WINDOW_TAB_CLOSE_RADIUS_LOGICAL_PX
+                            }) * scale)
+                                .round()
+                                .max(1.0) as u32,
+                        },
+                        pixel_snapped(clip_to_list(slot)),
+                        if active {
+                            palette.tab_close_pill_on_content
+                        } else {
+                            palette.tab_close_pill_on_hovered_tab
+                        },
+                    ));
+                }
+                let glyph_size = ((if is_pin {
+                    WINDOW_TAB_PIN_GLYPH_LOGICAL_PX
                 } else {
-                    ChromeMark::TabClose
-                },
-                glyph_rect,
-                ink,
-            );
-            // The `×` fades with the words (mock-up 895-896 lists `.vtab .close`
-            // among them) while the pin does not appear in that list at all — and it
-            // should not: a pinned row is the one thing in a parked rail whose 15px
-            // slot is *already* saying something, and dropping its pin would leave
-            // the icon column claiming every row is alike.
-            if !pinned {
-                glyph.opacity = text;
+                    WINDOW_TAB_CLOSE_GLYPH_LOGICAL_PX
+                }) * scale)
+                    .round()
+                    .max(1.0);
+                // `.vtab .pin { overflow: hidden }` while the box is opening — the
+                // strip's own ruling, and for the same reason: a chrome mark fills
+                // the box it is rasterised into, so a half-open box cannot crop
+                // one. The glyph waits for a box that can hold it rather than
+                // spilling over the title.
+                if slot[2] - slot[0] < glyph_size {
+                    continue;
+                }
+                let glyph_left = ((slot[0] + slot[2] - glyph_size) / 2.0).round();
+                let glyph_top = ((slot[1] + slot[3] - glyph_size) / 2.0).round();
+                let glyph_rect = [
+                    glyph_left,
+                    glyph_top,
+                    glyph_left + glyph_size,
+                    glyph_top + glyph_size,
+                ];
+                if !in_list(glyph_rect) {
+                    continue;
+                }
+                // Q174 again, now as ink: the `×` is stated at rest here, which is
+                // why the rail needs `rail_glyph_on_active_tab` where the strip
+                // never did — the strip's `×` only ever appears under the pointer,
+                // so it never had to be legible on a resting selected row.
+                //
+                // F51's step comes with the pin: "the state is darker than the
+                // action". A `.pin.on` reaches `--ink` standing on the bare row,
+                // while the `×` beside it and the *offer* to pin both rest at
+                // `--ink3` — three mixes each, over the row's three surfaces.
+                let ink = if glyph_hovered {
+                    if active {
+                        palette.tab_close_glyph_on_pill_over_active_tab
+                    } else {
+                        palette.tab_close_glyph_on_pill_over_hovered_tab
+                    }
+                } else if is_pin && pinned {
+                    if active {
+                        palette.rail_tab_active_text
+                    } else if hovered {
+                        palette.tab_pin_state_on_hovered_tab
+                    } else {
+                        palette.title_text_hover
+                    }
+                } else if active {
+                    palette.rail_glyph_on_active_tab
+                } else if hovered {
+                    palette.tab_close_glyph_on_hovered_tab
+                } else {
+                    palette.title_text_muted
+                };
+                let mut glyph = ChromeSprite::new(
+                    if is_pin {
+                        // Fluent 2's fill axis: regular is the action ("you could
+                        // pin this"), filled is the state ("it is pinned").
+                        ChromeMark::Pin { filled: pinned }
+                    } else {
+                        ChromeMark::TabClose
+                    },
+                    glyph_rect,
+                    ink,
+                );
+                // The `×` fades with the words (mock-up 895-896 lists `.vtab
+                // .close` among them) and so does the offer standing beside it —
+                // half a cluster fading is worse than both. A *pinned* pin does
+                // not appear in that list and should not: it is the one thing in a
+                // parked rail whose 15px slot is already saying something, and
+                // dropping it would leave the icon column claiming every row is
+                // alike.
+                if !(is_pin && pinned) {
+                    glyph.opacity = text;
+                }
+                sprites.push(glyph);
             }
-            sprites.push(glyph);
         }
     }
 
@@ -5867,11 +6084,16 @@ fn rail_chrome(
         (geometry.new_tab_menu, menu_hovered),
     ] {
         if let Some(rect) = rect.filter(|_| hovered) {
+            // The same pill the strip's own `+` wears (`.newtab { border-radius:
+            // 6px }`), and the reason it must be: this button sits at the foot of
+            // the rail with the panel below it, so the strip's square-footed
+            // `TabBody` reads here as a hover fill someone cropped — which is
+            // exactly what it was reported as.
             sprites.push(ChromeSprite::new(
-                ChromeMark::TabBody {
+                ChromeMark::ControlPill {
                     radius_px: row_radius as u32,
                 },
-                rect,
+                pixel_snapped(rect),
                 palette.caption_hover,
             ));
         }
@@ -8119,6 +8341,7 @@ mod tests {
             1.0,
             None,
             &crate::settings::visible_rows(TabLayoutMode::Horizontal),
+            0.0,
         )
         .expect("this window hosts the dialog");
 
@@ -14209,13 +14432,23 @@ mod tests {
         );
     }
 
-    /// Q174, painted: an unpinned row wears its `×` with no pointer anywhere
-    /// near it, and a pinned one wears a filled pin instead. The active row's
-    /// glyph takes `rail_glyph_on_active_tab`, which is the palette entry the
-    /// rail needs and the strip never did — the strip's `×` only ever appears
-    /// under the pointer, so it never had to be legible on a resting selection.
+    /// Q174, painted, and the half of the trailer it does *not* govern.
+    ///
+    /// Q174 is a ruling about the `×`: "the rail is wide enough to be honest at
+    /// rest", so an unpinned row wears it with no pointer anywhere near it, and a
+    /// pinned row has none at all. It says nothing about the pin, and the
+    /// mock-up's trailer is one function for both axes (`tabTrailer`, 4238-4241):
+    /// an unpinned row carries a hover-revealed `.pin` **as well as** its `×`.
+    ///
+    /// Read once as "one glyph, one fact" — which left the rail able to state
+    /// that a tab was pinned and unable to offer to pin one. This pins both
+    /// halves: the fact at rest, and the offer under the pointer.
+    ///
+    /// F51's ink step comes with the pair: `.pin.on` reaches `--ink` standing on
+    /// the bare row while the `×` beside it rests at `--ink3`, "the state is
+    /// darker than the action".
     #[test]
-    fn the_rail_wears_one_glyph_per_row_at_rest_and_lights_it_on_the_active_one() {
+    fn a_rail_row_states_that_it_is_pinned_and_offers_to_pin_the_ones_that_are_not() {
         let palette = chrome_palette();
         let tabs = [
             TabContent {
@@ -14280,8 +14513,9 @@ mod tests {
             "filled is the state — a rail's pin is only ever a state"
         );
         assert_eq!(
-            pin.color, palette.rail_glyph_on_active_tab,
-            "on the active row, over `--active` (Q174's own palette entry)"
+            pin.color, palette.rail_tab_active_text,
+            "F51: `.pin.on {{ color: var(--ink) }}` — over this row's own `--active` fill, \
+             a step darker than the `--ink3` the `×` rests at"
         );
         let close_slot = geometry.tabs[1]
             .close
@@ -14296,9 +14530,286 @@ mod tests {
             "a resting row's `×` is `--ink3` over `--panel`"
         );
         assert!(
-            geometry.tabs[0].close.is_none() && geometry.tabs[1].pin.is_none(),
-            "one glyph, one fact — never both, never neither"
+            geometry.tabs[0].close.is_none(),
+            "a pinned row has no `×` at all — protecting it from a stray click IS the feature"
         );
+        assert!(
+            geometry.tabs[1].pin.is_none(),
+            "and an unpinned row's pin is zero-width at rest, so it is dropped rather than \
+             drawn — the offer costs the resting column nothing"
+        );
+
+        // ── the offer, once the pointer is on the row ──
+        let revealed = [
+            TabTrailer {
+                pinned: true,
+                reveal: 0.0,
+            },
+            TabTrailer {
+                pinned: false,
+                reveal: 1.0,
+            },
+        ];
+        let open = rail_geometry(600.0, 1.0, &revealed, 1, 0.0, expanded_rail())
+            .expect("a rail is on screen");
+        let row = &open.tabs[1];
+        let pin = row.pin.expect("`.vtab:hover .pin` — the offer is revealed");
+        let close = row.close.expect("and the `×` has not gone anywhere");
+        assert_eq!(
+            pin[2] - pin[0],
+            WINDOW_TAB_PIN_BOX_LOGICAL_PX,
+            "`.vtab .pin` is the strip's own 17px box"
+        );
+        assert!(
+            (close[0]
+                - pin[2]
+                - (WINDOW_TAB_GAP_LOGICAL_PX - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX))
+                .abs()
+                < 0.01,
+            "`.vtab .pin + .close {{ margin-left: -4px }}` — the trailing controls cluster \
+             tighter than the row's own 8px gap: {pin:?} then {close:?}"
+        );
+        assert!(
+            pin[0] > row.title[0],
+            "and it opens leftwards out of the `×`'s side, never off the row's front"
+        );
+        // The hit test has to find it, or the offer is only paint.
+        let hit = |x: f32, y: f32| {
+            hit_rail_chrome(
+                600.0,
+                1.0,
+                &revealed,
+                1,
+                0.0,
+                expanded_rail(),
+                f64::from(x),
+                f64::from(y),
+            )
+        };
+        assert_eq!(
+            hit((pin[0] + pin[2]) / 2.0, (pin[1] + pin[3]) / 2.0),
+            Some(ChromeTarget::TabPin(1)),
+            "F61: the offer is clickable where it is drawn"
+        );
+        assert_eq!(
+            hit((close[0] + close[2]) / 2.0, (close[1] + close[3]) / 2.0),
+            Some(ChromeTarget::TabClose(1)),
+            "and the `×` beside it still answers for itself"
+        );
+    }
+
+    /// Q172/Q175, painted: **every** fill the rail lays down is round on all four
+    /// corners, and the `New tab` button at its foot is one of them.
+    ///
+    /// The rail's fills and the strip's are two different silhouettes for a
+    /// reason the mock-up states twice — `.vtab { border-radius: 6px }` and
+    /// `.newtab { border-radius: 6px }` against `.tab`'s square foot — and the
+    /// list here is exhaustive on purpose: the shape was wrong in five places at
+    /// once, and a test that checked one of them would have passed while the
+    /// column stayed cropped.
+    ///
+    /// Red gate: point any of these five at `ChromeMark::TabBody` and its
+    /// assertion fails. That is the bug as reported — the `New tab` button's
+    /// hover fill "square-cornered, and the bottom looks cut off", which is one
+    /// symptom of a foot that was never rounded.
+    #[test]
+    fn every_fill_in_the_rail_is_round_on_all_four_corners() {
+        let round = |radius: f32| ChromeMark::ControlPill {
+            radius_px: radius as u32,
+        };
+        let row_radius = RAIL_TAB_RADIUS_LOGICAL_PX;
+        // The four row states that put a fill down, plus the button.
+        let tabs = [
+            TabContent {
+                title: "active".to_owned(),
+                pane_count: 1,
+                ..TabContent::default()
+            },
+            TabContent {
+                title: "landing".to_owned(),
+                pane_count: 1,
+                landing: 1.0,
+                ..TabContent::default()
+            },
+        ];
+        let (_, _, sprites) = rail_paint_of(
+            1.0,
+            &tabs,
+            0,
+            None,
+            None,
+            expanded_rail(),
+            Some(ChromeTarget::NewTab),
+        );
+        let has = |mark: ChromeMark| sprites.iter().any(|sprite| sprite.mark == mark);
+        assert!(
+            has(round(row_radius)),
+            "`.vtab.active {{ background: var(--active) }}` — a round fill, not a tab silhouette"
+        );
+        assert!(
+            has(ChromeMark::ControlPillRing {
+                radius_px: row_radius as u32,
+                stroke_px: TAB_LAND_RING_LOGICAL_PX.round().max(1.0) as u32,
+            }),
+            "`@keyframes tab-land`'s inset ring follows the row it rings"
+        );
+        assert!(
+            !sprites.iter().any(|sprite| matches!(
+                sprite.mark,
+                ChromeMark::TabBody { .. } | ChromeMark::TabBodyRing { .. }
+            )),
+            "and the strip's square-footed silhouette appears nowhere in a column: {:?}",
+            sprites.iter().map(|sprite| sprite.mark).collect::<Vec<_>>()
+        );
+
+        // `.rail-new .nt-main` — the button, at the foot of the panel where a
+        // square corner reads as a crop. Its fill covers the whole 30px row: the
+        // sticky slot is a position, never a clip.
+        let geometry = rail_geometry(
+            600.0,
+            1.0,
+            &[TabTrailer::default(), TabTrailer::default()],
+            0,
+            0.0,
+            expanded_rail(),
+        )
+        .expect("a rail is on screen");
+        let fill = sprites
+            .iter()
+            .find(|sprite| sprite.rect == geometry.new_tab)
+            .expect("the hovered `+` wears a fill over its whole box");
+        assert_eq!(
+            fill.mark,
+            round(row_radius),
+            "`.newtab {{ border-radius: 6px }}` — the same pill the strip's own `+` wears"
+        );
+        assert!(
+            (fill.rect[3] - fill.rect[1] - RAIL_TAB_HEIGHT_LOGICAL_PX).abs() < 0.01,
+            "and it is the row's full height, not a box the sticky slot cut short: {:?}",
+            fill.rect
+        );
+        assert!(
+            fill.rect[3] <= geometry.body[3],
+            "which still lands inside the rail rather than hanging past its foot"
+        );
+    }
+
+    /// C27-C29 on the second axis: the badge counts panes in the rail exactly as
+    /// it does in the strip, because the mock-up writes it once for both
+    /// (`.tab.active .panecount, .vtab.active .panecount`, line 304) and hands
+    /// `paneBadge(w)` to one `tabHtml` serving each.
+    ///
+    /// Red gate: the rail drew no badge at all. A tab holding two panes was
+    /// indistinguishable from one holding a single pane, which is the one thing
+    /// the badge exists to say and the one thing a column of names cannot.
+    #[test]
+    fn a_rail_row_counts_its_panes_above_one_and_never_at_one() {
+        let palette = chrome_palette();
+        let tabs = [
+            TabContent {
+                title: "split".to_owned(),
+                pane_count: 2,
+                badge_text_width: 6.0,
+                ..TabContent::default()
+            },
+            TabContent {
+                title: "lone".to_owned(),
+                pane_count: 1,
+                ..TabContent::default()
+            },
+        ];
+        let (_, labels, sprites) = rail_paint_of(1.0, &tabs, 0, None, None, expanded_rail(), None);
+        let counts = labels
+            .iter()
+            .filter(|label| label.text == "2")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            counts.len(),
+            1,
+            "one badge, on the row that holds two panes and on no other"
+        );
+        let badge = counts[0];
+        assert!(
+            badge.tabular_numerals && badge.align_center,
+            "`font-variant-numeric: tabular-nums` centred in its pill — `min-width` is a floor, \
+             not an indent"
+        );
+        assert_eq!(
+            badge.color, palette.tab_badge_text_on_active_tab,
+            "`--ink` on the active row, and deliberately never the accent: the rail is where \
+             unread dots live too"
+        );
+        let pill = sprites
+            .iter()
+            .find(|sprite| {
+                sprite.mark
+                    == ChromeMark::ControlPill {
+                        radius_px: WINDOW_TAB_BADGE_RADIUS_LOGICAL_PX as u32,
+                    }
+            })
+            .expect("and it stands on `--active`, the same fill the `×`'s pill wears");
+        assert!(
+            (pill.rect[3] - pill.rect[1] - WINDOW_TAB_BADGE_HEIGHT_LOGICAL_PX).abs() < 0.01,
+            "at the strip's own 15px height: {:?}",
+            pill.rect
+        );
+
+        // It docks against the trailing cluster and the name stops short of it —
+        // the strip's arithmetic, asked of a row.
+        let geometry = rail_geometry(
+            600.0,
+            1.0,
+            &[TabTrailer::default(), TabTrailer::default()],
+            0,
+            0.0,
+            expanded_rail(),
+        )
+        .expect("a rail is on screen");
+        let trailing = rail_trailing_edge(&geometry.tabs[0], 1.0);
+        assert!(
+            (pill.rect[2] - trailing).abs() < 1.01,
+            "the badge's right edge is the row's trailing boundary: {:?} against {trailing}",
+            pill.rect
+        );
+        let title = labels
+            .iter()
+            .find(|label| label.text == "split")
+            .expect("the row still draws its name");
+        assert!(
+            title.rect[2] <= pill.rect[0],
+            "and the name stops before the badge rather than running under it: {:?} then {:?}",
+            title.rect,
+            pill.rect
+        );
+    }
+
+    /// The pinned row and the resting unpinned row put their badges in the *same*
+    /// column, which is the whole point of the -4px on `.pin.on` — and the bug
+    /// the strip's own doc records ("the two counts sat 4px apart") arriving on
+    /// the second axis.
+    #[test]
+    fn a_rails_trailing_edge_lands_in_one_column_whether_a_row_is_pinned_or_not() {
+        let trailers = [
+            TabTrailer {
+                pinned: true,
+                reveal: 0.0,
+            },
+            TabTrailer {
+                pinned: false,
+                reveal: 0.0,
+            },
+        ];
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            let rail = rail_geometry(600.0, scale, &trailers, 1, 0.0, expanded_rail())
+                .expect("a rail is on screen");
+            let pinned = rail_trailing_edge(&rail.tabs[0], scale);
+            let resting = rail_trailing_edge(&rail.tabs[1], scale);
+            assert!(
+                (pinned - resting).abs() < 0.01,
+                "scale {scale}: a pinned row's `.pin.on` and a resting row's zero-width \
+                 `.pin` both leave the same -4px behind — {pinned} vs {resting}"
+            );
+        }
     }
 
     /// Q183: the words fade and the icons do not, which is the whole promise of
@@ -15379,6 +15890,121 @@ mod tests {
     // *projection*: that a rail hands those rules `y`, that the strip still
     // hands them `x`, and that the two cannot be told apart from above.
 
+    /// **K129 is reachable in a rail, and a pane's middle means the same thing
+    /// on both axes** — the question R3/R4 could state and not settle.
+    ///
+    /// `Runtime::survey_drop` asks three things in order: is the pointer over the
+    /// *run*, is the thing in hand the tab already on screen (K129), and what
+    /// does the layout make of it. The report those slices closed with recorded
+    /// that on a real machine a rail's K129 refusal and a K129 line that is
+    /// simply never reached look identical — both are a drag that does nothing —
+    /// so the branch could not be told apart from dead code by watching it.
+    ///
+    /// It can be told apart from underneath, because the two facts the branch
+    /// hangs on are pure. **Reachability**: the run's band has to *not* cover the
+    /// pane a pointer is over, or the strip arm would answer first and the K129
+    /// line below it would be unreachable on this axis — and the rail's band is a
+    /// column down the window's left, which is the one shape that could plausibly
+    /// have swallowed the layout. **Same meaning**: the aim the layout returns for
+    /// a pane's own middle is `SeatCentre` for that pane whichever layout the
+    /// window is in, even though the rail moves every pane's window coordinates
+    /// by 220px — so the gesture that follows is the same gesture, not a second
+    /// one that happens to look like it.
+    ///
+    /// Both halves are asserted against the *horizontal* answers rather than
+    /// against constants, so this cannot drift into agreeing with itself.
+    #[test]
+    fn a_row_carried_onto_a_panes_middle_aims_where_a_tab_carried_there_aims() {
+        let (width, height) = (960_u32, 600_u32);
+        let dpi_milli = 1_000;
+        let scale = 1.0_f32;
+        let scale_ppm = scale_ppm(dpi_milli);
+        let metrics = seat_metrics(dpi_milli);
+        let seats = row_of_terminals(2);
+
+        // One window, two layouts of it: the strip across the title bar with the
+        // whole width below, and the rail down the side with the terminal
+        // starting after it.
+        let case = |state: RailState| {
+            let inset = rail_inset_device_px(state, scale_ppm);
+            let layout = solved(
+                &seats,
+                logical_viewport(width, height, scale_ppm, inset),
+                &metrics,
+            );
+            let host = device_viewport(width, height, scale_ppm, inset);
+            (layout, host, inset)
+        };
+        let flat = RailState::default();
+        assert_eq!(
+            rail_inset_device_px(flat, scale_ppm),
+            0,
+            "the horizontal layout keeps no column clear — the control arm has to be a control"
+        );
+        let (flat_layout, flat_host, _) = case(flat);
+        let (rail_layout, rail_host, rail_inset) = case(expanded_rail());
+        assert!(
+            rail_inset > 0,
+            "and the rail's arm actually moves the terminal, or there is nothing to prove"
+        );
+
+        // The second pane's own middle, in each window's coordinates.
+        let middle = |layout: &SeatLayout| {
+            let device = layout
+                .get(SeatId(2))
+                .and_then(|placement| placement.device_rect)
+                .expect("the second pane is on screen");
+            (
+                (device.left + device.right) as f64 / 2.0,
+                (device.top + device.bottom) as f64 / 2.0,
+            )
+        };
+        let (flat_x, flat_y) = middle(&flat_layout);
+        let (rail_x, rail_y) = middle(&rail_layout);
+        assert!(
+            rail_x > flat_x,
+            "the rail really has pushed that pane along: {flat_x} then {rail_x}"
+        );
+
+        // ── reachability: neither run claims the pointer ──
+        let strip = tab_strip_geometry(width as f32, scale, &resting(2), 0, 0.0);
+        let flat_run = strip_run(&strip, scale);
+        let rail_geometry = rail_of(expanded_rail(), &resting(2), 0);
+        let rail_run = rail_run(&rail_geometry);
+        assert!(
+            !flat_run.contains(flat_x, flat_y),
+            "the strip does not reach down over the panes, so K129 is asked"
+        );
+        assert!(
+            !rail_run.contains(rail_x, rail_y),
+            "and neither does the rail reach across them — K129 is asked on this axis too, \
+             which is the whole of what could not be seen from outside"
+        );
+        // Not vacuous: each run does claim its own surface, so the assertions
+        // above are about where the bands are and not about bands that are empty.
+        let claimed = |run: &TabRun| {
+            let band = run.band;
+            run.contains(
+                f64::from(band[0] + band[2]) / 2.0,
+                f64::from(band[1] + band[3]) / 2.0,
+            )
+        };
+        assert!(claimed(&flat_run) && claimed(&rail_run));
+
+        // ── same meaning: one aim, two windows ──
+        let flat_aim = aim_at_layout(&flat_layout, flat_host, 2, scale, flat_x, flat_y);
+        let rail_aim = aim_at_layout(&rail_layout, rail_host, 2, scale, rail_x, rail_y);
+        assert_eq!(
+            flat_aim,
+            Some(LayoutAim::SeatCentre(SeatId(2))),
+            "K125/K134 — a pane's middle is its place being taken"
+        );
+        assert_eq!(
+            rail_aim, flat_aim,
+            "and the rail says exactly the same thing about the same pane"
+        );
+    }
+
     /// **The rail's run is measured down the column, the strip's across it** —
     /// mock-up 6505's `stripEl()` and the `state.tabs === "vertical" ? …y : …x`
     /// reads underneath it (6511-6519, 6646-6665).
@@ -15714,9 +16340,12 @@ mod tests {
             expanded_rail(),
             None,
         );
+        // `ControlPill` and not `TabBody`: the rail's rows are round on all four
+        // corners (`.vtab { border-radius: 6px }`), which is a different
+        // silhouette from the strip's square-footed tab and not a variant of it.
         let body_at = |rect: [f32; 4]| {
             sprites.iter().position(|sprite| {
-                sprite.rect == rect && matches!(sprite.mark, ChromeMark::TabBody { .. })
+                sprite.rect == rect && matches!(sprite.mark, ChromeMark::ControlPill { .. })
             })
         };
         let carried = rail.tabs[GRABBED].shifted(CARRY);
@@ -15764,18 +16393,19 @@ mod tests {
             half,
             vec![
                 (
-                    ChromeMark::TabBody { radius_px: 6 },
+                    ChromeMark::ControlPill { radius_px: 6 },
                     TAB_LAND_WASH_ALPHA * 0.5
                 ),
                 (
-                    ChromeMark::TabBodyRing {
+                    ChromeMark::ControlPillRing {
                         radius_px: 6,
                         stroke_px: 2
                     },
                     TAB_LAND_RING_ALPHA * 0.5
                 ),
             ],
-            "the wash then the ring, both riding the clock as opacity on the accent"
+            "the wash then the ring, both riding the clock as opacity on the accent — \
+             on the column's own round silhouette, not the strip's square-footed one"
         );
         assert!(
             accents(&dragging_rows(1, 0.0, 0.0), None).is_empty(),
@@ -15784,9 +16414,12 @@ mod tests {
         assert_eq!(
             accents(&dragging_rows(1, 0.0, 0.0), Some(1)),
             vec![
-                (ChromeMark::TabBody { radius_px: 6 }, TAB_LAND_WASH_ALPHA),
                 (
-                    ChromeMark::TabBodyRing {
+                    ChromeMark::ControlPill { radius_px: 6 },
+                    TAB_LAND_WASH_ALPHA
+                ),
+                (
+                    ChromeMark::ControlPillRing {
                         radius_px: 6,
                         stroke_px: 2
                     },

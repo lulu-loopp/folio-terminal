@@ -26,13 +26,22 @@ use serde_json::Value;
 
 /// One migration step: transforms a JSON value at schema_version `N` (the
 /// key it is registered under) into schema_version `N+1`. Structural only —
-/// see this module's doc comment, rule 3. `settings.json` is still v1;
-/// `session.json` uses this scaffold for its registered forward migrations.
+/// see this module's doc comment, rule 3. Both `settings.json` and
+/// `session.json` use this scaffold for their registered forward migrations.
 pub type MigrationStep = fn(Value) -> Value;
 
-/// Migration table for `settings.json`. Empty: v1 is the only version that
-/// has ever existed.
-pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+/// Migration table for `settings.json`. v2 adds the display-formula render
+/// switch; every v1 file was written by a build that always drew formulas, so
+/// the step carries that behaviour forward rather than imposing a new one.
+pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[(1, migrate_settings_v1_to_v2)];
+
+fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(2));
+        object.insert("display_formulas".to_owned(), Value::from(true));
+    }
+    value
+}
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.
 pub const SESSION_MIGRATIONS: &[(u32, MigrationStep)] = &[

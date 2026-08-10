@@ -99,6 +99,10 @@ const COMBO_RADIUS_LOGICAL_PX: f32 = 6.0;
 const COMBO_PADDING_LEFT_LOGICAL_PX: f32 = 12.0;
 const COMBO_PADDING_RIGHT_LOGICAL_PX: f32 = 10.0;
 const COMBO_FONT_LOGICAL_PX: f32 = 13.0;
+/// The size a picker item's label is drawn at, and therefore the size it has to
+/// be measured at. Public so the one caller that owns a font cannot measure the
+/// popup's text at a size the popup does not draw it at.
+pub const MENU_ITEM_FONT_LOGICAL_PX: f32 = COMBO_FONT_LOGICAL_PX;
 /// `.combo .chev { font-size: 8.5px }`.
 ///
 /// The chevron's own column is reserved at this same number: `▼` at 8.5px inks
@@ -138,6 +142,10 @@ pub const CURSOR_OPTIONS: [CursorStyle; 3] =
 pub const TAB_LAYOUT_OPTIONS: [TabLayoutMode; 2] =
     [TabLayoutMode::Horizontal, TabLayoutMode::Vertical];
 pub const SIDEBAR_OPTIONS: [RailMode; 2] = [RailMode::Expanded, RailMode::Icons];
+/// On first, which is the order every On/Off picker in the mock-up uses
+/// (`data-combo="wrap"`, `data-combo="attnchip"`) and the order a reader expects
+/// when the affirmative is the default.
+pub const FORMULA_OPTIONS: [bool; 2] = [true, false];
 
 /// The label a theme wears in the picker, matching the mock-up's own casing.
 fn theme_label(theme: ThemeModeV1) -> &'static str {
@@ -163,14 +171,22 @@ fn tab_layout_label(layout: TabLayoutMode) -> &'static str {
     }
 }
 
-/// The mock-up spells the icon rail's option out as a sentence (line 2382)
-/// rather than naming the mode: "Icons" alone says what the sidebar becomes and
-/// not that it comes back when you reach for it, which is the half of the
-/// behaviour a user has to know before choosing it.
+/// The mock-up's own word for both states of every On/Off picker it draws.
+fn on_off_label(enabled: bool) -> &'static str {
+    if enabled { "On" } else { "Off" }
+}
+
+/// User ruling 2026-08-10: the mode's name, not a sentence about it.
+///
+/// The mock-up used to spell this option out as "Icons, expand on hover" so the
+/// picker would name the hover behaviour; the ruling cut it back to "Icons" and
+/// the mock-up moved with it (line 2381). A picker item is a name, and the one
+/// place with no room to explain a behaviour is the line the user reads while
+/// choosing it. The rail still expands on hover — the label just stops saying so.
 fn sidebar_label(mode: RailMode) -> &'static str {
     match mode {
         RailMode::Expanded => "Expanded",
-        RailMode::Icons => "Icons, expand on hover",
+        RailMode::Icons => "Icons",
     }
 }
 
@@ -192,6 +208,10 @@ fn sidebar_label(mode: RailMode) -> &'static str {
 pub enum SettingsRow {
     Theme,
     Cursor,
+    /// User ruling 2026-08-10. Sits above the conditional pair rather than below
+    /// it: a row underneath Sidebar would slide up and down the dialog every
+    /// time Tab layout changed, for no reason of its own.
+    Formulas,
     TabLayout,
     Sidebar,
 }
@@ -202,6 +222,7 @@ impl SettingsRow {
         match self {
             Self::Theme => "Theme",
             Self::Cursor => "Cursor",
+            Self::Formulas => "Display formulas",
             // Mock-up 2360.
             Self::TabLayout => "Tab layout",
             // Mock-up 2374.
@@ -217,6 +238,9 @@ impl SettingsRow {
             // lie in the one place the user goes to find out what it does.
             Self::Theme => "Light or dark",
             Self::Cursor => "Focused cursor shape",
+            // What Off does and, just as much, what it does not do: the line has
+            // to say "source" or a reader will expect the formula to vanish.
+            Self::Formulas => "Typeset $$…$$ blocks; off shows the LaTeX source",
             // Mock-up 2361.
             Self::TabLayout => "Choose where tabs appear in the window",
             // Mock-up 2375.
@@ -230,9 +254,17 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.len(),
             Self::Cursor => CURSOR_OPTIONS.len(),
+            Self::Formulas => FORMULA_OPTIONS.len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
         }
+    }
+
+    /// Every word this row's picker will draw, for a caller that has to measure
+    /// them before the geometry can be solved. The draw reads `option_label` for
+    /// the same indices, so the set measured and the set drawn cannot drift.
+    pub fn option_labels(self) -> impl Iterator<Item = &'static str> {
+        (0..self.option_count()).filter_map(move |index| self.option_label(index))
     }
 
     /// The word an item wears, or `None` past the end of the row's options.
@@ -240,6 +272,7 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.get(index).copied().map(theme_label),
             Self::Cursor => CURSOR_OPTIONS.get(index).copied().map(cursor_label),
+            Self::Formulas => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
         }
@@ -250,6 +283,9 @@ impl SettingsRow {
         match self {
             Self::Theme => THEME_OPTIONS.iter().position(|it| *it == values.theme),
             Self::Cursor => CURSOR_OPTIONS.iter().position(|it| *it == values.cursor),
+            Self::Formulas => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.display_formulas),
             Self::TabLayout => TAB_LAYOUT_OPTIONS
                 .iter()
                 .position(|it| *it == values.tab_layout),
@@ -270,6 +306,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     let mut rows = vec![
         SettingsRow::Theme,
         SettingsRow::Cursor,
+        SettingsRow::Formulas,
         SettingsRow::TabLayout,
     ];
     if tab_layout == TabLayoutMode::Vertical {
@@ -289,6 +326,7 @@ pub struct SettingsValues {
     pub cursor: CursorStyle,
     pub tab_layout: TabLayoutMode,
     pub sidebar: RailMode,
+    pub display_formulas: bool,
 }
 
 /// Whether the dialog is up, and what is open inside it.
@@ -460,6 +498,14 @@ pub fn cursor_style_requested(target: SettingsTarget) -> Option<CursorStyle> {
 }
 
 #[must_use]
+pub fn display_formulas_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::Formulas, index) => FORMULA_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+#[must_use]
 pub fn tab_layout_requested(target: SettingsTarget) -> Option<TabLayoutMode> {
     match target {
         SettingsTarget::Choice(SettingsRow::TabLayout, index) => {
@@ -506,6 +552,7 @@ pub fn layout_for_menu(
     scale: f32,
     menu_kind: Option<SettingsRow>,
     rows: &[SettingsRow],
+    widest_option: f32,
 ) -> Option<SettingsLayout> {
     let px = |value: f32| value * scale;
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
@@ -633,7 +680,15 @@ pub fn layout_for_menu(
             .map(|placed| (row, placed.combo))
     });
     let (menu, items) = match active {
-        Some((row, combo)) => menu_layout(combo, surface_height, scale, border, row.option_count()),
+        Some((row, combo)) => menu_layout(
+            combo,
+            surface_width,
+            surface_height,
+            scale,
+            border,
+            row.option_count(),
+            widest_option,
+        ),
         None => (None, Vec::new()),
     };
     Some(SettingsLayout {
@@ -660,15 +715,33 @@ pub fn layout_for_menu(
 /// scroll and therefore clips nothing. Measured against `.content` anyway, this
 /// menu flips up into the header and gets its first item cut off — which the
 /// prototype does, and which is the artefact that rule exists to avoid.
+///
+/// `min-width: 100%` is a **floor**, not a size. This read it as an equality for
+/// as long as every option happened to be one short word, and an option longer
+/// than its button was therefore cropped mid-glyph — the popup, its item pills
+/// and the text all inheriting the button's width. `widest_option` is the
+/// measured width of the longest label the open row will draw (the caller owns
+/// the font, so the caller measures — the same division `peek_strip::layout` and
+/// `restore` already use), and the box grows leftward off `right: 0` to hold it.
 fn menu_layout(
     combo: [f32; 4],
+    surface_width: f32,
     surface_height: f32,
     scale: f32,
     border: f32,
     option_count: usize,
+    widest_option: f32,
 ) -> (Option<[f32; 4]>, Vec<[f32; 4]>) {
     let px = |value: f32| value * scale;
-    let width = combo[2] - combo[0];
+    // Everything an item spends before and after its own glyphs: the menu's two
+    // borders and its padding on both sides, then the item's left padding, the
+    // fixed tick column, the gap after it, and the item's right padding.
+    let chrome = 2.0 * border
+        + 2.0 * px(MENU_PADDING_LOGICAL_PX)
+        + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX)
+        + px(TICK_WIDTH_LOGICAL_PX)
+        + px(ITEM_GAP_LOGICAL_PX);
+    let width = (combo[2] - combo[0]).max((chrome + widest_option).ceil());
     let height = 2.0 * border
         + 2.0 * px(MENU_PADDING_LOGICAL_PX)
         + option_count as f32 * px(ITEM_HEIGHT_LOGICAL_PX);
@@ -678,7 +751,16 @@ fn menu_layout(
     } else {
         below
     };
-    let frame = [combo[0], top, combo[0] + width, top + height];
+    // `right: 0`, so a popup wider than its button grows leftward and its right
+    // edge stays on the button's. Then the same clamp every other floating box
+    // in this app uses (`profiles`, `tooltip`, `peek_strip`): pull it back inside
+    // the window rather than let it hang off, and on a window too narrow to hold
+    // it at all the `max` wins and it hangs off the right, never off the left.
+    let margin = px(MENU_CLEARANCE_LOGICAL_PX);
+    let left = (combo[2] - width)
+        .min(surface_width - width - margin)
+        .max(margin);
+    let frame = [left, top, left + width, top + height];
     let item_left = frame[0] + border + px(MENU_PADDING_LOGICAL_PX);
     let item_right = frame[2] - border - px(MENU_PADDING_LOGICAL_PX);
     let item_height = px(ITEM_HEIGHT_LOGICAL_PX);
@@ -1124,6 +1206,7 @@ mod tests {
             cursor: CursorStyle::Bar,
             tab_layout: TabLayoutMode::Horizontal,
             sidebar: RailMode::Expanded,
+            display_formulas: true,
         }
     }
 
@@ -1134,6 +1217,7 @@ mod tests {
             scale,
             menu_open.then_some(SettingsRow::Theme),
             &flat_rows(),
+            0.0,
         )
         .expect("this window can host the dialog")
     }
@@ -1149,12 +1233,25 @@ mod tests {
         menu: Option<SettingsRow>,
         tab_layout: TabLayoutMode,
     ) -> SettingsLayout {
+        open_rows_measured(scale, menu, tab_layout, 0.0)
+    }
+
+    /// The same dialog, told how wide the open picker's longest label measures.
+    /// Zero is the honest reading for every caller above: their options are one
+    /// short word each and the popup's floor — the button's own width — wins.
+    fn open_rows_measured(
+        scale: f32,
+        menu: Option<SettingsRow>,
+        tab_layout: TabLayoutMode,
+        widest_option: f32,
+    ) -> SettingsLayout {
         layout_for_menu(
             SURFACE.0 * scale,
             SURFACE.1 * scale,
             scale,
             menu,
             &visible_rows(tab_layout),
+            widest_option,
         )
         .expect("the settings dialog fits")
     }
@@ -1216,7 +1313,7 @@ mod tests {
         );
 
         // The 92% share takes over below 480/0.92 ~= 521.7 logical pixels.
-        let narrow = layout_for_menu(480.0, 800.0, 1.0, None, &flat_rows())
+        let narrow = layout_for_menu(480.0, 800.0, 1.0, None, &flat_rows(), 0.0)
             .expect("480 wide still hosts the dialog");
         assert_eq!(
             width(narrow.frame),
@@ -1541,11 +1638,22 @@ mod tests {
             "top: calc(100% + 4px)"
         );
         assert_eq!(menu[2], tall_combo[2], "right: 0");
-        assert_eq!(width(menu), width(tall_combo), "min-width: 100%");
+        assert_eq!(
+            width(menu),
+            width(tall_combo),
+            "min-width: 100% — with one short word per option the floor is the width"
+        );
 
         // A window whose bottom is right under the combo leaves no room below.
-        let short = layout_for_menu(1280.0, 200.0, 1.0, Some(SettingsRow::Theme), &flat_rows())
-            .expect("200 tall still hosts the dialog");
+        let short = layout_for_menu(
+            1280.0,
+            200.0,
+            1.0,
+            Some(SettingsRow::Theme),
+            &flat_rows(),
+            0.0,
+        )
+        .expect("200 tall still hosts the dialog");
         let short_combo = combo_of(&short, SettingsRow::Theme);
         let menu = short.menu.expect("the menu is open");
         assert_eq!(
@@ -1569,15 +1677,15 @@ mod tests {
     #[test]
     fn a_window_too_small_to_host_the_dialog_says_so() {
         assert!(
-            layout_for_menu(1280.0, 100.0, 1.0, None, &flat_rows()).is_none(),
+            layout_for_menu(1280.0, 100.0, 1.0, None, &flat_rows(), 0.0).is_none(),
             "too short"
         );
         assert!(
-            layout_for_menu(100.0, 800.0, 1.0, None, &flat_rows()).is_none(),
+            layout_for_menu(100.0, 800.0, 1.0, None, &flat_rows(), 0.0).is_none(),
             "too narrow"
         );
         assert!(
-            layout_for_menu(1280.0, 800.0, 1.0, None, &flat_rows()).is_some(),
+            layout_for_menu(1280.0, 800.0, 1.0, None, &flat_rows(), 0.0).is_some(),
             "a real window"
         );
     }
@@ -2004,6 +2112,202 @@ mod tests {
         );
     }
 
+    /// PIN (user screenshot 2026-08-10): `min-width: 100%` is a **floor**.
+    ///
+    /// The popup used to take the button's width as its size outright, so an
+    /// option longer than its button was cropped mid-glyph and the item's own
+    /// hover pill was cropped with it. The measured label now sets the width
+    /// when it is the larger of the two, and the arithmetic is stated here in
+    /// the numbers the stylesheet uses: the box must hold the text *plus* the
+    /// chrome around it, which is the menu's two borders and padding, the item's
+    /// padding on both sides, the fixed tick column and the gap after it.
+    #[test]
+    fn a_picker_wider_than_its_button_grows_to_hold_its_longest_option() {
+        // Wider than the 118px button can hold, so the floor loses and the text wins.
+        const MEASURED: f32 = 200.0;
+        let placed = open_rows_measured(
+            1.0,
+            Some(SettingsRow::Sidebar),
+            TabLayoutMode::Vertical,
+            MEASURED,
+        );
+        let menu = placed.menu.expect("the picker is open");
+        let combo = combo_of(&placed, SettingsRow::Sidebar);
+        let chrome = 2.0 * 1.0
+            + 2.0 * MENU_PADDING_LOGICAL_PX
+            + 2.0 * ITEM_PADDING_X_LOGICAL_PX
+            + TICK_WIDTH_LOGICAL_PX
+            + ITEM_GAP_LOGICAL_PX;
+
+        assert!(
+            width(menu) > width(combo),
+            "a label too wide for the button must widen the popup, not be cut by it"
+        );
+        assert_eq!(width(menu), chrome + MEASURED);
+        assert_eq!(
+            menu[2], combo[2],
+            "`right: 0` still holds - the extra width is taken on the left"
+        );
+
+        // The item, its pill and its text all inherit the new width, which is
+        // the half the screenshot actually showed: a cropped pill under cropped
+        // words.
+        let item = placed.items[0];
+        assert_eq!(
+            item[2] - item[0],
+            width(menu) - 2.0 * 1.0 - 2.0 * MENU_PADDING_LOGICAL_PX
+        );
+        let labels = labels_of(&placed, None, values());
+        // The closed button draws this word too, so the popup's own copy is the
+        // one inside the popup — picking the first match finds the button's.
+        let drawn = labels
+            .iter()
+            .find(|label| label.text == "Expanded" && overlaps(label.rect, menu))
+            .expect("the option is drawn inside the picker");
+        assert!(
+            width(drawn.rect) >= MEASURED,
+            "the text's own box must not be narrower than the text it holds: {} < {MEASURED}",
+            width(drawn.rect)
+        );
+        assert!(
+            within(drawn.rect, menu),
+            "and it must stay inside the popup that drew it"
+        );
+    }
+
+    /// PIN: the widening is conditional, so every picker that shipped before it
+    /// is untouched. Theme, Cursor and Tab layout each wear one short word, and
+    /// a short word must leave the popup exactly as wide as its button.
+    #[test]
+    fn a_picker_whose_options_all_fit_keeps_the_button_width_it_always_had() {
+        for (row, tab_layout) in [
+            (SettingsRow::Theme, TabLayoutMode::Horizontal),
+            (SettingsRow::Cursor, TabLayoutMode::Horizontal),
+            (SettingsRow::Formulas, TabLayoutMode::Horizontal),
+            (SettingsRow::TabLayout, TabLayoutMode::Horizontal),
+            (SettingsRow::Sidebar, TabLayoutMode::Vertical),
+        ] {
+            // 40px of glyphs is roomier than any of these words needs and still
+            // fits inside the button, so the floor must win.
+            let placed = open_rows_measured(1.0, Some(row), tab_layout, 40.0);
+            let menu = placed.menu.expect("the picker is open");
+            let combo = combo_of(&placed, row);
+            assert_eq!(
+                width(menu),
+                width(combo),
+                "{row:?}: a picker whose options fit must not grow a pixel"
+            );
+        }
+    }
+
+    /// PIN: a popup too wide for the window is pulled back inside it, the same
+    /// clamp `profiles`, `tooltip` and `peek_strip` each apply to their own
+    /// floating boxes.
+    #[test]
+    fn a_picker_too_wide_for_the_window_is_clamped_into_it() {
+        let placed = layout_for_menu(
+            520.0,
+            800.0,
+            1.0,
+            Some(SettingsRow::Theme),
+            &flat_rows(),
+            4_000.0,
+        )
+        .expect("the dialog still fits this window");
+        let menu = placed.menu.expect("the picker is open");
+        assert!(
+            menu[0] >= 0.0,
+            "the popup must not start off the left edge of the window: {menu:?}"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-10): the Display formulas row, and the one thing
+    /// its switch means. Off is a *rendering* choice - the row says so in the
+    /// dialog, because a user who reads "off" and expects the formula to vanish
+    /// has been told the wrong thing.
+    #[test]
+    fn the_display_formulas_row_offers_on_and_off_and_says_what_off_does() {
+        let placed = open_rows_measured(
+            1.0,
+            Some(SettingsRow::Formulas),
+            TabLayoutMode::Horizontal,
+            0.0,
+        );
+        let labels = labels_of(&placed, None, values());
+        for text in [
+            "Display formulas",
+            "Typeset $$…$$ blocks; off shows the LaTeX source",
+            "On",
+            "Off",
+        ] {
+            assert!(
+                labels.iter().any(|label| label.text == text),
+                "{text:?} is part of the row and is not drawn"
+            );
+        }
+        assert_eq!(SettingsRow::Formulas.option_count(), 2);
+        assert_eq!(
+            FORMULA_OPTIONS,
+            [true, false],
+            "On is the first item, as it is in every On/Off picker the mock-up draws"
+        );
+    }
+
+    /// PIN: clicking an item asks for exactly the value that item stands for,
+    /// and clicking anything else asks for nothing.
+    #[test]
+    fn only_the_formula_rows_items_ask_for_a_formula_setting() {
+        assert_eq!(
+            display_formulas_requested(SettingsTarget::Choice(SettingsRow::Formulas, 0)),
+            Some(true)
+        );
+        assert_eq!(
+            display_formulas_requested(SettingsTarget::Choice(SettingsRow::Formulas, 1)),
+            Some(false)
+        );
+        assert_eq!(
+            display_formulas_requested(SettingsTarget::Choice(SettingsRow::Formulas, 2)),
+            None,
+            "there is no third option to ask for"
+        );
+        for target in [
+            SettingsTarget::Choice(SettingsRow::Theme, 0),
+            SettingsTarget::Choice(SettingsRow::Cursor, 0),
+            SettingsTarget::Combo(SettingsRow::Formulas),
+            SettingsTarget::Scrim,
+            SettingsTarget::Panel,
+            SettingsTarget::Close,
+        ] {
+            assert_eq!(display_formulas_requested(target), None, "{target:?}");
+        }
+    }
+
+    /// PIN: the row draws the value it is given, both ways round. A tick that
+    /// ignored the stored value would still look right in one of the two states.
+    #[test]
+    fn the_formula_rows_tick_follows_the_stored_value() {
+        for (display_formulas, expected) in [(true, 0usize), (false, 1usize)] {
+            let placed = open_rows_measured(
+                1.0,
+                Some(SettingsRow::Formulas),
+                TabLayoutMode::Horizontal,
+                0.0,
+            );
+            let values = SettingsValues {
+                display_formulas,
+                ..values()
+            };
+            assert_eq!(
+                SettingsRow::Formulas.selected_index(values),
+                Some(expected),
+                "display_formulas={display_formulas} must tick item {expected}"
+            );
+            let labels = labels_of(&placed, None, values);
+            let ticks = labels.iter().filter(|label| label.text == TICK).count();
+            assert_eq!(ticks, 1, "exactly one item wears the tick");
+        }
+    }
+
     /// PIN (Q191, mock-up 5644): `$("row-railmode").style.display =
     /// state.layoutMode === "vertical" ? "" : "none"` — Sidebar is a dependent
     /// of Tab layout and is not in the dialog at all while the tabs run across
@@ -2015,6 +2319,7 @@ mod tests {
             [
                 SettingsRow::Theme,
                 SettingsRow::Cursor,
+                SettingsRow::Formulas,
                 SettingsRow::TabLayout
             ]
         );
@@ -2023,6 +2328,7 @@ mod tests {
             [
                 SettingsRow::Theme,
                 SettingsRow::Cursor,
+                SettingsRow::Formulas,
                 SettingsRow::TabLayout,
                 SettingsRow::Sidebar
             ]
@@ -2156,9 +2462,10 @@ mod tests {
         }
     }
 
-    /// The two new rows wear the mock-up's own words (lines 2358-2384), and the
-    /// sidebar's second option keeps the sentence the mock-up spells out rather
-    /// than the one-word name of the mode behind it.
+    /// The two new rows wear the mock-up's own words (lines 2358-2390), the
+    /// sidebar's second option among them: user ruling 2026-08-10 cut it from
+    /// "Icons, expand on hover" down to the mode's own name, and the mock-up
+    /// carries the same word.
     #[test]
     fn the_new_rows_wear_the_mock_ups_own_words() {
         let placed = open_rows(1.0, Some(SettingsRow::Sidebar), TabLayoutMode::Vertical);
@@ -2169,13 +2476,19 @@ mod tests {
             "Sidebar",
             "How the vertical tab sidebar rests",
             "Expanded",
-            "Icons, expand on hover",
+            "Icons",
         ] {
             assert!(
                 labels.iter().any(|label| label.text == text),
                 "{text:?} is the mock-up's own line and is not drawn"
             );
         }
+        assert!(
+            !labels
+                .iter()
+                .any(|label| label.text == "Icons, expand on hover"),
+            "the sentence form is what the ruling removed; drawing it again is the regression"
+        );
     }
 
     /// A fresh panel is shut, with nothing open inside it and nothing hovered.

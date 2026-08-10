@@ -2376,9 +2376,15 @@
           </div>
           <div class="combo" data-combo="railmode">
             <button aria-haspopup="listbox"><span class="value">Expanded</span><span class="chev">▼</span></button>
+            <!-- user ruling 2026-08-10: "Icons, expand on hover" → "Icons".
+                 The sentence form named the hover behaviour in the one place a
+                 label has no room for it, and it was the only option string in
+                 the whole dialog wide enough to overrun its own popup. The
+                 hover-to-expand behaviour is unchanged — it is simply not
+                 spelled out in the picker any more. -->
             <div class="combo-menu" role="listbox">
               <div class="combo-item selected" data-v="expanded" role="option"><span class="tick">✓</span>Expanded</div>
-              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons, expand on hover</div>
+              <div class="combo-item" data-v="icons" role="option"><span class="tick">✓</span>Icons</div>
             </div>
           </div>
         </div>
@@ -7621,8 +7627,9 @@
              choosing "icons" while it is collapsed does nothing visible and the
              collapse button sits there claiming to control something invisible */
           state.railCollapsed = false;
+          /* user ruling 2026-08-10: the short label, matching the listbox above. */
           combo.querySelector(".value").textContent =
-            item.dataset.v === "icons" ? "Icons, expand on hover" : "Expanded";
+            item.dataset.v === "icons" ? "Icons" : "Expanded";
           render();
         }
         if (kind === "attnchip") {

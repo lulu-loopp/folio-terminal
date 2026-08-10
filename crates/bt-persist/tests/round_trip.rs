@@ -15,9 +15,10 @@
 use std::path::PathBuf;
 
 use bt_persist::{
-    DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, SessionCursorStyleV1,
-    SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, TabV1, TermLeafV1,
-    read_session, write_session_atomic,
+    DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, SETTINGS_SCHEMA_VERSION,
+    SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
+    SettingsV1, TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
+    write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -288,5 +289,85 @@ fn writing_the_parsed_session_produces_the_canonical_bytes_on_disk() {
         "atomic_write must persist exactly the canonical bytes"
     );
 
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+// --- settings.json: display-formula rendering switch (settings schema v2) ---
+
+#[test]
+fn display_formulas_round_trips_through_the_public_settings_api() {
+    // Both states, not just the non-default one: a getter that ignored the
+    // stored value and always answered `true` would still pass a one-sided
+    // test (`CONVENTIONS.md` §三 "默认值会掩盖 bug").
+    for display_formulas in [false, true] {
+        let dir = std::env::temp_dir().join(format!(
+            "bt-persist-display-formulas-roundtrip-{}-{display_formulas}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let settings = SettingsV1 {
+            display_formulas,
+            ..SettingsV1::default()
+        };
+
+        write_settings_atomic(&path, &settings).unwrap();
+        let (loaded, report) = read_settings(&path);
+        assert_eq!(report, ReadReport::Loaded);
+        assert_eq!(loaded, settings);
+        assert_eq!(loaded.display_formulas, display_formulas);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn settings_defaults_render_formulas_at_the_current_schema_version() {
+    let defaults = SettingsV1::default();
+    assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        SETTINGS_SCHEMA_VERSION, 2,
+        "adding the display-formula switch is the v1→v2 bump (§1.3)"
+    );
+    assert!(
+        defaults.display_formulas,
+        "formulas render by default — the switch exists to turn rendering off"
+    );
+}
+
+#[test]
+fn settings_v1_fixture_migrates_to_v2_preserving_theme_and_rendering_formulas() {
+    // §1.3 rule 1 demands a *non-default* fixture: theme_mode is `Dark`, so a
+    // migration that dropped or reordered fields could not hide behind the
+    // `System` default. The unknown hand-edited key must vanish (ruling 4).
+    let (migrated, report) = read_settings(&fixture_path("settings_v1_nondefault.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.theme_mode,
+        ThemeModeV1::Dark,
+        "migration must carry the pre-existing theme across untouched"
+    );
+    assert!(
+        migrated.display_formulas,
+        "every pre-v2 settings file was written by a build that always rendered \
+         formulas — the migration must preserve that behaviour, not impose a new one"
+    );
+
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v1-migration-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    write_settings_atomic(&path, &migrated).unwrap();
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, migrated);
+    let on_disk = String::from_utf8(std::fs::read(&path).unwrap()).unwrap();
+    assert!(
+        !on_disk.contains("bt_unknown_hand_edit"),
+        "unknown fields are dropped, never round-tripped (§1.3 ruling 4)"
+    );
     std::fs::remove_dir_all(&dir).unwrap();
 }

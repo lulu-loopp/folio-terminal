@@ -1,5 +1,5 @@
-//! Where `session.json` lives, when it is written, and what a leftover
-//! sentinel means.
+//! Where `session.json` and `settings.json` live, when they are written, and
+//! what a leftover sentinel means.
 //!
 //! `bt-persist` is deliberately timer-free and path-free: it knows how to read
 //! and write two JSON documents given explicit paths, and how to degrade when
@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    Debouncer, ExitState, ReadReport, SessionV1, WriteAlertAction, WriteFailureTracker,
-    create_sentinel, probe_sentinel, read_session, remove_sentinel, write_session_atomic,
+    Debouncer, ExitState, ReadReport, SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker,
+    create_sentinel, probe_sentinel, read_session, read_settings, remove_sentinel,
+    write_session_atomic, write_settings_atomic,
 };
 
 /// docs/M2-persistence-schema-v1.md §5.1 rules "debounce roughly 1-2 seconds
@@ -137,6 +138,64 @@ impl SessionStore {
             let _ = remove_sentinel(&self.sentinel_path);
             self.armed = false;
         }
+    }
+}
+
+/// `settings.json` and when it reaches the disk.
+///
+/// No debouncer, unlike [`SessionStore`], and §1.1 is explicit about why the two
+/// files are separate at all: "设置改动应立即落盘(用户在设置面板点一下就该生效并
+/// 持久,丢失更痛)". A settings write happens when a human clicks a row in a
+/// dialog — it cannot arrive at the rate divider drags do, so there is nothing
+/// to coalesce and a quiet window would only be a window in which the choice can
+/// be lost.
+pub struct SettingsStore {
+    path: PathBuf,
+    settings: SettingsV1,
+    failures: WriteFailureTracker,
+}
+
+impl SettingsStore {
+    /// Read `settings.json`, falling back to defaults on every failure — same
+    /// contract as [`SessionStore::open`], and for the same reason: a terminal
+    /// that refuses to start because it could not read a preferences file would
+    /// be a worse product than one that starts with the default preferences.
+    pub fn open() -> Self {
+        let dir = storage_dir();
+        let path = dir.join("settings.json");
+        let _ = std::fs::create_dir_all(&dir);
+        let (settings, report) = read_settings(&path);
+        // §5.4 case 1 — no file yet — is the normal first run and must not alert.
+        if let ReadReport::FellBackToDefaults { reason } = &report {
+            eprintln!("BT_PERSIST settings.json fell back to defaults: {reason:?}");
+        }
+        Self {
+            path,
+            settings,
+            failures: WriteFailureTracker::new(),
+        }
+    }
+
+    /// The settings as they currently stand.
+    pub fn loaded(&self) -> &SettingsV1 {
+        &self.settings
+    }
+
+    /// Record a change and put it on disk now. Returns whether anything changed,
+    /// so a caller can skip the repaint when a user picks the value already set.
+    pub fn store(&mut self, settings: SettingsV1) -> bool {
+        if self.settings == settings {
+            return false;
+        }
+        self.settings = settings;
+        let result = write_settings_atomic(&self.path, &self.settings);
+        if self.failures.record(result.is_ok()) == WriteAlertAction::AlertOnce
+            && let Err(error) = &result
+        {
+            // §5.3: one alert per failure streak, not one per attempt.
+            eprintln!("BT_PERSIST could not write settings.json: {error}");
+        }
+        true
     }
 }
 

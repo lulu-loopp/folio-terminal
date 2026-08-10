@@ -10,16 +10,31 @@
 use serde::{Deserialize, Serialize};
 
 /// Current `schema_version` for `settings.json`.
-pub const SETTINGS_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 adds `display_formulas`. §2's "只收录已经在 DESIGN/M2 文档里落定的用户可见项"
+/// is satisfied the way §1.3 intends it to be: the field arrives in the same
+/// change that gives it a reader, not ahead of one.
+pub const SETTINGS_SCHEMA_VERSION: u32 = 2;
 
-/// `settings.json` v1 — docs/M2-persistence-schema-v1.md §2:
+/// `settings.json` v2 — docs/M2-persistence-schema-v1.md §2:
 /// ```json
-/// { "schema_version": 1, "theme_mode": "System" | "Light" | "Dark" }
+/// {
+///   "schema_version": 2,
+///   "theme_mode": "System" | "Light" | "Dark",
+///   "display_formulas": true | false
+/// }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettingsV1 {
     pub schema_version: u32,
     pub theme_mode: ThemeModeV1,
+    /// Whether detected display math (`$$…$$`, LaTeX environments) is *drawn*
+    /// as a typeset band. Off leaves detection entirely alone — the scanner,
+    /// the ownership ledger and every guard keep running, and the source text
+    /// simply stays on screen instead of being covered. This is a presentation
+    /// policy, not a detection one; see `MathLayoutOptions` in bt-term for the
+    /// detection-side bits, which this deliberately does not touch.
+    pub display_formulas: bool,
 }
 
 impl Default for SettingsV1 {
@@ -27,6 +42,7 @@ impl Default for SettingsV1 {
         Self {
             schema_version: SETTINGS_SCHEMA_VERSION,
             theme_mode: ThemeModeV1::default(),
+            display_formulas: true,
         }
     }
 }

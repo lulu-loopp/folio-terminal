@@ -755,6 +755,21 @@ pub struct DualPlaneSession {
     /// blank-tail relief, the input-region creation gates — is still pinned, by tests that turn the
     /// bit back on and say so. Production never writes it.
     inline_image_bands: bool,
+    /// Whether proven display-math rasters are allowed to become bands (user ruling 2026-08-10,
+    /// the "Display formulas" switch).
+    ///
+    /// A **presentation** policy bit, and deliberately not a detection one. Everything above it
+    /// runs untouched with the switch off: the scanner still pairs delimiters, the ownership
+    /// ledger still records them, workers still rasterize, and records still hold their artifacts.
+    /// The bit is read at exactly the two points where a `Ready` record would otherwise be handed
+    /// to the viewport (one per plane, frozen and live), so turning it off empties the projection's
+    /// artifact maps — and the viewport, seeing the set change, blanks no cells and lays the source
+    /// line out as ordinary text on the next frame. Turning it back on re-arms the same records
+    /// from memory with no re-detection, which is what makes it a switch rather than a reload.
+    ///
+    /// Unlike `inline_image_bands` this is written by the product: it is a user-facing setting
+    /// persisted in `settings.json`, not a ruling frozen into a `const`.
+    display_math_bands: bool,
     inline_image_tasks: VecDeque<InlineImageTask>,
     local_image_path_tasks: VecDeque<InlineImageTask>,
     /// At most one outstanding resample per image occurrence, so the queue is bounded by the
@@ -1002,6 +1017,9 @@ impl DualPlaneSession {
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
             live_tasks: VecDeque::new(),
             inline_image_bands: INLINE_IMAGE_BANDS,
+            // Formulas render unless the user says otherwise; the app pushes the persisted
+            // setting in right after construction.
+            display_math_bands: true,
             inline_image_tasks: VecDeque::new(),
             local_image_path_tasks: VecDeque::new(),
             inline_image_scale_tasks: VecDeque::new(),
@@ -1152,6 +1170,24 @@ impl DualPlaneSession {
 
     pub fn set_ascii_baseline_subpixels(&mut self, ascii_baseline_subpixels: NonZeroI64) {
         self.ascii_baseline_subpixels = Some(ascii_baseline_subpixels);
+    }
+
+    /// Whether proven display math is allowed to be drawn as a band.
+    #[must_use]
+    pub fn display_math_bands(&self) -> bool {
+        self.display_math_bands
+    }
+
+    /// Point the "Display formulas" switch at `enabled`, reporting whether that changed anything.
+    ///
+    /// Deliberately *not* part of [`MathLayoutOptions`]: those options feed the detector, and
+    /// changing one is a reason to re-scan. This one is read only where a finished record becomes
+    /// a viewport artifact, so it costs nothing but the next frame — the caller repaints and the
+    /// bands appear or dissolve, with every record left exactly where it was.
+    pub fn set_display_math_bands(&mut self, enabled: bool) -> bool {
+        let changed = self.display_math_bands != enabled;
+        self.display_math_bands = enabled;
+        changed
     }
 
     pub fn set_math_layout_options(&mut self, options: MathLayoutOptions) {
@@ -5357,11 +5393,16 @@ impl DualPlaneSession {
         projection.set_resize_reflow_active(self.resize_epoch.is_active());
         projection.set_exact_source_reprint_hold(self.primary_reprint_presentation_hold());
         projection.set_selection(self.view_selection());
+        // The "Display formulas" gate, frozen plane (user ruling 2026-08-10). One of the two
+        // points where a finished record becomes a viewport artifact; with the switch off the
+        // map goes empty and `project` lays the source line out as ordinary text instead of
+        // blanking its rows. The records themselves are not consulted about it and not changed.
         let mut frozen_artifacts = self
             .decorations
             .iter()
             .filter_map(|(id, record)| {
-                (!record.show_source
+                (self.display_math_bands
+                    && !record.show_source
                     && record
                         .span
                         .as_ref()
@@ -5408,11 +5449,15 @@ impl DualPlaneSession {
     }
 
     fn sync_live_projection_artifacts(&self, projection: &mut ViewportProjection) {
+        // The "Display formulas" gate, live plane — the mirror of the frozen one above, and the
+        // other of the two points a record can reach the viewport through.
         let mut live_artifacts = self
             .live_decorations
             .values()
             .filter_map(|record| {
-                (!record.show_source && record.span.mode == MathMode::Display)
+                (self.display_math_bands
+                    && !record.show_source
+                    && record.span.mode == MathMode::Display)
                     .then(|| {
                         projected_live_artifact(
                             record,
@@ -12952,6 +12997,166 @@ mod tests {
         assert_eq!(
             selected,
             vec![vec!["old".to_owned(), "middle".to_owned(), "new".to_owned()]; 3]
+        );
+    }
+
+    /// PIN (user ruling 2026-08-10, "Display formulas"): the switch turns off
+    /// **rendering**, not detection.
+    ///
+    /// The distinction is the whole ruling, so the test states both halves. Off:
+    /// the frame carries no band product and the `$$x$$` source stands in the
+    /// cells that the band used to blank. Underneath, the live decoration record
+    /// keeps its span, its lifecycle and its raster — it simply reaches no
+    /// viewport, exactly as a retired image record does. On again: the same
+    /// record re-arms from memory, and no worker task is ever taken, which is
+    /// what proves nothing was re-detected or re-rasterized across the flip.
+    #[test]
+    fn turning_display_formulas_off_shows_source_and_leaves_detection_running() {
+        let start = Instant::now();
+        let mut session = DualPlaneSession::new(nz(40), nz(12));
+        session.feed_at(b"$$x$$\r\nbarrier", start).unwrap();
+        session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+        assert_eq!(
+            complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+            1
+        );
+        let mut projection = session.new_projection(session.layout_key());
+        let rendered = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(rendered.math_blocks.len(), 1);
+        assert_eq!(rendered.math_blocks[0].display, MathBlockDisplay::Rendered);
+        assert_eq!(
+            crate::observe_formula_frame(&rendered).state,
+            crate::FormulaFrameState::Rendered
+        );
+
+        // Flip the policy bit. No re-feed, no new session, no re-detection: the
+        // next frame off the same projection is the whole mechanism.
+        assert!(session.set_display_math_bands(false));
+        session.refresh_projection(&mut projection);
+        let source = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            source.math_blocks.is_empty(),
+            "the switch is off, so the frame must carry no band product at all: {:?}",
+            source.math_blocks
+        );
+        let observed = crate::observe_formula_frame(&source);
+        assert_eq!(observed.state, crate::FormulaFrameState::Source);
+        assert!(
+            observed.source_rows.iter().any(|row| row.contains("$$x$$")),
+            "the source the band used to cover must stand in the cells again: {:?}",
+            observed.source_rows
+        );
+
+        // Detection is untouched above the gate: same record, same raster.
+        assert_eq!(
+            session.live_decorations.len(),
+            1,
+            "the switch must not retire the decoration record it hides"
+        );
+        assert!(
+            session
+                .live_decorations
+                .values()
+                .all(|record| record.artifact.is_some()),
+            "the raster that was already proven must still be held"
+        );
+
+        // On again, from memory alone.
+        assert!(session.set_display_math_bands(true));
+        session.refresh_projection(&mut projection);
+        let again = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(again.math_blocks.len(), 1);
+        assert_eq!(again.math_blocks[0].display, MathBlockDisplay::Rendered);
+        assert!(
+            session.take_live_worker_task().is_none(),
+            "flipping the switch must not cost a single re-detection or re-render"
+        );
+        assert!(
+            !session.set_display_math_bands(true),
+            "setting the switch to the value it already holds is not a change"
+        );
+    }
+
+    /// PIN (user ruling 2026-08-10): the same switch, the other plane.
+    ///
+    /// A formula the cursor has walked past is a frozen transcript decoration and reaches the
+    /// viewport by a different route than a live one, so a gate on the live plane alone would
+    /// leave scrollback still drawing bands. This is that route's own pin — without it, deleting
+    /// the frozen gate costs nothing and the whole history side of the switch rots.
+    #[test]
+    fn turning_display_formulas_off_reverts_frozen_bands_to_source_as_well() {
+        // A two-row grid scrolls the formula off the live screen, so the record that survives is
+        // a frozen transcript decoration; `scroll_to_top` then puts that history line back on
+        // screen, which is the only way this plane's band is visible at all.
+        let mut session = DualPlaneSession::new(nz(40), nz(2));
+        session.feed(b"$$x$$\r\none\r\ntwo\r\ntail").unwrap();
+        let mut completed = 0;
+        while let Some(mut task) = session.take_worker_task() {
+            if resolve_detection_task(&mut task) {
+                assert!(session.complete_worker_result(task, Ok(synthetic_raster(40, 18))));
+                completed += 1;
+            } else {
+                assert!(session.complete_worker_result(task, Err(MathRenderError::NotDetected)));
+            }
+        }
+        assert_eq!(completed, 1, "the finalized line is a frozen decoration");
+
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        projection.scroll_to_top();
+        session.refresh_projection(&mut projection);
+        let rendered = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            rendered.math_blocks.len(),
+            1,
+            "baseline: history draws the band"
+        );
+        assert_eq!(rendered.math_blocks[0].display, MathBlockDisplay::Rendered);
+        let records_before = session.decorations.len();
+        let ready_before = session
+            .decorations
+            .values()
+            .filter(|record| record.decoration == DecorationLifecycle::Ready)
+            .count();
+        assert_eq!(ready_before, 1);
+
+        assert!(session.set_display_math_bands(false));
+        session.refresh_projection(&mut projection);
+        let source = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            source.math_blocks.is_empty(),
+            "the frozen plane must honour the switch too: {:?}",
+            source.math_blocks
+        );
+        let observed = crate::observe_formula_frame(&source);
+        assert!(
+            observed.source_rows.iter().any(|row| row.contains("$$x$$")),
+            "the transcript line must lay out as ordinary text again: {:?}",
+            observed.source_rows
+        );
+        assert_eq!(
+            session.decorations.len(),
+            records_before,
+            "the switch must hide the band without retiring a single frozen record"
+        );
+        assert_eq!(
+            session
+                .decorations
+                .values()
+                .filter(|record| record.decoration == DecorationLifecycle::Ready)
+                .count(),
+            ready_before,
+            "the proven record stays proven while it is hidden"
+        );
+
+        assert!(session.set_display_math_bands(true));
+        session.refresh_projection(&mut projection);
+        let again = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(again.math_blocks.len(), 1);
+        assert_eq!(again.math_blocks[0].display, MathBlockDisplay::Rendered);
+        assert!(
+            session.take_worker_task().is_none(),
+            "re-arming a frozen band must not re-detect anything"
         );
     }
 

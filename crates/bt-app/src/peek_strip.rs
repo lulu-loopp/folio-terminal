@@ -618,10 +618,24 @@ pub fn layout(
             PeekRow {
                 mark,
                 dot: status_dot_rect(mark),
+                // `.peek-list { max-width: 210px }`, and the right edge is a
+                // bound and not a suggestion. The wrap above already gives an
+                // over-wide entry a line of its own rather than looping forever,
+                // but a line of its own is still only 210px wide: without this
+                // clamp the label is laid out at its full measured width and
+                // paints straight out of the popup and across the terminal.
+                //
+                // Cropped rather than ellipsised, which is this codebase's
+                // standing answer for `overflow: hidden` (see the profile menu's
+                // `.recent-item`): a `ChromeLabel` clips per glyph and per pixel,
+                // and a real `…` needs a measured *prefix*, which means the font
+                // — and only the caller beside the renderer has that. With names
+                // now cut to their last segment this is the rare case rather
+                // than the common one.
                 title: [
                     title_left,
                     title_top,
-                    title_left + width,
+                    (title_left + width).min(list_left + list_width),
                     title_top + list_text,
                 ],
             }
@@ -1093,6 +1107,81 @@ mod tests {
         assert!(
             (wide.frame[2] - wide.frame[0] - expected).abs() < 0.001,
             "a long name cannot widen the box"
+        );
+    }
+
+    /// L133, the half the box's own width did not cover: **nothing the peek
+    /// draws may leave the peek.**
+    ///
+    /// The box was already capped at 210px, and that was read as the whole of
+    /// `max-width`. It is not: a name is laid out at its measured width inside
+    /// that box, and a measured width the box cannot hold is a label painted
+    /// straight out of the popup and across the terminal underneath. The frame
+    /// stopped growing; the writing did not stop running.
+    ///
+    /// Red gate: it took whole paths (`seat_caption`) rather than last segments
+    /// (`seat_short_caption`), so the common case — every pane named by its
+    /// folder — was the overflowing one. Both halves are fixed here: the caller
+    /// hands over short names, and this bound holds whatever it is handed.
+    #[test]
+    fn no_name_in_a_peek_is_drawn_outside_the_peek() {
+        let tree = split(1, Axis::Row, 500_000, term(1), term(2));
+        let long = [900.0, 900.0];
+        let laid = layout(&tree, &leaves(2), &long, host_tab(), WINDOW, SCALE)
+            .expect("a two-pane tab peeks");
+        let palette = bt_render::chrome_palette();
+        let layers = build(&laid, &leaves(2), &palette, SCALE);
+        let frame = laid.frame;
+        for layer in &layers {
+            for label in &layer.labels {
+                assert!(
+                    label.rect[0] >= frame[0]
+                        && label.rect[2] <= frame[2]
+                        && label.rect[1] >= frame[1]
+                        && label.rect[3] <= frame[3],
+                    "a name ran out of the popup: {:?} against {frame:?}",
+                    label.rect
+                );
+            }
+        }
+        for row in &laid.rows {
+            assert!(
+                row.title[2]
+                    <= frame[2] - (PEEK_PADDING_LOGICAL_PX + PEEK_BORDER_LOGICAL_PX) * SCALE,
+                "and stops inside the padding rather than on the border: {:?}",
+                row.title
+            );
+        }
+    }
+
+    /// Two panes standing in the same folder are two panes standing in the same
+    /// folder, and the peek says so twice.
+    ///
+    /// The short name is a *cut*, not an identifier — nothing here disambiguates,
+    /// renumbers or falls back to the long form, because the schematic beside the
+    /// list is what tells the two apart and inventing "scratchpad (2)" would put
+    /// a name on screen that nothing else in the window uses.
+    #[test]
+    fn two_panes_with_one_name_both_wear_it() {
+        let tree = split(1, Axis::Row, 500_000, term(1), term(2));
+        let same = vec![leaf("scratchpad"), leaf("scratchpad")];
+        let laid = layout(&tree, &same, &[70.0, 70.0], host_tab(), WINDOW, SCALE)
+            .expect("a two-pane tab peeks");
+        assert_eq!(
+            laid.rows.len(),
+            2,
+            "one row per leaf, however they are named"
+        );
+        let palette = bt_render::chrome_palette();
+        let layers = build(&laid, &same, &palette, SCALE);
+        let spoken = layers
+            .iter()
+            .flat_map(|layer| layer.labels.iter())
+            .filter(|label| label.text == "scratchpad")
+            .count();
+        assert_eq!(
+            spoken, 4,
+            "twice in the schematic and twice in the list — no disambiguation invented"
         );
     }
 

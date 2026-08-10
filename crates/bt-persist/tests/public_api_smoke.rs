@@ -8,9 +8,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use bt_persist::{
-    Debouncer, ExitState, ReadReport, SettingsV1, ThemeModeV1, WriteAlertAction,
-    WriteFailureTracker, create_sentinel, probe_sentinel, read_settings, remove_sentinel,
-    write_settings_atomic,
+    Debouncer, ExitState, ReadReport, SETTINGS_SCHEMA_VERSION, SettingsV1, ThemeModeV1,
+    WriteAlertAction, WriteFailureTracker, create_sentinel, probe_sentinel, read_settings,
+    remove_sentinel, write_settings_atomic,
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
@@ -27,9 +27,12 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
     let dir = unique_dir("settings");
     let path = dir.join("settings.json");
 
+    // Every field carries a non-default value, so a serializer that dropped one
+    // could not hide behind a matching default on the way back in.
     let settings = SettingsV1 {
-        schema_version: 1,
+        schema_version: SETTINGS_SCHEMA_VERSION,
         theme_mode: ThemeModeV1::Dark,
+        display_formulas: false,
     };
     write_settings_atomic(&path, &settings).unwrap();
 
@@ -40,6 +43,10 @@ fn settings_write_then_read_round_trips_a_non_default_value() {
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
         on_disk.contains("\"theme_mode\": \"Dark\""),
+        "written file must be human-readable JSON: {on_disk}"
+    );
+    assert!(
+        on_disk.contains("\"display_formulas\": false"),
         "written file must be human-readable JSON: {on_disk}"
     );
 }
