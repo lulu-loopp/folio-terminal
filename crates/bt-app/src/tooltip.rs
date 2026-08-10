@@ -174,6 +174,18 @@ impl NameSource {
     }
 }
 
+/// The one mark this window writes between a name and the place that name
+/// belongs to.
+///
+/// Two readers, one glyph, and it is a constant rather than two literals because
+/// they are deliberately the *same* punctuation saying the same thing: the tab
+/// tip's `Working folder · C:\src` (M140) and the pane head's `vim main.rs ·
+/// C:\src`, where a program has announced something and the head still has to
+/// say where that something is standing. A head that separated its two halves
+/// with a dash while the tip beside it used a middle dot would be two spellings
+/// of one idea, and the eye reads punctuation as meaning.
+pub const NAME_PLACE_SEPARATOR: &str = " · ";
+
 /// A tab's tip: its name, where the name came from, and where it is standing
 /// (M140, mock-up 4197-4201).
 ///
@@ -187,7 +199,7 @@ impl NameSource {
 pub fn tab_tip(name: &str, source: Option<NameSource>, cwd: Option<&str>, pinned: bool) -> String {
     let mut tip = name.to_owned();
     let provenance = match (source, cwd) {
-        (Some(source), Some(cwd)) => Some(format!("{} · {cwd}", source.label())),
+        (Some(source), Some(cwd)) => Some(format!("{}{NAME_PLACE_SEPARATOR}{cwd}", source.label())),
         (Some(source), None) => Some(source.label().to_owned()),
         (None, Some(cwd)) => Some(cwd.to_owned()),
         (None, None) => None,

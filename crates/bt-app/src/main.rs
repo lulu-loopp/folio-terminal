@@ -1247,6 +1247,75 @@ impl TabState {
         self.sessions.iter_mut()
     }
 
+    /// Give one leaf a selection — and take it from every other leaf of this
+    /// tab.
+    ///
+    /// **Copy-on-select is what makes this a correctness rule and not a taste.**
+    /// A selection in this window is not a private highlight; the moment it is
+    /// made, its text is on the clipboard. The clipboard holds exactly one
+    /// thing. So two panes wearing selection colour at once is the screen making
+    /// two claims where only one can be true, and the user has no way to tell
+    /// which of the two highlighted runs is the one Ctrl+V will paste. The
+    /// highlight *is* the answer to "what did I just copy", and an answer given
+    /// twice is not an answer.
+    ///
+    /// Enforced here, at the single writer, rather than at the gestures that
+    /// start selections. There are three of those today — a drag, a double click
+    /// and a triple click — and they are not the interesting number: the
+    /// interesting number is that every one of them, and anything added later,
+    /// reaches a leaf's selection through this function. A rule spelled at the
+    /// gestures would be a rule three places have to remember and the fourth
+    /// gesture would not.
+    ///
+    /// **Only a selection displaces one.** `None` passes through without
+    /// touching a soul, and that is the difference between this and "the focused
+    /// pane owns the selection". Moving the keyboard to another pane clears
+    /// nothing, because a focus change makes no second claim — there is still
+    /// exactly one highlight on screen and it still names what is on the
+    /// clipboard. Likewise a bare click that begins a drag but never moves: it
+    /// sets `None` (no selection is owned until the pointer travels), so a click
+    /// to focus a neighbour leaves the highlight where the user put it rather
+    /// than wiping it for nothing.
+    ///
+    /// **The boundary is this tab, and it is structural rather than chosen at
+    /// the call site** — a [`TabState`] holds one tab's leaves and cannot reach
+    /// another's. Other tabs are not on screen, so their selections make no
+    /// competing visual claim; the ambiguity this rule exists to end is an
+    /// ambiguity of the eye. Their state is also something the user built and
+    /// can return to, and reaching across to destroy it would be spending real
+    /// work to fix a contradiction nobody can see.
+    fn set_leaf_selection(&mut self, seat: SeatId, selection: Option<ViewSelection>) {
+        if selection.is_some() {
+            let others: Vec<SeatId> = self
+                .sessions
+                .keys()
+                .copied()
+                .filter(|other| *other != seat)
+                .collect();
+            for other in others {
+                self.clear_leaf_selection(other);
+            }
+        }
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return;
+        };
+        leaf.session.set_view_selection(selection);
+    }
+
+    /// Drop one leaf's selection, in both places a selection is remembered.
+    ///
+    /// The session holds the anchors the copy is cut from and the projection
+    /// holds what the renderer paints; a clear that reached only one of them
+    /// would either leave colour on screen with nothing behind it or leave text
+    /// copyable with nothing shown. Both, always, in one place.
+    fn clear_leaf_selection(&mut self, seat: SeatId) {
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return;
+        };
+        leaf.session.set_view_selection(None);
+        leaf.projection.set_selection(None);
+    }
+
     /// What one Terminal seat's own shell is called (C28, per leaf).
     ///
     /// [`pane_head_title`] and not [`resolve_title`], which is the one place
@@ -1268,6 +1337,11 @@ impl TabState {
         pane_head_title(
             leaf.session.window_title(),
             leaf.session.working_directory(),
+            // The tab's profile, because that is the one this pane's shell was
+            // launched from — this build has no per-pane profile (see
+            // `term_leaf`), so the tab's is the only honest answer to "what is
+            // this shell already known as".
+            profiles::PROFILES[self.profile].title,
         )
         .map(|(name, _)| name)
     }
@@ -10132,12 +10206,15 @@ impl Runtime {
     /// Never through the focused-leaf deref, which answers "whichever pane holds
     /// the keyboard *now*" — the right pane during a drag only because nothing
     /// moves focus while a button is held.
+    /// Hand a selection to one pane of the tab on screen.
+    ///
+    /// The window's half of [`TabState::set_leaf_selection`], which is where the
+    /// "one selection to a tab" rule lives. Every route that gives a pane a
+    /// selection — the drag, the double click, the triple click — comes through
+    /// here, so it is the one door that rule has to be written on.
     fn set_pane_view_selection(&mut self, seat: SeatId, selection: Option<ViewSelection>) {
         let active = self.active_tab;
-        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
-            return;
-        };
-        leaf.session.set_view_selection(selection);
+        self.tabs[active].set_leaf_selection(seat, selection);
     }
 
     fn forwarded_mouse_hit(&self) -> Option<bt_render::GridHit> {
@@ -10737,6 +10814,53 @@ impl Runtime {
         })
     }
 
+    /// Get a change made *to one named pane* onto the glass — including when
+    /// that pane is not the one holding the keyboard.
+    ///
+    /// [`Self::publish_interaction_frame`] builds the **focused** leaf's frame,
+    /// and it is allowed to decline: a presentation hold standing on that leaf
+    /// returns before it ever reaches `request_redraw`. For the focused pane's
+    /// own content that is exactly right — the hold exists to keep the last
+    /// complete frame on screen instead of flashing through a resize reprint.
+    ///
+    /// For **every other pane it is wrong**, and silently so. An unfocused pane
+    /// is composed nowhere but inside `redraw`, and `redraw` returns
+    /// immediately unless a frame reached the slot, so a hold owned by the
+    /// focused leaf freezes panes whose own shells are holding nothing. That is
+    /// the shape of the wheel bug: `scroll_by_subpixels` clears the hold on the
+    /// leaf it scrolls, so a notch over the focused pane always healed its own
+    /// path to the screen while a notch over any other pane moved that pane's
+    /// projection and then had no way to draw it.
+    ///
+    /// The repair is the one this window already uses for a peek overlay
+    /// (`present_peek_overlay`): when the focused leaf declines, re-present the
+    /// frame **already on screen**. Its pixels are unchanged and stay unchanged
+    /// — the hold is honoured to the letter — but putting it back in the slot
+    /// runs the compositor, and the compositor rebuilds every other pane from
+    /// that pane's own projection. Nothing is invented for the held pane; the
+    /// panes that have something new to show simply stop being hostage to it.
+    fn repaint_pane_change(&mut self, seat: SeatId) -> Result<()> {
+        let trigger = FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        };
+        if self.publish_frame_inner(trigger, false)? || seat == self.focused_leaf {
+            return Ok(());
+        }
+        // Not while a resize present is outstanding: that gate admits only the
+        // newly projected grid, and the frame on screen is the previous one.
+        if self.pending_resize_present.is_none()
+            && self.pending_frames.pending_frame().is_none()
+            && let Some(frame) = self.last_presented_frame.clone()
+        {
+            self.pending_frames
+                .publish(frame, trigger)
+                .context("re-present the on-screen frame for an unfocused pane's scroll")?;
+        }
+        self.window.request_redraw();
+        Ok(())
+    }
+
     fn clear_selection(&mut self) {
         self.clear_pane_selection(self.focused_leaf);
     }
@@ -10746,11 +10870,7 @@ impl Runtime {
     /// in for as long as the button is down.
     fn clear_pane_selection(&mut self, seat: SeatId) {
         let active = self.active_tab;
-        let Some(leaf) = self.tabs[active].sessions.get_mut(&seat) else {
-            return;
-        };
-        leaf.session.set_view_selection(None);
-        leaf.projection.set_selection(None);
+        self.tabs[active].clear_leaf_selection(seat);
     }
 
     fn return_to_live_for_input(&mut self) -> bool {
@@ -12871,13 +12991,32 @@ impl Runtime {
         // One physical event, two currencies. Local routes scroll by exact subpixels (stage C of
         // the pixel-scroll plan); forwarding routes speak whole wheel lines because that is the
         // application protocol. Route is decided first, then only that route's accumulator moves.
-        let cell_subpixels = self.projection.cell_height_subpixels().get() as f64;
+        // The notch belongs to the pane under the pointer, so the currency it is
+        // converted into is *that* pane's: its cell height, and — for the "one
+        // screen at a time" wheel setting — its own row count. Reading the
+        // focused leaf's through the deref would scroll a hovered pane by a page
+        // of somebody else's window, and the two stop agreeing the moment a
+        // split is uneven.
+        let (cell_subpixels, target_rows) = self.sessions.get(&target_seat).map_or_else(
+            || {
+                (
+                    self.projection.cell_height_subpixels().get() as f64,
+                    self.grid.rows.get() as f64,
+                )
+            },
+            |leaf| {
+                (
+                    leaf.projection.cell_height_subpixels().get() as f64,
+                    leaf.grid.rows.get() as f64,
+                )
+            },
+        );
         let event_subpixels = match delta {
             MouseScrollDelta::LineDelta(_, y) => {
                 let multiplier =
                     match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
                         bt_platform::WheelScrollAmount::Lines(lines) => lines as f64,
-                        bt_platform::WheelScrollAmount::Page => self.grid.rows.get() as f64,
+                        bt_platform::WheelScrollAmount::Page => target_rows,
                     };
                 f64::from(y) * multiplier * cell_subpixels
             }
@@ -12929,82 +13068,65 @@ impl Runtime {
             || self.session.terminal_modes(),
             |leaf| leaf.session.terminal_modes(),
         );
-        // Sticky local review: while the alternate-screen viewport is displaced into the
-        // projection-local overflow (Shift+wheel entered it), the user is looking at displaced
-        // pixels, not the application's live pane — forwarding wheel bytes there would scroll a
-        // surface the user cannot see. Plain wheel therefore stays local in both directions;
-        // scrolling back to the resting bottom (offset 0) exits and restores forwarding.
         let target_is_scrolled = self
             .sessions
             .get(&target_seat)
             .is_some_and(|leaf| leaf.projection.is_scrolled());
-        if modes.alternate_screen && target_is_scrolled {
-            return self.scroll_view_exact_in(target_seat, event_subpixels);
-        }
-        // Wheel *bytes* only ever reach the pane that has the keyboard. A mouse
-        // report carries a row and a column, and those coordinates are only
-        // meaningful to the shell whose grid they were measured in; sending an
-        // unfocused pane's notch to the focused pane's TUI would move a cursor
-        // in a program the pointer is nowhere near. An unfocused TUI simply
-        // waits to be clicked into — which is also how it gets a keystroke.
-        if target_is_focused
-            && !self.modifiers.shift_key()
-            && modes.mouse_tracking != MouseTracking::Off
-        {
-            // Mouse-protocol wheel reports are per-notch, never per-system-scroll-line: the
-            // application applies its own lines-per-event step, so multiplying by the Windows
-            // wheel setting had TUIs (user report 2026-08-01: Claude Code transcript) scrolling
-            // three times too far per notch.
-            let notches = self.take_forward_wheel_notches(delta);
-            if notches == 0 {
-                return Ok(());
+        match wheel_route(
+            target_is_focused,
+            self.modifiers.shift_key(),
+            modes,
+            target_is_scrolled,
+        ) {
+            WheelRoute::MouseReport => {
+                // Mouse-protocol wheel reports are per-notch, never per-system-scroll-line: the
+                // application applies its own lines-per-event step, so multiplying by the Windows
+                // wheel setting had TUIs (user report 2026-08-01: Claude Code transcript) scrolling
+                // three times too far per notch.
+                let notches = self.take_forward_wheel_notches(delta);
+                if notches == 0 {
+                    return Ok(());
+                }
+                let Some(hit) = self.forwarded_mouse_hit() else {
+                    return Ok(());
+                };
+                let button = if notches > 0 {
+                    input::MouseProtocolButton::WheelUp
+                } else {
+                    input::MouseProtocolButton::WheelDown
+                };
+                let one = input::mouse_bytes(
+                    modes.sgr_mouse,
+                    button,
+                    input::MouseProtocolEvent::Press,
+                    hit.row,
+                    hit.column,
+                    self.modifiers,
+                );
+                self.send_user_input(
+                    &one.repeat(notches.unsigned_abs() as usize),
+                    "forward SGR mouse wheel to PTY",
+                    UserInputKind::Mouse,
+                )
             }
-            let Some(hit) = self.forwarded_mouse_hit() else {
-                return Ok(());
-            };
-            let button = if notches > 0 {
-                input::MouseProtocolButton::WheelUp
-            } else {
-                input::MouseProtocolButton::WheelDown
-            };
-            let one = input::mouse_bytes(
-                modes.sgr_mouse,
-                button,
-                input::MouseProtocolEvent::Press,
-                hit.row,
-                hit.column,
-                self.modifiers,
-            );
-            return self.send_user_input(
-                &one.repeat(notches.unsigned_abs() as usize),
-                "forward SGR mouse wheel to PTY",
-                UserInputKind::Mouse,
-            );
-        }
-        if modes.alternate_screen {
-            // Alternate-screen wheel emulation belongs to the application. Shift is the explicit
-            // local override for reviewing projection-only rows displaced above this screen.
-            if self.modifiers.shift_key() {
-                return self.scroll_view_exact_in(target_seat, event_subpixels);
-            }
-            // Arrow-key emulation is bytes, so it obeys the same rule the SGR
-            // route above does: only the focused pane's shell is written to.
-            if modes.alternate_scroll && target_is_focused {
+            WheelRoute::ArrowKeys => {
                 let lines = self.take_forward_wheel_lines(delta);
                 if lines == 0 {
                     return Ok(());
                 }
+                // The focused shell's cursor mode, and this route is only ever
+                // reached for the focused pane — see [`wheel_route`].
                 let bytes =
                     input::alternate_scroll_bytes(lines, self.session.application_cursor_mode());
-                return self.send_user_input(
+                self.send_user_input(
                     &bytes,
                     "forward alternate-screen wheel to PTY",
                     UserInputKind::Mouse,
-                );
+                )
             }
-            return Ok(());
+            WheelRoute::Local => self.scroll_view_exact_in(target_seat, event_subpixels),
+            WheelRoute::Nothing => Ok(()),
         }
-        self.scroll_view_exact_in(target_seat, event_subpixels)
     }
 
     /// Whole-line quantization for the alternate-scroll emulation route: arrow-key emulation
@@ -13071,7 +13193,7 @@ impl Runtime {
             return Ok(());
         };
         leaf.projection.scroll_by_subpixels(take);
-        self.publish_interaction_frame()
+        self.repaint_pane_change(seat)
     }
 
     fn keyboard_input(&mut self, event: &KeyEvent) -> Result<()> {
@@ -14284,6 +14406,94 @@ fn recoverable_clipboard_read(result: Result<String>) -> Option<String> {
     }
 }
 
+/// What one wheel notch does, once it is known which pane it landed in.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WheelRoute {
+    /// A mouse-protocol report (SGR or X10), one per notch, to that pane's
+    /// shell.
+    MouseReport,
+    /// Alternate-screen arrow-key emulation, in whole lines, to that pane's
+    /// shell.
+    ArrowKeys,
+    /// This window scrolls its own view of that pane. No bytes.
+    Local,
+    /// The notch is the application's to want and it did not want it.
+    Nothing,
+}
+
+/// **"A wheel scrolls whatever it hovers but whispers protocol only to the
+/// focused shell"** — the wheel ruling, as a function of the four facts it turns
+/// on.
+///
+/// A function rather than a run of `if`s inside the event handler, because the
+/// ruling is a claim about a decision and a decision that cannot be named cannot
+/// be pinned. Everything the handler needs the window for — the accumulators,
+/// the PTY, the projection — happens *after* this returns, so the part that is a
+/// policy is testable and the part that is plumbing is not asked to be.
+///
+/// The two halves of the ruling are deliberately independent here:
+///
+/// * **Scrolling follows the pointer.** `target_is_focused` never turns a
+///   [`Self::Local`] into a [`Self::Nothing`]. Reading a build log in one pane
+///   while typing in another is the reason to have two panes at all, and it is
+///   the thing that breaks the moment focus is allowed into this decision for
+///   any purpose but bytes.
+/// * **Bytes follow the keyboard.** A mouse report carries a row and a column,
+///   and those coordinates mean something only to the shell whose grid measured
+///   them; sending an unfocused pane's notch to a TUI would move a cursor in a
+///   program the pointer is nowhere near. So both forwarding routes — the SGR
+///   report and the arrow-key emulation, which is equally bytes — require the
+///   target to hold the keyboard.
+///
+/// The case that was wrong, and is the bug this pins: an **unfocused pane in
+/// alternate screen**. Every forwarding route refused it for being unfocused,
+/// the local route was reachable only with Shift held, and what was left was a
+/// bare "do nothing" — so a wheel over an unfocused TUI was silently discarded.
+/// It now falls to [`Self::Local`], which is the ruling's own first clause: the
+/// wheel still scrolls what it hovers, it simply never speaks. Nothing is
+/// forwarded that was not forwarded before, and the focused pane's behaviour is
+/// unchanged in every combination.
+///
+/// [`Self::Nothing`] survives for the one case that really is the application's:
+/// the **focused** alternate-screen pane whose program asked for neither mouse
+/// tracking nor alternate scroll. It owns its screen and has declined the wheel.
+fn wheel_route(
+    target_is_focused: bool,
+    shift: bool,
+    modes: bt_term::TerminalModes,
+    target_is_scrolled: bool,
+) -> WheelRoute {
+    // Sticky local review: while the alternate-screen viewport is displaced into
+    // the projection-local overflow (Shift+wheel entered it), the user is looking
+    // at displaced pixels, not the application's live pane — forwarding bytes
+    // there would scroll a surface the user cannot see. Plain wheel therefore
+    // stays local in both directions; scrolling back to the resting bottom
+    // (offset 0) exits and restores forwarding.
+    if modes.alternate_screen && target_is_scrolled {
+        return WheelRoute::Local;
+    }
+    if target_is_focused && !shift && modes.mouse_tracking != MouseTracking::Off {
+        return WheelRoute::MouseReport;
+    }
+    if modes.alternate_screen {
+        // Shift is the explicit local override for reviewing projection-only
+        // rows displaced above this screen.
+        if shift {
+            return WheelRoute::Local;
+        }
+        if modes.alternate_scroll && target_is_focused {
+            return WheelRoute::ArrowKeys;
+        }
+        // The pane the pointer is not in still scrolls; it just never speaks.
+        return if target_is_focused {
+            WheelRoute::Nothing
+        } else {
+            WheelRoute::Local
+        };
+    }
+    WheelRoute::Local
+}
+
 fn recoverable_wheel_scroll_amount(
     result: std::result::Result<bt_platform::WheelScrollAmount, String>,
 ) -> bt_platform::WheelScrollAmount {
@@ -14617,37 +14827,96 @@ fn session_title(
     title_layer(program_title, TITLE_MAX_CHARS)
         .map(|text| (text, tooltip::NameSource::Program))
         .or_else(|| {
-            title_layer(
-                working_directory.and_then(place.write).as_deref(),
-                place.maximum,
-            )
-            .map(|text| (text, tooltip::NameSource::Cwd))
+            place_layer(working_directory, place).map(|text| (text, tooltip::NameSource::Cwd))
         })
 }
 
-/// A *pane head's* name: its program's OSC 2 title, else its OSC 7 folder
-/// written whole (C28, mock-up 4559), else nothing.
+/// The folder layer on its own: the working directory as one reader writes it,
+/// sanitised at that reader's bound.
 ///
-/// The head's counterpart to [`resolve_title`], and it exists for the same
-/// reason that one does: to be the single place that says which of the two
-/// folder renderings this reader wants. [`session_title`] takes the rendering as
-/// a parameter precisely because its two readers disagree about it, and a
-/// parameter with two legal values is a choice — so the choice is made once,
-/// here, named, rather than at every call site that happens to want a head's
-/// name. A second site passing [`CWD_AS_LEAF`] by hand would be C28's reversal
-/// creeping back in one caller at a time, and nothing would be able to see it
-/// happen.
+/// Lifted out of [`session_title`] because the pane head stopped asking for the
+/// folder as the *loser* of a race against the title. A head answers "where is
+/// this" (C28), so the folder is the thing it is made of and the title is at
+/// most a prefix on top — which means the head needs the folder resolved on its
+/// own terms, not as an `or_else` that only runs when nothing else spoke.
+///
+/// One function rather than the two call sites each doing
+/// `title_layer(cwd.and_then(write), maximum)`, because that expression is where
+/// the [`CwdRendering`] pairing would come apart: it is exactly the two halves
+/// this window insists are not independently choosable, spelled out by hand.
+/// Written once, a reader picks a rendering and gets its bound with it.
+fn place_layer(working_directory: Option<&Path>, place: CwdRendering) -> Option<String> {
+    title_layer(
+        working_directory.and_then(place.write).as_deref(),
+        place.maximum,
+    )
+}
+
+/// A *pane head's* name: **the folder, whole (C28, mock-up 4559), with the
+/// program's OSC 2 title in front of it only when that title has something to
+/// say.**
+///
+/// A tab answers "what is this called" and a head answers "**where is this**",
+/// and the reason the head needed its own ruling is that the old stack could not
+/// tell the two apart. It put OSC 2 above the folder unconditionally, which is
+/// right for a name and wrong for a place — and the shell integration this
+/// window ships makes the difference impossible to miss: `betterterminal.ps1`
+/// ends by writing `ESC ]0;PowerShell BEL`, an honest default title that every
+/// session then carries forever. Under the old order that one static string won
+/// every head in the window, so a four-pane split printed "PowerShell" four
+/// times and the location — the single fact a head exists to carry — was gone
+/// from all of them.
+///
+/// So the folder leads, and the title is admitted as a **prefix** rather than a
+/// replacement. Nothing is lost by that: `vim main.rs · D:\src\app` says both
+/// things at once, which is what a head with a whole bar to fill has room for.
+///
+/// **"Has something to say" is measured against the profile's own title**, and
+/// that is the ruling's load-bearing edge. A shell that reports the very name
+/// its profile already goes by has announced nothing — it has agreed with the
+/// launcher — and a prefix repeating the answer to a question nobody asked is
+/// noise in front of the answer to the one that was. So the comparison is
+/// against [`profiles::Profile::title`] and not against a literal: the day a
+/// second profile ships, *its* default title is the string *its* panes must not
+/// repeat, and a hard-coded `"PowerShell"` would silently start prefixing every
+/// head of the new profile with a word the user already read on the tab.
+///
+/// The comparison runs on the **sanitised** title, like every other decision in
+/// this stack, so a program cannot slip past the check with a control character
+/// glued to the profile's name.
+///
+/// With no folder — OSC 7 never reported, or reported as something that
+/// sanitises away — the head falls back to the chain it has always had, which is
+/// [`session_title`] exactly: the title, else nothing, with the kind's own name
+/// supplied by [`seats::seat_caption`] where the caption is drawn. The
+/// profile-title check is deliberately *not* applied there. Its whole
+/// justification is that a better answer exists underneath; where there is no
+/// folder there is no better answer, and suppressing "PowerShell" would leave
+/// the head emptier than the shell left it.
 ///
 /// It is deliberately *not* `#[cfg(test)]`, and that is the load-bearing part.
 /// [`TabState::terminal_name`] and the pins both come through here, so the pins
-/// exercise the wiring the window actually runs instead of restating it; point
-/// this line at [`CWD_AS_LEAF`] and they go red, which is exactly what a pin for
-/// this ruling has to be able to do.
+/// exercise the wiring the window actually runs instead of restating it.
 fn pane_head_title(
     program_title: Option<&str>,
     working_directory: Option<&Path>,
+    profile_title: &str,
 ) -> Option<(String, tooltip::NameSource)> {
-    session_title(program_title, working_directory, CWD_AS_WHOLE_PATH)
+    let separator = tooltip::NAME_PLACE_SEPARATOR;
+    let place = place_layer(working_directory, CWD_AS_WHOLE_PATH);
+    // A title that merely repeats the profile's own is the shell agreeing with
+    // the launcher, not a program announcing itself.
+    let announcement =
+        title_layer(program_title, TITLE_MAX_CHARS).filter(|title| title.as_str() != profile_title);
+    match (announcement, place) {
+        (Some(title), Some(place)) => Some((
+            format!("{title}{separator}{place}"),
+            tooltip::NameSource::Program,
+        )),
+        (None, Some(place)) => Some((place, tooltip::NameSource::Cwd)),
+        // No folder to lead with: the chain the head has always had.
+        (_, None) => session_title(program_title, working_directory, CWD_AS_WHOLE_PATH),
+    }
 }
 
 #[cfg(test)]
@@ -16039,68 +16308,138 @@ mod tests {
     /// is called — `session_title` cannot see the tab at all.
     ///
     /// Red gate: point the head's place layer back at [`cwd_leaf`] instead of
-    /// [`cwd_whole`] and the second assertion fails; drop the sanitiser's
+    /// [`cwd_whole`] and the whole-path assertions fail; drop the sanitiser's
     /// fall-through and the control-character case names the pane after a
-    /// program that said nothing.
+    /// program that said nothing; **drop the profile-title filter — treat the
+    ///档案名 as a real announcement — and the first assertion prints
+    /// `PowerShell · D:\…` on every head in the window, which is the bug.**
     #[test]
-    fn a_pane_names_itself_by_its_program_then_by_its_whole_folder() {
+    fn a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it() {
         let cwd = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app");
         let whole = r"D:\Developer\BetterTerminal\crates\bt-app".to_owned();
+        let profile = profiles::PROFILES[profiles::DEFAULT_PROFILE].title;
 
-        // A title beats a folder: the program has said something more specific
-        // than where it happens to be standing.
+        // THE BUG. `scripts/shell-integration/betterterminal.ps1` ends by
+        // writing `ESC ]0;PowerShell BEL`, so every session in this window
+        // carries this exact title for its whole life. Under the old order it
+        // outranked the folder, and a four-pane split printed one word four
+        // times while the location — the only thing a head is for — was gone
+        // from all four.
         assert_eq!(
-            pane_head_title(Some("cargo build"), Some(cwd)),
-            Some(("cargo build".to_owned(), tooltip::NameSource::Program))
+            pane_head_title(Some(profile), Some(cwd), profile),
+            Some((whole.clone(), tooltip::NameSource::Cwd)),
+            "a shell that only agrees with its profile has announced nothing"
         );
-        // With no title it is the WHOLE folder, not its last segment — C28's own
-        // `${s.cwd}`, the answer to "where is this".
+        // A program with something of its own to say rides in FRONT of the
+        // place, and does not replace it: a head has a whole bar and can carry
+        // both facts at once.
         assert_eq!(
-            pane_head_title(None, Some(cwd)),
+            pane_head_title(Some("vim main.rs"), Some(cwd), profile),
+            Some((
+                format!("vim main.rs{}{whole}", tooltip::NAME_PLACE_SEPARATOR),
+                tooltip::NameSource::Program
+            )),
+            "`title · path`, the tip's own punctuation"
+        );
+        // The suppression is measured against THIS profile's name, not against
+        // a literal. Hard-code `\"PowerShell\"` here and the day a second
+        // profile ships, its panes start repeating a word already on the tab —
+        // and this assertion is what notices.
+        assert_eq!(
+            pane_head_title(Some("PowerShell"), Some(cwd), "Ubuntu"),
+            Some((
+                format!("PowerShell{}{whole}", tooltip::NAME_PLACE_SEPARATOR),
+                tooltip::NameSource::Program
+            )),
+            "under another profile that same word IS an announcement"
+        );
+        // Measured on the sanitised title, like every other decision here, so a
+        // control character glued to the profile's name cannot smuggle the
+        // prefix back in.
+        assert_eq!(
+            pane_head_title(Some("Power\u{1b}Shell\u{8}"), Some(cwd), profile),
+            Some((whole.clone(), tooltip::NameSource::Cwd)),
+            "the check sees what the head would print, not what arrived"
+        );
+
+        // With no title at all it is the WHOLE folder, not its last segment —
+        // C28's own `${s.cwd}`, the answer to "where is this".
+        assert_eq!(
+            pane_head_title(None, Some(cwd), profile),
             Some((whole.clone(), tooltip::NameSource::Cwd)),
             "the whole path; the leaf is what a label riding the pointer says"
         );
         // A title that sanitises away has said nothing, and falls through rather
         // than blanking the head — the impersonation the sanitiser refuses.
         assert_eq!(
-            pane_head_title(Some("\u{1b}\u{7}\u{8}"), Some(cwd)),
+            pane_head_title(Some("\u{1b}\u{7}\u{8}"), Some(cwd), profile),
             Some((whole.clone(), tooltip::NameSource::Cwd)),
             "an empty sanitised layer is not an answer"
         );
         assert_eq!(
-            pane_head_title(Some("   "), Some(cwd)),
+            pane_head_title(Some("   "), Some(cwd), profile),
             Some((whole.clone(), tooltip::NameSource::Cwd))
+        );
+
+        // NO FOLDER: the chain the head has always had, and the profile filter
+        // is deliberately absent from it. Suppressing the title here would
+        // leave the head emptier than the shell left it, because there is no
+        // better answer underneath to reveal.
+        assert_eq!(
+            pane_head_title(Some(profile), None, profile),
+            Some((profile.to_owned(), tooltip::NameSource::Program)),
+            "with nowhere to be, the profile's own word is still the best there is"
+        );
+        assert_eq!(
+            pane_head_title(Some("vim main.rs"), None, profile),
+            Some(("vim main.rs".to_owned(), tooltip::NameSource::Program))
         );
         // The path layer is sanitised on the same terms, because OSC 7 is as
         // program-controlled as OSC 2: a folder that sanitises to nothing has
         // named no place, and falls through exactly as an empty title does.
         assert_eq!(
-            pane_head_title(None, Some(Path::new("\u{1b}\u{7}"))),
+            pane_head_title(None, Some(Path::new("\u{1b}\u{7}")), profile),
             None,
             "a path that sanitises away is not a place either"
         );
         // Neither layer: nobody has said anything, and the caption falls back to
         // the seat's kind where it is drawn rather than to a guess here.
-        assert_eq!(pane_head_title(None, None), None);
-        assert_eq!(pane_head_title(Some(""), None), None);
+        assert_eq!(pane_head_title(None, None, profile), None);
+        assert_eq!(pane_head_title(Some(""), None, profile), None);
 
         // Two panes, two answers — the whole point of resolving per leaf. They
         // differ in the last segment, and at the head's length they carry the
-        // shared prefix that says which tree the two of them are in.
+        // shared prefix that says which tree the two of them are in. This is the
+        // pair that used to be two identical "PowerShell"s.
         assert_ne!(
-            pane_head_title(None, Some(Path::new(r"C:\repo\crates\bt-app"))),
-            pane_head_title(None, Some(Path::new(r"C:\repo\crates\bt-term"))),
+            pane_head_title(
+                Some(profile),
+                Some(Path::new(r"C:\repo\crates\bt-app")),
+                profile
+            ),
+            pane_head_title(
+                Some(profile),
+                Some(Path::new(r"C:\repo\crates\bt-term")),
+                profile
+            ),
         );
 
         // And the tab's own name is not in this stack at all: `resolve_title`
-        // adds it on top for the *tab*, and a pane never sees it.
+        // adds it on top for the *tab*, and a pane never sees it. The tab's four
+        // layers are untouched by this ruling — a tab answers "what is this
+        // called" and keeps taking the program's title outright.
         assert_eq!(
             resolve_title(Some("my tab"), None, Some(cwd)).0,
             "my tab",
             "the tab wears the override"
         );
         assert_eq!(
-            pane_head_title(None, Some(cwd)).map(|(name, _)| name),
+            resolve_title(None, Some(profile), Some(cwd)).0,
+            profile,
+            "and the tab still takes a title over a folder, filter or no filter"
+        );
+        assert_eq!(
+            pane_head_title(None, Some(cwd), profile).map(|(name, _)| name),
             Some(whole),
             "the pane under it does not"
         );
@@ -16129,6 +16468,7 @@ mod tests {
     /// anything.
     #[test]
     fn a_pane_heads_folder_is_capped_at_max_path_and_not_at_a_names_forty() {
+        let profile = profiles::PROFILES[profiles::DEFAULT_PROFILE].title;
         let ordinary = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app\src");
         let ordinary_text = ordinary.to_str().expect("a test path is UTF-8");
         assert!(
@@ -16136,7 +16476,7 @@ mod tests {
             "the fixture only proves anything if a name's cap would have bitten"
         );
         assert_eq!(
-            pane_head_title(None, Some(ordinary)),
+            pane_head_title(None, Some(ordinary), profile),
             Some((ordinary_text.to_owned(), tooltip::NameSource::Cwd)),
             "an ordinary path is not cut at all — C28's whole path, whole"
         );
@@ -16152,8 +16492,8 @@ mod tests {
                 .join("\\")
         );
         assert!(long.chars().count() > CWD_MAX_CHARS);
-        let (named, source) =
-            pane_head_title(None, Some(Path::new(&long))).expect("a long path is still a place");
+        let (named, source) = pane_head_title(None, Some(Path::new(&long)), profile)
+            .expect("a long path is still a place");
         assert_eq!(
             named.chars().count(),
             CWD_MAX_CHARS,
@@ -16189,6 +16529,18 @@ mod tests {
         format!("\u{1b}]7;file:///{}\u{7}", path.replace('\\', "/"))
     }
 
+    /// The title `scripts/shell-integration/betterterminal.ps1` writes, in its
+    /// own bytes.
+    ///
+    /// Copied from the script's last line rather than posted straight into
+    /// `window_title`, for the same reason [`osc7_report`] is built: the string
+    /// under test has to travel the road a real one travels. It is the shipped
+    /// integration's actual parting shot, and it is the input that made this
+    /// ruling necessary.
+    fn osc0_report(title: &str) -> String {
+        format!("\u{1b}]0;{title}\u{7}")
+    }
+
     /// PIN (C28, end to end): the names a *tab* hands the chrome are the whole
     /// folders its shells reported.
     ///
@@ -16214,10 +16566,26 @@ mod tests {
     fn a_tabs_terminal_names_are_the_whole_folders_its_shells_reported() {
         let left_path = r"D:\Developer\BetterTerminal\crates\bt-app";
         let right_path = r"D:\Developer\BetterTerminal\crates\bt-term";
-        let tab = cross_tab(1, &[&osc7_report(left_path), &osc7_report(right_path)]);
+        let profile = profiles::PROFILES[profiles::DEFAULT_PROFILE].title;
+        // Both shells say exactly what the shipped integration makes them say:
+        // the profile's own title, then where they stand. This is the pane pair
+        // that used to read "PowerShell" twice.
+        let tab = cross_tab(
+            1,
+            &[
+                &format!("{}{}", osc0_report(profile), osc7_report(left_path)),
+                &format!("{}{}", osc0_report(profile), osc7_report(right_path)),
+            ],
+        );
         let [left, right] = tab.seats.terminals()[..] else {
             panic!("a two-pane cross tab holds two terminal seats");
         };
+        assert_eq!(
+            tab.sessions[&left].session.window_title(),
+            Some(profile),
+            "the fixture only proves anything if the integration's title really \
+             arrived and really outranked the folder under the old order"
+        );
 
         let names = tab.terminal_names();
         assert_eq!(
@@ -16242,6 +16610,272 @@ mod tests {
             ),
             "bt-app",
             "3304: the label riding the pointer still gets the one word"
+        );
+    }
+
+    /// A real selection over one leaf's own text, with anchors taken from that
+    /// leaf's own viewport frame — the way a drag in that pane would make one.
+    fn leaf_selection(tab: &mut TabState, seat: SeatId, columns: u32) -> ViewSelection {
+        let leaf = tab
+            .sessions
+            .get_mut(&seat)
+            .expect("the seat under test holds a session");
+        let frame = leaf
+            .session
+            .viewport_frame(&mut leaf.projection)
+            .expect("a live leaf has a viewport frame");
+        ViewSelection {
+            start: frame
+                .anchor_at(0, 0, Bias::Before)
+                .expect("a continuous frame")
+                .expect("the first cell has an anchor"),
+            end: frame
+                .anchor_at(0, columns, Bias::After)
+                .expect("a continuous frame")
+                .expect("the last cell has an anchor"),
+        }
+    }
+
+    /// Which panes of a tab are currently wearing selection colour.
+    ///
+    /// The invariant is a statement about the whole tab, so it is asserted
+    /// against the whole tab. Counting "did the one pane I happened to think of
+    /// get cleared" would pass a sweep that only ever clears the pane it saw
+    /// last.
+    fn panes_wearing_a_selection(tab: &TabState) -> Vec<SeatId> {
+        tab.leaves()
+            .filter(|(_, leaf)| leaf.session.view_selection().is_some())
+            .map(|(seat, _)| *seat)
+            .collect()
+    }
+
+    /// PIN: **a window shows at most one selection, because a window has one
+    /// clipboard.**
+    ///
+    /// Copy-on-select means the highlight is not decoration — it is this
+    /// window's answer to "what will Ctrl+V paste". Two panes highlighted at
+    /// once is that answer given twice, and the user cannot tell which of them
+    /// is true. Before this ruling every pane kept its own selection forever, so
+    /// a session of ordinary work left colour in three panes naming text that
+    /// had been off the clipboard for minutes.
+    ///
+    /// Three assertions, each ruling out a different wrong rule:
+    ///
+    /// * **A new selection displaces every other.** Not just the one made
+    ///   before it — the forbidden two-pane state is built here behind the
+    ///   invariant's back precisely so the sweep has more than one stale claim
+    ///   to find. A rule that cleared only "the previous pane" would pass a
+    ///   two-pane test and leave the third pane lit.
+    /// * **Focus alone displaces nothing.** Moving the keyboard makes no second
+    ///   claim; there is still one highlight and it still names the clipboard.
+    ///   Clearing on focus would delete a selection the user is about to paste
+    ///   somewhere, which is the opposite of the service.
+    /// * **`None` displaces nothing.** A click that begins a drag but never
+    ///   moves owns no selection (`begin_local_selection` passes `None` for the
+    ///   linear case on purpose), so clicking into a neighbour to look at it
+    ///   must not wipe the highlight for nothing.
+    ///
+    /// MUTATION: delete the sweep from [`TabState::set_leaf_selection`] and the
+    /// first and last blocks go red — two panes, and then three, wear colour at
+    /// once. Widen it to fire on `None` as well and the focus/click blocks go
+    /// red instead.
+    #[test]
+    fn a_new_selection_leaves_no_other_pane_of_the_tab_wearing_one() {
+        let mut tab = cross_tab(1, &["left text", "middle text", "right text"]);
+        let [left, middle, right] = tab.seats.terminals()[..] else {
+            panic!("a three-pane cross tab holds three terminal seats");
+        };
+
+        // One gesture, one selection, wherever it lands and however often the
+        // hand moves between panes.
+        for seat in [left, middle, right, left] {
+            let selection = leaf_selection(&mut tab, seat, 3);
+            tab.set_leaf_selection(seat, Some(selection));
+            assert_eq!(
+                panes_wearing_a_selection(&tab),
+                vec![seat],
+                "the pane that was just selected in is the only one lit"
+            );
+        }
+
+        // Focus is not a claim. The keyboard moves; the highlight stays where
+        // the user put it.
+        tab.focused_leaf = right;
+        assert_eq!(
+            panes_wearing_a_selection(&tab),
+            vec![left],
+            "a focus change makes no second claim, so it settles no ambiguity"
+        );
+        // Nor is a click that never becomes a drag: it owns no selection, and
+        // owning none must not take one away.
+        tab.set_leaf_selection(right, None);
+        assert_eq!(
+            panes_wearing_a_selection(&tab),
+            vec![left],
+            "a bare press passes `None`, and `None` displaces nobody"
+        );
+
+        // The state this rule exists to end, built directly so the sweep has two
+        // stale claims to clear and not one.
+        let stale_left = leaf_selection(&mut tab, left, 3);
+        let stale_right = leaf_selection(&mut tab, right, 3);
+        tab.sessions
+            .get_mut(&left)
+            .expect("the left seat holds a session")
+            .session
+            .set_view_selection(Some(stale_left));
+        tab.sessions
+            .get_mut(&right)
+            .expect("the right seat holds a session")
+            .session
+            .set_view_selection(Some(stale_right));
+        assert_eq!(
+            panes_wearing_a_selection(&tab).len(),
+            2,
+            "the fixture only proves anything if two panes really are lit"
+        );
+
+        let fresh = leaf_selection(&mut tab, middle, 4);
+        tab.set_leaf_selection(middle, Some(fresh));
+        assert_eq!(
+            panes_wearing_a_selection(&tab),
+            vec![middle],
+            "one new selection ends every older claim, not merely the last"
+        );
+        assert!(
+            tab.sessions[&left].projection.selection().is_none()
+                && tab.sessions[&right].projection.selection().is_none(),
+            "and the projections agree, so nothing stays painted with nothing behind it"
+        );
+    }
+
+    /// Every combination of the four facts [`wheel_route`] turns on.
+    fn every_wheel_situation() -> impl Iterator<Item = (bool, bool, bt_term::TerminalModes, bool)> {
+        use bt_term::{MouseTracking, TerminalModes};
+        let trackings = [
+            MouseTracking::Off,
+            MouseTracking::Click,
+            MouseTracking::Drag,
+            MouseTracking::Motion,
+        ];
+        [true, false].into_iter().flat_map(move |focused| {
+            [true, false].into_iter().flat_map(move |shift| {
+                [true, false].into_iter().flat_map(move |alternate_screen| {
+                    [true, false].into_iter().flat_map(move |alternate_scroll| {
+                        trackings.into_iter().flat_map(move |mouse_tracking| {
+                            [true, false].into_iter().map(move |scrolled| {
+                                (
+                                    focused,
+                                    shift,
+                                    TerminalModes {
+                                        alternate_screen,
+                                        alternate_scroll,
+                                        sgr_mouse: true,
+                                        mouse_tracking,
+                                    },
+                                    scrolled,
+                                )
+                            })
+                        })
+                    })
+                })
+            })
+        })
+    }
+
+    /// PIN (1a39adc): **"a wheel scrolls whatever it hovers but whispers
+    /// protocol only to the focused shell."**
+    ///
+    /// The ruling has two halves and they are pinned separately, because the bug
+    /// was that one half quietly acquired the other's condition. Scrolling is
+    /// supposed to follow the *pointer* and bytes are supposed to follow the
+    /// *keyboard*; what shipped let focus veto scrolling too, so a wheel over an
+    /// unfocused pane running any full-screen program — vim, htop, less, Claude
+    /// Code — was dropped on the floor with nothing to show for it.
+    ///
+    /// Asserted over the **whole fact space** rather than a handful of cases,
+    /// because the failure was a hole in a chain of `if`s and a hole is found by
+    /// covering the space, not by sampling it. A hundred and twenty-eight
+    /// situations, sixty-four of them unfocused, three invariants:
+    ///
+    /// * an unfocused pane is **never** told to do nothing — it always scrolls;
+    /// * an unfocused pane **never** forwards, by either route, so the pointer
+    ///   can never put bytes in a shell the keyboard is not in;
+    /// * the focused pane's answers are unchanged in every combination, which is
+    ///   what makes this a repair rather than a new policy.
+    ///
+    /// MUTATION: return [`WheelRoute::Nothing`] instead of [`WheelRoute::Local`]
+    /// for the unfocused alternate-screen case — the shipped behaviour — and the
+    /// first invariant goes red. Drop `target_is_focused` from either forwarding
+    /// arm and the second goes red.
+    #[test]
+    fn a_wheel_scrolls_whatever_it_hovers_and_whispers_only_to_the_focused_shell() {
+        let mut unfocused_situations = 0;
+        for (focused, shift, modes, scrolled) in every_wheel_situation() {
+            let route = wheel_route(focused, shift, modes, scrolled);
+            if focused {
+                continue;
+            }
+            unfocused_situations += 1;
+            assert_eq!(
+                route,
+                WheelRoute::Local,
+                "a wheel over an unfocused pane scrolls it and says nothing \
+                 (shift={shift} modes={modes:?} scrolled={scrolled})"
+            );
+        }
+        assert_eq!(
+            unfocused_situations, 64,
+            "the sweep really did cover every unfocused situation"
+        );
+
+        // The focused pane, unchanged — the established table, restated so a
+        // change to it cannot hide behind the repair above.
+        use bt_term::{MouseTracking, TerminalModes};
+        let plain = TerminalModes {
+            alternate_screen: false,
+            alternate_scroll: false,
+            sgr_mouse: true,
+            mouse_tracking: MouseTracking::Off,
+        };
+        assert_eq!(wheel_route(true, false, plain, false), WheelRoute::Local);
+        let tracked = TerminalModes {
+            mouse_tracking: MouseTracking::Drag,
+            ..plain
+        };
+        assert_eq!(
+            wheel_route(true, false, tracked, false),
+            WheelRoute::MouseReport,
+            "the focused shell still gets its protocol first"
+        );
+        assert_eq!(
+            wheel_route(true, true, tracked, false),
+            WheelRoute::Local,
+            "Shift is the local override it has always been"
+        );
+        let tui = TerminalModes {
+            alternate_screen: true,
+            alternate_scroll: true,
+            ..plain
+        };
+        assert_eq!(
+            wheel_route(true, false, tui, false),
+            WheelRoute::ArrowKeys,
+            "alternate-scroll emulation still answers the focused pane"
+        );
+        let mute_tui = TerminalModes {
+            alternate_screen: true,
+            ..plain
+        };
+        assert_eq!(
+            wheel_route(true, false, mute_tui, false),
+            WheelRoute::Nothing,
+            "a focused program that owns its screen and declined the wheel keeps it"
+        );
+        assert_eq!(
+            wheel_route(true, false, mute_tui, true),
+            WheelRoute::Local,
+            "except once displaced into local review, which is sticky"
         );
     }
 
