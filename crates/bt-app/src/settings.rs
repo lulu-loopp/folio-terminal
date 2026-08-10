@@ -75,6 +75,13 @@ const GROUP_LABEL_FONT_LOGICAL_PX: f32 = 11.0;
 /// The 11px line box, measured in the mock-up.
 const GROUP_LABEL_LINE_LOGICAL_PX: f32 = 13.0;
 const GROUP_LABEL_MARGIN_TOP_LOGICAL_PX: f32 = 10.0;
+/// What every heading after the first stands off the group above it.
+///
+/// The mock-up writes the base `margin: 10px 0 2px` once and then overrides the
+/// top on each later heading with an inline `style="margin-top:16px"`
+/// (`design/ui-mockup.html:2406, 2421, 2452`) — the extra six pixels are what
+/// separate one group from the next rather than one row from the next.
+const GROUP_LABEL_MARGIN_TOP_LATER_LOGICAL_PX: f32 = 16.0;
 const GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX: f32 = 2.0;
 /// `letter-spacing: .05em` at 11px.
 const GROUP_LABEL_TRACKING_EM: f32 = 0.05;
@@ -190,6 +197,38 @@ fn sidebar_label(mode: RailMode) -> &'static str {
     }
 }
 
+/// A headed run of rows in the dialog's `.content`.
+///
+/// The mock-up's settings panel is not a flat list — it is group labels with
+/// their rows beneath them (`design/ui-mockup.html:2343, 2406, 2421, 2452`), and
+/// the user's 2026-08-10 ruling took that literally: groups laid out one after
+/// another, with a category rail down the side left for when the panel has grown
+/// enough to need one.
+///
+/// Only the two groups this build has rows for are named. A group with nothing in
+/// it draws no heading and costs no height, which falls out of deriving the
+/// headings from the row list rather than declaring them beside it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsGroup {
+    Appearance,
+    RenderedBlocks,
+}
+
+impl SettingsGroup {
+    /// The heading as it is drawn.
+    ///
+    /// Upper-cased at the source, as `"APPEARANCE"` always was: the chrome text
+    /// path has no `text-transform`, and the mock-up's own words are
+    /// "Appearance" (2343) and "Rendered blocks" (2421).
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Appearance => "APPEARANCE",
+            Self::RenderedBlocks => "RENDERED BLOCKS",
+        }
+    }
+}
+
 /// One line of the dialog's `.content`: a title, a description and a picker.
 ///
 /// An enumeration and not a set of named fields, because a row now exists in
@@ -198,25 +237,44 @@ fn sidebar_label(mode: RailMode) -> &'static str {
 /// make each of those four teach itself the condition separately, and the first
 /// one that is not taught is a control the user can click but cannot see.
 ///
-/// **Order is Theme, Cursor, Tab layout, Sidebar.** The mock-up's binding
-/// constraint is that Sidebar reads as a dependent of Tab layout — its row only
-/// exists while Tab layout is Vertical — so it has to sit immediately under the
-/// row it depends on. Cursor is a row the mock-up does not have at all, so it
-/// keeps the position it already shipped in rather than being moved for a reason
-/// the mock-up never states.
+/// **Order is Theme, Cursor, Tab layout, Sidebar, Display formulas.** The
+/// mock-up's binding constraint is that Sidebar reads as a dependent of Tab
+/// layout — its row only exists while Tab layout is Vertical — so it has to sit
+/// immediately under the row it depends on. Cursor is a row the mock-up does not
+/// have at all, so it keeps the position it already shipped in rather than being
+/// moved for a reason the mock-up never states.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SettingsRow {
     Theme,
     Cursor,
-    /// User ruling 2026-08-10. Sits above the conditional pair rather than below
-    /// it: a row underneath Sidebar would slide up and down the dialog every
-    /// time Tab layout changed, for no reason of its own.
-    Formulas,
     TabLayout,
     Sidebar,
+    /// User ruling 2026-08-10. Last, because it is the only row of the second
+    /// group; it used to sit above the conditional Tab layout/Sidebar pair to
+    /// keep it from sliding up and down the dialog, and being in a group of its
+    /// own underneath them serves the same end.
+    Formulas,
 }
 
 impl SettingsRow {
+    /// Which heading this row is filed under.
+    ///
+    /// Stated once, per row, and read by the layout — the headings the dialog
+    /// draws are derived by walking [`visible_rows`] and noticing where this
+    /// answer changes, so there is no second list of groups to keep in step and
+    /// no way to show a heading over rows that do not belong to it.
+    #[must_use]
+    pub fn group(self) -> SettingsGroup {
+        match self {
+            Self::Theme | Self::Cursor | Self::TabLayout | Self::Sidebar => {
+                SettingsGroup::Appearance
+            }
+            // The mock-up files what typesetting does to a block under "Rendered
+            // blocks" (2421), beside that group's own Maximum height row.
+            Self::Formulas => SettingsGroup::RenderedBlocks,
+        }
+    }
+
     #[must_use]
     pub fn title(self) -> &'static str {
         match self {
@@ -294,24 +352,29 @@ impl SettingsRow {
     }
 }
 
-/// Which rows the dialog holds while the tabs run on this axis.
+/// Which rows the dialog holds while the tabs run on this axis, in the order
+/// they are stacked — grouped, with each group's rows together.
 ///
 /// **The one place the conditional row is stated** (mock-up 5644:
 /// `$("row-railmode").style.display = state.layoutMode === "vertical" ? "" :
-/// "none"`). The height, the stacking, the hit test and the draw all read the
-/// list this returns, so none of them carries a copy of the rule and none of
-/// them can be forgotten when it changes.
+/// "none"`). The height, the stacking, the hit test, the draw *and the headings*
+/// all read the list this returns, so none of them carries a copy of the rule and
+/// none of them can be forgotten when it changes.
+///
+/// Rows of one group must stay contiguous here: the headings are derived from
+/// where [`SettingsRow::group`] changes as this list is walked, so a row filed
+/// out of order would head its group twice.
 #[must_use]
 pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     let mut rows = vec![
         SettingsRow::Theme,
         SettingsRow::Cursor,
-        SettingsRow::Formulas,
         SettingsRow::TabLayout,
     ];
     if tab_layout == TabLayoutMode::Vertical {
         rows.push(SettingsRow::Sidebar);
     }
+    rows.push(SettingsRow::Formulas);
     rows
 }
 
@@ -433,6 +496,13 @@ pub struct RowLayout {
     pub combo: [f32; 4],
 }
 
+/// One heading's line box, and which group it names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupLayout {
+    pub group: SettingsGroup,
+    pub label: [f32; 4],
+}
+
 /// Every rectangle the overlay draws and hit-tests, in physical pixels of the
 /// whole surface.
 #[derive(Clone, Debug, PartialEq)]
@@ -446,7 +516,9 @@ pub struct SettingsLayout {
     close: [f32; 4],
     /// The `.content` padding box, which is also what content is clipped to.
     content: [f32; 4],
-    group_label: [f32; 4],
+    /// The headings the dialog is drawing, top to bottom. Derived from `rows`,
+    /// never declared beside it.
+    groups: Vec<GroupLayout>,
     /// The rows the dialog is holding, top to bottom — the list
     /// [`visible_rows`] handed in, given boxes.
     rows: Vec<RowLayout>,
@@ -568,12 +640,31 @@ pub fn layout_for_menu(
         px(ROW_TITLE_LINE_LOGICAL_PX + ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX);
     let row_height =
         2.0 * px(ROW_PADDING_Y_LOGICAL_PX) + text_height.max(px(COMBO_HEIGHT_LOGICAL_PX));
-    let content_height = px(CONTENT_PADDING_TOP_LOGICAL_PX)
-        + px(GROUP_LABEL_MARGIN_TOP_LOGICAL_PX)
-        + px(GROUP_LABEL_LINE_LOGICAL_PX)
-        + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX)
-        + rows.len() as f32 * row_height
-        + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX);
+    // The content is a stack of headings and rows in one order, so its height is
+    // that same stack measured — not a row count plus a remembered number of
+    // headings. `heading_advance` answers for both the height here and the
+    // placement below, which is what keeps a row from being drawn one heading's
+    // worth away from where the dialog made room for it.
+    let heading_advance = |first: bool| {
+        px(if first {
+            GROUP_LABEL_MARGIN_TOP_LOGICAL_PX
+        } else {
+            GROUP_LABEL_MARGIN_TOP_LATER_LOGICAL_PX
+        }) + px(GROUP_LABEL_LINE_LOGICAL_PX)
+            + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX)
+    };
+    let mut stack_height = 0.0_f32;
+    let mut previous_group: Option<SettingsGroup> = None;
+    for row in rows {
+        let group = row.group();
+        if previous_group != Some(group) {
+            stack_height += heading_advance(previous_group.is_none());
+            previous_group = Some(group);
+        }
+        stack_height += row_height;
+    }
+    let content_height =
+        px(CONTENT_PADDING_TOP_LOGICAL_PX) + stack_height + px(CONTENT_PADDING_BOTTOM_LOGICAL_PX);
     let header = px(HEADER_HEIGHT_LOGICAL_PX);
     let height = (2.0 * border + header + content_height)
         .min(available)
@@ -616,29 +707,41 @@ pub fn layout_for_menu(
     ];
     let text_left = content[0] + px(CONTENT_PADDING_X_LOGICAL_PX);
     let text_right = content[2] - px(CONTENT_PADDING_X_LOGICAL_PX);
-    let group_top =
-        content[1] + px(CONTENT_PADDING_TOP_LOGICAL_PX + GROUP_LABEL_MARGIN_TOP_LOGICAL_PX);
-    let group_label = [
-        text_left,
-        group_top,
-        text_right,
-        group_top + px(GROUP_LABEL_LINE_LOGICAL_PX),
-    ];
-    let row_top = group_label[3] + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX);
-    let row_content_top = row_top + px(ROW_PADDING_Y_LOGICAL_PX);
     let row_content_height = text_height.max(px(COMBO_HEIGHT_LOGICAL_PX));
     let row_left = text_left + px(ROW_PADDING_X_LOGICAL_PX);
     let row_right = text_right - px(ROW_PADDING_X_LOGICAL_PX);
     let combo_width = px(COMBO_MIN_WIDTH_LOGICAL_PX);
     let combo_height = px(COMBO_HEIGHT_LOGICAL_PX);
-    // One stack at one pitch. A row's whole geometry is its index times the row
-    // height off the first one, which is why adding or removing a row costs
-    // nothing here beyond the list it is read from.
-    let placed_rows: Vec<RowLayout> = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| {
-            let top = row_content_top + index as f32 * row_height;
+    // One walk down the same stack the height was measured from. A heading is
+    // emitted wherever the group changes and everything after it moves down by
+    // exactly what the heading took, so the boxes drawn, the boxes hit-tested and
+    // the height reserved are three readings of one derivation rather than three
+    // rules that have to be kept in agreement.
+    let mut cursor = content[1] + px(CONTENT_PADDING_TOP_LOGICAL_PX);
+    let mut placed_groups: Vec<GroupLayout> = Vec::new();
+    let mut placed_rows: Vec<RowLayout> = Vec::with_capacity(rows.len());
+    let mut previous_group: Option<SettingsGroup> = None;
+    for row in rows {
+        let group = row.group();
+        if previous_group != Some(group) {
+            cursor += px(if previous_group.is_none() {
+                GROUP_LABEL_MARGIN_TOP_LOGICAL_PX
+            } else {
+                GROUP_LABEL_MARGIN_TOP_LATER_LOGICAL_PX
+            });
+            let label = [
+                text_left,
+                cursor,
+                text_right,
+                cursor + px(GROUP_LABEL_LINE_LOGICAL_PX),
+            ];
+            cursor = label[3] + px(GROUP_LABEL_MARGIN_BOTTOM_LOGICAL_PX);
+            placed_groups.push(GroupLayout { group, label });
+            previous_group = Some(group);
+        }
+        placed_rows.push({
+            let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
+            cursor += row_height;
             let combo_top = top + (row_content_height - combo_height) / 2.0;
             let combo = [
                 row_right - combo_width,
@@ -667,8 +770,8 @@ pub fn layout_for_menu(
                 desc,
                 combo,
             }
-        })
-        .collect();
+        });
+    }
     // A picker hangs off a row's button, so a picker named for a row the dialog
     // is not holding has nothing to hang from and is not open. That is not a
     // guard against the impossible: switching Tab layout to Horizontal takes the
@@ -698,7 +801,7 @@ pub fn layout_for_menu(
         header_content,
         close,
         content,
-        group_label,
+        groups: placed_groups,
         rows: placed_rows,
         menu,
         items,
@@ -898,23 +1001,23 @@ pub fn build(
     // Everything below the header is clipped to the content box, which is what
     // `max-height` plus `overflow-y` leaves when the window is too short.
     let clip = layout.content;
-    if let Some(rect) = clipped(layout.group_label, clip) {
-        labels.push(ChromeLabel {
-            // `text-transform: uppercase` applied at the source: the chrome text
-            // path has no transform, and the design's word is "Appearance".
-            text: "APPEARANCE".to_owned(),
-            rect,
-            font_size_px: px(GROUP_LABEL_FONT_LOGICAL_PX),
-            color: palette.dialog_muted_text,
-            align_right: false,
-            align_center: false,
-            // A ratio, so it carries no `scale`: the shaper adds it to a glyph's
-            // advance before the font size multiplies both.
-            letter_spacing_em: GROUP_LABEL_TRACKING_EM,
-            weight: ChromeLabelWeight::Regular,
-            tabular_numerals: false,
-            clip: None,
-        });
+    for headed in &layout.groups {
+        if let Some(rect) = clipped(headed.label, clip) {
+            labels.push(ChromeLabel {
+                text: headed.group.label().to_owned(),
+                rect,
+                font_size_px: px(GROUP_LABEL_FONT_LOGICAL_PX),
+                color: palette.dialog_muted_text,
+                align_right: false,
+                align_center: false,
+                // A ratio, so it carries no `scale`: the shaper adds it to a
+                // glyph's advance before the font size multiplies both.
+                letter_spacing_em: GROUP_LABEL_TRACKING_EM,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+        }
     }
     for placed in &layout.rows {
         if let Some(rect) = clipped(placed.title, clip) {
@@ -1184,11 +1287,28 @@ mod tests {
     /// the two-line text column (16.5 + 1 + 14.5) and the 27.5 control.
     const ROW_HEIGHT: f32 = 54.0;
 
-    /// The dialog's height at scale 1 for a content box holding `rows` rows:
-    /// two hairlines, the header's `16 + 30 + 10`, and
-    /// `2 + 10 + 13 + 2 + rows * 54 + 18` of content.
-    fn dialog_height(rows: usize) -> f32 {
-        103.0 + ROW_HEIGHT * rows as f32
+    /// A heading past the first costs `16 + 13 + 2`; the first costs `10 + 13 + 2`
+    /// and is already inside the 103 below.
+    const LATER_HEADING_HEIGHT: f32 = 31.0;
+
+    /// The dialog's height at scale 1 for a content box holding `rows` rows under
+    /// `groups` headings: two hairlines, the header's `16 + 30 + 10`, and
+    /// `2 + 10 + 13 + 2 + rows * 54 + 18` of content, plus 31 for every heading
+    /// after the first.
+    fn dialog_height(rows: usize, groups: usize) -> f32 {
+        103.0 + ROW_HEIGHT * rows as f32 + LATER_HEADING_HEIGHT * (groups.saturating_sub(1)) as f32
+    }
+
+    /// How many headings a list of rows draws — the same derivation the layout
+    /// makes, so a pin cannot count groups a different way than the dialog does.
+    fn group_count(rows: &[SettingsRow]) -> usize {
+        let mut groups: Vec<SettingsGroup> = Vec::new();
+        for row in rows {
+            if groups.last() != Some(&row.group()) {
+                groups.push(row.group());
+            }
+        }
+        groups.len()
     }
 
     /// The rows a dialog holds with the tabs across the top — the state the app
@@ -1287,9 +1407,10 @@ mod tests {
     ///
     /// The height is not a guess: it is `1 + 56 + content + 1` — two hairlines,
     /// the header's `16 + 30 + 10`, and a content box of
-    /// `2 + 10 + 13 + 2 + rows * (11 + 32 + 11) + 18`. The mock-up's own
-    /// renderer reported 211 for the two rows this dialog first shipped with,
-    /// which is [`dialog_height`] at 2 and the number the formula is anchored on.
+    /// `2 + 10 + 13 + 2 + rows * (11 + 32 + 11) + 18`, plus `16 + 13 + 2` for
+    /// every heading after the first. The mock-up's own renderer reported 211 for
+    /// the two rows under one heading this dialog first shipped with, which is
+    /// [`dialog_height`] at `(2, 1)` and the number the formula is anchored on.
     ///
     /// Red gate: every term is load-bearing. Drop the `auto` centring and `left`
     /// moves; drop the 54 and `top` moves; use the row's *border* box (55, which
@@ -1297,7 +1418,12 @@ mod tests {
     /// is one pixel per row too big.
     #[test]
     fn the_dialog_lands_where_the_mock_up_puts_it() {
-        assert_eq!(dialog_height(2), 211.0, "the mock-up's own measurement");
+        assert_eq!(
+            dialog_height(2, 1),
+            211.0,
+            "the mock-up's own measurement: two rows under one heading, which is \
+             what this dialog first shipped with"
+        );
         let placed = open(1.0, false);
         assert_eq!(width(placed.frame), 480.0, "min(480px, 92%) at 1280 wide");
         assert_eq!(placed.frame[1], 54.0, "margin-top: 54px");
@@ -1308,8 +1434,8 @@ mod tests {
         );
         assert_eq!(
             height(placed.frame),
-            dialog_height(flat_rows().len()),
-            "content decides the height"
+            dialog_height(flat_rows().len(), group_count(&flat_rows())),
+            "content decides the height, headings included"
         );
 
         // The 92% share takes over below 480/0.92 ~= 521.7 logical pixels.
@@ -1404,7 +1530,7 @@ mod tests {
             let combo = combo_of(&placed, SettingsRow::Theme);
             near(480.0 * scale, width(placed.frame), "the dialog's width");
             near(
-                dialog_height(flat_rows().len()) * scale,
+                dialog_height(flat_rows().len(), group_count(&flat_rows())) * scale,
                 height(placed.frame),
                 "the dialog's height",
             );
@@ -2100,6 +2226,180 @@ mod tests {
         }
     }
 
+    /// The dialog is a stack of headed groups, and every row sits under the
+    /// heading that names it.
+    ///
+    /// The mock-up's `.content` is four `.group-label`s with their rows beneath
+    /// (`design/ui-mockup.html:2343, 2406, 2421, 2452`); this build has the two
+    /// the audit assigned. A row drawn under the wrong heading is a row filed
+    /// under a word that does not describe it, which is the only thing a group is
+    /// for.
+    #[test]
+    fn every_row_is_drawn_under_the_heading_that_names_it() {
+        let placed = open_rows(1.0, None, TabLayoutMode::Vertical);
+        let labels = labels_of(&placed, None, values());
+        let heading_top = |text: &str| {
+            labels
+                .iter()
+                .find(|label| label.text == text)
+                .unwrap_or_else(|| panic!("{text} is headed"))
+                .rect[1]
+        };
+        let appearance = heading_top("APPEARANCE");
+        let rendered = heading_top("RENDERED BLOCKS");
+        assert!(
+            appearance < rendered,
+            "Appearance is the first group in the mock-up's own order"
+        );
+
+        for row in [
+            SettingsRow::Theme,
+            SettingsRow::Cursor,
+            SettingsRow::TabLayout,
+            SettingsRow::Sidebar,
+        ] {
+            let top = placed.row(row).expect("row is shown").title[1];
+            assert!(
+                top > appearance && top < rendered,
+                "{row:?} belongs to Appearance and must be drawn between the two \
+                 headings"
+            );
+        }
+        let formulas = placed
+            .row(SettingsRow::Formulas)
+            .expect("row is shown")
+            .title[1];
+        assert!(
+            formulas > rendered,
+            "Display formulas is what Rendered blocks names"
+        );
+    }
+
+    /// A heading past the first stands further off what precedes it than a row
+    /// does, which is the whole of what makes the stack read as groups.
+    ///
+    /// The mock-up says it twice: `.group-label { margin: 10px 0 2px }` for the
+    /// first (`design/ui-mockup.html:2042`) and an inline `margin-top:16px` on
+    /// every later one (2406, 2421, 2452).
+    #[test]
+    fn a_later_heading_stands_off_the_group_above_it() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let placed = open_rows(scale, None, TabLayoutMode::Vertical);
+            let labels = labels_of(&placed, None, values());
+            let heading = |text: &str| {
+                labels
+                    .iter()
+                    .find(|label| label.text == text)
+                    .unwrap_or_else(|| panic!("{text} is headed"))
+                    .rect
+            };
+            let first = heading("APPEARANCE");
+            let later = heading("RENDERED BLOCKS");
+
+            // The first heading takes the base 10px off the content padding.
+            let content_top = placed.content[1];
+            assert!(
+                (first[1]
+                    - (content_top
+                        + (CONTENT_PADDING_TOP_LOGICAL_PX + GROUP_LABEL_MARGIN_TOP_LOGICAL_PX)
+                            * scale))
+                    .abs()
+                    < 0.5,
+                "scale {scale}: the first heading keeps the stylesheet's 10px"
+            );
+
+            // The later heading takes 16px off the bottom of the group above it.
+            let last_of_first_group = placed
+                .row(SettingsRow::Sidebar)
+                .expect("vertical tabs show the sidebar row")
+                .desc[3];
+            let gap = later[1] - last_of_first_group;
+            assert!(
+                gap > (GROUP_LABEL_MARGIN_TOP_LOGICAL_PX * scale),
+                "scale {scale}: a later heading is pushed further than the base \
+                 margin, saw {gap}"
+            );
+            assert!(
+                (later[3] - later[1] - GROUP_LABEL_LINE_LOGICAL_PX * scale).abs() < 0.5,
+                "scale {scale}: every heading is one line box tall"
+            );
+        }
+    }
+
+    /// R4's lesson, asked again now that a second heading pushes the rows below it
+    /// down: the height, the stack, the hit test and the draw are one derivation,
+    /// so a row is never clickable somewhere it is not drawn.
+    ///
+    /// This is the red gate for the bug that shipped once already — geometry
+    /// taught in one place and forgotten in another gives a control the user can
+    /// press but cannot see.
+    #[test]
+    fn every_row_answers_the_pointer_where_its_own_group_put_it() {
+        for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            for scale in [1.0_f32, 1.25, 2.0] {
+                let placed = open_rows(scale, None, tab_layout);
+                for row in visible_rows(tab_layout) {
+                    let combo = placed.row(row).expect("a visible row is placed").combo;
+                    let centre = (
+                        f64::from((combo[0] + combo[2]) / 2.0),
+                        f64::from((combo[1] + combo[3]) / 2.0),
+                    );
+                    assert_eq!(
+                        hit(&placed, centre.0, centre.1),
+                        SettingsTarget::Combo(row),
+                        "{tab_layout:?} at {scale}: {row:?}'s picker must answer \
+                         where it is drawn"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The dialog is as tall as everything it is holding — both headings included.
+    ///
+    /// A height that counted one heading while the stack drew two would push the
+    /// last group past the bottom of the content box and clip it away.
+    #[test]
+    fn the_dialog_makes_room_for_every_heading_it_draws() {
+        let placed = open_rows(1.0, None, TabLayoutMode::Vertical);
+        let content = placed.content;
+        let last = placed
+            .row(SettingsRow::Formulas)
+            .expect("row is shown")
+            .desc[3];
+        assert!(
+            last + CONTENT_PADDING_BOTTOM_LOGICAL_PX <= content[3] + 0.5,
+            "the last row and the content's bottom padding both fit inside the \
+             content box"
+        );
+    }
+
+    /// Every group the dialog can show holds at least one row, and a group's rows
+    /// are contiguous — the order in [`visible_rows`] is what the headings are
+    /// derived from, so a row filed out of order would split its own group in two.
+    #[test]
+    fn each_groups_rows_stand_together_in_the_visible_order() {
+        for tab_layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
+            let rows = visible_rows(tab_layout);
+            let mut seen: Vec<SettingsGroup> = Vec::new();
+            for row in rows {
+                let group = row.group();
+                if seen.last() != Some(&group) {
+                    assert!(
+                        !seen.contains(&group),
+                        "{tab_layout:?}: {group:?} is interrupted by another group"
+                    );
+                    seen.push(group);
+                }
+            }
+            assert_eq!(
+                seen,
+                vec![SettingsGroup::Appearance, SettingsGroup::RenderedBlocks],
+                "{tab_layout:?}: both groups are shown, in the mock-up's order"
+            );
+        }
+    }
+
     /// The dialog's close affordance is the mock-up's own `#i-close`, and it is
     /// the only mark the overlay draws.
     #[test]
@@ -2325,8 +2625,8 @@ mod tests {
             [
                 SettingsRow::Theme,
                 SettingsRow::Cursor,
-                SettingsRow::Formulas,
-                SettingsRow::TabLayout
+                SettingsRow::TabLayout,
+                SettingsRow::Formulas
             ]
         );
         assert_eq!(
@@ -2334,10 +2634,12 @@ mod tests {
             [
                 SettingsRow::Theme,
                 SettingsRow::Cursor,
-                SettingsRow::Formulas,
                 SettingsRow::TabLayout,
-                SettingsRow::Sidebar
-            ]
+                SettingsRow::Sidebar,
+                SettingsRow::Formulas
+            ],
+            "Sidebar still lands directly under the row it depends on, and \
+             Formulas stays last as the whole of the second group"
         );
     }
 
@@ -2391,27 +2693,37 @@ mod tests {
         }
     }
 
-    /// PIN (mock-up geometry): the rows are one stack at one pitch, whatever is
-    /// in it — the generalisation of the claim the Cursor row shipped with, now
-    /// that the list is not two fixed rows any more.
+    /// PIN (mock-up geometry): the rows are one stack at one pitch inside a group,
+    /// whatever is in it, and crossing into the next group costs exactly one
+    /// heading and not a pixel more.
+    ///
+    /// Two claims in one, because the pair is what a group *is*: rows that are
+    /// evenly spaced say "these belong together", and the one larger step says
+    /// "and these do not". Every row keeps the identical control either way — a
+    /// heading separates rows, it does not restyle them.
     #[test]
-    fn rows_stack_one_row_height_apart_whatever_the_visible_list_is() {
+    fn rows_stack_one_row_height_apart_within_a_group_and_one_heading_across_one() {
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
             let placed = open_rows(1.0, None, layout);
             assert_eq!(placed.rows.len(), visible_rows(layout).len());
             for pair in placed.rows.windows(2) {
                 let (above, below) = (&pair[0], &pair[1]);
+                let expected = if above.row.group() == below.row.group() {
+                    ROW_HEIGHT
+                } else {
+                    ROW_HEIGHT + LATER_HEADING_HEIGHT
+                };
                 assert_eq!(
                     below.combo[1] - above.combo[1],
-                    ROW_HEIGHT,
-                    "{:?} is the next identical row under {:?}",
+                    expected,
+                    "{:?} follows {:?}",
                     below.row,
                     above.row
                 );
                 assert_eq!(width(below.combo), width(above.combo));
                 assert_eq!(height(below.combo), height(above.combo));
-                assert_eq!(below.title[1] - above.title[1], ROW_HEIGHT);
-                assert_eq!(below.desc[1] - above.desc[1], ROW_HEIGHT);
+                assert_eq!(below.title[1] - above.title[1], expected);
+                assert_eq!(below.desc[1] - above.desc[1], expected);
             }
         }
     }

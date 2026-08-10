@@ -2339,6 +2339,18 @@
         <h1>Settings</h1>
         <button class="dlg-close" id="btn-close-settings" title="Close" aria-label="Close settings"><svg><use href="#i-close"/></svg></button>
       </header>
+      <!-- GROUPS, not a flat list (user ruling 2026-08-10). The native dialog
+           now reads this literally: `.content` is a stack of `.group-label`s with
+           their rows beneath, the first at the base `margin-top:10px` and every
+           later one at the inline `margin-top:16px` below. The native build has
+           the two groups it has rows for — Appearance (Theme, Cursor, Tab layout,
+           Sidebar) and Rendered blocks (Display formulas) — and derives the
+           headings by walking its row list and noticing where the group changes,
+           so a group with no rows draws no heading and costs no height.
+           The left-hand category rail is deliberately NOT built yet: it waits for
+           the Settings extension block, and it will be born the same day as the
+           shortcut-editing panel (P2-7) rather than before there is enough here
+           to navigate. -->
       <div class="content">
         <div class="group-label">Appearance</div>
         <div class="row">
@@ -6010,6 +6022,46 @@
       default:       return [`<span class="dim">'${esc(head)}' is not recognized — this terminal is a mockup. Try 'help'.</span>`];
     }
   }
+  /* ── P2-7, THE KEYBOARD SHORTCUT AUDIT (user ruling, plan A, 2026-08-10) ──
+     Every binding that was "provisional pending the audit" is now decided. The
+     native build carries this as a DATA TABLE, not as a chain of ifs like the one
+     below — `crates/bt-app/src/shortcuts.rs` maps each action to its default
+     chord in one constant, dispatch is a lookup into it, and the shortcut-editing
+     panel that Settings will grow is an editor for exactly that table. A binding
+     that cannot be written as a row there is a binding the panel could never
+     offer, which is the whole reason for the shape.
+
+       New tab                     Ctrl+Shift+N     (default profile — I86)
+       Close pane                  Ctrl+Shift+W     (last pane closes the tab — I103)
+       Next / previous tab         Ctrl+Tab / Ctrl+Shift+Tab   (wraps both ways)
+       Go to tab N                 Ctrl+Shift+1..9  (past the end is ignored)
+       Undo close                  Ctrl+Shift+T     (N143, already shipped)
+       Jump to longest waiting     Ctrl+Shift+A     (P1-8; bound, machine pending)
+       Command palette             Ctrl+Shift+P     (P1-9; bound, machine pending)
+       Split horizontal/vertical   Alt+Shift+- / Alt+Shift+=   (WT's own pair)
+       Duplicate pane              Ctrl+Shift+D     (splits the longer side)
+       Pane focus navigation       Alt+arrows       (held back — see below)
+       Pane resize                 Alt+Shift+arrows (held back — see below)
+       Tab layout                  no default key   (the Settings combo is the door)
+       Open settings               Ctrl+,
+
+     Two standing rules the table may not break:
+       · Bare Ctrl+letter is the shell's control-code alphabet and is never taken.
+         That is why every window action above wears Shift.
+       · Ctrl+Alt is a FORBIDDEN ZONE. Windows reports AltGr as exactly that pair,
+         so a Ctrl+Alt binding is one a German, French, Polish or Portuguese
+         keyboard can arrive at by typing a `@` or a `{`.
+
+     Retired the same day: the dev chords Ctrl+Alt+Shift+D/E (now Alt+Shift+-/=)
+     and Ctrl+Shift+F9 (the rail cycle, whose real door is the Settings combo).
+
+     Not yet landed (2026-08-10): Alt+arrows and Alt+Shift+arrows. Alt+arrow is
+     already a terminal sequence — readline reads it as word movement — so taking
+     it needs its own decision about what the child loses, and the audit did not
+     make one. The rows are listed here so the table stays the whole ruling.
+
+     The F9 note further down still stands as written: a summon key is per-slot
+     configurable, and the prototype's default is only a default. */
   document.addEventListener("keydown", (e) => {
     /* Ctrl+B — before the terminal-typing path, gated on a modifier the terminal
        ignores. If a files pane already exists in this tab, focus it (a toggle-ish
@@ -6043,7 +6095,7 @@
       return;
     }
     /* Ctrl+Shift+A — answer the longest-waiting session; repeat to walk the
-       queue (P1-8; the binding is provisional pending the P2-7 audit) */
+       queue (P1-8; the P2-7 audit confirmed this binding on 2026-08-10) */
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === "a"
         && !document.body.classList.contains("shut")
         && !$("settings-overlay").classList.contains("show")) {

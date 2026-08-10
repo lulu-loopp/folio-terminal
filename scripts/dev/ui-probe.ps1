@@ -9,6 +9,8 @@
 #   .\ui-probe.ps1 launch [-TraceDpi] [-WaitSeconds 15]   → prints PID + HWND; keeps app running
 #   .\ui-probe.ps1 type -Pid <pid> -Text "echo hi"        → focuses window, injects text (Unicode SendInput)
 #   .\ui-probe.ps1 key  -Pid <pid> -Name Enter|Backspace|Escape|Shift
+#   .\ui-probe.ps1 chord -Pid <pid> -Mods cs -Key n      → Ctrl+Shift+N (c/s/a = ctrl/shift/alt)
+#   .\ui-probe.ps1 chord -Pid <pid> -Mods c -Name Tab    → Ctrl+Tab
 #   .\ui-probe.ps1 capture -Pid <pid> -Out shot.png [-Margin 400]  → DPI-aware capture; Margin grows the
 #                                                                    region beyond the window (IME popups
 #                                                                    are separate windows and live outside)
@@ -23,24 +25,44 @@
 # Capture is per-monitor-DPI-aware: pixels are 1:1 physical, so cell width can
 # be measured directly (expected: ceil(8.8 × scale) px per ASCII cell).
 #
-# KNOWN LIMITS (2026-07-17):
-# - launch/capture/close: proven (settled the M0-β presentation-shrink case).
-# - type/key: foreground-VERIFIED before any key is sent (never types blind —
-#   the first draft sprayed keys at whatever was foreground; never again), and
-#   scancode-level injection reaches classic Win32 apps (charmap), but bt-app
-#   (winit) does not surface the injected keys — under investigation. Until
-#   solved, rendering-path probes should set BT_PROBE_INPUT to a raw byte file;
-#   bt-app feeds it directly into Term at startup without starting ConPTY. The
-#   M1 fixture is scripts/dev/width-probe-input.vt. IME candidate-window checks
-#   stay with a human.
+# SOLVED 2026-08-10 — keyboard injection reaches bt-app.
+# - The old KNOWN LIMIT ("scancode injection reaches charmap but bt-app/winit
+#   does not surface the injected keys") was never about winit at all. The INPUT
+#   struct in this file marshalled to 32 bytes instead of the 40 that Win32 x64
+#   defines, so every SendInput call was rejected outright and nothing was ever
+#   sent. See the note on INPUTUNION below. type/key/chord now drive the real
+#   window, and every send path checks the count SendInput returns rather than
+#   assuming a call happened.
+# - Still true: foreground is VERIFIED before any key is sent (never types blind
+#   — the first draft sprayed keystrokes at whatever was foreground; never
+#   again). A refusal means the window did not take the foreground, not that the
+#   key failed.
+# - Still true: BT_PROBE_INPUT is the right tool for rendering-path probes that
+#   want bytes rather than keys — bt-app feeds the file straight into Term at
+#   startup without starting ConPTY. The M1 fixture is
+#   scripts/dev/width-probe-input.vt. IME candidate-window checks stay with a
+#   human.
+#
+# ENVIRONMENT NOTE (measured 2026-08-10, P2-7 acceptance): with a Chinese IME
+# loaded, unmodified printable keys arrive as NamedKey::Process — the IME owns
+# them and commits through the Ime path, which is correct and is what bt-app
+# already handles. Ctrl/Alt chords bypass the IME and arrive as characters. The
+# one exception found: `Ctrl+,` has its KEYDOWN swallowed system-wide while its
+# keyup still arrives (Ctrl+. / Ctrl+; / Ctrl+/ all arrive normally), which is
+# the signature of a global hotkey owned by the IME stack. A chord that "does
+# nothing" is worth checking against that before it is called an app bug.
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("launch", "type", "key", "capture", "close", "wheel", "resize", "click", "hover", "drag")]
+  [ValidateSet("launch", "type", "key", "chord", "capture", "close", "wheel", "resize", "click", "hover", "drag")]
   [string]$Cmd,
   [int]$ProcId = 0,
   [string]$Text = "",
   [string]$Name = "",
+  # chord: modifiers as a string containing any of c(trl) s(hift) a(lt), and the
+  # base key named by the character printed on it (-Key "n", -Key "-", -Key "1").
+  [string]$Mods = "",
+  [string]$Key = "",
   [string]$Out = "$env:TEMP\ui-probe.png",
   [int]$Margin = 0,
   [int]$WaitSeconds = 15,
@@ -69,8 +91,20 @@ public struct PRECT { public int L, T, R, B; }
 public struct WPOINT { public int X, Y; }
 [StructLayout(LayoutKind.Sequential)]
 public struct KEYBDINPUT { public ushort wVk, wScan; public uint dwFlags, time; public IntPtr dwExtraInfo; }
+/* The union must be as big as its LARGEST member, and that is MOUSEINPUT, not
+   KEYBDINPUT: on x64 MOUSEINPUT is 4+4+4+4+4+8 = 28 bytes padded to 32, so the
+   union is 32 and `INPUT` is 4 + 4 of alignment + 32 = 40.
+
+   Diagnosed 2026-08-10, and it is the whole of the "injected keys do not reach
+   winit" mystery this file has carried as a KNOWN LIMIT since 2026-07-17: with
+   only three pads the union measured 24, `Marshal.SizeOf(INPUT)` handed
+   SendInput a cbSize of 32, and SendInput rejects any cbSize that is not
+   exactly sizeof(INPUT) — it returned 0 and sent nothing, every time. Nothing
+   was ever being swallowed by winit; nothing was ever being sent. The fourth
+   pad is the fix, and callers should check the count SendInput returns rather
+   than trust that a call happened. */
 [StructLayout(LayoutKind.Explicit)]
-public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0)] public long pad1; [FieldOffset(8)] public long pad2; [FieldOffset(16)] public long pad3; }
+public struct INPUTUNION { [FieldOffset(0)] public KEYBDINPUT ki; [FieldOffset(0)] public long pad1; [FieldOffset(8)] public long pad2; [FieldOffset(16)] public long pad3; [FieldOffset(24)] public long pad4; }
 [StructLayout(LayoutKind.Sequential)]
 public struct INPUT { public uint type; public INPUTUNION u; }
 public class Probe {
@@ -129,7 +163,10 @@ public class Probe {
      zero characters in the app). This path is what a physical keyboard emits,
      so it exercises the app's REAL input path — which for an input-probe is a
      feature, not a workaround. */
-  public static void TypeText(string text) {
+  /* Returns how many events SendInput actually accepted, so a caller can tell
+     "sent" from "silently rejected" — see the INPUT struct note above. */
+  public static uint TypeText(string text) {
+    uint accepted = 0;
     foreach (char c in text) {
       short vks = VkKeyScanW(c);
       if (vks == -1) continue;                    // not typeable on this layout
@@ -141,14 +178,45 @@ public class Probe {
       var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = 0 }; seq.Add(down);
       var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = KEYEVENTF_KEYUP }; seq.Add(up);
       if (shift) { var s = new INPUT { type = 1 }; s.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = KEYEVENTF_KEYUP }; seq.Add(s); }
-      SendInput((uint)seq.Count, seq.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+      accepted += SendInput((uint)seq.Count, seq.ToArray(), Marshal.SizeOf(typeof(INPUT)));
       System.Threading.Thread.Sleep(24);   // real-ish cadence; IMEs dislike zero-interval streams
     }
+    return accepted;
   }
-  public static void TapVk(ushort vk) {
-    var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = 0, dwFlags = 0 };
-    var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = 0, dwFlags = KEYEVENTF_KEYUP };
-    SendInput(2, new INPUT[] { down, up }, Marshal.SizeOf(typeof(INPUT)));
+  public static uint TapVk(ushort vk) {
+    ushort sc = (ushort)MapVirtualKeyW(vk, 0);
+    var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = 0 };
+    var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = KEYEVENTF_KEYUP };
+    return SendInput(2, new INPUT[] { down, up }, Marshal.SizeOf(typeof(INPUT)));
+  }
+  /* A modifier chord, at the same scancode level TypeText uses — hold the
+     modifiers, tap the base key, release in reverse. Added 2026-08-10 for the
+     P2-7 shortcut audit, which needs Ctrl+Shift+N, Ctrl+Tab and Alt+Shift+= to
+     arrive as the app's own dispatcher sees them rather than as text.
+
+     The base key is named by the character printed on it, and its VK comes from
+     VkKeyScanW on the CURRENT layout: only the low byte is taken, and the shift
+     bit VkKeyScanW reports is deliberately discarded, because the caller is
+     supplying its own Shift. That is what makes `-Key "-"` mean "the key that
+     types a minus here" rather than a hard-coded US scancode. */
+  public static uint Chord(bool ctrl, bool shift, bool alt, ushort vk) {
+    ushort sc = (ushort)MapVirtualKeyW(vk, 0);
+    var seq = new System.Collections.Generic.List<INPUT>();
+    if (ctrl)  { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = 0 }; seq.Add(m); }
+    if (shift) { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = 0 }; seq.Add(m); }
+    if (alt)   { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = 0 }; seq.Add(m); }
+    var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = 0 }; seq.Add(down);
+    var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = KEYEVENTF_KEYUP }; seq.Add(up);
+    if (alt)   { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
+    if (shift) { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
+    if (ctrl)  { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
+    return SendInput((uint)seq.Count, seq.ToArray(), Marshal.SizeOf(typeof(INPUT)));
+  }
+  /* The VK of the key that prints this character on the current layout. */
+  public static ushort VkForChar(char c) {
+    short vks = VkKeyScanW(c);
+    if (vks == -1) return 0;
+    return (ushort)(vks & 0xFF);
   }
   /* Discovered 2026-07-17: unlike synthetic KEYBOARD events, synthetic mouse
      WHEEL events DO reach winit — scrollback can be driven autonomously. Same
@@ -221,16 +289,38 @@ switch ($Cmd) {
   "type" {
     $h = Get-AppWindow $ProcId
     if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not typing blind" }
-    [Probe]::TypeText($Text)
-    "typed $($Text.Length) chars into pid=$ProcId (foreground verified)"
+    $sent = [Probe]::TypeText($Text)
+    if ($sent -eq 0) { throw "SendInput accepted 0 events — nothing was typed" }
+    "typed $($Text.Length) chars into pid=$ProcId ($sent events accepted, foreground verified)"
   }
   "key" {
     $h = Get-AppWindow $ProcId
     if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not sending keys blind" }
     $vk = @{ Enter = 0x0D; Backspace = 0x08; Escape = 0x1B; Shift = 0x10 }[$Name]
     if (-not $vk) { throw "unknown key: $Name" }
-    [Probe]::TapVk([uint16]$vk)   # [ushort] accelerator only exists in PS 7; this runs on 5.1
-    "sent $Name (foreground verified)"
+    $sent = [Probe]::TapVk([uint16]$vk)   # [ushort] accelerator only exists in PS 7; this runs on 5.1
+    if ($sent -eq 0) { throw "SendInput accepted 0 events — $Name was not sent" }
+    "sent $Name ($sent events accepted, foreground verified)"
+  }
+  "chord" {
+    $h = Get-AppWindow $ProcId
+    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not sending keys blind" }
+    $ctrl  = $Mods -match "c"
+    $shift = $Mods -match "s"
+    $alt   = $Mods -match "a"
+    # A named key wins; otherwise the base key is the one printing $Key here.
+    $named = @{ Tab = 0x09; Enter = 0x0D; Escape = 0x1B; F9 = 0x78 }
+    if ($Name -and $named.ContainsKey($Name)) {
+      $vk = $named[$Name]
+    } elseif ($Key) {
+      $vk = [Probe]::VkForChar([char]$Key)
+      if (-not $vk) { throw "'$Key' is not typeable on the current layout" }
+    } else {
+      throw "chord needs -Key <char> or -Name <Tab|Enter|Escape|F9>"
+    }
+    $sent = [Probe]::Chord($ctrl, $shift, $alt, [uint16]$vk)
+    if ($sent -eq 0) { throw "SendInput accepted 0 events — the chord was not sent" }
+    "sent chord mods=$Mods key=$(if ($Name) { $Name } else { $Key }) vk=0x$('{0:X2}' -f $vk) ($sent events accepted, foreground verified)"
   }
   "capture" {
     $h = Get-AppWindow $ProcId

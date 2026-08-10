@@ -21,6 +21,7 @@ mod restore;
 mod seats;
 mod seed;
 mod settings;
+mod shortcuts;
 mod tooltip;
 
 use anyhow::{Context, Result, anyhow, ensure};
@@ -62,6 +63,10 @@ use winit::{
     event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
+    // Windows reports what a key means with Shift and what it means without, and a shortcut table
+    // needs the second: `Ctrl+Shift+1` produces `!` on a US keyboard and `1` on layouts that put
+    // the digit behind Shift, and the binding is meant to be the digit either way.
+    platform::modifier_supplement::KeyEventExtModifierSupplement,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{Theme as OsTheme, Window, WindowId},
 };
@@ -905,9 +910,10 @@ struct Runtime {
     /// the product verbs this field was once waiting for, so the pair is written
     /// to the session as `tab_layout`/`sidebar_mode` and read back at startup
     /// (`rail_state_for(render_tab_layout(…), render_sidebar_mode(…))`). The dev
-    /// chord ([`is_rail_layout_toggle_shortcut`]) still exists and commits through
-    /// the *same* [`Self::set_rail_state`] the dialog does — one write path, so a
-    /// preference cannot mean two things depending on which door it came through.
+    /// chord that once cycled the rail has retired with the P2-7 audit, so the
+    /// dialog is now the only door; anything that opens a second one commits
+    /// through the *same* [`Self::set_rail_state`], because a preference cannot
+    /// mean two things depending on which door it came through.
     rail: seats::RailState,
     /// How far the rail is scrolled, in physical pixels.
     ///
@@ -5716,6 +5722,28 @@ enum TabCloseAction {
     Keep { active_tab: usize },
 }
 
+/// Where Ctrl+Tab and Ctrl+Shift+Tab land, wrapping at both ends.
+///
+/// A lone tab is already the answer to "next tab", so nothing moves and the
+/// window does not flash a re-activation at a key that had nothing to do.
+fn stepped_tab(tab_count: usize, active_tab: usize, forward: bool) -> Option<usize> {
+    if tab_count < 2 {
+        return None;
+    }
+    let step = if forward { 1 } else { tab_count - 1 };
+    Some((active_tab + step) % tab_count)
+}
+
+/// Where Ctrl+Shift+1..9 lands, if it lands anywhere.
+///
+/// The chord names an ordinal the user can count on the strip, so it is 1-based
+/// here and 0-based nowhere else; an ordinal past the end of the strip is
+/// ignored rather than clamped onto the last tab.
+fn goto_tab_index(tab_count: usize, ordinal: u8) -> Option<usize> {
+    let index = usize::from(ordinal).checked_sub(1)?;
+    (index < tab_count).then_some(index)
+}
+
 fn tab_close_action(tab_count: usize, active_tab: usize, closing: usize) -> TabCloseAction {
     debug_assert!(tab_count > 0 && active_tab < tab_count && closing < tab_count);
     if tab_count == 1 {
@@ -9181,6 +9209,82 @@ impl Runtime {
         }
         self.mark_session_dirty(Instant::now());
         Ok(())
+    }
+
+    /// Carry out one row of the shortcut registry.
+    ///
+    /// Every arm is a call into a verb that already exists for the pointer to
+    /// reach: a shortcut is a second door onto the same room, never a second
+    /// implementation of it.
+    fn run_shortcut(&mut self, action: shortcuts::Action) -> Result<()> {
+        match action {
+            // I86: the keyboard's new tab is the default profile's. Choosing a
+            // different one is the strip's `+` menu, which is where the choice
+            // is visible.
+            shortcuts::Action::NewTab => self.new_tab(),
+            // I103's chain lives inside `close_pane`: the last pane of a tab
+            // closes the tab, and the last tab hands off to the window's own
+            // shut flow rather than leaving an empty window behind.
+            shortcuts::Action::ClosePane => self.close_pane(self.focused_leaf),
+            shortcuts::Action::NextTab => self.step_tab(true),
+            shortcuts::Action::PrevTab => self.step_tab(false),
+            shortcuts::Action::GotoTab(ordinal) => {
+                // Out of range is ignored, not clamped: Ctrl+Shift+9 in a window
+                // with three tabs means "the ninth", and there is no ninth. A
+                // clamp would silently answer a different question.
+                match goto_tab_index(self.tabs.len(), ordinal) {
+                    Some(index) => self.activate_tab(index, false),
+                    None => Ok(()),
+                }
+            }
+            shortcuts::Action::ReopenClosed => self.reopen_recent(0),
+            // Bound, claimed, and deliberately inert. The attention queue (P1-8)
+            // and the command palette (P1-9) are ruled and keyed but unbuilt;
+            // the row is real so that nothing else takes the chord and no byte
+            // leaks to the shell in the meantime. Same latitude as the formulas
+            // switch: the seat exists before the machine that sits in it.
+            shortcuts::Action::JumpAttention | shortcuts::Action::CommandPalette => Ok(()),
+            // The glyph names the divider it draws, as in Windows Terminal: the
+            // minus lays a horizontal rule across the pane and the new shell
+            // opens below it; the equals stands a vertical one and the new shell
+            // opens beside it.
+            shortcuts::Action::SplitHorizontal => self.split_focused_terminal(Axis::Col),
+            shortcuts::Action::SplitVertical => self.split_focused_terminal(Axis::Row),
+            // Windows Terminal's `duplicatePane` defaults to `split: "auto"` —
+            // cut the pane across its longer side, so the two halves come out as
+            // square as the pane allows and a wide pane never becomes two
+            // slivers. The measurement is the solver's own rectangle, never a
+            // guess (red line L10).
+            shortcuts::Action::DuplicatePaneSplit => {
+                self.split_focused_terminal(self.duplicate_split_axis())
+            }
+            shortcuts::Action::OpenSettings => self.toggle_settings_panel(),
+        }
+    }
+
+    /// Ctrl+Tab / Ctrl+Shift+Tab, wrapping at both ends.
+    fn step_tab(&mut self, forward: bool) -> Result<()> {
+        match stepped_tab(self.tabs.len(), self.active_tab, forward) {
+            Some(index) => self.activate_tab(index, false),
+            None => Ok(()),
+        }
+    }
+
+    /// The axis `Alt+Shift+D`'s duplicate cuts along: across the focused pane's
+    /// longer side. A pane the solver has not placed cannot be measured, and the
+    /// side-by-side split is the one the dev chord had always used.
+    fn duplicate_split_axis(&self) -> Axis {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        seats::pane_body_viewport(&self.seats, &self.seat_layout, self.focused_leaf, scale).map_or(
+            Axis::Row,
+            |body| {
+                if body.width >= body.height {
+                    Axis::Row
+                } else {
+                    Axis::Col
+                }
+            },
+        )
     }
 
     /// Split the focused terminal pane, seating a second shell beside it.
@@ -13569,17 +13673,6 @@ impl Runtime {
         }
     }
 
-    /// **The dev chord's cycle: horizontal, open sidebar, icon rail, back.**
-    ///
-    /// Scaffolding of exactly the kind [`is_preview_toggle_shortcut`] is, and it
-    /// carries the same debt: R1's real verbs are the `.panel-toggle` button in
-    /// the title bar and the settings switch, and both arrive with their own
-    /// tickets. What this buys meanwhile is the only thing that matters before
-    /// then — being able to *look* at the other axis.
-    fn cycle_rail_layout(&mut self) -> Result<()> {
-        self.set_rail_state(next_rail_layout(self.rail))
-    }
-
     /// **`.panel-toggle`'s verb (Q178): fold the rail away, or bring it back.**
     ///
     /// R1's real trigger, arriving where the mock-up puts it — `#btn-rail` in the
@@ -14147,21 +14240,19 @@ impl Runtime {
             }
             return Ok(());
         }
-        // Dev-only, and above the PTY encoder for the same reason: the chord
-        // must not reach the child. Splits the focused terminal pane and spawns
-        // the shell that lives in the new one.
-        if let Some(dir) = split_shortcut_direction(&event.logical_key, self.modifiers) {
+        // The shortcut registry (P2-7), above the PTY encoder because that is what
+        // "we claim this chord" means: the table is consulted before any key is
+        // encoded, and a chord that is in it never reaches the child. Only chords
+        // in the table are taken — `lookup_action` matches modifiers exactly, so
+        // ordinary typing, bare `Ctrl+letter` control codes and the AltGr family
+        // all fall straight through to the encoder below.
+        if let Some(action) = shortcuts::lookup_action(
+            &event.logical_key,
+            &event.key_without_modifiers(),
+            self.modifiers,
+        ) {
             if !event.repeat {
-                self.split_focused_terminal(dir)?;
-            }
-            return Ok(());
-        }
-        // Dev-only, and above the PTY encoder for the same reason as its two
-        // neighbours. R1's layout cycle: tabs across the top, tabs down the side,
-        // tabs parked as an icon rail, and back.
-        if is_rail_layout_toggle_shortcut(&event.logical_key, self.modifiers) {
-            if !event.repeat {
-                self.cycle_rail_layout()?;
+                self.run_shortcut(action)?;
             }
             return Ok(());
         }
@@ -14190,17 +14281,6 @@ impl Runtime {
                 _ => {}
             }
         }
-        // Undo close. It sits above the PTY encoder for the same reason the line
-        // above does — the chord is ours, so the child never sees it — and it is
-        // below the settings guard, which swallows every key while the dialog is
-        // up (mock-up 7374-7376 tests the same two conditions).
-        if is_reopen_closed_tab_shortcut(&event.logical_key, self.modifiers) {
-            if !event.repeat {
-                self.reopen_recent(0)?;
-            }
-            return Ok(());
-        }
-
         if !self.session.terminal_modes().alternate_screen {
             let page = self.grid.rows.get() as i32;
             match &event.logical_key {
@@ -16053,87 +16133,12 @@ fn is_preview_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
         && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("p"))
 }
 
-/// The pane splits: `Ctrl+Alt+Shift+D` beside the focused pane,
-/// `Ctrl+Alt+Shift+E` under it.
-///
-/// Scaffolding of exactly the kind [`is_preview_toggle_shortcut`] is, and
-/// documented as such: U12 gives panes their own shells, and a shell you cannot
-/// create is a shell you cannot try. The real verbs — the pane head's menu, the
-/// command palette — arrive with their own tickets, and they will call the same
-/// [`Runtime::split_focused_terminal`] this chord calls.
-///
-/// The chord carries Alt for the reason the preview toggle does. `Ctrl+D` is a
-/// real terminal control byte (EOT, "end of input") and `Ctrl+Shift+D` is short
-/// enough that product will want it; a placeholder does not get to spend either.
-/// Matched on the character the layout produced, and required to be the whole
-/// chord and nothing looser.
-fn split_shortcut_direction(key: &Key, modifiers: ModifiersState) -> Option<Axis> {
-    if modifiers != ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT {
-        return None;
-    }
-    match key {
-        // Beside: a new column in the row this pane is in.
-        Key::Character(text) if text.eq_ignore_ascii_case("d") => Some(Axis::Row),
-        // Under: a new row in the column this pane is in.
-        Key::Character(text) if text.eq_ignore_ascii_case("e") => Some(Axis::Col),
-        _ => None,
-    }
-}
-
-/// **R1's dev-only layout toggle: `Ctrl+Shift+F9`.**
-///
-/// Scaffolding of exactly the kind [`is_preview_toggle_shortcut`] is: R1's real
-/// verbs are the title bar's `.panel-toggle` and the settings switch, and a rail
-/// you cannot reach is a rail nobody can look at.
-///
-/// **Not `Ctrl+Alt+Shift`, and the break with the two chords above is deliberate**
-/// (user ruling). Windows keyboards send `Ctrl+Alt` for AltGr, so on every layout
-/// that has one — German, French, Polish, Portuguese, most of Europe — a chord
-/// carrying both modifiers is a chord the user can arrive at by typing a `@` or a
-/// `{`. The other two placeholders spend that risk on a *character* key, where
-/// the collision at least produces a character; F9 has no AltGr meaning to
-/// collide with, so it takes the shorter chord instead and the risk goes away.
-///
-/// A function key rather than a character, and therefore matched on
-/// [`NamedKey`] rather than on the text a layout produced: `F9` is `F9`
-/// everywhere, so the "match what the layout wrote" discipline that keeps the
-/// character chords honest has nothing to do here. The exact-equality test on the
-/// modifiers is the same one every chord in this file makes.
-fn is_rail_layout_toggle_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
-    modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
-        && matches!(key, Key::Named(NamedKey::F9))
-}
-
-/// The next stop on the dev chord's cycle: horizontal, open sidebar, icon rail,
-/// back to horizontal.
-///
-/// A free function so the cycle can be argued about without a window: it is
-/// three ruled transitions and no I/O, and everything `cycle_rail_layout` does
-/// around it — re-solving the panes, resetting the tweens, re-reading the hover
-/// — is a consequence of the answer rather than part of it.
-///
-/// Both scalars come back at their defaults on every step. A rail arriving in
-/// icon mode is parked with its words away, whatever the last one was doing; a
-/// pointer already standing inside it opens it again on the next move, which is
-/// the trigger doing its job rather than this deciding for it.
-fn next_rail_layout(current: seats::RailState) -> seats::RailState {
-    use seats::{RailMode, TabLayoutMode};
-    let (layout, mode) = match (current.layout, current.mode) {
-        (TabLayoutMode::Horizontal, _) => (TabLayoutMode::Vertical, RailMode::Expanded),
-        (TabLayoutMode::Vertical, RailMode::Expanded) => (TabLayoutMode::Vertical, RailMode::Icons),
-        (TabLayoutMode::Vertical, RailMode::Icons) => {
-            (TabLayoutMode::Horizontal, RailMode::Expanded)
-        }
-    };
-    rail_state_for(layout, mode)
-}
-
 /// **The one place a chosen (layout, sidebar mode) pair becomes a `RailState`.**
 ///
-/// Both routes into the rail go through here — the settings dialog's two combos
-/// and the dev chord above — because the alternative is two copies of what a
-/// rail in a given posture looks like, and the moment they disagree the dialog
-/// shows one thing while the chord leaves another.
+/// Every route into the rail goes through here — today the settings dialog's two
+/// combos, tomorrow whatever else offers the choice — because the alternative is
+/// two copies of what a rail in a given posture looks like, and the moment they
+/// disagree one surface shows a rail the other did not leave.
 ///
 /// The mode is carried into Horizontal rather than reset, which is what the
 /// mock-up's `state.railMode` does: it is a standing preference and the layout
@@ -16163,17 +16168,6 @@ fn rail_state_for(layout: seats::TabLayoutMode, mode: seats::RailMode) -> seats:
             1.0
         },
     }
-}
-
-/// Undo close — "that one, now", and the door with the real traffic (N143).
-///
-/// The exact-equality test on the modifiers is the same discipline the preview
-/// toggle uses and for the same reason: a bare `Ctrl+T` is a real control byte
-/// and must keep reaching the child. Ctrl+**Shift**+T is not, which is why the
-/// whole ecosystem could agree on it.
-fn is_reopen_closed_tab_shortcut(key: &Key, modifiers: ModifiersState) -> bool {
-    modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
-        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("t"))
 }
 
 /// One shell's share of a solved layout: the rectangle it is to be sized from,
@@ -17839,38 +17833,6 @@ mod tests {
         );
     }
 
-    /// N143. Exact-equality on the modifiers, for the same reason the preview
-    /// toggle uses it: a bare `Ctrl+T` is a real control byte and has to keep
-    /// reaching the child.
-    #[test]
-    fn undo_close_answers_to_ctrl_shift_t_and_to_nothing_looser() {
-        let lower = Key::Character("t".into());
-        let upper = Key::Character("T".into());
-        let chord = ModifiersState::CONTROL | ModifiersState::SHIFT;
-
-        assert!(is_reopen_closed_tab_shortcut(&lower, chord));
-        assert!(
-            is_reopen_closed_tab_shortcut(&upper, chord),
-            "Shift is in the chord, so the character arrives capitalised"
-        );
-        assert!(
-            !is_reopen_closed_tab_shortcut(&lower, ModifiersState::CONTROL),
-            "bare Ctrl+T is the child's"
-        );
-        assert!(!is_reopen_closed_tab_shortcut(
-            &lower,
-            ModifiersState::empty()
-        ));
-        assert!(
-            !is_reopen_closed_tab_shortcut(&lower, chord | ModifiersState::ALT),
-            "a longer chord is a different chord"
-        );
-        assert!(!is_reopen_closed_tab_shortcut(
-            &Key::Character("p".into()),
-            chord
-        ));
-    }
-
     // ── T2: the tab strip's state channels ──
 
     /// The facts the strip reads for one shell.
@@ -19394,6 +19356,52 @@ mod tests {
             tab_close_action(4, 1, 3),
             TabCloseAction::Keep { active_tab: 1 }
         );
+    }
+
+    /// Ctrl+Tab and Ctrl+Shift+Tab walk the strip in opposite directions and both
+    /// wrap, so a four-tab window is a ring with no dead end at either edge.
+    #[test]
+    fn the_tab_chords_walk_the_strip_in_a_ring() {
+        assert_eq!(stepped_tab(4, 0, true), Some(1));
+        assert_eq!(stepped_tab(4, 3, true), Some(0), "forward wraps at the end");
+        assert_eq!(stepped_tab(4, 3, false), Some(2));
+        assert_eq!(
+            stepped_tab(4, 0, false),
+            Some(3),
+            "backward wraps at the start"
+        );
+        // A full lap in either direction returns to where it started.
+        let mut index = 1;
+        for _ in 0..4 {
+            index = stepped_tab(4, index, true).expect("four tabs step");
+        }
+        assert_eq!(index, 1);
+
+        // A lone tab is already the answer, so nothing is re-activated.
+        assert_eq!(stepped_tab(1, 0, true), None);
+        assert_eq!(stepped_tab(1, 0, false), None);
+        assert_eq!(stepped_tab(0, 0, true), None);
+    }
+
+    /// Ctrl+Shift+1..9 counts the strip the way the user does, and an ordinal past
+    /// the end of it names no tab at all.
+    #[test]
+    fn goto_tab_counts_from_one_and_ignores_an_ordinal_off_the_end() {
+        assert_eq!(
+            goto_tab_index(4, 1),
+            Some(0),
+            "the first tab is Ctrl+Shift+1"
+        );
+        assert_eq!(goto_tab_index(4, 4), Some(3));
+        assert_eq!(
+            goto_tab_index(4, 5),
+            None,
+            "there is no fifth tab, and clamping onto the fourth would answer a \
+             question nobody asked"
+        );
+        assert_eq!(goto_tab_index(4, 9), None);
+        assert_eq!(goto_tab_index(0, 1), None);
+        assert_eq!(goto_tab_index(4, 0), None, "there is no zeroth tab");
     }
 
     #[test]
@@ -21134,73 +21142,32 @@ mod tests {
         assert!(!is_preview_toggle_shortcut(&lower, ModifiersState::empty()));
     }
 
-    /// **R1's dev chord keeps clear of AltGr, which is why it breaks with its
-    /// two neighbours** (user ruling).
+    /// Every rail state the settings dialog can ask for arrives with both of the
+    /// rail's scalars at their defaults.
     ///
-    /// Windows sends `Ctrl+Alt` for AltGr, so on every layout that has one a
-    /// `Ctrl+Alt+Shift` chord is a chord the user can arrive at by typing. The
-    /// two placeholders above spend that risk on a character key; this one has a
-    /// function key available and takes `Ctrl+Shift+F9` instead.
-    ///
-    /// Red gate: bind it to `Ctrl+Alt+Shift+F9` and the second assertion fails —
-    /// which is the whole of the ruling, stated as a test.
+    /// This is the half that would rot silently: a rail that inherited the last
+    /// icon rail's `open: 1.0` would appear already wide with the pointer nowhere
+    /// near it, and would then never close, because the zone trigger only fires
+    /// on a pointer that *moves*.
     #[test]
-    fn the_rail_toggle_avoids_the_ctrl_alt_chord_that_altgr_can_type() {
-        let f9 = Key::Named(NamedKey::F9);
-        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
-        assert!(is_rail_layout_toggle_shortcut(&f9, ctrl_shift));
-        assert!(
-            !is_rail_layout_toggle_shortcut(&f9, ctrl_shift | ModifiersState::ALT),
-            "Ctrl+Alt is AltGr on a European keyboard, and a dev chord may not \
-             answer to a key that types a `@`"
-        );
-        // The whole chord and nothing looser, exactly as every other binding in
-        // this file insists.
-        for near_miss in [
-            ModifiersState::empty(),
-            ModifiersState::CONTROL,
-            ModifiersState::SHIFT,
-            ModifiersState::ALT | ModifiersState::SHIFT,
-        ] {
-            assert!(!is_rail_layout_toggle_shortcut(&f9, near_miss));
-        }
-        // And it is F9 and not a neighbour: F9 has no AltGr meaning to collide
-        // with, which is the property being bought.
-        assert!(!is_rail_layout_toggle_shortcut(
-            &Key::Named(NamedKey::F8),
-            ctrl_shift
-        ));
-        assert!(!is_rail_layout_toggle_shortcut(
-            &Key::Character("f9".into()),
-            ctrl_shift
-        ));
-    }
-
-    /// The cycle is three stops and returns to where it started, and every stop
-    /// arrives with both of the rail's scalars at their defaults.
-    ///
-    /// The second half is the one that would rot silently: a rail that inherited
-    /// the last icon rail's `open: 1.0` would appear already wide with the
-    /// pointer nowhere near it, and would then never close, because the zone
-    /// trigger only fires on a pointer that *moves*.
-    #[test]
-    fn the_dev_chord_walks_horizontal_expanded_icons_and_back() {
+    fn every_rail_state_is_born_with_its_scalars_at_rest() {
         use seats::{RailMode, TabLayoutMode};
         let start = seats::RailState::default();
         assert_eq!(start.layout, TabLayoutMode::Horizontal);
+        assert_eq!(
+            start,
+            rail_state_for(TabLayoutMode::Horizontal, RailMode::Expanded),
+            "the default rail is the one the dialog builds for the same pair"
+        );
 
-        let expanded = next_rail_layout(start);
-        assert_eq!(expanded.layout, TabLayoutMode::Vertical);
-        assert_eq!(expanded.mode, RailMode::Expanded);
+        let expanded = rail_state_for(TabLayoutMode::Vertical, RailMode::Expanded);
         assert_eq!(
             expanded.terminal_inset_logical_px(),
             bt_render::RAIL_WIDTH_LOGICAL_PX,
             "an expanded rail is in the flow and takes its width out of the terminal's"
         );
 
-        let icons = next_rail_layout(expanded);
-        assert_eq!(icons.layout, TabLayoutMode::Vertical);
-        assert_eq!(icons.mode, RailMode::Icons);
+        let icons = rail_state_for(TabLayoutMode::Vertical, RailMode::Icons);
         assert_eq!(icons.open, 0.0, "an icon rail is born parked");
         assert_eq!(icons.text_opacity, 0.0, "with its words away");
         assert_eq!(
@@ -21209,49 +21176,14 @@ mod tests {
             "Q179: the terminal keeps only the parked strip clear"
         );
 
-        assert_eq!(
-            next_rail_layout(icons),
-            start,
-            "three stops and back to the tabs across the top"
-        );
-        // A rail mid-animation still walks to the same next stop: the cycle is a
-        // function of the layout, and the scalars are what it resets.
+        // A rail caught mid-animation still resolves to the same state: the
+        // scalars are what the builder resets, not what it reads.
         let mid = seats::RailState {
             open: 0.6,
             text_opacity: 0.3,
             ..icons
         };
-        assert_eq!(next_rail_layout(mid), start);
-    }
-
-    /// PIN (R4): the settings dialog and the dev chord are one state machine.
-    ///
-    /// Every stop the chord walks is the state [`rail_state_for`] builds for the
-    /// same pair, so there is exactly one place that says what a rail in a given
-    /// layout and mode looks like. Two copies of that rule is the bug: the
-    /// dialog would show one thing and the chord would leave another.
-    #[test]
-    fn the_settings_path_and_the_dev_chord_reach_the_same_rail_state() {
-        use seats::{RailMode, TabLayoutMode};
-        let start = seats::RailState::default();
-        assert_eq!(
-            start,
-            rail_state_for(TabLayoutMode::Horizontal, RailMode::Expanded)
-        );
-        let expanded = next_rail_layout(start);
-        assert_eq!(
-            expanded,
-            rail_state_for(TabLayoutMode::Vertical, RailMode::Expanded)
-        );
-        let icons = next_rail_layout(expanded);
-        assert_eq!(
-            icons,
-            rail_state_for(TabLayoutMode::Vertical, RailMode::Icons)
-        );
-        assert_eq!(
-            next_rail_layout(icons),
-            rail_state_for(TabLayoutMode::Horizontal, RailMode::Expanded)
-        );
+        assert_eq!(rail_state_for(mid.layout, mid.mode), icons);
     }
 
     /// PIN (Q190 through the settings path): choosing Horizontal clears the rail
