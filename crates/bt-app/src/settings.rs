@@ -681,6 +681,13 @@ pub struct SettingsLayout {
     close: [f32; 4],
     /// The `.content` padding box, which is also what content is clipped to.
     content: [f32; 4],
+    /// The furthest the content may be scrolled, and therefore also the test for
+    /// whether it scrolls at all: `0.0` exactly when the whole stack fits.
+    ///
+    /// The same shape `RailGeometry::max_scroll` carries, for the same reason —
+    /// the caller owns the offset, the geometry owns what the offset may legally
+    /// be, and neither has to remember the other's arithmetic.
+    max_scroll: f32,
     /// The headings the dialog is drawing, top to bottom. Derived from `rows`,
     /// never declared beside it.
     groups: Vec<GroupLayout>,
@@ -709,6 +716,28 @@ impl SettingsLayout {
     #[must_use]
     pub fn row(&self, row: SettingsRow) -> Option<&RowLayout> {
         self.rows.iter().find(|placed| placed.row == row)
+    }
+
+    /// The furthest this dialog may be scrolled; `0.0` when nothing overflows.
+    #[must_use]
+    pub fn max_scroll(&self) -> f32 {
+        self.max_scroll
+    }
+
+    /// The box the content is clipped to — the wheel's own catchment.
+    #[must_use]
+    pub fn content_box(&self) -> [f32; 4] {
+        self.content
+    }
+
+    /// Whether a content box landed wholly inside the scroll viewport.
+    ///
+    /// Partly-visible is not visible enough to press: a combo sliced by the
+    /// content edge would take a click aimed at the row above it. The vertical
+    /// rail already answers a scrolled list this way (`seats::hit_rail_chrome`),
+    /// and a dialog that scrolls is the same list with a different border.
+    fn shows(&self, rect: [f32; 4]) -> bool {
+        rect[1] >= self.content[1] && rect[3] <= self.content[3]
     }
 }
 
@@ -809,6 +838,13 @@ fn clipped(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
 /// go to nothing, and a scrim over a dialog that is not there would be a window
 /// nobody can use. The runtime treats it as "not open", so no input is trapped
 /// behind an invisible modal.
+///
+/// `scroll` is how far the content stack has been pushed up, in physical pixels,
+/// and it is clamped here rather than trusted: `max-height` plus `overflow-y`
+/// is a pair, and the half that says how far the overflow reaches belongs to
+/// whoever measured the stack. The caller keeps the number and reads
+/// [`SettingsLayout::max_scroll`] back to clamp its own copy — the same division
+/// the tab strip and the rail already run on.
 #[must_use]
 pub fn layout_for_menu(
     surface_width: f32,
@@ -817,6 +853,7 @@ pub fn layout_for_menu(
     menu_kind: Option<SettingsRow>,
     rows: &[SettingsRow],
     widest_option: f32,
+    scroll: f32,
 ) -> Option<SettingsLayout> {
     let px = |value: f32| value * scale;
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
@@ -897,6 +934,11 @@ pub fn layout_for_menu(
         inner[2],
         inner[3].max(inner[1] + header),
     ];
+    // What the stack wanted minus what the box gives it. The dialog already
+    // stopped growing at `available`; this is the height that capping refused,
+    // and refusing it silently is what cut the last row off before.
+    let max_scroll = (content_height - (content[3] - content[1])).max(0.0);
+    let scroll = scroll.clamp(0.0, max_scroll);
     let text_left = content[0] + px(CONTENT_PADDING_X_LOGICAL_PX);
     let text_right = content[2] - px(CONTENT_PADDING_X_LOGICAL_PX);
     let row_content_height = text_height.max(px(COMBO_HEIGHT_LOGICAL_PX));
@@ -909,7 +951,7 @@ pub fn layout_for_menu(
     // exactly what the heading took, so the boxes drawn, the boxes hit-tested and
     // the height reserved are three readings of one derivation rather than three
     // rules that have to be kept in agreement.
-    let mut cursor = content[1] + px(CONTENT_PADDING_TOP_LOGICAL_PX);
+    let mut cursor = content[1] + px(CONTENT_PADDING_TOP_LOGICAL_PX) - scroll;
     let mut placed_groups: Vec<GroupLayout> = Vec::new();
     let mut placed_rows: Vec<RowLayout> = Vec::with_capacity(rows.len());
     let mut previous_group: Option<SettingsGroup> = None;
@@ -968,10 +1010,16 @@ pub fn layout_for_menu(
     // is not holding has nothing to hang from and is not open. That is not a
     // guard against the impossible: switching Tab layout to Horizontal takes the
     // Sidebar row out from under its own open menu.
+    //
+    // A row scrolled out from under its own picker is the same sentence with the
+    // same answer. The button is the anchor, and an anchor clipped away by the
+    // content edge is one the popup cannot honestly hang from — it would float
+    // beside a control nobody can see, over rows it does not belong to.
     let active = menu_kind.and_then(|row| {
         placed_rows
             .iter()
             .find(|placed| placed.row == row)
+            .filter(|placed| placed.combo[1] >= content[1] && placed.combo[3] <= content[3])
             .map(|placed| (row, placed.combo))
     });
     let (menu, items) = match active {
@@ -993,6 +1041,7 @@ pub fn layout_for_menu(
         header_content,
         close,
         content,
+        max_scroll,
         groups: placed_groups,
         rows: placed_rows,
         menu,
@@ -1100,7 +1149,7 @@ pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> S
         return SettingsTarget::Close;
     }
     for placed in &layout.rows {
-        if contains(placed.combo, x, y) {
+        if layout.shows(placed.combo) && contains(placed.combo, x, y) {
             return SettingsTarget::Combo(placed.row);
         }
     }
@@ -1562,6 +1611,7 @@ mod tests {
             menu_open.then_some(SettingsRow::Theme),
             &flat_rows(),
             0.0,
+            UNSCROLLED,
         )
         .expect("this window can host the dialog")
     }
@@ -1596,9 +1646,14 @@ mod tests {
             menu,
             &visible_rows(tab_layout),
             widest_option,
+            UNSCROLLED,
         )
         .expect("the settings dialog fits")
     }
+
+    /// A dialog nobody has turned a wheel over — what every claim that is not
+    /// about scrolling is stated against.
+    const UNSCROLLED: f32 = 0.0;
 
     /// A row's boxes, which every geometry claim below names rather than
     /// reaching for a field that no longer exists.
@@ -1663,7 +1718,7 @@ mod tests {
         );
 
         // The 92% share takes over below 480/0.92 ~= 521.7 logical pixels.
-        let narrow = layout_for_menu(480.0, 800.0, 1.0, None, &flat_rows(), 0.0)
+        let narrow = layout_for_menu(480.0, 800.0, 1.0, None, &flat_rows(), 0.0, UNSCROLLED)
             .expect("480 wide still hosts the dialog");
         assert_eq!(
             width(narrow.frame),
@@ -2014,6 +2069,7 @@ mod tests {
             Some(SettingsRow::Theme),
             &flat_rows(),
             0.0,
+            UNSCROLLED,
         )
         .expect("200 tall still hosts the dialog");
         let short_combo = combo_of(&short, SettingsRow::Theme);
@@ -2033,21 +2089,200 @@ mod tests {
         assert!(short.items[0][1] < short.items[1][1]);
     }
 
+    /// A settings list of `count` rows, cycling the real ones.
+    ///
+    /// Real rows and not invented ones: a row carries its own group, and it is
+    /// the group changes that put headings into the stack, so a synthetic row
+    /// would be measuring an easier shape than the dialog actually holds. Twenty
+    /// of these is the row count this module's growth is pinned against — six
+    /// today, seven with the rail's own row, and the Default profile row was
+    /// already being cut off the bottom at seven.
+    fn many_rows(count: usize) -> Vec<SettingsRow> {
+        let cycle = visible_rows(TabLayoutMode::Vertical);
+        (0..count).map(|index| cycle[index % cycle.len()]).collect()
+    }
+
+    /// The dialog holding `rows`, scrolled this far, in a normal window.
+    fn scrolled(rows: &[SettingsRow], scroll: f32) -> SettingsLayout {
+        layout_for_menu(SURFACE.0, SURFACE.1, 1.0, None, rows, 0.0, scroll)
+            .expect("this window hosts the dialog")
+    }
+
+    /// PIN (Bug 2): the dialog never grows out of the window it is in.
+    ///
+    /// `max-height: calc(100% - 72px)` is a cap, and a cap that content is
+    /// allowed to overrun is not one. Before the content scrolled, the stack was
+    /// laid out from the content box's top with no offset and simply ran past the
+    /// bottom edge — at seven rows the Startup group's Default profile row was
+    /// drawn below the frame and clipped away, which is exactly what the user saw.
+    #[test]
+    fn a_stack_taller_than_the_window_leaves_the_dialog_inside_it() {
+        let rows = many_rows(20);
+        let placed = scrolled(&rows, 0.0);
+        assert_eq!(
+            placed.frame[1], DIALOG_TOP_LOGICAL_PX,
+            "the dialog keeps its fixed top margin"
+        );
+        assert!(
+            placed.frame[3] <= SURFACE.1 - DIALOG_BOTTOM_LOGICAL_PX,
+            "20 rows must not push the frame past the window's bottom margin: \
+             frame {:?} in a {}px window",
+            placed.frame,
+            SURFACE.1
+        );
+        assert!(
+            placed.max_scroll() > 0.0,
+            "a stack this tall overflows, so it must report somewhere to scroll"
+        );
+        // The overflow is exactly what the cap refused, so scrolling to the end
+        // puts the last row's bottom on the content box's bottom.
+        let end = scrolled(&rows, placed.max_scroll());
+        let last = end.rows.last().expect("20 rows were placed");
+        assert!(
+            last.combo[3] <= end.content[3] + f32::EPSILON,
+            "scrolled to the end, the last row is inside the content box: \
+             combo {:?} content {:?}",
+            last.combo,
+            end.content
+        );
+    }
+
+    /// PIN (Bug 2): every row can be brought into reach and pressed.
+    ///
+    /// The half of "it scrolls" that a height assertion cannot see. A row drawn
+    /// inside the content box but still answering `Panel` to a press would be a
+    /// dialog that shows a control it will not accept — so the claim is stated
+    /// through `hit`, at the row's own combo, and not through the geometry the
+    /// draw call happens to read.
+    #[test]
+    fn every_row_scrolls_into_reach_and_answers_a_press() {
+        let rows = many_rows(20);
+        let reference = scrolled(&rows, 0.0);
+        let max = reference.max_scroll();
+        for index in 0..rows.len() {
+            // Where this row sits when nothing is scrolled, turned into the
+            // offset that puts it at the top of the content box — clamped, which
+            // is what makes the first and last rows work without a special case.
+            let unscrolled = reference.rows[index].combo;
+            let want = (unscrolled[1] - reference.content[1]).clamp(0.0, max);
+            let placed = scrolled(&rows, want);
+            let combo = placed.rows[index].combo;
+            assert!(
+                placed.shows(combo),
+                "row {index} ({:?}) never comes fully inside the content box: \
+                 combo {combo:?} content {:?} scroll {want}",
+                rows[index],
+                placed.content
+            );
+            let (x, y) = centre(combo);
+            assert_eq!(
+                hit(&placed, values(), x, y),
+                SettingsTarget::Combo(rows[index]),
+                "row {index} ({:?}) is visible but does not answer a press",
+                rows[index]
+            );
+        }
+    }
+
+    /// PIN (Bug 2): a row that has been scrolled out of the box is not pressable.
+    ///
+    /// The other side of the same rule, and the reason `hit` asks `shows` rather
+    /// than testing the combo alone: the boxes still exist off the end of the
+    /// content box, and a press landing on one of them would be the dialog acting
+    /// on a control that is not on screen.
+    #[test]
+    fn a_row_scrolled_out_of_the_content_box_takes_no_press() {
+        let rows = many_rows(20);
+        let placed = scrolled(&rows, 0.0);
+        let last = placed.rows.last().expect("20 rows were placed");
+        assert!(
+            last.combo[3] > placed.content[3],
+            "this fixture depends on the last row overflowing"
+        );
+        let (x, y) = centre(last.combo);
+        assert_eq!(
+            hit(&placed, values(), x, y),
+            SettingsTarget::Scrim,
+            "a combo below the dialog's own bottom edge is scrim, not a control"
+        );
+    }
+
+    /// PIN (Bug 2): a list that fits does not scroll, and cannot be made to.
+    ///
+    /// The dialog as it stands today, so the wheel is a no-op until the row list
+    /// actually outgrows the window — and the clamp is what makes the runtime's
+    /// unclamped field safe to keep across a resize.
+    #[test]
+    fn a_stack_that_fits_reports_nowhere_to_scroll() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let placed = scrolled(&rows, 0.0);
+        assert_eq!(
+            placed.max_scroll(),
+            0.0,
+            "seven rows fit a {}px window with room to spare",
+            SURFACE.1
+        );
+        let shoved = scrolled(&rows, 4_000.0);
+        assert_eq!(
+            shoved.rows[0].combo, placed.rows[0].combo,
+            "an offset a list this short cannot honour is clamped away, not applied"
+        );
+    }
+
+    /// PIN (Bug 2): the picker lets go of a row that scrolls out from under it.
+    ///
+    /// A popup is anchored to its button. The same sentence the Sidebar row
+    /// already answers when the Tab layout combo takes it out of the list, asked
+    /// of the other way a row can leave: the content moving under it.
+    #[test]
+    fn a_picker_whose_row_scrolls_away_is_not_open() {
+        let rows = many_rows(20);
+        let anchored = layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            Some(SettingsRow::Theme),
+            &rows,
+            0.0,
+            UNSCROLLED,
+        )
+        .expect("this window hosts the dialog");
+        assert!(
+            anchored.menu.is_some(),
+            "the Theme row is on screen unscrolled, so its picker hangs from it"
+        );
+        let past = layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            Some(SettingsRow::Theme),
+            &rows,
+            0.0,
+            anchored.max_scroll(),
+        )
+        .expect("this window hosts the dialog");
+        assert!(
+            past.menu.is_none(),
+            "scrolled to the end, the Theme row is gone and its picker has \
+             nothing to hang from"
+        );
+    }
+
     /// PIN: a window that cannot host the dialog answers `None` rather than a
     /// squashed one — and the runtime reads `None` as "shut", so nothing is
     /// trapped behind a modal with nothing on it.
     #[test]
     fn a_window_too_small_to_host_the_dialog_says_so() {
         assert!(
-            layout_for_menu(1280.0, 100.0, 1.0, None, &flat_rows(), 0.0).is_none(),
+            layout_for_menu(1280.0, 100.0, 1.0, None, &flat_rows(), 0.0, UNSCROLLED).is_none(),
             "too short"
         );
         assert!(
-            layout_for_menu(100.0, 800.0, 1.0, None, &flat_rows(), 0.0).is_none(),
+            layout_for_menu(100.0, 800.0, 1.0, None, &flat_rows(), 0.0, UNSCROLLED).is_none(),
             "too narrow"
         );
         assert!(
-            layout_for_menu(1280.0, 800.0, 1.0, None, &flat_rows(), 0.0).is_some(),
+            layout_for_menu(1280.0, 800.0, 1.0, None, &flat_rows(), 0.0, UNSCROLLED).is_some(),
             "a real window"
         );
     }
@@ -2950,6 +3185,7 @@ mod tests {
             Some(SettingsRow::Theme),
             &flat_rows(),
             4_000.0,
+            UNSCROLLED,
         )
         .expect("the dialog still fits this window");
         let menu = placed.menu.expect("the picker is open");

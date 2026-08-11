@@ -860,6 +860,17 @@ struct Runtime {
     /// so the session file never does either — a window that reopened with a
     /// question on it would be answering one nobody asked.
     settings: settings::SettingsPanel,
+    /// How far the settings dialog's content is scrolled, in physical pixels.
+    ///
+    /// Beside the panel rather than inside it, on the same terms as
+    /// [`Self::rail_scroll`] and [`Self::tab_scroll`]: the panel holds what the
+    /// dialog *is* (open, and which picker), and a scroll distance is a fact
+    /// about a box that only exists once the window has a size. It is likewise
+    /// unclamped here — every read runs it back through
+    /// [`settings::layout_for_menu`], which clamps it to the rows and the window
+    /// that exist right now, so a window resized taller cannot leave the stack
+    /// pushed past its own end.
+    settings_scroll: f32,
     /// Whether the tab strip's profile picker is up. Beside `settings` and for
     /// the same reasons — and separate from it because the two are different
     /// kinds of surface: one is modal and one is a popup.
@@ -972,6 +983,17 @@ struct Runtime {
     /// gets wide enough to hold words before the words arrive, and on the way shut
     /// the words leave first. One tween sampled twice could express neither.
     rail_text: RevealTween,
+    /// `.window.rail-collapsed`'s own travel — the panel folding away and back
+    /// (P168), `1.0` fully present and `0.0` gone.
+    ///
+    /// A third tween rather than a reuse of [`Self::rail_open`], because the two
+    /// answer different questions about the same edge and can be in flight at
+    /// once: `rail_open` is the icon rail reacting to the pointer and only ever
+    /// runs in `RailMode::Icons`, while this one is the panel-toggle's verb and
+    /// runs in either mode. Multiplying one tween by the other is what
+    /// [`seats::RailState::width_logical_px`] does with the two scalars they
+    /// sample into.
+    rail_fold: RevealTween,
     /// The rail as this frame's chrome build drew it, waiting to be stacked.
     ///
     /// The rail floats over the panes, so it cannot share their run of the three
@@ -3778,6 +3800,21 @@ impl RevealTween {
         Self {
             from: 0.0,
             to: 0.0,
+            started: None,
+            span,
+        }
+    }
+
+    /// A reveal already standing at `position`, with nothing in flight.
+    ///
+    /// [`Self::over`] is this with `0.0`, and stays the name for the tweens whose
+    /// resting state really is "out". A tween whose rest depends on restored
+    /// state needs to be told where that is, or its first `retarget` would ease
+    /// from an origin the window was never in.
+    fn resting(position: f32, span: Duration) -> Self {
+        Self {
+            from: position,
+            to: position,
             started: None,
             span,
         }
@@ -7231,6 +7268,7 @@ impl Runtime {
             tooltip_drawn_opacity: None,
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
+            settings_scroll: 0.0,
             profile_menu: profiles::ProfileMenu::default(),
             profile_programs,
             chevron_turn: ChevronTurn::default(),
@@ -7244,6 +7282,9 @@ impl Runtime {
             rail_scroll: 0.0,
             rail_open: RevealTween::over(RAIL_TRANSITION),
             rail_text: RevealTween::over(RAIL_TEXT_FADE),
+            // Seeded at the rail's resting fold so the first frame is the state
+            // the window restored into, not a fold arriving out of nowhere.
+            rail_fold: RevealTween::resting(f32::from(u8::from(!rail.collapsed)), RAIL_TRANSITION),
             rail_chrome: seats::ChromeGroup::default(),
             last_drawn_rail: None,
             tab_press: None,
@@ -8569,26 +8610,78 @@ impl Runtime {
             return;
         };
         let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
-        let geometry =
-            seats::tab_strip_geometry(width, scale, &trailers, self.active_tab, self.tab_scroll);
-        let (Some(geometry_tab), Some(content)) = (geometry.tabs.get(index), tabs.get_mut(index))
-        else {
+        // **The box, on whichever axis the tab list is on.** The editor's window
+        // onto its own draft is measured against the run it will actually be
+        // drawn in, and the two axes give it very different ones: a strip tab is
+        // as wide as its share of the run, a rail row is as wide as the panel
+        // minus its trailing cluster. Measured against the strip's box while the
+        // rail was on screen, the caret walked out of a box that was not there.
+        //
+        // Both branches answer the same pair — how wide the editor's box is, and
+        // what size its text is set in — so everything below is one arithmetic
+        // that never learns which axis it ran on.
+        let measured = match self.rail.layout {
+            seats::TabLayoutMode::Vertical => {
+                let (_, height) = self.renderer.presentation_geometry().swapchain_size;
+                let pinned = seats::pinned_run_len(&trailers);
+                seats::rail_geometry(
+                    height as f32,
+                    scale,
+                    &trailers,
+                    pinned,
+                    self.rail_scroll,
+                    self.sampled_rail(Instant::now()),
+                )
+                .and_then(|geometry| {
+                    let row = geometry.tabs.get(index)?;
+                    let content = tabs.get(index)?;
+                    let right = seats::rail_title_right(
+                        row,
+                        content.pane_count,
+                        content.badge_text_width,
+                        scale,
+                    );
+                    (right > row.title[0]).then_some((
+                        right - row.title[0],
+                        bt_render::RAIL_TAB_FONT_LOGICAL_PX * scale,
+                    ))
+                })
+            }
+            seats::TabLayoutMode::Horizontal => {
+                let geometry = seats::tab_strip_geometry(
+                    width,
+                    scale,
+                    &trailers,
+                    self.active_tab,
+                    self.tab_scroll,
+                );
+                geometry.tabs.get(index).and_then(|geometry_tab| {
+                    let content = tabs.get(index)?;
+                    let title_box = seats::tab_title_box(
+                        geometry_tab,
+                        content.pane_count,
+                        content.badge_text_width,
+                        scale,
+                    )?;
+                    Some((
+                        title_box[2] - title_box[0],
+                        bt_render::WINDOW_TAB_FONT_LOGICAL_PX * scale,
+                    ))
+                })
+            }
+        };
+        let Some(content) = tabs.get_mut(index) else {
             return;
         };
-        let Some(title_box) = seats::tab_title_box(
-            geometry_tab,
-            content.pane_count,
-            content.badge_text_width,
-            scale,
-        ) else {
+        let Some((box_width, font_px)) = measured else {
             // A squeezed tab draws no title, so there is no box to be the editor
             // and nothing to show. The draft is not lost — it is still in
-            // `self.rename`, and widening the window brings it back mid-word.
+            // `self.rename`, and widening the window brings it back mid-word. A
+            // rail row whose trailing cluster has eaten the whole run is the same
+            // sentence on the other axis.
             content.edit = None;
             return;
         };
-        let box_width = title_box[2] - title_box[0];
-        let font_px = bt_render::WINDOW_TAB_FONT_LOGICAL_PX * scale;
         let caret_width = (seats::TAB_RENAME_CARET_LOGICAL_PX * scale)
             .round()
             .max(1.0);
@@ -8812,6 +8905,7 @@ impl Runtime {
             // it in the same frame.
             &settings::visible_rows(self.rail.layout),
             widest_option,
+            self.settings_scroll,
         )
     }
 
@@ -8927,14 +9021,25 @@ impl Runtime {
     /// A straight lift of [`Runtime::rail_chrome`] into the overlay's vocabulary.
     /// Chrome fills are opaque by construction — every translucent thing the rail
     /// draws (a hover pill, a landing wash, the shade it casts) is a *sprite*,
-    /// which carries its own opacity — so the alpha here is 1.0 and the lift
-    /// changes not one pixel of what the rail looked like. All it changes is when
-    /// the three channels are drawn, which is the whole of the fix.
+    /// which carries its own opacity — so the per-quad alpha here is 1.0 and the
+    /// lift changes not one pixel of what the rail looked like. All it changes is
+    /// when the three channels are drawn, which is the whole of that fix.
+    ///
+    /// **The layer's own opacity is the fold** — `.rail { transition: … opacity
+    /// .18s ease }` with `.window.rail-collapsed .rail { opacity: 0 }` (mock-up
+    /// 814/823). CSS `opacity` on the element the layer *is*, which is exactly
+    /// what this field means, so the panel and everything standing in it leave
+    /// together rather than the ground going while the icons stay. Reading it
+    /// here rather than baking it into each sprite is also what keeps the fade
+    /// from compounding with the label fade the rail already runs (Q183): they
+    /// are two different declarations on two different elements, and CSS
+    /// multiplies them exactly once each.
     fn rail_overlay_layers(&self) -> Vec<marks::OverlayLayer> {
         let rail = &self.rail_chrome;
         if rail.quads.is_empty() && rail.labels.is_empty() && rail.sprites.is_empty() {
             return Vec::new();
         }
+        let opacity = self.rail_fold.sample(Instant::now(), self.motion).0;
         vec![marks::OverlayLayer {
             quads: rail
                 .quads
@@ -8947,7 +9052,7 @@ impl Runtime {
                 .collect(),
             labels: rail.labels.clone(),
             sprites: rail.sprites.clone(),
-            ..Default::default()
+            opacity: opacity.clamp(0.0, 1.0),
         }]
     }
 
@@ -9390,6 +9495,10 @@ impl Runtime {
     /// button claiming to be reachable through a modal.
     fn toggle_settings_panel(&mut self) -> Result<()> {
         self.settings.toggle();
+        // A dialog opens at its top. The distance belongs to the sitting the
+        // wheel moved, not to the preference the dialog edits, so it does not
+        // outlive the dialog being shut.
+        self.settings_scroll = 0.0;
         if self.settings.is_open() {
             self.seat_pointer.hover = None;
             self.apply_pointer_cursor();
@@ -10994,8 +11103,16 @@ impl Runtime {
         // neither is ever true — `RevealTween` reports the target with no frames
         // asked for — which is what makes `Reduced` a genuinely idle window and
         // not a fast animation.
-        let rail_moving = self.rail.draws_icon_rail()
-            && (self.rail_open.sample(now, motion).1 || self.rail_text.sample(now, motion).1);
+        //
+        // The fold sits **outside** that `draws_icon_rail()` gate, and has to:
+        // a rail folding away is one whose `collapsed` is already true, which is
+        // exactly the case that predicate answers `false` for. Inside the gate,
+        // the fold would be a transition nobody ever woke the loop to draw — the
+        // panel would sit still until some other event happened to ask for a
+        // frame, which is the snap this animation exists to remove.
+        let rail_moving = (self.rail.draws_icon_rail()
+            && (self.rail_open.sample(now, motion).1 || self.rail_text.sample(now, motion).1))
+            || self.rail_fold.sample(now, motion).1;
         // U8 — the active tab's panes, on the same terms and with the same
         // `None`: a window whose split has settled asks for no wake-ups at all,
         // and under reduced motion there was never a tween to ask for one.
@@ -14256,17 +14373,25 @@ impl Runtime {
     /// `opacity` declaration in that list to `.window.rail-icons` (lines 892-903),
     /// so an expanded rail's words are *there*, full stop, and are not waiting on
     /// a tween that has no reason to have been started.
+    /// The fold is sampled on both paths and outside that `if`, because it is the
+    /// one clock that runs while the rail is *not* drawing an icon rail — a rail
+    /// folding away is collapsing, and `draws_icon_rail()` is false throughout.
+    /// Reading it only on the icon path is precisely how the fold would go back to
+    /// snapping.
     fn sampled_rail(&self, now: Instant) -> seats::RailState {
+        let fold = Some(self.rail_fold.sample(now, self.motion).0);
         if !self.rail.draws_icon_rail() {
             return seats::RailState {
                 open: 1.0,
                 text_opacity: 1.0,
+                fold,
                 ..self.rail
             };
         }
         seats::RailState {
             open: self.rail_open.sample(now, self.motion).0,
             text_opacity: self.rail_text.sample(now, self.motion).0,
+            fold,
             ..self.rail
         }
     }
@@ -14389,6 +14514,28 @@ impl Runtime {
     /// session file following it.
     fn set_rail_state(&mut self, state: seats::RailState) -> Result<()> {
         let moved = (self.rail.layout, self.rail.mode) != (state.layout, state.mode);
+        // P168 — the fold travels rather than cutting. `.window.rail-collapsed`
+        // sets `.rail`'s width to zero and `.rail` carries `width .18s ease`, so
+        // the panel is seen to leave instead of blinking out.
+        //
+        // Aimed only when the flag actually turned over, because
+        // `set_rail_state` is also the settings dialog's commit path: choosing a
+        // sidebar mode must not restart a transition on an edge that is not
+        // moving. Nothing here needs to care about the horizontal layout —
+        // `width_logical_px` answers `0.0` for it whatever the fold holds, so a
+        // rail that has no business being on screen cannot be eased onto it.
+        //
+        // Reduced motion is handled where every other tween handles it, inside
+        // `RevealTween`: under `Motion::Reduced` the value snaps to its target
+        // and asks for no frames, so the fold is instant and the panel-toggle
+        // stays as immediate as it was before it could animate.
+        if self.rail.collapsed != state.collapsed {
+            self.rail_fold.retarget(
+                f32::from(u8::from(!state.collapsed)),
+                Instant::now(),
+                self.motion,
+            );
+        }
         self.rail = state;
         eprintln!(
             "BT_RAIL layout={:?} mode={:?} inset={}px",
@@ -14446,22 +14593,7 @@ impl Runtime {
         let Some(geometry) = self.rail_geometry_now(now) else {
             return Ok(());
         };
-        let travel = match delta {
-            MouseScrollDelta::LineDelta(_, y) => {
-                let line = self.projection.cell_height_subpixels().get() as f32
-                    / bt_viewport::SUBPIXELS_PER_PX as f32;
-                let amount =
-                    match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
-                        bt_platform::WheelScrollAmount::Lines(lines) => lines as f32 * line,
-                        // A page of a vertical scroller is a screenful of it.
-                        bt_platform::WheelScrollAmount::Page => {
-                            geometry.viewport[1] - geometry.viewport[0]
-                        }
-                    };
-                y * amount
-            }
-            MouseScrollDelta::PixelDelta(position) => position.y as f32,
-        };
+        let travel = self.vertical_wheel_travel(delta, geometry.viewport[1] - geometry.viewport[0]);
         // Wheel-up reveals what lies above, which is a smaller offset.
         let scrolled = (self.rail_scroll - travel).clamp(0.0, geometry.max_scroll);
         if scrolled == self.rail_scroll {
@@ -14472,6 +14604,64 @@ impl Runtime {
         // without the pointer having done anything.
         if let Some(position) = self.pointer_position {
             self.seat_pointer.hover = self.chrome_target_at(position);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// How far one wheel event moves a vertical scroller, in physical pixels.
+    ///
+    /// The system's own "lines per notch" measured against the terminal's line,
+    /// because that is the height Windows is answering about; `page` is what the
+    /// user's "one screen at a time" setting means for *this* scroller, and it is
+    /// the caller's to supply since only the caller knows how tall its viewport
+    /// is. Shared by every vertical scroller in the chrome so a notch means the
+    /// same distance in all of them.
+    fn vertical_wheel_travel(&self, delta: MouseScrollDelta, page: f32) -> f32 {
+        match delta {
+            MouseScrollDelta::LineDelta(_, y) => {
+                let line = self.projection.cell_height_subpixels().get() as f32
+                    / bt_viewport::SUBPIXELS_PER_PX as f32;
+                let amount =
+                    match recoverable_wheel_scroll_amount(bt_platform::wheel_scroll_amount()) {
+                        bt_platform::WheelScrollAmount::Lines(lines) => lines as f32 * line,
+                        // A page of a vertical scroller is a screenful of it.
+                        bt_platform::WheelScrollAmount::Page => page,
+                    };
+                y * amount
+            }
+            MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        }
+    }
+
+    /// A wheel notch anywhere over the settings modal.
+    ///
+    /// Anywhere, and not only over the content box: the dialog is modal, so the
+    /// scrim is not a place where a notch could mean something else, and a
+    /// pointer resting on the header while the wheel turns is asking about the
+    /// only scroller on screen. A dialog whose content fits has `max_scroll ==
+    /// 0`, and the clamp then makes this the same no-op the old early return was.
+    fn scroll_settings(
+        &mut self,
+        layout: &settings::SettingsLayout,
+        delta: MouseScrollDelta,
+    ) -> Result<()> {
+        let content = layout.content_box();
+        let travel = self.vertical_wheel_travel(delta, content[3] - content[1]);
+        let scrolled = (self.settings_scroll - travel).clamp(0.0, layout.max_scroll());
+        if scrolled == self.settings_scroll {
+            return Ok(());
+        }
+        self.settings_scroll = scrolled;
+        // The stack moved under a stationary pointer, so what it is over changed
+        // without the pointer having done anything.
+        if let Some(position) = self.pointer_position {
+            let moved = self.settings_layout();
+            self.settings.set_hover(moved.map(|layout| {
+                settings::hit(&layout, self.settings_values(), position.x, position.y)
+            }));
         }
         if self.refresh_chrome() {
             self.present_chrome_change()?;
@@ -14542,11 +14732,13 @@ impl Runtime {
     }
 
     fn mouse_wheel(&mut self, delta: MouseScrollDelta) -> Result<()> {
-        // A notch behind the scrim is nobody's. The dialog's own content fits,
-        // so there is nothing here for a wheel to move — and scrolling the
-        // terminal under a modal is the same violation as clicking it.
-        if self.settings_layout().is_some() {
-            return Ok(());
+        // A notch behind the scrim is nobody's — scrolling the terminal under a
+        // modal is the same violation as clicking it. But the dialog's content
+        // no longer always fits: `max-height` plus `overflow-y` is a scroller,
+        // and a wheel over a scroller scrolls it, which is the same sentence the
+        // strip and the rail are already answering below.
+        if let Some(layout) = self.settings_layout() {
+            return self.scroll_settings(&layout, delta);
         }
         // A7/A8 — a notch over the tab strip is the strip's. The mock-up gives
         // `.tabs-inline` `overflow-x: auto`, and a wheel over an overflowing
@@ -17125,6 +17317,10 @@ fn rail_state_for(layout: seats::TabLayoutMode, mode: seats::RailMode) -> seats:
         } else {
             1.0
         },
+        // At rest, and therefore reading `collapsed` — which this function has
+        // just written as `false`. A layout arriving from the settings dialog is
+        // an unfolded rail standing still, not a fold caught halfway.
+        fold: None,
     }
 }
 
@@ -22906,6 +23102,118 @@ mod tests {
         }
     }
 
+    /// PIN (Bug 4): the panel-toggle's fold travels on P168's own curve.
+    ///
+    /// The defect this pins was a pair of omissions, and the test names both.
+    /// `set_rail_state` started a tween only when `(layout, mode)` moved, so
+    /// flipping `collapsed` started none; and `width_logical_px` short-circuited
+    /// to `0.0` on the flag, so even a running tween would have had nothing to
+    /// scale. The rail therefore left in one frame while the *same* declaration
+    /// — `.rail { transition: width .18s ease }` — was easing the hover open.
+    #[test]
+    fn folding_the_rail_away_travels_over_the_rails_own_transition() {
+        let expanded = seats::RailState {
+            layout: seats::TabLayoutMode::Vertical,
+            mode: seats::RailMode::Expanded,
+            ..seats::RailState::default()
+        };
+        // At rest the fold is `collapsed` read as a number, which is the constant
+        // the old short-circuit returned — so nothing that never mentions a fold
+        // can have changed width.
+        assert_eq!(
+            expanded.width_logical_px(),
+            bt_render::RAIL_WIDTH_LOGICAL_PX
+        );
+        assert_eq!(
+            seats::RailState {
+                collapsed: true,
+                ..expanded
+            }
+            .width_logical_px(),
+            0.0,
+            "a collapsed rail at rest is still exactly gone"
+        );
+        // Halfway through, it is halfway out — the state the snap never had.
+        assert_eq!(
+            seats::RailState {
+                collapsed: true,
+                fold: Some(0.5),
+                ..expanded
+            }
+            .width_logical_px(),
+            bt_render::RAIL_WIDTH_LOGICAL_PX / 2.0,
+            "the fold scales the width instead of switching it off"
+        );
+        // The horizontal layout still owns the first word, fold or no fold: a
+        // rail that is not on this axis cannot be eased onto it.
+        assert_eq!(
+            seats::RailState {
+                layout: seats::TabLayoutMode::Horizontal,
+                fold: Some(1.0),
+                ..expanded
+            }
+            .width_logical_px(),
+            0.0
+        );
+
+        // And the clock it travels on is `.rail`'s own 180ms, moving at 30ms and
+        // arrived at 180 — the same span and curve the hover open already uses.
+        let start = Instant::now();
+        let mut fold = RevealTween::resting(1.0, RAIL_TRANSITION);
+        fold.retarget(0.0, start, Motion::Full);
+        let (partway, moving) = fold.sample(start + Duration::from_millis(30), Motion::Full);
+        assert!(
+            partway < 1.0 && partway > 0.0,
+            "30ms into the fold the panel is on its way, not gone: {partway}"
+        );
+        assert!(moving, "and it owes the next frame");
+        assert_eq!(
+            fold.sample(start + RAIL_TRANSITION, Motion::Full),
+            (0.0, false),
+            "at 180ms it has arrived and asks for nothing more"
+        );
+    }
+
+    /// PIN (Bug 4): reduced motion folds the rail instantly, as it always did.
+    ///
+    /// The animation must not become a delay for someone who asked the OS for no
+    /// animations. Stated on the fold's own tween rather than inherited from the
+    /// hover's, because "it reuses `RevealTween`" is the implementation and this
+    /// is the promise.
+    #[test]
+    fn reduced_motion_folds_the_rail_with_no_travel_and_no_frames() {
+        let start = Instant::now();
+        let mut fold = RevealTween::resting(1.0, RAIL_TRANSITION);
+        fold.retarget(0.0, start, Motion::Reduced);
+        for at in [0, 1, 30, 90, 180, 400] {
+            assert_eq!(
+                fold.sample(start + Duration::from_millis(at), Motion::Reduced),
+                (0.0, false),
+                "{at}ms in: the fold is already done and owes no frame"
+            );
+        }
+        fold.retarget(1.0, start, Motion::Reduced);
+        assert_eq!(fold.sample(start, Motion::Reduced), (1.0, false));
+    }
+
+    /// PIN (Bug 4): a rail restored collapsed starts folded, not folding.
+    ///
+    /// [`RevealTween::over`] would have seeded every fold at `0.0` — right for a
+    /// collapsed rail by accident and wrong for the ordinary one, which would
+    /// have opened the window with its panel missing until something moved it.
+    #[test]
+    fn the_fold_is_seeded_where_the_rail_actually_stands() {
+        let now = Instant::now();
+        for collapsed in [false, true] {
+            let seeded = RevealTween::resting(f32::from(u8::from(!collapsed)), RAIL_TRANSITION);
+            assert_eq!(
+                seeded.sample(now, Motion::Full),
+                (f32::from(u8::from(!collapsed)), false),
+                "a window opening with collapsed={collapsed} is already standing there"
+            );
+        }
+    }
+
     #[test]
     fn startup_metrics_must_match_the_authoritative_win32_scale_factor() {
         assert!(ensure_metrics_match_authoritative_scale(1.5, 1.5).is_ok());
@@ -24510,6 +24818,7 @@ mod tests {
                 collapsed: false,
                 open: 1.0,
                 text_opacity: 1.0,
+                fold: None,
             },
         )
         .expect("an expanded rail is on screen");

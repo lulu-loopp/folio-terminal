@@ -1971,6 +1971,52 @@ fn rail_trailing_edge(row: &RailTabGeometry, scale: f32) -> f32 {
     )
 }
 
+/// A rail row's own badge box, or `None` when the row draws no badge.
+///
+/// C28's condition — above one pane, never at one — and no room reserved for a
+/// badge that is not drawn.
+#[must_use]
+fn rail_badge_rect(
+    row: &RailTabGeometry,
+    pane_count: usize,
+    badge_text_width: f32,
+    scale: f32,
+) -> Option<[f32; 4]> {
+    (pane_count > 1).then(|| {
+        badge_rect_of(
+            row.body,
+            rail_trailing_edge(row, scale),
+            badge_text_width,
+            scale,
+        )
+    })
+}
+
+/// Where a rail row's title run ends — [`tab_title_box`]'s right edge on the
+/// other axis.
+///
+/// Its own function for that function's own reason: T4's editor *is* the title
+/// (mock-up 376-378, "same box, same metrics"), so the box the caret is measured
+/// against and the box the row draws its title in have to be one computation.
+/// Two would drift, and the drift shows as a caret standing beside its own
+/// letters — which is exactly what the strip's editor was doing when the rail
+/// was on screen and this answer was being taken from the strip.
+///
+/// `.panecount` is `flex: none` between the title and the `×`, so it takes its
+/// width off the trailing end and the title — `flex: 1`, `min-width: 0` — keeps
+/// what is left.
+#[must_use]
+pub fn rail_title_right(
+    row: &RailTabGeometry,
+    pane_count: usize,
+    badge_text_width: f32,
+    scale: f32,
+) -> f32 {
+    rail_badge_rect(row, pane_count, badge_text_width, scale).map_or(row.title[1], |badge| {
+        (badge[0] - RAIL_TAB_GAP_LOGICAL_PX * scale).max(row.title[0])
+    })
+}
+
 /// [`tab_badge_rect`]'s arithmetic, shared with the rail for the reason
 /// [`trailing_edge_of`] is: `.panecount` is one declaration (mock-up 291-298) and
 /// `.tab.active .panecount, .vtab.active .panecount` is the mock-up saying so in
@@ -2268,6 +2314,20 @@ pub struct RailState {
     /// gives it its own shorter clock and a delay on the way open only — the
     /// panel gets wide enough to hold words *before* the words arrive.
     pub text_opacity: f32,
+    /// How much of the rail the fold is currently leaving on screen,
+    /// `0.0 ..= 1.0` — `None` while the fold is at rest (P168).
+    ///
+    /// **An `Option` and not a bare scalar, because the resting value is not a
+    /// constant: it is `0.0` under a collapsed rail and `1.0` under an open
+    /// one.** A plain `f32` would need every one of this module's struct
+    /// literals to remember to set it in agreement with `collapsed`, and the
+    /// first one that forgot would report a folded rail at full width. `None`
+    /// means "wherever `collapsed` says", so a state built without mentioning
+    /// the fold is exactly the state that existed before the fold could animate.
+    ///
+    /// `Some` therefore has one producer — the sampler that owns the frame clock
+    /// — and says one thing: a fold is in flight, and this is how far it has got.
+    pub fold: Option<f32>,
 }
 
 impl Default for RailState {
@@ -2278,6 +2338,7 @@ impl Default for RailState {
             collapsed: false,
             open: 0.0,
             text_opacity: 1.0,
+            fold: None,
         }
     }
 }
@@ -2294,20 +2355,40 @@ impl RailState {
         self.layout == TabLayoutMode::Vertical && self.mode == RailMode::Icons && !self.collapsed
     }
 
+    /// How much of the rail the fold leaves on screen right now.
+    ///
+    /// At rest this is `collapsed` read as a number, which is what makes the
+    /// `None` in [`Self::fold`] safe: a state that never mentions the fold
+    /// answers exactly the constant the short-circuit used to return.
+    #[must_use]
+    fn fold_fraction(self) -> f32 {
+        self.fold
+            .unwrap_or(if self.collapsed { 0.0 } else { 1.0 })
+            .clamp(0.0, 1.0)
+    }
+
     /// The rail's own width in logical pixels — `--railw` as it currently
     /// stands, including its border.
+    ///
+    /// The fold scales the whole width rather than short-circuiting it, which is
+    /// `.window.rail-collapsed .rail { width: 0 }` reached along the `.rail`'s
+    /// own `width .18s ease` instead of instantly (P168, mock-up 814/823). A
+    /// collapsed rail at rest still measures exactly `0.0`: `fold_fraction` is
+    /// the constant the old `|| self.collapsed` guard returned, only now it can
+    /// also be somewhere in between.
     #[must_use]
     pub fn width_logical_px(self) -> f32 {
-        if self.layout != TabLayoutMode::Vertical || self.collapsed {
+        if self.layout != TabLayoutMode::Vertical {
             return 0.0;
         }
-        match self.mode {
+        let open_width = match self.mode {
             RailMode::Expanded => RAIL_WIDTH_LOGICAL_PX,
             RailMode::Icons => {
                 let open = self.open.clamp(0.0, 1.0);
                 RAIL_PARK_LOGICAL_PX + (RAIL_WIDTH_LOGICAL_PX - RAIL_PARK_LOGICAL_PX) * open
             }
-        }
+        };
+        open_width * self.fold_fraction()
     }
 
     /// The space the terminal keeps clear on its left, in logical pixels.
@@ -2322,6 +2403,16 @@ impl RailState {
     /// there to prevent: leaving the rail in flow while parked and lifting it
     /// out on open "hands the terminal 46px back at the moment it opens, and
     /// everything jumps left."
+    ///
+    /// **The fold is deliberately absent here, and that is the same ruling one
+    /// step further out.** `width_logical_px` eases so the panel is *seen* to
+    /// slide away; the inset steps, so the grid behind it is reshaped once. An
+    /// inset that eased would re-solve the seat layout and resize the PTY on
+    /// every frame of the transition — sixty `SIGWINCH`-equivalents per fold,
+    /// into a `PSReadLine` that corrupts its own input line when a narrowing
+    /// resize arrives mid-prompt. The rail is `position: absolute` for exactly
+    /// this reason while it opens; folding it away is the same motion with the
+    /// same excuse, so it travels over the terminal rather than through it.
     #[must_use]
     pub fn terminal_inset_logical_px(self) -> f32 {
         if self.layout != TabLayoutMode::Vertical || self.collapsed {
@@ -5926,7 +6017,32 @@ fn rail_chrome(
     // `within_strip` rules for the other axis. The `+` and the heading are
     // outside the scroller and answer to no clip at all.
     let [list_top, list_bottom] = geometry.viewport;
-    let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom;
+    // **`.rail { overflow: hidden }` on the axis the fold moves.**
+    //
+    // The list's clip box answers for the scroller — a row above or below it is
+    // not on screen. It says nothing about the *width*, and until the fold
+    // animated there was never a width to say anything about: an expanded rail
+    // is 220px and a collapsed one does not draw at all, so no box the rail
+    // placed could ever have been wider than the rail.
+    //
+    // A folding panel breaks that. Row marks, the `+` and the `˅` are placed at
+    // fixed offsets from the rail's *left* edge at their own fixed sizes, so as
+    // the right edge travels left they stop fitting — and, drawn anyway, they
+    // stand over the terminal with no panel under them. That is the ghost the
+    // fold left behind: at one or two pixels of panel the ground is invisible
+    // and every glyph is still full size, so the last frame before zero is a row
+    // of icons floating on the terminal.
+    //
+    // Dropped rather than squashed: `clip_to_list` narrows a sprite's rect,
+    // which *scales* the mark inside it, and a mark that shrinks as the panel
+    // passes over it would read as a second animation nobody asked for. A glyph
+    // that no longer fits the panel has left with the panel.
+    let panel_right = geometry.body[2];
+    let in_panel = |rect: [f32; 4]| rect[2] <= panel_right + 0.5;
+    // Where this call's own text starts, so the sweep at the end can clip the
+    // channel it added without touching whatever the caller already had in it.
+    let labels_from = labels.len();
+    let in_list = |rect: [f32; 4]| rect[3] > list_top && rect[1] < list_bottom && in_panel(rect);
     // A row is clipped by the list rather than hidden by it: half a row at the
     // foot of the scroller is half a row, so the label's own clip box is the
     // overlap and its layout box stays the row's. That is exactly the pair
@@ -6190,14 +6306,7 @@ fn rail_chrome(
             // It fades with the words rather than leaving (mock-up 895-896 lists
             // `.panecount`), which is Q183's whole rule: the run does not change
             // between the two states, only the ink in it does.
-            let badge = (content.pane_count > 1).then(|| {
-                badge_rect_of(
-                    row.body,
-                    rail_trailing_edge(row, scale),
-                    content.badge_text_width,
-                    scale,
-                )
-            });
+            let badge = rail_badge_rect(row, content.pane_count, content.badge_text_width, scale);
             if let Some(badge) = badge.filter(|badge| text > 0.0 && in_list(*badge)) {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
@@ -6258,10 +6367,11 @@ fn rail_chrome(
             // rail's own overflow does the cropping meanwhile.
             //
             // It stops one gap short of the badge when there is one, exactly as
-            // `tab_title_box` does on the other axis.
-            let title_right = badge.map_or(row.title[1], |badge| {
-                (badge[0] - RAIL_TAB_GAP_LOGICAL_PX * scale).max(row.title[0])
-            });
+            // `tab_title_box` does on the other axis — and through the same
+            // function the rename editor measures its caret against, so the two
+            // cannot drift apart.
+            let title_right =
+                rail_title_right(row, content.pane_count, content.badge_text_width, scale);
             if title_right > row.title[0] && text > 0.0 {
                 let ink = if active {
                     palette.rail_tab_active_text
@@ -6270,8 +6380,57 @@ fn rail_chrome(
                 } else {
                     palette.title_text
                 };
+                // T4 on this axis. `.rename` is `background: transparent; font:
+                // inherit; padding: 0` in the mock-up's one rule for both axes,
+                // so here too the editor *is* the row's own title — the same
+                // label, the same box, the same metrics, with a different string
+                // and, for an empty draft, the muted ink `.rename::placeholder`
+                // asks for. The column cannot shift when the editor opens.
+                //
+                // The band the selection and caret stand in is the row's mark
+                // slot, exactly as the strip takes the tab's: it is the axis
+                // everything else in the row is centred on, so the caret is as
+                // tall as the row it is standing in.
+                let (ink, drawn) = match &content.edit {
+                    Some(edit) if edit.text.is_empty() => {
+                        (palette.title_text_muted, edit.placeholder.clone())
+                    }
+                    Some(edit) => (ink, edit.text.clone()),
+                    None => (ink, content.title.clone()),
+                };
+                let band = |left: f32, right: f32| {
+                    let mark_height = row.mark[3] - row.mark[1];
+                    [
+                        left,
+                        (row.body[1] + (row.body[3] - row.body[1] - mark_height) / 2.0).round(),
+                        right,
+                        (row.body[1] + (row.body[3] - row.body[1] + mark_height) / 2.0).round(),
+                    ]
+                };
+                // Before the text and after the row's own silhouette, which is
+                // why these are sprites: a quad would go under the active row's
+                // fill, which is itself a mark.
+                if let Some(edit) = &content.edit
+                    && edit.selection_px > 0.0
+                {
+                    let selection = band(
+                        row.title[0],
+                        (row.title[0] + edit.selection_px).min(title_right),
+                    );
+                    if selection[2] > selection[0] && in_list(selection) {
+                        let mut sprite = ChromeSprite::new(
+                            ChromeMark::Fill,
+                            clip_to_list(selection),
+                            palette.tab_close_pill_on_content,
+                        );
+                        // The wash parks with the panel it is drawn in, on the
+                        // same fade the words beside it are already taking.
+                        sprite.opacity = text;
+                        sprites.push(sprite);
+                    }
+                }
                 labels.push(ChromeLabel {
-                    text: content.title.clone(),
+                    text: drawn,
                     rect: [row.title[0], row.body[1], title_right, row.body[3]],
                     clip: Some(clip_to_list([
                         row.title[0],
@@ -6307,6 +6466,26 @@ fn rail_chrome(
                     },
                     tabular_numerals: false,
                 });
+                // The caret last: it is the one thing in the box that has to be
+                // visible over the letters as well as over the fill. The same
+                // hairline the strip's editor and the terminal's own cursor use,
+                // because an insertion point is an insertion point.
+                if let Some(edit) = &content.edit
+                    && edit.caret_lit
+                {
+                    let width = (TAB_RENAME_CARET_LOGICAL_PX * scale).round().max(1.0);
+                    let left = (row.title[0] + edit.caret_px).round();
+                    let caret = band(left, left + width);
+                    if caret[0] >= row.title[0] && caret[2] <= title_right && in_list(caret) {
+                        let mut sprite = ChromeSprite::new(
+                            ChromeMark::Fill,
+                            clip_to_list(caret),
+                            palette.rail_tab_active_text,
+                        );
+                        sprite.opacity = text;
+                        sprites.push(sprite);
+                    }
+                }
             }
             // ── the trailing cluster: `[pin] [×]`, in the mock-up's own order ──
             //
@@ -6441,7 +6620,7 @@ fn rail_chrome(
         (Some(geometry.new_tab), new_hovered),
         (geometry.new_tab_menu, menu_hovered),
     ] {
-        if let Some(rect) = rect.filter(|_| hovered) {
+        if let Some(rect) = rect.filter(|rect| hovered && in_panel(*rect)) {
             // The same pill the strip's own `+` wears (`.newtab { border-radius:
             // 6px }`), and the reason it must be: this button sits at the foot of
             // the rail with the panel below it, so the strip's square-footed
@@ -6470,15 +6649,21 @@ fn rail_chrome(
     let plus = (WINDOW_NEW_TAB_GLYPH_LOGICAL_PX * scale).round().max(1.0);
     let plus_left = (plus_slot_left + (mark_size - plus) / 2.0).round();
     let plus_top = ((geometry.new_tab[1] + geometry.new_tab[3] - plus) / 2.0).round();
-    sprites.push(ChromeSprite::new(
-        ChromeMark::Plus,
-        [plus_left, plus_top, plus_left + plus, plus_top + plus],
-        if new_hovered {
-            palette.title_text_hover
-        } else {
-            palette.title_text_muted
-        },
-    ));
+    let plus_rect = [plus_left, plus_top, plus_left + plus, plus_top + plus];
+    // The `+` is furniture rather than a row, so it answers to no *list* clip —
+    // but it answers to the panel's edge like everything else, or a folding rail
+    // leaves it standing on the terminal.
+    if in_panel(plus_rect) {
+        sprites.push(ChromeSprite::new(
+            ChromeMark::Plus,
+            plus_rect,
+            if new_hovered {
+                palette.title_text_hover
+            } else {
+                palette.title_text_muted
+            },
+        ));
+    }
     // `.rail-new .nt-main span` — the words beside the `+`, which fade with
     // every other word in the rail (mock-up 896).
     let words_left = plus_slot_left + mark_size + RAIL_TAB_GAP_LOGICAL_PX * scale;
@@ -6524,25 +6709,28 @@ fn rail_chrome(
             .max(1.0);
         let chevron_left = ((menu[0] + menu[2] - chevron_width) / 2.0).round();
         let chevron_top = ((menu[1] + menu[3] - chevron_height) / 2.0).round();
-        let mut chevron = ChromeSprite::new(
-            ChromeMark::chevron(chevron_turn),
-            [
-                chevron_left,
-                chevron_top,
-                chevron_left + chevron_width,
-                chevron_top + chevron_height,
-            ],
-            if menu_hovered || profile_menu_open {
-                palette.title_text_hover
-            } else {
-                palette.title_text_muted
-            },
-        );
-        // `.nt-chev` is in the fade list too (mock-up 897): while parked the
-        // chevron's box has already collapsed to nothing, and on the way open
-        // the arrow arrives with the words rather than ahead of them.
-        chevron.opacity = text;
-        sprites.push(chevron);
+        let chevron_rect = [
+            chevron_left,
+            chevron_top,
+            chevron_left + chevron_width,
+            chevron_top + chevron_height,
+        ];
+        if in_panel(chevron_rect) {
+            let mut chevron = ChromeSprite::new(
+                ChromeMark::chevron(chevron_turn),
+                chevron_rect,
+                if menu_hovered || profile_menu_open {
+                    palette.title_text_hover
+                } else {
+                    palette.title_text_muted
+                },
+            );
+            // `.nt-chev` is in the fade list too (mock-up 897): while parked the
+            // chevron's box has already collapsed to nothing, and on the way open
+            // the arrow arrives with the words rather than ahead of them.
+            chevron.opacity = text;
+            sprites.push(chevron);
+        }
     }
 
     // ── Q182: the shade the open panel casts on the terminal ──
@@ -6576,6 +6764,29 @@ fn rail_chrome(
             sprites.push(column);
         }
     }
+
+    // ── `.rail { overflow: hidden }`, for the text channel ──
+    //
+    // One sweep over everything this call wrote rather than a test at each of
+    // the five places a label is pushed, because the property is about the
+    // *channel* and not about any one caption: a label added here tomorrow would
+    // otherwise be one more thing that can be left standing on the terminal when
+    // the panel folds out from under it.
+    //
+    // A word whose box has not yet been reached by the closing edge is clipped
+    // to it — that is `overflow: hidden` exactly, and it is what makes the last
+    // visible frame of a fold a sliver of ink rather than a whole name. One that
+    // starts past the edge has nothing left to show and is dropped: a label
+    // clipped to zero width is a shaping cost with no pixels at the end of it.
+    let mut written = labels.split_off(labels_from);
+    written.retain(|label| label.rect[0] < panel_right);
+    for label in &mut written {
+        label.rect[2] = label.rect[2].min(panel_right);
+        if let Some(clip) = label.clip.as_mut() {
+            clip[2] = clip[2].min(panel_right);
+        }
+    }
+    labels.append(&mut written);
 }
 
 /// A collapsed seat's bar carries its name and its state icon (§2.6.3) — except
@@ -8724,6 +8935,7 @@ mod tests {
             1.0,
             None,
             &crate::settings::visible_rows(TabLayoutMode::Horizontal),
+            0.0,
             0.0,
         )
         .expect("this window hosts the dialog");
@@ -14667,6 +14879,244 @@ mod tests {
         rail_paint_of(scale, &tabs, active_tab, None, None, state, hover)
     }
 
+    /// The rail's own [`ChromeGroup`], unflattened.
+    ///
+    /// `rail_chrome_of` joins the two runs, which is right for "what does this
+    /// window draw" and wrong for any claim about the rail alone — the title bar
+    /// and the caption buttons are on screen whatever the rail is doing.
+    fn rail_group_of(
+        scale: f32,
+        titles: &[&str],
+        active_tab: usize,
+        state: RailState,
+    ) -> ChromeGroup {
+        let tabs = titles
+            .iter()
+            .map(|title| TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
+                title: (*title).to_owned(),
+                pane_count: 1,
+                ..TabContent::default()
+            })
+            .collect::<Vec<_>>();
+        let dpi_milli = (scale * 1_000.0).round() as u32;
+        let metrics = seat_metrics(dpi_milli);
+        let seats = Seats::lone_terminal();
+        let layout = solved(
+            &seats,
+            viewport_of((960.0 * scale) as u32, (600.0 * scale) as u32, dpi_milli),
+            &metrics,
+        );
+        build_chrome_for_tabs(
+            &seats,
+            &layout,
+            scale,
+            ChromePointer::default(),
+            ChromeContent {
+                tabs: &tabs,
+                active_tab,
+                grabbed: None,
+                strip_preview: None,
+                tab_scroll: 0.0,
+                rail: state,
+                rail_scroll: 0.0,
+                preview_title: None,
+                terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
+                preview_message: None,
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        )
+        .rail
+    }
+
+    /// PIN (Bug 4b): a folding rail leaves nothing standing on the terminal.
+    ///
+    /// The ghost the user photographed: the panel's ground is a quad sized off
+    /// the rail's body and shrinks with it, but the row marks, the `+` and the
+    /// `˅` are fixed-size sprites placed off the rail's *left* edge, so at one
+    /// or two pixels of panel they were still drawn full size — a row of icons
+    /// and an unread dot floating on the terminal with no panel under them.
+    ///
+    /// Stated across the whole fold rather than at one width: every sprite the
+    /// rail emits must be inside the rail's own body at every fraction, which is
+    /// `overflow: hidden` and is the property that has to hold frame by frame.
+    #[test]
+    fn a_folding_rail_never_paints_past_its_own_edge() {
+        let titles = ["one", "two", "three"];
+        for percent in 0..=100 {
+            let fold = percent as f32 / 100.0;
+            let state = RailState {
+                collapsed: true,
+                fold: Some(fold),
+                ..expanded_rail()
+            };
+            let width = state.width_logical_px();
+            // The rail's *own* group, not the window's flattened run: the title
+            // bar and the caption buttons are on screen at every fold and would
+            // answer this question for the rail.
+            let rail = rail_group_of(1.0, &titles, 0, state);
+            let (quads, labels, sprites) = (&rail.quads, &rail.labels, &rail.sprites);
+            if width <= 0.0 {
+                assert!(
+                    quads.is_empty() && labels.is_empty() && sprites.is_empty(),
+                    "a rail of no width draws nothing at all, so there is no ghost \
+                     to leave behind: {} quads, {} labels, {} sprites",
+                    quads.len(),
+                    labels.len(),
+                    sprites.len()
+                );
+                // And nothing to press, either. A rail that is not on screen
+                // must not go on answering for the strip of terminal it used to
+                // cover — the pointer would be picking rows out of thin air.
+                let resting = resting(titles.len());
+                for y in [0.0, 100.0, 300.0, 590.0] {
+                    for x in [0.0, 10.0, 100.0, 219.0] {
+                        assert_eq!(
+                            hit_rail_chrome(600.0, 1.0, &resting, 0, 0.0, state, x, y),
+                            None,
+                            "a folded rail claims no point, but claimed ({x}, {y})"
+                        );
+                    }
+                }
+                continue;
+            }
+            // The panel's own right edge, read off the ground the rail paints
+            // rather than recomputed, so the claim is about what was drawn.
+            let edge = width;
+            for sprite in sprites {
+                assert!(
+                    sprite.rect[2] <= edge + 0.5,
+                    "at fold {fold} the panel ends at {edge} but a {:?} sprite \
+                     reaches {}: it would stand on the terminal",
+                    sprite.mark,
+                    sprite.rect[2]
+                );
+            }
+            for label in labels {
+                assert!(
+                    label.rect[0] <= edge + 0.5,
+                    "at fold {fold} a label starts at {}, past the panel's {edge}",
+                    label.rect[0]
+                );
+            }
+        }
+    }
+
+    /// PIN (Bug 5): the rail draws the open editor, in the row's own box.
+    ///
+    /// T4's state machine was already on both axes — `hit_rail_chrome` answers
+    /// `ChromeTarget::Tab(index)` and every handler downstream is axis-agnostic —
+    /// so a double-click on a rail row opened the editor and took the keyboard
+    /// while the column went on showing the committed title. A caret nobody can
+    /// see, over letters that are not the ones being typed, is worse than no
+    /// rename at all: it looks like the keyboard has stopped working.
+    #[test]
+    fn a_rail_row_shows_the_draft_its_editor_is_holding() {
+        let editing = TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
+            title: "committed-title".to_owned(),
+            pane_count: 1,
+            edit: Some(TabEdit {
+                text: "draft".to_owned(),
+                placeholder: String::new(),
+                caret_px: 10.0,
+                selection_px: 20.0,
+                caret_lit: true,
+            }),
+            ..TabContent::default()
+        };
+        let (_, labels, sprites) =
+            rail_paint_of(1.0, &[editing], 0, None, None, expanded_rail(), None);
+        assert!(
+            labels.iter().any(|label| label.text == "draft"),
+            "the row shows what is being typed"
+        );
+        assert!(
+            !labels.iter().any(|label| label.text == "committed-title"),
+            "and not the name it is replacing"
+        );
+        // The selection band and the caret, both after the active row's own
+        // silhouette so neither is buried under it.
+        let body = sprites
+            .iter()
+            .position(|sprite| {
+                matches!(sprite.mark, ChromeMark::ControlPill { .. })
+                    && sprite.color == chrome_palette().rail_tab_active
+            })
+            .expect("the active row paints its silhouette");
+        let fills = sprites
+            .iter()
+            .enumerate()
+            .filter(|(_, sprite)| sprite.mark == ChromeMark::Fill)
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
+        assert_eq!(fills.len(), 2, "the selection band and the caret");
+        assert!(
+            fills.iter().all(|index| *index > body),
+            "both stand after the silhouette in the painter's order"
+        );
+    }
+
+    /// PIN (Bug 5): an empty draft shows the auto-name, in the placeholder ink.
+    #[test]
+    fn an_empty_rail_draft_shows_the_auto_name_it_would_fall_back_to() {
+        let editing = TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
+            title: "committed-title".to_owned(),
+            pane_count: 1,
+            edit: Some(TabEdit {
+                text: String::new(),
+                placeholder: "PowerShell".to_owned(),
+                caret_px: 0.0,
+                selection_px: 0.0,
+                caret_lit: false,
+            }),
+            ..TabContent::default()
+        };
+        let (_, labels, _) = rail_paint_of(1.0, &[editing], 0, None, None, expanded_rail(), None);
+        let shown = labels
+            .iter()
+            .find(|label| label.text == "PowerShell")
+            .expect("an empty draft shows the layer underneath");
+        assert_ne!(
+            shown.color,
+            chrome_palette().rail_tab_active_text,
+            "`.rename::placeholder` is the muted ink, not the row's own"
+        );
+    }
+
+    /// PIN (Bug 5): the row's title run is one computation, not two.
+    ///
+    /// `rail_title_right` was split out of the rail's paint for the reason
+    /// `tab_title_box` was split out of the strip's: the editor measures its
+    /// caret window against the box it will be drawn in, and a second derivation
+    /// would drift. Measuring against the *strip's* box while the rail was on
+    /// screen is the drift this replaced.
+    #[test]
+    fn the_rails_title_run_is_the_box_its_editor_measures_against() {
+        let trailers = resting(3);
+        let geometry = rail_of(expanded_rail(), &trailers, 0);
+        for row in &geometry.tabs {
+            let plain = rail_title_right(row, 1, 0.0, 1.0);
+            assert_eq!(
+                plain, row.title[1],
+                "with one pane there is no badge, so the run reaches its own end"
+            );
+            // A badge takes its width off the trailing end and the title keeps
+            // what is left — strictly less, and never past the run's own start.
+            let badged = rail_title_right(row, 2, 12.0, 1.0);
+            assert!(
+                badged < plain && badged >= row.title[0],
+                "a badge shortens the run without inverting it: {badged} vs {plain}"
+            );
+        }
+    }
+
     /// The same window, with the drag's own three inputs said out loud: which
     /// row is in hand, which slot a torn-out pane is standing in, and the
     /// per-row `offset`/`landing` the tabs carry.
@@ -15902,6 +16352,7 @@ mod tests {
             collapsed: false,
             open: 0.0,
             text_opacity: 1.0,
+            fold: None,
         }
     }
 
@@ -15913,6 +16364,7 @@ mod tests {
             collapsed: false,
             open,
             text_opacity: open,
+            fold: None,
         }
     }
 

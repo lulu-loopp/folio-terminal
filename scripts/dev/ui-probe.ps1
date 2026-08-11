@@ -15,6 +15,14 @@
 #                                                                    region beyond the window (IME popups
 #                                                                    are separate windows and live outside)
 #   .\ui-probe.ps1 click -Pid <pid> -X 100 -Y 20               → left click at window+(X,Y) physical px
+#   .\ui-probe.ps1 dblclick -Pid <pid> -X 100 -Y 20 [-GapMs 90] → two presses inside the multi-click
+#                                                                interval, from one process — two separate
+#                                                                `click` runs are never a double click
+#   .\ui-probe.ps1 burst -Pid <pid> -Out run.png [-Frames 8] [-EveryMs 30] [-ClickFirst -X .. -Y ..]
+#                                                              → a run of captures from one process, to
+#                                                                photograph something that is moving; a
+#                                                                180ms transition is over before a second
+#                                                                `capture` invocation could start
 #   .\ui-probe.ps1 hover -Pid <pid> -X -160 -Y 20              → park the pointer; negative counts from
 #                                                                the right/bottom edge (the caption run)
 #   .\ui-probe.ps1 drag -Pid <pid> -X 40 -Y 120 -X2 400 -Y2 160 → press at (X,Y), travel, release at
@@ -54,7 +62,7 @@
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet("launch", "type", "key", "chord", "capture", "close", "wheel", "resize", "click", "hover", "drag")]
+  [ValidateSet("launch", "type", "key", "chord", "capture", "close", "wheel", "resize", "click", "dblclick", "hover", "drag", "burst")]
   [string]$Cmd,
   [int]$ProcId = 0,
   [string]$Text = "",
@@ -78,6 +86,17 @@ param(
   [int]$X2 = 0,
   [int]$Y2 = 0,
   [int]$Steps = 12,
+  # dblclick: the gap between the two releases. Must stay under the app's own
+  # multi-click interval; the OS default is 500ms and bt-app follows it.
+  [int]$GapMs = 90,
+  # burst: how many frames to grab, and how far apart. The default window spans
+  # a 180ms transition with frames either side of it.
+  [int]$Frames = 8,
+  [int]$EveryMs = 30,
+  # burst: press at X/Y and start the run immediately. A separate `click`
+  # invocation cannot be used to start an animation, because the burst's own
+  # PowerShell start-up would land after the transition had finished.
+  [switch]$ClickFirst,
   [switch]$TraceDpi
 )
 
@@ -235,12 +254,20 @@ public class Probe {
      a press through the position its last CursorMoved reported, so a click sent
      in the same tick as the move would be tested against the old point. */
   public static void Click(int x, int y) {
+    ClickNoSettle(x, y);
+    System.Threading.Thread.Sleep(120);
+  }
+  /* The same press with the settling sleep left off, for the one caller that
+     must not have it: a burst photographing a transition. The 120ms `Click`
+     waits out so the *next* command sees a finished window is longer than the
+     180ms transition itself, so a burst started after it would only ever
+     photograph the end state and report that nothing moved. */
+  public static void ClickNoSettle(int x, int y) {
     SetCursorPos(x, y);
     System.Threading.Thread.Sleep(120);
     mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);   // LEFTDOWN
     System.Threading.Thread.Sleep(40);
     mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);   // LEFTUP
-    System.Threading.Thread.Sleep(120);
   }
   public static void MoveTo(int x, int y) {
     SetCursorPos(x, y);
@@ -354,6 +381,76 @@ switch ($Cmd) {
     $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
     [Probe]::Click($px, $py)
     "clicked ($px, $py) = window+($X, $Y) on pid=$ProcId (foreground verified)"
+  }
+  "dblclick" {
+    # Two presses inside the multi-click interval, from *one* process. Two
+    # separate `click` invocations cannot be a double click: each pays for its
+    # own PowerShell start-up, and the app's pairing window closes long before
+    # the second one arrives.
+    $h = Get-AppWindow $ProcId
+    if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not clicking blind" }
+    $r = New-Object PRECT
+    [Probe]::GetWindowRect($h, [ref]$r) | Out-Null
+    $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
+    $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+    if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) { throw "REFUSED: ($px, $py) is not over pid=$ProcId — not clicking blind" }
+    [Probe]::Click($px, $py)
+    Start-Sleep -Milliseconds $GapMs
+    [Probe]::Click($px, $py)
+    "double-clicked ($px, $py) = window+($X, $Y) on pid=$ProcId, ${GapMs}ms apart (foreground verified)"
+  }
+  "burst" {
+    # A run of captures from one process, to catch something that is moving.
+    # A transition is over in 180ms and a fresh `capture` invocation costs more
+    # than that, so an animation can only ever be photographed from inside a
+    # loop that is already running. `-Out shot.png` writes shot-00.png … .
+    # `$hwnd`, not the `$h` every other block uses: `$h` *is* the `-H` parameter
+    # (PowerShell variables are case-insensitive), so the handle would overwrite
+    # the requested crop height with a window handle.
+    $hwnd = Get-AppWindow $ProcId
+    $r = New-Object PRECT
+    [Probe]::GetWindowRect($hwnd, [ref]$r) | Out-Null
+    Add-Type -AssemblyName System.Drawing
+    # `-W`/`-H` crop the grab to a sub-rect of the window's top-left corner. A
+    # full 2060x1138 CopyFromScreen costs ~50ms, which is a third of the
+    # transition being photographed — the frames end up further apart than the
+    # thing they are meant to sample. A strip wide enough to hold the rail is
+    # four times cheaper and turns 2 usable frames into 6.
+    # Named apart from `$W`/`$H`: PowerShell variables are case-insensitive, so a
+    # local `$w` *is* the `-W` parameter and assigning to it destroys the value
+    # being read on the same line.
+    $capW = if ($W -gt 0) { [int]$W } else { [int]($r.R - $r.L) }
+    $capH = if ($H -gt 0) { [int]$H } else { [int]($r.B - $r.T) }
+    $stem = [System.IO.Path]::Combine(
+      [System.IO.Path]::GetDirectoryName($Out),
+      [System.IO.Path]::GetFileNameWithoutExtension($Out))
+    if ($ClickFirst) {
+      if (-not [Probe]::BringToFront($hwnd)) { throw "REFUSED: target window did not take foreground — not clicking blind" }
+      $px = if ($X -lt 0) { $r.R + $X } else { $r.L + $X }
+      $py = if ($Y -lt 0) { $r.B + $Y } else { $r.T + $Y }
+      if (-not [Probe]::PointBelongsTo($px, $py, $ProcId)) { throw "REFUSED: ($px, $py) is not over pid=$ProcId — not clicking blind" }
+      # The first CopyFromScreen pays for GDI warm-up, so take one throwaway
+      # frame *before* the press. Paid here, that cost lands before the clock
+      # rather than inside the transition being photographed.
+      $warm = New-Object -TypeName System.Drawing.Bitmap -ArgumentList @(8, 8)
+      $wg = [System.Drawing.Graphics]::FromImage($warm)
+      $wg.CopyFromScreen($r.L, $r.T, 0, 0, $warm.Size)
+      $wg.Dispose(); $warm.Dispose()
+      [Probe]::ClickNoSettle($px, $py)
+    }
+    $clock = [System.Diagnostics.Stopwatch]::StartNew()
+    $shots = @()
+    for ($i = 0; $i -lt $Frames; $i++) {
+      $bmp = New-Object -TypeName System.Drawing.Bitmap -ArgumentList @($capW, $capH)
+      $g = [System.Drawing.Graphics]::FromImage($bmp)
+      $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
+      $at = $clock.ElapsedMilliseconds
+      $path = "{0}-{1:d2}.png" -f $stem, $i
+      $bmp.Save($path); $g.Dispose(); $bmp.Dispose()
+      $shots += "{0} @ {1}ms" -f $path, $at
+      if ($i -lt $Frames - 1) { Start-Sleep -Milliseconds $EveryMs }
+    }
+    $shots -join "`n"
   }
   "drag" {
     $h = Get-AppWindow $ProcId
