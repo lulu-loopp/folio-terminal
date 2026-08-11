@@ -8775,7 +8775,7 @@ mod tests {
             ("the terminal", terminal),
         ] {
             assert_eq!(
-                crate::settings::hit(&overlay, x, y),
+                crate::settings::hit(&overlay, crate::settings::SettingsValues::sample(), x, y,),
                 crate::settings::SettingsTarget::Scrim,
                 "a modal means MODAL: {what} is behind the scrim"
             );

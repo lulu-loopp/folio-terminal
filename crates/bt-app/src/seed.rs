@@ -402,7 +402,7 @@ mod tests {
         UNIX_EPOCH + Duration::from_secs(secs)
     }
 
-    /// PIN — the vault's ruler. `docs/DESIGN.md` §7.1.4 and mock-up 4056.
+    /// PIN — the vault's ruler. `docs/DESIGN.md` §7.1.4 and mock-up 4106.
     #[test]
     fn the_vault_measures_what_the_spec_says_it_measures() {
         assert_eq!(RECENT_CAPACITY, 8, "state.recent.slice(0, 8)");

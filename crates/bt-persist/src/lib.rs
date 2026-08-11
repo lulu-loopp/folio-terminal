@@ -52,7 +52,7 @@ pub use session::{
     SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1, TabV1, WindowBoundsV1,
     WindowStateV1,
 };
-pub use settings::{SETTINGS_SCHEMA_VERSION, SettingsV1, ThemeModeV1};
+pub use settings::{DEFAULT_PROFILE_UNSET, SETTINGS_SCHEMA_VERSION, SettingsV1, ThemeModeV1};
 pub use write_tracker::{WriteAlertAction, WriteFailureTracker};
 
 use std::path::Path;

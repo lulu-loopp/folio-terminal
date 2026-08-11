@@ -1,9 +1,15 @@
 //! The profile picker — the menu the tab strip's `˅` opens.
 //!
 //! Spec authority is `design/ui-mockup.html`: the `.profile-menu` / `.profile-item`
-//! block (lines 976-1002) for the surface and its rows, and `openProfileMenu`
-//! (line 7296) for where the menu lands and what a click on a row does. Every
+//! block (lines 1006-1030) for the surface and its rows, and `openProfileMenu`
+//! (line 7409) for where the menu lands and what a click on a row does. Every
 //! number below is that stylesheet's own.
+//!
+//! Those two line numbers were written as 976-1002 and 7296 and had drifted about
+//! thirty lines as the mock-up grew above them. They are re-anchored here, and the
+//! individual constants below carry their own — a reference that names a *number*
+//! rots silently, so the ones that matter are stated beside the value they
+//! justify where a wrong line is caught by the value not matching.
 //!
 //! Two facts decide the shape of this module:
 //!
@@ -18,7 +24,7 @@
 //!   of opaque chrome quads would have to know what is under it, and nothing is
 //!   under a popup but whatever the terminal happens to be showing.
 //! * **It shows two lists, so a row is not a number.** Under the profiles sits
-//!   `Recently opened` (mock-up 7311-7320), and its rows index the seed vault
+//!   `Recently opened` (mock-up 7424-7433), and its rows index the seed vault
 //!   rather than [`PROFILES`]. Both [`hit`] and the hover therefore speak in
 //!   [`MenuRow`], because the one thing a bare index cannot say is which list it
 //!   came from — and the answer it gets wrong is silent.
@@ -71,7 +77,7 @@ const ITEM_MARK_LOGICAL_PX: f32 = 15.0;
 /// `.default-hint { margin-left: auto; font-size: 11px; color: var(--ink3) }`.
 ///
 /// Two annotations ride in this one slot: the profile list's `default`, and a
-/// recent row's `agoLabel` (mock-up 7319). They are the same declaration in the
+/// recent row's `agoLabel` (mock-up 7428/7432). They are the same declaration in the
 /// same place, so they are the same number here.
 const HINT_FONT_LOGICAL_PX: f32 = 11.0;
 const HINT_TEXT: &str = "default";
@@ -103,7 +109,7 @@ const UNAVAILABLE_HINT_TEXT: &str = "not installed";
 /// shells".
 const UNAVAILABLE_MARK_OPACITY: f32 = 0.35;
 
-// ── `.menu-sep` (mock-up line 996) ─────────────────────────────────────────
+// ── `.menu-sep` (mock-up line 1025) ─────────────────────────────────────────
 /// `height: 1px`, taken to whole device pixels and never below one.
 ///
 /// Rounded rather than left fractional, which is where the floating window's own
@@ -132,7 +138,7 @@ const SEPARATOR_ALPHA_ON_DARK: f32 = 0.06;
 /// The light theme's half of [`SEPARATOR_ALPHA_ON_DARK`].
 const SEPARATOR_ALPHA_ON_LIGHT: f32 = 0.055;
 
-// ── `.menu-label` (mock-up lines 997-1000) ─────────────────────────────────
+// ── `.menu-label` (mock-up lines 1026-1029) ─────────────────────────────────
 const SECTION_LABEL_FONT_LOGICAL_PX: f32 = 10.5;
 /// The 10.5px line box, measured in the mock-up's own renderer (Inter at
 /// `line-height: normal`) — 12.5px, the same ladder its 11px group label climbs
@@ -153,7 +159,7 @@ const SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX: f32 = 5.0;
 /// above rather than in a lowercase constant nothing would uppercase.
 const RECENT_SECTION_LABEL: &str = "RECENTLY OPENED";
 
-// ── `.recent-item` (mock-up lines 1001-1002) ───────────────────────────────
+// ── `.recent-item` (mock-up lines 1030-1031) ───────────────────────────────
 /// `max-width: 260px`.
 ///
 /// It is a real clamp on the row's box and it cannot bind today: the menu is
@@ -161,7 +167,7 @@ const RECENT_SECTION_LABEL: &str = "RECENTLY OPENED";
 /// row is already 170px of content. In the mock-up the menu is content-sized
 /// (`min-width: 180px` over `white-space: nowrap` rows) and this is what stops
 /// one long path from stretching the popup across the window — the day this
-/// module can measure a string, that growth and the ellipsis at mock-up 1002
+/// module can measure a string, that growth and the ellipsis at mock-up 1031
 /// arrive together, and the clamp is already where it belongs.
 const RECENT_ITEM_MAX_WIDTH_LOGICAL_PX: f32 = 260.0;
 
@@ -220,8 +226,59 @@ pub struct Profile {
     /// was a PowerShell. It is a PowerShell flag: `cmd.exe` would take it as the
     /// name of a batch file to run, and `bash` as a filename to open.
     pub args: &'static [&'static str],
+    /// Where a leaf of this profile opens when nothing else says.
+    ///
+    /// The mock-up has no such field: it has one `HOME` constant (line 2632) that
+    /// every profile shares, because every one of its profiles is a fiction that
+    /// never starts a process. A real one has to say *whose* home, and the answer
+    /// is not the same kind of thing for all four — see [`StartingDir`].
+    ///
+    /// It is a fixed property of the profile rather than something the user can
+    /// edit, and that is this ticket's boundary, not an opinion about the feature:
+    /// editing it belongs to the profile editor (K86, → the Settings extension
+    /// block) along with the program, the arguments and the environment. What is
+    /// owed now is that the slot exists and is *read*, so that the editor is a
+    /// screen over a working mechanism rather than a screen and a mechanism.
+    pub starting_dir: StartingDir,
     /// Which shell-integration script this profile is served by, if any.
     pub integration: Integration,
+}
+
+/// Where a profile's shell stands when it is not told.
+///
+/// Two shapes, because "home" is not one fact here. Three of these profiles run
+/// as Windows processes and take their starting directory the way every Windows
+/// process does — as a working directory handed to `CreateProcess`. WSL's shell
+/// does not: `wsl.exe` is a *launcher*, its working directory is a Windows path
+/// that the distribution sees through `/mnt`, and the Linux home it should open
+/// in has no Windows spelling at all. Handing `C:\Users\Weiyi` to a WSL tab lands
+/// it in `/mnt/c/Users/Weiyi` — a real directory, and not the one a shell opens
+/// in when you start it yourself.
+///
+/// So the enum carries the *form* the answer takes rather than a path. That is
+/// what keeps this from being a special case bolted onto the spawn path: a
+/// profile states how it is told where to start, and the spawn reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartingDir {
+    /// `%USERPROFILE%` — the Windows home, handed over as a working directory.
+    ///
+    /// The variable rather than a composed `C:\Users\<name>`: a roaming or
+    /// redirected profile lives elsewhere and the variable is the only thing that
+    /// knows it.
+    WindowsHome,
+    /// The shell's own `$HOME`, reached by *asking the launcher for it* — these
+    /// arguments, appended when there is no directory to hand over instead.
+    ///
+    /// `wsl.exe --cd ~` is the whole of it, and it is the documented flag rather
+    /// than a trick: verified on this machine to answer `/home/weiyi` from a
+    /// process standing in `D:\`, where the same launcher with no flag answers
+    /// `/mnt/d`.
+    ///
+    /// Appended *instead of* a working directory and never beside one, because
+    /// `--cd` overrides the inherited directory: a profile that always passed it
+    /// could never be started anywhere else, which is exactly the inheritance P5
+    /// is going to want back once WSL's two path namespaces have a translation.
+    LauncherFlag(&'static [&'static str]),
 }
 
 /// How a profile's executable is located on the machine.
@@ -240,7 +297,7 @@ pub enum ProgramSource {
     ///
     /// Never unavailable, and that is a fact about Windows rather than an
     /// optimism: `powershell.exe` is part of the OS, so the last step of that
-    /// chain always answers. It is what makes [`DEFAULT_PROFILE`] safe to fall
+    /// chain always answers. It is what makes [`FALLBACK_PROFILE`] safe to fall
     /// back to.
     DefaultShell,
     /// The first of these that is a real file, in order.
@@ -312,6 +369,7 @@ pub const PROFILES: [Profile; 4] = [
         // The flag this terminal has always passed, now said by the profile that
         // means it rather than by the spawn path every profile goes through.
         args: &["-NoLogo"],
+        starting_dir: StartingDir::WindowsHome,
         integration: Integration::PowerShellOptIn,
     },
     Profile {
@@ -334,6 +392,8 @@ pub const PROFILES: [Profile; 4] = [
             tail: r"System32\wsl.exe",
         }]),
         args: &[],
+        // The one profile whose home is not a Windows directory.
+        starting_dir: StartingDir::LauncherFlag(&["--cd", "~"]),
         integration: Integration::None,
     },
     Profile {
@@ -375,6 +435,10 @@ pub const PROFILES: [Profile; 4] = [
         // what sources `/etc/profile` and puts `git` on the path, and without it
         // this would be a bash that cannot find the tool it is named after.
         args: &["--login", "-i"],
+        // Git for Windows' MSYS layer maps `$HOME` onto `%USERPROFILE%` by
+        // default, so the Windows home *is* this shell's home — one directory
+        // under two spellings, unlike WSL's two directories.
+        starting_dir: StartingDir::WindowsHome,
         integration: Integration::None,
     },
     Profile {
@@ -388,32 +452,140 @@ pub const PROFILES: [Profile; 4] = [
         // None. `cmd.exe` has no logo to suppress, and every switch it does take
         // (`/c`, `/k`) would end the session rather than start one.
         args: &[],
+        starting_dir: StartingDir::WindowsHome,
         integration: Integration::None,
     },
 ];
 
-/// The index a new tab is started from when nobody picks — `state.defaultProfile`.
+/// The profile everything falls back **to**, and the one thing in this module
+/// that is not a choice.
 ///
-/// Still a constant rather than a setting: making it one is the Startup group's
-/// row in the settings dialog (mock-up 2464-2474) and a `settings.json` bump,
-/// which is P3's ticket. What this ticket owes that one is that the constant
-/// names a profile which is [`ProgramSource::DefaultShell`] and therefore cannot
-/// be unavailable — see [`the_default_profile_can_always_be_started`].
-pub const DEFAULT_PROFILE: usize = 0;
+/// It used to be called `DEFAULT_PROFILE` and it used to be both things at once:
+/// the floor a broken `profile_id` lands on, *and* the profile the `+` starts.
+/// P3 makes the second one a setting, and the two have to come apart before that
+/// setting exists — a name that means "what the user picked" and "what we do when
+/// nothing was picked" is a name that will be read as the wrong one of the two by
+/// whoever touches it next.
+///
+/// What it must satisfy is one property: it is [`ProgramSource::DefaultShell`],
+/// whose last resolution step is `powershell.exe`, which is part of Windows. So
+/// it always starts, which is what makes it safe to be the end of every fallback
+/// chain — see [`the_fallback_profile_can_always_be_started`]. The *user's*
+/// default carries no such guarantee (they can uninstall Git after choosing Git
+/// Bash), which is precisely why [`default_profile`] resolves through here.
+pub const FALLBACK_PROFILE: usize = 0;
 
-/// Which profile a seed's `profile_id` names, or [`DEFAULT_PROFILE`] when the
+/// Which profile the `+`, `Ctrl+Shift+N` and the opening window start from —
+/// `state.defaultProfile` (mock-up 3217), resolved for this machine.
+///
+/// `stored` is `settings.json`'s `default_profile`, an id and not an index
+/// (`bt_persist::SettingsV1::default_profile` says why). Three inputs collapse to
+/// one answer here rather than at each of the four call sites, because four
+/// readings of "the default" is how three of them end up meaning something
+/// slightly different:
+///
+/// * an id naming no profile in this build — including the empty id a user who
+///   has never opened the setting has — is [`FALLBACK_PROFILE`], which is
+///   [`index_of_id`]'s rule and not a second one;
+/// * an id naming a profile this machine cannot start is **also**
+///   [`FALLBACK_PROFILE`], and this is the part `index_of_id` cannot do because
+///   it is a fact about the machine rather than about the file. Someone who chose
+///   Git Bash and then uninstalled Git must still get a window;
+/// * anything else is what they chose.
+///
+/// The stored id is *not* rewritten when it degrades. Uninstalling Git must not
+/// quietly consume the answer "Git Bash", or reinstalling it would leave the
+/// user's own choice erased with nothing to say so — the degradation lives for
+/// exactly as long as its cause.
+#[must_use]
+pub fn default_profile(stored: &str, programs: &ProfilePrograms) -> usize {
+    PROFILES
+        .iter()
+        .position(|profile| profile.id == stored)
+        .filter(|index| programs.is_available(*index))
+        .unwrap_or(FALLBACK_PROFILE)
+}
+
+/// Which profile a seed's `profile_id` names, or [`FALLBACK_PROFILE`] when the
 /// file names one this build does not have.
 ///
 /// Falling back rather than refusing is the schema's own rule — `§5.4` 逐叶降级,
 /// "未知 profile→默认": a profile that was removed (or that a newer build wrote)
 /// must cost you that tab's *shell choice*, never the tab. The place you were
 /// standing is the part worth keeping, and it survives this.
+///
+/// It falls to the *fallback* and deliberately not to the user's configured
+/// default, which is the one place those two answers visibly differ. The setting
+/// says what it is for in the dialog's own words — "What opens on a new tab, and
+/// when BetterTerminal starts" — and a leaf coming back off disk is neither. A
+/// user who set their default to `cmd` and restores a session written by a build
+/// that spelled a profile differently is owed the pane back, not every such pane
+/// silently converted to their current preference; and the conversion would be
+/// written to disk on the next save, so the original spelling could never be
+/// recovered by a build that understood it again.
 #[must_use]
 pub fn index_of_id(id: &str) -> usize {
     PROFILES
         .iter()
         .position(|profile| profile.id == id)
-        .unwrap_or(DEFAULT_PROFILE)
+        .unwrap_or(FALLBACK_PROFILE)
+}
+
+/// What a greyed row says when the pointer rests on it — the *why* behind the
+/// grey, which the row itself has no room for.
+///
+/// The mock-up has no tooltip here to quote: its four profiles are always
+/// startable, so it never had a greyed row to explain (user ruling: where the
+/// mock-up is silent, rule and report). Its own convention decides the shape
+/// anyway — a `title` on a menu row is the fact the row could not fit (7426/7430
+/// put the full path on a Recent row captioned with only its leaf), so this is
+/// the fact `not installed` could not fit.
+///
+/// The wording names **the profile and the machine**, in that order, and it is
+/// chosen against two alternatives that read as bug reports. "Not found" alone
+/// invites "where did you look?"; "BetterTerminal could not find Git Bash" makes
+/// the terminal the subject of a sentence whose subject is the machine. `— not
+/// found on this machine` says the search happened, that it was for a real thing,
+/// and that the answer is about this computer rather than about the product.
+#[must_use]
+pub fn unavailable_tip(profile: usize) -> String {
+    format!("{} — not found on this machine", PROFILES[profile].title)
+}
+
+/// How a profile is told where to start, once the machine has been asked.
+///
+/// The two shapes of [`StartingDir`] resolved into the two things a spawn can
+/// actually do with them, plus the honest third answer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartingPlace {
+    /// Hand this over as the process's working directory.
+    Directory(PathBuf),
+    /// Append these to the profile's own arguments, and hand over no directory.
+    Arguments(&'static [&'static str]),
+    /// This machine cannot name the place. The shell starts where a process
+    /// started by this one starts, which is what every leaf did before this
+    /// field existed — an unchanged answer rather than a guessed one.
+    Unstated,
+}
+
+/// Where a leaf of `profile` opens when nothing else has said — the resolution
+/// of [`Profile::starting_dir`] against this machine.
+///
+/// Read at spawn rather than probed once like [`ProfilePrograms`], and the
+/// difference is the rate: availability is asked by the *paint*, four times a
+/// frame for as long as a menu is open, while this is asked once per shell
+/// started. A value cached for the life of the process would be trading nothing
+/// for a home directory that cannot then follow a `%USERPROFILE%` the user
+/// changed under us.
+#[must_use]
+pub fn starting_place(profile: usize, environment: &dyn ShellEnvironment) -> StartingPlace {
+    match PROFILES[profile].starting_dir {
+        StartingDir::WindowsHome => environment
+            .var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .map_or(StartingPlace::Unstated, StartingPlace::Directory),
+        StartingDir::LauncherFlag(arguments) => StartingPlace::Arguments(arguments),
+    }
 }
 
 /// The first directory of `PATH` holding `file_name`, joined.
@@ -586,7 +758,7 @@ pub struct ProfileMenuLayout {
     /// `.menu-sep`'s 1px rule, or `None` when there is nothing to separate.
     ///
     /// The three Recent boxes are `Option`/empty together and never singly:
-    /// mock-up 7311 is one ternary over `state.recent.length`, and a heading
+    /// mock-up 7424 is one ternary over `state.recent.length`, and a heading
     /// over an empty list is a promise the menu cannot keep.
     separator: Option<[f32; 4]>,
     /// `.menu-label`'s band, padding included.
@@ -595,9 +767,55 @@ pub struct ProfileMenuLayout {
     recent: Vec<[f32; 4]>,
 }
 
+impl ProfileMenuLayout {
+    /// Every row that has something to say beyond its own caption, paired with
+    /// the box it says it over.
+    ///
+    /// The mock-up puts a `title` on a menu row exactly when the row is showing
+    /// less than it knows: 7426 and 7430 caption a Recent row with the last
+    /// segment of a path and hang the whole path off it. This is that rule, plus
+    /// the one row the mock-up never had — a profile this machine cannot start,
+    /// captioned `not installed`, which is a state without its reason.
+    ///
+    /// It is one iterator rather than a tooltip block beside the draw, because
+    /// the rectangles are the *laid-out* ones: a tip registered against a box
+    /// computed a second way is a tip that appears where the row is not. An
+    /// available profile row yields nothing — its caption already is everything
+    /// the row knows, and a tip that restates the label under the pointer is the
+    /// noise `hideTip` exists to prevent.
+    pub fn tips<'a>(
+        &'a self,
+        programs: &'a ProfilePrograms,
+        recent: &'a [RecentEntry],
+    ) -> impl Iterator<Item = (MenuRow, [f32; 4], String)> + 'a {
+        let profiles = self
+            .items
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !programs.is_available(*index))
+            .map(|(index, rect)| (MenuRow::Profile(index), *rect, unavailable_tip(index)));
+        let recents =
+            self.recent
+                .iter()
+                .zip(menu_rows(recent))
+                .enumerate()
+                .map(|(index, (rect, entry))| {
+                    (
+                        MenuRow::Recent(index),
+                        *rect,
+                        match &entry.seed {
+                            Seed::Term { cwd, .. } => cwd.clone(),
+                            Seed::Files { root } => root.clone(),
+                        },
+                    )
+                });
+        profiles.chain(recents)
+    }
+}
+
 /// What the menu shows of a vault: its first [`RECENT_CAPACITY`] entries.
 ///
-/// The cap is the vault's own (`docs/DESIGN.md` §7.1.4, mock-up 4056) and not a
+/// The cap is the vault's own (`docs/DESIGN.md` §7.1.4, mock-up 4106) and not a
 /// second policy invented here — but it is applied here too, because a menu is
 /// a surface with a window edge under it and "however many the caller passed"
 /// is not a height. Both [`layout`] and [`build`] read the slice through this,
@@ -608,7 +826,7 @@ fn menu_rows(recent: &[RecentEntry]) -> &[RecentEntry] {
 
 /// Which way the menu hangs off the button that opened it.
 ///
-/// `openProfileMenu` (mock-up 7357-7405) needs no such choice: it writes `top:
+/// `openProfileMenu` (mock-up 7409-7457) needs no such choice: it writes `top:
 /// a.bottom + 4; left: a.left` off whatever element was clicked, and in a
 /// document that is right for both layouts for free, because both chevrons are
 /// real boxes and a menu below either one has the whole page to fall into.
@@ -818,14 +1036,29 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 pub fn build(
     layout: &ProfileMenuLayout,
     programs: &ProfilePrograms,
+    default: usize,
     hover: Option<MenuRow>,
     recent: &[RecentEntry],
     now: SystemTime,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
     let px = |value: f32| value * scale;
     let alpha = |value: u8| f32::from(value) / 255.0;
+    // `.default-hint { margin-left: auto }` is a flex item, so in the mock-up it
+    // takes its own width out of the row before the name gets any — and the name
+    // is what shrinks (line 1031 puts `text-overflow: ellipsis` on the name span
+    // and not on the hint). Measuring it is how that becomes true here: the row
+    // is 180px, `Command Prompt` and `default` do not both fit in it, and until
+    // this was measured the two were drawn into overlapping boxes and printed on
+    // top of each other. Caller-measured for the reason every other surface's
+    // text is (`restore`, `peek_strip`, `settings`): the font is the renderer's.
+    let hint_font = px(HINT_FONT_LOGICAL_PX);
+    let mut hint = |text: String| {
+        let width = measure(&text, hint_font);
+        (text, width)
+    };
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
     let mut quads = Vec::new();
     let mut labels = Vec::new();
@@ -858,13 +1091,13 @@ pub fn build(
                 // than the row's state — so it does not answer to hover.
                 //
                 // The two annotations are exclusive by construction rather than
-                // by an `if/else` that could one day pick wrong: the default
-                // profile resolves through the OS's own PowerShell and cannot be
-                // the unavailable one.
+                // by an `if/else` that could one day pick wrong: `default` is
+                // resolved through [`default_profile`], which refuses to answer
+                // with a profile this machine cannot start.
                 hint: if available {
-                    (index == DEFAULT_PROFILE).then_some(HINT_TEXT.to_owned())
+                    (index == default).then(|| hint(HINT_TEXT.to_owned()))
                 } else {
-                    Some(UNAVAILABLE_HINT_TEXT.to_owned())
+                    Some(hint(UNAVAILABLE_HINT_TEXT.to_owned()))
                 },
                 hovered: hover == Some(MenuRow::Profile(index)),
                 available,
@@ -920,7 +1153,7 @@ pub fn build(
                 // row's one annotation answers "when", the grey already answers
                 // "can you", and losing the timestamp would cost the row the
                 // only thing that orders it against its neighbours.
-                hint: Some(ago_label(entry.at, now)),
+                hint: Some(hint(ago_label(entry.at, now))),
                 hovered: hover == Some(MenuRow::Recent(index)),
                 available: recent_is_available(&entry.seed, programs),
             },
@@ -942,7 +1175,7 @@ pub fn build(
 
 /// One `.profile-item`, whichever list it belongs to.
 ///
-/// The two lists are the same row — mock-up 7317 is `class="profile-item
+/// The two lists are the same row — mock-up 7426/7430 is `class="profile-item
 /// recent-item"`, and `.recent-item` adds a width and nothing else. So they are
 /// drawn by one function rather than two that look alike, because the way two
 /// menu rows drift apart is that somebody fixes the ink on one of them.
@@ -950,9 +1183,14 @@ struct Row<'a> {
     rect: [f32; 4],
     mark: ChromeMark,
     name: &'a str,
-    /// The `.default-hint` slot: `default` on the default profile, `3m ago` on
-    /// a recent row, `not installed` on one this machine cannot start.
-    hint: Option<String>,
+    /// The `.default-hint` slot and **its measured width**: `default` on the
+    /// default profile, `3m ago` on a recent row, `not installed` on one this
+    /// machine cannot start.
+    ///
+    /// The width travels with the words because the two are used together and
+    /// once: the hint is right-aligned into it and the name's box ends where it
+    /// begins.
+    hint: Option<(String, f32)>,
     hovered: bool,
     /// Whether this row can do what it says. A row that cannot is drawn and not
     /// offered — see [`hit`], which is where "not offered" is actually enforced.
@@ -994,18 +1232,26 @@ fn push_row(
         sprite.grayscale = true;
     }
     sprites.push(sprite);
+    // What the hint has already claimed, out of the row's trailing padding: its
+    // own measured width, and the `gap: 10px` between two flex items. A row with
+    // nothing to add gives the name the whole span, which is what every row did
+    // before any of them had a hint long enough to collide.
+    let hint_claim = row
+        .hint
+        .as_ref()
+        .map_or(0.0, |(_, width)| width + px(ITEM_GAP_LOGICAL_PX));
     labels.push(ChromeLabel {
         text: row.name.to_owned(),
         // The name's box ends at the row's trailing padding, and the row's own
         // right edge is where `.recent-item`'s `max-width` already landed. A
         // `ChromeLabel` clips per glyph and per pixel, so a name too long for
         // that box is cropped exactly as CSS `overflow: hidden` crops it —
-        // mock-up 1002 asks for `text-overflow: ellipsis` instead, and the `…`
+        // mock-up 1031 asks for `text-overflow: ellipsis` instead, and the `…`
         // needs a measured string this module is not given.
         rect: [
             column_right + px(ITEM_GAP_LOGICAL_PX),
             item[1],
-            item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
+            item[2] - px(ITEM_PADDING_X_LOGICAL_PX) - hint_claim,
             item[3],
         ],
         font_size_px: px(ITEM_FONT_LOGICAL_PX),
@@ -1029,7 +1275,7 @@ fn push_row(
         tabular_numerals: false,
         clip: None,
     });
-    if let Some(hint) = &row.hint {
+    if let Some((hint, _)) = &row.hint {
         labels.push(ChromeLabel {
             text: hint.clone(),
             rect: [
@@ -1066,12 +1312,12 @@ fn separator_alpha(ink: [u8; 3]) -> f32 {
     }
 }
 
-/// The mark a recent row wears — mock-up 7314/7318.
+/// The mark a recent row wears — mock-up 7427/7431.
 ///
 /// A terminal seed wears **its own profile's** mark rather than a generic one:
 /// the row is offering to reopen that shell, and the picker's rows one section
 /// up are already teaching what the mark means. A files locus has no profile,
-/// so it wears the folder the pane is (`#i-folder` in `--accent`, mock-up 7314).
+/// so it wears the folder the pane is (`#i-folder` in `--accent`, mock-up 7427).
 fn recent_mark(seed: &Seed) -> ChromeMark {
     match seed {
         Seed::Term { profile_id, .. } => PROFILES[index_of_id(profile_id)].mark,
@@ -1079,7 +1325,7 @@ fn recent_mark(seed: &Seed) -> ChromeMark {
     }
 }
 
-/// What a recent row calls itself — mock-up 7318: `r.seed.name || cwdLeaf(r.seed)`.
+/// What a recent row calls itself — mock-up 7431: `r.seed.name || cwdLeaf(r.seed)`.
 ///
 /// Your own name for the tab wins, and the folder it stood in answers when you
 /// never gave it one. An empty manual name is not a name: `||` in the mock-up
@@ -1140,6 +1386,18 @@ mod tests {
     /// A vault with nothing in it: the menu every test that predates Recent was
     /// written against.
     const NO_RECENT: &[RecentEntry] = &[];
+
+    /// A stand-in for the renderer's own text measurement.
+    ///
+    /// A fixed advance per character rather than a real font: these tests are
+    /// about *where the boxes end up given a width*, and a real font would make
+    /// every one of them a claim about the machine's font stack. The advance is
+    /// deliberately generous (0.6em is about right for Inter's digits and rather
+    /// wider than its lowercase) so that a row's hint claims a realistic slice of
+    /// a 180px menu.
+    fn fake_measure(text: &str, font_px: f32) -> f32 {
+        text.chars().count() as f32 * font_px * 0.6
+    }
 
     /// An in-memory machine: what is on the `PATH`, and which files exist.
     ///
@@ -1211,7 +1469,7 @@ mod tests {
     fn term(cwd: &str, manual_name: Option<&str>, secs_ago: u64) -> RecentEntry {
         RecentEntry {
             seed: Seed::Term {
-                profile_id: PROFILES[DEFAULT_PROFILE].id.to_owned(),
+                profile_id: PROFILES[FALLBACK_PROFILE].id.to_owned(),
                 cwd: cwd.to_owned(),
                 manual_name: manual_name.map(str::to_owned),
             },
@@ -1349,7 +1607,7 @@ mod tests {
     ///
     /// The order is load-bearing rather than tidy: `state.defaultProfile` is an
     /// *index* into this list (mock-up 3217), and until P3 makes it a setting,
-    /// [`DEFAULT_PROFILE`] is a constant index too. Reordering this array
+    /// [`FALLBACK_PROFILE`] is a constant index too. Reordering this array
     /// silently re-points it.
     ///
     /// This test replaces one that asserted `PROFILES.len() == 1` and was right
@@ -1362,7 +1620,7 @@ mod tests {
         assert_eq!(PROFILES.len(), 4);
         let listed: Vec<_> = PROFILES.iter().map(|profile| profile.id).collect();
         assert_eq!(listed, ["pwsh", "wsl", "gitbash", "cmd"]);
-        assert_eq!(PROFILES[DEFAULT_PROFILE].title, "PowerShell");
+        assert_eq!(PROFILES[FALLBACK_PROFILE].title, "PowerShell");
 
         // Four profiles, four marks: the icon column carries information only
         // while no two rows carry the same thing.
@@ -1418,24 +1676,299 @@ mod tests {
         );
     }
 
-    /// PIN — the default profile is the one profile that cannot be unavailable.
+    /// PIN — the fallback profile is the one profile that cannot be unavailable.
     ///
-    /// Everything else in this ticket leans on it: `index_of_id` falls back to
-    /// it for an id this build does not have, `create_leaf_session` falls back
-    /// to it when a profile's own program will not start, and the picker's
-    /// `default` hint is drawn on the assumption that no row is ever both the
-    /// default and greyed. A default that could be missing would turn each of
-    /// those into a window with no shell in it.
+    /// Everything else leans on it: `index_of_id` falls back to it for an id this
+    /// build does not have, `default_profile` falls back to it for a *setting*
+    /// this machine cannot honour, `create_leaf_session` falls back to it when a
+    /// profile's own program will not start, and the picker's `default` hint is
+    /// drawn on the assumption that no row is ever both the default and greyed. A
+    /// fallback that could be missing would turn each of those into a window with
+    /// no shell in it.
     #[test]
-    fn the_default_profile_can_always_be_started() {
+    fn the_fallback_profile_can_always_be_started() {
         assert_eq!(
-            PROFILES[DEFAULT_PROFILE].program,
+            PROFILES[FALLBACK_PROFILE].program,
             ProgramSource::DefaultShell,
-            "the default profile resolves through the OS's own PowerShell chain"
+            "the fallback profile resolves through the OS's own PowerShell chain"
         );
         // Even on a machine with nothing else on it.
-        assert!(bare().is_available(DEFAULT_PROFILE));
-        assert!(equipped().is_available(DEFAULT_PROFILE));
+        assert!(bare().is_available(FALLBACK_PROFILE));
+        assert!(equipped().is_available(FALLBACK_PROFILE));
+    }
+
+    /// PIN — `default` is a caption on the *chosen* row, not on the first one.
+    ///
+    /// Red gate: the hint used to be `index == DEFAULT_PROFILE`, a constant, so
+    /// every reading of the menu said PowerShell however the setting was set. The
+    /// second half — exactly one row wears it — is what keeps a fix that ORs a
+    /// new condition onto the old one from passing.
+    #[test]
+    fn the_default_caption_follows_the_setting_and_lands_on_exactly_one_row() {
+        let scale = 1.0;
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            NO_RECENT,
+        );
+        for (chosen, profile) in PROFILES.iter().enumerate() {
+            let layers = build(
+                &layout,
+                &equipped(),
+                chosen,
+                None,
+                NO_RECENT,
+                now(),
+                &mut fake_measure,
+            );
+            let captioned: Vec<usize> = layout
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| {
+                    layers.iter().flat_map(|layer| &layer.labels).any(|label| {
+                        label.text == HINT_TEXT
+                            && label.rect[1] == row[1]
+                            && label.rect[3] == row[3]
+                    })
+                })
+                .map(|(index, _)| index)
+                .collect();
+            assert_eq!(
+                captioned,
+                vec![chosen],
+                "the `default` hint belongs to {} and to nothing else",
+                profile.id
+            );
+        }
+    }
+
+    /// PIN — a row's annotation takes its width out of the row before the name
+    /// gets any, so the two are never drawn on top of each other.
+    ///
+    /// **Found on the real machine** (2026-08-11), the frame after "Command
+    /// Prompt" became the default: the menu is 180px, `Command Prompt` alone very
+    /// nearly fills it, and `default` was right-aligned into a span the name's
+    /// own box also ran to the end of — so the window printed `Command Promptdefault`,
+    /// two labels in one place. It was latent before this ticket and reachable
+    /// only through `not installed` on a long-named profile; making the default
+    /// configurable put it on the common path.
+    ///
+    /// The mock-up never has it because `.default-hint { margin-left: auto }` is a
+    /// flex item and the *name* is the one carrying `text-overflow: ellipsis`
+    /// (line 1031). Reserving the measured hint is that layout; the name then
+    /// clips, which is what `ChromeLabel` already does per glyph.
+    #[test]
+    fn a_rows_annotation_reserves_its_own_width_and_the_name_stops_short_of_it() {
+        let scale = 1.0;
+        let vault = [term(r"C:\some\very\long\path\indeed", None, 3_600)];
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+        );
+        // Every profile as the default in turn, so the longest name carrying the
+        // hint is covered rather than only the first row's short one.
+        for chosen in 0..PROFILES.len() {
+            for programs in [equipped(), bare()] {
+                let layer = one_layer(build(
+                    &layout,
+                    &programs,
+                    chosen,
+                    None,
+                    &vault,
+                    now(),
+                    &mut fake_measure,
+                ));
+                // Rows are one line box tall, so two labels sharing a row are the
+                // two whose vertical spans agree.
+                for name in &layer.labels {
+                    if name.align_right {
+                        continue;
+                    }
+                    for annotation in layer.labels.iter().filter(|other| {
+                        other.align_right
+                            && other.rect[1] == name.rect[1]
+                            && other.rect[3] == name.rect[3]
+                    }) {
+                        // Where the hint's glyphs actually start: it is right
+                        // aligned, so its ink begins one measured width back from
+                        // the right edge of its box.
+                        let ink_left = annotation.rect[2]
+                            - fake_measure(&annotation.text, annotation.font_size_px);
+                        assert!(
+                            name.rect[2] <= ink_left,
+                            "default={chosen}: {:?} runs to {} and {:?} starts at {ink_left}",
+                            name.text,
+                            name.rect[2],
+                            annotation.text,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// PIN — a row says what its caption could not fit, and only then.
+    ///
+    /// Two rules in one list because they are one rule: the mock-up hangs a
+    /// `title` on a menu row exactly when the row is showing less than it knows
+    /// (7426/7430 caption a Recent row with a path's last segment and tip the
+    /// whole path). A greyed profile row is the case the mock-up never had — it
+    /// is captioned `not installed`, which is a state without its reason — and an
+    /// *available* profile row is showing everything it knows, so it says nothing
+    /// rather than restating the label under the pointer.
+    #[test]
+    fn a_row_is_tipped_with_what_its_caption_left_out_and_nothing_else() {
+        let scale = 1.0;
+        let vault = [term(r"D:\Developer\BetterTerminal\crates", None, 30)];
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+        );
+
+        let bare_tips: Vec<_> = layout.tips(&bare(), &vault).collect();
+        let profiles_tipped: Vec<_> = bare_tips
+            .iter()
+            .filter_map(|(row, _, text)| match row {
+                MenuRow::Profile(index) => Some((*index, text.clone())),
+                MenuRow::Recent(_) => None,
+            })
+            .collect();
+        assert_eq!(
+            profiles_tipped,
+            vec![
+                (
+                    index_of_id("wsl"),
+                    "WSL — not found on this machine".to_owned()
+                ),
+                (
+                    index_of_id("gitbash"),
+                    "Git Bash — not found on this machine".to_owned()
+                ),
+                (
+                    index_of_id("cmd"),
+                    "Command Prompt — not found on this machine".to_owned()
+                ),
+            ],
+            "every greyed row says why, in its own name, and the startable one \
+             says nothing"
+        );
+
+        // The rectangles are the laid-out rows themselves — a tip registered
+        // against a box computed a second way is a tip that appears where the
+        // row is not.
+        for (row, rect, _) in &bare_tips {
+            let expected = match row {
+                MenuRow::Profile(index) => layout.items[*index],
+                MenuRow::Recent(index) => layout.recent[*index],
+            };
+            assert_eq!(*rect, expected);
+        }
+
+        // And on a machine with all four, no profile row has anything to add —
+        // but the Recent row still carries the path its caption cropped.
+        let equipped_tips: Vec<_> = layout.tips(&equipped(), &vault).collect();
+        assert_eq!(
+            equipped_tips,
+            vec![(
+                MenuRow::Recent(0),
+                layout.recent[0],
+                r"D:\Developer\BetterTerminal\crates".to_owned()
+            )],
+        );
+        assert_eq!(
+            recent_label(&vault[0].seed),
+            "crates",
+            "the caption really is only the leaf, which is what the tip is for"
+        );
+    }
+
+    /// PIN — the setting decides, the machine vetoes, and neither is the other.
+    ///
+    /// Red gate for the whole of P3's data half. Four inputs and four different
+    /// answers, and the two failure modes this exists to stop are opposites: a
+    /// resolver that trusted the file hands a window a shell that is not
+    /// installed, and one that only ever answered `FALLBACK_PROFILE` makes the
+    /// setting a control that does nothing.
+    #[test]
+    fn the_default_profile_is_the_stored_choice_unless_this_machine_cannot_honour_it() {
+        let all = equipped();
+
+        assert_eq!(
+            default_profile("cmd", &all),
+            index_of_id("cmd"),
+            "a stored id this machine can start is the answer, whatever index it is"
+        );
+        assert_eq!(
+            default_profile(bt_persist::DEFAULT_PROFILE_UNSET, &all),
+            FALLBACK_PROFILE,
+            "nobody has ever opened the setting: the floor, not an error"
+        );
+        assert_eq!(
+            default_profile("a-profile-from-a-newer-build", &all),
+            FALLBACK_PROFILE,
+            "an id this build does not have degrades exactly as a leaf's does"
+        );
+        assert_eq!(
+            default_profile("gitbash", &bare()),
+            FALLBACK_PROFILE,
+            "chosen, installed once, uninstalled since — the window still opens"
+        );
+        // And the resolved answer is always startable, which is the property
+        // `create_leaf_session`'s `expect` is standing on.
+        for stored in ["cmd", "gitbash", "wsl", "pwsh", "", "nonsense"] {
+            for machine in [&all, &bare()] {
+                assert!(
+                    machine.is_available(default_profile(stored, machine)),
+                    "the default resolved for {stored:?} must be startable"
+                );
+            }
+        }
+    }
+
+    /// PIN — every profile can say where it starts, and WSL says it differently.
+    ///
+    /// The trap is a `starting_dir` that resolves to a Windows path for all four:
+    /// it would compile, it would look right in the table, and a WSL tab would
+    /// open in `/mnt/c/Users/…` — a real directory, silently not the one the same
+    /// shell opens in when started any other way.
+    #[test]
+    fn a_profile_states_its_starting_place_in_the_form_its_launcher_can_take() {
+        let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
+        for profile in ["pwsh", "gitbash", "cmd"] {
+            assert_eq!(
+                starting_place(index_of_id(profile), &machine),
+                StartingPlace::Directory(PathBuf::from(r"C:\Users\dev")),
+                "{profile} is a Windows process and takes a working directory"
+            );
+        }
+        assert_eq!(
+            starting_place(index_of_id("wsl"), &machine),
+            StartingPlace::Arguments(&["--cd", "~"]),
+            "WSL's home has no Windows spelling, so it is asked for rather than handed over"
+        );
+        // The home is read from the variable and never composed, so a redirected
+        // profile is followed rather than guessed at.
+        assert_eq!(
+            starting_place(
+                FALLBACK_PROFILE,
+                &FakeMachine::default().with_var("USERPROFILE", r"\\server\redirected\dev")
+            ),
+            StartingPlace::Directory(PathBuf::from(r"\\server\redirected\dev")),
+        );
+        assert_eq!(
+            starting_place(FALLBACK_PROFILE, &FakeMachine::default()),
+            StartingPlace::Unstated,
+            "a machine that cannot name its own home is told nothing, not a guess"
+        );
     }
 
     /// PIN — a profile is available exactly when its program is on the machine,
@@ -1453,7 +1986,7 @@ mod tests {
             (0..PROFILES.len())
                 .filter(|index| none.is_available(*index))
                 .collect::<Vec<_>>(),
-            vec![DEFAULT_PROFILE],
+            vec![FALLBACK_PROFILE],
             "a bare Windows box offers PowerShell and says the truth about the rest"
         );
 
@@ -1620,7 +2153,15 @@ mod tests {
         );
 
         let palette = chrome_palette();
-        let layer = one_layer(build(&layout, &programs, None, NO_RECENT, now()));
+        let layer = one_layer(build(
+            &layout,
+            &programs,
+            FALLBACK_PROFILE,
+            None,
+            NO_RECENT,
+            now(),
+            &mut fake_measure,
+        ));
         let name = layer
             .labels
             .iter()
@@ -1724,7 +2265,15 @@ mod tests {
             );
         }
 
-        let layer = one_layer(build(&layout, &programs, None, &vault, now()));
+        let layer = one_layer(build(
+            &layout,
+            &programs,
+            FALLBACK_PROFILE,
+            None,
+            &vault,
+            now(),
+            &mut fake_measure,
+        ));
         let git = layer
             .sprites
             .iter()
@@ -1845,13 +2394,23 @@ mod tests {
             NO_RECENT,
         );
         let palette = chrome_palette();
-        let rest = one_layer(build(&layout, &equipped(), None, NO_RECENT, now()));
+        let rest = one_layer(build(
+            &layout,
+            &equipped(),
+            FALLBACK_PROFILE,
+            None,
+            NO_RECENT,
+            now(),
+            &mut fake_measure,
+        ));
         let hover = one_layer(build(
             &layout,
             &equipped(),
+            FALLBACK_PROFILE,
             Some(MenuRow::Profile(0)),
             NO_RECENT,
             now(),
+            &mut fake_measure,
         ));
         let (rest_quads, rest_labels, sprites) = (rest.quads, rest.labels, rest.sprites);
         let (hover_quads, hover_labels) = (hover.quads, hover.labels);
@@ -1886,7 +2445,7 @@ mod tests {
     }
 
     /// PIN — I89/I90/I93/I95: every measured value of `.profile-menu` and
-    /// `.profile-item` (mock-up lines 976-1002), nailed to the stylesheet.
+    /// `.profile-item` (mock-up lines 1006-1031), nailed to the stylesheet.
     ///
     /// The surface, its rows and its ink are checked elsewhere in this module;
     /// what this pins is the ruler — the numbers a redesign would have to change
@@ -1989,7 +2548,15 @@ mod tests {
             NO_RECENT,
         );
         let palette = chrome_palette();
-        let layers = build(&layout, &equipped(), None, NO_RECENT, now());
+        let layers = build(
+            &layout,
+            &equipped(),
+            FALLBACK_PROFILE,
+            None,
+            NO_RECENT,
+            now(),
+            &mut fake_measure,
+        );
         let labels: Vec<_> = layers.iter().flat_map(|layer| &layer.labels).collect();
         let sprites: Vec<_> = layers.iter().flat_map(|layer| &layer.sprites).collect();
         let hint = labels
@@ -2032,7 +2599,7 @@ mod tests {
         assert_eq!(title.font_size_px, ITEM_FONT_LOGICAL_PX * scale);
     }
 
-    /// PIN — I92, mock-up 7311: `state.recent.length ? … : ""`. An empty vault
+    /// PIN — I92, mock-up 7424: `state.recent.length ? … : ""`. An empty vault
     /// adds no rule, no heading and no rows, and leaves the menu at exactly the
     /// height it had before Recent existed.
     ///
@@ -2061,7 +2628,15 @@ mod tests {
             assert_eq!(layout.section_label, None);
             assert!(layout.recent.is_empty());
 
-            let layer = one_layer(build(&layout, &equipped(), None, NO_RECENT, now()));
+            let layer = one_layer(build(
+                &layout,
+                &equipped(),
+                FALLBACK_PROFILE,
+                None,
+                NO_RECENT,
+                now(),
+                &mut fake_measure,
+            ));
             assert!(
                 !layer
                     .labels
@@ -2208,7 +2783,7 @@ mod tests {
     }
 
     /// PIN — the menu shows at most the eight seeds the vault itself keeps
-    /// (`docs/DESIGN.md` §7.1.4, mock-up 4056), whatever it is handed.
+    /// (`docs/DESIGN.md` §7.1.4, mock-up 4106), whatever it is handed.
     ///
     /// Red gate: a menu whose height is "however many the caller passed" is a
     /// popup that grows off the bottom of the window, and every row past the
@@ -2238,7 +2813,15 @@ mod tests {
             "and the menu is only as tall as the rows it draws"
         );
 
-        let layer = one_layer(build(&layout, &equipped(), None, &vault, now()));
+        let layer = one_layer(build(
+            &layout,
+            &equipped(),
+            FALLBACK_PROFILE,
+            None,
+            &vault,
+            now(),
+            &mut fake_measure,
+        ));
         assert!(
             layer.labels.iter().any(|label| label.text == "p7"),
             "the eighth seed is drawn"
@@ -2270,7 +2853,15 @@ mod tests {
             &vault,
         );
         let palette = chrome_palette();
-        let layer = one_layer(build(&layout, &equipped(), None, &vault, now()));
+        let layer = one_layer(build(
+            &layout,
+            &equipped(),
+            FALLBACK_PROFILE,
+            None,
+            &vault,
+            now(),
+            &mut fake_measure,
+        ));
         let heading = layer
             .labels
             .iter()
@@ -2319,7 +2910,7 @@ mod tests {
         );
     }
 
-    /// PIN — mock-up 7318: a recent row is called by your own name for it, and
+    /// PIN — mock-up 7431: a recent row is called by your own name for it, and
     /// by the folder it stood in when you never gave it one. The leaf rule is
     /// drive-root aware, so `C:\` is `C:` rather than the empty caption a naive
     /// split leaves behind a trailing separator.
@@ -2344,7 +2935,15 @@ mod tests {
             files("D:\\Developer\\BetterTerminal\\", 180),
         ];
         let layout = layout(anchor(1.0), MenuSide::Below, (960.0, 600.0), 1.0, &vault);
-        let layer = one_layer(build(&layout, &equipped(), None, &vault, now()));
+        let layer = one_layer(build(
+            &layout,
+            &equipped(),
+            FALLBACK_PROFILE,
+            None,
+            &vault,
+            now(),
+            &mut fake_measure,
+        ));
         let drawn: Vec<&str> = layer
             .labels
             .iter()
@@ -2355,7 +2954,7 @@ mod tests {
         }
     }
 
-    /// PIN — mock-up 7314/7318: a terminal seed wears its own profile's mark,
+    /// PIN — mock-up 7427/7431: a terminal seed wears its own profile's mark,
     /// a files locus wears `#i-folder`, and both are `--accent`. The ago label
     /// rides in the `.default-hint` slot the `default` hint already owns.
     #[test]
@@ -2370,7 +2969,15 @@ mod tests {
             &vault,
         );
         let palette = chrome_palette();
-        let layer = one_layer(build(&layout, &equipped(), None, &vault, now()));
+        let layer = one_layer(build(
+            &layout,
+            &equipped(),
+            FALLBACK_PROFILE,
+            None,
+            &vault,
+            now(),
+            &mut fake_measure,
+        ));
 
         let in_row = |row: [f32; 4], sprite: &ChromeSprite| {
             sprite.rect[1] >= row[1] && sprite.rect[3] <= row[3]
@@ -2387,7 +2994,7 @@ mod tests {
             .iter()
             .find(|sprite| in_row(layout.recent[1], sprite))
             .expect("the terminal row wears a mark");
-        assert_eq!(shell.mark, PROFILES[DEFAULT_PROFILE].mark);
+        assert_eq!(shell.mark, PROFILES[FALLBACK_PROFILE].mark);
         assert_eq!(shell.color, palette.accent);
         // An id this build does not have costs the row its shell choice, never
         // its mark — `index_of_id` falls back rather than refusing.
@@ -2397,7 +3004,7 @@ mod tests {
                 cwd: "C:\\repo".to_owned(),
                 manual_name: None,
             }),
-            PROFILES[DEFAULT_PROFILE].mark
+            PROFILES[FALLBACK_PROFILE].mark
         );
 
         let hint = layer
@@ -2439,9 +3046,11 @@ mod tests {
         let layer = one_layer(build(
             &layout,
             &equipped(),
+            FALLBACK_PROFILE,
             Some(MenuRow::Recent(0)),
             &vault,
             now(),
+            &mut fake_measure,
         ));
         let row = layout.recent[0];
         assert!(

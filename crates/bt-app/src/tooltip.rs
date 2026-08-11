@@ -78,6 +78,13 @@ pub enum TooltipAnchorId {
     TabPin(usize),
     NewTab,
     NewTabMenu,
+    /// A row of the open profile picker — a profile the machine cannot start, or
+    /// a Recent row whose caption is only the last segment of its path.
+    ///
+    /// It carries [`crate::profiles::MenuRow`] rather than a bare index for the
+    /// reason that type exists at all: the picker shows two lists, and a number
+    /// that could mean either names the wrong row silently.
+    ProfileRow(crate::profiles::MenuRow),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.

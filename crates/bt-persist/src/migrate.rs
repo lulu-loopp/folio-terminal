@@ -38,6 +38,7 @@ pub type MigrationStep = fn(Value) -> Value;
 pub const SETTINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[
     (1, migrate_settings_v1_to_v2),
     (2, migrate_settings_v2_to_v3),
+    (3, migrate_settings_v3_to_v4),
 ];
 
 fn migrate_settings_v1_to_v2(mut value: Value) -> Value {
@@ -64,6 +65,26 @@ fn migrate_settings_v2_to_v3(mut value: Value) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("schema_version".to_owned(), Value::from(3));
         object.insert("inline_formulas".to_owned(), Value::from(true));
+    }
+    value
+}
+
+/// v3 -> v4: which profile a new tab starts from, defaulted to **unchosen**.
+///
+/// The third shape these three steps have taken, and it is neither of the first
+/// two. `v1_to_v2` carried a behaviour forward and `v2_to_v3` took the product's
+/// default for a feature shipping new; this one writes the *absence* of a choice,
+/// because a v3 user was never offered the question. Writing `"pwsh"` here would
+/// look identical today — PowerShell is what the reader falls back to — and would
+/// differ the moment the fallback moved: every migrated file would be pinning a
+/// decision its owner never made, indistinguishable from one they had.
+fn migrate_settings_v3_to_v4(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(4));
+        object.insert(
+            "default_profile".to_owned(),
+            Value::from(crate::settings::DEFAULT_PROFILE_UNSET),
+        );
     }
     value
 }

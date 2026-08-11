@@ -1224,6 +1224,18 @@ impl TabState {
         )
     }
 
+    /// Which profile the focused pane is running.
+    ///
+    /// Through the same `Deref` every other reader of the focused session uses,
+    /// rather than through `sessions[&focused_leaf]`: the two disagree exactly
+    /// when the focused seat holds no shell (a files column), and in that case
+    /// `focused()` is the leaf whose folder and title the whole window is already
+    /// reading. A caller pairing this profile with that folder must get them off
+    /// one leaf or it is describing a pane that does not exist.
+    fn session_profile(&self) -> usize {
+        self.focused().profile
+    }
+
     /// The name the focused pane's *own* profile goes by.
     ///
     /// The last layer of every name this tab can have, and it used to be the
@@ -1302,7 +1314,7 @@ impl TabState {
     /// one of them; the identity terminal is the one the tab has always been.
     /// Which profile the shell in `seat` was started from.
     ///
-    /// [`profiles::DEFAULT_PROFILE`] for a seat this tab holds no shell for,
+    /// [`profiles::FALLBACK_PROFILE`] for a seat this tab holds no shell for,
     /// which is not a fallback so much as the only answer available: the callers
     /// are the chrome, asking what mark to draw over a seat, and a Files or
     /// Preview seat has no profile because it has no shell. Those callers pick
@@ -1310,7 +1322,7 @@ impl TabState {
     fn leaf_profile(&self, seat: SeatId) -> usize {
         self.sessions
             .get(&seat)
-            .map_or(profiles::DEFAULT_PROFILE, |leaf| leaf.profile)
+            .map_or(profiles::FALLBACK_PROFILE, |leaf| leaf.profile)
     }
 
     /// The mark the chrome draws for one seat's shell — this tab's per-seat half
@@ -6129,13 +6141,41 @@ fn create_leaf_session(
                 chosen.id
             )
         });
+        // **Where it opens, when nothing has said.** A leaf with a directory of
+        // its own — inherited from the pane it was split off, revived from disk,
+        // carried across from the tab you were looking at — uses it and this
+        // whole branch is skipped. A leaf without one used to be handed `None`,
+        // which `bt-pty` resolves to *this process's* working directory: the
+        // folder BetterTerminal itself was launched from, which is the desktop's
+        // idea of "wherever", and for a shell started from an installed shortcut
+        // is `C:\WINDOWS\system32`. That is not a place anybody meant.
+        //
+        // The profile answers, in whichever of the two forms it can be told —
+        // see `profiles::StartingDir`. The arguments case is appended *after* the
+        // profile's own, because `wsl.exe --cd ~` is a launcher flag and the
+        // profile's list is what it launches with; there is no interleaving to
+        // get wrong while one of the two lists is empty for every profile.
+        let (cwd, extra) = match seed.cwd.clone() {
+            Some(cwd) => (Some(cwd), None),
+            None => match profiles::starting_place(seed.profile, &bt_pty::SystemShellEnvironment) {
+                profiles::StartingPlace::Directory(home) => (Some(home), None),
+                profiles::StartingPlace::Arguments(flags) => (None, Some(flags)),
+                profiles::StartingPlace::Unstated => (None, None),
+            },
+        };
+        let args: Vec<&str> = chosen
+            .args
+            .iter()
+            .copied()
+            .chain(extra.into_iter().flatten().copied())
+            .collect();
         Some(
             PtySession::spawn_shell_in(
                 program,
-                chosen.args,
+                &args,
                 pty_size(grid, PhysicalSize::new(body.width, body.height)),
                 wake,
-                seed.cwd.clone(),
+                cwd,
             )
             .with_context(|| format!("spawn the {} profile in ConPTY", chosen.title))?,
         )
@@ -6161,10 +6201,10 @@ fn create_leaf_session(
     // channel rather than this decision.
     //
     // For the default profile itself this changes nothing, because that fallback
-    // is `pwsh` → `powershell.exe` *within* the same profile: `DEFAULT_PROFILE`
+    // is `pwsh` → `powershell.exe` *within* the same profile: `FALLBACK_PROFILE`
     // is what it already was.
     let profile = if shell_fallback_notice.is_some() {
-        profiles::DEFAULT_PROFILE
+        profiles::FALLBACK_PROFILE
     } else {
         seed.profile
     };
@@ -6255,6 +6295,9 @@ fn create_tab_state(
     leaves: &BTreeMap<SeatId, LeafSeed>,
     seed: TabSeed,
     programs: &profiles::ProfilePrograms,
+    // What a Terminal seat with no entry in `leaves` is started as — the
+    // resolved `settings.json` default, never `LeafSeed::default()`'s zero.
+    default_profile: usize,
     policy: SizePolicy,
     rail: seats::RailState,
     formulas: FormulaSwitches,
@@ -6281,14 +6324,24 @@ fn create_tab_state(
         };
         // A seat with no seed of its own is a seat the caller had nothing saved
         // for — `Seats::lone_terminal`'s stand-in when a persisted tree held no
-        // Term leaf to pair with — and the default is exactly right there: the
-        // default profile, standing where a fresh shell would.
+        // Term leaf to pair with, and the window's very first tab on a machine
+        // with no session file. It gets `default_profile`, standing where a fresh
+        // shell of that profile would.
+        //
+        // Not `LeafSeed::default()`, which is what it used to be: a `usize`'s own
+        // `Default` is `0`, and that was the same profile only for as long as the
+        // default was a constant. This is mock-up 7575 — `bootFresh()` opening
+        // its first tab from `defaultProfile()` — and it is the half of "新 tab，
+        // 和启动" that the `+` does not cover.
         let leaf = create_leaf_session(
             renderer,
             body,
             Arc::clone(&wake),
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
-            &leaves.get(&seat).cloned().unwrap_or_default(),
+            &leaves.get(&seat).cloned().unwrap_or(LeafSeed {
+                profile: default_profile,
+                cwd: None,
+            }),
             programs,
             formulas,
         )?;
@@ -6748,9 +6801,22 @@ impl Runtime {
             render_tab_layout(session_store.loaded().tab_layout),
             render_sidebar_mode(session_store.loaded().sidebar_mode),
         );
+        // Probed here rather than beside the first shell, which is where it used
+        // to sit: the opening window is *titled* after the default profile, and
+        // resolving which profile that is needs to know what this machine can
+        // start. It is an environment read and four `is_file` calls, so moving it
+        // ahead of the window costs the launch nothing measurable.
+        let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        let default_profile =
+            profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
-            .with_title(profiles::PROFILES[profiles::DEFAULT_PROFILE].title)
+            // "新 tab，和启动" — one setting for both (mock-up 7575: `bootFresh()`
+            // opens its first tab from `defaultProfile()`). The title is replaced
+            // by the active tab's own the moment there is one, so what this is
+            // for is the name on the taskbar button between `CreateWindow` and
+            // the first paint.
+            .with_title(profiles::PROFILES[default_profile].title)
             // Approximate on purpose: winit sizes by client area and the frame
             // installed below turns the client area into the whole outer rect, so
             // the exact rectangle can only be set once that frame exists. What
@@ -6838,10 +6904,6 @@ impl Runtime {
         // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
         // it produces here is computed fresh against this machine's DPI.
         let probe_input = load_probe_input()?;
-        // Before the first shell, because the first shell is already a profile
-        // being started: even the opening tab goes through the registry rather
-        // than through a `spawn_default` that nobody chose.
-        let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
         let pty_proxy = proxy.clone();
         let wake: OutputWake = Arc::new(move || {
             let _ = pty_proxy.send_event(AppEvent::PtyOutput);
@@ -6884,6 +6946,7 @@ impl Runtime {
                 &leaves,
                 seed,
                 &profile_programs,
+                default_profile,
                 // Startup: the opening rectangle is the program's own.
                 SizePolicy::Lawful,
                 // And so is the opening layout. The rail is not persisted — a
@@ -7101,8 +7164,13 @@ impl Runtime {
 
     /// The `+`'s verb: a tab on the default profile, which is what the button's
     /// own tooltip promises in the mock-up (`New tab (${defaultProfile().title})`).
+    ///
+    /// `Ctrl+Shift+N` is the same verb through the same door (mock-up 6034,
+    /// `docs/DESIGN.md` §247): the chord opens the default and never the picker,
+    /// so there is one sentence about what "new tab" means rather than a button's
+    /// and a key's.
     fn new_tab(&mut self) -> Result<()> {
-        self.new_tab_with_profile(profiles::DEFAULT_PROFILE)
+        self.new_tab_with_profile(self.default_profile())
     }
 
     /// The picker's verb: a tab on the profile the row names.
@@ -7122,25 +7190,20 @@ impl Runtime {
         });
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
-        // I88 — "a new shell opens where the one you are looking at is standing"
-        // (mock-up line 3961). The address is the focused session's own OSC 7
-        // report, so a tab only inherits a directory its shell actually named;
-        // a session that has never reported one hands over nothing and the new
-        // shell starts where it always did.
+        // Both facts are read off the *same* leaf — `self` derefs to the focused
+        // session, which is also what `working_directory()` is asked of. A
+        // profile taken from one pane and a directory from another would be the
+        // exact mismatch the rule exists to prevent.
+        let cwd = new_tab_cwd(
+            self.session_profile(),
+            self.session.working_directory(),
+            profile,
+        );
         // A lone terminal is `Seats::lone_terminal`'s own seat id, so the map is
         // that one entry — or empty, when the shell you are looking at has never
         // named a folder.
         let seats = seats::Seats::lone_terminal();
-        let leaves = BTreeMap::from([(
-            seats.terminal(),
-            LeafSeed {
-                profile,
-                cwd: self
-                    .session
-                    .working_directory()
-                    .map(std::path::Path::to_path_buf),
-            },
-        )]);
+        let leaves = BTreeMap::from([(seats.terminal(), LeafSeed { profile, cwd })]);
         let (tab, _) = create_tab_state(
             id,
             seats,
@@ -7151,6 +7214,7 @@ impl Runtime {
             &leaves,
             TabSeed::default(),
             &self.profile_programs,
+            self.default_profile(),
             self.size_policy,
             self.rail,
             FormulaSwitches::from_settings(self.settings_store.loaded()),
@@ -7308,6 +7372,7 @@ impl Runtime {
                 pinned: false,
             },
             &self.profile_programs,
+            self.default_profile(),
             self.size_policy,
             self.rail,
             FormulaSwitches::from_settings(self.settings_store.loaded()),
@@ -7376,6 +7441,7 @@ impl Runtime {
                 &leaves,
                 seed,
                 &self.profile_programs,
+                self.default_profile(),
                 self.size_policy,
                 self.rail,
                 FormulaSwitches::from_settings(self.settings_store.loaded()),
@@ -7850,6 +7916,16 @@ impl Runtime {
     /// Registration is also where every suppression lands, because "do not tip
     /// this" and "this has nothing to say" are the same instruction to a host
     /// that only ever sees a list (M141).
+    ///
+    /// **It answers to the layout**, which it did not, and the bug that was is
+    /// the one `layout_peek_layer`, `profile_menu_layout` and `chrome_target_at`
+    /// each already carry a comment about: `tab_strip_geometry` is a pure
+    /// function of a width and a trailer list and knows nothing about a rail
+    /// being on screen, so in vertical layout it went on handing back boxes for a
+    /// strip nobody was drawing — tab 0's body landing over the top bar, where
+    /// the sidebar toggle actually lives. First match wins in
+    /// [`tooltip::TooltipAnchors`] and the phantom was pushed first, so hovering
+    /// the visible toggle answered with some tab's name.
     fn rebuild_tooltip_anchors(&mut self, scale: f32, width: f32, now: Instant) {
         let mut anchors = tooltip::TooltipAnchors::default();
         // A drag owns the pointer outright and everything else goes quiet for the
@@ -7857,81 +7933,38 @@ impl Runtime {
         // terminal's own selection already live by. An empty list is how that is
         // said here: there is nothing to be over.
         if self.drag.is_none() {
-            let geometry = seats::tab_strip_geometry(
+            // **First, so it wins.** The picker floats over whichever surface
+            // opened it, and first-match-wins is this list's whole ordering rule
+            // — a row registered after the chevron under it would never be
+            // reached. It is the innermost thing on screen, so it is pushed
+            // innermost.
+            if let Some(layout) = self.profile_menu_layout() {
+                for (row, rect, text) in layout.tips(&self.profile_programs, self.recent.entries())
+                {
+                    anchors.push(tooltip::TooltipAnchorId::ProfileRow(row), rect, text);
+                }
+            }
+            let strip = seats::tab_strip_geometry(
                 width,
                 scale,
                 &self.tab_trailers(now),
                 self.active_tab,
                 self.tab_scroll,
             );
-            // What is cropped away is not there to be tipped, exactly as it is
-            // not there to be clicked (`hit_tab_chrome`).
-            let visible =
-                |rect: [f32; 4]| rect[0] >= geometry.viewport[0] && rect[2] <= geometry.viewport[1];
-            let renaming = self.rename.as_ref().map(|editor| editor.tab);
-            for (index, slot) in geometry.tabs.iter().enumerate() {
-                let Some(tab) = self.tabs.get(index) else {
-                    continue;
-                };
-                // The editor IS the answer (mock-up 4193-4196): while you are
-                // typing a name, a box telling you what the name currently is
-                // would be covering the box you are typing it into.
-                if renaming == Some(tab.id) {
-                    continue;
-                }
-                if let Some(pin) = slot.pin.filter(|pin| visible(*pin)) {
-                    anchors.push(
-                        tooltip::TooltipAnchorId::TabPin(index),
-                        pin,
-                        if tab.pinned {
-                            // Solid pin = "it is pinned", and the tip names the
-                            // verb *and* the reason, because "Unpin" alone does
-                            // not explain why the `×` went away (mock-up 4204).
-                            "Unpin — a pinned tab closes only after unpinning"
-                        } else {
-                            "Pin"
-                        },
-                    );
-                }
-                let mark = seats::tab_mark_box(slot, scale);
-                if visible(mark) {
-                    let status = tab.session.status();
-                    anchors.push(
-                        tooltip::TooltipAnchorId::TabIcon(index),
-                        mark,
-                        tooltip::mark_tip(status.progress, status.working),
-                    );
-                }
-                if visible(slot.body) {
-                    anchors.push(
-                        tooltip::TooltipAnchorId::Tab(index),
-                        slot.body,
-                        tab.tooltip_text(),
-                    );
-                }
-                // The `×` is deliberately absent: `tabTrailer` writes no `title`
-                // on it (mock-up 4207), so a pointer there falls through to the
-                // tab — which is the tip you wanted anyway.
-            }
-            if visible(geometry.new_tab) {
-                anchors.push(
-                    tooltip::TooltipAnchorId::NewTab,
-                    geometry.new_tab,
-                    format!(
-                        "New tab ({})",
-                        profiles::PROFILES[profiles::DEFAULT_PROFILE].title
-                    ),
-                );
-            }
-            // I94: the chevron's own tip is silenced while its menu is up. You
-            // just clicked it and the answer is on screen, so the question is
-            // closed and the tip would be noise sitting on top of the answer.
-            if visible(geometry.new_tab_menu) && !self.profile_menu.is_open() {
-                anchors.push(
-                    tooltip::TooltipAnchorId::NewTabMenu,
-                    geometry.new_tab_menu,
-                    "Choose a profile",
-                );
+            let rail = self.rail_geometry_now(now);
+            let renaming = self
+                .rename
+                .as_ref()
+                .and_then(|editor| self.tabs.iter().position(|tab| tab.id == editor.tab));
+            for (id, rect) in tab_surface_tip_boxes(
+                self.rail.layout,
+                &strip,
+                rail.as_ref(),
+                scale,
+                self.profile_menu.is_open(),
+                renaming,
+            ) {
+                anchors.push(id, rect, self.tab_surface_tip_text(id));
             }
             for (target, rect) in seats::window_chrome_boxes(width, scale, self.rail) {
                 let text = match target {
@@ -7969,6 +8002,54 @@ impl Runtime {
             .collect();
         self.layout_peek
             .retain(|index| eligible.get(index).copied().unwrap_or(false));
+    }
+
+    /// What one of those boxes says.
+    ///
+    /// Split from the boxes because the *geometry* of the tab surface is a pure
+    /// function of a layout and two geometries — which is what
+    /// [`tab_surface_tip_boxes`] can therefore be tested as — while the words are
+    /// a fact about which tab is running what, and only a live window has that.
+    ///
+    /// An id naming a tab this window does not have says nothing, and
+    /// `TooltipAnchors::push` drops an empty string: the two lists are built from
+    /// one `self.tabs` on one frame, so the case is unreachable rather than
+    /// handled, and answering with nothing is what keeps it from becoming a panic
+    /// if that ever stops being true.
+    fn tab_surface_tip_text(&self, id: tooltip::TooltipAnchorId) -> String {
+        match id {
+            tooltip::TooltipAnchorId::TabPin(index) => self
+                .tabs
+                .get(index)
+                .map(|tab| {
+                    if tab.pinned {
+                        // Solid pin = "it is pinned", and the tip names the verb
+                        // *and* the reason, because "Unpin" alone does not
+                        // explain why the close button went away (mock-up 4204).
+                        "Unpin — a pinned tab closes only after unpinning"
+                    } else {
+                        "Pin"
+                    }
+                })
+                .unwrap_or_default()
+                .to_owned(),
+            tooltip::TooltipAnchorId::TabIcon(index) => self
+                .tabs
+                .get(index)
+                .map(|tab| {
+                    let status = tab.session.status();
+                    tooltip::mark_tip(status.progress, status.working)
+                })
+                .unwrap_or_default(),
+            tooltip::TooltipAnchorId::Tab(index) => self
+                .tabs
+                .get(index)
+                .map(TabState::tooltip_text)
+                .unwrap_or_default(),
+            tooltip::TooltipAnchorId::NewTab => new_tab_tip(self.default_profile()),
+            tooltip::TooltipAnchorId::NewTabMenu => "Choose a profile".to_owned(),
+            _ => String::new(),
+        }
     }
 
     /// Whether the tip on screen differs from the tip last painted — the strip's
@@ -8540,7 +8621,26 @@ impl Runtime {
             sidebar: self.rail.mode,
             display_formulas: self.settings_store.loaded().display_formulas,
             inline_formulas: self.settings_store.loaded().inline_formulas,
+            default_profile: self.default_profile(),
+            profile_available: std::array::from_fn(|index| {
+                self.profile_programs.is_available(index)
+            }),
         }
+    }
+
+    /// Which profile the `+` starts, the window is titled after and the picker
+    /// marks `default` — the user's setting, resolved against this machine.
+    ///
+    /// One reader, called by all four, and that is the point of it being a method
+    /// rather than a field: the setting can change mid-session and a field would
+    /// have to be refreshed by whoever wrote it, in every place they wrote it.
+    /// [`profiles::default_profile`] is cheap — a walk of four entries and an
+    /// array index — and none of these callers is a hot path.
+    fn default_profile(&self) -> usize {
+        profiles::default_profile(
+            &self.settings_store.loaded().default_profile,
+            &self.profile_programs,
+        )
     }
 
     /// Rebuild the blended layer over the chrome. Returns whether anything
@@ -8581,13 +8681,20 @@ impl Runtime {
             // allowed to exist (mock-up 2219-2221).
             restore::build(&layout, self.restore_prompt.hover())
         } else if let Some(layout) = self.profile_menu_layout() {
-            profiles::build(
-                &layout,
-                &self.profile_programs,
-                self.profile_menu.hover(),
-                self.recent.entries(),
-                SystemTime::now(),
-            )
+            {
+                let default = self.default_profile();
+                let renderer = &mut self.renderer;
+                let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+                profiles::build(
+                    &layout,
+                    &self.profile_programs,
+                    default,
+                    self.profile_menu.hover(),
+                    self.recent.entries(),
+                    SystemTime::now(),
+                    &mut measure,
+                )
+            }
         } else {
             Vec::new()
         });
@@ -9104,7 +9211,7 @@ impl Runtime {
         if state != ElementState::Pressed || button != MouseButton::Left {
             return Ok(());
         }
-        match settings::hit(layout, position.x, position.y) {
+        match settings::hit(layout, self.settings_values(), position.x, position.y) {
             settings::SettingsTarget::Scrim => self.settings.close(),
             settings::SettingsTarget::Close => self.settings.close(),
             settings::SettingsTarget::Combo(row) => self.settings.toggle_menu(row),
@@ -9132,6 +9239,9 @@ impl Runtime {
                 if let Some(mode) = settings::sidebar_mode_requested(target) {
                     self.set_rail_state(rail_state_for(self.rail.layout, mode))?;
                 }
+                if let Some(id) = settings::default_profile_requested(target) {
+                    self.apply_default_profile(id)?;
+                }
             }
             // A press on the dialog's own body, or inside the open menu but on
             // none of its items, lands nowhere. It notably does *not* close: the
@@ -9140,9 +9250,9 @@ impl Runtime {
             settings::SettingsTarget::Menu(_) => {}
         }
         if let Some(position) = self.pointer_position {
-            let hover = self
-                .settings_layout()
-                .map(|layout| settings::hit(&layout, position.x, position.y));
+            let hover = self.settings_layout().map(|layout| {
+                settings::hit(&layout, self.settings_values(), position.x, position.y)
+            });
             self.settings.set_hover(hover);
             if !self.settings.is_open() {
                 self.update_chrome_hover(position)?;
@@ -9337,6 +9447,40 @@ impl Runtime {
             return Ok(false);
         }
         self.mark_session_dirty(Instant::now());
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })?;
+        Ok(true)
+    }
+
+    /// Point "Default profile" at the profile called `id` (mock-up 7708-7712).
+    ///
+    /// Written to disk immediately, for the reason `apply_display_formulas`
+    /// gives, and with the same one-line body — this is a preference and not a
+    /// verb, so nothing is re-spawned, re-scanned or reopened. **What is already
+    /// on screen does not move.** A tab is the shell it is running; changing what
+    /// the `+` will start next is not a claim about the ones already started, and
+    /// a setting that retro-actively converted live panes would be the same
+    /// mistake as a leaf silently adopting the current default off disk.
+    ///
+    /// What *does* move within the frame is everything that merely *names* the
+    /// default: the `+`'s tooltip and the picker's `default` hint both read
+    /// [`Self::default_profile`] on each build rather than caching it, so a
+    /// change is drawn on the next paint — mock-up 4293's `stripIds()` folding
+    /// `state.defaultProfile` into the strip's rebuild key, arrived at by not
+    /// having a cache to invalidate.
+    ///
+    /// The OS window title is deliberately *not* in that list. It is the active
+    /// tab's name, whose last layer is the focused pane's own profile title
+    /// ([`TabState::focused_profile_title`]) — the shell that is running, not the
+    /// one that would be started next.
+    fn apply_default_profile(&mut self, id: &str) -> Result<bool> {
+        let mut settings = self.settings_store.loaded().clone();
+        settings.default_profile = id.to_owned();
+        if !self.settings_store.store(settings) {
+            return Ok(false);
+        }
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
@@ -11968,7 +12112,7 @@ impl Runtime {
         // The overlay owns the pointer the way it owns the next click: no chrome
         // hover, no divider, no hyperlink, no peek settle behind the scrim.
         if let Some(layout) = self.settings_layout() {
-            let hover = settings::hit(&layout, position.x, position.y);
+            let hover = settings::hit(&layout, self.settings_values(), position.x, position.y);
             if self.settings.set_hover(Some(hover)) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -12003,6 +12147,21 @@ impl Runtime {
                 self.present_chrome_change()?;
             }
             if over.is_some() {
+                // **The picker's own rows may speak, and only they.** This
+                // branch returns before the tip is noted further down, which was
+                // right for as long as a menu row had nothing to say; now a
+                // greyed profile explains its grey and a Recent row carries the
+                // path its caption cropped, so the tip has to be answered here or
+                // the anchors would be registered and never reached.
+                //
+                // Filtered rather than taken as it comes: a popup covers what is
+                // under it, and `tooltip_anchor_at` would otherwise hand back a
+                // tab's tip for a point over the menu's own body, printing a tip
+                // about something the pointer cannot see.
+                let anchor = self
+                    .tooltip_anchor_at(position)
+                    .filter(|anchor| matches!(anchor, tooltip::TooltipAnchorId::ProfileRow(_)));
+                self.note_tooltip(anchor)?;
                 self.update_chrome_hover_target(None)?;
                 return Ok(());
             }
@@ -12050,8 +12209,10 @@ impl Runtime {
         }
         self.update_chrome_hover(position)?;
         // Below every gesture that owns the pointer and beside the hover it
-        // follows: the anchors under a drag, a divider or an open picker were
-        // never reached, and each of those paths returned above having said so.
+        // follows: the anchors under a drag or a divider were never reached, and
+        // each of those paths returned above having said so. An open picker also
+        // returns above, but it answers the tip on its way out — its rows are
+        // anchors of their own now.
         // The peek first, and the tip only where the peek is not already
         // answering (§6). A tab that qualifies for neither is untouched by both.
         self.note_layout_peek(self.layout_peek_target_at(position))?;
@@ -14612,6 +14773,24 @@ impl Runtime {
             self.publish_interaction_frame()?;
         }
 
+        // **An open picker owns the keyboard the way it owns the next click.**
+        // The mock-up says it in as many words, in a guard of its own above the
+        // one that types: "an open menu owns the keyboard … typing must not land
+        // in the terminal behind it" (line 6188), and it returns for
+        // `profile-menu` before a single character is delivered.
+        //
+        // It sits *here* — under the shortcut registry and over the encoder — and
+        // that placement is the whole of the rule. A popup is not a modal, so it
+        // does not swallow the window's own chords: `Ctrl+Shift+N` is not typing
+        // into a hidden terminal, it is a verb, and the settings dialog above is
+        // the thing that takes everything. What this stops is a keystroke the
+        // user aimed at a menu they can see going into a shell they cannot,
+        // which is a keystroke you only find out about later.
+        //
+        // Esc has already been answered above, where it puts the picker away.
+        if self.profile_menu.is_open() {
+            return Ok(());
+        }
         let application_cursor_mode = self.session.application_cursor_mode();
         let Some(bytes) =
             input::keyboard_bytes(&event.logical_key, self.modifiers, application_cursor_mode)
@@ -15965,6 +16144,177 @@ fn display_title(
 /// subtlety a copy would lose. `None` is the fourth layer, which is nobody's
 /// claim: the profile's own name is what a tab is called when no one has said
 /// anything about it, and it has no provenance to report.
+/// The folder a new tab opens in — I88, plus the one thing the mock-up cannot
+/// say.
+///
+/// "A new shell opens where the one you are looking at is standing" (mock-up
+/// 4010), and the address is that shell's own OSC 7 report, so a tab only ever
+/// inherits a directory some shell actually named — never a guess.
+///
+/// **Only from the same profile.** The mock-up's `newTab` inherits
+/// `focusedSession()?.cwd` unconditionally, while its own fixtures put a `pwsh`
+/// session in `C:\Users\Weiyi` and a `wsl` one in `~/src/bt-corpus` (3234 and
+/// 3241) — two path namespaces, with no conversion anywhere in the file. Carrying
+/// `C:\Users\Weiyi` into a WSL tab names nothing; carrying `/home/weiyi/src` into
+/// PowerShell names nothing either. The existing convention for a path we cannot
+/// vouch for is `docs/shell-integration.md` §34-35's — leave it undetected rather
+/// than guess one — so a cross-profile tab hands back `None` and starts at its own
+/// profile's starting directory instead of at a place that does not exist.
+///
+/// This is the **conservative** answer and it is deliberately temporary. The
+/// translation it stands in for (`\wsl$\<distro>\…` one way, `/mnt/<drive>/…`
+/// the other) is P5's, along with naming the distribution; when it lands, this
+/// test becomes "can the target profile express where you are standing", and
+/// inheritance comes back for every pair that can.
+fn new_tab_cwd(
+    focused_profile: usize,
+    focused_cwd: Option<&Path>,
+    target_profile: usize,
+) -> Option<PathBuf> {
+    (focused_profile == target_profile)
+        .then_some(focused_cwd)?
+        .map(Path::to_path_buf)
+}
+
+/// Every tippable box of the **tab surface** that is actually on screen, in
+/// innermost-first order.
+///
+/// One function for two surfaces, and the layout picks which. That is the whole
+/// of the bug it exists to close: `tab_strip_geometry` is a pure function of a
+/// width and a trailer list and knows nothing about a rail being on screen, so
+/// asking it unconditionally — which is what the tooltip rebuild used to do —
+/// yields a full run of tab, pin and mark boxes lying across the top bar in
+/// vertical layout, where the only thing actually drawn is the app's name and
+/// the sidebar toggle. [`tooltip::TooltipAnchors`] is first-match-wins and those
+/// phantoms are pushed before the window chrome, so the visible toggle answered
+/// with some tab's name. `layout_peek_layer`, `profile_menu_layout` and
+/// `chrome_target_at` each already carry a comment about meeting this in their
+/// own corner; this is the fourth, and the last of the four to be told.
+///
+/// Pure, and that is deliberate: the *words* need a live window (which tab is
+/// running what), the *boxes* need only two geometries, and separating them is
+/// what makes "vertical registers nothing from the strip" a claim a test can
+/// make without a GPU. [`Runtime::tab_surface_tip_text`] is the other half.
+///
+/// `renaming` is the index of the tab whose name is being edited, if any: the
+/// editor IS the answer (mock-up 4193-4196), and a box telling you what the name
+/// currently is would be covering the box you are typing it into.
+fn tab_surface_tip_boxes(
+    layout: seats::TabLayoutMode,
+    strip: &seats::TabStripGeometry,
+    rail: Option<&seats::RailGeometry>,
+    scale: f32,
+    profile_menu_open: bool,
+    renaming: Option<usize>,
+) -> Vec<(tooltip::TooltipAnchorId, [f32; 4])> {
+    let mut boxes = Vec::new();
+    // Per row: the pin and the mark first, then the body they sit in — the
+    // innermost-first order `TooltipAnchors` reproduces `closest()` with.
+    //
+    // The close button is deliberately absent on both surfaces: `tabTrailer`
+    // writes no `title` on it (mock-up 4207), so a pointer there falls through to
+    // the tab, which is the tip you wanted anyway.
+    //
+    // Each of the three boxes is handed in already measured against its
+    // surface's own clip, because "cropped away" is the one thing the two
+    // surfaces answer differently — the strip clips on X, the rail on Y.
+    let mut row = |index: usize, parts: [(tooltip::TooltipAnchorId, Option<[f32; 4]>); 3]| {
+        if renaming == Some(index) {
+            return;
+        }
+        boxes.extend(parts.into_iter().filter_map(|(id, rect)| Some((id, rect?))));
+    };
+    let (new_tab, new_tab_menu) = match layout {
+        seats::TabLayoutMode::Horizontal => {
+            // What is cropped away is not there to be tipped, exactly as it is
+            // not there to be clicked (`hit_tab_chrome`). The strip scrolls on X.
+            let visible =
+                |rect: [f32; 4]| rect[0] >= strip.viewport[0] && rect[2] <= strip.viewport[1];
+            for (index, slot) in strip.tabs.iter().enumerate() {
+                row(
+                    index,
+                    [
+                        (
+                            tooltip::TooltipAnchorId::TabPin(index),
+                            slot.pin.filter(|pin| visible(*pin)),
+                        ),
+                        (
+                            tooltip::TooltipAnchorId::TabIcon(index),
+                            Some(seats::tab_mark_box(slot, scale)).filter(|rect| visible(*rect)),
+                        ),
+                        (
+                            tooltip::TooltipAnchorId::Tab(index),
+                            Some(slot.body).filter(|rect| visible(*rect)),
+                        ),
+                    ],
+                );
+            }
+            (
+                Some(strip.new_tab).filter(|rect| visible(*rect)),
+                Some(strip.new_tab_menu).filter(|rect| visible(*rect)),
+            )
+        }
+        // `None` is a real answer here as everywhere else the rail is asked: a
+        // collapsed rail puts no list on screen, so there is nothing to be over.
+        seats::TabLayoutMode::Vertical => match rail {
+            None => (None, None),
+            Some(rail) => {
+                // The rail scrolls on Y, so its clip is a band rather than a pair
+                // of X bounds — the same rule on the other axis.
+                let visible =
+                    |rect: [f32; 4]| rect[1] >= rail.viewport[0] && rect[3] <= rail.viewport[1];
+                for (index, slot) in rail.tabs.iter().enumerate() {
+                    row(
+                        index,
+                        [
+                            (
+                                tooltip::TooltipAnchorId::TabPin(index),
+                                slot.pin.filter(|pin| visible(*pin)),
+                            ),
+                            (
+                                tooltip::TooltipAnchorId::TabIcon(index),
+                                Some(slot.mark).filter(|rect| visible(*rect)),
+                            ),
+                            (
+                                tooltip::TooltipAnchorId::Tab(index),
+                                Some(slot.body).filter(|rect| visible(*rect)),
+                            ),
+                        ],
+                    );
+                }
+                // The `+` row is `position: sticky` and never scrolls out from
+                // under the list, so it is not measured against that band.
+                (Some(rail.new_tab), rail.new_tab_menu)
+            }
+        },
+    };
+    if let Some(rect) = new_tab {
+        boxes.push((tooltip::TooltipAnchorId::NewTab, rect));
+    }
+    // I94: the chevron's own tip is silenced while its menu is up. You just
+    // clicked it and the answer is on screen, so the question is closed and the
+    // tip would be noise sitting on top of the answer.
+    if let Some(rect) = new_tab_menu.filter(|_| !profile_menu_open) {
+        boxes.push((tooltip::TooltipAnchorId::NewTabMenu, rect));
+    }
+    boxes
+}
+
+/// `title="New tab (${defaultProfile().title})"` — mock-up 4367 and 4369.
+///
+/// One function for the two buttons that wear it, because the mock-up writes the
+/// same template literal twice, once for the horizontal strip and once for the
+/// rail, and "two surfaces, one sentence" is `UI-UX.md` §549 principle 7's own
+/// rule about this exact pair. A second spelling here is how the rail's `+` comes
+/// to promise a shell the strip's `+` does not.
+///
+/// The parentheses are the mock-up's and not a stylistic choice: the tip names
+/// the *verb* first and qualifies it, so that a user who reads only the first two
+/// words has still read the truth.
+fn new_tab_tip(profile: usize) -> String {
+    format!("New tab ({})", profiles::PROFILES[profile].title)
+}
+
 fn resolve_title(
     manual_name: Option<&str>,
     program_title: Option<&str>,
@@ -17393,7 +17743,7 @@ mod tests {
         let (seats, seed, leaves) = revive_plan(&tab);
         assert_eq!(
             leaves.get(&seats.terminal()).map(|leaf| leaf.profile),
-            Some(profiles::DEFAULT_PROFILE),
+            Some(profiles::FALLBACK_PROFILE),
             "an id this build cannot place falls to the default profile"
         );
         assert_eq!(
@@ -17638,7 +17988,7 @@ mod tests {
     fn a_pane_head_says_where_it_is_and_a_program_speaks_only_in_front_of_it() {
         let cwd = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app");
         let whole = r"D:\Developer\BetterTerminal\crates\bt-app".to_owned();
-        let profile = profiles::PROFILES[profiles::DEFAULT_PROFILE].title;
+        let profile = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
 
         // THE BUG. `scripts/shell-integration/betterterminal.ps1` ends by
         // writing `ESC ]0;PowerShell BEL`, so every session in this window
@@ -17754,7 +18104,7 @@ mod tests {
                 Some("my tab"),
                 None,
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             )
             .0,
             "my tab",
@@ -17765,7 +18115,7 @@ mod tests {
                 None,
                 Some(profile),
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             )
             .0,
             profile,
@@ -17801,7 +18151,7 @@ mod tests {
     /// anything.
     #[test]
     fn a_pane_heads_folder_is_capped_at_max_path_and_not_at_a_names_forty() {
-        let profile = profiles::PROFILES[profiles::DEFAULT_PROFILE].title;
+        let profile = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
         let ordinary = Path::new(r"D:\Developer\BetterTerminal\crates\bt-app\src");
         let ordinary_text = ordinary.to_str().expect("a test path is UTF-8");
         assert!(
@@ -17845,7 +18195,7 @@ mod tests {
                 None,
                 Some(&"x".repeat(CWD_MAX_CHARS)),
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             )
             .chars()
             .count(),
@@ -17904,7 +18254,7 @@ mod tests {
     fn a_tabs_terminal_names_are_the_whole_folders_its_shells_reported() {
         let left_path = r"D:\Developer\BetterTerminal\crates\bt-app";
         let right_path = r"D:\Developer\BetterTerminal\crates\bt-term";
-        let profile = profiles::PROFILES[profiles::DEFAULT_PROFILE].title;
+        let profile = profiles::PROFILES[profiles::FALLBACK_PROFILE].title;
         // Both shells say exactly what the shipped integration makes them say:
         // the profile's own title, then where they stand. This is the pane pair
         // that used to read "PowerShell" twice.
@@ -21330,7 +21680,7 @@ mod tests {
                 Some("我的构建"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "我的构建",
             "what you typed outranks everything under it"
@@ -21340,7 +21690,7 @@ mod tests {
                 None,
                 Some("Claude ✳ 任务"),
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "Claude ✳ 任务",
             "then what the program announced"
@@ -21350,7 +21700,7 @@ mod tests {
                 None,
                 None,
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "BetterTerminal",
             "then where the shell says it is standing"
@@ -21360,7 +21710,7 @@ mod tests {
                 None,
                 None,
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "PowerShell",
             "and the profile catches what is left"
@@ -21378,7 +21728,7 @@ mod tests {
                 Some("build"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             )
             .1,
             Some(tooltip::NameSource::Manual)
@@ -21388,7 +21738,7 @@ mod tests {
                 None,
                 Some("pwsh"),
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             )
             .1,
             Some(tooltip::NameSource::Program)
@@ -21398,7 +21748,7 @@ mod tests {
                 None,
                 None,
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             )
             .1,
             Some(tooltip::NameSource::Cwd)
@@ -21410,7 +21760,7 @@ mod tests {
                 None,
                 None,
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             )
             .1,
             None
@@ -21422,7 +21772,7 @@ mod tests {
                 Some("\u{7}"),
                 Some("pwsh"),
                 Some(cwd),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             ("pwsh".to_owned(), Some(tooltip::NameSource::Program))
         );
@@ -21437,7 +21787,7 @@ mod tests {
             None,
             None,
             Some(cwd),
-            profiles::PROFILES[profiles::DEFAULT_PROFILE].title,
+            profiles::PROFILES[profiles::FALLBACK_PROFILE].title,
         );
         let path = cwd.to_string_lossy().into_owned();
         assert_eq!(
@@ -21454,14 +21804,221 @@ mod tests {
 
     /// I87: the `+` names the profile it would start, so the button says what it
     /// will do rather than merely that it will do something.
+    ///
+    /// D32/D34: and it names the one it *would* start, not the one it used to.
+    /// The mock-up folds `state.defaultProfile` into `stripIds()` (4293) purely
+    /// so this string is repainted when the setting moves; here there is no
+    /// cached string to repaint, and the pin is that the wording is a function of
+    /// the argument rather than of the table's first row.
     #[test]
     fn the_new_tab_button_names_the_profile_it_would_start() {
         assert_eq!(
-            format!(
-                "New tab ({})",
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
-            ),
+            new_tab_tip(profiles::FALLBACK_PROFILE),
             "New tab (PowerShell)"
+        );
+        assert_eq!(
+            new_tab_tip(profiles::index_of_id("cmd")),
+            "New tab (Command Prompt)",
+            "point the setting elsewhere and the button says so"
+        );
+        for (index, profile) in profiles::PROFILES.iter().enumerate() {
+            assert_eq!(new_tab_tip(index), format!("New tab ({})", profile.title));
+        }
+    }
+
+    /// PIN — a new tab inherits where you are standing only when the shell it
+    /// starts can read that address.
+    ///
+    /// Red gate: inheriting unconditionally is what the mock-up does, and it is
+    /// the one thing its own fixtures prove it never tested — a `pwsh` session in
+    /// `C:\Users\Weiyi` and a `wsl` one in `~/src/bt-corpus`, two namespaces,
+    /// no conversion. `bt-pty` validates the directory before spawning, so the
+    /// visible symptom is not a crash but a WSL tab silently opening somewhere
+    /// other than where the `˅` menu implied, with no way to tell it happened.
+    ///
+    /// **This is the pre-P5 conservative state and is meant to be narrowed**:
+    /// once WSL's two path namespaces have a translation, the test stops being
+    /// "same profile" and becomes "can the target express this path".
+    #[test]
+    fn a_new_tab_inherits_a_folder_only_from_its_own_profile() {
+        let here = Path::new(r"D:\Developer\BetterTerminal");
+        let pwsh = profiles::index_of_id("pwsh");
+        let wsl = profiles::index_of_id("wsl");
+
+        assert_eq!(
+            new_tab_cwd(pwsh, Some(here), pwsh),
+            Some(here.to_path_buf()),
+            "I88 — the `+` opens where the shell you are looking at is standing"
+        );
+        assert_eq!(
+            new_tab_cwd(pwsh, Some(here), wsl),
+            None,
+            "a Windows path is not an address a WSL shell can be started at, so \
+             nothing is handed over and the profile's own starting directory wins"
+        );
+        assert_eq!(
+            new_tab_cwd(wsl, Some(Path::new("/home/weiyi/src")), pwsh),
+            None,
+            "and the same in the other direction"
+        );
+        assert_eq!(
+            new_tab_cwd(pwsh, None, pwsh),
+            None,
+            "a shell that never reported a folder hands over nothing, which is \
+             what it always did"
+        );
+        // Every same-profile pair inherits and every crossing pair does not —
+        // stated over the whole table so a fifth profile cannot arrive with the
+        // rule quietly applied to only four.
+        for from in 0..profiles::PROFILES.len() {
+            for to in 0..profiles::PROFILES.len() {
+                assert_eq!(
+                    new_tab_cwd(from, Some(here), to).is_some(),
+                    from == to,
+                    "{} -> {}",
+                    profiles::PROFILES[from].id,
+                    profiles::PROFILES[to].id
+                );
+            }
+        }
+    }
+
+    /// PIN — the tab surface's tips come off the surface that is **drawn**.
+    ///
+    /// Red gate, and it is a bug this caught rather than a shape being preserved:
+    /// `tab_strip_geometry` is a pure function of a width and a trailer list and
+    /// has no idea a rail is on screen, so under `Vertical` it went on handing
+    /// back a full run of tab, pin and mark boxes lying across the top bar — over
+    /// the sidebar toggle, which is the only thing actually drawn there. First
+    /// match wins in `TooltipAnchors` and those came first, so hovering the
+    /// visible toggle answered with tab 0's name.
+    ///
+    /// The two halves are asserted together because either alone passes while
+    /// the other is broken: registering the rail's boxes without dropping the
+    /// strip's leaves both live, and dropping the strip's without the rail's
+    /// leaves the vertical layout with no tips at all.
+    #[test]
+    fn the_tab_surface_is_tipped_where_it_is_drawn_and_never_where_it_is_not() {
+        let scale = 1.0;
+        let width = 960.0;
+        let trailers = [seats::TabTrailer {
+            pinned: false,
+            reveal: 1.0,
+        }];
+        let strip = seats::tab_strip_geometry(width, scale, &trailers, 0, 0.0);
+        // The rail the window would actually be showing: vertical, expanded, and
+        // fully open — `sampled_rail`'s own answer for a rail that is not the
+        // parked icon kind.
+        let rail = seats::rail_geometry(
+            600.0,
+            scale,
+            &trailers,
+            0,
+            0.0,
+            seats::RailState {
+                open: 1.0,
+                ..rail_state_for(seats::TabLayoutMode::Vertical, seats::RailMode::Expanded)
+            },
+        )
+        .expect("an expanded rail holding one tab is on screen");
+
+        let flat = tab_surface_tip_boxes(
+            seats::TabLayoutMode::Horizontal,
+            &strip,
+            Some(&rail),
+            scale,
+            false,
+            None,
+        );
+        let railed = tab_surface_tip_boxes(
+            seats::TabLayoutMode::Vertical,
+            &strip,
+            Some(&rail),
+            scale,
+            false,
+            None,
+        );
+
+        // The same anchors on both surfaces — one `tabHtml` (mock-up 4333) and
+        // one `paintStrip` (4366-4369) produce them, so neither layout is missing
+        // a tip the other has.
+        let ids = |boxes: &[(tooltip::TooltipAnchorId, [f32; 4])]| {
+            boxes.iter().map(|(id, _)| *id).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(&flat),
+            ids(&railed),
+            "both surfaces tip the same things — the rail's `+` included (D32)"
+        );
+        assert!(
+            ids(&flat).contains(&tooltip::TooltipAnchorId::NewTab)
+                && ids(&flat).contains(&tooltip::TooltipAnchorId::NewTabMenu),
+            "the `+` and its chevron are both tipped"
+        );
+
+        // And the boxes are the drawn surface's own. The rail is a column down
+        // the left; the strip is a row across the top. A box from the wrong one
+        // is the bug.
+        let strip_boxes: Vec<_> = flat.iter().map(|(_, rect)| *rect).collect();
+        let rail_boxes: Vec<_> = railed.iter().map(|(_, rect)| *rect).collect();
+        assert!(
+            strip_boxes.iter().all(|rect| rect[3] <= rail.body[1]),
+            "every horizontal tip sits in the title bar band: {strip_boxes:?}"
+        );
+        assert!(
+            rail_boxes
+                .iter()
+                .all(|rect| rect[1] >= rail.body[1] && rect[2] <= rail.body[2]),
+            "every vertical tip sits inside the rail's own column: {rail_boxes:?}"
+        );
+        assert!(
+            !rail_boxes.iter().any(|rect| strip_boxes.contains(rect)),
+            "not one box survived from the surface that is not drawn"
+        );
+
+        // I94 holds on both: the chevron goes quiet under its own open menu.
+        for layout in [
+            seats::TabLayoutMode::Horizontal,
+            seats::TabLayoutMode::Vertical,
+        ] {
+            let open = tab_surface_tip_boxes(layout, &strip, Some(&rail), scale, true, None);
+            assert!(
+                !ids(&open).contains(&tooltip::TooltipAnchorId::NewTabMenu),
+                "{layout:?}: the chevron is silent while its own menu is up"
+            );
+            assert!(
+                ids(&open).contains(&tooltip::TooltipAnchorId::NewTab),
+                "{layout:?}: the `+` beside it still answers"
+            );
+        }
+
+        // The editor IS the answer (mock-up 4193-4196), on both surfaces.
+        for layout in [
+            seats::TabLayoutMode::Horizontal,
+            seats::TabLayoutMode::Vertical,
+        ] {
+            let renaming =
+                tab_surface_tip_boxes(layout, &strip, Some(&rail), scale, false, Some(0));
+            assert!(
+                !ids(&renaming)
+                    .iter()
+                    .any(|id| matches!(id, tooltip::TooltipAnchorId::Tab(0))),
+                "{layout:?}: a tab being renamed is not tipped"
+            );
+        }
+
+        // A rail that is not on screen tips nothing, rather than falling through
+        // to the strip that is also not on screen.
+        assert!(
+            tab_surface_tip_boxes(
+                seats::TabLayoutMode::Vertical,
+                &strip,
+                None,
+                scale,
+                false,
+                None
+            )
+            .is_empty()
         );
     }
 
@@ -21499,7 +22056,7 @@ mod tests {
                     None,
                     None,
                     Some(Path::new(path)),
-                    profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                    profiles::PROFILES[profiles::FALLBACK_PROFILE].title
                 ),
                 leaf,
                 "cwd {path}"
@@ -21520,7 +22077,7 @@ mod tests {
                 None,
                 Some("a\u{7}b\u{1b}c"),
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "abc",
             "C0 goes, including the escape that starts every sequence"
@@ -21530,7 +22087,7 @@ mod tests {
                 None,
                 Some("\u{9b}0m evil"),
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "0m evil",
             "and C1 goes, including the single-byte CSI"
@@ -21540,7 +22097,7 @@ mod tests {
                 None,
                 Some("  \tspaced  "),
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "spaced",
             "the trim happens after the strip, as `cleanTitle` writes it"
@@ -21550,7 +22107,7 @@ mod tests {
                 None,
                 Some(&"x".repeat(80)),
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             )
             .chars()
             .count(),
@@ -21564,7 +22121,7 @@ mod tests {
                 None,
                 Some("\u{1}\u{2}"),
                 Some(Path::new(r"C:\work")),
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "work"
         );
@@ -21573,7 +22130,7 @@ mod tests {
                 None,
                 Some(""),
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "PowerShell"
         );
@@ -21582,7 +22139,7 @@ mod tests {
                 Some("hi\u{0}there"),
                 Some("prog"),
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "hithere",
             "the name you type goes through the same sieve (mock-up line 5882)"
@@ -21592,7 +22149,7 @@ mod tests {
                 Some("   "),
                 Some("prog"),
                 None,
-                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                profiles::PROFILES[profiles::FALLBACK_PROFILE].title
             ),
             "prog",
             "emptying the override reveals the layer underneath"
@@ -26045,7 +26602,7 @@ mod tests {
             // A shell-less fixture is not a shell of some other kind: these
             // panes exist to carry scrollback, and the default profile is what
             // the pane they stand in for would have been started as.
-            profile: profiles::DEFAULT_PROFILE,
+            profile: profiles::FALLBACK_PROFILE,
             session,
             shell_fallback_notice: None,
             projection,
@@ -26466,7 +27023,7 @@ mod tests {
             .get_mut(&SeatId(2))
             .expect("the right-hand pane")
             .profile = gitbash;
-        assert_ne!(gitbash, profiles::DEFAULT_PROFILE, "the two panes differ");
+        assert_ne!(gitbash, profiles::FALLBACK_PROFILE, "the two panes differ");
         let torn = tear_pane_into_tab(
             &mut source,
             &cross_metrics(),
@@ -26510,7 +27067,7 @@ mod tests {
         );
         assert_eq!(
             source.leaf_profile(SeatId(1)),
-            profiles::DEFAULT_PROFILE,
+            profiles::FALLBACK_PROFILE,
             "and the pane that stayed is still its own shell, not the one that left"
         );
         assert_eq!(

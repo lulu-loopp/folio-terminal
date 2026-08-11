@@ -360,8 +360,9 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
     let defaults = SettingsV1::default();
     assert_eq!(defaults.schema_version, SETTINGS_SCHEMA_VERSION);
     assert_eq!(
-        SETTINGS_SCHEMA_VERSION, 3,
-        "adding the display-formula switch was the v1→v2 bump and the inline one the v2→v3 (§1.3)"
+        SETTINGS_SCHEMA_VERSION, 4,
+        "the display-formula switch was the v1→v2 bump, the inline one the v2→v3, \
+         and the default profile the v3→v4 (§1.3)"
     );
     assert!(
         defaults.display_formulas,
@@ -371,6 +372,50 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
         defaults.inline_formulas,
         "inline formulas render by default too; the site gate is what keeps that safe"
     );
+}
+
+/// PIN — v3→v4 adds the default profile as **unchosen**, and touches nothing.
+///
+/// The fixture is non-default in all three of its older fields (§1.3 rule 1), so
+/// a step that rewrote a sibling while inserting its own field could not hide
+/// behind a matching default on the way back out. And a file this old must not
+/// come back claiming its owner picked PowerShell: they were never asked.
+#[test]
+fn settings_v3_fixture_migrates_to_v4_with_no_profile_chosen() {
+    let (v4, report) = read_settings(&fixture_path("settings_v3_inline_off.json"));
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(v4.schema_version, SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        v4.default_profile, "",
+        "a v3 user was never offered the question, and a migration that answered \
+         it for them would be indistinguishable from one they had answered"
+    );
+    assert_eq!(
+        v4.theme_mode,
+        ThemeModeV1::Dark,
+        "v3→v4 is structural: the theme crosses untouched"
+    );
+    assert!(!v4.display_formulas, "and so does the display switch");
+    assert!(!v4.inline_formulas, "and so does the inline one");
+
+    // A file that *does* name a profile keeps naming it — the id is opaque here,
+    // and this crate must not decide that a spelling it does not recognise is
+    // wrong. Which profile it means is the reading build's question.
+    let dir = std::env::temp_dir().join(format!(
+        "bt-persist-settings-v3-migration-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("settings.json");
+    let chosen = SettingsV1 {
+        default_profile: "a-profile-this-build-never-heard-of".to_owned(),
+        ..SettingsV1::default()
+    };
+    write_settings_atomic(&path, &chosen).unwrap();
+    let (round_tripped, report) = read_settings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(round_tripped, chosen);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

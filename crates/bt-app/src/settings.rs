@@ -32,6 +32,7 @@ use bt_render::{
 };
 
 use crate::marks::{ChromeMark, ChromeSprite, OverlayLayer};
+use crate::profiles;
 use crate::seats::{RailMode, TabLayoutMode};
 
 // ── `.settings`, `.overlay` ────────────────────────────────────────────────
@@ -141,6 +142,30 @@ const TICK_WIDTH_LOGICAL_PX: f32 = 14.0;
 const TICK_FONT_LOGICAL_PX: f32 = 11.0;
 const TICK: &str = "\u{2713}";
 
+// ── the one picker whose items carry a mark (mock-up 7647) ─────────────────
+/// `.profile-item .ticon { width: 14px }` (mock-up 1023) — the same column the
+/// `˅` menu gives a profile mark, because it is the same `.ticon` class.
+const OPTION_ICON_COLUMN_LOGICAL_PX: f32 = 14.0;
+/// `.pmark { width: 15px }` (mock-up 246). Wider than its 14px column by one
+/// pixel, exactly as in the picker: a flex box centres a child that overflows it.
+const OPTION_MARK_LOGICAL_PX: f32 = 15.0;
+/// What a `.ticon` costs an item that has one: the column, and the flex gap
+/// after it. Zero for every other row, which is what keeps their popups the
+/// width they have always been.
+fn option_icon_advance(row: SettingsRow, scale: f32) -> f32 {
+    if row.option_mark(0).is_some() {
+        (OPTION_ICON_COLUMN_LOGICAL_PX + ITEM_GAP_LOGICAL_PX) * scale
+    } else {
+        0.0
+    }
+}
+
+/// `.ticon-wrap.dead .ticon { opacity: .35; filter: grayscale(1) }` (mock-up
+/// 314), quoted through `profiles`' own reading of it — the picker greys an
+/// unstartable profile exactly this way, and a second spelling of the same state
+/// is how two surfaces come to disagree about what grey means.
+const UNAVAILABLE_MARK_OPACITY: f32 = 0.35;
+
 /// The persisted theme modes, in product order.
 pub const THEME_OPTIONS: [ThemeModeV1; 3] =
     [ThemeModeV1::System, ThemeModeV1::Light, ThemeModeV1::Dark];
@@ -212,6 +237,11 @@ fn sidebar_label(mode: RailMode) -> &'static str {
 pub enum SettingsGroup {
     Appearance,
     RenderedBlocks,
+    /// Last, which is the mock-up's own order: `Appearance` (2355), `Terminal`
+    /// (2418), `Rendered blocks` (2433), `Startup` (2464). This build has no
+    /// Terminal group, and a group with no rows draws no heading — so the two it
+    /// does have keep their places and this one arrives under them.
+    Startup,
 }
 
 impl SettingsGroup {
@@ -219,12 +249,13 @@ impl SettingsGroup {
     ///
     /// Upper-cased at the source, as `"APPEARANCE"` always was: the chrome text
     /// path has no `text-transform`, and the mock-up's own words are
-    /// "Appearance" (2343) and "Rendered blocks" (2421).
+    /// "Appearance" (2355), "Rendered blocks" (2433) and "Startup" (2464).
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Appearance => "APPEARANCE",
             Self::RenderedBlocks => "RENDERED BLOCKS",
+            Self::Startup => "STARTUP",
         }
     }
 }
@@ -261,6 +292,15 @@ pub enum SettingsRow {
     /// who wants typeset blocks with every `$` in a log left alone has to be
     /// able to say exactly that.
     InlineFormulas,
+    /// Mock-up 2464-2474, the Startup group's only row — and the only picker in
+    /// this dialog whose items carry a mark (7645-7648).
+    ///
+    /// **The one row whose options can be unavailable.** Every other picker here
+    /// offers choices this program can always honour; this one offers four
+    /// shells, and whether a machine has Git Bash is not the product's to decide.
+    /// A greyed item is the same sentence the `˅` menu's greyed row speaks, in
+    /// the same words, because it is the same fact.
+    DefaultProfile,
 }
 
 impl SettingsRow {
@@ -277,8 +317,9 @@ impl SettingsRow {
                 SettingsGroup::Appearance
             }
             // The mock-up files what typesetting does to a block under "Rendered
-            // blocks" (2421), beside that group's own Maximum height row.
+            // blocks" (2433), beside that group's own Maximum height row.
             Self::Formulas | Self::InlineFormulas => SettingsGroup::RenderedBlocks,
+            Self::DefaultProfile => SettingsGroup::Startup,
         }
     }
 
@@ -293,6 +334,8 @@ impl SettingsRow {
             Self::TabLayout => "Tab layout",
             // Mock-up 2374.
             Self::Sidebar => "Sidebar",
+            // Mock-up 2467.
+            Self::DefaultProfile => "Default profile",
         }
     }
 
@@ -316,6 +359,11 @@ impl SettingsRow {
             Self::TabLayout => "Choose where tabs appear in the window",
             // Mock-up 2375.
             Self::Sidebar => "How the vertical tab sidebar rests",
+            // Mock-up 2468, word for word. It is also the *scope* of the setting
+            // and the reason `profiles::index_of_id` does not read it: a tab and
+            // a launch are the two things it answers for, and a pane coming back
+            // off disk is neither.
+            Self::DefaultProfile => "What opens on a new tab, and when BetterTerminal starts",
         }
     }
 
@@ -328,6 +376,11 @@ impl SettingsRow {
             Self::Formulas | Self::InlineFormulas => FORMULA_OPTIONS.len(),
             Self::TabLayout => TAB_LAYOUT_OPTIONS.len(),
             Self::Sidebar => SIDEBAR_OPTIONS.len(),
+            // The picker is built from the same list the `˅` menu is built from
+            // (mock-up 7645: "the default-profile picker is built from the same
+            // list the ⌄ menu uses"). Not a copy of it — the same table — so a
+            // fifth profile appears in both surfaces or in neither.
+            Self::DefaultProfile => profiles::PROFILES.len(),
         }
     }
 
@@ -348,6 +401,45 @@ impl SettingsRow {
             }
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
+            Self::DefaultProfile => profiles::PROFILES.get(index).map(|profile| profile.title),
+        }
+    }
+
+    /// The mark an item wears, for the one row whose items have one.
+    ///
+    /// Mock-up 7647: `<span class="tick">✓</span><span class="ticon">${p.icon}</span>${p.title}`
+    /// — and it is the only combo item in the whole dialog with a `.ticon`, which
+    /// is why this returns `Option` from a row rather than being a field every
+    /// option list has to fill in with `None`.
+    ///
+    /// It is the profile's own mark and not a generic shell glyph, for the reason
+    /// `UI-UX.md:115` gives about every other surface: you recognise PowerShell by
+    /// that blue, not by reading a word. A picker that named four shells in text
+    /// alone would be the one place in the product where they are not marks.
+    #[must_use]
+    pub fn option_mark(self, index: usize) -> Option<ChromeMark> {
+        match self {
+            Self::DefaultProfile => profiles::PROFILES.get(index).map(|profile| profile.mark),
+            _ => None,
+        }
+    }
+
+    /// Whether this item can be chosen on this machine.
+    ///
+    /// **Answered once, and read by both the hit test and the draw** — the ruling
+    /// `profiles::hit` already made for the `˅` menu's greyed rows, and it is the
+    /// same ruling because it is the same failure: a rule spelled only at the
+    /// click lights the row under the pointer and then does nothing; a rule
+    /// spelled only at the draw leaves the item dark and still selectable.
+    #[must_use]
+    pub fn option_enabled(self, index: usize, values: SettingsValues) -> bool {
+        match self {
+            Self::DefaultProfile => values
+                .profile_available
+                .get(index)
+                .copied()
+                .unwrap_or(false),
+            _ => index < self.option_count(),
         }
     }
 
@@ -366,6 +458,14 @@ impl SettingsRow {
                 .iter()
                 .position(|it| *it == values.tab_layout),
             Self::Sidebar => SIDEBAR_OPTIONS.iter().position(|it| *it == values.sidebar),
+            // The *resolved* default, which is why the caller hands over an index
+            // rather than the stored id. **Mock-up bug not copied** (2471): its
+            // combo button is born with the literal text `PowerShell` and only
+            // ever updates when the user picks something, so a default that was
+            // not index 0 showed stale words until touched. Reading state is the
+            // whole of the fix, and it is free here because there is no second
+            // place holding the button's caption.
+            Self::DefaultProfile => Some(values.default_profile),
         }
     }
 }
@@ -394,6 +494,7 @@ pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     }
     rows.push(SettingsRow::Formulas);
     rows.push(SettingsRow::InlineFormulas);
+    rows.push(SettingsRow::DefaultProfile);
     rows
 }
 
@@ -410,6 +511,48 @@ pub struct SettingsValues {
     pub sidebar: RailMode,
     pub display_formulas: bool,
     pub inline_formulas: bool,
+    /// The resolved default profile — an index into `profiles::PROFILES`, never
+    /// the stored id.
+    ///
+    /// The dialog shows what will actually happen. If the file names a profile
+    /// this machine no longer has, `profiles::default_profile` has already
+    /// degraded it and the tick sits on the shell the `+` would really start —
+    /// which is what the row's own description promises. The *stored* id is left
+    /// alone by that degradation, so nothing here can quietly consume a choice
+    /// the user made before they uninstalled something.
+    pub default_profile: usize,
+    /// Which profiles this machine can start, in table order.
+    ///
+    /// An array rather than a borrowed `ProfilePrograms`, so this type stays
+    /// `Copy` and `build`/`hit` can keep taking it by value. Four bools is the
+    /// whole of what those two need to know about the filesystem.
+    pub profile_available: [bool; profiles::PROFILES.len()],
+}
+
+#[cfg(test)]
+impl SettingsValues {
+    /// A representative reading of every row, for a test that is about the
+    /// dialog's geometry or its scrim rather than about a value.
+    ///
+    /// Here rather than in this module's `mod tests` because [`hit`] now takes
+    /// one, so a test in *another* module that presses on the dialog needs one
+    /// too — and a second hand-written literal over there is a second place to
+    /// forget a field when a row is added.
+    #[must_use]
+    pub fn sample() -> Self {
+        Self {
+            theme: ThemeModeV1::Dark,
+            cursor: CursorStyle::Bar,
+            tab_layout: TabLayoutMode::Horizontal,
+            sidebar: RailMode::Expanded,
+            display_formulas: true,
+            inline_formulas: true,
+            default_profile: profiles::FALLBACK_PROFILE,
+            // A fully equipped machine, so a geometry test is not quietly also a
+            // test of what is installed on the one running it.
+            profile_available: [true; profiles::PROFILES.len()],
+        }
+    }
 }
 
 /// Whether the dialog is up, and what is open inside it.
@@ -577,6 +720,23 @@ impl SettingsLayout {
 pub fn theme_requested(target: SettingsTarget) -> Option<ThemeModeV1> {
     match target {
         SettingsTarget::Choice(SettingsRow::Theme, index) => THEME_OPTIONS.get(index).copied(),
+        _ => None,
+    }
+}
+
+/// The profile **id** a press asks to become the default, if it asks at all.
+///
+/// An id and not the index the press carried, and that is the whole reason this
+/// function exists rather than the caller reading `Choice(_, index).1`: an index
+/// is a fact about today's table and `settings.json` has to survive tomorrow's
+/// (`bt_persist::SettingsV1::default_profile`). The one place the index becomes a
+/// name is here, at the boundary between the pointer and the file.
+#[must_use]
+pub fn default_profile_requested(target: SettingsTarget) -> Option<&'static str> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::DefaultProfile, index) => {
+            profiles::PROFILES.get(index).map(|profile| profile.id)
+        }
         _ => None,
     }
 }
@@ -820,7 +980,7 @@ pub fn layout_for_menu(
             scale,
             border,
             row.option_count(),
-            widest_option,
+            widest_option + option_icon_advance(row, scale),
         ),
         None => (None, Vec::new()),
     };
@@ -913,12 +1073,21 @@ fn menu_layout(
 /// sits inside a menu, a menu and a close button sit on the dialog, and the
 /// dialog sits on the scrim.
 #[must_use]
-pub fn hit(layout: &SettingsLayout, x: f64, y: f64) -> SettingsTarget {
+pub fn hit(layout: &SettingsLayout, values: SettingsValues, x: f64, y: f64) -> SettingsTarget {
     let (x, y) = (x as f32, y as f32);
     if let (Some(menu), Some(row)) = (layout.menu, layout.menu_kind) {
         for (index, item) in layout.items.iter().enumerate() {
             if contains(*item, x, y) {
-                return SettingsTarget::Choice(row, index);
+                // **An item this machine cannot honour is menu body**, which is
+                // where the greying is enforced — one answer read by the hover
+                // and the click alike (`SettingsRow::option_enabled`). The menu
+                // stays open under such a press, exactly as it does over the gap
+                // between two items, because nothing was chosen.
+                return if row.option_enabled(index, values) {
+                    SettingsTarget::Choice(row, index)
+                } else {
+                    SettingsTarget::Menu(row)
+                };
             }
         }
         if contains(menu, x, y) {
@@ -1124,10 +1293,15 @@ pub fn build(
             alpha(palette.menu_border_alpha),
         );
         let selected = row.selected_index(values);
+        let icon_advance = option_icon_advance(row, scale);
         for (index, item) in layout.items.iter().enumerate() {
             let label = row.option_label(index).unwrap_or_default();
             let is_selected = selected == Some(index);
-            let is_hovered = hover == Some(SettingsTarget::Choice(row, index));
+            let enabled = row.option_enabled(index, values);
+            // An item that cannot be chosen is never hovered — `hit` answers
+            // `Menu` over it — but the state is read from the same predicate
+            // rather than inferred from that, so the two cannot come apart.
+            let is_hovered = enabled && hover == Some(SettingsTarget::Choice(row, index));
             if is_hovered {
                 popup.quads.extend(rounded_overlay_fill(
                     *item,
@@ -1152,16 +1326,40 @@ pub fn build(
                     clip: None,
                 });
             }
+            let text_left = tick_right + px(ITEM_GAP_LOGICAL_PX) + icon_advance;
+            if let Some(mark) = row.option_mark(index) {
+                // Centred on its own 14px column, one pixel narrower than the
+                // 15px mark in it — `profiles::push_row`'s arithmetic, because it
+                // is the same `.ticon` holding the same `.pmark`.
+                let column_left = tick_right + px(ITEM_GAP_LOGICAL_PX);
+                let column_right = column_left + px(OPTION_ICON_COLUMN_LOGICAL_PX);
+                let side = px(OPTION_MARK_LOGICAL_PX).round();
+                let left = ((column_left + column_right - side) / 2.0).round();
+                let top = ((item[1] + item[3] - side) / 2.0).round();
+                let mut sprite =
+                    ChromeSprite::new(mark, [left, top, left + side, top + side], palette.accent);
+                if !enabled {
+                    sprite.opacity = UNAVAILABLE_MARK_OPACITY;
+                    sprite.grayscale = true;
+                }
+                popup.sprites.push(sprite);
+            }
             popup.labels.push(ChromeLabel {
                 text: label.to_owned(),
                 rect: [
-                    tick_right + px(ITEM_GAP_LOGICAL_PX),
+                    text_left,
                     item[1],
                     item[2] - px(ITEM_PADDING_X_LOGICAL_PX),
                     item[3],
                 ],
                 font_size_px: px(COMBO_FONT_LOGICAL_PX),
-                color: if is_selected || is_hovered {
+                // Three inks, unavailable first — the picker menu's own order and
+                // its reason: an unavailable item is never hovered, and stating
+                // that precedence rather than relying on it is what keeps the two
+                // from disagreeing if it ever stops being true.
+                color: if !enabled {
+                    palette.menu_item_hint_text
+                } else if is_selected || is_hovered {
                     palette.menu_item_text_selected
                 } else {
                     palette.menu_item_text
@@ -1351,14 +1549,7 @@ mod tests {
     /// A representative reading for every row, for the tests that are about
     /// geometry rather than about which value is shown.
     fn values() -> SettingsValues {
-        SettingsValues {
-            theme: ThemeModeV1::Dark,
-            cursor: CursorStyle::Bar,
-            tab_layout: TabLayoutMode::Horizontal,
-            sidebar: RailMode::Expanded,
-            display_formulas: true,
-            inline_formulas: true,
-        }
+        SettingsValues::sample()
     }
 
     fn open(scale: f32, menu_open: bool) -> SettingsLayout {
@@ -1611,7 +1802,7 @@ mod tests {
             "the point under test really is the gear"
         );
         assert_eq!(
-            hit(&placed, gear, y),
+            hit(&placed, values(), gear, y),
             SettingsTarget::Scrim,
             "a modal means MODAL: the gear is behind the scrim like everything else"
         );
@@ -1629,7 +1820,7 @@ mod tests {
         while y < SURFACE.1 {
             let mut x = 0.0_f32;
             while x < SURFACE.0 {
-                let target = hit(&placed, f64::from(x), f64::from(y));
+                let target = hit(&placed, values(), f64::from(x), f64::from(y));
                 let inside_dialog = contains(placed.frame, x, y);
                 let inside_menu = contains(menu, x, y);
                 match target {
@@ -1661,7 +1852,7 @@ mod tests {
     fn every_control_answers_where_it_is_drawn() {
         let placed = open(1.0, true);
         let (x, y) = centre(placed.close);
-        assert_eq!(hit(&placed, x, y), SettingsTarget::Close);
+        assert_eq!(hit(&placed, values(), x, y), SettingsTarget::Close);
         // Every row's button, on a dialog with nothing open over them — with a
         // picker up the row it hangs over belongs to the picker, which is
         // `a_press_inside_an_open_picker_never_reaches_the_row_beneath_it`.
@@ -1669,7 +1860,7 @@ mod tests {
         for placed_row in &shut.rows {
             let (x, y) = centre(placed_row.combo);
             assert_eq!(
-                hit(&shut, x, y),
+                hit(&shut, values(), x, y),
                 SettingsTarget::Combo(placed_row.row),
                 "{:?}'s button must answer for its own row",
                 placed_row.row
@@ -1678,7 +1869,7 @@ mod tests {
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
             assert_eq!(
-                hit(&placed, x, y),
+                hit(&placed, values(), x, y),
                 SettingsTarget::Choice(SettingsRow::Theme, index),
                 "item {index} must answer for its own option"
             );
@@ -1686,13 +1877,19 @@ mod tests {
         // The menu's own padding: inside the popup, on none of its items.
         let menu = placed.menu.expect("the menu is open");
         assert_eq!(
-            hit(&placed, f64::from(menu[0] + 1.0), f64::from(menu[1] + 1.0)),
+            hit(
+                &placed,
+                values(),
+                f64::from(menu[0] + 1.0),
+                f64::from(menu[1] + 1.0)
+            ),
             SettingsTarget::Menu(SettingsRow::Theme)
         );
         // The header, left of the title, is the dialog and nothing more.
         assert_eq!(
             hit(
                 &placed,
+                values(),
                 f64::from(placed.frame[0] + 4.0),
                 f64::from(placed.frame[1] + 4.0),
             ),
@@ -1717,7 +1914,7 @@ mod tests {
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
             assert_eq!(
-                theme_requested(hit(&placed, x, y)),
+                theme_requested(hit(&placed, values(), x, y)),
                 Some(THEME_OPTIONS[index])
             );
         }
@@ -1746,7 +1943,7 @@ mod tests {
         assert_eq!(placed.items.len(), CURSOR_OPTIONS.len());
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
-            let target = hit(&placed, x, y);
+            let target = hit(&placed, values(), x, y);
             assert_eq!(target, SettingsTarget::Choice(SettingsRow::Cursor, index));
             assert_eq!(cursor_style_requested(target), Some(CURSOR_OPTIONS[index]));
         }
@@ -1777,7 +1974,7 @@ mod tests {
         );
         let (x, y) = centre(cursor);
         assert_eq!(
-            hit(&placed, x, y),
+            hit(&placed, values(), x, y),
             SettingsTarget::Combo(SettingsRow::Cursor)
         );
         assert_eq!(placed.items.len(), 3);
@@ -2054,7 +2251,7 @@ mod tests {
         while y < covered[3] {
             let mut x = covered[0] + 0.5;
             while x < covered[2] {
-                let target = hit(&placed, f64::from(x), f64::from(y));
+                let target = hit(&placed, values(), f64::from(x), f64::from(y));
                 assert!(
                     matches!(
                         target,
@@ -2376,7 +2573,7 @@ mod tests {
                         f64::from((combo[1] + combo[3]) / 2.0),
                     );
                     assert_eq!(
-                        hit(&placed, centre.0, centre.1),
+                        hit(&placed, values(), centre.0, centre.1),
                         SettingsTarget::Combo(row),
                         "{tab_layout:?} at {scale}: {row:?}'s picker must answer \
                          where it is drawn"
@@ -2425,8 +2622,210 @@ mod tests {
             }
             assert_eq!(
                 seen,
-                vec![SettingsGroup::Appearance, SettingsGroup::RenderedBlocks],
-                "{tab_layout:?}: both groups are shown, in the mock-up's order"
+                vec![
+                    SettingsGroup::Appearance,
+                    SettingsGroup::RenderedBlocks,
+                    SettingsGroup::Startup,
+                ],
+                "{tab_layout:?}: every group is shown, in the mock-up's own order \
+                 (2355, 2433, 2464 — its Terminal group at 2418 has no rows here)"
+            );
+        }
+    }
+
+    /// PIN — the Startup row is the picker built from the `˅` menu's own list,
+    /// and the only one in this dialog whose items wear a mark.
+    ///
+    /// Mock-up 7645: "the default-profile picker is built from the same list the
+    /// ⌄ menu uses" — the *same* table, so a fifth profile appears in both
+    /// surfaces or in neither, and 7647 is the one `.ticon` in any combo item.
+    #[test]
+    fn the_startup_row_offers_the_pickers_own_profiles_each_under_its_own_mark() {
+        assert_eq!(
+            SettingsRow::DefaultProfile.title(),
+            "Default profile",
+            "mock-up 2467"
+        );
+        assert_eq!(
+            SettingsRow::DefaultProfile.description(),
+            "What opens on a new tab, and when BetterTerminal starts",
+            "mock-up 2468, word for word"
+        );
+        assert_eq!(
+            SettingsRow::DefaultProfile
+                .option_labels()
+                .collect::<Vec<_>>(),
+            profiles::PROFILES
+                .iter()
+                .map(|profile| profile.title)
+                .collect::<Vec<_>>(),
+        );
+        for (index, profile) in profiles::PROFILES.iter().enumerate() {
+            assert_eq!(
+                SettingsRow::DefaultProfile.option_mark(index),
+                Some(profile.mark),
+                "{} wears its own mark, not a generic shell glyph",
+                profile.id
+            );
+            assert_eq!(
+                default_profile_requested(SettingsTarget::Choice(
+                    SettingsRow::DefaultProfile,
+                    index
+                )),
+                Some(profile.id),
+                "the press asks for a profile by id — an index would not survive \
+                 the table being reordered"
+            );
+        }
+        // The only one. Every other picker's items are words.
+        for row in visible_rows(TabLayoutMode::Vertical) {
+            if row == SettingsRow::DefaultProfile {
+                continue;
+            }
+            for index in 0..row.option_count() {
+                assert_eq!(row.option_mark(index), None, "{row:?} draws no marks");
+            }
+        }
+    }
+
+    /// PIN — the combo reads the app's state, and the app's state is the
+    /// *resolved* default.
+    ///
+    /// **The mock-up's own bug, deliberately not copied** (2471): its combo
+    /// button is born holding the literal string `PowerShell` and only ever
+    /// updates when the user picks something, so a default that was not index 0
+    /// showed stale words until touched. `selected_index` reading `values` is the
+    /// whole of the fix, and this pins that the button's caption is derived from
+    /// it rather than from a constant.
+    #[test]
+    fn the_default_profile_combo_shows_the_profile_that_would_actually_start() {
+        for chosen in 0..profiles::PROFILES.len() {
+            let values = SettingsValues {
+                default_profile: chosen,
+                ..values()
+            };
+            assert_eq!(
+                SettingsRow::DefaultProfile.selected_index(values),
+                Some(chosen)
+            );
+            let placed = open_rows(1.0, None, TabLayoutMode::Horizontal);
+            let combo = placed
+                .row(SettingsRow::DefaultProfile)
+                .expect("the Startup row is in the dialog")
+                .combo;
+            let caption = labels_of(&placed, None, values)
+                .into_iter()
+                .find(|label| label.rect[1] >= combo[1] && label.rect[3] <= combo[3])
+                .expect("the closed combo shows its current value");
+            assert_eq!(
+                caption.text,
+                profiles::PROFILES[chosen].title,
+                "the button says what the `+` would start"
+            );
+        }
+    }
+
+    /// PIN — a profile this machine cannot start is greyed *and* unclickable, and
+    /// the two are one answer.
+    ///
+    /// The picker menu's ruling (`profiles::hit`) applied to the dialog, because
+    /// it is the same fact about the same machine: a rule spelled only at the
+    /// click lights the row under the pointer and then does nothing when pressed;
+    /// a rule spelled only at the draw leaves the item dark and still selectable.
+    /// So the press, the hover and the ink are asserted together.
+    #[test]
+    fn a_shell_this_machine_lacks_is_greyed_in_the_startup_picker_and_cannot_be_chosen() {
+        let missing = profiles::index_of_id("gitbash");
+        let mut available = [true; profiles::PROFILES.len()];
+        available[missing] = false;
+        let lacking = SettingsValues {
+            profile_available: available,
+            ..values()
+        };
+        let placed = open_rows(
+            1.0,
+            Some(SettingsRow::DefaultProfile),
+            TabLayoutMode::Horizontal,
+        );
+        let item = placed.items[missing];
+        let centre = (
+            f64::from((item[0] + item[2]) / 2.0),
+            f64::from((item[1] + item[3]) / 2.0),
+        );
+
+        assert_eq!(
+            hit(&placed, lacking, centre.0, centre.1),
+            SettingsTarget::Menu(SettingsRow::DefaultProfile),
+            "the press lands on the menu's body — nothing was chosen, and the \
+             menu stays up"
+        );
+        assert_eq!(
+            hit(&placed, values(), centre.0, centre.1),
+            SettingsTarget::Choice(SettingsRow::DefaultProfile, missing),
+            "and on a machine that has Git Bash the very same point chooses it"
+        );
+
+        let palette = bt_render::chrome_palette();
+        let mark = sprites_of(&placed, None, lacking)
+            .into_iter()
+            .find(|sprite| sprite.mark == profiles::PROFILES[missing].mark)
+            .expect("the greyed item still draws its mark");
+        assert_eq!(mark.opacity, UNAVAILABLE_MARK_OPACITY);
+        assert!(mark.grayscale, "and it loses its colours saying so");
+        let label = labels_of(&placed, None, lacking)
+            .into_iter()
+            .find(|label| label.text == profiles::PROFILES[missing].title)
+            .expect("the greyed item is still named");
+        assert_eq!(
+            label.color, palette.menu_item_hint_text,
+            "the quietest ink this surface has, which is what it already uses \
+             for text that reports rather than offers"
+        );
+
+        // A hover that somehow arrived on it lights nothing — the two halves
+        // cannot come apart, which is the whole reason `option_enabled` is asked
+        // by the draw as well as by the hit test.
+        let hovered = SettingsTarget::Choice(SettingsRow::DefaultProfile, missing);
+        assert_eq!(
+            labels_of(&placed, Some(hovered), lacking)
+                .into_iter()
+                .find(|label| label.text == profiles::PROFILES[missing].title)
+                .map(|label| label.color),
+            Some(palette.menu_item_hint_text),
+        );
+    }
+
+    /// PIN — the marked picker makes room for its marks.
+    ///
+    /// `min-width: 100%` is a floor and the popup grows leftward to hold its
+    /// widest label; an item that also carries a 14px `.ticon` and its 10px gap
+    /// needs 24px more than that label, and a popup sized without them crops the
+    /// last glyph of every profile name.
+    #[test]
+    fn the_marked_picker_reserves_its_icon_column_on_top_of_the_widest_label() {
+        for scale in [1.0_f32, 1.5, 2.0] {
+            let widest = 120.0 * scale;
+            let marked = open_rows_measured(
+                scale,
+                Some(SettingsRow::DefaultProfile),
+                TabLayoutMode::Horizontal,
+                widest,
+            );
+            let plain = open_rows_measured(
+                scale,
+                Some(SettingsRow::Theme),
+                TabLayoutMode::Horizontal,
+                widest,
+            );
+            let width = |placed: &SettingsLayout| {
+                let menu = placed.menu.expect("the picker is open");
+                menu[2] - menu[0]
+            };
+            assert_eq!(
+                width(&marked) - width(&plain),
+                ((OPTION_ICON_COLUMN_LOGICAL_PX + ITEM_GAP_LOGICAL_PX) * scale).ceil(),
+                "scale {scale}: exactly the column and its gap, and not a pixel \
+                 of slack invented here"
             );
         }
     }
@@ -2658,7 +3057,8 @@ mod tests {
                 SettingsRow::Cursor,
                 SettingsRow::TabLayout,
                 SettingsRow::Formulas,
-                SettingsRow::InlineFormulas
+                SettingsRow::InlineFormulas,
+                SettingsRow::DefaultProfile
             ]
         );
         assert_eq!(
@@ -2669,10 +3069,12 @@ mod tests {
                 SettingsRow::TabLayout,
                 SettingsRow::Sidebar,
                 SettingsRow::Formulas,
-                SettingsRow::InlineFormulas
+                SettingsRow::InlineFormulas,
+                SettingsRow::DefaultProfile
             ],
-            "Sidebar still lands directly under the row it depends on, and the \
-             two formula rows stay last as the whole of the second group"
+            "Sidebar still lands directly under the row it depends on, the two \
+             formula rows stay together as the whole of the second group, and \
+             Startup's one row is last"
         );
     }
 
@@ -2699,7 +3101,7 @@ mod tests {
         while y < SURFACE.1 {
             let mut x = 0.0_f32;
             while x < SURFACE.0 {
-                let target = hit(&flat, f64::from(x), f64::from(y));
+                let target = hit(&flat, values(), f64::from(x), f64::from(y));
                 assert!(
                     !matches!(
                         target,
@@ -2767,7 +3169,7 @@ mod tests {
         assert_eq!(placed.items.len(), TAB_LAYOUT_OPTIONS.len());
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
-            let target = hit(&placed, x, y);
+            let target = hit(&placed, values(), x, y);
             assert_eq!(
                 target,
                 SettingsTarget::Choice(SettingsRow::TabLayout, index)
@@ -2797,7 +3199,7 @@ mod tests {
         assert_eq!(placed.items.len(), SIDEBAR_OPTIONS.len());
         for (index, item) in placed.items.iter().enumerate() {
             let (x, y) = centre(*item);
-            let target = hit(&placed, x, y);
+            let target = hit(&placed, values(), x, y);
             assert_eq!(target, SettingsTarget::Choice(SettingsRow::Sidebar, index));
             assert_eq!(sidebar_mode_requested(target), Some(SIDEBAR_OPTIONS[index]));
             assert_eq!(tab_layout_requested(target), None);
