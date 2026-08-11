@@ -15,10 +15,10 @@
 use std::path::PathBuf;
 
 use bt_persist::{
-    DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, SETTINGS_SCHEMA_VERSION,
-    SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1, SessionThemeV1, SessionV1,
-    SettingsV1, TabV1, TermLeafV1, ThemeModeV1, read_session, read_settings, write_session_atomic,
-    write_settings_atomic,
+    DegradationReport, LayoutNodeV1, LeafNodeV1, ReadReport, RecentSeedV1, SESSION_SCHEMA_VERSION,
+    SETTINGS_SCHEMA_VERSION, SessionCursorStyleV1, SessionSidebarModeV1, SessionTabLayoutV1,
+    SessionThemeV1, SessionV1, SettingsV1, TabV1, TermLeafV1, ThemeModeV1, read_session,
+    read_settings, write_session_atomic, write_settings_atomic,
 };
 
 fn fixture_path(name: &str) -> PathBuf {
@@ -53,7 +53,7 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
     // Spot-check individual non-default fields end to end, not just an
     // opaque byte comparison — each of these would fail on its own if the
     // corresponding piece of parsing regressed.
-    assert_eq!(session.schema_version, 5);
+    assert_eq!(session.schema_version, SESSION_SCHEMA_VERSION);
     assert_eq!(session.theme, SessionThemeV1::Dark);
     assert_eq!(session.cursor_style, SessionCursorStyleV1::Bar);
     assert_eq!(session.tab_layout, SessionTabLayoutV1::Horizontal);
@@ -83,6 +83,40 @@ fn messy_input_parses_clean_and_matches_canonical_struct() {
         files_leaf.open,
         vec!["node-12".to_string(), "node-45".to_string()]
     );
+
+    // **v5 -> v6: every `profile_id` in the document arrives as a slug.**
+    //
+    // This fixture is the strongest case available for it, because it is written
+    // throughout in the *other* convention — §3.3's "shell executable path"
+    // spelling, and two different PowerShell installs at that. A migration that
+    // walked only the top-level object, or only the first leaf, or that mapped
+    // only the one path it happened to be written against, fails here rather
+    // than in somebody's real session file.
+    let LayoutNodeV1::Split(inner) = root_split.children[1].as_ref() else {
+        panic!("tab 0's second child must be the nested split");
+    };
+    for (index, expected_cwd) in [(0usize, r"C:\Users\dev\project"), (1, r"C:\Users\dev")] {
+        let LayoutNodeV1::Leaf(LeafNodeV1::Term(term)) = inner.children[index].as_ref() else {
+            panic!("the nested split's children are both term leaves");
+        };
+        assert_eq!(
+            term.profile_id, "pwsh",
+            "a term leaf two splits deep must arrive slugged"
+        );
+        // The step renamed the profile and nothing standing beside it.
+        assert_eq!(term.cwd, expected_cwd);
+    }
+    let LayoutNodeV1::Leaf(LeafNodeV1::Term(lone)) = &session.tabs[1].root else {
+        panic!("tab 1's root must be the lone term leaf");
+    };
+    assert_eq!(lone.profile_id, "pwsh");
+    match &session.recent[0].seed {
+        RecentSeedV1::Term { profile_id, .. } => assert_eq!(
+            profile_id, "pwsh",
+            "a Recent seed carries the same field and migrates with it"
+        ),
+        other => panic!("expected a term seed, got {other:?}"),
+    }
 
     // The real assertion this test exists for: re-serializing must reproduce
     // the canonical bytes exactly, proving canonical field order + unknown
@@ -133,7 +167,7 @@ fn v3_dark_and_light_fixtures_migrate_and_round_trip_without_changing_mode() {
         let (migrated, report, degradation) = read_session(&fixture_path(fixture));
         assert_eq!(report, ReadReport::Loaded);
         assert!(degradation.is_clean());
-        assert_eq!(migrated.schema_version, 5);
+        assert_eq!(migrated.schema_version, SESSION_SCHEMA_VERSION);
         assert_eq!(migrated.theme, expected_theme);
 
         let dir = std::env::temp_dir().join(format!(

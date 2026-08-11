@@ -5,7 +5,11 @@ use serde::{Deserialize, Serialize};
 use crate::layout::LayoutNodeV1;
 
 /// Current `schema_version` for `session.json`.
-pub const SESSION_SCHEMA_VERSION: u32 = 5;
+///
+/// v6 is the first bump that changes an existing field's *meaning* rather than adding one:
+/// `profile_id` becomes a stable profile slug. See [`crate::migrate`]'s `migrate_session_v5_to_v6`
+/// for the ruling and the one-time mapping.
+pub const SESSION_SCHEMA_VERSION: u32 = 6;
 
 /// Persisted theme mode restored with the session. `System` is resolved by the app against winit's
 /// OS theme; `BT_BG` remains a process diagnostic override and is never persisted as a mode.

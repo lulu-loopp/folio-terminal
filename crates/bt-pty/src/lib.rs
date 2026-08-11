@@ -259,16 +259,26 @@ impl PtyCommand {
         self
     }
 
+    /// Windows PowerShell as this terminal starts it: interactive, color-capable, `-NoLogo`.
+    ///
+    /// The one command in this crate that still names an argument, because it is the one command
+    /// that names a *specific shell*: it is the guaranteed fallback every other spawn retries
+    /// against, so it cannot ask a caller which flags PowerShell takes.
     pub fn powershell() -> Self {
-        Self::interactive_shell("powershell.exe")
+        Self::interactive_shell("powershell.exe").arg("-NoLogo")
     }
 
-    /// An interactive, color-capable shell command for `program` — `-NoLogo` plus the same
-    /// `COLORTERM`/`TERM` declaration policy as [`Self::powershell`]. `pwsh.exe` accepts the same
-    /// `-NoLogo` flag as `powershell.exe`, so `spawn_default`'s resolved shell shares this
-    /// constructor with the Windows PowerShell default it may fall back to.
-    fn interactive_shell(program: impl Into<OsString>) -> Self {
-        let mut command = Self::new(program).arg("-NoLogo");
+    /// An interactive, color-capable shell command for `program` — the `COLORTERM`/`TERM`
+    /// declaration policy, and **no arguments**.
+    ///
+    /// `-NoLogo` used to be welded in here as "the one argument", which was true only while every
+    /// shell this terminal could start was a PowerShell. It is a PowerShell flag: `cmd.exe` reads
+    /// it as the name of a batch file and `bash` as a file to open, so a terminal that can start
+    /// either cannot pass it to both. Arguments are now the caller's — for the app, a profile's
+    /// own `args` list — and what this constructor still owns is the thing that is genuinely
+    /// common to every interactive shell: that it is one, and that it may emit colour.
+    pub fn interactive_shell(program: impl Into<OsString>) -> Self {
+        let mut command = Self::new(program);
         command.declare_color_support = true;
         command
     }
@@ -368,6 +378,22 @@ fn backend(error: impl std::fmt::Display) -> PtyError {
 /// identical command.
 fn shell_spawn_failure_should_fall_back(choice: ShellChoice) -> bool {
     choice != ShellChoice::WindowsPowerShell
+}
+
+/// The flags this terminal starts any PowerShell with.
+const POWERSHELL_INTERACTIVE_ARGS: &[&str] = &["-NoLogo"];
+
+/// Whether `program` already names the shell the fallback would retry with.
+///
+/// The named-program half of [`shell_spawn_failure_should_fall_back`]'s rule, and the same rule:
+/// retrying a spawn that has just failed with the identical program is not a fallback, it is the
+/// same failure twice. Compared case-insensitively and by file name because Windows paths are
+/// case-insensitive and `powershell.exe` reaches this both as a bare name (what
+/// `resolve_default_shell` returns) and as the System32 path a profile would resolve to.
+fn program_is_windows_powershell(program: &OsStr) -> bool {
+    Path::new(program)
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(OsStr::new("powershell.exe")))
 }
 
 #[derive(Default)]
@@ -540,6 +566,31 @@ impl PtySession {
         Self::spawn_default_with(size, wake, working_directory, &SystemShellEnvironment)
     }
 
+    /// Start `program` with `args` as this terminal's interactive shell, in `working_directory`.
+    ///
+    /// The entry point a **profile** spawns through: the caller has already decided which
+    /// executable this is and which flags it takes, because those are properties of the profile
+    /// the user picked and not of "the shell". `spawn_default_in` is the special case of this
+    /// where the caller wants the default-shell resolution order instead of a named program.
+    ///
+    /// It keeps the same recoverable-failure contract as `spawn_default`: a program that will not
+    /// start falls back once to `powershell.exe` and leaves a one-line notice
+    /// (`take_shell_fallback_notice`) rather than failing the session, because a window with no
+    /// shell in it is worse than a window with the wrong one *provided the swap is stated*. The
+    /// retry is skipped when the program is already `powershell.exe`, where it would repeat an
+    /// identical, already-failed spawn.
+    pub fn spawn_shell_in(
+        program: impl Into<OsString>,
+        args: &[&str],
+        size: PtySize,
+        wake: OutputWake,
+        working_directory: Option<PathBuf>,
+    ) -> Result<Self, PtyError> {
+        let program = program.into();
+        let fall_back = !program_is_windows_powershell(&program);
+        Self::spawn_interactive(program, args, size, wake, working_directory, fall_back)
+    }
+
     /// The testable core of `spawn_default`: shell resolution goes through the injected
     /// `environment` rather than `std::env`/the real filesystem, so resolution-order and
     /// fallback-on-failure tests are deterministic regardless of what is installed on the host.
@@ -548,6 +599,33 @@ impl PtySession {
         wake: OutputWake,
         working_directory: Option<PathBuf>,
         environment: &dyn ShellEnvironment,
+    ) -> Result<Self, PtyError> {
+        let resolved = resolve_default_shell(environment);
+        Self::spawn_interactive(
+            resolved.program,
+            // PowerShell's own flag, stated by the one entry point that knows it is starting a
+            // PowerShell. Every other shell's arguments arrive through `spawn_shell_in`.
+            POWERSHELL_INTERACTIVE_ARGS,
+            size,
+            wake,
+            working_directory,
+            shell_spawn_failure_should_fall_back(resolved.choice),
+        )
+    }
+
+    /// Both spawn doors' shared body: validate the directory, build the interactive command, and
+    /// apply the one-shot fallback when the caller says the failure is recoverable.
+    ///
+    /// One function so the two doors cannot drift on the three things that are not about *which*
+    /// shell — that a vanished working directory is survivable, that every shell gets the colour
+    /// declarations, and what a fallback leaves behind for the window to say.
+    fn spawn_interactive(
+        program: OsString,
+        args: &[&str],
+        size: PtySize,
+        wake: OutputWake,
+        working_directory: Option<PathBuf>,
+        fall_back: bool,
     ) -> Result<Self, PtyError> {
         // A directory that no longer exists would fail the spawn outright, and a
         // tab that refuses to open because the last one was deleted out from
@@ -558,15 +636,19 @@ impl PtySession {
             Some(directory) if directory.is_dir() => directory,
             _ => std::env::current_dir().map_err(PtyError::Io)?,
         };
-        let resolved = resolve_default_shell(environment);
-        let command = PtyCommand::interactive_shell(resolved.program.clone())
+        let command = args
+            .iter()
+            .fold(
+                PtyCommand::interactive_shell(program.clone()),
+                |command, argument| command.arg(*argument),
+            )
             .working_directory(working_directory.clone());
         match Self::spawn(command, size, wake.clone()) {
             Ok(session) => Ok(session),
-            Err(spawn_error) if shell_spawn_failure_should_fall_back(resolved.choice) => {
+            Err(spawn_error) if fall_back => {
                 let notice = format!(
                     "{} failed to start ({spawn_error}); using powershell.exe instead",
-                    Path::new(&resolved.program).display()
+                    Path::new(&program).display()
                 );
                 eprintln!("recoverable shell spawn failure: {notice}");
                 let fallback = PtyCommand::powershell().working_directory(working_directory);

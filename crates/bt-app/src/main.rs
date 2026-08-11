@@ -73,7 +73,7 @@ use winit::{
 
 const INITIAL_WIDTH: f64 = 960.0;
 const INITIAL_HEIGHT: f64 = 600.0;
-const DEFAULT_PROFILE_TITLE: &str = "PowerShell";
+
 #[cfg(test)]
 const WINDOW_TITLE: &str = "BetterTerminal M0-beta";
 const WIN32_DEFAULT_DPI: f64 = 96.0;
@@ -552,6 +552,17 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// Which of [`profiles::PROFILES`] this pane's shell was started from.
+    ///
+    /// **Here, and not on the tab.** It is a fact about the process — this is
+    /// the struct that owns the process — and so it survives every gesture that
+    /// moves a pane without restarting it: a tear-out into a new tab and a merge
+    /// into another tab's layout both *move* this whole struct, so the profile
+    /// travels with the shell it describes rather than being re-derived from
+    /// whichever tab the pane landed in. Under the old tab-level field, tearing
+    /// a Git Bash pane out of a PowerShell tab produced a tab that said
+    /// PowerShell over a running bash.
+    profile: usize,
     session: DualPlaneSession,
     shell_fallback_notice: Option<String>,
     projection: ViewportProjection,
@@ -612,10 +623,6 @@ struct TabState {
     sessions: BTreeMap<SeatId, LeafSession>,
     /// Which leaf has the keyboard. Typing, pasting and IME all land here.
     focused_leaf: SeatId,
-    /// Which of [`profiles::PROFILES`] started this tab — the stable half of its
-    /// seed, kept so a closed tab can be reopened as the same *kind* of shell
-    /// rather than whatever the default happens to be that day.
-    profile: usize,
     /// "Bring this one back next time."
     ///
     /// It is an answer, not a decoration, and that is why launch does not ask
@@ -847,6 +854,22 @@ struct Runtime {
     /// the same reasons — and separate from it because the two are different
     /// kinds of surface: one is modal and one is a popup.
     profile_menu: profiles::ProfileMenu,
+    /// Which of [`profiles::PROFILES`] this machine can actually start, and with
+    /// which executable — probed once, when the window opens.
+    ///
+    /// Once, and held here, for the reason [`profiles::ProfilePrograms`] gives:
+    /// availability is a filesystem question and the picker asks it of every row
+    /// on every frame it is open. Held on the `Runtime` rather than passed down
+    /// from the event loop because it is the same kind of fact as `settings` —
+    /// something about the world this window was opened into, which every verb
+    /// that starts a shell has to consult and none of them may re-derive.
+    ///
+    /// It is deliberately **not** re-probed when a menu opens. Installing Git
+    /// while a menu is on screen is not a case worth a filesystem call per
+    /// frame, and the failure it would introduce — a row changing under a
+    /// pointer already travelling toward it — is worse than the staleness it
+    /// would fix.
+    profile_programs: profiles::ProfilePrograms,
     /// The picker's arrow on its way to matching it.
     ///
     /// Beside `profile_menu` rather than inside it because they are two
@@ -1197,7 +1220,19 @@ impl TabState {
             self.manual_name.as_deref(),
             self.session.window_title(),
             self.session.working_directory(),
+            self.focused_profile_title(),
         )
+    }
+
+    /// The name the focused pane's *own* profile goes by.
+    ///
+    /// The last layer of every name this tab can have, and it used to be the
+    /// constant `"PowerShell"` — right while that was the only shell, and a
+    /// plain falsehood the moment a second one shipped: a WSL tab whose shell
+    /// has never reported a folder is not called PowerShell. It is the same
+    /// mistake the mark made, one column to the right.
+    fn focused_profile_title(&self) -> &'static str {
+        profiles::PROFILES[self.leaf_profile(self.focused_leaf)].title
     }
 
     /// What this tab's tooltip says (M140).
@@ -1211,6 +1246,7 @@ impl TabState {
             self.manual_name.as_deref(),
             self.session.window_title(),
             self.session.working_directory(),
+            self.focused_profile_title(),
         );
         let cwd = self
             .session
@@ -1229,26 +1265,25 @@ impl TabState {
     /// reviving that starts where a fresh tab would, which is the honest answer
     /// to "where was it?" when nobody said.
     ///
-    /// Two of the three fields are deliberately *tab-level facts replicated into
-    /// every leaf*, and both are worth saying out loud because the shape of the
-    /// file invites the opposite reading:
+    /// `profile_id` is now **this leaf's own**, which is what the file always
+    /// claimed it was. The field has been per-leaf on disk since v1 (§3.3) while
+    /// this build had only a tab-level answer to write into it, so every pane of
+    /// a tab was saved as the same shell whatever it was actually running; a
+    /// two-pane tab torn from a Git Bash split came back as two PowerShells.
+    /// The seed is read off the pane, so the pane is what it names.
     ///
-    /// * `profile_id` — this build has no per-pane profile. A split spawns the
-    ///   same default shell whatever the tab was started as, so writing the
-    ///   tab's profile into each leaf records what is true rather than inventing
-    ///   a per-pane choice the user was never offered.
-    /// * `manual_name` — a name is a **tab-level override** ("`name` is an
-    ///   OVERRIDE, not a field", mock-up 2595), and it is not pushed down to
-    ///   panes. Replicating it keeps the round trip exact — the seed is read
-    ///   back off the *first* terminal leaf — without any pane ever wearing it;
-    ///   `TabState::terminal_names` leaves it out of the pane-head stack for
-    ///   exactly that reason.
+    /// `manual_name` is the one field still replicated, and deliberately: a name
+    /// is a **tab-level override** ("`name` is an OVERRIDE, not a field",
+    /// mock-up 2595) and is not pushed down to panes. Replicating it keeps the
+    /// round trip exact — the seed is read back off the *first* terminal leaf —
+    /// without any pane ever wearing it; `TabState::terminal_names` leaves it
+    /// out of the pane-head stack for exactly that reason.
     ///
     /// The program's title is deliberately not in here (mock-up 4009-4010):
     /// it left with the program. Your name for the tab did not.
     fn term_leaf(&self, seat: SeatId) -> TermLeafV1 {
         TermLeafV1 {
-            profile_id: profiles::PROFILES[self.profile].id.to_owned(),
+            profile_id: profiles::PROFILES[self.leaf_profile(seat)].id.to_owned(),
             cwd: self
                 .sessions
                 .get(&seat)
@@ -1265,6 +1300,51 @@ impl TabState {
     /// the one leaf a tab is reopened as when you ask for it back by name. A
     /// vault entry is one address, and a tab with two panes has to answer with
     /// one of them; the identity terminal is the one the tab has always been.
+    /// Which profile the shell in `seat` was started from.
+    ///
+    /// [`profiles::DEFAULT_PROFILE`] for a seat this tab holds no shell for,
+    /// which is not a fallback so much as the only answer available: the callers
+    /// are the chrome, asking what mark to draw over a seat, and a Files or
+    /// Preview seat has no profile because it has no shell. Those callers pick
+    /// their own mark by [`SeatKind`] before ever reaching here.
+    fn leaf_profile(&self, seat: SeatId) -> usize {
+        self.sessions
+            .get(&seat)
+            .map_or(profiles::DEFAULT_PROFILE, |leaf| leaf.profile)
+    }
+
+    /// The mark the chrome draws for one seat's shell — this tab's per-seat half
+    /// of [`Self::terminal_names`], and threaded through the chrome the same way.
+    fn leaf_marks(&self) -> BTreeMap<SeatId, marks::ChromeMark> {
+        self.sessions
+            .iter()
+            .map(|(seat, leaf)| (*seat, profiles::PROFILES[leaf.profile].mark))
+            .collect()
+    }
+
+    /// The mark this whole tab wears in the strip and on a drag ghost.
+    ///
+    /// **The focused leaf's**, which is the mock-up's own `identityLeaf` (line
+    /// 3294): the focused pane, unless that pane is a files tree — which lends
+    /// no identity — in which case the first terminal the tab holds. `tabIcon`
+    /// (line 4228) draws that leaf's `stateIcon`, and a session's icon is its
+    /// profile's mark.
+    ///
+    /// So a split tab's mark *follows the keyboard*: standing in the bash pane
+    /// of a `[pwsh | git bash]` tab, the strip says Git Bash. That is the right
+    /// reading of F49's "a session's identity is icon × directory" — the tab
+    /// already renames itself to the focused pane's folder (`display_title`
+    /// derefs to the focused leaf), and an icon that stayed on some other pane
+    /// while the name moved would be half an identity pointing two ways.
+    fn tab_mark(&self) -> marks::ChromeMark {
+        let leaf = if self.sessions.contains_key(&self.focused_leaf) {
+            self.focused_leaf
+        } else {
+            self.seats.terminal()
+        };
+        profiles::PROFILES[self.leaf_profile(leaf)].mark
+    }
+
     fn seed(&self) -> seed::Seed {
         let leaf = self.term_leaf(self.seats.terminal());
         seed::Seed::Term {
@@ -1403,11 +1483,14 @@ impl TabState {
         pane_head_title(
             leaf.session.window_title(),
             leaf.session.working_directory(),
-            // The tab's profile, because that is the one this pane's shell was
-            // launched from — this build has no per-pane profile (see
-            // `term_leaf`), so the tab's is the only honest answer to "what is
-            // this shell already known as".
-            profiles::PROFILES[self.profile].title,
+            // **This pane's own** profile, which is the one its shell was
+            // actually launched from. The filter this feeds asks "has this
+            // program announced anything, or is it merely agreeing with its own
+            // profile's name" — and under the old tab-level answer, a `cmd.exe`
+            // pane split out of a PowerShell tab was measured against the word
+            // "PowerShell", so its honest `Command Prompt` title read as an
+            // announcement while a second PowerShell pane's did not.
+            profiles::PROFILES[self.leaf_profile(seat)].title,
         )
         .map(|(name, _)| name)
     }
@@ -5840,40 +5923,49 @@ fn plan_launch(saved: &[TabV1], active: usize) -> LaunchPlan {
 /// leaf at all, and the fallback to `lone_terminal` then zips one seat against
 /// zero saved leaves and produces no entries — which is right, because there
 /// was nothing saved to pair with.
-fn revive_plan(tab: &TabV1) -> (seats::Seats, TabSeed, BTreeMap<SeatId, PathBuf>) {
+fn revive_plan(tab: &TabV1) -> (seats::Seats, TabSeed, BTreeMap<SeatId, LeafSeed>) {
     let mut seats =
         seats::Seats::from_persisted(&tab.root).unwrap_or_else(seats::Seats::lone_terminal);
     seats.restore_focus_token(&tab.focused_leaf);
     let saved = persisted_term_leaves(&tab.root);
-    let leaf = saved.first().copied();
     let seed = TabSeed {
-        profile: leaf
-            .map(|leaf| profiles::index_of_id(&leaf.profile_id))
-            .unwrap_or(profiles::DEFAULT_PROFILE),
-        manual_name: leaf.and_then(|leaf| leaf.manual_name.clone()),
+        manual_name: saved.first().and_then(|leaf| leaf.manual_name.clone()),
         pinned: tab.pinned,
     };
+    // **Each pane comes back as its own shell in its own folder.** The two facts
+    // are read out of the same saved leaf in the same pass, which is what makes
+    // it impossible for a pane to be revived as one profile standing in another
+    // profile's directory.
+    //
     // An empty `cwd` is a shell that never reported one, not a path to the root
     // of the drive — hand over nothing and let the new shell start where a fresh
     // one would. Whether the folder still exists is a filesystem question, and
     // the answer to a missing one is the same as the answer to none: HOME. Both
-    // are expressed as an *absence* from the map rather than as an entry holding
-    // nothing, so `create_tab_state` has one shape to read instead of two.
-    let folders = seats
+    // are expressed as `None` rather than as an empty path, so
+    // `create_leaf_session` has one shape to read instead of two.
+    //
+    // An unknown `profile_id` falls to the default profile and keeps the pane —
+    // §5.4 逐叶降级, and `index_of_id`'s own rule: a profile that was removed, or
+    // that a newer build wrote, costs you that pane's *shell choice* and never
+    // the pane or the place it was standing in.
+    let leaves = seats
         .terminals()
         .into_iter()
         .zip(saved)
-        .filter_map(|(seat, leaf)| {
-            Some(seat)
-                .zip(
-                    Some(leaf.cwd.as_str())
+        .map(|(seat, leaf)| {
+            (
+                seat,
+                LeafSeed {
+                    profile: profiles::index_of_id(&leaf.profile_id),
+                    cwd: Some(leaf.cwd.as_str())
                         .filter(|cwd| !cwd.is_empty())
-                        .map(PathBuf::from),
-                )
-                .filter(|(_, cwd)| cwd.is_dir())
+                        .map(PathBuf::from)
+                        .filter(|cwd| cwd.is_dir()),
+                },
+            )
         })
         .collect();
-    (seats, seed, folders)
+    (seats, seed, leaves)
 }
 
 /// Every Term leaf of a persisted tree, in the order the tree is drawn.
@@ -5929,24 +6021,43 @@ fn first_term_leaf(node: &LayoutNodeV1) -> Option<&TermLeafV1> {
 /// would be a door that opened somewhere else.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct TabSeed {
-    /// Index into [`profiles::PROFILES`].
-    profile: usize,
     /// The user's name for the tab, if it had one. It survives a close because
     /// it is the one layer of the name nobody else can regenerate.
+    ///
+    /// It is a **tab-level** override ("`name` is an OVERRIDE, not a field",
+    /// mock-up 2595) and that is why it is still here while the profile has
+    /// moved down to the leaves: a name is something you said about the tab, and
+    /// a profile is something each shell in it *is*.
     manual_name: Option<String>,
     pinned: bool,
 }
 
-impl TabSeed {
-    /// A tab the user is starting now: the profile they picked, no name yet, and
-    /// not pinned — pinning is a promise about *next* launch and nobody has made
-    /// it yet.
-    fn of_profile(profile: usize) -> Self {
-        Self {
-            profile,
-            ..Self::default()
-        }
-    }
+/// What one Terminal leaf is started from: which profile, and where.
+///
+/// `docs/UI-UX.md` §425 in its own words — every leaf of the tree stores
+/// `profile + cwd + 名字 + 自动化` — and the reason that ruling is worth the
+/// churn is the example it is stated with: `[claude in mpc | git bash]`, one tab
+/// holding two panes on two different profiles. A `profile` on the *tab* cannot
+/// express that sentence at all, which is why this build used to write the tab's
+/// profile into every leaf it saved and call it "recording what is true".
+///
+/// The two fields travel together rather than as two parallel `BTreeMap`s keyed
+/// by the same seat, because a seat present in one map and missing from the
+/// other is a pane started as the wrong shell in the right folder — a state
+/// neither map can be inspected to rule out, and one that no type would catch.
+///
+/// The remaining two of §425's four are not here and are not forgotten:
+/// `名字` is a tab-level override (see [`TabSeed::manual_name`]), and `自动化`
+/// has no mechanism behind it yet — a slot with nothing to put in it would be a
+/// field that only ever serializes its own default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct LeafSeed {
+    /// Index into [`profiles::PROFILES`].
+    profile: usize,
+    /// Where this shell opens. `None` is "wherever a fresh shell would" — an
+    /// absence rather than a path, so that "the saved folder is gone" and "no
+    /// folder was ever saved" arrive as one case instead of two.
+    cwd: Option<PathBuf>,
 }
 
 // Eight, and every one of them is a different question the answer to which
@@ -5989,18 +6100,44 @@ fn create_leaf_session(
     body: bt_render::SeatViewport,
     wake: OutputWake,
     probe_input: Option<&[u8]>,
-    working_directory: Option<PathBuf>,
+    seed: &LeafSeed,
+    programs: &profiles::ProfilePrograms,
     formulas: FormulaSwitches,
 ) -> Result<LeafSession> {
     let grid = renderer.metrics().grid_for_pixels(body.width, body.height);
+    let chosen = profiles::PROFILES[seed.profile];
     let mut pty = if probe_input.is_none() {
+        // **The line the picker was missing.** Choosing a profile used to change
+        // a tab's title and its mark and nothing else — `spawn_default_in` was
+        // not told which one had been picked, so every row of the menu started
+        // the same shell. What makes it real is this one argument: the program
+        // this profile resolved to on this machine, with this profile's own
+        // arguments.
+        //
+        // `expect` rather than a fallback, and the invariant behind it is the
+        // greying: [`profiles::ProfilePrograms`] is probed before the first tab
+        // exists, the picker refuses to hand back a row it cannot start, and
+        // every other door into this function carries a profile that some
+        // earlier door already resolved. A profile with no program reaching here
+        // is not a machine without Git — it is those two facts having come
+        // apart, and quietly starting PowerShell instead would hide exactly the
+        // bug worth seeing.
+        let program = programs.program(seed.profile).unwrap_or_else(|| {
+            panic!(
+                "profile {:?} reached spawn with no resolved program: the picker \
+                 must not offer a profile this machine cannot start",
+                chosen.id
+            )
+        });
         Some(
-            PtySession::spawn_default_in(
+            PtySession::spawn_shell_in(
+                program,
+                chosen.args,
                 pty_size(grid, PhysicalSize::new(body.width, body.height)),
                 wake,
-                working_directory,
+                seed.cwd.clone(),
             )
-            .context("spawn default PowerShell in ConPTY")?,
+            .with_context(|| format!("spawn the {} profile in ConPTY", chosen.title))?,
         )
     } else {
         None
@@ -6008,6 +6145,29 @@ fn create_leaf_session(
     let shell_fallback_notice = pty
         .as_mut()
         .and_then(PtySession::take_shell_fallback_notice);
+    // **A pane is the shell it is actually running.** When the profile's own
+    // program would not start, `bt-pty` falls back once to `powershell.exe` and
+    // hands back the notice that says so — so what this leaf *is*, from here on,
+    // is the default profile. Leaving `seed.profile` in place would put a Git
+    // mark over a PowerShell, name the pane "Git Bash", and write `"gitbash"`
+    // into the session file for a shell that was never bash; the tab would go on
+    // claiming it forever, across restarts, with no way to notice.
+    //
+    // This is `M2-restart-shell-contract.md` §3/§5#3's rule — "unknown or
+    // missing shell → fall to the default profile, and never silently" — as far
+    // as this ticket can carry it. The *silently* half is already answered by the
+    // notice, which `Runtime::redraw` surfaces; turning that one-line notice into
+    // the contract's first-line banner is the later ticket's, and it upgrades the
+    // channel rather than this decision.
+    //
+    // For the default profile itself this changes nothing, because that fallback
+    // is `pwsh` → `powershell.exe` *within* the same profile: `DEFAULT_PROFILE`
+    // is what it already was.
+    let profile = if shell_fallback_notice.is_some() {
+        profiles::DEFAULT_PROFILE
+    } else {
+        seed.profile
+    };
     let columns = nonzero_u32(grid.columns.get());
     let rows = nonzero_u32(grid.rows.get());
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
@@ -6041,6 +6201,7 @@ fn create_leaf_session(
     let projection = session.new_projection(session.layout_key());
     Ok(LeafSession {
         pty,
+        profile,
         session,
         shell_fallback_notice,
         projection,
@@ -6091,8 +6252,9 @@ fn create_tab_state(
     render_physical: PhysicalSize<u32>,
     wake: OutputWake,
     probe_input: Option<&[u8]>,
-    working_directories: &BTreeMap<SeatId, PathBuf>,
+    leaves: &BTreeMap<SeatId, LeafSeed>,
     seed: TabSeed,
+    programs: &profiles::ProfilePrograms,
     policy: SizePolicy,
     rail: seats::RailState,
     formulas: FormulaSwitches,
@@ -6117,12 +6279,17 @@ fn create_tab_state(
                 format!("place a body rectangle for terminal seat {seat:?} from its own solve")
             })?
         };
+        // A seat with no seed of its own is a seat the caller had nothing saved
+        // for — `Seats::lone_terminal`'s stand-in when a persisted tree held no
+        // Term leaf to pair with — and the default is exactly right there: the
+        // default profile, standing where a fresh shell would.
         let leaf = create_leaf_session(
             renderer,
             body,
             Arc::clone(&wake),
             (seat == terminal_seat_id).then_some(probe_input).flatten(),
-            working_directories.get(&seat).cloned(),
+            &leaves.get(&seat).cloned().unwrap_or_default(),
+            programs,
             formulas,
         )?;
         sessions.insert(seat, leaf);
@@ -6182,7 +6349,6 @@ fn assemble_tab_state(
         id,
         sessions,
         focused_leaf,
-        profile: seed.profile,
         pinned: seed.pinned,
         manual_name: seed.manual_name,
         pending_keyboard_at: None,
@@ -6288,10 +6454,13 @@ fn pane_into_new_tab(
         BTreeMap::from([(key, session)]),
         key,
         TabSeed {
-            // I88's rule for a new tab, read for a pane: the tab a pane becomes
-            // is the same *kind* of shell the tab it left was, because it is
-            // running the very shell that tab started.
-            profile: from.profile,
+            // The profile is not stated here any more, and its absence is the
+            // point: it rides on the [`LeafSession`] being moved, so the new tab
+            // is the same kind of shell as the pane because it *is* the pane. It
+            // used to be copied off `from.profile` — the tab the pane was
+            // leaving — which was right only while every pane of a tab was the
+            // same shell.
+            //
             // The name belonged to the tab, not to the pane. A tear-out that
             // carried "build" across would name a room after the house.
             manual_name: None,
@@ -6581,7 +6750,7 @@ impl Runtime {
         );
         let restored = restore_window_placement(event_loop, session_store.loaded());
         let attributes = Window::default_attributes()
-            .with_title(DEFAULT_PROFILE_TITLE)
+            .with_title(profiles::PROFILES[profiles::DEFAULT_PROFILE].title)
             // Approximate on purpose: winit sizes by client area and the frame
             // installed below turns the client area into the whole outer rect, so
             // the exact rectangle can only be set once that frame exists. What
@@ -6669,6 +6838,10 @@ impl Runtime {
         // cols/rows. The persisted tree is layout *intent* (L11); the rectangle
         // it produces here is computed fresh against this machine's DPI.
         let probe_input = load_probe_input()?;
+        // Before the first shell, because the first shell is already a profile
+        // being started: even the opening tab goes through the registry rather
+        // than through a `spawn_default` that nobody chose.
+        let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
         let pty_proxy = proxy.clone();
         let wake: OutputWake = Arc::new(move || {
             let _ = pty_proxy.send_event(AppEvent::PtyOutput);
@@ -6693,7 +6866,7 @@ impl Runtime {
         };
         let mut tabs = Vec::with_capacity(restored_roots.len());
         let mut conpty_sources = Vec::with_capacity(restored_roots.len());
-        for (index, (seats, seed, working_directories)) in restored_roots.into_iter().enumerate() {
+        for (index, (seats, seed, leaves)) in restored_roots.into_iter().enumerate() {
             let (tab, conpty_source) = create_tab_state(
                 TabId(index as u64 + 1),
                 seats,
@@ -6708,8 +6881,9 @@ impl Runtime {
                 // A revived tab stands where its seed says, not where some other
                 // tab happens to be — that address IS what a seed is for, and
                 // now there is one per pane.
-                &working_directories,
+                &leaves,
                 seed,
+                &profile_programs,
                 // Startup: the opening rectangle is the program's own.
                 SizePolicy::Lawful,
                 // And so is the opening layout. The rail is not persisted — a
@@ -6809,6 +6983,7 @@ impl Runtime {
             chrome_marks: marks::ChromeMarkRasters::default(),
             settings: settings::SettingsPanel::default(),
             profile_menu: profiles::ProfileMenu::default(),
+            profile_programs,
             chevron_turn: ChevronTurn::default(),
             last_drawn_chevron: None,
             pane_motion: PaneMotion::default(),
@@ -6956,11 +7131,16 @@ impl Runtime {
         // that one entry — or empty, when the shell you are looking at has never
         // named a folder.
         let seats = seats::Seats::lone_terminal();
-        let inherited = self
-            .session
-            .working_directory()
-            .map(|path| BTreeMap::from([(seats.terminal(), path.to_path_buf())]))
-            .unwrap_or_default();
+        let leaves = BTreeMap::from([(
+            seats.terminal(),
+            LeafSeed {
+                profile,
+                cwd: self
+                    .session
+                    .working_directory()
+                    .map(std::path::Path::to_path_buf),
+            },
+        )]);
         let (tab, _) = create_tab_state(
             id,
             seats,
@@ -6968,8 +7148,9 @@ impl Runtime {
             render_physical,
             wake,
             None,
-            &inherited,
-            TabSeed::of_profile(profile),
+            &leaves,
+            TabSeed::default(),
+            &self.profile_programs,
             self.size_policy,
             self.rail,
             FormulaSwitches::from_settings(self.settings_store.loaded()),
@@ -7100,10 +7281,17 @@ impl Runtime {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
         let seats = seats::Seats::lone_terminal();
-        let working_directories = Some(PathBuf::from(&cwd))
-            .filter(|cwd| cwd.is_dir())
-            .map(|cwd| BTreeMap::from([(seats.terminal(), cwd)]))
-            .unwrap_or_default();
+        // The seed's own profile, never the default one — H66's contract read
+        // for a Recent row: the shell you are asking back is the shell you had,
+        // and "whatever the default is today" is a different tab wearing this
+        // one's folder.
+        let leaves = BTreeMap::from([(
+            seats.terminal(),
+            LeafSeed {
+                profile: profiles::index_of_id(&profile_id),
+                cwd: Some(PathBuf::from(&cwd)).filter(|cwd| cwd.is_dir()),
+            },
+        )]);
         let (tab, _) = create_tab_state(
             id,
             seats,
@@ -7111,15 +7299,15 @@ impl Runtime {
             render_physical,
             wake,
             None,
-            &working_directories,
+            &leaves,
             TabSeed {
-                profile: profiles::index_of_id(&profile_id),
                 manual_name,
                 // A reopened tab is not pinned: it is coming back because you
                 // asked for it now, which is not the same as promising to bring
                 // it back every time.
                 pinned: false,
             },
+            &self.profile_programs,
             self.size_policy,
             self.rail,
             FormulaSwitches::from_settings(self.settings_store.loaded()),
@@ -7171,7 +7359,7 @@ impl Runtime {
         let placeholder = self.placeholder_tab.take();
         let first_revived = self.tabs.len();
         for tab in &pending {
-            let (seats, seed, working_directories) = revive_plan(tab);
+            let (seats, seed, leaves) = revive_plan(tab);
             let proxy = self.event_proxy.clone();
             let wake: OutputWake = Arc::new(move || {
                 let _ = proxy.send_event(AppEvent::PtyOutput);
@@ -7185,8 +7373,9 @@ impl Runtime {
                 render_physical,
                 wake,
                 None,
-                &working_directories,
+                &leaves,
                 seed,
+                &self.profile_programs,
                 self.size_policy,
                 self.rail,
                 FormulaSwitches::from_settings(self.settings_store.loaded()),
@@ -7504,6 +7693,7 @@ impl Runtime {
                 (
                     tab.display_title(),
                     pane_count,
+                    tab.tab_mark(),
                     tab.mark_state(index == self.active_tab, now, self.motion, &palette),
                     seats::TabTrailer {
                         pinned: tab.pinned,
@@ -7519,6 +7709,7 @@ impl Runtime {
                             None,
                             tab.session.window_title(),
                             tab.session.working_directory(),
+                            tab.focused_profile_title(),
                         )
                     }),
                 )
@@ -7528,8 +7719,9 @@ impl Runtime {
         let mut tabs = tabs
             .into_iter()
             .map(
-                |(title, pane_count, mark, trailer, offset, landing, placeholder)| {
+                |(title, pane_count, mark_kind, mark, trailer, offset, landing, placeholder)| {
                     seats::TabContent {
+                        mark_kind,
                         badge_text_width: if pane_count > 1 {
                             self.renderer
                                 .measure_chrome_text(&pane_count.to_string(), badge_font_px)
@@ -7576,6 +7768,7 @@ impl Runtime {
         // C28, per leaf: every terminal pane head names its *own* shell. Resolved
         // here rather than in `seats`, which knows nothing about sessions (L1).
         let terminal_names = self.terminal_names();
+        let leaf_marks = self.leaf_marks();
         let preview_message = match self.preview_image.as_ref() {
             Some(preview) => preview.message(),
             // An open pane with nothing chosen invites rather than sits mute.
@@ -7617,6 +7810,7 @@ impl Runtime {
                 rail_scroll: self.rail_scroll,
                 preview_title: preview_title.as_deref(),
                 terminal_names: &terminal_names,
+                leaf_marks: &leaf_marks,
                 preview_message: preview_message.as_deref(),
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
@@ -8022,6 +8216,10 @@ impl Runtime {
                 });
                 peek_strip::PeekLeaf {
                     kind: seat.kind,
+                    // This leaf's own shell, off the session that is running in
+                    // it — the same map every other per-seat fact in this frame
+                    // comes from.
+                    profile_mark: session.map(|leaf| profiles::PROFILES[leaf.profile].mark),
                     // The short name, and C28's own two lengths are why. A pane
                     // head has a whole bar and answers "where is this" with the
                     // place entire; this popup is a 210px thumbnail whose names
@@ -8385,6 +8583,7 @@ impl Runtime {
         } else if let Some(layout) = self.profile_menu_layout() {
             profiles::build(
                 &layout,
+                &self.profile_programs,
                 self.profile_menu.hover(),
                 self.recent.entries(),
                 SystemTime::now(),
@@ -8488,6 +8687,21 @@ impl Runtime {
                 // than one only because the count is of a tab that does not exist
                 // yet; both answers draw nothing, and zero is the honest one.
                 pane_count: 0,
+                // "Its own mark", in `showDropPreview`'s own words — the shell
+                // this pane is running, not the shell its old tab was named
+                // after. The ghost riding the pointer reads the very same
+                // `pane_mark` (see [`Runtime::drag_label`]), and the two are one
+                // picture of one pane: a stand-in wearing a different mark from
+                // the ghost above it would be the strip and the pointer naming
+                // two different shells for one drag.
+                mark_kind: seats::pane_mark(
+                    kind,
+                    self.sessions
+                        .get(&seat)
+                        .map(|leaf| profiles::PROFILES[leaf.profile].mark),
+                    bt_render::chrome_palette(),
+                )
+                .0,
                 ..seats::TabContent::default()
             },
         ))
@@ -8742,7 +8956,11 @@ impl Runtime {
             DragSource::Tab(id) => {
                 let tab = self.tabs.iter().find(|candidate| candidate.id == id)?;
                 Some((
-                    marks::ChromeMark::ProfilePowerShell,
+                    // The tab's own mark, by the same `identityLeaf` rule the
+                    // strip draws it with — a ghost is a picture of the tab it
+                    // was lifted out of, so the two must not disagree about what
+                    // that tab is.
+                    tab.tab_mark(),
                     bt_render::WINDOW_TAB_MARK_LOGICAL_PX,
                     palette.accent,
                     tab.display_title(),
@@ -8750,7 +8968,13 @@ impl Runtime {
             }
             DragSource::Pane(seat) => {
                 let kind = self.seats.tree().find_seat(seat)?.kind;
-                let (mark, size, colour) = seats::pane_mark(kind, palette);
+                let (mark, size, colour) = seats::pane_mark(
+                    kind,
+                    self.sessions
+                        .get(&seat)
+                        .map(|leaf| profiles::PROFILES[leaf.profile].mark),
+                    palette,
+                );
                 // The dragged seat's own name, by id — the ghost and the
                 // stand-in it hands off to are two pictures of one pane, so they
                 // read the same door ([`Runtime::strip_stand_in`]).
@@ -9378,16 +9602,32 @@ impl Runtime {
             self.commit_seat_geometry()?;
             return Ok(());
         };
-        let inherited = self
-            .sessions
-            .get(&source)
-            .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
+        // **The arriving pane is the same kind of shell as the pane it came out
+        // of, and stands where that pane stands.** Both halves are inherited from
+        // the *source leaf* rather than from the tab, which is the whole of what
+        // per-leaf profiles buy at this call site: splitting a Git Bash pane used
+        // to seat a PowerShell beside it, because a split spawned the default
+        // shell whatever the pane was running. Splitting is "another one of
+        // these, here", and it is now able to mean it.
+        let inherited = self.sessions.get(&source).map(|leaf| LeafSeed {
+            profile: leaf.profile,
+            cwd: leaf.session.working_directory().map(Path::to_path_buf),
+        });
+        let inherited = inherited.unwrap_or_default();
         let proxy = self.event_proxy.clone();
         let wake: OutputWake = Arc::new(move || {
             let _ = proxy.send_event(AppEvent::PtyOutput);
         });
         let formulas = FormulaSwitches::from_settings(self.settings_store.loaded());
-        let leaf = create_leaf_session(&self.renderer, body, wake, None, inherited, formulas)?;
+        let leaf = create_leaf_session(
+            &self.renderer,
+            body,
+            wake,
+            None,
+            &inherited,
+            &self.profile_programs,
+            formulas,
+        )?;
         self.sessions.insert(arriving, leaf);
         debug_assert!(
             self.sessions_match_terminals(),
@@ -11752,7 +11992,13 @@ impl Runtime {
         // The picker is not modal, so it takes the pointer only where it is: over
         // its own box the rows answer, and everywhere else the window carries on.
         if let Some(layout) = self.profile_menu_layout() {
-            let over = profiles::hit(&layout, position.x, position.y);
+            let over = profiles::hit(
+                &layout,
+                &self.profile_programs,
+                self.recent.entries(),
+                position.x,
+                position.y,
+            );
             if self.profile_menu.set_hover(over.flatten()) && self.refresh_overlay() {
                 self.present_chrome_change()?;
             }
@@ -13422,7 +13668,13 @@ impl Runtime {
         // goes on to be the press it always was.
         if let (Some(layout), Some(position)) = (self.profile_menu_layout(), self.pointer_position)
         {
-            match profiles::hit(&layout, position.x, position.y) {
+            match profiles::hit(
+                &layout,
+                &self.profile_programs,
+                self.recent.entries(),
+                position.x,
+                position.y,
+            ) {
                 Some(row) => {
                     if state == ElementState::Pressed && button == MouseButton::Left {
                         self.close_profile_menu()?;
@@ -15698,8 +15950,9 @@ fn display_title(
     manual_name: Option<&str>,
     program_title: Option<&str>,
     working_directory: Option<&Path>,
+    profile_title: &str,
 ) -> String {
-    resolve_title(manual_name, program_title, working_directory).0
+    resolve_title(manual_name, program_title, working_directory, profile_title).0
 }
 
 /// The same walk, keeping the answer to "which layer won?" that
@@ -15716,12 +15969,13 @@ fn resolve_title(
     manual_name: Option<&str>,
     program_title: Option<&str>,
     working_directory: Option<&Path>,
+    profile_title: &str,
 ) -> (String, Option<tooltip::NameSource>) {
     title_layer(manual_name, TITLE_MAX_CHARS)
         .map(|text| (text, tooltip::NameSource::Manual))
         .or_else(|| session_title(program_title, working_directory, CWD_AS_LEAF))
         .map_or_else(
-            || (DEFAULT_PROFILE_TITLE.to_owned(), None),
+            || (profile_title.to_owned(), None),
             |(text, source)| (text, Some(source)),
         )
 }
@@ -17135,14 +17389,70 @@ mod tests {
     /// costs you the shell choice, never the tab.
     #[test]
     fn a_seed_naming_a_profile_we_do_not_have_still_comes_back() {
-        let (_, seed, _) = revive_plan(&saved_tab("wsl-ubuntu", "C:\\a", Some("notes"), true));
-        assert_eq!(seed.profile, profiles::DEFAULT_PROFILE);
+        let tab = saved_tab("wsl-ubuntu", "C:\\a", Some("notes"), true);
+        let (seats, seed, leaves) = revive_plan(&tab);
+        assert_eq!(
+            leaves.get(&seats.terminal()).map(|leaf| leaf.profile),
+            Some(profiles::DEFAULT_PROFILE),
+            "an id this build cannot place falls to the default profile"
+        );
         assert_eq!(
             seed.manual_name.as_deref(),
             Some("notes"),
             "your name stays"
         );
         assert!(seed.pinned, "and so does the promise");
+    }
+
+    /// PIN — **a saved pane comes back as its own shell**, per leaf, and two
+    /// panes of one tab may be two different ones.
+    ///
+    /// Red gate, and it is the whole of R-e. `revive_plan` used to read the
+    /// profile off the *first* term leaf and put it on the tab, so a tab saved
+    /// as `[pwsh | cmd]` — the very shape `docs/UI-UX.md` §425 names as the
+    /// reason for per-leaf profiles — came back as two PowerShells. Nothing on
+    /// disk had to change for that bug: the file said `cmd` in the right place
+    /// the whole time, and the reader threw it away.
+    #[test]
+    fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
+        let leaf = |profile_id: &str, cwd: &str| {
+            Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+                profile_id: profile_id.to_owned(),
+                cwd: cwd.to_owned(),
+                manual_name: None,
+            })))
+        };
+        let here = std::env::current_dir().expect("a test runs somewhere");
+        let (seats, _, leaves) = revive_plan(&TabV1 {
+            root: LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+                dir: bt_persist::SplitDirV1::Row,
+                ratio: 500_000,
+                children: [leaf("pwsh", &here.to_string_lossy()), leaf("cmd", "")],
+            }),
+            pinned: false,
+            focused_leaf: "leaf-0".to_owned(),
+        });
+        let [left, right] = seats.terminals()[..] else {
+            panic!("a row of two terminals holds two terminal seats");
+        };
+        assert_eq!(
+            leaves[&left],
+            LeafSeed {
+                profile: profiles::index_of_id("pwsh"),
+                cwd: Some(here),
+            }
+        );
+        assert_eq!(
+            leaves[&right],
+            LeafSeed {
+                profile: profiles::index_of_id("cmd"),
+                cwd: None,
+            }
+        );
+        assert_ne!(
+            leaves[&left].profile, leaves[&right].profile,
+            "two panes, two shells — the tab has no single answer to give"
+        );
     }
 
     /// A tab of two terminals side by side, each standing where it was told.
@@ -17237,20 +17547,21 @@ mod tests {
         let [revived_left, revived_right] = revived.terminals()[..] else {
             panic!("the tree came back with its two terminals");
         };
+        let folder = |seat: SeatId| folders.get(&seat).and_then(|leaf| leaf.cwd.clone());
         assert_eq!(folders.len(), 2, "not collapsed to one");
         assert_eq!(
-            folders.get(&revived_left),
-            Some(&here),
+            folder(revived_left),
+            Some(here),
             "the first leaf's folder lands on the first seat"
         );
         assert_eq!(
-            folders.get(&revived_right),
-            Some(&up),
+            folder(revived_right),
+            Some(up),
             "and the second's on the second — not crossed"
         );
         assert_ne!(
-            folders.get(&revived_left),
-            folders.get(&revived_right),
+            folder(revived_left),
+            folder(revived_right),
             "two panes, two places"
         );
     }
@@ -17265,8 +17576,17 @@ mod tests {
     /// to read and not two.
     #[test]
     fn a_saved_pane_that_named_no_folder_contributes_no_entry() {
-        let (_, _, none) = revive_plan(&saved_row_of_two("", ""));
-        assert!(none.is_empty(), "two silent shells, two absences");
+        let (seats, _, none) = revive_plan(&saved_row_of_two("", ""));
+        assert!(
+            none.values().all(|leaf| leaf.cwd.is_none()),
+            "two silent shells, two absences"
+        );
+        assert_eq!(
+            none.len(),
+            seats.terminals().len(),
+            "an absent folder is an absent *folder*, not an absent leaf: the pane \
+             still has a profile to come back as"
+        );
 
         let here = std::env::current_dir().expect("a test runs somewhere");
         let (seats, _, one) = revive_plan(&saved_row_of_two(
@@ -17276,13 +17596,11 @@ mod tests {
         let [left, right] = seats.terminals()[..] else {
             panic!("a row of two terminals holds two terminal seats");
         };
-        assert_eq!(one.get(&left), Some(&here));
+        assert_eq!(one[&left].cwd, Some(here));
         assert_eq!(
-            one.get(&right),
-            None,
+            one[&right].cwd, None,
             "a folder that is no longer a directory is answered like one never named"
         );
-        assert_eq!(one.len(), 1);
     }
 
     /// PIN (C28, by its letter): a terminal pane names itself with its own
@@ -17432,12 +17750,24 @@ mod tests {
         // layers are untouched by this ruling — a tab answers "what is this
         // called" and keeps taking the program's title outright.
         assert_eq!(
-            resolve_title(Some("my tab"), None, Some(cwd)).0,
+            resolve_title(
+                Some("my tab"),
+                None,
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            )
+            .0,
             "my tab",
             "the tab wears the override"
         );
         assert_eq!(
-            resolve_title(None, Some(profile), Some(cwd)).0,
+            resolve_title(
+                None,
+                Some(profile),
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            )
+            .0,
             profile,
             "and the tab still takes a title over a folder, filter or no filter"
         );
@@ -17511,9 +17841,14 @@ mod tests {
         // And the two bounds stay two: a *name* is still capped where a name has
         // always been capped, so widening the path layer did not widen the tab.
         assert_eq!(
-            display_title(None, Some(&"x".repeat(CWD_MAX_CHARS)), None)
-                .chars()
-                .count(),
+            display_title(
+                None,
+                Some(&"x".repeat(CWD_MAX_CHARS)),
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            )
+            .chars()
+            .count(),
             TITLE_MAX_CHARS,
             "a program title is a name, and forty characters is a name's length"
         );
@@ -20991,22 +21326,42 @@ mod tests {
     fn a_tab_name_takes_the_most_specific_layer_that_actually_spoke() {
         let cwd = Path::new(r"D:\Developer\BetterTerminal");
         assert_eq!(
-            display_title(Some("我的构建"), Some("pwsh"), Some(cwd)),
+            display_title(
+                Some("我的构建"),
+                Some("pwsh"),
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "我的构建",
             "what you typed outranks everything under it"
         );
         assert_eq!(
-            display_title(None, Some("Claude ✳ 任务"), Some(cwd)),
+            display_title(
+                None,
+                Some("Claude ✳ 任务"),
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "Claude ✳ 任务",
             "then what the program announced"
         );
         assert_eq!(
-            display_title(None, None, Some(cwd)),
+            display_title(
+                None,
+                None,
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "BetterTerminal",
             "then where the shell says it is standing"
         );
         assert_eq!(
-            display_title(None, None, None),
+            display_title(
+                None,
+                None,
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "PowerShell",
             "and the profile catches what is left"
         );
@@ -21019,24 +21374,56 @@ mod tests {
     fn the_tip_names_the_layer_that_actually_named_the_tab() {
         let cwd = Path::new(r"D:\Developer\BetterTerminal");
         assert_eq!(
-            resolve_title(Some("build"), Some("pwsh"), Some(cwd)).1,
+            resolve_title(
+                Some("build"),
+                Some("pwsh"),
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            )
+            .1,
             Some(tooltip::NameSource::Manual)
         );
         assert_eq!(
-            resolve_title(None, Some("pwsh"), Some(cwd)).1,
+            resolve_title(
+                None,
+                Some("pwsh"),
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            )
+            .1,
             Some(tooltip::NameSource::Program)
         );
         assert_eq!(
-            resolve_title(None, None, Some(cwd)).1,
+            resolve_title(
+                None,
+                None,
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            )
+            .1,
             Some(tooltip::NameSource::Cwd)
         );
         // The profile's own name is nobody's claim, so there is no provenance to
         // report and the tip says only the name.
-        assert_eq!(resolve_title(None, None, None).1, None);
+        assert_eq!(
+            resolve_title(
+                None,
+                None,
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            )
+            .1,
+            None
+        );
         // A hostile layer that sanitises away does not get the credit for the
         // layer beneath it: it said nothing, so it named nothing.
         assert_eq!(
-            resolve_title(Some("\u{7}"), Some("pwsh"), Some(cwd)),
+            resolve_title(
+                Some("\u{7}"),
+                Some("pwsh"),
+                Some(cwd),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             ("pwsh".to_owned(), Some(tooltip::NameSource::Program))
         );
     }
@@ -21046,7 +21433,12 @@ mod tests {
     #[test]
     fn a_tabs_tip_is_the_name_then_its_provenance_then_its_promise() {
         let cwd = Path::new(r"D:\Developer\BetterTerminal");
-        let (name, source) = resolve_title(None, None, Some(cwd));
+        let (name, source) = resolve_title(
+            None,
+            None,
+            Some(cwd),
+            profiles::PROFILES[profiles::DEFAULT_PROFILE].title,
+        );
         let path = cwd.to_string_lossy().into_owned();
         assert_eq!(
             tooltip::tab_tip(&name, source, Some(&path), false),
@@ -21103,7 +21495,12 @@ mod tests {
             ("/home/weiyi/src", "src"),
         ] {
             assert_eq!(
-                display_title(None, None, Some(Path::new(path))),
+                display_title(
+                    None,
+                    None,
+                    Some(Path::new(path)),
+                    profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+                ),
                 leaf,
                 "cwd {path}"
             );
@@ -21119,41 +21516,84 @@ mod tests {
     #[test]
     fn a_program_title_is_stripped_and_capped_before_it_reaches_the_strip() {
         assert_eq!(
-            display_title(None, Some("a\u{7}b\u{1b}c"), None),
+            display_title(
+                None,
+                Some("a\u{7}b\u{1b}c"),
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "abc",
             "C0 goes, including the escape that starts every sequence"
         );
         assert_eq!(
-            display_title(None, Some("\u{9b}0m evil"), None),
+            display_title(
+                None,
+                Some("\u{9b}0m evil"),
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "0m evil",
             "and C1 goes, including the single-byte CSI"
         );
         assert_eq!(
-            display_title(None, Some("  \tspaced  "), None),
+            display_title(
+                None,
+                Some("  \tspaced  "),
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "spaced",
             "the trim happens after the strip, as `cleanTitle` writes it"
         );
         assert_eq!(
-            display_title(None, Some(&"x".repeat(80)), None)
-                .chars()
-                .count(),
+            display_title(
+                None,
+                Some(&"x".repeat(80)),
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            )
+            .chars()
+            .count(),
             TITLE_MAX_CHARS,
             "forty characters, and the forty-first is not a title"
         );
         // A layer that sanitises to nothing has said nothing, and falls through
         // — otherwise a program could blank a tab with one control byte.
         assert_eq!(
-            display_title(None, Some("\u{1}\u{2}"), Some(Path::new(r"C:\work"))),
+            display_title(
+                None,
+                Some("\u{1}\u{2}"),
+                Some(Path::new(r"C:\work")),
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "work"
         );
-        assert_eq!(display_title(None, Some(""), None), "PowerShell");
         assert_eq!(
-            display_title(Some("hi\u{0}there"), Some("prog"), None),
+            display_title(
+                None,
+                Some(""),
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
+            "PowerShell"
+        );
+        assert_eq!(
+            display_title(
+                Some("hi\u{0}there"),
+                Some("prog"),
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "hithere",
             "the name you type goes through the same sieve (mock-up line 5882)"
         );
         assert_eq!(
-            display_title(Some("   "), Some("prog"), None),
+            display_title(
+                Some("   "),
+                Some("prog"),
+                None,
+                profiles::PROFILES[profiles::DEFAULT_PROFILE].title
+            ),
             "prog",
             "emptying the override reveals the layer underneath"
         );
@@ -25602,6 +26042,10 @@ mod tests {
         };
         LeafSession {
             pty: None,
+            // A shell-less fixture is not a shell of some other kind: these
+            // panes exist to carry scrollback, and the default profile is what
+            // the pane they stand in for would have been started as.
+            profile: profiles::DEFAULT_PROFILE,
             session,
             shell_fallback_notice: None,
             projection,
@@ -25665,7 +26109,7 @@ mod tests {
             TabId(id),
             sessions,
             focused,
-            TabSeed::of_profile(0),
+            TabSeed::default(),
             seats,
             layout,
             overflow,
@@ -26009,7 +26453,20 @@ mod tests {
         let mut source = cross_tab(1, &["ALPHA", "BETA"]);
         source.pinned = true;
         source.manual_name = Some("build".to_string());
-        source.profile = 2;
+        // Two panes, two different shells — the `[claude in mpc | git bash]`
+        // shape `docs/UI-UX.md` §425 names, and the case a tab-level profile
+        // could not express at all. The pane about to be torn out is the Git
+        // Bash one, so "the same kind of shell it always was" has something to
+        // be wrong about: under the old model the new tab took `from.profile`,
+        // the tab's single answer, and a bash pane torn out of a PowerShell tab
+        // arrived calling itself PowerShell.
+        let gitbash = profiles::index_of_id("gitbash");
+        source
+            .sessions
+            .get_mut(&SeatId(2))
+            .expect("the right-hand pane")
+            .profile = gitbash;
+        assert_ne!(gitbash, profiles::DEFAULT_PROFILE, "the two panes differ");
         let torn = tear_pane_into_tab(
             &mut source,
             &cross_metrics(),
@@ -26040,7 +26497,22 @@ mod tests {
         assert!(torn.sessions_match_terminals(), "item 6, on the new tab");
         assert!(source.sessions_match_terminals(), "item 6, on the old one");
         assert_eq!(source.seats.terminals(), vec![SeatId(1)]);
-        assert_eq!(torn.profile, 2, "the same kind of shell it always was");
+        assert_eq!(
+            torn.leaf_profile(SeatId(1)),
+            gitbash,
+            "the same kind of shell it always was — and it needs no copying, \
+             because the profile rides on the session that moved"
+        );
+        assert_eq!(
+            torn.tab_mark(),
+            profiles::PROFILES[gitbash].mark,
+            "so the strip draws the new tab as the shell actually running in it"
+        );
+        assert_eq!(
+            source.leaf_profile(SeatId(1)),
+            profiles::DEFAULT_PROFILE,
+            "and the pane that stayed is still its own shell, not the one that left"
+        );
         assert_eq!(
             torn.manual_name, None,
             "the name belonged to the tab, not to the pane"

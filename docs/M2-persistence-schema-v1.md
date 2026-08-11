@@ -148,11 +148,46 @@ term {
 }
 ```
 
-`profile_id` 是**稳定标识**而非标题(`DESIGN.md` §7.1.4 原文强调"不是标题、不是展示对象")——
-profile 系统尚未落地时,v1 的过渡取值是**启动该 pane 时实际使用的 shell 可执行路径**
-(如 `powershell.exe`、`pwsh.exe`、`wsl.exe` 的规范化路径),这是当前唯一"稳定且不依赖尚不存在
-的 profile 系统"的标识来源。profile 系统落地后,这个字段的语义升级为真正的 `ProfileId`,
-是一次 `schema_version` bump 加一次一次性迁移(把可执行路径映射到新建的默认 profile)。
+`profile_id` 是**稳定标识**而非标题(`DESIGN.md` §7.1.4 原文强调"不是标题、不是展示对象")。
+
+> **【批注 2026-08-10 · 已落地,本节上一段的"可执行路径"条被推翻】**
+>
+> 原文(保留于下方引用块,便于对照旧文件)规定 v1 的过渡取值是「启动该 pane 时实际使用的
+> shell 可执行路径」,并预告 profile 系统落地时做一次 bump + 一次性迁移。**profile 系统已于
+> 本次落地(P1),迁移已写:`SESSION_SCHEMA_VERSION` 5 → 6,`migrate_session_v5_to_v6`。**
+> 但迁移的**方向与原文相反**:
+>
+> - **裁决(用户,2026-08-10,Q3):`profile_id` 取值为稳定 slug**,当前四值
+>   `pwsh` / `wsl` / `gitbash` / `cmd`,与 `crates/bt-app/src/profiles.rs` 的 `Profile::id` 同源。
+> - **理由:可执行路径既不稳定也不是身份。** 同一个 `pwsh.exe` 会因 MSI / winget / Store 别名
+>   落在不同目录,`BT_SHELL` 能把它指到任何地方,用户什么都没改路径就变了;反过来,两个不同
+>   档案完全可以跑同一个二进制(本块的 PowerShell 档案与将来「参数不同的 PowerShell」档案就是
+>   这种关系),路径无法把它们区分开。
+> - **实现早已与原文分叉**:应用侧自始至终写的是短 id `"pwsh"`,而本仓夹具里存的是全路径,
+>   **盘上同时存在两种拼写**。这正是必须做迁移而不是读时猜测的原因。
+> - **迁移规则**:按可执行文件名(大小写不敏感、忽略目录)映射 ——
+>   `pwsh.exe` / `powershell.exe` → `pwsh`(两者从来是**同一个档案的解析顺序**,不是两个档案)、
+>   `wsl.exe` → `wsl`、`cmd.exe` → `cmd`、`bash.exe` / `git-bash.exe` → `gitbash`;
+>   已经是 slug 的原样保留;**认不出的值逐字保留、绝不映射成默认档案**——读时的 §5.4
+>   逐叶降级(见 §5「未知 `profile_id` → 落到默认 profile」)是可逆的、每次启动重来一遍的,
+>   而迁移写下去就是永久的。
+> - **`recent[].key` 不迁移**:它是只写字段(`SeedVault::from_persisted` 从不读它,
+>   `to_persisted` 每次保存都按 seed 重算),盘上过期的 key 不影响任何行为,且 §3.5 明说本
+>   crate 不计算也不校验该键格式。
+>
+> 原文存档:
+>
+> > profile 系统尚未落地时,v1 的过渡取值是**启动该 pane 时实际使用的 shell 可执行路径**
+> > (如 `powershell.exe`、`pwsh.exe`、`wsl.exe` 的规范化路径),这是当前唯一"稳定且不依赖
+> > 尚不存在的 profile 系统"的标识来源。profile 系统落地后,这个字段的语义升级为真正的
+> > `ProfileId`,是一次 `schema_version` bump 加一次一次性迁移(把可执行路径映射到新建的
+> > 默认 profile)。
+
+**另:本字段是 per-leaf 的,现在名副其实。** 字段自 v1 起就长在每片 `term` 叶上,但在 P1 之前
+应用只有 tab 级的一个答案可写,于是一个 tab 的每片叶都被写成同一个 shell —— 从 Git Bash 分屏
+存下的两格,回来是两个 PowerShell。`docs/UI-UX.md` §425(「树上每个叶子存 profile + cwd +
+名字 + 自动化」,例子正是 `[claude in mpc | git bash]`)要的就是这一条,P1 已把运行时的
+`profile` 从 `TabState` 移到 `LeafSession`,读写两侧都按叶走。
 
 ### 3.4 files 叶
 

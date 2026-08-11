@@ -1,5 +1,5 @@
 {
-  "schema_version": 5,
+  "schema_version": 6,
   "theme": "dark",
   "cursor_style": "bar",
   "tab_layout": "horizontal",
@@ -37,13 +37,13 @@
             "children": [
               {
                 "kind": "term",
-                "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+                "profile_id": "pwsh",
                 "cwd": "C:\\Users\\dev\\project",
                 "manual_name": "build"
               },
               {
                 "kind": "term",
-                "profile_id": "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                "profile_id": "pwsh",
                 "cwd": "C:\\Users\\dev",
                 "manual_name": null
               }
@@ -57,7 +57,7 @@
     {
       "root": {
         "kind": "term",
-        "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        "profile_id": "pwsh",
         "cwd": "C:\\Users\\dev\\scratch",
         "manual_name": null
       },
@@ -71,7 +71,7 @@
       "key": "C:\\Program Files\\PowerShell\\7\\pwsh.exe|C:\\Users\\dev\\notes|",
       "seed": {
         "kind": "term",
-        "profile_id": "C:\\Program Files\\PowerShell\\7\\pwsh.exe",
+        "profile_id": "pwsh",
         "cwd": "C:\\Users\\dev\\notes",
         "manual_name": null
       },

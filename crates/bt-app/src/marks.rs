@@ -88,6 +88,35 @@ pub enum ChromeMark {
     /// The mock-up is explicit that a mark's colour is its own and the active
     /// tab does not recolour it (`.pmark`, and the comment above it).
     ProfilePowerShell,
+    /// `#p-ubuntu` — the WSL profile's mark: Ubuntu's Circle of Friends.
+    ///
+    /// The orientation is a hard constraint the mock-up states in as many words
+    /// (lines 2181-2188): ring and friends are concentric on (8,8), the three
+    /// friends sit exactly on `r=4.1`, and **one friend points up**, which makes
+    /// the mark mirror-symmetric about the vertical. The earlier one-left-two-
+    /// right arrangement was geometrically centred and read as right-heavy — the
+    /// eye mistook it for a ring that was not centred, which is a worse failure
+    /// than being off-centre, because the thing it accuses is the wrong part.
+    ///
+    /// It is also the one round profile mark, and that is a live cross-block
+    /// tension rather than a detail: the tab's progress ring (Tab block D36) is
+    /// demonstrated on the *square* PowerShell mark on purpose, because an arc
+    /// drawn round a circular logo reads as part of the logo. See
+    /// `docs/PROBLEM-LIST.md` and the profiles inventory's F56 — the ring's
+    /// legibility over this mark is owed a look the day both are on screen.
+    ProfileUbuntu,
+    /// `#p-git` — the Git Bash profile's mark: Git's orange lozenge with the
+    /// branch gesture and its three nodes.
+    ProfileGit,
+    /// `#p-cmd` — the Command Prompt profile's mark.
+    ///
+    /// Charcoal with a lighter edge, and **not** true console black: the mock-up
+    /// (lines 2205-2208) rules that a `#1E1E1E` panel on the dark theme's
+    /// `#1B1B1B` ground disappears, leaving a chevron floating with no window
+    /// around it. A mark has to hold its silhouette on both grounds, so it may
+    /// not be the same colour as either — which is why this is `#3A3A3A` inside
+    /// a `#606060` hairline and why nobody may "fix" it back to black.
+    ProfileCmd,
     /// `#i-file`.
     File,
     /// `#i-folder`.
@@ -229,6 +258,9 @@ impl ChromeMark {
             // `Self::ProgressRing`, whose id is likewise shared across sweeps.
             Self::Chevron { .. } => "i-chev",
             Self::ProfilePowerShell => "p-pwsh",
+            Self::ProfileUbuntu => "p-ubuntu",
+            Self::ProfileGit => "p-git",
+            Self::ProfileCmd => "p-cmd",
             Self::File => "i-file",
             Self::Folder => "i-folder",
             Self::Panel => "i-panel",
@@ -276,8 +308,20 @@ impl ChromeMark {
     }
 
     /// Whether `color` reaches this mark at all. A profile mark paints itself.
+    ///
+    /// The house rule is the mock-up's own (line 2148, `Fixed colours, no theme
+    /// swap`) and it is stated over the *class* rather than over PowerShell:
+    /// "only the profile marks and the app icon carry their own colours; every
+    /// other glyph is `currentColor` and follows the theme". Written as a match
+    /// over the profile family rather than as `!= ProfilePowerShell`, because
+    /// the second spelling is the same sentence only while there is one profile
+    /// — and the day a second one arrives it silently recolours somebody's
+    /// orange to the accent.
     fn takes_current_color(self) -> bool {
-        self != Self::ProfilePowerShell
+        !matches!(
+            self,
+            Self::ProfilePowerShell | Self::ProfileUbuntu | Self::ProfileGit | Self::ProfileCmd
+        )
     }
 
     /// How many whole pixels of room this mark needs *outside* the box the
@@ -897,6 +941,9 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::Chevron { .. } => 9,
         ChromeMark::Pin { filled: false } => 10,
         ChromeMark::Pin { filled: true } => 11,
+        ChromeMark::ProfileUbuntu => 12,
+        ChromeMark::ProfileGit => 13,
+        ChromeMark::ProfileCmd => 14,
         // Handled before this function is reached; their geometry is generated,
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
@@ -910,7 +957,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 12] = [
+const SYMBOL_VIEW_BOX: [&str; 15] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -923,11 +970,14 @@ const SYMBOL_VIEW_BOX: [&str; 12] = [
     "0 0 10 6",
     "0 0 16 16",
     "0 0 16 16",
+    "0 0 16 16",
+    "0 0 16 16",
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 12] = [
+const SYMBOL_BODY: [&str; 15] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -968,6 +1018,37 @@ const SYMBOL_BODY: [&str; 12] = [
     // #i-pinned — the state. Same group, same `d`, and the only difference in
     // the file is that the outline's three stroke attributes become one fill.
     r#"<g transform="rotate(45 8 8)"><path d="M5.5 1.6h5a.8.8 0 010 1.6h-.7v2.9l2.15 2.25c.42.44.65 1.03.65 1.64a.6.6 0 01-.6.6H8.8v4.2a.8.8 0 01-1.6 0v-4.2H4a.6.6 0 01-.6-.6c0-.61.23-1.2.65-1.64L6.2 6.1V3.2h-.7a.8.8 0 010-1.6z" fill="currentColor"/></g>"#,
+    // #p-ubuntu — the Circle of Friends, and its own colours. The three friends
+    // are stroked in the disc's own orange, which *punches* the gaps in the
+    // white ring rather than drawing the ring in three separate segments: one
+    // ring, three holes, and no seam to line up.
+    concat!(
+        r##"<circle cx="8" cy="8" r="7" fill="#E95420"/>"##,
+        r##"<circle cx="8" cy="8" r="4.1" fill="none" stroke="#fff" stroke-width="1"/>"##,
+        r##"<g stroke="#E95420" stroke-width="1.5">"##,
+        r##"<circle cx="8" cy="3.9" r="1.5" fill="#fff"/>"##,
+        r##"<circle cx="11.55" cy="10.05" r="1.5" fill="#fff"/>"##,
+        r##"<circle cx="4.45" cy="10.05" r="1.5" fill="#fff"/>"##,
+        r##"</g>"##,
+    ),
+    // #p-git — the lozenge, the branch, and its three nodes.
+    concat!(
+        r##"<path d="M8 1.3L14.7 8 8 14.7 1.3 8z" fill="#F05033" stroke="#F05033" stroke-width="1.1" stroke-linejoin="round"/>"##,
+        r##"<g stroke="#fff" stroke-width="1.25" fill="none" stroke-linecap="round">"##,
+        r##"<path d="M5.7 10.3l4.6-4.6"/><path d="M8 8l2.3 2.3"/>"##,
+        r##"</g>"##,
+        r##"<g fill="#fff"><circle cx="5.7" cy="10.3" r="1.2"/><circle cx="10.3" cy="5.7" r="1.2"/><circle cx="10.3" cy="10.3" r="1.2"/></g>"##,
+    ),
+    // #p-cmd — charcoal with a lighter edge, never true console black; see the
+    // `ProfileCmd` variant's own note for the ruling that forbids "fixing" it.
+    // The chevron and underline are `#p-pwsh`'s geometry to the digit, in
+    // `#CCCCCC` instead of white: the two are the same console idiom, and what
+    // tells them apart is the panel they sit in.
+    concat!(
+        r##"<rect x="1.4" y="2.9" width="13.2" height="10.2" rx="1.7" fill="#3A3A3A" stroke="#606060" stroke-width=".8"/>"##,
+        r##"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#CCCCCC" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>"##,
+        r##"<path d="M8.5 10.9h3.2" stroke="#CCCCCC" stroke-width="1.35" stroke-linecap="round"/>"##,
+    ),
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the
@@ -1452,6 +1533,10 @@ mod tests {
             (ChromeMark::PaneClose, 8.0),
             (ChromeMark::Plus, 10.0),
             (ChromeMark::ProfilePowerShell, 15.0),
+            // The other three profiles wear the same 15px `.pmark` slot.
+            (ChromeMark::ProfileUbuntu, 15.0),
+            (ChromeMark::ProfileGit, 15.0),
+            (ChromeMark::ProfileCmd, 15.0),
             (ChromeMark::File, 14.0),
             (ChromeMark::Folder, 13.0),
             (ChromeMark::Panel, 13.0),
@@ -1530,6 +1615,99 @@ mod tests {
             [0x2c, 0x5c, 0x9e],
             "the PowerShell panel keeps the mock-up's own #2C5C9E"
         );
+    }
+
+    /// PIN — **all four** profile marks carry their own colours, and each one
+    /// carries its *own*.
+    ///
+    /// Two claims, and the second is the one that needed a test. The first is
+    /// read off the pixels: at a 32px raster a `viewBox="0 0 16 16"` unit is
+    /// exactly two pixels, so each sample below is a named point of the mock-up's
+    /// own artwork — the PowerShell panel, the Ubuntu disc inside its ring, the
+    /// Git lozenge clear of its branch, the Command Prompt panel left of its
+    /// chevron — and each must come back as the literal the design states.
+    ///
+    /// The second is read off the **cache key**, and that is the red gate.
+    /// `takes_current_color` used to be spelled `self != ProfilePowerShell`,
+    /// which is the right sentence only while there is one profile mark. Under
+    /// that spelling the three marks added here would be declared
+    /// palette-following — and *nothing on screen would change*, because their
+    /// bodies contain no `currentColor` for the substitution to find. The only
+    /// visible consequence is in `mark_key`, which folds the ink into the key
+    /// for a palette-following mark: the same orange disc drawn beside two
+    /// different accents would be rasterized and cached twice, forever, in
+    /// silence. So the assertion is that one mark under two inks is one key.
+    #[test]
+    fn every_profile_mark_paints_itself_and_caches_once_whatever_ink_it_is_handed() {
+        // 32px over a 16-unit box: one unit is two pixels, so a sample point can
+        // be stated in the mock-up's own coordinates.
+        const SIDE: f32 = 32.0;
+        let unit = |u: f32| (u * SIDE / 16.0) as u32;
+        let cases = [
+            // The panel, left of the chevron that starts at x=4.4.
+            (
+                ChromeMark::ProfilePowerShell,
+                (3.0, 8.0),
+                [0x2c, 0x5c, 0x9e],
+            ),
+            // Dead centre of the disc: the ring is `fill="none"` at r=4.1 and the
+            // three friends sit on it, so the middle is bare orange.
+            (ChromeMark::ProfileUbuntu, (8.0, 8.0), [0xe9, 0x54, 0x20]),
+            // Inside the lozenge and clear of both the branch and its nodes.
+            (ChromeMark::ProfileGit, (8.0, 3.6), [0xf0, 0x50, 0x33]),
+            // The charcoal panel — *not* console black, by the mock-up's ruling.
+            (ChromeMark::ProfileCmd, (3.0, 8.0), [0x3a, 0x3a, 0x3a]),
+        ];
+        for (mark, (x, y), expected) in cases {
+            let inks = [[0x7a, 0x99, 0xff], [0xff, 0x00, 0x00]];
+            let mut rasters = ChromeMarkRasters::default();
+            let icons: Vec<_> = inks
+                .iter()
+                .map(|ink| rasters.resolve(&[sprite(mark, SIDE, SIDE, *ink)]).remove(0))
+                .collect();
+            for (ink, icon) in inks.iter().zip(&icons) {
+                assert_eq!(
+                    rgb_at(icon, unit(x), unit(y)),
+                    expected,
+                    "{mark:?} at unit ({x}, {y}) must be its own colour, not {ink:?}"
+                );
+                assert_eq!(
+                    alpha_at(icon, unit(x), unit(y)),
+                    255,
+                    "{mark:?} at unit ({x}, {y}) must be solid artwork, not an edge"
+                );
+            }
+            assert_eq!(
+                icons[0].key, icons[1].key,
+                "{mark:?} paints itself, so the ink must not reach its cache key"
+            );
+        }
+
+        // And the four are four different drawings, not one drawing four times.
+        let ink = [0x7a, 0x99, 0xff];
+        let mut rasters = ChromeMarkRasters::default();
+        let marks = [
+            ChromeMark::ProfilePowerShell,
+            ChromeMark::ProfileUbuntu,
+            ChromeMark::ProfileGit,
+            ChromeMark::ProfileCmd,
+        ];
+        let icons = rasters.resolve(
+            &marks
+                .iter()
+                .map(|mark| sprite(*mark, SIDE, SIDE, ink))
+                .collect::<Vec<_>>(),
+        );
+        let keys: std::collections::HashSet<_> = icons.iter().map(|icon| &icon.key).collect();
+        assert_eq!(keys.len(), marks.len(), "four profiles, four rasters");
+        for (index, left) in icons.iter().enumerate() {
+            for right in &icons[index + 1..] {
+                assert_ne!(
+                    left.rgba, right.rgba,
+                    "two profile marks rasterized to the same pixels"
+                );
+            }
+        }
     }
 
     /// PIN (tab shape): the active tab is round on top, square-cut at the

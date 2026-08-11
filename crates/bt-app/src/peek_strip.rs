@@ -281,6 +281,16 @@ pub fn suppresses(showing: Option<usize>, anchor: crate::tooltip::TooltipAnchorI
 #[derive(Clone, Debug, PartialEq)]
 pub struct PeekLeaf {
     pub kind: SeatKind,
+    /// Which shell this leaf is running, as the mark it wears — `None` for a
+    /// leaf that has no shell (a files column, a preview, a placeholder), which
+    /// picks its mark from its kind instead.
+    ///
+    /// Carried rather than derived, because the schematic must not have a second
+    /// opinion about which shell a pane is: the same argument
+    /// [`Self::mark_opacity`] makes about the breath, and the same failure —
+    /// a peek that draws a PowerShell square over the pane whose head says
+    /// `Git Bash` is a schematic of a different window.
+    pub profile_mark: Option<ChromeMark>,
     /// What this pane calls itself — see `seats::seat_caption`, the one channel
     /// both this and the pane head read.
     pub title: String,
@@ -868,7 +878,7 @@ fn push_mark_slot(
             ));
         }
         None => {
-            let (mark, color) = leaf_mark(leaf.kind, palette);
+            let (mark, color) = leaf_mark(leaf.kind, leaf.profile_mark, palette);
             sprites.push(ChromeSprite {
                 mark,
                 rect: mark_rect,
@@ -899,8 +909,12 @@ fn push_mark_slot(
 /// head sizes a mark for a 28px bar, the peek for a 9px slot and an 11px line.
 /// Sharing the *artwork* is the point — a schematic whose folder is not the
 /// folder the pane head shows is a schematic of a different window.
-fn leaf_mark(kind: SeatKind, palette: &ChromePalette) -> (ChromeMark, [u8; 3]) {
-    let (mark, _size, color) = crate::seats::pane_mark(kind, *palette);
+fn leaf_mark(
+    kind: SeatKind,
+    profile_mark: Option<ChromeMark>,
+    palette: &ChromePalette,
+) -> (ChromeMark, [u8; 3]) {
+    let (mark, _size, color) = crate::seats::pane_mark(kind, profile_mark, *palette);
     (mark, color)
 }
 
@@ -933,6 +947,7 @@ mod tests {
     /// A leaf with nothing to say: no claim, no progress, mark at full strength.
     fn leaf(title: &str) -> PeekLeaf {
         PeekLeaf {
+            profile_mark: Some(ChromeMark::ProfilePowerShell),
             kind: SeatKind::Terminal,
             title: title.to_owned(),
             focused: false,
@@ -2001,7 +2016,7 @@ mod tests {
             ),
             "and reports the reading it was handed"
         );
-        let (kind_mark, _) = leaf_mark(cast[0].kind, &palette);
+        let (kind_mark, _) = leaf_mark(cast[0].kind, cast[0].profile_mark, &palette);
         assert!(
             !over.iter().any(|s| s.mark == kind_mark),
             "the leaf's own mark was replaced, not drawn under the ring"

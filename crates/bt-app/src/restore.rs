@@ -307,11 +307,28 @@ impl RestoreRow {
                 profile_id,
                 cwd,
                 manual_name,
-            } => (
-                PROFILES[index_of_id(profile_id)].mark,
-                crate::display_title(manual_name.as_deref(), None, Some(Path::new(cwd))),
-                cwd.clone(),
-            ),
+            } => {
+                let profile = PROFILES[index_of_id(profile_id)];
+                (
+                    profile.mark,
+                    // **This seed's own profile** is the name's last layer, and
+                    // this row is where getting it wrong shows worst: a restore
+                    // row has no program title at all (the program left with the
+                    // tab), so a shell that never reported a folder falls
+                    // straight through to it. Under the old hard-coded
+                    // `"PowerShell"` the prompt listed three tabs wearing the
+                    // Ubuntu, Git and Command Prompt marks and captioned every
+                    // one of them `PowerShell` — the mark and the word, side by
+                    // side, naming two different shells.
+                    crate::display_title(
+                        manual_name.as_deref(),
+                        None,
+                        Some(Path::new(cwd)),
+                        profile.title,
+                    ),
+                    cwd.clone(),
+                )
+            }
             Seed::Files { root } => (
                 ChromeMark::Folder,
                 crate::cwd_leaf(Path::new(root)).unwrap_or_else(|| root.clone()),
@@ -918,6 +935,77 @@ mod tests {
     /// The window the mock-up was measured in, and the shape every geometry
     /// claim below is stated against.
     const SURFACE: (f32, f32) = (1440.0, 756.0);
+
+    /// PIN — **a restore row is named by its own profile**, not by the default
+    /// one, whenever nothing else named it.
+    ///
+    /// Red gate, and it was caught on a real machine rather than reasoned about:
+    /// the prompt came back listing three tabs wearing the Ubuntu, the Git and
+    /// the Command Prompt marks, and captioned every one of them `PowerShell`.
+    /// The mark and the word sat side by side on one row naming two different
+    /// shells — half an identity contradicting the other half, which is exactly
+    /// what `docs/UI-UX.md` §126-137 says a session's identity may never do.
+    ///
+    /// This row is where the last layer of the name chain is most exposed, and
+    /// the reason is structural rather than bad luck: a restore row has **no**
+    /// program title by construction (mock-up 7480 — the program's title left
+    /// with the program), so a shell that never reported a folder falls straight
+    /// through manual name and OSC 2 and OSC 7 to the profile. Three of the four
+    /// profiles ship without shell integration, so "never reported a folder" is
+    /// their ordinary state rather than an edge case.
+    #[test]
+    fn a_restore_row_falls_back_to_its_own_profile_s_name_and_never_the_default_s() {
+        for profile in PROFILES {
+            let row = RestoreRow::from_seed(
+                &Seed::Term {
+                    profile_id: profile.id.to_owned(),
+                    // The case the bug lived in: no folder was ever reported, so
+                    // there is nothing under the profile to catch the name.
+                    cwd: String::new(),
+                    manual_name: None,
+                },
+                1,
+            );
+            assert_eq!(row.mark, profile.mark);
+            assert_eq!(
+                row.label, profile.title,
+                "a {} row must not be captioned with another profile's name",
+                profile.id
+            );
+        }
+
+        // The layers above it still win, and still for every profile: a folder
+        // names the row when the shell reported one, and your own name beats
+        // both. Otherwise "fall back to the profile" would quietly become
+        // "always show the profile".
+        let git = PROFILES[index_of_id("gitbash")];
+        assert_eq!(
+            RestoreRow::from_seed(
+                &Seed::Term {
+                    profile_id: git.id.to_owned(),
+                    cwd: r"C:\work\repo".to_owned(),
+                    manual_name: None,
+                },
+                1,
+            )
+            .label,
+            "repo",
+            "the folder it stood in outranks the profile"
+        );
+        assert_eq!(
+            RestoreRow::from_seed(
+                &Seed::Term {
+                    profile_id: git.id.to_owned(),
+                    cwd: r"C:\work\repo".to_owned(),
+                    manual_name: Some("build".to_owned()),
+                },
+                1,
+            )
+            .label,
+            "build",
+            "and your own name outranks the folder"
+        );
+    }
 
     /// The two rows and the three-line paragraph the measurement was taken with,
     /// at 1x. The widths are the mock-up's own renderer's, so a rectangle

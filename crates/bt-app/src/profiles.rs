@@ -23,8 +23,13 @@
 //!   [`MenuRow`], because the one thing a bare index cannot say is which list it
 //!   came from — and the answer it gets wrong is silent.
 
-use std::time::SystemTime;
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+    time::SystemTime,
+};
 
+use bt_pty::{ShellEnvironment, resolve_default_shell};
 use bt_render::{
     ChromeLabel, ChromeLabelWeight, ChromePalette, FLOAT_WINDOW_BORDER_LOGICAL_PX,
     FLOAT_WINDOW_SHADOW_LOGICAL_PX, OverlayQuad, chrome_palette, rounded_overlay_fill,
@@ -70,6 +75,33 @@ const ITEM_MARK_LOGICAL_PX: f32 = 15.0;
 /// same place, so they are the same number here.
 const HINT_FONT_LOGICAL_PX: f32 = 11.0;
 const HINT_TEXT: &str = "default";
+/// What a row says instead of `default` when this machine cannot start it.
+///
+/// The same slot, because it is the same sentence in the same place: one short
+/// annotation about the profile rather than about the pointer. `default` and
+/// `not installed` are the two things a row can have to add, and no row has both
+/// — the default profile is [`ProgramSource::DefaultShell`], which always
+/// resolves.
+///
+/// The words are chosen against the alternative of showing nothing. A greyed row
+/// with no caption asks the user to work out *why* it is grey, and the two
+/// available guesses — "not on this machine" and "BetterTerminal is broken" —
+/// are not equally actionable.
+const UNAVAILABLE_HINT_TEXT: &str = "not installed";
+
+// ── the greyed row ─────────────────────────────────────────────────────────
+/// `.ticon-wrap.dead .ticon { opacity: .35; filter: grayscale(1) }` (mock-up
+/// line 314) — the mock-up's own register for a mark that names something not
+/// running, borrowed here for a mark that names something not installed.
+///
+/// Both fields, and neither alone: grayscale without the fade leaves a mark at
+/// full strength that merely lost its colour, which reads as a *rendering* fault
+/// rather than as a state; the fade without the grayscale leaves Ubuntu's orange
+/// still the loudest thing in a menu of rows you cannot click. It is the one
+/// place a profile mark is allowed to lose its own colours, and it is allowed
+/// because the sentence being spoken is precisely "this is not one of your
+/// shells".
+const UNAVAILABLE_MARK_OPACITY: f32 = 0.35;
 
 // ── `.menu-sep` (mock-up line 996) ─────────────────────────────────────────
 /// `height: 1px`, taken to whole device pixels and never below one.
@@ -135,10 +167,20 @@ const RECENT_ITEM_MAX_WIDTH_LOGICAL_PX: f32 = 260.0;
 
 /// A profile the picker can start a tab from.
 ///
-/// One entry, and the list is a list rather than a constant because that is the
-/// honest shape of it: the mock-up carries four (PowerShell, WSL, Git Bash,
-/// Command Prompt) and this build launches exactly one shell. Offering the other
-/// three would be three rows that cannot do what they say.
+/// The mock-up's own four (`const PROFILES`, line 2598): PowerShell, WSL, Git
+/// Bash, Command Prompt, in that order, because the order **is** the index and
+/// `state.defaultProfile` is a number into it.
+///
+/// Four fixed entries rather than a discovery pass over the machine (user ruling
+/// 2026-08-10, Q1). The alternative — Windows Terminal's dynamic profiles, where
+/// a profile exists only if its shell is installed — answers a different
+/// question than the one this list is asked: the list is the *product's* offer,
+/// and which of them this machine can honour is a fact about the machine.
+/// Discovery is not skipped, it is **separated**: [`ProfilePrograms`] probes for
+/// each one's executable and a profile it cannot find is drawn greyed rather
+/// than dropped. That is the honest form of "you do not have this", and it is
+/// the one a hidden row cannot say — a row that is missing looks exactly like a
+/// row that was never designed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Profile {
     /// The name a seed keeps this profile by — `docs/DESIGN.md` §7.1.4 requires a
@@ -150,20 +192,213 @@ pub struct Profile {
     /// and the tab would come back as somebody else. It is not the executable
     /// path either — that is what the shell *is*, not which profile chose it, and
     /// two profiles can legitimately launch the same binary.
+    ///
+    /// **Ruling 2026-08-10 (Q3), and it overturns a written spec.**
+    /// `docs/M2-persistence-schema-v1.md` §3.3 says the v1 transitional value is
+    /// "启动该 pane 时实际使用的 shell 可执行路径" — a normalized executable path
+    /// — while this build has always written `"pwsh"`, so both spellings exist on
+    /// real disks. The slug wins: a path is not stable (`pwsh.exe` moves between
+    /// `%ProgramFiles%` and the Store alias without the user changing anything,
+    /// and `BT_SHELL` moves it anywhere), and it is not an identity (two profiles
+    /// may legitimately run one binary — which is precisely what the pwsh profile
+    /// and a future "pwsh with different arguments" profile would do). The paths
+    /// already on disk are therefore *historical values to be migrated*, which is
+    /// `migrate_session_v5_to_v6`'s whole job.
     pub id: &'static str,
     pub title: &'static str,
     /// A profile's icon is its mark, not a letter that happens to be in its
     /// prompt — the mock-up says so in as many words at `const mark`.
     pub mark: ChromeMark,
+    /// How this profile's program is found on the machine it is running on.
+    pub program: ProgramSource,
+    /// The arguments the profile always passes, ahead of nothing else — there is
+    /// no user-supplied argument list yet (that is the profile editor's, K86).
+    ///
+    /// `-NoLogo` lives here now, and that is the point of the field. It used to
+    /// be welded into `PtyCommand::interactive_shell` as "the one argument, hard
+    /// coded", which was true only while every shell this terminal could start
+    /// was a PowerShell. It is a PowerShell flag: `cmd.exe` would take it as the
+    /// name of a batch file to run, and `bash` as a filename to open.
+    pub args: &'static [&'static str],
+    /// Which shell-integration script this profile is served by, if any.
+    pub integration: Integration,
 }
 
-pub const PROFILES: [Profile; 1] = [Profile {
-    id: "pwsh",
-    title: "PowerShell",
-    mark: ChromeMark::ProfilePowerShell,
-}];
+/// How a profile's executable is located on the machine.
+///
+/// Two shapes rather than one because they answer to different authorities.
+/// [`Self::DefaultShell`] defers to a resolution *order* that is already ruled
+/// and already tested (`bt_pty::resolve_default_shell`: `BT_SHELL`, then a
+/// `pwsh` probe, then `powershell.exe`); [`Self::FirstOf`] is a list of places
+/// to look, in order, for a program that either is on this machine or is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramSource {
+    /// `bt_pty::resolve_default_shell`'s answer — `BT_SHELL` first (ruling
+    /// 2026-08-10, Q4: the override is **kept**, as a development back door, and
+    /// it covers this profile alone rather than becoming a fifth profile's
+    /// worth of configuration), then PowerShell 7, then Windows PowerShell.
+    ///
+    /// Never unavailable, and that is a fact about Windows rather than an
+    /// optimism: `powershell.exe` is part of the OS, so the last step of that
+    /// chain always answers. It is what makes [`DEFAULT_PROFILE`] safe to fall
+    /// back to.
+    DefaultShell,
+    /// The first of these that is a real file, in order.
+    FirstOf(&'static [ProgramCandidate]),
+}
+
+/// One place to look for a profile's executable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgramCandidate {
+    /// `%VARIABLE%\tail` — an environment variable and a path under it.
+    ///
+    /// Never a bare relative path: "wherever this process happens to be
+    /// standing" is not a place a shell lives.
+    Under {
+        variable: &'static str,
+        tail: &'static str,
+    },
+    /// Find `anchor` on `PATH`, climb out of the directory it was found in, and
+    /// take `tail` from there.
+    ///
+    /// The general answer to "installed somewhere we did not think of", and it
+    /// is not a guess: it reads the install the user is *already using*. A
+    /// well-known-paths list can only ever enumerate the installers' defaults,
+    /// and the one thing a person who changed the install directory has
+    /// certainly done is put the tool on their `PATH` — so the tool itself is
+    /// the most reliable landmark its siblings have.
+    ///
+    /// Concretely, for Git for Windows: `git.exe` lives at `<root>\cmd\git.exe`
+    /// and `bash.exe` at `<root>\bin\bash.exe`, so the anchor's *parent's*
+    /// parent is the root both hang off. Climbing one directory rather than
+    /// joining onto the anchor's own is what makes this work for a layout where
+    /// the two are siblings rather than nested.
+    BesideOnPath {
+        anchor: &'static str,
+        tail: &'static str,
+    },
+}
+
+/// Which shell-integration script a profile is served by.
+///
+/// A slot rather than a mechanism. `scripts/shell-integration/betterterminal.ps1`
+/// is **opt-in and manual** — the user dot-sources it into their own `$PROFILE`
+/// and this product never injects it (`docs/shell-integration.md` §83-96) — so
+/// there is nothing here for spawn to do today, and this ticket adds nothing.
+/// What the field records is which profiles *have* a script at all, which is the
+/// question the honest-capability matrix (P7) and the bash/cmd injection tickets
+/// (P5/P6) both start from.
+///
+/// The three profiles without one are not degraded by a special case: a shell
+/// that never emits OSC 133 keeps the cursor/WRAPLINE heuristics, and one that
+/// never emits OSC 7 leaves the relative path undetected rather than guessing a
+/// directory. Both are the existing, already-implemented conventions
+/// (`docs/shell-integration.md` §34-35 and §111-115) — this ticket confirms they
+/// hold for the new shells rather than inventing a second set for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Integration {
+    /// `betterterminal.ps1`, dot-sourced by the user into `$PROFILE`.
+    PowerShellOptIn,
+    /// No script exists for this profile yet.
+    None,
+}
+
+pub const PROFILES: [Profile; 4] = [
+    Profile {
+        id: "pwsh",
+        title: "PowerShell",
+        mark: ChromeMark::ProfilePowerShell,
+        program: ProgramSource::DefaultShell,
+        // The flag this terminal has always passed, now said by the profile that
+        // means it rather than by the spawn path every profile goes through.
+        args: &["-NoLogo"],
+        integration: Integration::PowerShellOptIn,
+    },
+    Profile {
+        id: "wsl",
+        // The mock-up writes `WSL · Ubuntu`, and this build writes `WSL`.
+        //
+        // The qualifier after the `·` is a **discovery claim**, and this ticket
+        // does not discover: `wsl.exe` with no arguments starts whatever the
+        // user's *default* distribution is, which on this machine may be Ubuntu
+        // and on the next is Debian or Alpine. Printing "Ubuntu" over a command
+        // that will start Debian is the same failure as a greyed row that was
+        // hidden instead — chrome saying something it did not check. Naming the
+        // distribution needs `wsl.exe -l -q`'s answer, which is P5's, and the
+        // `·` qualifier arrives with it (and with it the mock-up's own rule at
+        // line 4013 that a session's name drops everything from the `·` on).
+        title: "WSL",
+        mark: ChromeMark::ProfileUbuntu,
+        program: ProgramSource::FirstOf(&[ProgramCandidate::Under {
+            variable: "SystemRoot",
+            tail: r"System32\wsl.exe",
+        }]),
+        args: &[],
+        integration: Integration::None,
+    },
+    Profile {
+        id: "gitbash",
+        title: "Git Bash",
+        mark: ChromeMark::ProfileGit,
+        // Git for Windows lands in more places than a list can enumerate — the
+        // same shape of problem `find_pwsh` already solves for PowerShell 7,
+        // and the same answer: probe rather than assume.
+        //
+        // `git.exe` on `PATH` is tried **first**, and it is the only candidate
+        // that generalises. The three paths under it are the system-wide, the
+        // 32-bit and the per-user installers' *defaults*, which between them
+        // still miss everyone who chose their own install directory — a case
+        // this project met on the very first machine it was tested on, where
+        // Git sits on another drive entirely. Somebody who moved the install has
+        // certainly put `git` on their path, so the tool is the landmark its own
+        // shell is found by.
+        program: ProgramSource::FirstOf(&[
+            ProgramCandidate::BesideOnPath {
+                anchor: "git.exe",
+                tail: r"bin\bash.exe",
+            },
+            ProgramCandidate::Under {
+                variable: "ProgramFiles",
+                tail: r"Git\bin\bash.exe",
+            },
+            ProgramCandidate::Under {
+                variable: "ProgramFiles(x86)",
+                tail: r"Git\bin\bash.exe",
+            },
+            ProgramCandidate::Under {
+                variable: "LocalAppData",
+                tail: r"Programs\Git\bin\bash.exe",
+            },
+        ]),
+        // `bin\bash.exe` is the MSYS wrapper the Git Bash shortcut itself runs,
+        // and `--login -i` is that shortcut's own argument list: `--login` is
+        // what sources `/etc/profile` and puts `git` on the path, and without it
+        // this would be a bash that cannot find the tool it is named after.
+        args: &["--login", "-i"],
+        integration: Integration::None,
+    },
+    Profile {
+        id: "cmd",
+        title: "Command Prompt",
+        mark: ChromeMark::ProfileCmd,
+        program: ProgramSource::FirstOf(&[ProgramCandidate::Under {
+            variable: "SystemRoot",
+            tail: r"System32\cmd.exe",
+        }]),
+        // None. `cmd.exe` has no logo to suppress, and every switch it does take
+        // (`/c`, `/k`) would end the session rather than start one.
+        args: &[],
+        integration: Integration::None,
+    },
+];
 
 /// The index a new tab is started from when nobody picks — `state.defaultProfile`.
+///
+/// Still a constant rather than a setting: making it one is the Startup group's
+/// row in the settings dialog (mock-up 2464-2474) and a `settings.json` bump,
+/// which is P3's ticket. What this ticket owes that one is that the constant
+/// names a profile which is [`ProgramSource::DefaultShell`] and therefore cannot
+/// be unavailable — see [`the_default_profile_can_always_be_started`].
 pub const DEFAULT_PROFILE: usize = 0;
 
 /// Which profile a seed's `profile_id` names, or [`DEFAULT_PROFILE`] when the
@@ -179,6 +414,98 @@ pub fn index_of_id(id: &str) -> usize {
         .iter()
         .position(|profile| profile.id == id)
         .unwrap_or(DEFAULT_PROFILE)
+}
+
+/// The first directory of `PATH` holding `file_name`, joined.
+///
+/// `std::env::split_paths` only parses an already-fetched `PATH` string — it
+/// touches neither the real environment nor the real filesystem — so this stays
+/// a pure function of whatever `environment` reports, which is what lets a test
+/// hand it an imaginary machine.
+fn search_path(environment: &dyn ShellEnvironment, file_name: &str) -> Option<PathBuf> {
+    let path = environment.var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|directory| directory.join(file_name))
+        .find(|candidate| environment.is_file(candidate))
+}
+
+/// Which executable each profile resolves to **on this machine**, probed once.
+///
+/// Once, and that is the whole reason this is a value rather than a function.
+/// Availability is a filesystem question, the picker asks it of every row it
+/// draws, and the picker is redrawn on every frame it is open — a probe called
+/// from the paint would put four `is_file` calls on the pointer's path at
+/// whatever rate the screen refreshes. It is also a question whose answer must
+/// not change *while the menu is open*: a row that greys out between the frame
+/// you read it on and the click you aimed at it is a worse answer than a stale
+/// one.
+///
+/// The environment is injected for the reason `bt_pty::shell`'s already is:
+/// otherwise every test of this module would be a test of what happens to be
+/// installed on the machine running it, and "Git Bash is greyed" would pass on
+/// the build server and fail on the developer's laptop for the same code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfilePrograms {
+    resolved: [Option<OsString>; PROFILES.len()],
+}
+
+impl ProfilePrograms {
+    /// Ask the machine, once, what each profile would start.
+    #[must_use]
+    pub fn probe(environment: &dyn ShellEnvironment) -> Self {
+        Self {
+            resolved: std::array::from_fn(|index| match PROFILES[index].program {
+                // Always answers: the last step of that chain is
+                // `powershell.exe`, which is part of the OS.
+                ProgramSource::DefaultShell => Some(resolve_default_shell(environment).program),
+                ProgramSource::FirstOf(candidates) => candidates
+                    .iter()
+                    .filter_map(|candidate| Self::candidate_path(*candidate, environment))
+                    .find(|candidate| environment.is_file(candidate))
+                    .map(PathBuf::into_os_string),
+            }),
+        }
+    }
+
+    /// The program this profile would start, or `None` when this machine has
+    /// nowhere to start it from.
+    #[must_use]
+    pub fn program(&self, profile: usize) -> Option<&OsStr> {
+        self.resolved.get(profile)?.as_deref()
+    }
+
+    /// Where one candidate says to look, or `None` when the machine cannot even
+    /// name the place — an environment variable that is unset, or an anchor that
+    /// is nowhere on `PATH`.
+    ///
+    /// Naming a place is not finding a file there; the caller still probes.
+    fn candidate_path(
+        candidate: ProgramCandidate,
+        environment: &dyn ShellEnvironment,
+    ) -> Option<PathBuf> {
+        match candidate {
+            ProgramCandidate::Under { variable, tail } => {
+                Some(Path::new(&environment.var_os(variable)?).join(tail))
+            }
+            ProgramCandidate::BesideOnPath { anchor, tail } => {
+                let found = search_path(environment, anchor)?;
+                // `<root>\cmd\git.exe` -> `<root>\cmd` -> `<root>` -> `<root>\bin\bash.exe`.
+                Some(found.parent()?.parent()?.join(tail))
+            }
+        }
+    }
+
+    /// Whether this profile can do what its row says it does.
+    ///
+    /// The picker draws a profile it cannot start greyed rather than hiding it
+    /// (user ruling 2026-08-10): the row is the product saying "this is a thing
+    /// BetterTerminal opens", and the grey is it saying "not on this machine".
+    /// Dropping the row conflates "you have not installed Git" with "we never
+    /// thought of Git", and only one of those is something the user can act on.
+    #[must_use]
+    pub fn is_available(&self, profile: usize) -> bool {
+        self.program(profile).is_some()
+    }
 }
 
 /// Which row of the menu, and **what kind of row** — the two lists the picker
@@ -424,20 +751,56 @@ pub fn layout(
 ///
 /// The separator and the heading are body, not rows — they are the two things in
 /// the menu that name nothing you can open.
+///
+/// **A row this machine cannot start is body too**, and that is the whole
+/// enforcement of the greying: it is answered here, at the one place both the
+/// hover and the click read, rather than at each of them. A rule spelled at the
+/// click would light the row under the pointer and then do nothing when pressed,
+/// which is a menu lying about what it is about to do; a rule spelled at the
+/// hover would leave the row dark and still open a tab. Neither half is
+/// separately correct, so neither half is separately written.
 #[must_use]
-pub fn hit(layout: &ProfileMenuLayout, x: f64, y: f64) -> Option<Option<MenuRow>> {
+pub fn hit(
+    layout: &ProfileMenuLayout,
+    programs: &ProfilePrograms,
+    recent: &[RecentEntry],
+    x: f64,
+    y: f64,
+) -> Option<Option<MenuRow>> {
     let (x, y) = (x as f32, y as f32);
     for (index, item) in layout.items.iter().enumerate() {
         if contains(*item, x, y) {
-            return Some(Some(MenuRow::Profile(index)));
+            return Some(
+                programs
+                    .is_available(index)
+                    .then_some(MenuRow::Profile(index)),
+            );
         }
     }
-    for (index, row) in layout.recent.iter().enumerate() {
+    for (index, (row, entry)) in layout.recent.iter().zip(menu_rows(recent)).enumerate() {
         if contains(*row, x, y) {
-            return Some(Some(MenuRow::Recent(index)));
+            return Some(
+                recent_is_available(&entry.seed, programs).then_some(MenuRow::Recent(index)),
+            );
         }
     }
     contains(layout.frame, x, y).then_some(None)
+}
+
+/// Whether the shell a Recent row would revive can be started on this machine.
+///
+/// Asked of Recent rows and not only of profile rows, because the row above and
+/// the row below are the same offer: `~/repo · 3m ago` under a Git mark is
+/// "start Git Bash here", and if the profile row that says `Git Bash` is greyed
+/// then this one has to be too. Greying one and not the other would put, in one
+/// menu, both answers to the same question.
+///
+/// A files locus has no shell, so nothing about it can be missing.
+fn recent_is_available(seed: &Seed, programs: &ProfilePrograms) -> bool {
+    match seed {
+        Seed::Term { profile_id, .. } => programs.is_available(index_of_id(profile_id)),
+        Seed::Files { .. } => true,
+    }
 }
 
 fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
@@ -454,6 +817,7 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 #[must_use]
 pub fn build(
     layout: &ProfileMenuLayout,
+    programs: &ProfilePrograms,
     hover: Option<MenuRow>,
     recent: &[RecentEntry],
     now: SystemTime,
@@ -483,6 +847,7 @@ pub fn build(
 
     for (index, item) in layout.items.iter().enumerate() {
         let profile = PROFILES[index];
+        let available = programs.is_available(index);
         push_row(
             &Row {
                 rect: *item,
@@ -491,8 +856,18 @@ pub fn build(
                 // `margin-left: auto` puts the hint hard against the row's
                 // trailing padding, and it names a fact about the profile rather
                 // than the row's state — so it does not answer to hover.
-                hint: (index == DEFAULT_PROFILE).then_some(HINT_TEXT.to_owned()),
+                //
+                // The two annotations are exclusive by construction rather than
+                // by an `if/else` that could one day pick wrong: the default
+                // profile resolves through the OS's own PowerShell and cannot be
+                // the unavailable one.
+                hint: if available {
+                    (index == DEFAULT_PROFILE).then_some(HINT_TEXT.to_owned())
+                } else {
+                    Some(UNAVAILABLE_HINT_TEXT.to_owned())
+                },
                 hovered: hover == Some(MenuRow::Profile(index)),
+                available,
             },
             scale,
             palette,
@@ -541,8 +916,13 @@ pub fn build(
                 rect: *row,
                 mark: recent_mark(&entry.seed),
                 name: recent_label(&entry.seed),
+                // Still the age, and deliberately not `not installed`: a Recent
+                // row's one annotation answers "when", the grey already answers
+                // "can you", and losing the timestamp would cost the row the
+                // only thing that orders it against its neighbours.
                 hint: Some(ago_label(entry.at, now)),
                 hovered: hover == Some(MenuRow::Recent(index)),
+                available: recent_is_available(&entry.seed, programs),
             },
             scale,
             palette,
@@ -571,9 +951,12 @@ struct Row<'a> {
     mark: ChromeMark,
     name: &'a str,
     /// The `.default-hint` slot: `default` on the default profile, `3m ago` on
-    /// a recent row, nothing on the rest.
+    /// a recent row, `not installed` on one this machine cannot start.
     hint: Option<String>,
     hovered: bool,
+    /// Whether this row can do what it says. A row that cannot is drawn and not
+    /// offered — see [`hit`], which is where "not offered" is actually enforced.
+    available: bool,
 }
 
 fn push_row(
@@ -601,11 +984,16 @@ fn push_row(
     let mark = px(ITEM_MARK_LOGICAL_PX).round();
     let mark_left = ((column_left + column_right - mark) / 2.0).round();
     let mark_top = ((item[1] + item[3] - mark) / 2.0).round();
-    sprites.push(ChromeSprite::new(
+    let mut sprite = ChromeSprite::new(
         row.mark,
         [mark_left, mark_top, mark_left + mark, mark_top + mark],
         palette.accent,
-    ));
+    );
+    if !row.available {
+        sprite.opacity = UNAVAILABLE_MARK_OPACITY;
+        sprite.grayscale = true;
+    }
+    sprites.push(sprite);
     labels.push(ChromeLabel {
         text: row.name.to_owned(),
         // The name's box ends at the row's trailing padding, and the row's own
@@ -621,7 +1009,15 @@ fn push_row(
             item[3],
         ],
         font_size_px: px(ITEM_FONT_LOGICAL_PX),
-        color: if row.hovered {
+        // Three inks and one order of precedence. An unavailable row drops to
+        // the hint's own `--ink3` — the menu's quietest ink, and already the one
+        // this surface uses for text that reports rather than offers — and it
+        // wins over hover because an unavailable row is never hovered anyway
+        // (see [`hit`]); stating it first means the two cannot disagree if that
+        // ever stops being true.
+        color: if !row.available {
+            palette.menu_item_hint_text
+        } else if row.hovered {
             palette.menu_item_text_selected
         } else {
             palette.menu_item_text
@@ -744,6 +1140,63 @@ mod tests {
     /// A vault with nothing in it: the menu every test that predates Recent was
     /// written against.
     const NO_RECENT: &[RecentEntry] = &[];
+
+    /// An in-memory machine: what is on the `PATH`, and which files exist.
+    ///
+    /// The whole reason [`ProfilePrograms::probe`] takes a trait rather than
+    /// reading `std::env` is here. "Git Bash is greyed out" is a claim about a
+    /// machine, and a test that asked the *host* would pass on the build server
+    /// and fail on a developer's laptop for identical code — the two would even
+    /// disagree about which assertion was the bug.
+    #[derive(Default)]
+    struct FakeMachine {
+        vars: std::collections::HashMap<String, OsString>,
+        files: std::collections::HashSet<PathBuf>,
+    }
+
+    impl FakeMachine {
+        fn with_var(mut self, key: &str, value: &str) -> Self {
+            self.vars.insert(key.to_owned(), value.into());
+            self
+        }
+
+        fn with_file(mut self, path: &str) -> Self {
+            self.files.insert(PathBuf::from(path));
+            self
+        }
+
+        /// A machine with all four shells on it, spelled the way a real Windows
+        /// install spells them.
+        fn fully_equipped() -> Self {
+            Self::default()
+                .with_var("SystemRoot", r"C:\WINDOWS")
+                .with_var("ProgramFiles", r"C:\Program Files")
+                .with_file(r"C:\WINDOWS\System32\wsl.exe")
+                .with_file(r"C:\WINDOWS\System32\cmd.exe")
+                .with_file(r"C:\Program Files\Git\bin\bash.exe")
+        }
+    }
+
+    impl ShellEnvironment for FakeMachine {
+        fn var_os(&self, key: &str) -> Option<OsString> {
+            self.vars.get(key).cloned()
+        }
+
+        fn is_file(&self, path: &Path) -> bool {
+            self.files.contains(path)
+        }
+    }
+
+    /// The four profiles all startable — the machine most of these tests are
+    /// about the *menu* on rather than about availability.
+    fn equipped() -> ProfilePrograms {
+        ProfilePrograms::probe(&FakeMachine::fully_equipped())
+    }
+
+    /// A bare Windows box: PowerShell and nothing else this product can start.
+    fn bare() -> ProfilePrograms {
+        ProfilePrograms::probe(&FakeMachine::default())
+    }
 
     fn at(secs: u64) -> SystemTime {
         UNIX_EPOCH + Duration::from_secs(secs)
@@ -891,15 +1344,399 @@ mod tests {
         assert!(low.frame[1] >= 0.0, "{:?}", low.frame);
     }
 
-    /// PIN — the list is what this build can actually launch, and no more.
+    /// PIN — the mock-up's own four, in the mock-up's own order, each with a
+    /// stable slug, its own mark and a real program to start.
+    ///
+    /// The order is load-bearing rather than tidy: `state.defaultProfile` is an
+    /// *index* into this list (mock-up 3217), and until P3 makes it a setting,
+    /// [`DEFAULT_PROFILE`] is a constant index too. Reordering this array
+    /// silently re-points it.
+    ///
+    /// This test replaces one that asserted `PROFILES.len() == 1` and was right
+    /// to: a list of four rows that all started PowerShell would have been three
+    /// rows that cannot do what they say. What makes four honest now is the rest
+    /// of this file — a program per profile, and a greyed row where the machine
+    /// has none.
     #[test]
     fn the_picker_offers_exactly_the_profiles_this_build_has() {
-        assert_eq!(PROFILES.len(), 1);
+        assert_eq!(PROFILES.len(), 4);
+        let listed: Vec<_> = PROFILES.iter().map(|profile| profile.id).collect();
+        assert_eq!(listed, ["pwsh", "wsl", "gitbash", "cmd"]);
         assert_eq!(PROFILES[DEFAULT_PROFILE].title, "PowerShell");
+
+        // Four profiles, four marks: the icon column carries information only
+        // while no two rows carry the same thing.
+        for (index, left) in PROFILES.iter().enumerate() {
+            for right in &PROFILES[index + 1..] {
+                assert_ne!(
+                    left.mark, right.mark,
+                    "{} and {} would be one row twice — a profile's icon is its mark",
+                    left.id, right.id
+                );
+            }
+        }
+
+        // And four ids, because an id is what a seed is keyed on: two profiles
+        // sharing one would be two tabs that cannot be told apart on disk.
+        let ids: std::collections::HashSet<_> = listed.iter().collect();
+        assert_eq!(ids.len(), PROFILES.len());
+        for profile in PROFILES {
+            assert_eq!(
+                index_of_id(profile.id),
+                PROFILES.iter().position(|p| p.id == profile.id).unwrap(),
+                "{} must resolve to its own row",
+                profile.id
+            );
+        }
+    }
+
+    /// PIN — **the arguments are the profile's, not the spawn path's.**
+    ///
+    /// `-NoLogo` used to be welded into `PtyCommand::interactive_shell` as "the
+    /// one argument", which was true only while every shell this terminal could
+    /// start was a PowerShell. It is a PowerShell flag: `cmd.exe` reads it as
+    /// the name of a batch file to run and `bash` as a file to open, so passing
+    /// it to the other three would produce three shells that start wrong — the
+    /// exact failure that cannot be seen from a screenshot of the menu.
+    #[test]
+    fn only_the_powershell_profile_asks_for_nologo() {
+        for profile in PROFILES {
+            let has_nologo = profile.args.contains(&"-NoLogo");
+            assert_eq!(
+                has_nologo,
+                profile.id == "pwsh",
+                "{} must {} pass -NoLogo",
+                profile.id,
+                if profile.id == "pwsh" { "" } else { "not" }
+            );
+        }
+        assert_eq!(PROFILES[index_of_id("cmd")].args, &[] as &[&str]);
         assert_eq!(
-            PROFILES[DEFAULT_PROFILE].mark,
-            ChromeMark::ProfilePowerShell,
-            "a profile's icon is its mark"
+            PROFILES[index_of_id("gitbash")].args,
+            &["--login", "-i"],
+            "without --login this is a bash that cannot find git"
+        );
+    }
+
+    /// PIN — the default profile is the one profile that cannot be unavailable.
+    ///
+    /// Everything else in this ticket leans on it: `index_of_id` falls back to
+    /// it for an id this build does not have, `create_leaf_session` falls back
+    /// to it when a profile's own program will not start, and the picker's
+    /// `default` hint is drawn on the assumption that no row is ever both the
+    /// default and greyed. A default that could be missing would turn each of
+    /// those into a window with no shell in it.
+    #[test]
+    fn the_default_profile_can_always_be_started() {
+        assert_eq!(
+            PROFILES[DEFAULT_PROFILE].program,
+            ProgramSource::DefaultShell,
+            "the default profile resolves through the OS's own PowerShell chain"
+        );
+        // Even on a machine with nothing else on it.
+        assert!(bare().is_available(DEFAULT_PROFILE));
+        assert!(equipped().is_available(DEFAULT_PROFILE));
+    }
+
+    /// PIN — a profile is available exactly when its program is on the machine,
+    /// and a machine that has none of them still has PowerShell.
+    ///
+    /// Red gate: probing only `%ProgramFiles%` for Git — which is where it lands
+    /// from the ordinary installer and nowhere else. A per-user install
+    /// (`%LocalAppData%\Programs\Git`) is the default for anybody without
+    /// administrator rights, so "Git Bash is greyed on a machine that has Git
+    /// Bash" is not a corner case, it is a whole class of user.
+    #[test]
+    fn a_profile_is_offered_when_this_machine_has_its_program_and_greyed_when_it_does_not() {
+        let none = bare();
+        assert_eq!(
+            (0..PROFILES.len())
+                .filter(|index| none.is_available(*index))
+                .collect::<Vec<_>>(),
+            vec![DEFAULT_PROFILE],
+            "a bare Windows box offers PowerShell and says the truth about the rest"
+        );
+
+        let all = equipped();
+        for (index, profile) in PROFILES.iter().enumerate() {
+            assert!(
+                all.is_available(index),
+                "{} is installed here and must be offered",
+                profile.id
+            );
+        }
+        assert_eq!(
+            all.program(index_of_id("cmd")),
+            Some(OsStr::new(r"C:\WINDOWS\System32\cmd.exe")),
+            "the resolved program is the probed path, not the profile's id"
+        );
+
+        // Git through the per-user installer, which is not under %ProgramFiles%.
+        let per_user = ProfilePrograms::probe(
+            &FakeMachine::default()
+                .with_var("LocalAppData", r"C:\Users\dev\AppData\Local")
+                .with_file(r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"),
+        );
+        assert_eq!(
+            per_user.program(index_of_id("gitbash")),
+            Some(OsStr::new(
+                r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"
+            ))
+        );
+        assert!(!per_user.is_available(index_of_id("wsl")));
+
+        // The candidate list is an *order*: the first well-known path that
+        // exists wins, so a machine carrying both installs starts the
+        // system-wide one.
+        let both = ProfilePrograms::probe(
+            &FakeMachine::default()
+                .with_var("ProgramFiles", r"C:\Program Files")
+                .with_var("LocalAppData", r"C:\Users\dev\AppData\Local")
+                .with_file(r"C:\Program Files\Git\bin\bash.exe")
+                .with_file(r"C:\Users\dev\AppData\Local\Programs\Git\bin\bash.exe"),
+        );
+        assert_eq!(
+            both.program(index_of_id("gitbash")),
+            Some(OsStr::new(r"C:\Program Files\Git\bin\bash.exe"))
+        );
+    }
+
+    /// PIN — **Git installed anywhere at all is found, through `git.exe` on
+    /// `PATH`.**
+    ///
+    /// Red gate, and it is not hypothetical: this ticket's own first real-machine
+    /// check ran on a box with Git at `D:\App\Tool\Git`, which is under none of
+    /// the three installers' default roots. A well-known-paths list can only
+    /// enumerate defaults, so on that machine — and on everyone else's who chose
+    /// their own directory — the row would have been greyed `not installed` over
+    /// a working Git Bash. That is not honest degradation, it is a wrong answer
+    /// delivered in the tone of an honest one, which is worse than no row at all.
+    ///
+    /// The anchor is climbed two levels because Git for Windows puts the tool at
+    /// `<root>\cmd\git.exe` and the shell at `<root>\bin\bash.exe` — siblings
+    /// under one root, not nested — so joining onto `git.exe`'s own directory
+    /// would look in `<root>\cmd\bin` and find nothing.
+    #[test]
+    fn git_installed_outside_the_well_known_roots_is_found_through_the_tool_on_path() {
+        let custom = ProfilePrograms::probe(
+            &FakeMachine::default()
+                .with_var(
+                    "PATH",
+                    std::env::join_paths([r"C:\Other", r"D:\App\Tool\Git\cmd"])
+                        .expect("test PATH joins cleanly")
+                        .to_str()
+                        .expect("ASCII test paths"),
+                )
+                .with_file(r"D:\App\Tool\Git\cmd\git.exe")
+                .with_file(r"D:\App\Tool\Git\bin\bash.exe"),
+        );
+        assert_eq!(
+            custom.program(index_of_id("gitbash")),
+            Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe")),
+            "a Git that is on the path is a Git we can find, wherever it was put"
+        );
+
+        // The anchor is a landmark, not a promise: `git.exe` on the path with no
+        // `bash.exe` beside it is still an unavailable profile, because what the
+        // row offers is bash and bash is what has to exist.
+        let tool_only = ProfilePrograms::probe(
+            &FakeMachine::default()
+                .with_var(
+                    "PATH",
+                    std::env::join_paths([r"D:\App\Tool\Git\cmd"])
+                        .expect("test PATH joins cleanly")
+                        .to_str()
+                        .expect("ASCII test paths"),
+                )
+                .with_file(r"D:\App\Tool\Git\cmd\git.exe"),
+        );
+        assert!(!tool_only.is_available(index_of_id("gitbash")));
+
+        // And the anchor is tried first, so the install the user actually works
+        // with wins over a stale copy in `%ProgramFiles%`.
+        let both = ProfilePrograms::probe(
+            &FakeMachine::default()
+                .with_var(
+                    "PATH",
+                    std::env::join_paths([r"D:\App\Tool\Git\cmd"])
+                        .expect("test PATH joins cleanly")
+                        .to_str()
+                        .expect("ASCII test paths"),
+                )
+                .with_var("ProgramFiles", r"C:\Program Files")
+                .with_file(r"D:\App\Tool\Git\cmd\git.exe")
+                .with_file(r"D:\App\Tool\Git\bin\bash.exe")
+                .with_file(r"C:\Program Files\Git\bin\bash.exe"),
+        );
+        assert_eq!(
+            both.program(index_of_id("gitbash")),
+            Some(OsStr::new(r"D:\App\Tool\Git\bin\bash.exe"))
+        );
+    }
+
+    /// PIN — **a greyed row is drawn and is not offered**, and both halves are
+    /// answered by [`hit`] so they cannot disagree.
+    ///
+    /// Red gate, and it is the difference between this and hiding the row. A
+    /// missing row and a greyed row look nothing alike to a user — one says "you
+    /// do not have this", the other says "we never thought of this" — but they
+    /// look identical to a test that only counts what the menu can launch. So
+    /// what is asserted here is that the row is *still on screen*, still named,
+    /// still carrying its own artwork, and still costs the same 29.5px of menu:
+    /// the layout does not move when a machine lacks a shell.
+    #[test]
+    fn a_profile_this_machine_cannot_start_is_drawn_greyed_and_refuses_the_press() {
+        let scale = 1.0;
+        let programs = bare();
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            NO_RECENT,
+        );
+        assert_eq!(
+            layout.items.len(),
+            PROFILES.len(),
+            "greying is not hiding: every profile still has a row"
+        );
+
+        let git = index_of_id("gitbash");
+        let row = layout.items[git];
+        let (x, y) = (
+            f64::from((row[0] + row[2]) / 2.0),
+            f64::from((row[1] + row[3]) / 2.0),
+        );
+        assert_eq!(
+            hit(&layout, &programs, NO_RECENT, x, y),
+            Some(None),
+            "a press on a row this machine cannot start is the menu's own body: \
+             it neither opens a tab nor escapes to whatever is under the menu"
+        );
+        assert_eq!(
+            hit(&layout, &equipped(), NO_RECENT, x, y),
+            Some(Some(MenuRow::Profile(git))),
+            "and the very same pixel does open it where Git is installed"
+        );
+
+        let palette = chrome_palette();
+        let layer = one_layer(build(&layout, &programs, None, NO_RECENT, now()));
+        let name = layer
+            .labels
+            .iter()
+            .find(|label| label.text == "Git Bash")
+            .expect("the row is still named — a hidden row would say nothing at all");
+        assert_eq!(
+            name.color, palette.menu_item_hint_text,
+            "and named in the menu's quietest ink"
+        );
+        assert!(
+            layer
+                .labels
+                .iter()
+                .any(|label| label.text == UNAVAILABLE_HINT_TEXT),
+            "with the reason in the hint slot, so the grey does not have to be guessed at"
+        );
+
+        let mark = layer
+            .sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::ProfileGit)
+            .expect("the row still wears its own artwork");
+        assert_eq!(mark.opacity, UNAVAILABLE_MARK_OPACITY);
+        assert!(
+            mark.grayscale,
+            "a profile mark carries its own colours, so only desaturation can quiet it"
+        );
+
+        // The default profile is on the same machine and is untouched: greying
+        // is per row, and the row that always works still looks like it works.
+        let pwsh = layer
+            .sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::ProfilePowerShell)
+            .expect("PowerShell is always startable");
+        assert_eq!(pwsh.opacity, 1.0);
+        assert!(!pwsh.grayscale);
+        assert!(
+            layer.labels.iter().any(|label| label.text == HINT_TEXT),
+            "and still says it is the default"
+        );
+    }
+
+    /// PIN — a Recent row is greyed by the same rule its profile row is.
+    ///
+    /// Red gate: greying the profile list and not the Recent list would put both
+    /// answers to one question in a single menu — `Git Bash` greyed at the top,
+    /// and three rows below it a live `~/repo · 3m ago` under the same Git mark,
+    /// offering to start the shell the row above just said you do not have.
+    #[test]
+    fn a_recent_row_whose_shell_is_missing_is_greyed_with_its_profile() {
+        let scale = 1.0;
+        let vault = [
+            RecentEntry {
+                seed: Seed::Term {
+                    profile_id: "gitbash".to_owned(),
+                    cwd: "C:\\repo".to_owned(),
+                    manual_name: None,
+                },
+                at: at(100_000),
+            },
+            term("C:\\work", None, 60),
+            files("C:\\notes", 120),
+        ];
+        let layout = layout(
+            anchor(scale),
+            MenuSide::Below,
+            (960.0, 600.0),
+            scale,
+            &vault,
+        );
+        let programs = bare();
+        let centre = |rect: [f32; 4]| {
+            (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            )
+        };
+
+        let (x, y) = centre(layout.recent[0]);
+        assert_eq!(
+            hit(&layout, &programs, &vault, x, y),
+            Some(None),
+            "the seed names a shell this machine has not got"
+        );
+        assert_eq!(
+            hit(&layout, &equipped(), &vault, x, y),
+            Some(Some(MenuRow::Recent(0))),
+            "and opens where it has"
+        );
+
+        // Its neighbours are untouched: the PowerShell seed still opens, and so
+        // does a files locus, which has no shell to be missing in the first
+        // place.
+        for index in [1, 2] {
+            let (x, y) = centre(layout.recent[index]);
+            assert_eq!(
+                hit(&layout, &programs, &vault, x, y),
+                Some(Some(MenuRow::Recent(index))),
+                "recent row {index} is startable on any machine"
+            );
+        }
+
+        let layer = one_layer(build(&layout, &programs, None, &vault, now()));
+        let git = layer
+            .sprites
+            .iter()
+            .find(|sprite| sprite.mark == ChromeMark::ProfileGit)
+            .expect("the recent row wears its own profile's mark");
+        assert!(git.grayscale && git.opacity == UNAVAILABLE_MARK_OPACITY);
+        assert!(
+            layer
+                .sprites
+                .iter()
+                .any(|sprite| sprite.mark == ChromeMark::Folder && !sprite.grayscale),
+            "a files locus is never greyed: it has no shell that could be missing"
         );
     }
 
@@ -918,6 +1755,8 @@ mod tests {
         assert_eq!(
             hit(
                 &layout,
+                &equipped(),
+                NO_RECENT,
                 f64::from((item[0] + item[2]) / 2.0),
                 f64::from((item[1] + item[3]) / 2.0)
             ),
@@ -926,6 +1765,8 @@ mod tests {
         assert_eq!(
             hit(
                 &layout,
+                &equipped(),
+                NO_RECENT,
                 f64::from(frame[0] + 1.0),
                 f64::from(frame[3] - 1.0)
             ),
@@ -935,13 +1776,15 @@ mod tests {
         assert_eq!(
             hit(
                 &layout,
+                &equipped(),
+                NO_RECENT,
                 f64::from(frame[0] - 4.0),
                 f64::from(frame[1] + 4.0)
             ),
             None,
             "beside the menu belongs to whatever is there"
         );
-        assert_eq!(hit(&layout, 400.0, 500.0), None);
+        assert_eq!(hit(&layout, &equipped(), NO_RECENT, 400.0, 500.0), None);
     }
 
     /// PIN — the menu is pushed off the window's right edge by no more than the
@@ -1002,8 +1845,14 @@ mod tests {
             NO_RECENT,
         );
         let palette = chrome_palette();
-        let rest = one_layer(build(&layout, None, NO_RECENT, now()));
-        let hover = one_layer(build(&layout, Some(MenuRow::Profile(0)), NO_RECENT, now()));
+        let rest = one_layer(build(&layout, &equipped(), None, NO_RECENT, now()));
+        let hover = one_layer(build(
+            &layout,
+            &equipped(),
+            Some(MenuRow::Profile(0)),
+            NO_RECENT,
+            now(),
+        ));
         let (rest_quads, rest_labels, sprites) = (rest.quads, rest.labels, rest.sprites);
         let (hover_quads, hover_labels) = (hover.quads, hover.labels);
         assert!(
@@ -1140,7 +1989,7 @@ mod tests {
             NO_RECENT,
         );
         let palette = chrome_palette();
-        let layers = build(&layout, None, NO_RECENT, now());
+        let layers = build(&layout, &equipped(), None, NO_RECENT, now());
         let labels: Vec<_> = layers.iter().flat_map(|layer| &layer.labels).collect();
         let sprites: Vec<_> = layers.iter().flat_map(|layer| &layer.sprites).collect();
         let hint = labels
@@ -1212,7 +2061,7 @@ mod tests {
             assert_eq!(layout.section_label, None);
             assert!(layout.recent.is_empty());
 
-            let layer = one_layer(build(&layout, None, NO_RECENT, now()));
+            let layer = one_layer(build(&layout, &equipped(), None, NO_RECENT, now()));
             assert!(
                 !layer
                     .labels
@@ -1337,13 +2186,16 @@ mod tests {
         for index in 0..vault.len() {
             let (x, y) = centre(layout.recent[index]);
             assert_eq!(
-                hit(&layout, x, y),
+                hit(&layout, &equipped(), &vault, x, y),
                 Some(Some(MenuRow::Recent(index))),
                 "recent row {index} must answer with its own index in its own list"
             );
         }
         let (x, y) = centre(layout.items[0]);
-        assert_eq!(hit(&layout, x, y), Some(Some(MenuRow::Profile(0))));
+        assert_eq!(
+            hit(&layout, &equipped(), &vault, x, y),
+            Some(Some(MenuRow::Profile(0)))
+        );
 
         // The rule and the heading name nothing you can open, so they are the
         // menu's body — a press there does nothing rather than something.
@@ -1351,7 +2203,7 @@ mod tests {
         let band = layout.section_label.expect("titled");
         for rect in [rule, band] {
             let (x, y) = centre(rect);
-            assert_eq!(hit(&layout, x, y), Some(None));
+            assert_eq!(hit(&layout, &equipped(), &vault, x, y), Some(None));
         }
     }
 
@@ -1386,7 +2238,7 @@ mod tests {
             "and the menu is only as tall as the rows it draws"
         );
 
-        let layer = one_layer(build(&layout, None, &vault, now()));
+        let layer = one_layer(build(&layout, &equipped(), None, &vault, now()));
         assert!(
             layer.labels.iter().any(|label| label.text == "p7"),
             "the eighth seed is drawn"
@@ -1418,7 +2270,7 @@ mod tests {
             &vault,
         );
         let palette = chrome_palette();
-        let layer = one_layer(build(&layout, None, &vault, now()));
+        let layer = one_layer(build(&layout, &equipped(), None, &vault, now()));
         let heading = layer
             .labels
             .iter()
@@ -1492,7 +2344,7 @@ mod tests {
             files("D:\\Developer\\BetterTerminal\\", 180),
         ];
         let layout = layout(anchor(1.0), MenuSide::Below, (960.0, 600.0), 1.0, &vault);
-        let layer = one_layer(build(&layout, None, &vault, now()));
+        let layer = one_layer(build(&layout, &equipped(), None, &vault, now()));
         let drawn: Vec<&str> = layer
             .labels
             .iter()
@@ -1518,7 +2370,7 @@ mod tests {
             &vault,
         );
         let palette = chrome_palette();
-        let layer = one_layer(build(&layout, None, &vault, now()));
+        let layer = one_layer(build(&layout, &equipped(), None, &vault, now()));
 
         let in_row = |row: [f32; 4], sprite: &ChromeSprite| {
             sprite.rect[1] >= row[1] && sprite.rect[3] <= row[3]
@@ -1584,7 +2436,13 @@ mod tests {
             &vault,
         );
         let palette = chrome_palette();
-        let layer = one_layer(build(&layout, Some(MenuRow::Recent(0)), &vault, now()));
+        let layer = one_layer(build(
+            &layout,
+            &equipped(),
+            Some(MenuRow::Recent(0)),
+            &vault,
+            now(),
+        ));
         let row = layout.recent[0];
         assert!(
             layer

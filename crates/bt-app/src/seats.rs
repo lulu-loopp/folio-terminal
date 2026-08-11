@@ -3109,7 +3109,7 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
     let head = [rect[0], rect[1], rect[2], head_bottom];
 
     let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
-    let (_, mark_logical_px, _) = pane_mark(kind, chrome_palette());
+    let (_, mark_logical_px, _) = pane_mark(kind, None, chrome_palette());
     let mark_size = (mark_logical_px * scale).round().max(1.0);
     let mark_left = (rect[0] + pad).round();
     let mark_top = (rect[1] + ((content_bottom - rect[1]) - mark_size) / 2.0).round();
@@ -3604,6 +3604,26 @@ pub fn build_chrome(
 /// here" says so, and is not mistaken for one that forgot to pass its names.
 #[cfg(test)]
 static NO_TERMINAL_NAMES: BTreeMap<SeatId, String> = BTreeMap::new();
+/// The same value for the identity marks: "no seat here is running a shell".
+#[cfg(test)]
+static NO_LEAF_MARKS: BTreeMap<SeatId, ChromeMark> = BTreeMap::new();
+
+/// Every Terminal seat of `seats` running a PowerShell — the map a real tab of
+/// one profile hands in.
+///
+/// A fixture helper rather than a default, and the distinction is the one
+/// [`TabContent`]'s own `Default` makes: `NO_LEAF_MARKS` says "no seat here has
+/// a shell", which is the truth for a tree of files columns and a lie for a
+/// tree of terminals. A test that wants terminal heads has to say which shells
+/// they are, exactly as the window does.
+#[cfg(test)]
+fn all_powershell(seats: &Seats) -> BTreeMap<SeatId, ChromeMark> {
+    seats
+        .terminals()
+        .into_iter()
+        .map(|seat| (seat, ChromeMark::ProfilePowerShell))
+        .collect()
+}
 
 /// Build chrome while supplying the preview seat's content title and optional body placeholder.
 #[cfg(test)]
@@ -3617,6 +3637,7 @@ pub fn build_chrome_with_preview(
     preview_message: Option<&str>,
 ) -> (Vec<ChromeQuad>, Vec<ChromeLabel>, Vec<ChromeSprite>) {
     let tabs = [TabContent {
+        mark_kind: ChromeMark::ProfilePowerShell,
         title: tab_title.unwrap_or("PowerShell").to_owned(),
         pane_count: seats.pane_count(),
         badge_text_width: 0.0,
@@ -3643,6 +3664,7 @@ pub fn build_chrome_with_preview(
             rail_scroll: 0.0,
             preview_title,
             terminal_names: &NO_TERMINAL_NAMES,
+            leaf_marks: &all_powershell(seats),
             preview_message,
             fit_overflow: None,
             profile_menu_open: false,
@@ -3655,7 +3677,7 @@ pub fn build_chrome_with_preview(
 }
 
 /// What one tab in the strip has to say for itself.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TabContent {
     pub title: String,
     /// How many panes this tab holds. The badge appears above one and never at
@@ -3669,6 +3691,20 @@ pub struct TabContent {
     /// wide a number is, and the mock-up sizes the pill from exactly that
     /// (`max(min-width, text + padding)`).
     pub badge_text_width: f32,
+    /// Which profile's mark this tab wears — its identity, as opposed to
+    /// [`Self::mark`], which is what its sessions are *doing*.
+    ///
+    /// Two fields and not one, because they are two claims that change on two
+    /// clocks and are drawn on top of one another: the identity is the artwork,
+    /// and `mark` is the breath, the fade, the dot and the ring applied to it.
+    /// Folding them together would mean re-stating a tab's profile every time
+    /// its shell went busy.
+    ///
+    /// A `ChromeMark` rather than an index into `profiles::PROFILES`, because
+    /// `seats` draws chrome and does not know what a profile is — red line L1 in
+    /// the small: the caller resolves identity to a mark and hands over a thing
+    /// to paint.
+    pub mark_kind: ChromeMark,
     /// What this tab's mark slot is saying about its sessions.
     pub mark: TabMarkState,
     /// What hangs off this tab's trailing end: its pin state, and how far the
@@ -3701,6 +3737,35 @@ pub struct TabContent {
     /// editor is the tab: same box, same metrics, so committing a name does not
     /// make the strip jump".
     pub edit: Option<TabEdit>,
+}
+
+/// A tab nobody has described yet: no name, one pane, nothing to say, and — the
+/// one field that has to be spelled out — the mark for a pane whose kind is not
+/// known.
+///
+/// Written by hand rather than derived because `mark_kind` has no derivable
+/// default, and deliberately **not** solved by giving [`ChromeMark`] one. A
+/// profile mark chosen by a `Default` impl is a specific shell's artwork
+/// appearing over a tab that never named a shell, which is precisely the bug
+/// this field exists to end — and granting the enum a global default would let
+/// that happen anywhere, silently, forever. `#i-panel` is the mock-up's own
+/// glyph for "a pane whose kind this build cannot name", so a tab built out of
+/// nothing wears exactly that, and any real tab that reaches the strip wearing
+/// it is a caller that forgot to say what it is.
+impl Default for TabContent {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            pane_count: 0,
+            badge_text_width: 0.0,
+            mark_kind: ChromeMark::Panel,
+            mark: TabMarkState::default(),
+            trailer: TabTrailer::default(),
+            offset: 0.0,
+            landing: 0.0,
+            edit: None,
+        }
+    }
 }
 
 /// The rename editor's contents, already measured.
@@ -3843,6 +3908,19 @@ pub struct ChromeContent<'a> {
     /// `SeatPlacement::id`, so a name can only ever land on the seat it was
     /// resolved for.
     pub terminal_names: &'a BTreeMap<SeatId, String>,
+    /// Which shell each Terminal seat of the active tab is running, as the mark
+    /// it wears — the identity half of [`Self::terminal_names`], carried the same
+    /// way and for the same reason.
+    ///
+    /// Keyed by [`SeatId`] and never by position, so a mark cannot land on the
+    /// seat next door when the solver lays a row out in a different order than
+    /// the tree walks it — the argument `terminal_names` already makes, and it is
+    /// worse here: a name on the wrong pane looks wrong, a *mark* on the wrong
+    /// pane looks like a pane running a shell it is not.
+    ///
+    /// Seats absent from the map are seats with no shell — a files column, a
+    /// preview, a placeholder — and they pick their own mark from their kind.
+    pub leaf_marks: &'a BTreeMap<SeatId, ChromeMark>,
     pub preview_message: Option<&'a str>,
     /// What the L4 fit-what-fits strip could not show, when the window is in
     /// that state at all ([`fit_what_fits`]). `None` on every ordinary solve.
@@ -4034,6 +4112,7 @@ pub fn build_chrome_for_tabs(
         rail_scroll,
         preview_title,
         terminal_names,
+        leaf_marks,
         preview_message,
         fit_overflow,
         profile_menu_open,
@@ -4167,6 +4246,7 @@ pub fn build_chrome_for_tabs(
                     rect,
                     scale,
                     placement.kind,
+                    leaf_marks.get(&placement.id).copied(),
                     placement.presentation,
                     seat_short_caption(placement.kind, preview_title, terminal_name(placement.id)),
                     &mut pane_labels,
@@ -4247,7 +4327,11 @@ pub fn build_chrome_for_tabs(
                 // mock-up puts in exactly these three heads.
                 let pad = SEAT_TITLE_PADDING_LOGICAL_PX * scale;
                 let focused = placement.id == seats.focus();
-                let (mark, _, mark_color) = pane_mark(placement.kind, palette);
+                let (mark, _, mark_color) = pane_mark(
+                    placement.kind,
+                    leaf_marks.get(&placement.id).copied(),
+                    palette,
+                );
                 pane_sprites.push(ChromeSprite::new(mark, head.mark, mark_color).with_opacity(
                     // `.pane:not(.focused) .panehead .ticon { opacity: .5 }`
                     // (mock-up 1645-1647). Opacity and not a paler ink,
@@ -5224,11 +5308,8 @@ fn window_tab_strip(
                             ));
                         }
                         None => {
-                            let mut profile = ChromeSprite::new(
-                                ChromeMark::ProfilePowerShell,
-                                mark_rect,
-                                palette.accent,
-                            );
+                            let mut profile =
+                                ChromeSprite::new(content.mark_kind, mark_rect, palette.accent);
                             // `.ticon.working`'s breath and `.ticon-wrap.dead`'s
                             // fade both land here, on the mark alone — never on
                             // the dot or the ring, which are other claims.
@@ -6065,11 +6146,8 @@ fn rail_chrome(
                         ));
                     }
                     None => {
-                        let mut profile = ChromeSprite::new(
-                            ChromeMark::ProfilePowerShell,
-                            mark_rect,
-                            palette.accent,
-                        );
+                        let mut profile =
+                            ChromeSprite::new(content.mark_kind, mark_rect, palette.accent);
                         // The breath and the dead fade land on the mark alone —
                         // never on the dot or the ring, which are other claims — and
                         // never on `text_opacity`, which is a claim about *words*.
@@ -6523,10 +6601,16 @@ fn rail_chrome(
 ///   a horizontal word. The mark sits at the head of the strip, where a title
 ///   would have started, rather than adrift in the middle of it.
 /// * Squeezed along both — the mark alone, centred (T209).
+// One more argument than clippy's taste allows, and it is the one that stops
+// every collapsed terminal in the product drawing the same shell's mark: see
+// `pane_mark`, whose `terminal` parameter this passes through.
+#[allow(clippy::too_many_arguments)]
 fn collapse_bar_contents(
     rect: [f32; 4],
     scale: f32,
     kind: SeatKind,
+    // Which shell this seat is running, when it is a terminal — see `pane_mark`.
+    terminal_mark: Option<ChromeMark>,
     presentation: Presentation,
     title: &str,
     labels: &mut Vec<ChromeLabel>,
@@ -6535,7 +6619,7 @@ fn collapse_bar_contents(
     let palette = chrome_palette();
     let width = rect[2] - rect[0];
     let height = rect[3] - rect[1];
-    let (mark, mark_logical_px, mark_color) = pane_mark(kind, palette);
+    let (mark, mark_logical_px, mark_color) = pane_mark(kind, terminal_mark, palette);
     let size = (mark_logical_px * scale)
         .round()
         .max(1.0)
@@ -7203,13 +7287,26 @@ fn seat_title(kind: SeatKind) -> &'static str {
 /// this build cannot name. It gets the generic pane outline in the same quiet
 /// ink a body notice uses — a placeholder is a statement about this build, not
 /// an invitation, and the accent is reserved for things that want you.
+/// `terminal` is **which shell** a Terminal seat is running, as a mark — the one
+/// thing this function cannot work out from a [`SeatKind`], because every
+/// terminal is the same kind and they are not the same shell. It used to be
+/// absent, and the consequence was that every pane head, collapse bar, peek row
+/// and drag ghost in the product drew the PowerShell square over whatever was
+/// actually running there.
+///
+/// `None` is "a terminal whose profile the caller did not state", which is not a
+/// state any paint path should be in; it draws the unnameable-pane glyph rather
+/// than picking a shell's artwork at random. The one honest caller of it is
+/// [`pane_head_geometry`], which wants the mark's *size* — the same 15px slot for
+/// all four profiles — and throws the mark itself away.
 pub(crate) fn pane_mark(
     kind: SeatKind,
+    terminal: Option<ChromeMark>,
     palette: bt_render::ChromePalette,
 ) -> (ChromeMark, f32, [u8; 3]) {
     match kind {
         SeatKind::Terminal => (
-            ChromeMark::ProfilePowerShell,
+            terminal.unwrap_or(ChromeMark::Panel),
             PANE_HEAD_PROFILE_MARK_LOGICAL_PX,
             palette.accent,
         ),
@@ -9063,6 +9160,7 @@ mod tests {
                     rail_scroll: 0.0,
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
+                    leaf_marks: &NO_LEAF_MARKS,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -9189,6 +9287,7 @@ mod tests {
         let tabs = titles
             .iter()
             .map(|title| TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: title.clone(),
                 pane_count: 1,
                 badge_text_width: 0.0,
@@ -9265,6 +9364,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open,
@@ -9599,6 +9699,7 @@ mod tests {
     fn the_chevron_is_drawn_partway_through_its_turn() {
         let titles = strip_titles(1);
         let tabs = [TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
             title: titles[0].clone(),
             pane_count: 1,
             ..TabContent::default()
@@ -10088,6 +10189,7 @@ mod tests {
     #[test]
     fn the_pane_count_badge_appears_only_above_one_pane() {
         let tab = |pane_count| TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
             title: "tab".to_owned(),
             pane_count,
             badge_text_width: 6.0,
@@ -10172,6 +10274,7 @@ mod tests {
     /// A tab with the rename editor open on it, already measured.
     fn editing_tab(edit: TabEdit) -> TabContent {
         TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
             title: "committed-title".to_owned(),
             pane_count: 1,
             badge_text_width: 0.0,
@@ -10200,6 +10303,7 @@ mod tests {
     fn the_editor_takes_the_titles_own_box_and_leaves_the_tab_alone() {
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
             let resting_tab = TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "committed-title".to_owned(),
                 pane_count: 1,
                 badge_text_width: 0.0,
@@ -10494,6 +10598,7 @@ mod tests {
             for pane_count in [1_usize, 3] {
                 let badge_text_width = if pane_count > 1 { 6.0 * scale } else { 0.0 };
                 let tabs = [TabContent {
+                    mark_kind: ChromeMark::ProfilePowerShell,
                     title: "measure-me".to_owned(),
                     pane_count,
                     badge_text_width,
@@ -10523,6 +10628,7 @@ mod tests {
 
     fn tab_with(mark: TabMarkState) -> TabContent {
         TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
             title: "session".to_owned(),
             pane_count: 1,
             badge_text_width: 0.0,
@@ -10542,6 +10648,7 @@ mod tests {
     /// One tab that carries nothing but the trailer under test.
     fn pinnable_tab(trailer: TabTrailer) -> TabContent {
         TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
             title: "tab".to_owned(),
             pane_count: 1,
             badge_text_width: 0.0,
@@ -10797,6 +10904,7 @@ mod tests {
         let palette = chrome_palette();
         let tabs = [
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "a".to_owned(),
                 pane_count: 2,
                 badge_text_width: 6.0,
@@ -10807,6 +10915,7 @@ mod tests {
                 edit: None,
             },
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "b".to_owned(),
                 pane_count: 3,
                 badge_text_width: 6.0,
@@ -11757,6 +11866,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -11771,6 +11881,7 @@ mod tests {
     fn plain_tabs(count: usize) -> Vec<TabContent> {
         (0..count)
             .map(|index| TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: format!("tab {index}"),
                 pane_count: 1,
                 badge_text_width: 0.0,
@@ -11941,6 +12052,7 @@ mod tests {
                     rail_scroll: 0.0,
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
+                    leaf_marks: &NO_LEAF_MARKS,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -12004,6 +12116,7 @@ mod tests {
         tabs.insert(
             1,
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "stand-in".to_owned(),
                 ..TabContent::default()
             },
@@ -12034,6 +12147,7 @@ mod tests {
                     rail_scroll: 0.0,
                     preview_title: None,
                     terminal_names: &NO_TERMINAL_NAMES,
+                    leaf_marks: &NO_LEAF_MARKS,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -12215,6 +12329,7 @@ mod tests {
             pointer,
             ChromeContent {
                 tabs: &[TabContent {
+                    mark_kind: ChromeMark::ProfilePowerShell,
                     title: "PowerShell".to_owned(),
                     pane_count: seats.pane_count(),
                     badge_text_width: 0.0,
@@ -12232,6 +12347,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &all_powershell(seats),
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -13748,6 +13864,7 @@ mod tests {
         fit_overflow: Option<FitOverflow>,
     ) -> ChromeParts {
         let tabs = [TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
             title: "PowerShell".to_owned(),
             pane_count: seats.pane_count(),
             ..TabContent::default()
@@ -13767,6 +13884,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names,
+                leaf_marks: &NO_LEAF_MARKS,
                 preview_message: None,
                 fit_overflow,
                 profile_menu_open: false,
@@ -13795,6 +13913,7 @@ mod tests {
         transforms: &[(SeatId, crate::PaneTransform)],
     ) -> ChromeParts {
         let tabs = [TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
             title: "PowerShell".to_owned(),
             pane_count: seats.pane_count(),
             ..TabContent::default()
@@ -13814,6 +13933,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -14093,7 +14213,7 @@ mod tests {
         ];
         let parts = chrome_of(&seats, &layout, None);
         let palette = chrome_palette();
-        let (expected_mark, _, _) = pane_mark(SeatKind::Preview, palette);
+        let (expected_mark, _, _) = pane_mark(SeatKind::Preview, None, palette);
         let marks: Vec<_> = parts
             .sprites
             .iter()
@@ -14538,6 +14658,7 @@ mod tests {
         let tabs = titles
             .iter()
             .map(|title| TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: (*title).to_owned(),
                 pane_count: 1,
                 ..TabContent::default()
@@ -14584,6 +14705,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -14791,12 +14913,14 @@ mod tests {
         };
         let tabs = [
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "kept".to_owned(),
                 pane_count: 1,
                 trailer: pinned,
                 ..TabContent::default()
             },
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "ordinary".to_owned(),
                 pane_count: 1,
                 ..TabContent::default()
@@ -14823,6 +14947,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -14929,6 +15054,7 @@ mod tests {
         let palette = chrome_palette();
         let tabs = [
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "kept".to_owned(),
                 pane_count: 1,
                 trailer: TabTrailer {
@@ -14938,6 +15064,7 @@ mod tests {
                 ..TabContent::default()
             },
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "ordinary".to_owned(),
                 pane_count: 1,
                 ..TabContent::default()
@@ -14965,6 +15092,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -15099,11 +15227,13 @@ mod tests {
         // The four row states that put a fill down, plus the button.
         let tabs = [
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "active".to_owned(),
                 pane_count: 1,
                 ..TabContent::default()
             },
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "landing".to_owned(),
                 pane_count: 1,
                 landing: 1.0,
@@ -15185,12 +15315,14 @@ mod tests {
         let palette = chrome_palette();
         let tabs = [
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "split".to_owned(),
                 pane_count: 2,
                 badge_text_width: 6.0,
                 ..TabContent::default()
             },
             TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: "lone".to_owned(),
                 pane_count: 1,
                 ..TabContent::default()
@@ -16105,6 +16237,7 @@ mod tests {
             .map(|seat| (seat, r"D:\Developer\BetterTerminal".to_owned()))
             .collect();
         let tabs = [TabContent {
+            mark_kind: ChromeMark::ProfilePowerShell,
             title: "PowerShell".to_owned(),
             pane_count: seats.pane_count(),
             ..TabContent::default()
@@ -16126,6 +16259,7 @@ mod tests {
                 rail_scroll: 0.0,
                 preview_title: None,
                 terminal_names: &names,
+                leaf_marks: &NO_LEAF_MARKS,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -16953,6 +17087,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(index, title)| TabContent {
+                mark_kind: ChromeMark::ProfilePowerShell,
                 title: title.to_owned(),
                 pane_count: 1,
                 offset: if index == row { offset } else { 0.0 },
