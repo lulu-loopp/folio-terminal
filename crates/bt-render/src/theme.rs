@@ -331,6 +331,41 @@ pub struct ChromePalette {
     pub files_row_muted_hover: [u8; 3],
     /// The same `--ink3`, standing on [`Self::files_row_selected`].
     pub files_row_muted_selected: [u8; 3],
+    // ── the same eight rows, mixed over the *other* ground a tree can stand on ──
+    //
+    // C39's rule is that the tree body is shared byte for byte between the
+    // docked column and the floating window, and that rule is about the
+    // *drawing*. It cannot be about the colours, because the two hosts do not
+    // stand on the same plane: a docked column's body is `--termbg` (B15/U11,
+    // the eight above), and `#files-flyout`'s face is `--win` (mock-up 674).
+    // Those are two different greys on dark, so `--ink2` over one and `--ink2`
+    // over the other are two different colours, and a browser would have shown
+    // two different colours. One pre-mixed set could not have served both
+    // without lying to one of them — the same argument the eight above are
+    // themselves named on, applied one host further out.
+    //
+    // On light the two sets are numerically identical, because `--termbg` and
+    // `--win` are both `#FFFFFF` there. That coincidence is the reason this
+    // could have gone unnoticed for a whole theme, and it is not a reason to
+    // fold them: the dark values are the ones a reader is checking, and a
+    // single field would be wrong on exactly the theme this product is used in.
+    /// `.frow:hover` over `--win` — [`Self::files_row_hover`]'s twin inside a
+    /// floating window.
+    pub float_row_hover: [u8; 3],
+    /// `.frow.sel` over `--win`.
+    pub float_row_selected: [u8; 3],
+    /// `--ink2` over `--win`.
+    pub float_row_text: [u8; 3],
+    /// The same `--ink2`, standing on [`Self::float_row_hover`].
+    pub float_row_text_hover: [u8; 3],
+    /// `--ink` standing on [`Self::float_row_selected`].
+    pub float_row_text_selected: [u8; 3],
+    /// `--ink3` over `--win`.
+    pub float_row_muted: [u8; 3],
+    /// The same `--ink3`, standing on [`Self::float_row_hover`].
+    pub float_row_muted_hover: [u8; 3],
+    /// The same `--ink3`, standing on [`Self::float_row_selected`].
+    pub float_row_muted_selected: [u8; 3],
     /// A divider at rest: one logical pixel of quiet separation.
     pub divider: [u8; 3],
     /// A divider under the pointer: "this edge is a thing you can touch".
@@ -445,6 +480,27 @@ pub struct ChromePalette {
     pub drag_ghost_shadow_inner_alpha: u8,
     /// Half the inner one, same falloff rule as every other floating surface's.
     pub drag_ghost_shadow_outer_alpha: u8,
+    /// A transient float's own lift (`#files-flyout { box-shadow: 0 12px 34px
+    /// rgba(0,0,0,.20) }`, mock-up 676), split into the same two rings.
+    ///
+    /// A fifth pair, theme-varied like the tip's (`body.dark #files-flyout { …
+    /// rgba(0,0,0,.5) }`, line 679) and for the tip's reason at a larger size: a
+    /// pale panel on a dark plane needs a heavier lift to read as floating than
+    /// the same panel on a light one.
+    pub float_shadow_inner_alpha: u8,
+    /// Half the inner one, same falloff rule as every other floating surface's.
+    pub float_shadow_outer_alpha: u8,
+    /// A *pinned* float's lift (`.float-win.pinned { box-shadow: 0 16px 40px
+    /// rgba(0,0,0,.24) }`, mock-up 702; `.58` on dark, line 703).
+    ///
+    /// A sixth pair rather than a reuse of the fifth, because the mock-up writes
+    /// a second declaration and means it: a peek is a thing hovering a moment
+    /// over the window, and a pinned window has been *torn off* it. The extra
+    /// lift is the whole of how that reads at a glance, and it is the only
+    /// visual difference between the two modes that survives being still.
+    pub float_pinned_shadow_inner_alpha: u8,
+    /// Half the inner one, same falloff rule as every other floating surface's.
+    pub float_pinned_shadow_outer_alpha: u8,
     /// A modal dialog's face — `--win`. Three surfaces have to be told apart here
     /// and the mock-up names all three: `--termbg` is what a terminal shows,
     /// `--menu` is what floats over it, and `--win` is the window's own plane,
@@ -691,6 +747,23 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     files_row_muted: [0x72, 0x72, 0x72],
     files_row_muted_hover: [0x79, 0x79, 0x79],
     files_row_muted_selected: [0x7e, 0x7e, 0x7e],
+    // The same eight over `--win #202020` = 32, which is the ground inside a
+    // floating window:
+    //   `--hover`  white .055 → 32 + 223×.055 = 44.3
+    //   `--active` white .09  → 32 + 223×.09  = 52.1
+    float_row_hover: [0x2c, 0x2c, 0x2c],
+    float_row_selected: [0x34, 0x34, 0x34],
+    // `--ink2` (white .55) over the bare face and over the hover fill:
+    // 32 + 223×.55 = 154.7, 44.3 + 210.7×.55 = 160.2. And `--ink` (white .87)
+    // over the selected fill: 52.1 + 202.9×.87 = 228.6.
+    float_row_text: [0x9b, 0x9b, 0x9b],
+    float_row_text_hover: [0xa0, 0xa0, 0xa0],
+    float_row_text_selected: [0xe5, 0xe5, 0xe5],
+    // `--ink3` (white .38) over the same three: 32 + 223×.38 = 116.7,
+    // 44.3 + 210.7×.38 = 124.4, 52.1 + 202.9×.38 = 129.2.
+    float_row_muted: [0x75, 0x75, 0x75],
+    float_row_muted_hover: [0x7c, 0x7c, 0x7c],
+    float_row_muted_selected: [0x81, 0x81, 0x81],
     divider: [0x35, 0x35, 0x35],
     divider_hover: [0x51, 0x51, 0x51],
     divider_active: [0x7a, 0x99, 0xff],
@@ -730,6 +803,11 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     // `.25` black, the ghost's single declaration: 255 × .25 = 63.75.
     drag_ghost_shadow_inner_alpha: 64,
     drag_ghost_shadow_outer_alpha: 32,
+    // `.5` and `.58` black — the dark overrides at mock-up 679 and 703.
+    float_shadow_inner_alpha: 128,
+    float_shadow_outer_alpha: 64,
+    float_pinned_shadow_inner_alpha: 148,
+    float_pinned_shadow_outer_alpha: 74,
     dialog_surface: [0x20, 0x20, 0x20],
     dialog_title_text: [0xe2, 0xe2, 0xe2],
     dialog_secondary_text: [0x9b, 0x9b, 0x9b],
@@ -830,6 +908,19 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     files_row_muted: [0xa5, 0xa4, 0xa1],
     files_row_muted_hover: [0x9f, 0x9e, 0x9b],
     files_row_muted_selected: [0x9b, 0x9a, 0x97],
+    // The same eight over `--win`, which on this canvas is the same `#FFFFFF`
+    // `--termbg` is — so these are the eight above, value for value. Spelled out
+    // rather than shared for the reason the two `×`-on-pill entries above are:
+    // the pair has to exist for dark, and one constant standing for both would
+    // hide the day the two grounds stop coinciding here too.
+    float_row_hover: [0xf4, 0xf4, 0xf4],
+    float_row_selected: [0xed, 0xed, 0xec],
+    float_row_text: [0x7d, 0x7c, 0x78],
+    float_row_text_hover: [0x79, 0x78, 0x74],
+    float_row_text_selected: [0x37, 0x35, 0x2f],
+    float_row_muted: [0xa5, 0xa4, 0xa1],
+    float_row_muted_hover: [0x9f, 0x9e, 0x9b],
+    float_row_muted_selected: [0x9b, 0x9a, 0x97],
     divider: [0xe9, 0xe9, 0xe9],
     divider_hover: [0xc2, 0xc1, 0xbf],
     divider_active: [0x30, 0x59, 0xd8],
@@ -866,6 +957,11 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     // same pair the night does — see the field's own note.
     drag_ghost_shadow_inner_alpha: 64,
     drag_ghost_shadow_outer_alpha: 32,
+    // `.20` and `.24` black — the base declarations at mock-up 676 and 702.
+    float_shadow_inner_alpha: 51,
+    float_shadow_outer_alpha: 26,
+    float_pinned_shadow_inner_alpha: 61,
+    float_pinned_shadow_outer_alpha: 31,
     dialog_surface: [0xff, 0xff, 0xff],
     dialog_title_text: [0x37, 0x35, 0x2f],
     dialog_secondary_text: [0x7d, 0x7c, 0x78],
@@ -1309,6 +1405,72 @@ pub const FLOAT_WINDOW_BORDER_LOGICAL_PX: f32 = 1.0;
 /// shadow: no gaussian tail, and no downward offset, so it sits symmetrically
 /// around the box instead of pooling below it.
 pub const FLOAT_WINDOW_SHADOW_LOGICAL_PX: f32 = 3.0;
+/// `#files-flyout { width: 264px }` — what a float opens at, in both modes.
+pub const FLOAT_WINDOW_WIDTH_LOGICAL_PX: f32 = 264.0;
+/// `max-height: min(62vh, 460px)` — the taller of the two caps on a float that
+/// is sizing itself to its content.
+///
+/// The mock-up hangs this cap on `#files-flyout` and takes it off again under
+/// `.pinned` (`max-height: none`, line 702). That reads as "a pinned window has
+/// no height limit", and it is not: what `max-height` governs in a browser is
+/// *automatic* sizing, and a pinned window's height stops being automatic the
+/// moment it is given one by the grip. So the cap applies to every float that
+/// is asked to size itself — peek and pinned alike, since a click-to-pin opens
+/// at the same default size a peek does — and the grip is what is not bound by
+/// it. Reading `max-height: none` as "a fresh pinned window may open as tall as
+/// its content" would let one directory of a thousand entries open a window
+/// taller than the screen, with its own header off the top edge.
+pub const FLOAT_WINDOW_MAX_HEIGHT_LOGICAL_PX: f32 = 460.0;
+/// The other cap: `62vh` of the viewport a float is allowed to occupy.
+pub const FLOAT_WINDOW_MAX_HEIGHT_VIEWPORT_FRACTION: f32 = 0.62;
+/// `.float-win .fly-head { height: 30px }`.
+pub const FLOAT_WINDOW_HEAD_LOGICAL_PX: f32 = 30.0;
+/// `.float-win .fly-foot { height: 30px }`.
+pub const FLOAT_WINDOW_FOOT_LOGICAL_PX: f32 = 30.0;
+/// `.float-win.pinned { min-width: 200px }` — the grip's own floor.
+pub const FLOAT_WINDOW_MIN_WIDTH_LOGICAL_PX: f32 = 200.0;
+/// `.float-win.pinned { min-height: 150px }`.
+pub const FLOAT_WINDOW_MIN_HEIGHT_LOGICAL_PX: f32 = 150.0;
+/// **The honest floor** a squeezed pinned float stops at —
+/// `M2-tiny-window-priority.md` §3.4's `PINNED_FLOAT_MIN_STRIP`, pinned to a
+/// number here as that document says it would be ("具体像素值实现时钉").
+///
+/// It is [`FLOAT_WINDOW_HEAD_LOGICAL_PX`] and cannot sensibly be anything else:
+/// the ruling is that the window shrinks to "只剩浮窗自身标题条(含 ×/拖拽手柄)
+/// 那一条高度" and never to nothing, precisely so the two things that can undo
+/// the squeeze — the `×` and the drag handle — are still there to be used. A
+/// floor below the header would take away the header, which is the only reason
+/// there is a floor.
+///
+/// Written as its own name rather than used inline because it means something
+/// the header's height does not: §7.1.2 says a pinned float is closed by
+/// `×`/Esc/Dock/re-click and by nothing else, and this constant is where that
+/// promise is kept against geometry. The day the header changes height, this
+/// follows it — but the day someone wants "collapse it to zero when it does not
+/// fit", they have to come here and argue with the doc comment.
+pub const FLOAT_WINDOW_MIN_STRIP_LOGICAL_PX: f32 = FLOAT_WINDOW_HEAD_LOGICAL_PX;
+/// `.float-win .fly-resize { width: 16px; height: 16px }` — the corner grip.
+pub const FLOAT_WINDOW_GRIP_LOGICAL_PX: f32 = 16.0;
+/// How far a float opens below the trigger that summoned it (§7.1.2「触发器→
+/// 浮层间距 6px」).
+pub const FLOAT_WINDOW_TRIGGER_GAP_LOGICAL_PX: f32 = 6.0;
+/// How close to the viewport's edge a float may be placed (§7.1.2「视口安全边距
+/// 8px」).
+pub const FLOAT_WINDOW_VIEWPORT_MARGIN_LOGICAL_PX: f32 = 8.0;
+/// How far a *dragged* pinned float may be pushed against the viewport's edge.
+///
+/// Six rather than the eight above, and the mock-up means the difference: the
+/// eight is where the app *places* a window you did not position, and this is
+/// how far your own hand is allowed to push one (`Math.max(6, …)`, mock-up
+/// 8665-8666). A margin you chose to close is not the same as a margin the app
+/// chose for you.
+pub const FLOAT_WINDOW_DRAG_MARGIN_LOGICAL_PX: f32 = 6.0;
+/// `@keyframes flyIn/flyOut` — `.12s` in and the same back out (§7.1.2「进出
+/// 动画 120ms」).
+pub const FLOAT_WINDOW_ANIMATION_MS: u64 = 120;
+/// `transform: translateY(-5px)` — how far a float rises into place, and falls
+/// back out of it.
+pub const FLOAT_WINDOW_RISE_LOGICAL_PX: f32 = 5.0;
 
 /// `.drag-ghost { border-radius: 7px }` (mock-up 1719) — the label that rides
 /// the pointer for the length of a drag.

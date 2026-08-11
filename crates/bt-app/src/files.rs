@@ -57,15 +57,40 @@ pub const DIR_ENTRY_CAP: usize = 2000;
 pub const FILES_WORKER_STOPPED_NOTICE: &str =
     "Directory reading stopped; terminal input and output remain available";
 
-/// "Read this directory for this column."
+/// **Who is asking.**
 ///
-/// Addressed by [`LeafId`] rather than by [`crate::seats::SeatId`] alone for the
-/// reason written over `MathWorkerRequest`: a seat id is only unique inside its
-/// tab, and a worker that answers the wrong tab's pane is the bug that comment
-/// records having already been paid for once.
+/// There are two kinds of file tree in this window and they are addressed
+/// differently, because they *are* different things. A docked column is a seat
+/// in a tab, and the pair names it. A floating window is not a seat and is not in
+/// a tab (`M2-layout-solver-spec.md` §2.6.4: 浮窗不是座位、不进树) — there is at
+/// most one of them in the whole window (§7.1.2「全窗口单例」), so what has to be
+/// carried is not *which* float but *which view* the one float was showing when
+/// the question was asked.
+///
+/// That is the epoch. Redirecting the peek to another trigger, or tearing a
+/// column out into a window, replaces the view behind the same singleton; an
+/// answer that was already in flight for the old one would otherwise be filed
+/// into the new one's cache, where its keys mean somewhere else entirely. The
+/// docked side solves the same problem by checking the seat still exists and by
+/// dropping the cache on re-root; this is that guard for a surface that has no
+/// seat to check.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FilesHost {
+    /// A column on the tree: the seat, in the tab that holds it.
+    ///
+    /// Addressed by [`LeafId`] rather than by [`crate::seats::SeatId`] alone for
+    /// the reason written over `MathWorkerRequest`: a seat id is only unique
+    /// inside its tab, and a worker that answers the wrong tab's pane is the bug
+    /// that comment records having already been paid for once.
+    Docked(LeafId),
+    /// The floating window, showing the view minted at this epoch.
+    Float(u64),
+}
+
+/// "Read this directory for this tree."
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirRequest {
-    pub leaf: LeafId,
+    pub host: FilesHost,
     /// The stable id of the directory being read — `""` for the column's root.
     pub key: String,
     /// Where on disk that id currently points.
@@ -81,14 +106,14 @@ impl DirRequest {
     /// newer request is the one that should win — which is exactly what
     /// coalescing on the pair already does.
     fn same_target(&self, other: &Self) -> bool {
-        self.leaf == other.leaf && self.key == other.key
+        self.host == other.host && self.key == other.key
     }
 }
 
 /// What the worker found.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DirResponse {
-    pub leaf: LeafId,
+    pub host: FilesHost,
     pub key: String,
     pub outcome: DirOutcome,
 }
@@ -859,7 +884,7 @@ impl FilesWorker {
                     let outcome = read_directory(&request.path);
                     if response_tx
                         .send(DirResponse {
-                            leaf: request.leaf,
+                            host: request.host,
                             key: request.key,
                             outcome,
                         })
@@ -1175,12 +1200,12 @@ mod tests {
     #[test]
     fn the_queue_keeps_the_newest_question_per_column_and_folder() {
         let (tx, rx) = mpsc::channel();
-        let leaf = LeafId {
+        let host = FilesHost::Docked(LeafId {
             tab: crate::TabId(1),
             seat: crate::SeatId(1),
-        };
+        });
         let ask = |key: &str, path: &str| DirRequest {
-            leaf,
+            host,
             key: key.to_owned(),
             path: PathBuf::from(path),
         };
@@ -1207,12 +1232,12 @@ mod tests {
     #[test]
     fn a_question_superseded_during_a_slow_read_is_dropped_rather_than_asked() {
         let (tx, rx) = mpsc::channel();
-        let leaf = LeafId {
+        let host = FilesHost::Docked(LeafId {
             tab: crate::TabId(1),
             seat: crate::SeatId(1),
-        };
+        });
         let ask = |key: &str, path: &str| DirRequest {
-            leaf,
+            host,
             key: key.to_owned(),
             path: PathBuf::from(path),
         };

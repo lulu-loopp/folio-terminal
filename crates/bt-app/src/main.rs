@@ -13,6 +13,7 @@ use std::{
 };
 
 mod files;
+mod float;
 mod input;
 mod marks;
 mod peek_strip;
@@ -45,7 +46,7 @@ use bt_render::{
     LatestFrameSlot, MathHit, MathHitTarget, PREVIEW_BODY_INSET_LOGICAL_PX, PeekImageOverlay,
     Preedit, PresentOutcome, PreviewImage, Renderer, SeatViewport, Theme, ThemeChange,
     WINDOW_TAB_BREATHE_MIN_OPACITY, WINDOW_TAB_BREATHE_PERIOD_MS,
-    WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_REVEAL_MS,
+    WINDOW_TAB_BREATHE_REDUCED_OPACITY, WINDOW_TAB_PIN_FADE_MS, WINDOW_TAB_PIN_REVEAL_MS,
     WINDOW_TAB_RING_INDETERMINATE_TURNS, WINDOW_TAB_RING_SPIN_PERIOD_MS,
     WINDOW_TAB_RING_SWEEP_TRANSITION_MS, background_rgb, compose_preedit, current_cursor_style,
     foreground_rgb, frame_content_digest, frame_is_alternate_screen, preview_image_extent,
@@ -837,6 +838,19 @@ struct TabState {
     /// The pin's hover reveal. A pinned tab holds it open at 1.0; an unpinned
     /// one opens it while the pointer is on the tab and closes it after.
     pin_reveal: RevealTween,
+    /// How lit this tab's folder trigger is — the 0 / .6 / 1 ladder of H76/H104.
+    ///
+    /// Its own tween beside [`Self::pin_reveal`] rather than a share, because the
+    /// two are different properties of the same reveal: the pin's is a *width*
+    /// (`width .16s`, and at rest the control occupies nothing at all), and this
+    /// is an *opacity* (`opacity .12s`) with a middle rung the other does not
+    /// have. Folding them would mean one number answering "how wide" and "how
+    /// lit", which are only ever equal at the two ends.
+    files_lit: RevealTween,
+    /// The lit-ness as it was last *drawn*, in the 1/255ths a sprite's opacity
+    /// resolves to — this tween's half of the frame debt, exactly as
+    /// [`Self::last_drawn_pin_reveal`] is the other's.
+    last_drawn_files_lit: Option<u8>,
     /// The reveal the strip was last told to draw, quantised — the pin's half of
     /// the frame debt.
     last_drawn_pin_reveal: Option<u8>,
@@ -1273,6 +1287,33 @@ struct Runtime {
     /// the tab switched, the column was closed, the pane became something else —
     /// is answered in one place.
     files_focus: Option<LeafId>,
+    /// The one floating window this window may have open (§7.1.2, G80/G96).
+    ///
+    /// A window-level singleton for the same reason `rename` above is one: there
+    /// is one of it by ruling, and "two floating trees" is not a state this
+    /// window can be in. It is *not* on a tab, and that is the whole of what
+    /// 撕下 means — a pinned float survives switching tabs, closing unrelated
+    /// tabs and opening new ones, because it stopped belonging to the tab it was
+    /// summoned from the moment it was torn off.
+    float: float::FloatHost,
+    /// A pinned float being moved or resized by hand, or `None`.
+    ///
+    /// Beside [`Runtime::divider_drag`] rather than folded into it: a divider
+    /// drag is one axis of one seam and writes a ratio into the tree, while this
+    /// is two axes of a surface that is not in the tree at all
+    /// (`M2-tiny-window-priority.md` §3.1 — 浮窗对布局是只读消费者). Sharing a
+    /// state machine would put a rewrite of the layout one typo away from a
+    /// gesture that must never perform one.
+    float_drag: Option<FloatDrag>,
+    /// What the pointer is over inside the float, or `None`.
+    ///
+    /// Stored rather than recomputed at paint time because the float's boxes are
+    /// derived from a frame this same pass may be about to move: a hover read
+    /// after a drag step and a hover read before it are two different answers,
+    /// and the one that matters is the one the pointer event produced.
+    float_hover: Option<float::FloatPart>,
+    /// When the foot last confirmed a reveal, or `None` (B24).
+    float_revealed_at: Option<Instant>,
     /// The open tab-name editor, or `None` when nobody is renaming anything.
     ///
     /// On the runtime rather than on the tab, because it is a *window*-level
@@ -2062,6 +2103,43 @@ enum DividerGrip {
         leading: bool,
         origin: bt_layout::LogicalPx,
     },
+}
+
+/// The caption on the float's dock button.
+///
+/// Written in its own case and upper-cased at the point of drawing, because
+/// `text-transform: uppercase` is a *presentation* of a word and not the word:
+/// the tooltip beside it says "Dock as a pane on the left" in sentence case, and
+/// storing the shouted form would make the two disagree about what the button is
+/// called.
+const FLOAT_DOCK_LABEL: &str = "DOCK";
+
+/// What every folder trigger's tip says (H108) — `title="Peek files here"` on
+/// the tab's and on the pane head's alike.
+const FLOAT_TRIGGER_TIP: &str = "Peek files here";
+
+/// What the foot says while it is confirming a reveal (B24).
+const FLOAT_REVEALED_LABEL: &str = "Revealed in File Explorer";
+
+/// How long that confirmation stands before the path comes back (B24).
+const FLOAT_REVEAL_FEEDBACK: Duration = Duration::from_millis(1300);
+
+/// A pinned float being moved or resized (G92).
+///
+/// **Nothing is captured until the gesture is committed to**, which is the
+/// mock-up's own bug written as a shape (line 8657-8660): capturing the pointer
+/// on every press inside the window retargeted the release to the window itself,
+/// so `×` and `DOCK` never received a click at all. A press on a button is not a
+/// drag and must not become one, so only a press on the *bare* header — or on the
+/// grip — produces one of these.
+#[derive(Clone, Copy, Debug)]
+enum FloatDrag {
+    /// Moving the whole window, keeping the point that was grabbed under the
+    /// pointer. The offset is what makes it read as carrying rather than as the
+    /// window jumping its own corner to the cursor.
+    Move { grab: [f32; 2] },
+    /// Resizing from the bottom-right grip, which moves that corner alone.
+    Resize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -5985,6 +6063,13 @@ impl TabState {
     /// The reveal as the strip would draw it: quantised to the 1/255 the
     /// sprite's opacity resolves to, which is the finest difference that can
     /// reach the screen.
+    /// The trigger's lit-ness quantised the way it will be drawn, so a tween
+    /// settling in the last thousandth stops owing frames.
+    fn drawn_files_lit(&self, now: Instant, motion: Motion) -> u8 {
+        let (lit, _) = self.files_lit.sample(now, motion);
+        (lit.clamp(0.0, 1.0) * 255.0).round() as u8
+    }
+
     fn drawn_pin_reveal(&self, now: Instant, motion: Motion) -> u8 {
         let (reveal, _) = self.pin_reveal.sample(now, motion);
         (reveal.clamp(0.0, 1.0) * 255.0).round() as u8
@@ -7057,6 +7142,11 @@ fn assemble_tab_state(
             span: Duration::from_millis(WINDOW_TAB_PIN_REVEAL_MS),
         },
         last_drawn_pin_reveal: None,
+        // Out, and out for every tab including this one if it arrives active:
+        // "an active tab does NOT show it by default" (H104), which the mock-up
+        // learned from a fresh tab flashing the icon on with no hover.
+        files_lit: RevealTween::over(Duration::from_millis(WINDOW_TAB_PIN_FADE_MS)),
+        last_drawn_files_lit: None,
         ring_tween: None,
         ring_sweep: None,
         last_drawn_mark: None,
@@ -7796,6 +7886,10 @@ impl Runtime {
             tab_clicks: TabClicks::default(),
             files_row_clicks: FilesRowClicks::default(),
             root_menu: profiles::RootMenu::default(),
+            float: float::FloatHost::default(),
+            float_drag: None,
+            float_hover: None,
+            float_revealed_at: None,
             files_name_widths: BTreeMap::new(),
             files_notice: None,
             files_focus: None,
@@ -8512,6 +8606,8 @@ impl Runtime {
                     seats::TabTrailer {
                         pinned: tab.pinned,
                         reveal: tab.pin_reveal.sample(now, self.motion).0,
+                        files: tab.seats.is_lone_terminal(),
+                        files_lit: tab.files_lit.sample(now, self.motion).0,
                     },
                     tab.drawn_offset(now, self.motion, carried.filter(|_| grabbed == Some(index))),
                     tab.landing.sample(now, self.motion).0,
@@ -8637,6 +8733,7 @@ impl Runtime {
                 rail: self.sampled_rail(now),
                 rail_scroll: self.rail_scroll,
                 preview_title: preview_title.as_deref(),
+                float_shown: self.float_shown_tab(),
                 terminal_names: &terminal_names,
                 leaf_marks: &leaf_marks,
                 files_names: &files_names,
@@ -8812,6 +8909,9 @@ impl Runtime {
                 })
                 .unwrap_or_default()
                 .to_owned(),
+            // H108: both surfaces say the same five words, because it is one
+            // action wearing one glyph in two places.
+            tooltip::TooltipAnchorId::TabFiles(_) => FLOAT_TRIGGER_TIP.to_owned(),
             tooltip::TooltipAnchorId::TabIcon(index) => self
                 .tabs
                 .get(index)
@@ -9578,6 +9678,13 @@ impl Runtime {
         // than for the compositor's, and the mock-up's own `z-index` agrees
         // (`.layout-peek` 35, `.tip` 60).
         layers.extend(self.layout_peek_layer());
+        // `#files-flyout { z-index: 60 }` against the menu chain's 30 and the
+        // root menu's 55 (mock-up 672, 629, 1014): a floating window covers every
+        // popup, because it is not one — a menu is a moment and this is a place.
+        // It goes under the tip for the tip's own stated reason: the tip is the
+        // one surface in this window that is never covered, and a float has
+        // controls with tips of their own.
+        layers.extend(self.float_layer(now));
         layers.extend(self.tooltip_layer());
         // Above even the tip: `z-index: 100` against its `60` (mock-up 1717).
         // The tip's claim to being uncoverable is that it explains what is under
@@ -10499,7 +10606,9 @@ impl Runtime {
             return self.close_pane(open);
         }
         let root = self.files_root_for_new_pane();
-        let Some(seat) = self.seats.add_files_pane(&metrics) else {
+        // No width to bring: a column opened from the keyboard has no history, so
+        // it takes the kind's own opening width (F62's 240).
+        let Some(seat) = self.seats.add_files_pane(&metrics, None) else {
             return Ok(());
         };
         self.files.insert(
@@ -11373,7 +11482,7 @@ impl Runtime {
                 // already asked rather than asking it a second time.
                 cache.mark_pending(&key);
                 asks.push(files::DirRequest {
-                    leaf: LeafId { tab: tab_id, seat },
+                    host: files::FilesHost::Docked(LeafId { tab: tab_id, seat }),
                     path: files::full_path(&root, &key),
                     key,
                 });
@@ -11427,7 +11536,7 @@ impl Runtime {
             return;
         };
         let request = files::DirRequest {
-            leaf: LeafId { tab: tab.id, seat },
+            host: files::FilesHost::Docked(LeafId { tab: tab.id, seat }),
             key: key.to_owned(),
             path: files::full_path(&state.root, key),
         };
@@ -11441,24 +11550,39 @@ impl Runtime {
         let mut changed = false;
         loop {
             match self.files_worker.responses.try_recv() {
-                Ok(response) => {
+                Ok(response) => match response.host {
                     // A tab or a column that closed while its read was in flight
                     // has nowhere to put the answer, and that is not a failure —
                     // it is the cancellation, arriving as a dropped result.
-                    let Some(index) = self.tabs.iter().position(|tab| tab.id == response.leaf.tab)
-                    else {
-                        continue;
-                    };
-                    let tab = &mut self.tabs[index];
-                    if !tab.files.contains_key(&response.leaf.seat) {
-                        continue;
+                    files::FilesHost::Docked(leaf) => {
+                        let Some(index) = self.tabs.iter().position(|tab| tab.id == leaf.tab)
+                        else {
+                            continue;
+                        };
+                        let tab = &mut self.tabs[index];
+                        if !tab.files.contains_key(&leaf.seat) {
+                            continue;
+                        }
+                        tab.file_trees
+                            .entry(leaf.seat)
+                            .or_default()
+                            .accept(&response.key, response.outcome);
+                        changed |= index == self.active_tab;
                     }
-                    tab.file_trees
-                        .entry(response.leaf.seat)
-                        .or_default()
-                        .accept(&response.key, response.outcome);
-                    changed |= index == self.active_tab;
-                }
+                    // The float's version of the same cancellation: the window is
+                    // gone, or it is showing a *different* view than the one that
+                    // asked. The epoch is what tells those apart — without it a
+                    // peek redirected to another trigger would be handed the old
+                    // root's directories under keys that now mean somewhere else.
+                    files::FilesHost::Float(epoch) => {
+                        let Some(win) = self.float.live_mut().filter(|win| win.epoch == epoch)
+                        else {
+                            continue;
+                        };
+                        win.cache.accept(&response.key, response.outcome);
+                        changed = true;
+                    }
+                },
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     changed |= self.disable_files_worker();
@@ -11676,6 +11800,887 @@ impl Runtime {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+
+    // ── the floating window (§7.1.2) ────────────────────────────────────────
+
+    /// What the pointer is over inside the float, if it is over the float at all.
+    ///
+    /// A *dismissed* float answers nothing — `pointer-events: none` on
+    /// `.closing`, which is what stops a window that is on its way out from
+    /// swallowing the click you aimed at what is behind it.
+    fn float_part_at(&mut self, position: PhysicalPosition<f64>) -> Option<float::FloatPart> {
+        self.float.live()?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let (geometry, _) = self.float_geometry_now()?;
+        let rows = self
+            .float
+            .live()
+            .map(|win| files::tree_view(&win.files, &win.cache).rows.len())
+            .unwrap_or_default();
+        let scroll = self
+            .float
+            .live()
+            .map(|win| win.cache.scroll_px)
+            .unwrap_or_default();
+        let tree = seats::files_tree_geometry(geometry.body, rows, scroll, scale);
+        float::float_hit(&geometry, position.x as f32, position.y as f32, |x, y| {
+            tree.row_at(x + geometry.body[0], y + geometry.body[1])
+        })
+    }
+
+    /// Drive the peek's two clocks from a pointer that has moved (G84/H112).
+    ///
+    /// A pinned window is deliberately not on this path at all: it is closed by
+    /// `×`, Esc, Dock or its own trigger, and "the pointer went somewhere else"
+    /// is not on that list.
+    fn drive_float_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
+        let part = self.float_part_at(position);
+        if self.float_hover != part {
+            self.float_hover = part;
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+        }
+        if !self.float.peek_is_open() {
+            return Ok(());
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let Some(frame) = self.float.live().map(|win| win.frame) else {
+            return Ok(());
+        };
+        let reach = float::peek_reach(frame, position.x as f32, position.y as f32, scale);
+        // The trigger counts as part of the region, and so does the root menu:
+        // the mock-up's own list is `#files-flyout, #root-menu, .tab-files,
+        // .pane-files` (3910-3911). Reaching for the thing that summoned it is
+        // not leaving it.
+        let on_trigger = matches!(
+            self.chrome_target_at(position),
+            Some(
+                seats::ChromeTarget::TabFiles(_)
+                    | seats::ChromeTarget::PaneFiles(_)
+                    | seats::ChromeTarget::FilesRoot(_)
+            )
+        );
+        if reach.inside || on_trigger {
+            self.float.hold();
+        } else {
+            self.float.release(reach.off_left, Instant::now());
+        }
+        Ok(())
+    }
+
+    /// Advance both of the float's clocks and its animation.
+    fn advance_float(&mut self, now: Instant) -> Result<()> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let mut changed = false;
+        // The confirmation has run out: the foot goes back to saying where it is.
+        if self.float_revealed_at.is_some() && !self.float_reveal_is_fresh(now) {
+            self.float_revealed_at = None;
+            changed = true;
+        }
+        // A *transient* peek whose trigger has gone — the tab closed, the split
+        // collapsed, the pane it hung from stopped being a terminal — has nothing
+        // left to hang from, and `PeekHost::retain`'s rule applies: a popup whose
+        // subject died must not be left on screen. A **pinned** window is exempt
+        // by ruling (§7.1.2): it was torn off, and the death of the header it came
+        // from is not on its list of closers.
+        if self.float.peek_is_open()
+            && let Some(origin) = self.float.live().and_then(|win| win.origin)
+            && self.trigger_rect(origin).is_none()
+        {
+            self.float.dismiss(now);
+            changed = true;
+        }
+        if let Some(trigger) = self.float.take_due(now) {
+            // The intent matured. The trigger is looked up **again, by identity**
+            // (G86): the strip may have been rebuilt during those 180ms, and an
+            // intent that had remembered a rectangle would be pointing at one
+            // that no longer exists.
+            if self.trigger_rect(trigger).is_some() {
+                self.open_float(trigger, float::FloatMode::Peek)?;
+            }
+            changed = true;
+        }
+        if self.float.grace_expired(now) {
+            self.dismiss_float()?;
+            changed = true;
+        }
+        if self.float.sweep(now, self.motion, scale) {
+            changed = true;
+        }
+        // `height: auto` while nobody has taken hold of it: the window grows as
+        // its rows arrive and stops at the cap, which is what the mock-up's CSS
+        // does and what a tree read on a worker cannot get by measuring once.
+        if self.resize_float_to_content() {
+            changed = true;
+        }
+        // A float in the middle of its entrance owes a frame; one standing still
+        // owes nothing, which is why the deadline below reports nothing then.
+        let animating = self
+            .float
+            .drawn()
+            .is_some_and(|win| win.fade(now, self.motion, scale).moving);
+        if (changed || animating) && self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        // A living float asks the worker for whatever it has not yet been told.
+        self.ask_float_directories();
+        Ok(())
+    }
+
+    /// The directories the float is showing but has never read.
+    ///
+    /// The docked columns' own walk, for the one tree that is not a column: the
+    /// view says what it wants, the cache is marked before the send so a second
+    /// walk on the same frame does not ask twice, and the epoch rides along so a
+    /// late answer can be matched to the view that asked.
+    fn ask_float_directories(&mut self) {
+        let Some(win) = self.float.live_mut() else {
+            return;
+        };
+        let epoch = win.epoch;
+        let root = win.files.root.clone();
+        let wanted = files::tree_view(&win.files, &win.cache).wanted;
+        if wanted.is_empty() {
+            return;
+        }
+        let mut asks = Vec::new();
+        for key in wanted {
+            win.cache.mark_pending(&key);
+            asks.push(files::DirRequest {
+                host: files::FilesHost::Float(epoch),
+                path: files::full_path(&root, &key),
+                key,
+            });
+        }
+        for ask in asks {
+            if !self.files_worker.request(ask) {
+                self.disable_files_worker();
+                break;
+            }
+        }
+    }
+
+    /// A press inside the float. Returns whether the float consumed it.
+    ///
+    /// **Nothing is captured until the gesture is committed to** (G92): a press
+    /// on `DOCK`, on `×`, on the foot or on a row must reach its own handler, so
+    /// only the bare header and the grip start a drag. The mock-up captured the
+    /// pointer on every press inside the window and paid for it — the release was
+    /// retargeted to the window, so `×` and `DOCK` never saw a click at all.
+    fn press_float(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(part) = self.float_part_at(position) else {
+            return Ok(false);
+        };
+        match part {
+            float::FloatPart::Close => {
+                self.dismiss_float()?;
+            }
+            float::FloatPart::Dock => self.dock_float()?,
+            float::FloatPart::Foot => self.reveal_float_root()?,
+            float::FloatPart::Row(index) => self.press_float_row(index)?,
+            float::FloatPart::Head => {
+                // Only a pinned window is draggable: a peek is a moment, and a
+                // moment you can pick up and carry is a window you were not told
+                // you had.
+                if self.float.pinned_is_open() {
+                    let frame = self.float.live().map(|win| win.frame).unwrap_or_default();
+                    self.float_drag = Some(FloatDrag::Move {
+                        grab: [position.x as f32 - frame[0], position.y as f32 - frame[1]],
+                    });
+                }
+            }
+            float::FloatPart::Grip => {
+                if self.float.pinned_is_open() {
+                    self.float_drag = Some(FloatDrag::Resize);
+                }
+            }
+            // The body away from any row: a press lands on the window and goes no
+            // further, which is what makes a float opaque to the layout beneath.
+            float::FloatPart::Body => {}
+        }
+        Ok(true)
+    }
+
+    /// A press on one row of the float's tree.
+    ///
+    /// The docked column's own two verbs (C155): a directory folds or unfolds and
+    /// the tree is redrawn; a file is merely selected, and **selecting must not
+    /// rebuild the list** — a row node swapped between two clicks is how the
+    /// double-click that opens a preview goes silently missing.
+    fn press_float_row(&mut self, index: usize) -> Result<()> {
+        let Some(win) = self.float.live_mut() else {
+            return Ok(());
+        };
+        let rows = files::tree_view(&win.files, &win.cache).rows;
+        let Some(row) = rows.get(index) else {
+            return Ok(());
+        };
+        let key = row.key.clone();
+        let is_dir = matches!(row.kind, files::RowKind::Directory { .. });
+        win.files.sel = Some(key.clone());
+        if is_dir {
+            let epoch = win.epoch;
+            let root = win.files.root.clone();
+            let opened =
+                files::apply_tree_command(&mut win.files, &rows, files::TreeCommand::Right);
+            // Unfolding is this product's refresh gesture (there is no watcher
+            // yet), so an opened directory is re-asked exactly as a column's is.
+            if matches!(opened, files::TreeAction::Opened(_)) {
+                win.cache.turn_row(&key, true, Instant::now(), Motion::Full);
+                let request = files::DirRequest {
+                    host: files::FilesHost::Float(epoch),
+                    path: files::full_path(&root, &key),
+                    key,
+                };
+                if !self.files_worker.request(request) {
+                    self.disable_files_worker();
+                }
+            } else {
+                let _ = files::apply_tree_command(
+                    &mut self.float.live_mut().expect("still open").files,
+                    &rows,
+                    files::TreeCommand::Left,
+                );
+            }
+        }
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Show the float's root in the OS file manager (B24, the float's foot).
+    ///
+    /// The confirmation is the mock-up's: the folder becomes a tick, the path
+    /// becomes a sentence, and both go back 1300ms later. It says the thing a
+    /// launched process cannot — Explorer may open behind this window, or focus a
+    /// window that was already open somewhere else, and without a word here the
+    /// click reads as having done nothing.
+    fn reveal_float_root(&mut self) -> Result<()> {
+        let Some(root) = self.float.live().map(|win| win.files.root.clone()) else {
+            return Ok(());
+        };
+        if root.is_empty() {
+            return Ok(());
+        }
+        // Failure is deliberately not an error path: this is a courtesy, and a
+        // window that refuses to keep working because a file manager would not
+        // start is a worse answer than a button that quietly did nothing. The
+        // confirmation is withheld in that case, which is the honest report.
+        if std::process::Command::new("explorer.exe")
+            .arg(&root)
+            .spawn()
+            .is_ok()
+        {
+            self.float_revealed_at = Some(Instant::now());
+            if self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the foot is still showing its confirmation.
+    fn float_reveal_is_fresh(&self, now: Instant) -> bool {
+        self.float_revealed_at
+            .is_some_and(|at| now.saturating_duration_since(at) < FLOAT_REVEAL_FEEDBACK)
+    }
+
+    /// Move or resize the float under a dragged pointer. Returns whether it owned
+    /// the event.
+    fn drive_float_drag(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some(drag) = self.float_drag else {
+            return Ok(false);
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let viewport = self.float_viewport();
+        let pointer = [position.x as f32, position.y as f32];
+        let Some(win) = self.float.live_mut() else {
+            self.float_drag = None;
+            return Ok(false);
+        };
+        win.frame = match drag {
+            FloatDrag::Move { grab } => {
+                float::float_dragged_to(win.frame, pointer, grab, viewport, scale)
+            }
+            FloatDrag::Resize => float::float_resized_to(win.frame, pointer, viewport, scale),
+        };
+        // A hand on the window ends `height: auto`: from here the size and the
+        // place are the user's answer, and rows arriving later do not get to
+        // move a window somebody has put somewhere.
+        win.self_sizing = false;
+        if self.refresh_overlay() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Grow (or shrink) a self-sizing float to the rows it is now showing.
+    ///
+    /// Returns whether anything moved. It re-runs the *placement* and not merely
+    /// the height, because a window that opened above its trigger — flipped for
+    /// want of room below — grows upward rather than down, and only the placement
+    /// knows which of those this one is.
+    fn resize_float_to_content(&mut self) -> bool {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let viewport = self.float_viewport();
+        let Some(win) = self.float.live() else {
+            return false;
+        };
+        if !win.self_sizing {
+            return false;
+        }
+        let rows = files::tree_view(&win.files, &win.cache).rows.len();
+        let anchor = win.anchor;
+        let was = win.frame;
+        let body = seats::files_tree_content_height(rows, scale);
+        let size =
+            float::float_opening_size(float::float_height_for_body(body, scale), viewport, scale);
+        let origin = match anchor {
+            Some(anchor) => float::float_placement(anchor, size, viewport, scale),
+            None => [was[0], was[1]],
+        };
+        let frame = float::clamp_pinned(
+            [
+                origin[0],
+                origin[1],
+                origin[0] + size[0],
+                origin[1] + size[1],
+            ],
+            viewport,
+            scale,
+        );
+        if frame == was {
+            return false;
+        }
+        if let Some(win) = self.float.live_mut() {
+            win.frame = frame;
+        }
+        true
+    }
+
+    /// Put the float back inside a viewport that has just changed shape.
+    ///
+    /// The two regimes of `M2-tiny-window-priority.md` §3.2, side by side:
+    /// TRANSIENT dissolves on any geometry change, PINNED is translated home and
+    /// keeps its size. The asymmetry is the promise: nobody was told the peek
+    /// would stay, and the pinned window is there because somebody asked for it,
+    /// so taking it away would be a silent undo of that choice.
+    fn reclamp_float(&mut self) {
+        if self.float.peek_is_open() {
+            self.float.wipe();
+            self.float_drag = None;
+            self.float_hover = None;
+            return;
+        }
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let viewport = self.float_viewport();
+        if let Some(win) = self.float.live_mut() {
+            win.frame = float::clamp_pinned(win.frame, viewport, scale);
+        }
+    }
+
+    /// The float's next appointment.
+    fn float_deadline(&self, now: Instant) -> Option<Instant> {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        self.float
+            .deadline(now, self.motion, scale, STRIP_ANIMATION_FRAME)
+    }
+
+    /// The tab whose own trigger opened the float on screen — `.vtab.shown`'s
+    /// row (Q173), as a position in the strip.
+    ///
+    /// `None` for a float torn out of a *pane* head or popped out of a column:
+    /// neither has a tab-level trigger, so there is no row entitled to say "this
+    /// one is mine".
+    fn float_shown_tab(&self) -> Option<usize> {
+        match self.float.live()?.origin? {
+            float::FloatTrigger::Tab(id) => self.tabs.iter().position(|tab| tab.id == id),
+            float::FloatTrigger::Pane(_) => None,
+        }
+    }
+
+    /// The float's chassis, laid out where it stands this frame.
+    ///
+    /// `rise` is the entrance's `translateY(-5px)` on its way to nothing, applied
+    /// to the whole window here rather than to each box inside it — one
+    /// displacement of one geometry, which is how a rising window stays
+    /// internally consistent by construction.
+    fn float_geometry_now(&mut self) -> Option<(float::FloatGeometry, float::FloatFade)> {
+        let now = Instant::now();
+        let (mode, frame, fade) = {
+            let win = self.float.drawn()?;
+            let scale = self.renderer.metrics().scale_factor as f32;
+            (win.mode, win.frame, win.fade(now, self.motion, scale))
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let dock_label = self.float_dock_label_width(scale);
+        let risen = [
+            frame[0],
+            frame[1] - fade.rise,
+            frame[2],
+            frame[3] - fade.rise,
+        ];
+        Some((float::float_geometry(risen, mode, scale, dock_label), fade))
+    }
+
+    /// How wide the `DOCK` caption is — only the font knows, so it is measured
+    /// beside the renderer exactly as the tip's and the badge's are.
+    fn float_dock_label_width(&mut self, scale: f32) -> f32 {
+        let font = float::FLOAT_DOCK_FONT_LOGICAL_PX * scale;
+        self.renderer.measure_chrome_text(FLOAT_DOCK_LABEL, font)
+    }
+
+    /// The float's own layer of the overlay stack.
+    fn float_layer(&mut self, now: Instant) -> Vec<marks::OverlayLayer> {
+        let Some((geometry, fade)) = self.float_geometry_now() else {
+            return Vec::new();
+        };
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let motion = self.motion;
+        // Everything the drawing needs, taken in one borrow so the measuring
+        // below — which wants the renderer — is not fighting the host for `self`.
+        let (mode, root, content) = {
+            let Some(win) = self.float.drawn() else {
+                return Vec::new();
+            };
+            let view = files::tree_view(&win.files, &win.cache);
+            let turns = view
+                .rows
+                .iter()
+                .filter_map(|row| match row.kind {
+                    files::RowKind::Directory { open } => Some((
+                        row.key.clone(),
+                        win.cache.row_turn(&row.key, open, now, motion).0,
+                    )),
+                    _ => None,
+                })
+                .collect();
+            (
+                win.mode,
+                win.files.root.clone(),
+                seats::FilesTreeContent {
+                    rows: view.rows,
+                    scroll_px: win.cache.scroll_px,
+                    selected: win.files.sel.clone(),
+                    turns,
+                    // A transient peek is never keyboard-driven (G90), so it
+                    // never wears the focus ring — the ring's whole job is to say
+                    // which list the arrow keys belong to, and the answer for a
+                    // peek is "neither".
+                    focused: win.focused,
+                },
+            )
+        };
+        let palette = bt_render::chrome_palette();
+        // The tree, drawn by the very function the docked column uses (C39) —
+        // handed a body rect, a hovered row and its own ground's inks, and asking
+        // nothing about which host it is in.
+        let mut quads = Vec::new();
+        let mut labels = Vec::new();
+        let mut sprites = Vec::new();
+        let hovered_row = match self.float_hover {
+            Some(float::FloatPart::Row(index)) => Some(index),
+            _ => None,
+        };
+        seats::push_files_tree(
+            geometry.body,
+            &content,
+            hovered_row,
+            seats::FilesRowInk::on_float(&palette),
+            scale,
+            &palette,
+            (&mut quads, &mut labels, &mut sprites),
+        );
+        let body = float::FloatBody {
+            // Chrome fills are opaque by construction, so the lift into the
+            // overlay's vocabulary is the rail's own: alpha 1.0, and the layer's
+            // opacity carries the fade for all three channels at once.
+            quads: quads
+                .into_iter()
+                .map(|quad| bt_render::OverlayQuad {
+                    rect: quad.rect,
+                    color: quad.color,
+                    alpha: 1.0,
+                })
+                .collect(),
+            labels,
+            sprites,
+        };
+        let head_font = float::FLOAT_HEAD_FONT_LOGICAL_PX * scale;
+        let foot_font = float::FLOAT_FOOT_FONT_LOGICAL_PX * scale;
+        // `#files-flyout .fly-head { text-transform: uppercase }` — the head
+        // shouts its ROOT, and the rule is the files head's alone because a
+        // *filename* keeps its case (mock-up 698-699).
+        let name = profiles::cwd_leaf(&root).to_uppercase();
+        let revealed = self.float_reveal_is_fresh(now);
+        let root = if revealed {
+            FLOAT_REVEALED_LABEL.to_owned()
+        } else {
+            root
+        };
+        let (name, path) = {
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            (
+                settings::ellipsized(
+                    &name,
+                    geometry.head_title[2] - geometry.head_title[0],
+                    head_font,
+                    &mut measure,
+                ),
+                // B23: the foot is cut from the front, because the end of a path
+                // is the part that answers "where am I".
+                settings::ellipsized_left(
+                    &root,
+                    geometry.foot_path[2] - geometry.foot_path[0],
+                    foot_font,
+                    &mut measure,
+                ),
+            )
+        };
+        vec![float::build(
+            &geometry,
+            mode,
+            &name,
+            &path,
+            FLOAT_DOCK_LABEL,
+            self.float_hover,
+            revealed,
+            body,
+            scale,
+            &palette,
+            fade,
+        )]
+    }
+
+    /// The rectangle a float is allowed to occupy, in physical pixels.
+    ///
+    /// **The solved content area, never the window** —
+    /// `M2-tiny-window-priority.md` §3.3: a float clamps into the box `solve()`
+    /// already produced, so "it must not cover the chrome to the point of
+    /// illegibility" is true *by construction* rather than by a runtime check
+    /// nobody remembers to write. It is read back off the placements the solver
+    /// produced rather than recomputed from the window size for A12's reason:
+    /// two derivations of one number are two numbers that can differ, and this
+    /// one has to agree with the rectangles the pointer is being tested against.
+    fn float_viewport(&self) -> [f32; 4] {
+        let mut viewport: Option<[f32; 4]> = None;
+        for placement in &self.seat_layout.rects {
+            let Some(device) = placement.device_rect else {
+                continue;
+            };
+            let rect = [
+                device.left as f32,
+                device.top as f32,
+                device.right as f32,
+                device.bottom as f32,
+            ];
+            viewport = Some(match viewport {
+                Some(box_) => [
+                    box_[0].min(rect[0]),
+                    box_[1].min(rect[1]),
+                    box_[2].max(rect[2]),
+                    box_[3].max(rect[3]),
+                ],
+                None => rect,
+            });
+        }
+        viewport.unwrap_or_else(|| {
+            // No seat is on stage, which the solver only produces for a window
+            // with nothing in it. The swapchain is then the honest answer, and
+            // the float has nothing to be pushed out of the way of anyway.
+            let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+            [0.0, 0.0, width as f32, height as f32]
+        })
+    }
+
+    /// The box a trigger occupies **right now** (G86/E60).
+    ///
+    /// Re-derived from this frame's geometry every time rather than remembered
+    /// from the press, and E60 is the judgement it comes from: a press bubbles
+    /// and may re-render, a re-rendered control is a *detached* control, and a
+    /// detached node measures `(0, 0)` — which is how the mock-up's menus kept
+    /// opening in the window's top-left corner, three separate times. Asking the
+    /// live geometry by identity is the shape that cannot have that bug.
+    fn trigger_rect(&self, trigger: float::FloatTrigger) -> Option<[f32; 4]> {
+        match trigger {
+            float::FloatTrigger::Tab(id) => {
+                let index = self.tabs.iter().position(|tab| tab.id == id)?;
+                let scale = self.renderer.metrics().scale_factor as f32;
+                match self.rail.layout {
+                    seats::TabLayoutMode::Vertical => {
+                        let rail = self.rail_geometry_now(Instant::now())?;
+                        rail.tabs.get(index).and_then(|row| row.files)
+                    }
+                    _ => {
+                        let (width, _) = self.renderer.presentation_geometry().swapchain_size;
+                        seats::tab_strip_geometry(
+                            width as f32,
+                            scale,
+                            &self.tab_trailers(Instant::now()),
+                            self.active_tab,
+                            self.tab_scroll,
+                        )
+                        .tabs
+                        .get(index)
+                        .and_then(|tab| tab.files)
+                    }
+                }
+            }
+            float::FloatTrigger::Pane(leaf) => {
+                if self.tabs[self.active_tab].id != leaf.tab {
+                    return None;
+                }
+                let scale = self.renderer.metrics().scale_factor as f32;
+                let placement = self
+                    .seat_layout
+                    .rects
+                    .iter()
+                    .find(|placement| placement.id == leaf.seat)?;
+                let device = placement.device_rect?;
+                let rect = [
+                    device.left as f32,
+                    device.top as f32,
+                    device.right as f32,
+                    device.bottom as f32,
+                ];
+                seats::pane_head_geometry(rect, placement.kind, scale).files
+            }
+        }
+    }
+
+    /// The folder a trigger speaks for, read at the instant it is asked.
+    ///
+    /// **Captured, never followed** (A7/R-g): §7.1.2 says the root is taken from
+    /// the cwd of the terminal the trigger belongs to *at summon time*, and the
+    /// float then stays there. A tree that re-roots itself as you `cd` is, in
+    /// this design's own words, 整个生态独立判定最惊吓的行为.
+    fn trigger_root(&self, trigger: float::FloatTrigger) -> String {
+        let seat = match trigger {
+            float::FloatTrigger::Tab(id) => self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == id)
+                .filter(|tab| tab.seats.is_lone_terminal())
+                .map(|tab| (tab, tab.seats.terminal())),
+            float::FloatTrigger::Pane(leaf) => self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == leaf.tab)
+                .map(|tab| (tab, leaf.seat)),
+        };
+        seat.and_then(|(tab, seat)| {
+            tab.sessions
+                .get(&seat)
+                .and_then(|leaf| leaf.session.working_directory())
+                .map(|path| path.display().to_string())
+        })
+        .or_else(|| {
+            profiles::home_directory(&bt_pty::SystemShellEnvironment)
+                .map(|home| home.display().to_string())
+        })
+        .unwrap_or_default()
+    }
+
+    /// Summon the float at a trigger, or redirect the one that is already up.
+    ///
+    /// §7.1.2's 全窗口单例 in one line: there is no second window to open, so an
+    /// operation on another trigger moves this one.
+    fn open_float(&mut self, trigger: float::FloatTrigger, mode: float::FloatMode) -> Result<()> {
+        let Some(anchor) = self.trigger_rect(trigger) else {
+            return Ok(());
+        };
+        let root = self.trigger_root(trigger);
+        let state = seats::FilesLeafState {
+            root,
+            ..seats::FilesLeafState::default()
+        };
+        self.place_float(
+            mode,
+            Some(trigger),
+            state,
+            files::DirCache::default(),
+            bt_layout::FILES_W,
+            Some(anchor),
+        )
+    }
+
+    /// Put a float on screen, sized to its content and placed against `anchor`.
+    ///
+    /// The one door every way of opening one goes through — hover, click,
+    /// redirect, and a column popping out — because the four differ only in what
+    /// they hand it, and four doors would be four places to forget the epoch or
+    /// the clamp.
+    fn place_float(
+        &mut self,
+        mode: float::FloatMode,
+        origin: float::FloatOrigin,
+        state: seats::FilesLeafState,
+        cache: files::DirCache,
+        width: bt_layout::LogicalPx,
+        anchor: Option<[f32; 4]>,
+    ) -> Result<()> {
+        // E61: the opener closes what it must not coexist with. A float is a
+        // window rather than a menu, so it does not join the menus' mutually
+        // exclusive chain — but a menu hanging off a control that is about to be
+        // covered is a menu pointing at nothing.
+        self.profile_menu.close();
+        self.root_menu.close();
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let viewport = self.float_viewport();
+        let rows = files::tree_view(&state, &cache).rows.len();
+        let body = seats::files_tree_content_height(rows, scale);
+        let size =
+            float::float_opening_size(float::float_height_for_body(body, scale), viewport, scale);
+        let origin_point = match anchor {
+            Some(anchor) => float::float_placement(anchor, size, viewport, scale),
+            // No anchor is the pop-out case with a head that has already gone;
+            // the middle of the content area is the honest place for a window
+            // that has no particular place to be.
+            None => [
+                ((viewport[0] + viewport[2]) / 2.0 - size[0] / 2.0).round(),
+                ((viewport[1] + viewport[3]) / 2.0 - size[1] / 2.0).round(),
+            ],
+        };
+        let frame = float::clamp_pinned(
+            [
+                origin_point[0],
+                origin_point[1],
+                origin_point[0] + size[0],
+                origin_point[1] + size[1],
+            ],
+            viewport,
+            scale,
+        );
+        self.float.open(
+            mode,
+            origin,
+            state,
+            cache,
+            width,
+            frame,
+            anchor,
+            Instant::now(),
+        );
+        self.float_drag = None;
+        // The rail's business may have just begun (G102). Re-asked here rather
+        // than waiting for the next pointer move, because the answer changed
+        // without the pointer moving — which is the whole reason the rail's zone
+        // is a function and not a `:hover`.
+        self.drive_rail_zone(self.pointer_position);
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
+    /// A press on a trigger — the three-state ladder (G91).
+    ///
+    /// No float here → open one, pinned, because a click is a commitment. A peek
+    /// here → promote it *in place*, keeping the tree you have already unfolded.
+    /// Already pinned here → this is you asking for it to go.
+    fn press_float_trigger(&mut self, trigger: float::FloatTrigger) -> Result<()> {
+        let here = self
+            .float
+            .live()
+            .is_some_and(|win| win.origin == Some(trigger));
+        if here {
+            if self.float.pinned_is_open() {
+                self.dismiss_float()?;
+                return Ok(());
+            }
+            self.float.promote();
+            self.refresh_chrome();
+            return self.present_chrome_change();
+        }
+        self.open_float(trigger, float::FloatMode::Pinned)
+    }
+
+    /// Begin the float's exit (§7.1.2's four closers, and only those).
+    fn dismiss_float(&mut self) -> Result<bool> {
+        if !self.float.dismiss(Instant::now()) {
+            return Ok(false);
+        }
+        self.float_drag = None;
+        self.float_hover = None;
+        // ...and it may have just ended.
+        self.drive_rail_zone(self.pointer_position);
+        self.refresh_chrome();
+        self.present_chrome_change()?;
+        Ok(true)
+    }
+
+    /// `.pane-float` — a docked column pops back out into a pinned window (G95).
+    ///
+    /// It carries root, expansion, selection, width **and scroll position**
+    /// (G97; the cache holds the last of those, which is the half the mock-up
+    /// never managed) — the column is not being closed and reopened, it is being
+    /// moved, and a move that lost half its state would be a different verb.
+    fn undock_files_column(&mut self, seat: SeatId) -> Result<()> {
+        let active = self.active_tab;
+        let Some(state) = self.tabs[active].files.get(&seat).cloned() else {
+            return Ok(());
+        };
+        let cache = self.tabs[active]
+            .file_trees
+            .get(&seat)
+            .cloned()
+            .unwrap_or_default();
+        let width = self
+            .seats
+            .fixed_extent_of(seat)
+            .unwrap_or(bt_layout::FILES_W);
+        let anchor = self
+            .seat_layout
+            .rects
+            .iter()
+            .find(|placement| placement.id == seat)
+            .and_then(|placement| placement.device_rect)
+            .map(|device| {
+                [
+                    device.left as f32,
+                    device.top as f32,
+                    device.right as f32,
+                    device.bottom as f32,
+                ]
+            });
+        // Taking the pane out first, so the window is never both docked and
+        // floating at once — the mock-up's own note (3828-3833) records that
+        // exact duplication, and the case it could not handle: the last pane of
+        // the last tab, where closing refuses to empty the strip. `close_pane`
+        // already answers that by keeping the tab alive, so there is no special
+        // case left here to write.
+        self.close_pane(seat)?;
+        self.place_float(float::FloatMode::Pinned, None, state, cache, width, anchor)
+    }
+
+    /// `DOCK` — the float becomes a column in the tab you are **looking at**.
+    ///
+    /// Not the tab it was born in (§7.1.2, user ruling 2026-07-17): a pinned
+    /// window floats across tab switches precisely so it can serve you wherever
+    /// you are, and sending it home on Dock would be the app deciding for you
+    /// where you meant to put it. It also erases the "the tab it came from has
+    /// since died" special case, which is the sort of thing a rule earns its
+    /// keep by deleting.
+    fn dock_float(&mut self) -> Result<()> {
+        let Some(win) = self.float.wipe() else {
+            return Ok(());
+        };
+        self.float_drag = None;
+        let metrics = self.seat_metrics();
+        let Some(seat) = self.seats.add_files_pane(&metrics, Some(win.width)) else {
+            return Ok(());
+        };
+        let active = self.active_tab;
+        self.tabs[active].files.insert(seat, win.files);
+        self.tabs[active].file_trees.insert(seat, win.cache);
+        self.set_files_keyboard(Some(seat));
+        self.divider_drag = None;
+        self.resolve_seat_layout(self.renderer.presentation_geometry().swapchain_size.into());
+        self.mark_session_dirty(Instant::now());
+        self.refresh_chrome();
+        self.present_chrome_change()
     }
 
     /// The files column holding the keyboard *right now*, or `None`.
@@ -12254,6 +13259,10 @@ impl Runtime {
         let motion = self.motion;
         let palette = bt_render::chrome_palette();
         let hovered = self.hovered_tab();
+        let trigger_hovered = match self.seat_pointer.hover {
+            Some(seats::ChromeTarget::TabFiles(index)) => Some(index),
+            _ => None,
+        };
         let mut owes_frame = false;
         for (index, tab) in self.tabs.iter_mut().enumerate() {
             // A new progress reading starts the arc easing toward it. This runs
@@ -12276,6 +13285,25 @@ impl Runtime {
             let drawn = tab.drawn_pin_reveal(now, motion);
             if tab.last_drawn_pin_reveal != Some(drawn) {
                 tab.last_drawn_pin_reveal = Some(drawn);
+                owes_frame = true;
+            }
+            // H76's three rungs: dark at rest, half-lit while the pointer is
+            // anywhere on the tab, full while it is on the trigger itself. The
+            // active tab is not exempt — H104.
+            tab.files_lit.retarget(
+                if trigger_hovered == Some(index) {
+                    1.0
+                } else if hovered == Some(index) {
+                    seats::TAB_FILES_TRIGGER_REVEAL
+                } else {
+                    0.0
+                },
+                now,
+                motion,
+            );
+            let drawn = tab.drawn_files_lit(now, motion);
+            if tab.last_drawn_files_lit != Some(drawn) {
+                tab.last_drawn_files_lit = Some(drawn);
                 owes_frame = true;
             }
             // The tab in hand is driven by the pointer and never by this clock,
@@ -12512,6 +13540,11 @@ impl Runtime {
             .map(|tab| seats::TabTrailer {
                 pinned: tab.pinned,
                 reveal: tab.pin_reveal.sample(now, motion).0,
+                // H107, asked of the tree and not of a cached flag: "exactly one
+                // pane, and it is a terminal" is a fact about the layout, and the
+                // layout is the only thing entitled to answer it.
+                files: tab.seats.is_lone_terminal(),
+                files_lit: tab.files_lit.sample(now, motion).0,
             })
             .collect()
     }
@@ -12522,10 +13555,15 @@ impl Runtime {
     /// pointer is anywhere inside.
     fn hovered_tab(&self) -> Option<usize> {
         match self.seat_pointer.hover {
+            // The folder is a control *of* its tab, so hovering it is hovering
+            // the tab — the mock-up's `.tab:hover .tab-files` is a descendant
+            // rule, and a trigger that stopped counting as its own tab's hover
+            // would go dark the instant the pointer reached it.
             Some(
                 seats::ChromeTarget::Tab(index)
                 | seats::ChromeTarget::TabClose(index)
-                | seats::ChromeTarget::TabPin(index),
+                | seats::ChromeTarget::TabPin(index)
+                | seats::ChromeTarget::TabFiles(index),
             ) => Some(index),
             _ => None,
         }
@@ -13846,6 +14884,13 @@ impl Runtime {
                 return Ok(());
             }
         }
+        // A float being moved or resized owns the pointer outright, above the
+        // divider for the reason it is a separate state at all: it is a window
+        // over the layout, so while your hand is on it the layout underneath is
+        // not being aimed at.
+        if self.drive_float_drag(position)? {
+            return Ok(());
+        }
         // A divider drag owns the pointer outright: while one is in flight the
         // terminal hears nothing, which is the same rule an in-progress
         // selection drag already lives by.
@@ -13888,6 +14933,27 @@ impl Runtime {
             return Ok(());
         }
         self.update_chrome_hover(position)?;
+        // H112: the intent is armed by hovering a trigger and disarmed by leaving
+        // the region. Asked after the chrome hover has been updated, because it
+        // is the chrome hit test that says which trigger — if any — is under the
+        // pointer, and the answer has to be this frame's.
+        //
+        // A drag in flight arms nothing (`armFlyOpen`'s first line, mock-up
+        // 3926): every path that owns the pointer has returned above, so the only
+        // way to reach here is with a free hand.
+        let trigger = match self.chrome_target_at(position) {
+            Some(seats::ChromeTarget::TabFiles(index)) => self
+                .tabs
+                .get(index)
+                .map(|tab| float::FloatTrigger::Tab(tab.id)),
+            Some(seats::ChromeTarget::PaneFiles(seat)) => Some(float::FloatTrigger::Pane(LeafId {
+                tab: self.tabs[self.active_tab].id,
+                seat,
+            })),
+            _ => None,
+        };
+        self.float.observe(trigger, Instant::now());
+        self.drive_float_hover(position)?;
         // Below every gesture that owns the pointer and beside the hover it
         // follows: the anchors under a drag or a divider were never reached, and
         // each of those paths returned above having said so. An open picker also
@@ -15512,6 +16578,23 @@ impl Runtime {
                 self.tab_clicks.interrupt();
                 self.close_pane(seat)?;
             }
+            // H77: a click on the folder **tears off** a pinned window. The
+            // press does not arm the head as a drag handle the way `FilesRoot`
+            // does — a control that both opens a window and starts a pane drag
+            // is one gesture with two meanings, and the mock-up returns out of
+            // `pointerdown` on this button for exactly that reason (5870).
+            seats::ChromeTarget::PaneFiles(seat) => {
+                self.tab_clicks.interrupt();
+                let leaf = LeafId {
+                    tab: self.tabs[self.active_tab].id,
+                    seat,
+                };
+                self.press_float_trigger(float::FloatTrigger::Pane(leaf))?;
+            }
+            seats::ChromeTarget::PaneFloat(seat) => {
+                self.tab_clicks.interrupt();
+                self.undock_files_column(seat)?;
+            }
             seats::ChromeTarget::FilesRow { seat, index } => {
                 self.tab_clicks.interrupt();
                 self.press_files_row(seat, index)?;
@@ -15543,6 +16626,20 @@ impl Runtime {
             seats::ChromeTarget::TabPin(index) => {
                 self.tab_clicks.interrupt();
                 self.toggle_pin(index)?;
+            }
+            // H77: the click tears the peek off into a pinned window. **H78 is
+            // the `interrupt()`** — the mock-up spells it out at 5800-5802:
+            // "double-clicking the peek icon is two pin-toggles, not *and now
+            // rename the tab*". It is the same rule `.close` and `.pin` above
+            // are held to, and it holds here for the same reason: a chain of
+            // clicks on a button is a chain of button presses, and rename lives
+            // on the tab body alone.
+            seats::ChromeTarget::TabFiles(index) => {
+                self.tab_clicks.interrupt();
+                let Some(id) = self.tabs.get(index).map(|tab| tab.id) else {
+                    return Ok(false);
+                };
+                self.press_float_trigger(float::FloatTrigger::Tab(id))?;
             }
             seats::ChromeTarget::NewTab => {
                 self.tab_clicks.interrupt();
@@ -15595,6 +16692,26 @@ impl Runtime {
             {
                 self.answer_restore_prompt(answer)?;
             }
+            return Ok(());
+        }
+        // A release ends whatever the float was doing, wherever it lands: a
+        // gesture that began on the header can finish anywhere, and a window that
+        // kept following the pointer after the button came up would be a window
+        // stuck to the hand.
+        if state == ElementState::Released && self.float_drag.take().is_some() {
+            return Ok(());
+        }
+        // The float takes the press where it is drawn, above the layout and below
+        // the modals. It is not in the menus' mutually exclusive chain — a menu is
+        // dismissed by a press outside it and this deliberately is not (§7.1.2:
+        // click-away does not close a pinned window; you click into the terminal
+        // to work beside it) — so a press that misses it simply goes on being the
+        // press it always was.
+        if state == ElementState::Pressed
+            && button == MouseButton::Left
+            && let Some(position) = self.pointer_position
+            && self.press_float(position)?
+        {
             return Ok(());
         }
         // The picker takes the press only where it is drawn. A press on a row
@@ -15936,7 +17053,19 @@ impl Runtime {
         // caption run is not in the rail however far left it is.
         let top = f64::from(bt_render::WINDOW_TITLE_BAR_LOGICAL_PX) * scale;
         let inside = position.is_some_and(|position| position.y >= top && position.x < width);
-        self.aim_rail_at(inside);
+        // **G102 — the rail has unfinished business.** A rectangle can only ever
+        // answer "is the pointer near the rail", and a transient peek is the case
+        // where that is the wrong question: the peek hangs off a rail row and
+        // floats out past the rail's own edge, so moving onto the thing the rail
+        // just opened would otherwise read as having left it — and the rail would
+        // retract out from under it, taking the anchor with it.
+        //
+        // A **pinned** window holds nothing open, and the mock-up is explicit
+        // about why (8735-8738): it has been torn off into a free-floating
+        // window, so the rail is free to retract normally. That is the whole
+        // difference between the two modes stated once more, in the one place
+        // where it changes what a *different* piece of chrome does.
+        self.aim_rail_at(inside || self.float.peek_is_open());
     }
 
     /// Point both of the rail's clocks at `open`.
@@ -16576,6 +17705,22 @@ impl Runtime {
         {
             return Ok(());
         }
+        // **The float's rung of §7.1.5's ladder**: 进行中的拖拽/divider → Menu →
+        // Dialog → pinned 浮窗 → owner=Terminal 时透传 PTY. Every layer above it
+        // has already answered and returned; below it the key belongs to the
+        // shell, so this is the last surface entitled to take an Escape before a
+        // running program does.
+        //
+        // It closes a *transient* peek too, and G87 is why that is one branch and
+        // not two: `dismiss` takes the armed intent with it, so an Escape pressed
+        // while a hover was still maturing does not close the peek and then watch
+        // it reopen 180ms later under a pointer that never moved.
+        if matches!(event.logical_key, Key::Named(NamedKey::Escape))
+            && !event.repeat
+            && self.dismiss_float()?
+        {
+            return Ok(());
+        }
 
         // A non-empty winit Preedit is the composition authority. Editing/navigation keys are
         // intentionally left to the IME here even if it also exposes a physical named key; no PTY
@@ -16901,6 +18046,16 @@ impl Runtime {
         // rectangle, and a pane whose shell is never told stays at the width it
         // had before the drag until something else happens to re-solve.
         self.resize_leaves_to_layout(observed_at, "resize terminal actor")?;
+        // G93 / `M2-tiny-window-priority.md` §3.2: a **pinned** float is
+        // re-clamped and never dissolved. It is asked *after* the layout has been
+        // re-solved, because the box it is being clamped into is that layout's
+        // output — clamping against the old one would put it back inside a
+        // viewport that no longer exists.
+        //
+        // A **transient** peek takes the other half of that ruling and dissolves,
+        // exactly as the hover-peek thumbnail above already does: it was never
+        // promised to anyone, and its anchor has just moved.
+        self.reclamp_float();
         self.sync_math_layout_key();
         // The grid actually in force, which under the typed-input gate is still the old one.
         self.pending_resize_present = Some(self.grid);
@@ -17575,6 +18730,14 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             self.fail(event_loop, error);
             return;
         }
+        // The float's two clocks and its entrance. After the tip's, because a
+        // maturing intent can *open* a window over whatever the tip was about to
+        // explain, and the frame both are due on should show that in the order
+        // they will actually be drawn.
+        if let Err(error) = runtime.advance_float(now) {
+            self.fail(event_loop, error);
+            return;
+        }
         // Service the PTY gate after every other due task that can mutate session state, then carry
         // the deadline derived from that exact sample into the control-flow decision below.
         let pty_resize_deadline = match runtime.flush_pending_pty_resize(now) {
@@ -17629,6 +18792,15 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             // it has no fade, so a schematic on screen is finished and asks for
             // no frames at all.
             runtime.layout_peek.deadline(),
+            // The intent's 180ms, the grace's 220/420, and the entrance's own
+            // frames until it lands. A window with no float and no hovered
+            // trigger reports nothing and costs no wake-ups at all.
+            runtime.float_deadline(now),
+            // The foot's confirmation owes exactly one wake-up: the instant it is
+            // due to turn back into a path.
+            runtime
+                .float_revealed_at
+                .map(|at| at + FLOAT_REVEAL_FEEDBACK),
             runtime.hyperlink_hover.show_at,
             runtime.peek_hover.show_at,
             runtime.math_hover_clear_at,
@@ -18119,7 +19291,7 @@ fn tab_surface_tip_boxes(
     // Each of the three boxes is handed in already measured against its
     // surface's own clip, because "cropped away" is the one thing the two
     // surfaces answer differently — the strip clips on X, the rail on Y.
-    let mut row = |index: usize, parts: [(tooltip::TooltipAnchorId, Option<[f32; 4]>); 3]| {
+    let mut row = |index: usize, parts: [(tooltip::TooltipAnchorId, Option<[f32; 4]>); 4]| {
         if renaming == Some(index) {
             return;
         }
@@ -18135,6 +19307,10 @@ fn tab_surface_tip_boxes(
                 row(
                     index,
                     [
+                        (
+                            tooltip::TooltipAnchorId::TabFiles(index),
+                            slot.files.filter(|files| visible(*files)),
+                        ),
                         (
                             tooltip::TooltipAnchorId::TabPin(index),
                             slot.pin.filter(|pin| visible(*pin)),
@@ -18168,6 +19344,10 @@ fn tab_surface_tip_boxes(
                     row(
                         index,
                         [
+                            (
+                                tooltip::TooltipAnchorId::TabFiles(index),
+                                slot.files.filter(|files| visible(*files)),
+                            ),
                             (
                                 tooltip::TooltipAnchorId::TabPin(index),
                                 slot.pin.filter(|pin| visible(*pin)),
@@ -24366,6 +25546,7 @@ mod tests {
         let trailers = [seats::TabTrailer {
             pinned: false,
             reveal: 1.0,
+            ..seats::TabTrailer::default()
         }];
         let strip = seats::tab_strip_geometry(width, scale, &trailers, 0, 0.0);
         // The rail the window would actually be showing: vertical, expanded, and

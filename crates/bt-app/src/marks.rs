@@ -142,6 +142,40 @@ pub enum ChromeMark {
     Folder,
     /// `#i-panel` — a pane whose kind this build cannot name.
     Panel,
+    /// `#i-float` — "pop this column out into a floating window" (B18/B19), the
+    /// `.pane-float` button on a files head.
+    ///
+    /// A rounded square with an arrow leaving it through the top right: the
+    /// standard "opens outside this frame" idiom, and the mock-up's own drawing
+    /// of it (line 2236).
+    Float,
+    /// `#i-dock-left` — "put this floating window back on the left as a pane"
+    /// (B20), the `DOCK` button in a float's header.
+    ///
+    /// **Side-honest**, and the mock-up says so at line 2233: the filled panel
+    /// sits on the side the pane will land on. Files dock left; previews dock
+    /// right, which is why the symbol sheet carries a mirrored twin. Only the
+    /// left one is drawn here — the right one is the preview block's, and
+    /// minting an unused variant now would be guessing at the day it is needed.
+    DockLeft,
+    /// `#i-check` — the tick that confirms a folder was revealed in the OS file
+    /// manager (B24).
+    ///
+    /// It stands in the open folder's slot for 1300ms and then hands it back. A
+    /// separate glyph rather than a state of that one, because it says something
+    /// about an *action* and not about the thing the icon names.
+    Check,
+    /// `.float-win .fly-resize::after` — the corner chevron that says a pinned
+    /// float can be resized (G79).
+    ///
+    /// Not a symbol in the mock-up's sheet: it is a CSS `::after` with a right
+    /// and a bottom border and a `border-bottom-right-radius`, which at this
+    /// size is one quarter-arc. It is drawn here as that arc rather than as two
+    /// straight rules meeting at a corner, because the radius is the whole point
+    /// — the mock-up's note (line 710-712) is that the grip's curve "nests
+    /// concentrically inside the window's 10px corner (10 − ~3px inset ≈ 7px)",
+    /// and two straight rules have no curve to nest.
+    ResizeGrip,
     /// `#i-pin` / `#i-pinned` — one pin at one angle, whose state rides on the
     /// fill (mock-up lines 2074-2111).
     ///
@@ -286,6 +320,10 @@ impl ChromeMark {
             // One id for every angle, on `Self::Chevron`'s precedent above.
             Self::TreeDisclosure { .. } => "i-tri",
             Self::Panel => "i-panel",
+            Self::Float => "i-float",
+            Self::DockLeft => "i-dock-left",
+            Self::ResizeGrip => "fly-resize",
+            Self::Check => "i-check",
             Self::Pin { filled: false } => "i-pin",
             Self::Pin { filled: true } => "i-pinned",
             Self::ActiveTab { .. } => "tab",
@@ -1002,6 +1040,10 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProfileUbuntu => 12,
         ChromeMark::ProfileGit => 13,
         ChromeMark::ProfileCmd => 14,
+        ChromeMark::Float => 17,
+        ChromeMark::DockLeft => 18,
+        ChromeMark::ResizeGrip => 19,
+        ChromeMark::Check => 20,
         // Handled before this function is reached; their geometry is generated,
         // not quoted.
         ChromeMark::ActiveTab { .. } => 8,
@@ -1015,7 +1057,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 17] = [
+const SYMBOL_VIEW_BOX: [&str; 21] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -1037,11 +1079,21 @@ const SYMBOL_VIEW_BOX: [&str; 17] = [
     // disclosure triangle is 10×10 on screen, so a 10-unit box is a one-to-one
     // map and re-cutting it to 16 would round its edges differently.
     "0 0 10 10",
+    // `#i-float` and `#i-dock-left`, both the house sixteen.
+    "0 0 16 16",
+    "0 0 16 16",
+    // The resize grip's chevron is `::after`'s own 8×8 box, not a symbol from
+    // the sheet, and it keeps that box for `#i-tri`'s reason: the CSS radius and
+    // border width are quoted in those units, and re-cutting them to sixteen
+    // would mean re-deriving both instead of reading them off.
+    "0 0 8 8",
+    // `#i-check`, the house sixteen again.
+    "0 0 16 16",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 17] = [
+const SYMBOL_BODY: [&str; 21] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1125,6 +1177,35 @@ const SYMBOL_BODY: [&str; 17] = [
     // rather than swapped for a second glyph, on the precedent `#i-chev` sets:
     // the turn is the sentence, and two end frames are only its punctuation.
     r##"<path d="M3.2 2.2L6.6 5 3.2 7.8z" fill="currentColor"/>"##,
+    // #i-float — a rounded frame with one corner opened for the arrow leaving
+    // through it. The frame's own top-right corner is missing from the `d` on
+    // purpose: the arrow is drawn *through* the gap, so the two paths read as
+    // one object rather than as an arrow laid over a closed box.
+    concat!(
+        r##"<path d="M8 3.2H4.4c-.7 0-1.2.6-1.2 1.2v7.2c0 .7.6 1.2 1.2 1.2h7.2c.7 0 1.2-.6 1.2-1.2V8" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>"##,
+        r##"<path d="M10.2 2.8h3v3M13.2 2.8L8.3 7.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"##,
+    ),
+    // #i-dock-left — the window, and the panel that will appear inside it, on
+    // the side it will actually appear on.
+    concat!(
+        r##"<rect x="1.6" y="2.6" width="12.8" height="10.8" rx="2.2" fill="none" stroke="currentColor" stroke-width="1.2"/>"##,
+        r##"<rect x="1.6" y="2.6" width="5" height="10.8" rx="2.2" fill="currentColor" opacity=".7"/>"##,
+    ),
+    // The resize grip, translated from CSS rather than quoted from the sheet.
+    //
+    // `border-right: 1.5px` and `border-bottom: 1.5px` on an 8×8 box put the two
+    // strokes' centre lines 0.75 in from each edge, at x = y = 7.25;
+    // `border-bottom-right-radius: 7px` is the *outer* radius, so the centre
+    // line turns on 7 − 0.75 = 6.25 about (1, 1). The right border therefore
+    // runs from the top edge down to where the arc starts at y = 1, the arc
+    // sweeps a quarter turn to (1, 7.25), and the bottom border runs on to the
+    // left edge — which at this radius is almost the whole of the glyph.
+    //
+    // The `.55` is the mock-up's own, baked in here on `#i-folder-open`'s
+    // precedent: it is part of the drawing, not a state of it.
+    r##"<path d="M7.25 0V1A6.25 6.25 0 0 1 1 7.25H0" fill="none" stroke="currentColor" stroke-width="1.5" opacity=".55"/>"##,
+    // #i-check
+    r##"<path d="M3 8.4l3.2 3.2L13 4.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>"##,
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the

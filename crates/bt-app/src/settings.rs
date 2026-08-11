@@ -923,7 +923,7 @@ fn clip_content(
 /// Binary search rather than a walk: text width is monotonic in prefix length for
 /// the left-to-right chrome face, and shaping a label is not free enough to do
 /// once per character on every frame the dialog is up.
-fn ellipsized(
+pub(crate) fn ellipsized(
     text: &str,
     max_width: f32,
     font_size_px: f32,
@@ -956,6 +956,54 @@ fn ellipsized(
         }
     }
     format!("{}{ELLIPSIS}", &text[..ends[best]])
+}
+
+/// The same, cut from the **front**: `text` if it fits, else a `…` and the
+/// longest *suffix* that fits after it.
+///
+/// This is B23 — `.foot-path { direction: rtl; text-align: left }` — and it is
+/// the right rule for a path rather than a stylistic preference: the end of a
+/// path is the part you are actually looking at, and a right-cut
+/// `C:\Users\Weiyi\Developer\Bett…` has thrown away the only segment that
+/// answers "where am I".
+///
+/// The mock-up reaches this through `direction: rtl`, and paid for it: `/`, `~`
+/// and `:` are bidi-neutral, so a bare RTL paragraph reorders them and the foot
+/// showed `bt/x.png/~` for `~/bt/x.png` (user-reported). The fix there was to
+/// wrap the path in a `<bdi>`. Here there is no bidi algorithm to fight in the
+/// first place — the string is cut and then laid out left to right like every
+/// other label — so the bug it records cannot occur, and this is the honest
+/// native equivalent rather than a re-implementation of the workaround.
+pub(crate) fn ellipsized_left(
+    text: &str,
+    max_width: f32,
+    font_size_px: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> String {
+    if measure(text, font_size_px) <= max_width {
+        return text.to_owned();
+    }
+    // Every place a suffix may begin, longest first — the mirror of the prefix
+    // search above, and over char boundaries for the same reason.
+    let starts: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    let fits = |start: usize, measure: &mut dyn FnMut(&str, f32) -> f32| {
+        measure(&format!("{ELLIPSIS}{}", &text[start..]), font_size_px) <= max_width
+    };
+    // The floor is the empty suffix — a lone `…` — for the same reason the
+    // prefix search's is: when nothing fits, that is still what CSS draws.
+    let mut best = starts.len();
+    let (mut low, mut high) = (0, starts.len());
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if fits(starts[middle], measure) {
+            best = middle;
+            high = middle;
+        } else {
+            low = middle + 1;
+        }
+    }
+    let start = starts.get(best).copied().unwrap_or(text.len());
+    format!("{ELLIPSIS}{}", &text[start..])
 }
 
 /// Where every part of the dialog lands in a window this size, or `None` when

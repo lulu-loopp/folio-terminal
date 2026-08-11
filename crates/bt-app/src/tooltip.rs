@@ -76,6 +76,9 @@ pub enum TooltipAnchorId {
     TabIcon(usize),
     /// The pin, in the `×`'s own slot.
     TabPin(usize),
+    /// The folder trigger — "Peek files here" (H108), the same words on both
+    /// surfaces because it is the same action in both.
+    TabFiles(usize),
     NewTab,
     NewTabMenu,
     /// A row of the open profile picker — a profile the machine cannot start, or

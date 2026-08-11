@@ -1942,7 +1942,7 @@ fn recent_label(seed: &Seed) -> &str {
 /// crate root that nothing can import from. The two must stay the same rule —
 /// a Recent row that names a folder differently from the tab it reopens is the
 /// same place under two names — so the day either moves, both move together.
-fn cwd_leaf(path: &str) -> &str {
+pub(crate) fn cwd_leaf(path: &str) -> &str {
     let trimmed = path.trim_end_matches(['\\', '/']);
     let leaf = trimmed.rsplit(['\\', '/']).next().unwrap_or(trimmed);
     if leaf.is_empty() { trimmed } else { leaf }
@@ -2303,6 +2303,7 @@ mod tests {
         let strip = [crate::seats::TabTrailer {
             pinned: false,
             reveal: 0.0,
+            ..crate::seats::TabTrailer::default()
         }];
         crate::seats::tab_strip_geometry(960.0 * scale, scale, &strip, 0, 0.0).new_tab_menu
     }

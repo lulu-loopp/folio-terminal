@@ -438,10 +438,25 @@ impl Seats {
     /// `None` when the edit refuses, which is the honest answer rather than a
     /// half-made pane: the caller has a files state to file under the returned
     /// id, and there is nothing to file it under if no seat was made.
-    pub fn add_files_pane(&mut self, metrics: &SeatMetrics) -> Option<SeatId> {
+    /// `width` is the column's own, or `None` for the kind's opening width.
+    ///
+    /// A parameter rather than a second function, because F75's rule is that a
+    /// column's width **follows its content**: docking a floating tree that was
+    /// dragged wider has to land at that width, and a fresh one has no width to
+    /// bring. Those are the same verb carrying different luggage, and splitting
+    /// them into two would be two places to keep the rim-drop in step.
+    pub fn add_files_pane(
+        &mut self,
+        metrics: &SeatMetrics,
+        width: Option<LogicalPx>,
+    ) -> Option<SeatId> {
         let id = SeatId(self.next_seat);
         let split_id = SplitId(self.next_split);
-        let arriving = LayoutNode::seat(Seat::new(id, SeatKind::Files));
+        let mut seat = Seat::new(id, SeatKind::Files);
+        if let Some(width) = width {
+            seat = seat.with_fixed_extent(width);
+        }
+        let arriving = LayoutNode::seat(seat);
         match apply(
             &self.tree,
             metrics,
@@ -1631,6 +1646,12 @@ pub enum ChromeTarget {
     /// 5837/5844): "the button is not the bar" has to be true at the hit test or
     /// it is not true anywhere.
     PaneClose(SeatId),
+    /// `.pane-files` — peek this terminal's folder (H110). Its own target for
+    /// [`Self::PaneClose`]'s reason: the head is a drag handle and this is a
+    /// button inside it.
+    PaneFiles(SeatId),
+    /// `.pane-float` — pop this files column out into a floating window (B18).
+    PaneFloat(SeatId),
     /// One row of one files column's tree (C30/C155).
     ///
     /// **By index and not by id.** The hit test's whole job is "which rectangle
@@ -1666,6 +1687,10 @@ pub enum ChromeTarget {
     /// tab has no `×` at all, and that it cannot be shut by a stray click is the
     /// feature rather than a side effect (mock-up 4059-4065).
     TabPin(usize),
+    /// `.tab-files` — the folder that peeks this tab's terminal (H103), in the
+    /// strip or in the rail. One target for both axes, because it is one control
+    /// built by one function (H109).
+    TabFiles(usize),
     NewTab,
     /// `.newtab.chevbtn.nt-chev` — the profile picker that shares the `+`'s box
     /// and stands immediately beside it.
@@ -1722,6 +1747,29 @@ const WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX: f32 = 4.0;
 pub struct TabTrailer {
     pub pinned: bool,
     pub reveal: f32,
+    /// Whether this tab carries the folder trigger at all (H107).
+    ///
+    /// **A tab is the header of the terminal it holds — when it holds exactly
+    /// one.** A split tab has no single terminal to speak for (each pane head
+    /// speaks for its own, H110) and a files-only tab has no terminal at all, so
+    /// neither wears one. The mock-up's note (4320-4325) adds the consequence
+    /// that makes this safe to compute per frame: the condition is already part
+    /// of the tab's key, so the trigger appears and disappears exactly when the
+    /// tab is rebuilt — **never in the middle of a gesture**.
+    pub files: bool,
+    /// How lit the trigger is: `0` at rest, `.6` on a hovered tab, `1` when the
+    /// pointer is on the trigger itself (H76/H104).
+    ///
+    /// Separate from [`Self::reveal`], which is the *width* the trailing run has
+    /// opened to. The two move together on the strip — one hover reveals the
+    /// whole cluster — but they are different properties with different curves
+    /// (`width .16s` against `opacity .12s`), and the middle rung of this ladder
+    /// has no counterpart in the other at all.
+    ///
+    /// The active tab is not exempt, and the mock-up says why at 759-761: an
+    /// active tab does **not** show it by default, because a fresh tab is active
+    /// and it was flashing the icon on with no hover.
+    pub files_lit: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1738,6 +1786,12 @@ pub struct TabGeometry {
     /// take the pin away outright (`.tab.tight .pin { display: none }`), and an
     /// unpinned tab at rest has one of literally zero width.
     pub pin: Option<[f32; 4]>,
+    /// `.tab-files`' 19px box — the peek trigger (H103/H104). `None` when the
+    /// tab carries none (H107), and when the two narrow tiers take it away
+    /// alongside the pin (H106: `.tab.tight .pin, .tab.tight .tab-files
+    /// { display: none }` — at that width summoning folder, pin and `×` together
+    /// crushes the title to nothing).
+    pub files: Option<[f32; 4]>,
     /// The trailer this geometry was built from, clamped.
     ///
     /// Kept because the trailing boundary cannot be read off the rectangles
@@ -1870,6 +1924,8 @@ pub fn tab_strip_geometry(
             let trailer = TabTrailer {
                 pinned: trailer.pinned,
                 reveal: trailer.reveal.clamp(0.0, 1.0),
+                files: trailer.files,
+                files_lit: trailer.files_lit.clamp(0.0, 1.0),
             };
             let left = origin + index as f32 * (tab_width + gap);
             let right = left + tab_width;
@@ -1945,10 +2001,40 @@ pub fn tab_strip_geometry(
                     ]
                 }),
             };
+            // The trigger stands at the head of the trailing run — the mock-up's
+            // own DOM order, `${flyoutTrigger(w)}${tabTrailer(w)}` (4337). It
+            // reveals on the same hover and by the same arithmetic the pin does:
+            // width is its box times the reveal, and `.tab-files + .pin`'s margin
+            // runs from -8px to -4px, so the pair closes up by 4px as it opens.
+            let files_box = (PANE_HEAD_TRIGGER_BOX_LOGICAL_PX * scale).round().max(1.0);
+            let files_top = (tab_top + (title - tab_top - files_box) / 2.0).round();
+            let files = match tier {
+                // H106, and it takes the trigger away for the pin's own reason —
+                // the two are named in one declaration.
+                TabWidthTier::Tight | TabWidthTier::Squeezed => None,
+                TabWidthTier::Full if !trailer.files => None,
+                TabWidthTier::Full => {
+                    // Anchored to whatever stands to its right, which is the pin
+                    // when there is one — including the zero-width one a resting
+                    // unpinned tab keeps — and the `×` otherwise.
+                    let anchor = pin
+                        .map(|pin| pin[0])
+                        .or(close.map(|close| close[0]))
+                        .unwrap_or((right - close_pad).max(left));
+                    let files_right = (anchor - tighten * trailer.reveal).max(left);
+                    Some([
+                        (files_right - files_box * trailer.reveal).max(left),
+                        files_top,
+                        files_right,
+                        files_top + files_box,
+                    ])
+                }
+            };
             TabGeometry {
                 body: [left, tab_top, right, title],
                 close: close.filter(|rect| rect[2] > rect[0]),
                 pin: pin.filter(|rect| rect[2] > rect[0]),
+                files: files.filter(|rect| rect[2] > rect[0]),
                 trailer,
                 tier,
             }
@@ -2054,6 +2140,7 @@ fn tab_trailer_box(tab: &TabGeometry) -> Option<[f32; 4]> {
 /// was written for: "the two counts sat 4px apart".
 fn tab_trailing_edge(tab: &TabGeometry, scale: f32) -> f32 {
     trailing_edge_of(
+        tab.files,
         tab.pin,
         tab.close,
         // `.tab.tight .pin` / `.tab.squeezed .pin { display: none }` is the one
@@ -2080,6 +2167,7 @@ fn tab_trailing_edge(tab: &TabGeometry, scale: f32) -> f32 {
 /// width tier and in the rail is always true — rows never compress, so nothing
 /// there can take the pin out of the flow.
 fn trailing_edge_of(
+    files: Option<[f32; 4]>,
     pin: Option<[f32; 4]>,
     close: Option<[f32; 4]>,
     pin_in_flow: bool,
@@ -2089,6 +2177,13 @@ fn trailing_edge_of(
 ) -> f32 {
     let gap = WINDOW_TAB_GAP_LOGICAL_PX * scale;
     let tightened = gap - WINDOW_TAB_TRAILER_TIGHTEN_LOGICAL_PX * scale;
+    // A tab that carries the folder has it at the head of the run, so it — not
+    // the pin — is what the badge docks against. Its own `margin-left` runs from
+    // -8px to 0 exactly as the pin's does, so the gap before it has opened by the
+    // reveal, and the three cases below go on describing what stands to its right.
+    if let Some(files) = files {
+        return files[0] - gap * reveal;
+    }
     match (pin, close) {
         // Pinned: `.pin.on` alone, carrying the -4px that lines it up with the
         // row below it.
@@ -2145,6 +2240,7 @@ pub fn tab_badge_rect(
 /// box does.
 fn rail_trailing_edge(row: &RailTabGeometry, scale: f32) -> f32 {
     trailing_edge_of(
+        row.files,
         row.pin,
         row.close,
         true,
@@ -2633,6 +2729,9 @@ pub struct RailTabGeometry {
     /// changes in the rail is the `×`, which stands at rest here instead of
     /// waiting for the pointer; the offer to pin is hover-revealed on both.
     pub pin: Option<[f32; 4]>,
+    /// `.vtab .tab-files` — the same trigger the strip's tabs wear (H109), from
+    /// the same declaration and the same builder.
+    pub files: Option<[f32; 4]>,
     pub title: [f32; 2],
     pub trailer: TabTrailer,
 }
@@ -2864,7 +2963,28 @@ pub fn rail_geometry(
         };
         let close = close.filter(|rect| rect[2] > rect[0]);
         let pin = pin.filter(|rect| rect[2] > rect[0]);
+        // H109: the rail's rows wear the same trigger the strip's tabs do, from
+        // the same declaration — `.tab .tab-files, .vtab .tab-files` is written
+        // once (mock-up 762) and the mock-up builds both from one
+        // `flyoutTrigger(w)`. There are no width tiers here to take it away.
+        let files_box = (PANE_HEAD_TRIGGER_BOX_LOGICAL_PX * scale).round().max(1.0);
+        let files_top = (body[1] + ((body[3] - body[1]) - files_box) / 2.0).round();
+        let files = trailer.files.then(|| {
+            let anchor = pin
+                .map(|pin| pin[0])
+                .or(close.map(|close| close[0]))
+                .unwrap_or(content_right - pad_right);
+            let files_right = (anchor - tighten * trailer.reveal.clamp(0.0, 1.0)).max(title_left);
+            [
+                (files_right - files_box * trailer.reveal.clamp(0.0, 1.0)).max(title_left),
+                files_top,
+                files_right,
+                files_top + files_box,
+            ]
+        });
+        let files = files.filter(|rect| rect[2] > rect[0]);
         let trailing = trailing_edge_of(
+            files,
             pin,
             close,
             // Nothing in the rail takes the pin out of the flow: rows are
@@ -2881,10 +3001,13 @@ pub fn rail_geometry(
             mark: mark_rect,
             close,
             pin,
+            files,
             title: [title_left, title_right],
             trailer: TabTrailer {
                 pinned: trailer.pinned,
                 reveal: trailer.reveal.clamp(0.0, 1.0),
+                files: trailer.files,
+                files_lit: trailer.files_lit.clamp(0.0, 1.0),
             },
         });
         row_top += row_height + gap;
@@ -3036,6 +3159,12 @@ pub fn hit_rail_chrome(
         return None;
     }
     for (index, tab) in geometry.tabs.iter().enumerate() {
+        // The folder joins the run at its head, and is asked first for the same
+        // reason the pin is: smallest target first, the surface they stand on
+        // last.
+        if tab.files.is_some_and(|files| contains(files, x, y)) {
+            return Some(ChromeTarget::TabFiles(index));
+        }
         if tab.pin.is_some_and(|pin| contains(pin, x, y)) {
             return Some(ChromeTarget::TabPin(index));
         }
@@ -3152,6 +3281,12 @@ pub fn hit_tab_chrome(
         // right edge is 4px short of the `×`'s left — so the order *between* the
         // two is a statement of intent rather than a tie-break; what matters is
         // that the tab body, which contains both, is asked last.
+        // The folder joins the run at its head, and is asked first for the same
+        // reason the pin is: smallest target first, the surface they stand on
+        // last.
+        if tab.files.is_some_and(|files| contains(files, x, y)) {
+            return Some(ChromeTarget::TabFiles(index));
+        }
         if tab.pin.is_some_and(|pin| contains(pin, x, y)) {
             return Some(ChromeTarget::TabPin(index));
         }
@@ -3220,6 +3355,12 @@ pub fn hit_chrome(
             // drag handle (C35), so it has to answer before the handle does.
             if head.close.is_some_and(|close| contains(close, x, y)) {
                 return Some(ChromeTarget::PaneClose(placement.id));
+            }
+            if head.files.is_some_and(|files| contains(files, x, y)) {
+                return Some(ChromeTarget::PaneFiles(placement.id));
+            }
+            if head.float.is_some_and(|float| contains(float, x, y)) {
+                return Some(ChromeTarget::PaneFloat(placement.id));
             }
             if contains(head.head, x, y) {
                 return Some(ChromeTarget::PaneHeader(placement.id));
@@ -3342,6 +3483,37 @@ fn pixel_snapped(rect: [f32; 4]) -> [f32; 4] {
     ]
 }
 
+/// `.tab-files, .pane-files { width: 19px; height: 19px }` (mock-up 753-755),
+/// and `.files-head .pane-float` is given the same box at line 516-517.
+///
+/// One constant for all three because the mock-up writes one rule for the first
+/// two and repeats its numbers for the third: they are the same control in three
+/// places, and the note at line 752 says why — "同一个字形两处用,因为它是同一个
+/// 动作".
+pub const PANE_HEAD_TRIGGER_BOX_LOGICAL_PX: f32 = 19.0;
+/// `border-radius: 5px` on the same three.
+pub const PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// `.tab-files svg, .pane-files svg { width: 13px }`.
+pub const PANE_HEAD_FILES_GLYPH_LOGICAL_PX: f32 = 13.0;
+/// `.files-head .pane-float svg { width: 14px }` — a pixel larger than the
+/// folder beside it, and the mock-up means it: the float glyph is an outline
+/// with a gap in it, and an outline needs a little more room than a solid to
+/// read at the same weight.
+pub const PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX: f32 = 14.0;
+/// `.files-head .pane-float + .pane-close { margin-left: 6px }`.
+pub const PANE_HEAD_FLOAT_CLOSE_GAP_LOGICAL_PX: f32 = 6.0;
+/// `.tab:hover .tab-files { opacity: .6 }` — the middle rung of the tab's own
+/// reveal ladder (H76/H104).
+pub const TAB_FILES_TRIGGER_REVEAL: f32 = 0.6;
+/// `.pane:hover .panehead .pane-files { opacity: .7 }` — the middle rung of the
+/// reveal ladder, where the pane is hovered but the control itself is not.
+///
+/// `.tab`'s own ladder rests at `.6` instead (mock-up 763). Two numbers for what
+/// looks like one idea, and the mock-up writes both: a pane head is already a
+/// quiet surface, while a tab is a lit one, so the same apparent weight costs a
+/// different alpha on each.
+pub const PANE_HEAD_TRIGGER_REVEAL: f32 = 0.7;
+
 /// Where everything inside one pane head stands, in physical pixels.
 ///
 /// One function answers this for the hit test and for the drawing both, which is
@@ -3364,6 +3536,19 @@ pub struct PaneHeadGeometry {
     /// it — at which point a press there must fall through to the head, exactly
     /// as a squeezed tab's does.
     pub close: Option<[f32; 4]>,
+    /// `.pane-files` — the folder that peeks this terminal's own directory
+    /// (H110), on a **terminal** head only, or `None` when there is no room.
+    ///
+    /// A split tab has no one terminal to speak for it, so the trigger the tab
+    /// wears in the strip (H107) cannot exist here; each pane head speaks for
+    /// its own instead. That is why this and [`Self::float`] are two fields and
+    /// not one "extra control": they are two different verbs that happen to
+    /// stand in the same slot, and which one a head carries is decided by what
+    /// kind of seat it is heading.
+    pub files: Option<[f32; 4]>,
+    /// `.pane-float` — pop this column out into a floating window (B18), on a
+    /// **files** head only.
+    pub float: Option<[f32; 4]>,
 }
 
 /// Lay out one pane head.
@@ -3406,8 +3591,46 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
     let close = (close_left > mark[2] && close_top >= rect[1])
         .then(|| pixel_snapped([close_left, close_top, close_right, close_top + close_box]));
 
-    let title_right = match close {
-        Some(close) => close[0] - SEAT_TITLE_GAP_LOGICAL_PX * scale,
+    // The second control, taken off the run *before* the `×` — the mock-up's own
+    // DOM order (`.pane-files`/`.pane-float`, then `.pane-close`). Which of the
+    // two it is follows from the kind, because they are the same slot wearing
+    // different verbs: a terminal offers to show you where it stands, and a
+    // column offers to leave.
+    let trigger_kind = match kind {
+        SeatKind::Terminal => Some(false),
+        SeatKind::Files => Some(true),
+        SeatKind::Preview | SeatKind::Placeholder => None,
+    };
+    let trigger_box = (PANE_HEAD_TRIGGER_BOX_LOGICAL_PX * scale).round().max(1.0);
+    let trigger_top = (rect[1] + ((content_bottom - rect[1]) - trigger_box) / 2.0).round();
+    // `.panehead .pane-files + .pane-close { margin-left: 0 }` against
+    // `.files-head .pane-float + .pane-close { margin-left: 6px }` — the two
+    // heads space their pair differently and the mock-up writes both, so this is
+    // read off the kind rather than shared.
+    let trigger = trigger_kind.and_then(|is_float| {
+        let gap = if is_float {
+            PANE_HEAD_FLOAT_CLOSE_GAP_LOGICAL_PX * scale
+        } else {
+            0.0
+        };
+        // Anchored to the `×`'s left edge when there is one, and to the padding
+        // when there is not: a head too narrow for the `×` is not a head that
+        // should quietly grow a different control in its place.
+        let right = close.map(|close| close[0] - gap)?;
+        let left = right - trigger_box;
+        (left > mark[2] && trigger_top >= rect[1]).then(|| {
+            (
+                is_float,
+                pixel_snapped([left, trigger_top, right, trigger_top + trigger_box]),
+            )
+        })
+    });
+
+    let run_left = trigger
+        .map(|(_, box_)| box_[0])
+        .or(close.map(|close| close[0]));
+    let title_right = match run_left {
+        Some(left) => left - SEAT_TITLE_GAP_LOGICAL_PX * scale,
         None => rect[2] - trailing_pad,
     };
     PaneHeadGeometry {
@@ -3421,6 +3644,8 @@ pub fn pane_head_geometry(rect: [f32; 4], kind: SeatKind, scale: f32) -> PaneHea
             content_bottom,
         ],
         close,
+        files: trigger.and_then(|(is_float, box_)| (!is_float).then_some(box_)),
+        float: trigger.and_then(|(is_float, box_)| is_float.then_some(box_)),
     }
 }
 
@@ -3953,6 +4178,7 @@ pub fn build_chrome_with_preview(
             active_tab: 0,
             grabbed: None,
             strip_preview: None,
+            float_shown: None,
             tab_scroll: 0.0,
             // The horizontal layout every test in this module that does not say
             // otherwise is written against.
@@ -4182,6 +4408,14 @@ pub struct ChromeContent<'a> {
     /// different axes with different lengths.
     pub rail_scroll: f32,
     pub preview_title: Option<&'a str>,
+    /// Which tab's floating tree is on screen, if the float was summoned from a
+    /// tab's own trigger — `.vtab.shown` (Q173).
+    ///
+    /// An index into [`Self::tabs`], resolved by the caller from the float's
+    /// origin, because that origin is an identity and only `bt-app` holds the
+    /// list that turns one into a position. A float torn out of a *pane* head
+    /// lights no row: there is no tab whose folder opened it.
+    pub float_shown: Option<usize>,
     /// What each Terminal seat's own shell is called — C28, per leaf.
     ///
     /// The per-leaf lookup the old single `terminal_cwd` promised to become, and
@@ -4446,6 +4680,7 @@ pub fn build_chrome_for_tabs(
         rail,
         rail_scroll,
         preview_title,
+        float_shown,
         terminal_names,
         leaf_marks,
         files_names,
@@ -4841,6 +5076,74 @@ pub fn build_chrome_for_tabs(
                         },
                     ));
                 }
+                // `.pane-files` / `.pane-float`, revealed by the same pane hover
+                // that reveals the `×` beside them.
+                //
+                // **They appear together, and that is the design's own
+                // requirement**: "match the close button: hidden until the pane
+                // is hovered, so an idle split header stays quiet and the two
+                // controls reveal together (not one-always, one-on-hover)"
+                // (mock-up 766-768). The mock-up gives this one an `opacity .12s`
+                // transition and gives the `×` a bare `visibility` switch — a
+                // difference that would show as one control fading in beside
+                // another that snaps, which is the one thing that sentence rules
+                // out. So the pair reveals the way the `×` already does here, and
+                // what this control keeps from its own rule is the part that is
+                // about it alone: the `.7` resting step and the lift to full
+                // under the pointer.
+                if pointer.pane_hover == Some(placement.id) {
+                    let trigger = head
+                        .files
+                        .map(|box_| (box_, false))
+                        .or(head.float.map(|box_| (box_, true)));
+                    if let Some((box_, is_float)) = trigger {
+                        let target = if is_float {
+                            ChromeTarget::PaneFloat(placement.id)
+                        } else {
+                            ChromeTarget::PaneFiles(placement.id)
+                        };
+                        let lit = pointer.hover == Some(target);
+                        if lit {
+                            pane_sprites.push(ChromeSprite::new(
+                                ChromeMark::ControlPill {
+                                    radius_px: (PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX * scale)
+                                        .round()
+                                        .max(1.0)
+                                        as u32,
+                                },
+                                box_,
+                                palette.pane_close_pill,
+                            ));
+                        }
+                        let glyph = ((if is_float {
+                            PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX
+                        } else {
+                            PANE_HEAD_FILES_GLYPH_LOGICAL_PX
+                        }) * scale)
+                            .round()
+                            .max(1.0);
+                        let glyph_left = ((box_[0] + box_[2] - glyph) / 2.0).round();
+                        let glyph_top = ((box_[1] + box_[3] - glyph) / 2.0).round();
+                        let mut mark = ChromeSprite::new(
+                            if is_float {
+                                ChromeMark::Float
+                            } else {
+                                ChromeMark::Folder
+                            },
+                            [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph],
+                            // `color: var(--ink3)` rising to `var(--accent)` —
+                            // and the accent is opaque in both themes, so unlike
+                            // every ink around it there is nothing to pre-mix.
+                            if lit {
+                                palette.accent
+                            } else {
+                                palette.pane_close_glyph
+                            },
+                        );
+                        mark.opacity = if lit { 1.0 } else { PANE_HEAD_TRIGGER_REVEAL };
+                        pane_sprites.push(mark);
+                    }
+                }
                 // C28-C43: a files column draws its rows into the body the floor
                 // quad above just laid down, and only falls through to a centred
                 // notice when the whole tree *is* one — an unrooted column, an
@@ -4857,8 +5160,15 @@ pub fn build_chrome_for_tabs(
                         None => push_files_tree(
                             body,
                             tree,
-                            pointer.hover,
-                            placement.id,
+                            match pointer.hover {
+                                Some(ChromeTarget::FilesRow { seat, index })
+                                    if seat == placement.id =>
+                                {
+                                    Some(index)
+                                }
+                                _ => None,
+                            },
+                            FilesRowInk::on_pane_body(&palette),
                             scale,
                             &palette,
                             (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
@@ -5050,6 +5360,7 @@ pub fn build_chrome_for_tabs(
             state: rail,
             profile_menu_open,
             chevron_turn,
+            shown: float_shown,
         },
         palette,
         rail_group.as_output(),
@@ -5979,6 +6290,63 @@ fn window_tab_strip(
                     clip: None,
                 });
             }
+            // ── the folder, at the head of the trailing run ──
+            if let Some(files) = tab.files {
+                let files_hovered = hover == Some(ChromeTarget::TabFiles(index));
+                if files_hovered && within_strip(viewport, files) {
+                    // `.tab-files:hover { background: var(--hover) }` — the same
+                    // pill the pin and the `×` wear, at this control's own 5px of
+                    // round rather than their 4.
+                    let mut pill = ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX * scale)
+                                .round()
+                                .max(1.0) as u32,
+                        },
+                        pixel_snapped(files),
+                        if active {
+                            palette.tab_close_pill_on_content
+                        } else {
+                            palette.tab_close_pill_on_hovered_tab
+                        },
+                    );
+                    pill.opacity = tab.trailer.reveal;
+                    sprites.push(pill);
+                }
+                let glyph = (PANE_HEAD_FILES_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+                let glyph_left = ((files[0] + files[2] - glyph) / 2.0).round();
+                let glyph_top = ((files[1] + files[3] - glyph) / 2.0).round();
+                let glyph_rect = [glyph_left, glyph_top, glyph_left + glyph, glyph_top + glyph];
+                // The pin's own rule about a box still opening: a mark fills the
+                // box it was rasterised into, so a half-open one cannot crop it
+                // and the glyph waits instead of spilling over the title.
+                if files[2] - files[0] >= glyph && within_strip(viewport, glyph_rect) {
+                    let mut mark = ChromeSprite::new(
+                        ChromeMark::Folder,
+                        glyph_rect,
+                        // `.tab-files { color: var(--ink3) }` rising to
+                        // `var(--accent)` under the pointer — and the accent is
+                        // the one colour in the chrome that is never pre-mixed,
+                        // because it is opaque in both themes.
+                        if files_hovered {
+                            palette.accent
+                        } else if active {
+                            palette.tab_close_glyph_on_active_tab
+                        } else if tab_hovered {
+                            palette.tab_close_glyph_on_hovered_tab
+                        } else {
+                            palette.title_text_muted
+                        },
+                    );
+                    // **Two multipliers, and they are not the same number.**
+                    // `reveal` is how far the box has opened (`width .16s`) and
+                    // `files_lit` is the 0/.6/1 ladder (`opacity .12s`). A glyph
+                    // at full strength inside a box that is still 3px wide is the
+                    // artefact this product of the two exists to prevent.
+                    mark.opacity = (tab.trailer.reveal * tab.trailer.files_lit).clamp(0.0, 1.0);
+                    sprites.push(mark);
+                }
+            }
             // ── the pin, in the `×`'s own slot ──
             if let Some(pin) = tab.pin {
                 let pinned = tab.trailer.pinned;
@@ -6298,6 +6666,13 @@ struct Rail<'a> {
     state: RailState,
     profile_menu_open: bool,
     chevron_turn: f32,
+    /// The row whose floating tree is on screen — `.vtab.shown` (Q173).
+    ///
+    /// Its own field rather than being read off `hovered`, because the whole
+    /// point of it is that the two have come apart: the pointer is free to be
+    /// anywhere once a window has been torn off, and this is the row that opened
+    /// it saying so.
+    shown: Option<usize>,
 }
 
 /// An ink faded to `opacity` over the ground it stands on.
@@ -6361,6 +6736,7 @@ fn rail_chrome(
         state,
         profile_menu_open,
         chevron_turn,
+        shown,
     } = rail;
     let (quads, labels, sprites) = output;
     let trailers = tabs.iter().map(|tab| tab.trailer).collect::<Vec<_>>();
@@ -6528,7 +6904,18 @@ fn rail_chrome(
             // terminal. A row in a column has four edges and no such join, so
             // the strip's silhouette here draws two square corners under a fill
             // the design rounds.
-            if active || hovered || grabbed_here {
+            // `.vtab.shown:not(.active) { background: var(--hover) }` (Q173,
+            // mock-up 948) — the row whose flyout is up wears the hover fill even
+            // when the pointer has walked away from it.
+            //
+            // It is what stops a torn-off window looking orphaned: a pinned float
+            // outlives the hover that summoned it, and without this the row it
+            // belongs to goes dark while the window it opened is still on screen.
+            // `:not(.active)` is in the selector and therefore in the condition —
+            // the active row already has a louder fill, and painting the quieter
+            // one over it would be a downgrade.
+            let shown_here = shown == Some(index) && !active;
+            if active || hovered || grabbed_here || shown_here {
                 sprites.push(ChromeSprite::new(
                     ChromeMark::ControlPill {
                         radius_px: row_radius as u32,
@@ -6860,6 +7247,62 @@ fn rail_chrome(
             // at zero width — so this draws what it was handed and re-decides
             // nothing.
             let pinned = row.trailer.pinned;
+            // The folder, drawn ahead of the pair for the same reason it is hit
+            // ahead of them: it is the head of the run. It is its own block
+            // rather than a third entry in the loop below because the loop is
+            // built on "pin or `×`" — two glyphs that share a box size, a radius
+            // and a family of inks — and this one shares none of the three.
+            if let Some(files) = row.files.filter(|files| in_list(*files)) {
+                let files_hovered = hover == Some(ChromeTarget::TabFiles(index));
+                if files_hovered {
+                    let mut pill = ChromeSprite::new(
+                        ChromeMark::ControlPill {
+                            radius_px: (PANE_HEAD_TRIGGER_RADIUS_LOGICAL_PX * scale)
+                                .round()
+                                .max(1.0) as u32,
+                        },
+                        pixel_snapped(clip_to_list(files)),
+                        if active {
+                            palette.tab_close_pill_on_content
+                        } else {
+                            palette.tab_close_pill_on_hovered_tab
+                        },
+                    );
+                    pill.opacity = row.trailer.reveal;
+                    sprites.push(pill);
+                }
+                let glyph_size = (PANE_HEAD_FILES_GLYPH_LOGICAL_PX * scale).round().max(1.0);
+                let glyph_left = ((files[0] + files[2] - glyph_size) / 2.0).round();
+                let glyph_top = ((files[1] + files[3] - glyph_size) / 2.0).round();
+                let glyph_rect = [
+                    glyph_left,
+                    glyph_top,
+                    glyph_left + glyph_size,
+                    glyph_top + glyph_size,
+                ];
+                if files[2] - files[0] >= glyph_size && in_list(glyph_rect) {
+                    let mut mark = ChromeSprite::new(
+                        ChromeMark::Folder,
+                        glyph_rect,
+                        if files_hovered {
+                            palette.accent
+                        } else if active {
+                            palette.rail_glyph_on_active_tab
+                        } else if hovered {
+                            palette.tab_close_glyph_on_hovered_tab
+                        } else {
+                            palette.title_text_muted
+                        },
+                    );
+                    // The reveal, the ladder, **and** the rail's own word-fade:
+                    // this control is listed with the words a parking rail drops
+                    // (mock-up 895-896), and half a cluster fading is worse than
+                    // both.
+                    mark.opacity =
+                        (row.trailer.reveal * row.trailer.files_lit * text).clamp(0.0, 1.0);
+                    sprites.push(mark);
+                }
+            }
             for (slot, is_pin) in [(row.pin, true), (row.close, false)] {
                 let Some(slot) = slot else {
                     continue;
@@ -7548,6 +7991,70 @@ impl FilesTreeGeometry {
     }
 }
 
+/// The eight inks a tree's rows are drawn in, already mixed over the ground the
+/// tree is standing on.
+///
+/// **The one thing that cannot be shared between the two hosts** (C39). The
+/// drawing is shared — `push_files_tree` is one function and both hosts call it
+/// — but every one of these is a translucent token composited over a surface,
+/// and a docked column stands on `--termbg` while a floating window stands on
+/// `--win`. Passing the palette and letting the painter pick would have meant the
+/// painter knowing which host it is in, which is the coupling this parameter
+/// exists to delete: it is handed its colours and does not ask where it is.
+///
+/// On the light theme the two sets are identical, because both grounds are
+/// `#FFFFFF` there. That is a fact about the palette and not a licence to fold
+/// them — see the palette's own note beside `float_row_hover`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilesRowInk {
+    pub hover: [u8; 3],
+    pub selected: [u8; 3],
+    pub text: [u8; 3],
+    pub text_hover: [u8; 3],
+    pub text_selected: [u8; 3],
+    pub muted: [u8; 3],
+    pub muted_hover: [u8; 3],
+    pub muted_selected: [u8; 3],
+    /// The centred sentence a whole-tree notice is drawn in.
+    pub hint: [u8; 3],
+}
+
+impl FilesRowInk {
+    /// A docked column's set: mixed over `--termbg`, the one ground a files
+    /// body has (B15/U11).
+    #[must_use]
+    pub fn on_pane_body(palette: &bt_render::ChromePalette) -> Self {
+        Self {
+            hover: palette.files_row_hover,
+            selected: palette.files_row_selected,
+            text: palette.files_row_text,
+            text_hover: palette.files_row_text_hover,
+            text_selected: palette.files_row_text_selected,
+            muted: palette.files_row_muted,
+            muted_hover: palette.files_row_muted_hover,
+            muted_selected: palette.files_row_muted_selected,
+            hint: palette.body_hint_text,
+        }
+    }
+
+    /// A floating window's set: mixed over `--win`, which is what
+    /// `#files-flyout`'s face is.
+    #[must_use]
+    pub fn on_float(palette: &bt_render::ChromePalette) -> Self {
+        Self {
+            hover: palette.float_row_hover,
+            selected: palette.float_row_selected,
+            text: palette.float_row_text,
+            text_hover: palette.float_row_text_hover,
+            text_selected: palette.float_row_text_selected,
+            muted: palette.float_row_muted,
+            muted_hover: palette.float_row_muted_hover,
+            muted_selected: palette.float_row_muted_selected,
+            hint: palette.dialog_muted_text,
+        }
+    }
+}
+
 /// When the whole tree is a single sentence about itself, that sentence belongs
 /// in the middle of the body rather than on a row.
 ///
@@ -7677,11 +8184,11 @@ pub fn hit_files_tree(
 /// one starts doing more work — a hundred-thousand-entry folder capped at 2000
 /// still only builds the two dozen rows the pane can show.
 #[allow(clippy::too_many_arguments)]
-fn push_files_tree(
+pub(crate) fn push_files_tree(
     body: [f32; 4],
     tree: &FilesTreeContent,
-    hover: Option<ChromeTarget>,
-    seat: SeatId,
+    hovered: Option<usize>,
+    ink: FilesRowInk,
     scale: f32,
     palette: &bt_render::ChromePalette,
     out: (
@@ -7693,10 +8200,6 @@ fn push_files_tree(
     use crate::files::RowKind;
     let (_quads, labels, sprites) = out;
     let geometry = files_tree_geometry(body, tree.rows.len(), tree.scroll_px, scale);
-    let hovered = match hover {
-        Some(ChromeTarget::FilesRow { seat: on, index }) if on == seat => Some(index),
-        _ => None,
-    };
     let radius = (FILES_ROW_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
     let row_pad = FILES_ROW_PADDING_X_LOGICAL_PX * scale;
     let indent = FILES_ROW_INDENT_LOGICAL_PX * scale;
@@ -7724,11 +8227,7 @@ fn push_files_tree(
             sprites.push(ChromeSprite::new(
                 ChromeMark::ControlPill { radius_px: radius },
                 crop(rect),
-                if selected {
-                    palette.files_row_selected
-                } else {
-                    palette.files_row_hover
-                },
+                if selected { ink.selected } else { ink.hover },
             ));
         }
         // `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px
@@ -7745,19 +8244,19 @@ fn push_files_tree(
                 palette.accent,
             ));
         }
-        let ink = if selected {
-            palette.files_row_text_selected
+        let text = if selected {
+            ink.text_selected
         } else if under_pointer {
-            palette.files_row_text_hover
+            ink.text_hover
         } else {
-            palette.files_row_text
+            ink.text
         };
         let muted = if selected {
-            palette.files_row_muted_selected
+            ink.muted_selected
         } else if under_pointer {
-            palette.files_row_muted_hover
+            ink.muted_hover
         } else {
-            palette.files_row_muted
+            ink.muted
         };
         let content_left = rect[0] + row_pad + indent * row.depth as f32;
         let name_left = content_left + tri + gap + icon + gap;
@@ -7771,7 +8270,7 @@ fn push_files_tree(
                     text: row.name.clone(),
                     rect: [name_left, rect[1], rect[2] - row_pad, rect[3]],
                     font_size_px: font,
-                    color: palette.body_hint_text,
+                    color: ink.hint,
                     align_right: false,
                     align_center: false,
                     letter_spacing_em: 0.0,
@@ -7853,7 +8352,7 @@ fn push_files_tree(
             text: row.name.clone(),
             rect: name_rect,
             font_size_px: font,
-            color: ink,
+            color: text,
             align_right: false,
             align_center: false,
             letter_spacing_em: 0.0,
@@ -7865,6 +8364,19 @@ fn push_files_tree(
             clip: Some(crop(name_rect)),
         });
     }
+}
+
+/// How tall a tree of `rows` rows wants its body to be.
+///
+/// The same arithmetic [`files_tree_geometry`] does, asked *before* there is a
+/// body to lay it into — which is what a float needs to open at the size of its
+/// content. It is expressed as a call to that function rather than as a second
+/// copy of `padding + rows × height + padding`, because two derivations of one
+/// number are two numbers that can drift apart, and this pair would drift the day
+/// the padding changes.
+#[must_use]
+pub fn files_tree_content_height(rows: usize, scale: f32) -> f32 {
+    files_tree_geometry([0.0, 0.0, 0.0, 0.0], rows, 0.0, scale).content_height
 }
 
 /// Lay the rows into the body, clamping the scroll to what there is to see.
@@ -9774,7 +10286,7 @@ mod tests {
             .expect("a lone terminal splits");
 
         let column = seats
-            .add_files_pane(&metrics)
+            .add_files_pane(&metrics, None)
             .expect("a files column fits beside two stacked terminals");
         let layout = solved(&seats, viewport, &metrics);
         let column_rect = layout
@@ -9826,7 +10338,7 @@ mod tests {
         let metrics = seat_metrics(dpi_milli);
         let viewport = viewport_of(1600, 900, dpi_milli);
         let mut seats = Seats::lone_terminal();
-        let column = seats.add_files_pane(&metrics).expect("a column fits");
+        let column = seats.add_files_pane(&metrics, None).expect("a column fits");
         let ratios_before = seats.tree().ratios();
         let origin = seats.fixed_extent_of(column).unwrap_or(FILES_W);
 
@@ -9902,7 +10414,7 @@ mod tests {
         let metrics = seat_metrics(dpi_milli);
         let viewport = viewport_of(1600, 900, dpi_milli);
         let mut seats = Seats::lone_terminal();
-        let column = seats.add_files_pane(&metrics).expect("a column fits");
+        let column = seats.add_files_pane(&metrics, None).expect("a column fits");
         let slot = seats.split_slots(&solved(&seats, viewport, &metrics))[0];
         let (_, leading) = seats
             .fixed_column_of_split(&metrics, slot.id)
@@ -10662,6 +11174,7 @@ mod tests {
                     active_tab: 0,
                     grabbed: None,
                     strip_preview: None,
+                    float_shown: None,
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
@@ -10870,6 +11383,7 @@ mod tests {
                 active_tab,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -10949,6 +11463,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -13177,6 +13692,7 @@ mod tests {
                 TabTrailer {
                     pinned: true,
                     reveal: 0.0,
+                    ..TabTrailer::default()
                 },
                 TabTrailer::default(),
             ];
@@ -13212,6 +13728,7 @@ mod tests {
                     TabTrailer {
                         pinned: true,
                         reveal: 1.0,
+                        ..TabTrailer::default()
                     },
                     TabTrailer::default(),
                 ],
@@ -13253,6 +13770,7 @@ mod tests {
                     TabTrailer {
                         pinned: true,
                         reveal: 1.0,
+                        ..TabTrailer::default()
                     };
                     count
                 ];
@@ -13303,6 +13821,7 @@ mod tests {
                 TabTrailer {
                     pinned: true,
                     reveal: 0.0,
+                    ..TabTrailer::default()
                 },
                 TabTrailer::default(),
             ];
@@ -13327,6 +13846,7 @@ mod tests {
                 TabTrailer {
                     pinned: false,
                     reveal: 1.0,
+                    ..TabTrailer::default()
                 },
                 TabTrailer::default(),
             ];
@@ -13395,6 +13915,7 @@ mod tests {
                     TabTrailer {
                         pinned: true,
                         reveal: 0.0,
+                        ..TabTrailer::default()
                     },
                     TabTrailer::default(),
                 ],
@@ -13432,6 +13953,7 @@ mod tests {
                         TabTrailer {
                             pinned: false,
                             reveal,
+                            ..TabTrailer::default()
                         },
                         TabTrailer::default(),
                     ],
@@ -13515,6 +14037,7 @@ mod tests {
                 pinnable_tab(TabTrailer {
                     pinned: true,
                     reveal: 0.0,
+                    ..TabTrailer::default()
                 }),
                 pinnable_tab(TabTrailer::default()),
             ];
@@ -13572,6 +14095,7 @@ mod tests {
             let offered = [pinnable_tab(TabTrailer {
                 pinned: false,
                 reveal: 1.0,
+                ..TabTrailer::default()
             })];
             let (_, _, offer_sprites) = strip_chrome_of(scale, &offered, 0, 0.0, None, false);
             let offer = pin_sprite(&offer_sprites, false).expect("a revealed pin is drawn");
@@ -13594,6 +14118,7 @@ mod tests {
                 pinnable_tab(TabTrailer {
                     pinned: true,
                     reveal: 0.0,
+                    ..TabTrailer::default()
                 }),
             ];
             let pinned_ink = |hover: Option<ChromeTarget>| {
@@ -13632,6 +14157,7 @@ mod tests {
                 let tabs = [pinnable_tab(TabTrailer {
                     pinned: false,
                     reveal,
+                    ..TabTrailer::default()
                 })];
                 let (_, _, sprites) = strip_chrome_of(scale, &tabs, 0, 0.0, None, false);
                 sprites
@@ -13670,10 +14196,12 @@ mod tests {
                 TabTrailer {
                     pinned: true,
                     reveal: 0.0,
+                    ..TabTrailer::default()
                 },
                 TabTrailer {
                     pinned: true,
                     reveal: 0.0,
+                    ..TabTrailer::default()
                 },
             ];
             let tabs = [pinnable_tab(trailers[0]), pinnable_tab(trailers[1])];
@@ -13755,6 +14283,7 @@ mod tests {
                     .map(|index| TabTrailer {
                         pinned: index % 2 == 0,
                         reveal: (index % 3) as f32 / 2.0,
+                        ..TabTrailer::default()
                     })
                     .collect::<Vec<_>>();
                 let plain = tab_strip_geometry(width, scale, &resting(count), 0, 0.0);
@@ -13936,10 +14465,12 @@ mod tests {
         let pinned = TabTrailer {
             pinned: true,
             reveal: 1.0,
+            ..TabTrailer::default()
         };
         let open = TabTrailer {
             pinned: false,
             reveal: 0.5,
+            ..TabTrailer::default()
         };
         let before = tab_strip_geometry(960.0, 1.0, &[pinned, open, open], 0, 0.0);
         let after = tab_strip_geometry(960.0, 1.0, &[open, pinned, open], 1, 0.0);
@@ -13989,6 +14520,7 @@ mod tests {
         let trailer = TabTrailer {
             pinned: false,
             reveal: 1.0,
+            ..TabTrailer::default()
         };
         let geometry = tab_strip_geometry(960.0, 1.0, &[trailer, trailer], 0, 0.0);
         let slot = geometry.tabs[0];
@@ -14031,6 +14563,7 @@ mod tests {
                 active_tab,
                 grabbed,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -14221,6 +14754,7 @@ mod tests {
                     active_tab: 0,
                     grabbed: None,
                     strip_preview: None,
+                    float_shown: None,
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
@@ -14320,6 +14854,7 @@ mod tests {
                     active_tab: 2,
                     grabbed: None,
                     strip_preview,
+                    float_shown: None,
                     tab_scroll: 0.0,
                     rail: RailState::default(),
                     rail_scroll: 0.0,
@@ -14524,6 +15059,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -14670,16 +15206,197 @@ mod tests {
             ),
             Some(ChromeTarget::PaneClose(terminal)),
         );
-        // One pixel to the left of the box is the head again — the boundary is
-        // where the drawing says it is, not a pixel either side of it.
+        // One pixel to the left of the box is its **neighbour in the trailing
+        // run**, not the head: `.panehead .pane-files + .pane-close
+        // { margin-left: 0 }` (mock-up 770) puts the folder flush against the `×`
+        // with nothing between them, so the two boxes share an edge.
+        //
+        // This assertion used to read `PaneHeader`, and it was right when the `×`
+        // was the only thing on that end. What changed is the run and not the
+        // rule: the boundary is still exactly where the drawing puts it, and the
+        // head is still what answers everywhere no control stands.
+        let files = head.files.expect("a terminal head carries the folder");
+        assert_eq!(
+            files[2], close[0],
+            "the folder and the `×` share an edge — no gap for a press to fall through"
+        );
         assert_eq!(
             hit_chrome(&seats, &layout, 1.0, f64::from(close[0]) - 1.0, middle_y),
-            Some(ChromeTarget::PaneHeader(terminal)),
+            Some(ChromeTarget::PaneFiles(terminal)),
         );
         assert_eq!(
             hit_chrome(&seats, &layout, 1.0, f64::from(close[0]), middle_y),
             Some(ChromeTarget::PaneClose(terminal)),
             "the box is half-open on its leading edge, like every other target"
+        );
+        // And one pixel left of the *run* is the handle, which is the claim this
+        // test was always making.
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, f64::from(files[0]) - 1.0, middle_y),
+            Some(ChromeTarget::PaneHeader(terminal)),
+        );
+    }
+
+    /// H110/B18: the two heads carry **different** verbs in the same slot — a
+    /// terminal offers to show you where it stands, a column offers to leave.
+    ///
+    /// Red gate: give both kinds the same control and a files column grows a
+    /// button that peeks itself, while the only way out of a docked tree
+    /// disappears.
+    #[test]
+    fn a_terminal_head_wears_the_folder_and_a_files_head_wears_the_float() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let viewport = viewport_of(1200, 800, 1_000);
+        let layout = solved(&seats, viewport, &metrics);
+        let terminal = layout.rects[0].id;
+        let column = layout.rects[1].id;
+
+        let term_head =
+            pane_head_geometry(device_rect_of(&layout, terminal), SeatKind::Terminal, 1.0);
+        assert!(term_head.files.is_some(), "a terminal peeks its own folder");
+        assert!(
+            term_head.float.is_none(),
+            "and has no column of its own to pop out"
+        );
+
+        let files_head = pane_head_geometry(device_rect_of(&layout, column), SeatKind::Files, 1.0);
+        assert!(
+            files_head.float.is_some(),
+            "a column offers to become a window"
+        );
+        assert!(
+            files_head.files.is_none(),
+            "and does not offer to peek the tree it already is"
+        );
+        // `.files-head .pane-float + .pane-close { margin-left: 6px }` against the
+        // terminal head's `margin-left: 0` — the mock-up writes both, so the two
+        // heads space their pair differently and this is where that shows.
+        let close = files_head.close.expect("wide enough");
+        let float = files_head.float.expect("present");
+        assert_eq!(
+            close[0] - float[2],
+            PANE_HEAD_FLOAT_CLOSE_GAP_LOGICAL_PX,
+            "the column's pair is spaced, the terminal's is flush"
+        );
+    }
+
+    /// H107: **a tab is the header of the terminal it holds — when it holds
+    /// exactly one.** A split tab has no single terminal to speak for it.
+    ///
+    /// Red gate: drop the `trailer.files` condition and every tab grows a folder,
+    /// including ones with no terminal at all — a trigger that, pressed, would
+    /// have nothing to take a root from.
+    #[test]
+    fn only_a_tab_holding_one_terminal_wears_the_folder() {
+        let scale = 1.0;
+        let width = 960.0;
+        let carried = TabTrailer {
+            files: true,
+            reveal: 1.0,
+            ..TabTrailer::default()
+        };
+        let bare = TabTrailer {
+            files: false,
+            reveal: 1.0,
+            ..TabTrailer::default()
+        };
+        let geometry = tab_strip_geometry(width, scale, &[carried, bare], 0, 0.0);
+        assert!(
+            geometry.tabs[0].files.is_some(),
+            "the lone-terminal tab speaks for it"
+        );
+        assert!(
+            geometry.tabs[1].files.is_none(),
+            "the split (or files-only) tab does not"
+        );
+    }
+
+    /// H106, the mock-up's own pairing: `.tab.tight .pin, .tab.tight .tab-files
+    /// { display: none }` — at that width, summoning folder, pin and `×` together
+    /// crushes the title to nothing.
+    ///
+    /// Red gate: exempt the trigger from the tiers and a narrow tab spends its
+    /// last pixels on three controls and none on its name.
+    #[test]
+    fn the_narrow_tiers_take_the_folder_away_with_the_pin() {
+        let scale = 1.0;
+        let carried = TabTrailer {
+            files: true,
+            reveal: 1.0,
+            ..TabTrailer::default()
+        };
+        // The counts its sibling test above already established land one on each
+        // side of the two thresholds at this width, and the tier is asserted
+        // rather than assumed.
+        for (count, tier) in [(6, TabWidthTier::Tight), (9, TabWidthTier::Squeezed)] {
+            let tabs = vec![carried; count];
+            let geometry = tab_strip_geometry(960.0, scale, &tabs, 0, 0.0);
+            assert_eq!(geometry.tabs[0].tier, tier, "the width tier under test");
+            assert!(
+                geometry.tabs[0].files.is_none(),
+                "{tier:?}: the folder retreats with the pin"
+            );
+        }
+    }
+
+    /// H76/H104's ladder, and the *product* that drives it: the box opens on the
+    /// tab's hover (`reveal`) while the glyph lights on its own (`files_lit`).
+    ///
+    /// Red gate: draw the glyph at `files_lit` alone and a full-strength folder
+    /// appears inside a box three pixels wide, which is the artefact the two
+    /// multipliers exist to prevent.
+    #[test]
+    fn the_folder_opens_with_the_tab_and_lights_on_its_own() {
+        let scale = 1.0;
+        let folder_opacity = |reveal: f32, lit: f32, hover: Option<ChromeTarget>| {
+            let tabs = [pinnable_tab(TabTrailer {
+                files: true,
+                files_lit: lit,
+                reveal,
+                ..TabTrailer::default()
+            })];
+            let (_, _, sprites) = strip_chrome_of(scale, &tabs, 0, 0.0, hover, false);
+            sprites
+                .iter()
+                .find(|sprite| sprite.mark == ChromeMark::Folder)
+                .map(|sprite| sprite.opacity)
+        };
+        assert_eq!(
+            folder_opacity(0.0, 0.0, None),
+            None,
+            "a resting tab draws no folder at all — the box has no width to hold one"
+        );
+        let half =
+            folder_opacity(1.0, TAB_FILES_TRIGGER_REVEAL, None).expect("a hovered tab reveals it");
+        assert!(
+            (half - TAB_FILES_TRIGGER_REVEAL).abs() < 1e-6,
+            "the middle rung is .6, not full strength"
+        );
+        let full = folder_opacity(1.0, 1.0, Some(ChromeTarget::TabFiles(0)))
+            .expect("the pointer is on the trigger");
+        assert!((full - 1.0).abs() < 1e-6, "and its own hover lifts it to 1");
+    }
+
+    /// The trigger joins the trailing run at its head, so the badge docks against
+    /// *it* rather than against the pin — H103's cluster read as geometry.
+    ///
+    /// Red gate: leave `trailing_edge_of` unaware of it and the pane-count badge
+    /// is drawn underneath the folder.
+    #[test]
+    fn the_badge_docks_against_the_folder_when_a_tab_carries_one() {
+        let scale = 1.0;
+        let carried = TabTrailer {
+            files: true,
+            reveal: 1.0,
+            ..TabTrailer::default()
+        };
+        let geometry = tab_strip_geometry(960.0, scale, &[carried], 0, 0.0);
+        let tab = geometry.tabs[0];
+        let files = tab.files.expect("revealed");
+        assert!(
+            tab_trailing_edge(&tab, scale) <= files[0],
+            "the run's boundary is the folder's left edge, not the pin's"
         );
     }
 
@@ -16113,6 +16830,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -16166,6 +16884,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: RailState::default(),
                 rail_scroll: 0.0,
@@ -16947,6 +17666,7 @@ mod tests {
                 active_tab,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
@@ -17184,6 +17904,7 @@ mod tests {
                 active_tab,
                 grabbed,
                 strip_preview: preview,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: state,
                 rail_scroll: 0.0,
@@ -17398,6 +18119,7 @@ mod tests {
         let pinned = TabTrailer {
             pinned: true,
             reveal: 0.0,
+            ..TabTrailer::default()
         };
         let tabs = [
             TabContent {
@@ -17430,6 +18152,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
@@ -17552,6 +18275,7 @@ mod tests {
                 trailer: TabTrailer {
                     pinned: true,
                     reveal: 0.0,
+                    ..TabTrailer::default()
                 },
                 ..TabContent::default()
             },
@@ -17579,6 +18303,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 rail: expanded_rail(),
                 rail_scroll: 0.0,
@@ -17646,10 +18371,12 @@ mod tests {
             TabTrailer {
                 pinned: true,
                 reveal: 0.0,
+                ..TabTrailer::default()
             },
             TabTrailer {
                 pinned: false,
                 reveal: 1.0,
+                ..TabTrailer::default()
             },
         ];
         let open = rail_geometry(600.0, 1.0, &revealed, 1, 0.0, expanded_rail())
@@ -17899,10 +18626,12 @@ mod tests {
             TabTrailer {
                 pinned: true,
                 reveal: 0.0,
+                ..TabTrailer::default()
             },
             TabTrailer {
                 pinned: false,
                 reveal: 0.0,
+                ..TabTrailer::default()
             },
         ];
         for scale in [1.0_f32, 1.25, 1.5, 2.0] {
@@ -18497,6 +19226,7 @@ mod tests {
             TabTrailer {
                 pinned: true,
                 reveal: 0.0,
+                ..TabTrailer::default()
             },
             TabTrailer::default(),
         ];
@@ -18531,6 +19261,7 @@ mod tests {
         let pinned = TabTrailer {
             pinned: true,
             reveal: 0.0,
+            ..TabTrailer::default()
         };
         let mixed = [pinned, TabTrailer::default(), TabTrailer::default()];
         let rail = rail_of(expanded_rail(), &mixed, 1);
@@ -18662,6 +19393,7 @@ mod tests {
         let revealed = TabTrailer {
             pinned: false,
             reveal: 1.0,
+            ..TabTrailer::default()
         };
         let trailers = [pinned, revealed];
 
@@ -18750,6 +19482,7 @@ mod tests {
                 active_tab: 0,
                 grabbed: None,
                 strip_preview: None,
+                float_shown: None,
                 tab_scroll: 0.0,
                 // Hovered fully open: this is the state that overlaps, and the
                 // state the report was made in.
@@ -19050,6 +19783,7 @@ mod tests {
             TabTrailer {
                 pinned: true,
                 reveal: 0.0,
+                ..TabTrailer::default()
             },
             TabTrailer::default(),
         ];
