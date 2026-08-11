@@ -446,11 +446,27 @@ pub const PROFILES: [Profile; 5] = [
         // different language versions, and a single row could only ever start
         // one of them while claiming to be both.
         //
-        // This row keeps the bare name, because that is what the product it
-        // starts is called; the 5.1 row carries the qualifier, because
-        // "Windows PowerShell" is *its* real name and not a disambiguation this
-        // list invented.
-        title: "PowerShell",
+        // **Both rows carry their version** (user ruling 2026-08-11, reversing
+        // the bare name this row shipped with). The two were named "PowerShell"
+        // and "Windows PowerShell", which is what each product is *called* — and
+        // in a tab strip, a tooltip and a picker standing one line apart, it left
+        // the user unable to tell which row was 7 and which was 5.1. A name whose
+        // job is to distinguish two things has to distinguish them.
+        //
+        // `7` and not `7.5`: the version is the product line's, which is what the
+        // family has been called since it stopped being 6. `5.1` is the whole
+        // number because 5.1 is where Windows PowerShell stopped — a fixed value,
+        // not a reading. A `pwsh` 8 would be a new line and a new word here.
+        //
+        // **`scripts/shell-integration/betterterminal.ps1` carries both of these
+        // strings and must be changed with them, character for character.** The
+        // script titles its session with the edition it is running, and
+        // `pane_head_title` drops a program title that merely repeats its own
+        // profile's — a shell agreeing with its launcher has announced nothing.
+        // That test is string equality, so a rename on one side alone puts the
+        // family name back in front of every pane head in the tab. Pinned by
+        // `the_integration_script_names_the_profiles_own_titles`.
+        title: "PowerShell 7",
         mark: ChromeMark::ProfilePowerShell,
         program: ProgramSource::PowerShellSeven,
         // The flag this terminal has always passed, now said by the profile that
@@ -463,7 +479,10 @@ pub const PROFILES: [Profile; 5] = [
     },
     Profile {
         id: "winps",
-        title: "Windows PowerShell",
+        // The qualifier was always this row's real name rather than one the list
+        // invented; the version is the ruling above, and 5.1 is where this product
+        // ends rather than where it happens to be.
+        title: "Windows PowerShell 5.1",
         // The same mark. The mock-up has one PowerShell symbol and drew no
         // second one, and there is nothing to invent: both rows start a
         // PowerShell, the blue tile is what "a PowerShell is here" looks like,
@@ -1855,6 +1874,18 @@ mod tests {
         text.chars().count() as f32 * font_px * 0.6
     }
 
+    /// What the PowerShell 7 row is called, read from the table rather than
+    /// written down.
+    ///
+    /// The rows below are about *drawing* — this row's name is inked here, greyed
+    /// there, tipped with what its caption left out — and none of them is about
+    /// what the name happens to be. Spelling it out made every one of them a
+    /// second, accidental copy of `PROFILES[…].title`, so the 7 / 5.1 rename came
+    /// back as six failures in tests that had no opinion about it.
+    fn powershell_seven() -> &'static str {
+        PROFILES[index_of_id("pwsh")].title
+    }
+
     /// An in-memory machine: what is on the `PATH`, and which files exist.
     ///
     /// The whole reason [`ProfilePrograms::probe`] takes a trait rather than
@@ -2144,7 +2175,7 @@ mod tests {
         assert_eq!(PROFILES.len(), 5);
         let listed: Vec<_> = PROFILES.iter().map(|profile| profile.id).collect();
         assert_eq!(listed, ["pwsh", "winps", "wsl", "gitbash", "cmd"]);
-        assert_eq!(PROFILES[FALLBACK_PROFILE].title, "Windows PowerShell");
+        assert_eq!(PROFILES[FALLBACK_PROFILE].title, "Windows PowerShell 5.1");
 
         // **Mark × title, and not the mark alone.** This used to require every
         // mark to be distinct, and the two PowerShells retire that: they are one
@@ -2236,8 +2267,22 @@ mod tests {
     fn the_two_powershells_are_two_rows_and_only_one_of_them_can_be_missing() {
         let (seven, five) = (index_of_id("pwsh"), index_of_id("winps"));
         assert_ne!(seven, five, "two rows, so two indices");
-        assert_eq!(PROFILES[seven].title, "PowerShell");
-        assert_eq!(PROFILES[five].title, "Windows PowerShell");
+        // Each row says which one it is. The bare "PowerShell" / "Windows
+        // PowerShell" pair these shipped with is what the user could not read
+        // apart at a glance, and the version is the whole answer.
+        assert_eq!(PROFILES[seven].title, "PowerShell 7");
+        assert_eq!(PROFILES[five].title, "Windows PowerShell 5.1");
+        for profile in [seven, five] {
+            assert!(
+                PROFILES[profile]
+                    .title
+                    .split_whitespace()
+                    .any(|word| word.starts_with(|first: char| first.is_ascii_digit())),
+                "{:?} names its version, which is the only thing telling it from \
+                 the row beside it",
+                PROFILES[profile].id
+            );
+        }
 
         // On a machine with both, each row starts its own binary — which is the
         // whole of what splitting them buys.
@@ -2277,6 +2322,53 @@ mod tests {
                 .map(|p| p.to_string_lossy().into_owned()),
             Some(r"C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe".to_owned()),
             "and it does not reach across into the row it is not for"
+        );
+    }
+
+    /// PIN — the integration script titles a session with its own profile's name,
+    /// character for character.
+    ///
+    /// The two files are one decision wearing two syntaxes.
+    /// `scripts/shell-integration/betterterminal.ps1` ends by writing the running
+    /// edition as an OSC 0 title; `pane_head_title` then *drops* a program title
+    /// equal to the profile's own, because a shell that agrees with its launcher
+    /// has announced nothing. That test is string equality and nothing weaker, so
+    /// the moment one side is renamed alone every pane head in a PowerShell tab
+    /// goes back to reading `PowerShell · D:\…` — the exact defect the suppression
+    /// was written for, re-entered through the back door of a half-done rename.
+    ///
+    /// This reads the bytes that ship rather than a copy of them, which is the
+    /// only version of this claim worth making: a constant restated here would
+    /// agree with `profiles.rs` forever and with the script never.
+    ///
+    /// Red gate: rename either title in the table, or either literal in the
+    /// script, and this fails naming the one that moved. It is what the
+    /// 7 / 5.1 rename was carried out under.
+    #[test]
+    fn the_integration_script_names_the_profiles_own_titles() {
+        let script = crate::shell_integration::script_source_ps1();
+        // The assignment as the script writes it — the two arms of the one
+        // conditional that decides what a PowerShell calls itself. `Core` is 7 and
+        // everything else is the 5.1 that ships with Windows.
+        for (id, edition) in [("pwsh", "Core"), ("winps", "Desktop")] {
+            let title = PROFILES[index_of_id(id)].title;
+            let quoted = format!("'{title}'");
+            assert!(
+                script.contains(&quoted),
+                "{id}'s title {title:?} is what the script's {edition} arm writes; \
+                 betterterminal.ps1 does not contain {quoted}"
+            );
+        }
+        // And the arms are told apart the way the script tells them apart, so the
+        // pair above cannot both be satisfied by one arm carrying both strings.
+        let seven = PROFILES[index_of_id("pwsh")].title;
+        let five = PROFILES[index_of_id("winps")].title;
+        assert!(
+            script.contains(&format!(
+                "$PSVersionTable.PSEdition -eq 'Core') {{ '{seven}' }} else {{ '{five}' }}"
+            )),
+            "the script picks {seven:?} for Core and {five:?} for every other \
+             edition, in that order"
         );
     }
 
@@ -2462,7 +2554,7 @@ mod tests {
                 // 5.1 row beside it is part of Windows and says nothing.
                 (
                     index_of_id("pwsh"),
-                    "PowerShell — not found on this machine".to_owned()
+                    format!("{} — not found on this machine", powershell_seven())
                 ),
                 (
                     index_of_id("wsl"),
@@ -3230,12 +3322,32 @@ mod tests {
 
     /// PIN — the menu is pushed off the window's right edge by no more than the
     /// mock-up's own 8px margin, however near that edge the button sits.
+    ///
+    /// The window is sized from the menu rather than written down, because the
+    /// menu is content-sized and this pin is about **placement**: a button jammed
+    /// against the right edge, and a popup that comes back inside for it. A fixed
+    /// number here quietly turns into a second, different claim the moment a
+    /// profile is renamed longer than it — which is how the 7 / 5.1 rename found
+    /// it, the old 300px window no longer being wide enough to hold the list at
+    /// all. That case has its own answer (`max(0.0)`: a menu with nowhere to fit
+    /// hangs off the right, never off the left) and it is not this one.
     #[test]
     fn a_menu_opened_near_the_right_edge_stays_inside_the_window() {
         let scale = 1.0;
-        let surface = 300.0;
+        let roomy = layout(
+            [0.0, 9.0, 28.0, 37.0],
+            MenuSide::Below,
+            (4_000.0, 600.0),
+            scale,
+            NO_RECENT,
+            &mut fake_measure,
+        );
+        let menu_width = roomy.frame[2] - roomy.frame[0];
+        let surface = menu_width + 40.0;
+        // The button in the top-right corner, which is where the `⌄` actually is.
+        let anchor = [surface - 34.0, 9.0, surface - 6.0, 37.0];
         let layout = layout(
-            [260.0, 9.0, 288.0, 37.0],
+            anchor,
             MenuSide::Below,
             (surface, 600.0),
             scale,
@@ -3243,6 +3355,11 @@ mod tests {
             &mut fake_measure,
         );
         let frame = layout.frame;
+        assert!(
+            frame[2] < anchor[2],
+            "this fixture depends on a button too near the edge for the menu to \
+             hang straight down from it: frame {frame:?} anchor {anchor:?}"
+        );
         assert!(
             frame[2] <= surface - 8.0,
             "the menu ran past the window edge: {frame:?}"
@@ -3316,11 +3433,14 @@ mod tests {
         assert!(
             rest_labels
                 .iter()
-                .any(|label| label.text == "PowerShell" && label.color == palette.menu_item_text)
+                .any(|label| label.text == powershell_seven()
+                    && label.color == palette.menu_item_text)
         );
         assert!(
-            hover_labels.iter().any(|label| label.text == "PowerShell"
-                && label.color == palette.menu_item_text_selected)
+            hover_labels
+                .iter()
+                .any(|label| label.text == powershell_seven()
+                    && label.color == palette.menu_item_text_selected)
         );
         assert!(
             hover_quads.len() > rest_quads.len(),
@@ -3486,7 +3606,7 @@ mod tests {
         // And the row's own label clears the column plus the row's 10px gap.
         let title = labels
             .iter()
-            .find(|label| label.text == "PowerShell")
+            .find(|label| label.text == powershell_seven())
             .expect("the row is named");
         assert_eq!(
             title.rect[0],
@@ -3983,7 +4103,8 @@ mod tests {
             layer
                 .labels
                 .iter()
-                .any(|label| label.text == "PowerShell" && label.color == palette.menu_item_text),
+                .any(|label| label.text == powershell_seven()
+                    && label.color == palette.menu_item_text),
             "while the profile row it is not stays `--ink2`"
         );
     }

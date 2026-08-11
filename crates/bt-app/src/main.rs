@@ -8971,7 +8971,15 @@ impl Runtime {
             self.dock_overlay_layers(now),
         ));
         layers.extend(if let Some(layout) = self.settings_layout() {
-            settings::build(&layout, self.settings.hover(), self.settings_values())
+            // The hover and the readings first, then the renderer: a combo whose
+            // value outgrows its 118px button is ellipsised, and only the font
+            // knows where the cut falls. Same division, and same hoist, as the
+            // profile menu's measured hints below.
+            let hover = self.settings.hover();
+            let values = self.settings_values();
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            settings::build(&layout, hover, values, &mut measure)
         } else if let Some(layout) = self.restore_layout() {
             // Above the strip but under no scrim: the prompt floats over a
             // window that already works, which is the whole reason it is
@@ -22318,12 +22326,12 @@ mod tests {
     fn the_new_tab_button_names_the_profile_it_would_start() {
         assert_eq!(
             new_tab_tip(profiles::FALLBACK_PROFILE),
-            "New tab (Windows PowerShell)"
+            "New tab (Windows PowerShell 5.1)"
         );
         assert_eq!(
             new_tab_tip(profiles::index_of_id("pwsh")),
-            "New tab (PowerShell)",
-            "the two PowerShells are told apart by the only thing that differs"
+            "New tab (PowerShell 7)",
+            "the two PowerShells are told apart by the only thing that differs \n             — their version, which is why both titles carry one"
         );
         assert_eq!(
             new_tab_tip(profiles::index_of_id("cmd")),
@@ -22567,7 +22575,7 @@ mod tests {
         let visible = session.terminal().visible_text();
         assert_eq!(
             visible[0].trim_end(),
-            "[BetterTerminal] Git Bash failed to start; using Windows PowerShell instead.",
+            "[BetterTerminal] Git Bash failed to start; using Windows PowerShell 5.1 instead.",
             "the line names the terminal and both profiles by the names the \
              picker offers them under, and is not mistakable for the shell's \
              own output"

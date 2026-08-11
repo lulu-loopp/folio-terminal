@@ -575,8 +575,14 @@ function Global:prompt {
 # It names the *edition*, and that matters now that the two are two profiles rather than two ends
 # of one resolution order. BetterTerminal drops a title that only repeats the profile's own name —
 # a shell agreeing with its launcher has announced nothing — and it can only do that if the two
-# strings match: a 5.1 session titled "PowerShell" under a profile called "Windows PowerShell"
+# strings match: a 5.1 session titled "PowerShell" under a profile called "Windows PowerShell 5.1"
 # would prefix every pane head in that tab with its own family name. `Desktop` is 5.1 and `Core`
 # is 7; `$PSVersionTable.PSEdition` is absent on 5.0 and earlier, where `Desktop` is still right.
-$btEdition = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell' } else { 'Windows PowerShell' }
+#
+# **These two strings are `crates/bt-app/src/profiles.rs`'s `title` fields, character for
+# character, and the version in each is deliberate**: the two rows used to read "PowerShell" and
+# "Windows PowerShell", which left nobody able to tell which was 7 and which was 5.1. The equality
+# above is exact, so the two files change together or the suppression stops firing —
+# `the_integration_script_names_the_profiles_own_titles` is the pin that says so.
+$btEdition = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell 7' } else { 'Windows PowerShell 5.1' }
 [Console]::Write(([string][char]27) + ']0;' + $btEdition + [char]7)

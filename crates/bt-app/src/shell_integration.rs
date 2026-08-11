@@ -347,8 +347,13 @@ pub(crate) const fn script_source() -> &'static str {
 
 /// PowerShell's script, which this module never installs but does depend on for
 /// one declaration — see [`hyperlink_declaration`].
+///
+/// Readable from outside for one more reason since: the script's parting OSC 0
+/// carries the two PowerShell profiles' own titles, and the pin that keeps the
+/// two files in step (`profiles::tests`) has to read the bytes that ship rather
+/// than a copy of them.
 #[cfg(test)]
-const fn script_source_ps1() -> &'static str {
+pub(crate) const fn script_source_ps1() -> &'static str {
     include_str!("../../../scripts/shell-integration/betterterminal.ps1")
 }
 

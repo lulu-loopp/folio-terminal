@@ -122,6 +122,10 @@ const COMBO_GAP_LOGICAL_PX: f32 = 10.0;
 /// The mock-up's chevron is the character, not the `#i-chev` symbol: a solid
 /// down-pointing triangle set as text beside the value.
 const COMBO_CHEVRON: &str = "\u{25bc}";
+/// What `text-overflow: ellipsis` puts at the cut — the single character, not
+/// three periods, because that is the glyph the property is named after and the
+/// one the face draws at a width three periods do not have.
+const ELLIPSIS: &str = "\u{2026}";
 
 // ── `.combo-menu` / `.combo-item` ──────────────────────────────────────────
 /// `border-radius: 8px` — a popup menu's own round, and deliberately not the
@@ -821,6 +825,11 @@ fn contains(rect: [f32; 4], x: f32, y: f32) -> bool {
 }
 
 /// Intersect a content rectangle with the box that clips it, or drop it.
+///
+/// Written so that a box already inside the other comes back *unchanged* —
+/// `max` of two equal floats is one of them, bit for bit, and so is `min` — which
+/// is what lets [`clip_content`] run over a dialog that does not scroll and hand
+/// back the values it was given rather than rounding them on the way through.
 fn clipped(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
     let out = [
         rect[0].max(clip[0]),
@@ -829,6 +838,124 @@ fn clipped(rect: [f32; 4], clip: [f32; 4]) -> Option<[f32; 4]> {
         rect[3].min(clip[3]),
     ];
     (out[2] > out[0] && out[3] > out[1]).then_some(out)
+}
+
+/// Whether `rect` lies wholly inside `clip`.
+fn wholly_inside(rect: [f32; 4], clip: [f32; 4]) -> bool {
+    rect[0] >= clip[0] && rect[1] >= clip[1] && rect[2] <= clip[2] && rect[3] <= clip[3]
+}
+
+/// **`overflow-y` on `.content`, in the three primitives this overlay draws in.**
+///
+/// The scrolling stack is built at its own full geometry — every row the height a
+/// row is, wherever the offset put it — and this is the single sweep that decides
+/// how much of it reaches the screen. The division is the whole fix for the bug
+/// this function was extracted for: the rows used to be *built from* the crop, so
+/// a row half out of the box was drawn as a shorter row rather than as the visible
+/// part of a whole one. A combo sliced by the bottom edge came out a squat pill
+/// with its bottom corners rounded on the cut, and a title sliced by the top edge
+/// re-centred itself in the sliver and rode up against the edge — the compression
+/// the user reported at both ends. Geometry translates; only drawing is cut.
+///
+/// It is [`seats::clip_pane_chrome`](crate::seats)'s rule, said for the overlay's
+/// primitives, and the three channels answer it three different ways for the
+/// reasons recorded there:
+///
+/// **Quads** intersect. A flat fill is the one primitive that crops exactly, and
+/// the rounded shapes here are already *made of* flat fills — `rounded_overlay_fill`
+/// emits whole runs and single coverage-weighted pixels — so cutting the run is
+/// cutting the shape, with the corner left wherever the shape's own corner is.
+///
+/// **Labels** keep their `rect` and gain a [`ChromeLabel::clip`]. Intersecting the
+/// layout box instead is exactly what compressed the titles: the box a label is
+/// laid out in is also the box it is centred in, so a cropped box re-centres the
+/// glyphs inside the crop and the text slides as the offset changes.
+///
+/// **Sprites** are dropped unless they are wholly inside. A [`ChromeSprite`] is a
+/// raster blit at its own size and the pipeline cannot draw part of one; the
+/// scrolling stack draws no marks today, and this is the rule the first one added
+/// to it will meet rather than a silent escape from the box.
+fn clip_content(
+    clip: [f32; 4],
+    content: OverlayLayer,
+    quads: &mut Vec<OverlayQuad>,
+    labels: &mut Vec<ChromeLabel>,
+    sprites: &mut Vec<ChromeSprite>,
+) {
+    let OverlayLayer {
+        quads: content_quads,
+        labels: content_labels,
+        sprites: content_sprites,
+        ..
+    } = content;
+    quads.extend(
+        content_quads
+            .into_iter()
+            .filter_map(|quad| clipped(quad.rect, clip).map(|rect| OverlayQuad { rect, ..quad })),
+    );
+    labels.extend(content_labels.into_iter().filter_map(|label| {
+        // Composed with whatever window the label already carried rather than
+        // replacing it: the combo's value is clipped to its own button before the
+        // content box ever sees it, and a clip that widened here would let a long
+        // value escape the control it names.
+        clipped(label.clip.unwrap_or(label.rect), clip).map(|window| ChromeLabel {
+            clip: Some(window),
+            ..label
+        })
+    }));
+    sprites.extend(
+        content_sprites
+            .into_iter()
+            .filter(|sprite| wholly_inside(sprite.rect, clip)),
+    );
+}
+
+/// `text-overflow: ellipsis` — `text` if the whole of it fits `max_width`, else
+/// the longest prefix that fits with a `…` after it.
+///
+/// The `…` is the whole reason this needs a `measure`: a prefix is only the right
+/// prefix against the font that will draw it, and this module is a pure function
+/// of numbers handed to it. So the caller measures — the same division
+/// `layout_for_menu`'s `widest_option`, `peek_strip::layout` and `profiles::build`
+/// already run on — and the search here is over char boundaries, never bytes, so
+/// no prefix can cut a glyph in half.
+///
+/// Binary search rather than a walk: text width is monotonic in prefix length for
+/// the left-to-right chrome face, and shaping a label is not free enough to do
+/// once per character on every frame the dialog is up.
+fn ellipsized(
+    text: &str,
+    max_width: f32,
+    font_size_px: f32,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> String {
+    if measure(text, font_size_px) <= max_width {
+        return text.to_owned();
+    }
+    // Every place a prefix may end, shortest first. `text` itself is not among
+    // them: the whole string was just refused, so `char_indices` — which stops
+    // before the end — is exactly the candidate set.
+    //
+    // A `text` that reaches here is non-empty (the empty string measures zero and
+    // left above), so index 0 always exists. It is the floor rather than a
+    // candidate: when not even a lone `…` fits, a lone `…` is still what CSS
+    // draws, and the label's own box clips it.
+    let ends: Vec<usize> = text.char_indices().map(|(at, _)| at).collect();
+    let fits = |end: usize, measure: &mut dyn FnMut(&str, f32) -> f32| {
+        measure(&format!("{}{ELLIPSIS}", &text[..end]), font_size_px) <= max_width
+    };
+    let mut best = 0;
+    let (mut low, mut high) = (1, ends.len());
+    while low < high {
+        let middle = low + (high - low) / 2;
+        if fits(ends[middle], measure) {
+            best = middle;
+            low = middle + 1;
+        } else {
+            high = middle;
+        }
+    }
+    format!("{}{ELLIPSIS}", &text[..ends[best]])
 }
 
 /// Where every part of the dialog lands in a window this size, or `None` when
@@ -1173,6 +1300,7 @@ pub fn build(
     layout: &SettingsLayout,
     hover: Option<SettingsTarget>,
     values: SettingsValues,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> Vec<OverlayLayer> {
     let palette = chrome_palette();
     let scale = layout.scale;
@@ -1250,78 +1378,78 @@ pub fn build(
 
     // Everything below the header is clipped to the content box, which is what
     // `max-height` plus `overflow-y` leaves when the window is too short.
+    //
+    // Built whole into a stack of its own and cut once, at the end, by
+    // [`clip_content`]. Every box below is therefore the box the layout placed —
+    // full height, at whatever offset the scroll put it — and no piece of this
+    // stack asks whether it is on screen. That question has exactly one asker, and
+    // a row's own drawing is not it.
     let clip = layout.content;
+    let mut content_stack = OverlayLayer::default();
     for headed in &layout.groups {
-        if let Some(rect) = clipped(headed.label, clip) {
-            labels.push(ChromeLabel {
-                text: headed.group.label().to_owned(),
-                rect,
-                font_size_px: px(GROUP_LABEL_FONT_LOGICAL_PX),
-                color: palette.dialog_muted_text,
-                align_right: false,
-                align_center: false,
-                // A ratio, so it carries no `scale`: the shaper adds it to a
-                // glyph's advance before the font size multiplies both.
-                letter_spacing_em: GROUP_LABEL_TRACKING_EM,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                clip: None,
-            });
-        }
+        content_stack.labels.push(ChromeLabel {
+            text: headed.group.label().to_owned(),
+            rect: headed.label,
+            font_size_px: px(GROUP_LABEL_FONT_LOGICAL_PX),
+            color: palette.dialog_muted_text,
+            align_right: false,
+            align_center: false,
+            // A ratio, so it carries no `scale`: the shaper adds it to a
+            // glyph's advance before the font size multiplies both.
+            letter_spacing_em: GROUP_LABEL_TRACKING_EM,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
     }
     for placed in &layout.rows {
-        if let Some(rect) = clipped(placed.title, clip) {
-            labels.push(ChromeLabel {
-                text: placed.row.title().to_owned(),
-                rect,
-                font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
-                color: palette.dialog_title_text,
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                clip: None,
-            });
-        }
-        if let Some(rect) = clipped(placed.desc, clip) {
-            labels.push(ChromeLabel {
-                text: placed.row.description().to_owned(),
-                rect,
-                font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
-                color: palette.dialog_muted_text,
-                align_right: false,
-                align_center: false,
-                letter_spacing_em: 0.0,
-                weight: ChromeLabelWeight::Regular,
-                tabular_numerals: false,
-                clip: None,
-            });
-        }
+        content_stack.labels.push(ChromeLabel {
+            text: placed.row.title().to_owned(),
+            rect: placed.title,
+            font_size_px: px(ROW_TITLE_FONT_LOGICAL_PX),
+            color: palette.dialog_title_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
+        content_stack.labels.push(ChromeLabel {
+            text: placed.row.description().to_owned(),
+            rect: placed.desc,
+            font_size_px: px(ROW_DESC_FONT_LOGICAL_PX),
+            color: palette.dialog_muted_text,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            clip: None,
+        });
     }
     // The buttons after every row's text, so a row's own control cannot be
     // covered by the *fill* of a later row's — the same channel ordering the
     // popup's layer exists for, one scale down.
     for placed in &layout.rows {
-        let Some(rect) = clipped(placed.combo, clip) else {
-            continue;
-        };
         let value = placed
             .row
             .selected_index(values)
             .and_then(|index| placed.row.option_label(index))
             .unwrap_or_default();
         push_combo(
-            &mut quads,
-            &mut labels,
-            rect,
+            &mut content_stack.quads,
+            &mut content_stack.labels,
+            placed.combo,
             hover == Some(SettingsTarget::Combo(placed.row)),
             value,
             scale,
             border,
             palette,
+            measure,
         );
     }
+    clip_content(clip, content_stack, &mut quads, &mut labels, &mut sprites);
 
     // The open picker, on a layer of its own above everything the dialog drew.
     // Not "pushed last": pushed last it covers the fills under it and none of the text,
@@ -1448,6 +1576,7 @@ fn push_combo(
     scale: f32,
     border: f32,
     palette: bt_render::ChromePalette,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
 ) {
     let px = |logical: f32| logical * scale;
     let radius = px(COMBO_RADIUS_LOGICAL_PX);
@@ -1473,15 +1602,23 @@ fn push_combo(
         1.0,
     ));
     let chevron_column = px(COMBO_CHEVRON_FONT_LOGICAL_PX + COMBO_GAP_LOGICAL_PX);
+    // `.combo > button` is a fixed 118px beside a value that is whatever the
+    // chosen option is called, and the two do not negotiate: the button's width is
+    // the design's, so it is the *text* that gives way. Cropping it mid-glyph is
+    // what a bare clip does and it reads as a rendering fault rather than as a
+    // name too long — "Windows PowerShell 5.1" arriving as "Windows Pov" is the
+    // report this exists to answer.
+    let value_box = [
+        rect[0] + border + px(COMBO_PADDING_LEFT_LOGICAL_PX),
+        rect[1],
+        rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX) - chevron_column,
+        rect[3],
+    ];
+    let font_size_px = px(COMBO_FONT_LOGICAL_PX);
     labels.push(ChromeLabel {
-        text: value.to_owned(),
-        rect: [
-            rect[0] + border + px(COMBO_PADDING_LEFT_LOGICAL_PX),
-            rect[1],
-            rect[2] - border - px(COMBO_PADDING_RIGHT_LOGICAL_PX) - chevron_column,
-            rect[3],
-        ],
-        font_size_px: px(COMBO_FONT_LOGICAL_PX),
+        text: ellipsized(value, value_box[2] - value_box[0], font_size_px, measure),
+        rect: value_box,
+        font_size_px,
         color: palette.dialog_title_text,
         align_right: false,
         align_center: false,
@@ -2268,6 +2405,298 @@ mod tests {
         );
     }
 
+    /// The value a row's button shows for [`values`], which is the string the
+    /// button has to fit.
+    fn shown_value(row: SettingsRow) -> &'static str {
+        row.selected_index(values())
+            .and_then(|index| row.option_label(index))
+            .expect("every row this dialog holds reads something")
+    }
+
+    /// The box a button's value is laid out in at 1x — the button less its two
+    /// hairlines, its padding and the chevron's reserved column.
+    ///
+    /// [`push_combo`]'s own arithmetic, written once here so the two pins that
+    /// read a drawn value find it the same way.
+    fn combo_value_box(combo: [f32; 4]) -> [f32; 4] {
+        [
+            combo[0] + 1.0 + COMBO_PADDING_LEFT_LOGICAL_PX,
+            combo[1],
+            combo[2]
+                - 1.0
+                - COMBO_PADDING_RIGHT_LOGICAL_PX
+                - COMBO_CHEVRON_FONT_LOGICAL_PX
+                - COMBO_GAP_LOGICAL_PX,
+            combo[3],
+        ]
+    }
+
+    /// PIN (Bug 1 — the edge rows were compressed): a row that only partly
+    /// reaches the content box is **cut**, never shortened.
+    ///
+    /// The report, on a scrolled dialog: the row at the top edge (Theme) and the
+    /// one at the bottom (Default profile) came out *squat* — the combo a shorter
+    /// pill with its corners rounded on the cut, the title jammed against the
+    /// edge — rather than whole rows with their overflow hidden. "无论上边下边,
+    /// 显示不全的框的高度都会被压缩."
+    ///
+    /// The cause was that every piece of the stack was built **from**
+    /// `clipped(box, content)`: the crop was handed in as the geometry, so a
+    /// `ChromeLabel` re-laid-out and re-centred its glyphs inside the sliver, and
+    /// `rounded_overlay_fill` put a real corner wherever the cut happened to fall.
+    /// Clamping a rectangle and clipping a drawing look alike from a distance and
+    /// are not the same operation.
+    ///
+    /// Stated as the law [`clip_content`] installs: **geometry translates, only
+    /// drawing is cut.** A label's layout box is the row's own box at every
+    /// offset, wearing the crop as a `clip` beside it; the button's fills are the
+    /// whole button's fills with whatever lies outside dropped.
+    ///
+    /// Red gate: hand the crop back to either channel — `rect: clipped(...)` on
+    /// the labels, or `push_combo(..., clipped(placed.combo, clip), ...)` on the
+    /// fills — and the matching half of this fails on the first cut row.
+    #[test]
+    fn a_row_at_the_content_edge_is_cut_and_never_compressed() {
+        let rows = many_rows(20);
+        let reference = scrolled(&rows, 0.0);
+        let max = reference.max_scroll();
+        assert!(max > 0.0, "this fixture depends on a stack that overflows");
+        let palette = chrome_palette();
+        let border = FLOAT_WINDOW_BORDER_LOGICAL_PX.max(1.0);
+        let mut rows_cut = 0;
+        for step in 0..=8 {
+            let placed = scrolled(&rows, max * step as f32 / 8.0);
+            let content = placed.content_box();
+            let labels = labels_of(&placed, None, values());
+            let quads = quads_of(&placed, None, values());
+            for row in &placed.rows {
+                // Text: the row's own boxes are the layout boxes, whatever the
+                // crop, and a box with nothing showing draws nothing at all.
+                for (box_of, text) in [
+                    (row.title, row.row.title()),
+                    (row.desc, row.row.description()),
+                ] {
+                    match clipped(box_of, content) {
+                        None => assert!(
+                            !labels.iter().any(|label| label.rect == box_of),
+                            "{:?}: a box wholly outside the content draws nothing",
+                            row.row
+                        ),
+                        Some(window) => {
+                            let drawn = labels
+                                .iter()
+                                .find(|label| label.rect == box_of)
+                                .unwrap_or_else(|| {
+                                    panic!(
+                                        "{:?}: {text:?} is laid out in the box the row was given, \
+                                         {box_of:?} — not in the crop. Labels: {:?}",
+                                        row.row,
+                                        labels.iter().map(|label| label.rect).collect::<Vec<_>>()
+                                    )
+                                });
+                            assert_eq!(
+                                drawn.clip,
+                                Some(window),
+                                "{:?}: {text:?} wears the crop as its clip",
+                                row.row
+                            );
+                        }
+                    }
+                }
+                // Fills: the whole button's fills, with the outside dropped. Built
+                // here from the row's *full* combo so the comparison is against
+                // the shape the button is, not against the shape the cut left.
+                let mut whole_quads = Vec::new();
+                let mut whole_labels = Vec::new();
+                push_combo(
+                    &mut whole_quads,
+                    &mut whole_labels,
+                    row.combo,
+                    false,
+                    shown_value(row.row),
+                    1.0,
+                    border,
+                    palette,
+                    &mut measure,
+                );
+                if clipped(row.combo, content).is_some_and(|seen| seen != row.combo) {
+                    rows_cut += 1;
+                }
+                for whole in whole_quads {
+                    let Some(rect) = clipped(whole.rect, content) else {
+                        continue;
+                    };
+                    let cut = OverlayQuad { rect, ..whole };
+                    assert!(
+                        quads.contains(&cut),
+                        "{:?}: the button's fill {:?} reaches the screen as {cut:?} — a run cut \
+                         by the content edge, not a shorter button's own run",
+                        row.row,
+                        whole.rect
+                    );
+                }
+            }
+        }
+        assert!(
+            rows_cut > 0,
+            "no offset in this sweep actually cut a row, so the pin proved nothing"
+        );
+    }
+
+    /// PIN (Bug 1): scrolling **moves** the stack and does nothing else.
+    ///
+    /// The geometry half of the law, and the stronger statement of the two: not
+    /// merely that a row keeps its height at every offset, but that the whole
+    /// stack at offset *s* is the stack at rest slid up by exactly *s* — every
+    /// heading, every title, every description, every button. A layout that
+    /// clamped a rectangle into the content box would fail this before any
+    /// drawing was asked for, which is the point of stating it here as well as at
+    /// the draw: the two are different places the same mistake can be made, and
+    /// [`clip_content`] can only be honest about a stack that was honest first.
+    #[test]
+    fn scrolling_translates_the_stack_and_changes_nothing_else() {
+        let rows = many_rows(20);
+        let rest = scrolled(&rows, 0.0);
+        let max = rest.max_scroll();
+        assert!(max > 0.0, "this fixture depends on a stack that overflows");
+        let slid = |rect: [f32; 4], by: f32| [rect[0], rect[1] - by, rect[2], rect[3] - by];
+        for step in 0..=16 {
+            let by = max * step as f32 / 16.0;
+            let placed = scrolled(&rows, by);
+            assert_eq!(
+                placed.content, rest.content,
+                "the box the stack slides behind does not move with it"
+            );
+            for (moved, still) in placed.groups.iter().zip(&rest.groups) {
+                assert_eq!(
+                    moved.label,
+                    slid(still.label, by),
+                    "{:?}'s heading at offset {by}",
+                    moved.group
+                );
+            }
+            for (moved, still) in placed.rows.iter().zip(&rest.rows) {
+                assert_eq!(
+                    [moved.title, moved.desc, moved.combo],
+                    [
+                        slid(still.title, by),
+                        slid(still.desc, by),
+                        slid(still.combo, by)
+                    ],
+                    "{:?} at offset {by} is its resting self, moved",
+                    moved.row
+                );
+            }
+        }
+    }
+
+    /// PIN (Bug 1, second half): a value too wide for its button ends in a `…`.
+    ///
+    /// `.combo > button` is a fixed 118px and the value inside it is whatever the
+    /// chosen option is called, so the two collide the moment an option has a long
+    /// name — which "Windows PowerShell 5.1" is, and which is how the user met
+    /// this: the Default profile button read `Windows Pov`, a name cut mid-glyph
+    /// by the label's own box. A crop mid-glyph reads as a rendering fault; an
+    /// ellipsis reads as a name too long, which is what it is.
+    ///
+    /// Two claims, and the second is the one that makes the first mean anything:
+    /// every button's value fits its box, **and** a value that had to give way is
+    /// a prefix of its own option marked with the `…`, never some other string.
+    ///
+    /// Red gate: drop the [`ellipsized`] call and the Default profile row fails
+    /// the width claim with the whole title in a box that cannot hold it.
+    #[test]
+    fn a_value_too_wide_for_its_button_is_ellipsised_not_cropped() {
+        let placed = open_rows(1.0, None, TabLayoutMode::Vertical);
+        let labels = labels_of(&placed, None, values());
+        let mut ellipsised = Vec::new();
+        for row in &placed.rows {
+            let whole = shown_value(row.row);
+            let box_of = combo_value_box(row.combo);
+            let drawn = labels
+                .iter()
+                .find(|label| label.rect == box_of)
+                .unwrap_or_else(|| panic!("{:?}'s button draws its value", row.row));
+            assert!(
+                measure(&drawn.text, COMBO_FONT_LOGICAL_PX) <= width(box_of),
+                "{:?}: {:?} is drawn in a box only {} wide",
+                row.row,
+                drawn.text,
+                width(box_of)
+            );
+            if drawn.text == whole {
+                continue;
+            }
+            let kept = drawn
+                .text
+                .strip_suffix(ELLIPSIS)
+                .unwrap_or_else(|| panic!("{:?}: {:?} gave way without a …", row.row, drawn.text));
+            assert!(
+                whole.starts_with(kept) && !kept.is_empty(),
+                "{:?}: {kept:?} is a prefix of {whole:?} and not a different word",
+                row.row
+            );
+            ellipsised.push(row.row);
+        }
+        assert_eq!(
+            ellipsised,
+            vec![SettingsRow::DefaultProfile],
+            "the long profile title is the one value that cannot fit, and every \
+             other row's option is one short word that must be left alone"
+        );
+    }
+
+    /// PIN: [`ellipsized`] keeps the **longest** prefix that fits, and cuts only
+    /// between characters.
+    ///
+    /// The rule the drawn pin above rests on, stated where it can be stated
+    /// exactly. The "longest" half is what separates a real `text-overflow` from a
+    /// truncation that throws away room it was given; the boundary half is what
+    /// keeps a multi-byte name from being cut into invalid UTF-8, which a byte
+    /// index would do and which no amount of measuring would catch.
+    #[test]
+    fn the_ellipsis_keeps_the_longest_prefix_that_fits() {
+        let font = 10.0;
+        let advance = font * TEST_ADVANCE_PER_EM;
+        let text = "Windows PowerShell 5.1";
+        assert_eq!(
+            ellipsized(text, advance * 100.0, font, &mut measure),
+            text,
+            "a value with room to spare is left alone, ellipsis and all"
+        );
+        for characters in 1..text.chars().count() {
+            let room = advance * characters as f32;
+            let cut = ellipsized(text, room, font, &mut measure);
+            assert!(
+                measure(&cut, font) <= room,
+                "{cut:?} does not fit {characters} characters' worth"
+            );
+            let kept = cut.strip_suffix(ELLIPSIS).expect("a cut value is marked");
+            assert!(text.starts_with(kept), "{kept:?} is a prefix of {text:?}");
+            // The longest such prefix: one more character would overflow. The `…`
+            // itself takes one character's room in this measure, so the prefix is
+            // one shorter than the room allows.
+            assert_eq!(
+                kept.chars().count(),
+                characters.saturating_sub(1),
+                "{cut:?} left room unused in {characters} characters' worth"
+            );
+        }
+        // Nothing fits, and a `…` is still what CSS draws — the box does the rest.
+        assert_eq!(ellipsized(text, 0.0, font, &mut measure), ELLIPSIS);
+        // Cut between characters, never inside one: every prefix of a name whose
+        // characters are three bytes each is still a name.
+        let wide = "文件资源管理器";
+        for characters in 1..=wide.chars().count() {
+            let cut = ellipsized(wide, advance * characters as f32, font, &mut measure);
+            let kept = cut.strip_suffix(ELLIPSIS).unwrap_or(&cut);
+            assert!(
+                wide.starts_with(kept),
+                "{kept:?} is a whole-character prefix of {wide:?}"
+            );
+        }
+    }
+
     /// PIN: a window that cannot host the dialog answers `None` rather than a
     /// squashed one — and the runtime reads `None` as "shut", so nothing is
     /// trapped behind a modal with nothing on it.
@@ -2322,6 +2751,28 @@ mod tests {
         assert!(!panel.is_open());
     }
 
+    /// How wide a chrome label is, for tests — one flat advance per character.
+    ///
+    /// A stand-in for the renderer's shaper on purpose. Every claim below that
+    /// touches text width is a claim about the *rule* — "the whole string, or a
+    /// prefix and a `…`, and never more than the box" — and a rule stated against
+    /// a real face would be re-stating Segoe UI's metrics, which no assertion
+    /// should own and which change with the font the machine has.
+    const TEST_ADVANCE_PER_EM: f32 = 0.5;
+
+    fn measure(text: &str, font_size_px: f32) -> f32 {
+        text.chars().count() as f32 * font_size_px * TEST_ADVANCE_PER_EM
+    }
+
+    /// The overlay as it is drawn, measured by [`measure`].
+    fn built(
+        placed: &SettingsLayout,
+        hover: Option<SettingsTarget>,
+        values: SettingsValues,
+    ) -> Vec<OverlayLayer> {
+        build(placed, hover, values, &mut measure)
+    }
+
     /// Every fill the overlay draws, whatever layer it is on — the question
     /// "does the dialog paint this at all" is not a question about z-order.
     fn quads_of(
@@ -2329,7 +2780,7 @@ mod tests {
         hover: Option<SettingsTarget>,
         values: SettingsValues,
     ) -> Vec<OverlayQuad> {
-        build(placed, hover, values)
+        built(placed, hover, values)
             .into_iter()
             .flat_map(|layer| layer.quads)
             .collect()
@@ -2340,7 +2791,7 @@ mod tests {
         hover: Option<SettingsTarget>,
         values: SettingsValues,
     ) -> Vec<ChromeLabel> {
-        build(placed, hover, values)
+        built(placed, hover, values)
             .into_iter()
             .flat_map(|layer| layer.labels)
             .collect()
@@ -2351,7 +2802,7 @@ mod tests {
         hover: Option<SettingsTarget>,
         values: SettingsValues,
     ) -> Vec<ChromeSprite> {
-        build(placed, hover, values)
+        built(placed, hover, values)
             .into_iter()
             .flat_map(|layer| layer.sprites)
             .collect()
@@ -2407,7 +2858,7 @@ mod tests {
         ] {
             let placed = open_rows(1.0, Some(kind), TabLayoutMode::Vertical);
             let menu = placed.menu.expect("the picker is open");
-            let layers = build(&placed, None, values());
+            let layers = built(&placed, None, values());
             let popup = popup_layer(&layers);
             assert_eq!(
                 popup,
@@ -2934,6 +3385,12 @@ mod tests {
     /// showed stale words until touched. `selected_index` reading `values` is the
     /// whole of the fix, and this pins that the button's caption is derived from
     /// it rather than from a constant.
+    ///
+    /// Said through [`ellipsized`] rather than against the bare title, because
+    /// two of these profiles are named longer than 118px of button can hold and
+    /// the row would otherwise be asserting that the fit never happens. What the
+    /// pin still forbids is the thing it was written for: a caption that does not
+    /// come from `chosen` fails here for every other profile in the table.
     #[test]
     fn the_default_profile_combo_shows_the_profile_that_would_actually_start() {
         for chosen in 0..profiles::PROFILES.len() {
@@ -2954,9 +3411,15 @@ mod tests {
                 .into_iter()
                 .find(|label| label.rect[1] >= combo[1] && label.rect[3] <= combo[3])
                 .expect("the closed combo shows its current value");
+            let box_of = combo_value_box(combo);
             assert_eq!(
                 caption.text,
-                profiles::PROFILES[chosen].title,
+                ellipsized(
+                    profiles::PROFILES[chosen].title,
+                    width(box_of),
+                    COMBO_FONT_LOGICAL_PX,
+                    &mut measure
+                ),
                 "the button says what the `+` would start"
             );
         }
