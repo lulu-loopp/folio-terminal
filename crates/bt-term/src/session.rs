@@ -3232,6 +3232,17 @@ impl DualPlaneSession {
         self.command_output_covers(&anchor(GraphemeOffset(0)), &anchor(end))
     }
 
+    /// The inline site of a frozen line.
+    ///
+    /// Always [`ScreenId::Primary`]: the transcript is the primary screen's scrollback and nothing
+    /// else ever enters it — an alternate screen keeps no history, which is why
+    /// [`Self::command_output_covers_history`] asks about `Primary` too. So the widened
+    /// alternate-screen site cannot arise here, and a frozen line is eligible on OSC 133 evidence
+    /// or not at all.
+    fn history_inline_site(&self, id: TranscriptId) -> InlineMathSite {
+        inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
+    }
+
     fn command_output_covers(&self, start: &ContentAnchor, end: &ContentAnchor) -> bool {
         self.semantic_output_regions
             .iter()
@@ -3738,7 +3749,7 @@ impl DualPlaneSession {
                         text: entry.line.text.clone(),
                         continues: false,
                         cell_boundaries: frozen_cell_boundaries(&entry.line),
-                        site: inline_math_site(self.command_output_covers_history(*id)),
+                        site: self.history_inline_site(*id),
                     }),
             );
         }
@@ -3760,11 +3771,14 @@ impl DualPlaneSession {
                     },
                     text,
                     continues: captured.continues,
-                    site: inline_math_site(self.command_output_covers_live(
+                    site: inline_math_site(
                         self.live_screen,
-                        GridPoint { row, column: 0 },
-                        extent_end,
-                    )),
+                        self.command_output_covers_live(
+                            self.live_screen,
+                            GridPoint { row, column: 0 },
+                            extent_end,
+                        ),
+                    ),
                     cell_boundaries,
                 }
             })
@@ -4038,7 +4052,7 @@ impl DualPlaneSession {
     ) -> Vec<LiveDetectionTask> {
         if !inputs
             .iter()
-            .any(|input| may_contain_math(input.text.trim(), self.inline_math_bands))
+            .any(|input| may_arm_math(input.text.trim(), self.inline_math_bands, || input.site))
         {
             return Vec::new();
         }
@@ -5519,10 +5533,11 @@ impl DualPlaneSession {
         let mut candidates = visible
             .iter()
             .filter(|id| {
-                self.document
-                    .entries()
-                    .get(id)
-                    .is_some_and(|entry| may_contain_math(&entry.line.text, inline_formulas))
+                self.document.entries().get(id).is_some_and(|entry| {
+                    may_arm_math(&entry.line.text, inline_formulas, || {
+                        self.history_inline_site(**id)
+                    })
+                })
             })
             .copied()
             .collect::<BTreeSet<_>>();
@@ -5540,7 +5555,11 @@ impl DualPlaneSession {
                 .get(id)
                 .and_then(|context| context.required_start(*id))
                 .is_some_and(|start| start <= last_visible);
-            if overlaps_visible && may_contain_math(&entry.line.text, inline_formulas) {
+            if overlaps_visible
+                && may_arm_math(&entry.line.text, inline_formulas, || {
+                    self.history_inline_site(*id)
+                })
+            {
                 candidates.insert(*id);
             }
         }
@@ -8016,11 +8035,7 @@ impl DualPlaneSession {
                         .entries()
                         .range(candidate_start..=closing_id)
                         .map(|(id, entry)| {
-                            (
-                                *id,
-                                entry.line.text.as_str(),
-                                inline_math_site(self.command_output_covers_history(*id)),
-                            )
+                            (*id, entry.line.text.as_str(), self.history_inline_site(*id))
                         }),
                     self.detection_options(),
                 )
@@ -8093,7 +8108,9 @@ impl DualPlaneSession {
         let Some(entry) = self.document.entries().get(&id) else {
             return;
         };
-        let armed_for_math = may_contain_math(&entry.line.text, self.inline_math_bands);
+        let armed_for_math = may_arm_math(&entry.line.text, self.inline_math_bands, || {
+            inline_math_site(ScreenId::Primary, self.command_output_covers_history(id))
+        });
         let versions = VersionStamp {
             source: entry.line.source_generation,
             detection: self.detection_revision,
@@ -8384,7 +8401,10 @@ impl DualPlaneSession {
             .entries()
             .iter()
             .filter_map(|(id, entry)| {
-                may_contain_math(&entry.line.text, inline_formulas).then_some(*id)
+                may_arm_math(&entry.line.text, inline_formulas, || {
+                    self.history_inline_site(*id)
+                })
+                .then_some(*id)
             })
             .collect::<Vec<_>>();
         for id in candidates {
@@ -8498,7 +8518,7 @@ impl DualPlaneSession {
                 id: *id,
                 text: entry.line.text.clone(),
                 cell_boundaries: frozen_cell_boundaries(&entry.line),
-                site: inline_math_site(self.command_output_covers_history(*id)),
+                site: self.history_inline_site(*id),
             });
         }
         (inputs.first().is_some_and(|input| input.id == anchor)
@@ -8561,7 +8581,7 @@ impl DualPlaneSession {
                     id: *id,
                     text: entry.line.text.clone(),
                     cell_boundaries: frozen_cell_boundaries(&entry.line),
-                    site: inline_math_site(self.command_output_covers_history(*id)),
+                    site: self.history_inline_site(*id),
                 });
             }
             if inputs.first().is_none_or(|input| input.id != start)
@@ -8578,7 +8598,7 @@ impl DualPlaneSession {
                 id: candidate_id,
                 text: entry.line.text.clone(),
                 cell_boundaries: frozen_cell_boundaries(&entry.line),
-                site: inline_math_site(self.command_output_covers_history(candidate_id)),
+                site: self.history_inline_site(candidate_id),
             });
         }
         let Some(mut task) = self.decorations.get_mut(&candidate_id).and_then(|record| {
@@ -8854,14 +8874,17 @@ fn render_task_math(
         let column = UnicodeWidthStr::width(before).saturating_sub(base_column);
         let available_px =
             (UnicodeWidthStr::width(delimited) as f32 * cell_width_px).floor() as u32;
-        let raster = engine.render(&run.source, key)?;
-        if !baseline_box_fits(
-            raster.height_px,
-            raster.baseline_px,
+        let fitted = render_inline_run_fitted(
+            engine,
+            &run.source,
+            key,
             terminal_baseline_subpixels,
             terminal_descent_subpixels,
-        ) || raster.width_px > available_px.max(1)
-        {
+        )?;
+        let Some(raster) = fitted else {
+            continue;
+        };
+        if raster.width_px > available_px.max(1) {
             continue;
         }
         baseline_px = baseline_px.max(raster.baseline_px.ceil().max(0.0) as u32);
@@ -8928,16 +8951,166 @@ fn render_task_math(
     })
 }
 
+/// How far an inline run may be shrunk to sit on the text baseline before shrinking stops helping.
+///
+/// The same half-size floor display math stops at, and for the same reason: past it the formula is
+/// no longer being made to fit, it is being made unreadable, and unreadable typesetting is worth
+/// less than the honest source text the run falls back to.
+const INLINE_READABLE_FLOOR_MILLI: u32 = 500;
+
+/// The ascent and descent a run actually contributes to a composite, in whole pixels.
+///
+/// A raster is blitted at an integer row offset — there is no such thing as half a row of pixels —
+/// so the composite aligns every run on a *whole-pixel* baseline, its own baseline rounded up.
+/// That rounded value, not the fractional one Typst reports, is the ascent the run occupies and the
+/// number every fit decision has to be made against.
+///
+/// Measuring the fit against the fractional baseline and then assembling against the rounded one is
+/// not a rounding nicety, it is a contradiction, and it had a very specific symptom: a fit that
+/// shrinks a run to land exactly on its ascent budget produces a baseline like 29.67 against a
+/// budget of 29, `ceil` takes it to 30, and the composite rejects the run for overflowing a box the
+/// run had just been fitted into. On a real 192-DPI window that silently cost every formula whose
+/// ascent was the binding constraint — `$E = mc^2$`, `$x^2$`, `$\hat{m}_t$`, `$\int_0^1$` and a
+/// whole line's `$\alpha+\beta$` and `$\rho$` with it — while the descent-bound `$\frac{a}{b}$` and
+/// `$\sum_i$` beside them rendered perfectly. One function now answers the question for the fit and
+/// for the assembly alike, so the two cannot disagree again.
+fn inline_run_box(height_px: u32, baseline_px: f32) -> (u32, u32) {
+    let ascent_px = baseline_px.ceil().max(0.0) as u32;
+    (ascent_px, height_px.saturating_sub(ascent_px))
+}
+
+/// The font scale, in per-mille, at which this raster's ink would sit inside the line box.
+///
+/// Both halves of the box are budgeted separately because the run is *baseline-anchored*: whatever
+/// is above the baseline has the row's ascent to live in and whatever is below has its descent, and
+/// there is no trading one for the other without the formula ceasing to sit on the same line as the
+/// text around it. The binding constraint is whichever half is tighter, and for real mathematics it
+/// is almost always the descent — a `\frac` puts a third of its ink below the baseline where a line
+/// of text keeps barely a fifth of its height.
+fn inline_fit_milli(
+    raster: &MathRaster,
+    terminal_ascent_subpixels: i64,
+    terminal_descent_subpixels: i64,
+) -> u32 {
+    // The budgets are whole pixels because the composite's baseline is whole pixels: a run's ascent
+    // inside it is `ceil(baseline)`, so the largest ascent that can fit a budget is that budget's
+    // floor. Asking for anything finer is asking for a precision the assembly does not have.
+    let budget_px = |subpixels: i64| (subpixels.max(0) / SUBPIXELS_PER_PX) as f32;
+    // The *current* metrics are read fractionally rather than rounded, and that asymmetry is the
+    // point. Comparing a rounded 30 against a budget of 29 says "shrink by 3%", and 3% of a raster
+    // whose true baseline is 29.81 leaves it at 28.9 — which is right, but only by luck. Comparing
+    // the rounded value when the true one is 29.05 says the same 3% and lands at 28.2, overshooting
+    // badly; and where the overshoot is genuinely under a pixel the rounded comparison can ask for
+    // a shrink so small that `ceil` does not move at all, which is exactly how `$\hat{m}_t$` and
+    // `$\int_0^1$` crawled through every attempt they were given and fell back to source text on a
+    // 192-DPI screen while every formula around them typeset. Aiming the fractional baseline at the
+    // integer budget aims *past* the rounding instead of into it.
+    let ratio = |ink_px: f32, budget_px: f32| -> f32 {
+        if ink_px <= 0.0 {
+            1.0
+        } else {
+            budget_px / ink_px
+        }
+    };
+    let ascent_px = raster.baseline_px.max(0.0);
+    let descent_px = (raster.height_px as f32 - raster.baseline_px).max(0.0);
+    let factor = ratio(ascent_px, budget_px(terminal_ascent_subpixels))
+        .min(ratio(descent_px, budget_px(terminal_descent_subpixels)))
+        .min(1.0);
+    ((factor * 1000.0).floor() as i64).clamp(0, 1000) as u32
+}
+
+/// Render one inline run at the largest size that still lets it sit on the text baseline.
+///
+/// Shrinking rather than rejecting is the whole point. The gate this replaces was a straight
+/// accept-or-fall-back on the natural size, which meant every construction taller than a line box —
+/// `\frac`, `\sum_i`, `\hat{m}_t`, anything with a subscript under a descender — silently stayed
+/// source text no matter how nearly it fit. Shrinking to the line box is the inline sibling of the
+/// readable scaling display math already does to fit its band; the only difference is what the
+/// budget is made of, a width there and the row's own ascent and descent here.
+///
+/// The size is re-rendered rather than the raster resampled, because a formula scaled by the
+/// rasterizer is a formula whose stems and fraction bars land between pixels. Typst is asked for
+/// the smaller size and lays it out properly.
+///
+/// It iterates because glyph layout is not linear in font size — hinting, rule thicknesses and
+/// script sizes all step — so the scale computed from one measurement may still overshoot by a
+/// pixel. Each pass measures what it actually got and compounds the correction, which converges in
+/// one or two passes and is bounded so a pathological source cannot spin. Falling through the floor
+/// or running out of passes returns `None`: this run keeps its source text, alone, and the other
+/// runs on the line are unaffected.
+fn render_inline_run_fitted(
+    engine: &MathEngine,
+    source: &str,
+    key: MathRenderKey,
+    terminal_ascent_subpixels: i64,
+    terminal_descent_subpixels: i64,
+) -> Result<Option<MathRaster>, MathRenderError> {
+    const MAX_ATTEMPTS: usize = 6;
+    /// Every pass must shrink the raster by at least this much, so `MAX_ATTEMPTS` is a real bound
+    /// rather than a hopeful one.
+    ///
+    /// The estimate is strictly decreasing on its own, so the loop cannot spin; what it cannot
+    /// promise is *speed*. An estimate that stops a hair on the wrong side of an integer asks next
+    /// time for a shrink of a fraction of a percent, and a run needing to lose most of a pixel can
+    /// then use up every attempt it has going nowhere. Measured against the real 192-DPI budgets,
+    /// either this floor or the integer-budget targeting in `inline_fit_milli` is enough to make
+    /// the corpus converge and removing both together is what makes it fall back to source; they
+    /// are kept together because one bounds the work and the other aims it.
+    const MIN_STEP_MILLI: u32 = 20;
+    let fits = |raster: &MathRaster| {
+        baseline_box_fits(
+            raster.height_px,
+            raster.baseline_px,
+            terminal_ascent_subpixels,
+            terminal_descent_subpixels,
+        )
+    };
+    let mut raster = engine.render(source, key)?;
+    let mut applied_milli = 1000_u32;
+    for _ in 0..MAX_ATTEMPTS {
+        if fits(&raster) {
+            return Ok(Some(raster));
+        }
+        let step_milli = inline_fit_milli(
+            &raster,
+            terminal_ascent_subpixels,
+            terminal_descent_subpixels,
+        );
+        let estimate_milli =
+            u32::try_from(u64::from(applied_milli) * u64::from(step_milli) / 1000).unwrap_or(0);
+        let next_milli = estimate_milli.min(applied_milli.saturating_sub(MIN_STEP_MILLI));
+        if next_milli < INLINE_READABLE_FLOOR_MILLI {
+            return Ok(None);
+        }
+        applied_milli = next_milli;
+        let Some(font_milli_pt) =
+            u32::try_from(u64::from(key.font_milli_pt.get()) * u64::from(applied_milli) / 1000)
+                .ok()
+                .and_then(NonZeroU32::new)
+        else {
+            return Ok(None);
+        };
+        raster = engine.render(
+            source,
+            MathRenderKey {
+                font_milli_pt,
+                ..key
+            },
+        )?;
+    }
+    Ok(fits(&raster).then_some(raster))
+}
+
 fn baseline_box_fits(
     height_px: u32,
     baseline_px: f32,
     terminal_ascent_subpixels: i64,
     terminal_descent_subpixels: i64,
 ) -> bool {
-    let ascent_subpixels = (baseline_px.max(0.0) * SUBPIXELS_PER_PX as f32).ceil() as i64;
-    let descent_subpixels =
-        ((height_px as f32 - baseline_px).max(0.0) * SUBPIXELS_PER_PX as f32).ceil() as i64;
-    ascent_subpixels <= terminal_ascent_subpixels && descent_subpixels <= terminal_descent_subpixels
+    let (ascent_px, descent_px) = inline_run_box(height_px, baseline_px);
+    i64::from(ascent_px).saturating_mul(SUBPIXELS_PER_PX) <= terminal_ascent_subpixels
+        && i64::from(descent_px).saturating_mul(SUBPIXELS_PER_PX) <= terminal_descent_subpixels
 }
 
 fn artifact_from_raster(task: &DetectionTask, raster: MathRaster) -> PlaceholderArtifact {
@@ -9476,22 +9649,42 @@ fn may_contain_display_math(text: &str) -> bool {
 /// not armed — `echo $PATH` and `Cost: $5` cost a two-byte scan and nothing else. Two is where the
 /// pre-filter has to stop being clever: `$5 和 $10` also has two, and deciding that it is currency
 /// rather than mathematics is the disambiguator's job, not a prefilter's.
-///
-/// What keeps the widened candidate set from becoming work on every shell line that mentions
-/// `$PATH` twice is the OSC 133 site gate downstream: `detect_inline_math` returns immediately for
-/// anything that is not command output, so an armed prompt or command-echo line resolves to no
-/// occurrence on the first branch of the scanner and is marked complete. The prefilter buys a scan;
-/// the site gate makes that scan O(1) wherever the answer was always going to be no.
 fn may_contain_inline_math(text: &str) -> bool {
     text.bytes().filter(|byte| *byte == b'$').take(2).count() == 2
 }
 
-/// The arming pre-filter for math detection: display delimiters always, inline pairs only while
-/// the "Inline formulas" switch is on. With the switch off the scanner is guaranteed to produce no
-/// inline occurrence (`DetectionOptions::inline_formulas`), so arming a row for one would be work
-/// that cannot have an outcome.
+/// Could this line take part in a math detection at *some* site? The membership test for the live
+/// context signature, which must stay deliberately broad: a row whose site is about to change has
+/// to be inside the hash beforehand, or gaining eligibility would not re-arm it.
 fn may_contain_math(text: &str, inline_formulas: bool) -> bool {
     may_contain_display_math(text) || (inline_formulas && may_contain_inline_math(text))
+}
+
+/// The arming pre-filter: is it worth queueing a detection for this line, here?
+///
+/// Display delimiters always arm — they carry their own proof and no site gates them. Inline pairs
+/// arm only while the "Inline formulas" switch is on *and* the line sits somewhere a lone `$` may
+/// be read as a delimiter at all. With the switch off the scanner is guaranteed to produce no
+/// inline occurrence (`DetectionOptions::inline_formulas`); at an ineligible site gate A is
+/// guaranteed to reject every run. Either way the queued scan cannot have an outcome.
+///
+/// The site half of this is what stops a pathological screen from arming itself to death. Measured
+/// on a screen of 936 lines each carrying two dollars and no shell integration — a `cat`-ed script,
+/// a `.env`, a price list — the old prefilter armed every row and detected nothing, for a measured
+/// +44%: the work was real and the answer was known in advance. Asking the site *before* queueing
+/// rather than after dequeuing costs one enum comparison and takes that whole screen to zero.
+///
+/// It changes no verdict. A row this rejects is a row `detect_inline_math` would have rejected on
+/// its first line, so the rendered result is identical and only the work is gone — which is exactly
+/// why it can be an unconditional prefilter rather than a heuristic.
+/// The site arrives as a thunk and is consulted last, after the two-byte dollar scan has already
+/// said the line could carry a run at all. Answering it can mean a map lookup and a region walk,
+/// and the overwhelming majority of terminal lines contain no pair of dollars to make that question
+/// worth asking — so the ordinary line pays exactly what it paid before this gate existed, and only
+/// the `$`-bearing line pays for the gate that is there to save it work.
+fn may_arm_math(text: &str, inline_formulas: bool, site: impl FnOnce() -> InlineMathSite) -> bool {
+    may_contain_display_math(text)
+        || (inline_formulas && may_contain_inline_math(text) && site().permits_inline())
 }
 
 fn empty_live_math_span() -> MathSpan {
@@ -10255,8 +10448,18 @@ fn live_candidate_rows(
     let mut hidden_code_prefix = context.is_commonmark_code();
     let mut logical_text = String::new();
     let mut logical_grid_rows = Vec::new();
+    // The joined line's site, folded exactly as `live_logical_lines` folds it for the scan itself:
+    // the first fragment states it and any disagreement demotes the whole line. Arming has to reach
+    // the same verdict the scanner will, or the prefilter would either queue rows the scan drops or
+    // — far worse — drop rows the scan would have rendered.
+    let mut logical_site = None;
     for input in inputs {
         logical_text.push_str(&input.text);
+        logical_site = Some(match logical_site {
+            None => input.site,
+            Some(site) if site == input.site => site,
+            Some(_) => InlineMathSite::Ineligible,
+        });
         if let LiveDetectionSource::Grid { row, .. } = input.source {
             logical_grid_rows.push(row);
         }
@@ -10264,7 +10467,9 @@ fn live_candidate_rows(
             continue;
         }
         if !hidden_code_prefix
-            && may_contain_math(&logical_text, inline_formulas)
+            && may_arm_math(&logical_text, inline_formulas, || {
+                logical_site.unwrap_or(InlineMathSite::Ineligible)
+            })
             && let Some(row) = logical_grid_rows
                 .last()
                 .copied()
@@ -10278,6 +10483,7 @@ fn live_candidate_rows(
         }
         logical_text.clear();
         logical_grid_rows.clear();
+        logical_site = None;
     }
     candidates
 }
@@ -10823,10 +11029,26 @@ fn compare_selection_anchors(
     }
 }
 
-/// The one place a coverage verdict becomes a site. `false` is `Ineligible`, never "probably fine".
-fn inline_math_site(covered_by_command_output: bool) -> InlineMathSite {
+/// The one place a coverage verdict becomes a site. Absent proof, `Ineligible` — never "probably
+/// fine".
+///
+/// Two things can prove a line eligible and they are checked in order of how much they claim.
+/// OSC 133 coverage is the stronger statement — this exact line was printed by a command — so it
+/// is reported when it holds. The alternate screen is the weaker, structural one: nothing is known
+/// about who printed the line, only that no *shell* prompt or input line can exist on a surface a
+/// full-screen application has taken over, which is precisely what gate A was built to protect
+/// (user ruling 2026-08-10, widening the site). The order matters only for what the site is
+/// *called*; both are eligible and bt-detect applies identical content gates to each.
+///
+/// Worth naming honestly: a full-screen application may draw an input box of its own, and text a
+/// user types into it is eligible here where the same text at a shell prompt would not be. That is
+/// the accepted price of the widening, and it is the same bargain display `$$…$$` has been running
+/// under on this screen for months.
+fn inline_math_site(screen: ScreenId, covered_by_command_output: bool) -> InlineMathSite {
     if covered_by_command_output {
         InlineMathSite::CommandOutput
+    } else if screen == ScreenId::Alternate {
+        InlineMathSite::AltScreenContent
     } else {
         InlineMathSite::Ineligible
     }
@@ -21484,26 +21706,32 @@ mod tests {
         );
     }
 
-    /// The price of blocker 1's widened arming predicate, on the screen designed to be worst for
-    /// it: forty columns-wide rows of shell text where every line carries several `$` and none is
-    /// mathematics.
+    /// The arming budget, on the screen designed to be worst for it: forty wide rows of shell text
+    /// where every line carries several `$` and none of it is mathematics.
     ///
-    /// The widening arms all of them; the OSC 133 site gate then answers "not command output" on
-    /// the scanner's first branch, so each armed row costs a scan that returns immediately. This
-    /// measures that difference against the same screen with the switch off, where no row is armed
-    /// at all — the strictest available baseline. The ceiling is deliberately loose: what it
-    /// forbids is the widening turning a `$`-heavy screen into per-row rendering work, not the
-    /// scan itself getting a few percent slower.
+    /// This screen used to arm all 936 of its lines and detect nothing on any of them, for a
+    /// measured +44% over the same screen with inline detection switched off. Every one of those
+    /// scans was known to be futile before it was queued — the lines sit on an unintegrated primary
+    /// screen, where gate A rejects a lone `$` unconditionally — and asking the site *before*
+    /// queueing rather than after dequeuing is what turns the whole screen into no work at all.
+    ///
+    /// Both directions are pinned, because a prefilter that armed nothing anywhere would also pass
+    /// the first half. So the same bytes are then replayed on the alternate screen, where the site
+    /// is eligible and the rows must genuinely arm — and must still resolve to nothing, because it
+    /// is the *content* gates, not the site, that decide `PATH=$HOME/bin:$PATH` is not a formula.
     #[test]
-    fn arming_every_dollar_row_is_cheap_while_the_site_gate_answers_no() {
+    fn a_pathological_dollar_screen_arms_nothing_where_the_site_can_never_answer_yes() {
         const ROWS: u32 = 40;
         const CYCLES: usize = 24;
 
-        let measure = |inline_formulas: bool| {
+        let measure = |inline_formulas: bool, alternate: bool| {
             let started = Instant::now();
             let mut session = DualPlaneSession::new(nz(120), nz(ROWS));
             seat_inline_metrics(&mut session);
             session.set_inline_math_bands(inline_formulas);
+            if alternate {
+                session.feed_at(b"\x1b[?1049h", started).unwrap();
+            }
             let mut at = started;
             let mut elapsed = Duration::ZERO;
             let mut armed = 0usize;
@@ -21529,28 +21757,37 @@ mod tests {
             (elapsed, armed, resolved)
         };
 
-        let (off, off_armed, _) = measure(false);
-        let (on, on_armed, on_resolved) = measure(true);
+        let (off, off_armed, _) = measure(false, false);
+        let (on, on_armed, _) = measure(true, false);
+        let (alt_on, alt_armed, alt_resolved) = measure(true, true);
         let ratio = on.as_secs_f64() / off.as_secs_f64().max(f64::EPSILON);
         println!(
             "INLINE_ARMING rows={ROWS} cycles={CYCLES} off={off:?} armed_off={off_armed} \
-             on={on:?} armed_on={on_armed} resolved_on={on_resolved} ratio={ratio:.2}"
+             on={on:?} armed_on={on_armed} ratio={ratio:.2} \
+             alt={alt_on:?} armed_alt={alt_armed} resolved_alt={alt_resolved}"
         );
         assert_eq!(
             off_armed, 0,
             "with the switch off no `$` row may be armed at all"
         );
+        assert_eq!(
+            on_armed, 0,
+            "an unintegrated primary screen can never answer yes, so it must queue no scan at all"
+        );
         assert!(
-            on_armed > 0,
-            "the probe must actually exercise the widened predicate"
+            ratio <= 1.5,
+            "a screen that arms nothing must cost what arming nothing costs: {ratio:.2}x \
+             ({on:?} vs {off:?})"
+        );
+        assert!(
+            alt_armed > 0,
+            "the prefilter must still arm where the site is eligible, or it has simply switched \
+             inline detection off"
         );
         assert_eq!(
-            on_resolved, 0,
-            "no shell line in this corpus may survive the disambiguator into an occurrence"
-        );
-        assert!(
-            ratio <= 8.0,
-            "arming every `$` row cost {ratio:.2}x the unarmed baseline ({on:?} vs {off:?})"
+            alt_resolved, 0,
+            "no shell line in this corpus may survive the disambiguator into an occurrence, \
+             eligible site or not"
         );
     }
 
@@ -21657,6 +21894,184 @@ mod tests {
         assert_eq!(
             grid_site_of(&session, "printed"),
             InlineMathSite::Ineligible
+        );
+    }
+
+    /// PIN: the fit converges on the geometry a real 192-DPI window actually has.
+    ///
+    /// Stated at the fitting function with the window's own numbers because that is where two
+    /// separate defects hid, and neither was visible at the 96-DPI metrics the other inline tests
+    /// use. A real high-DPI row is 44 pixels with a 29-pixel ascent and a 14-pixel descent, and
+    /// against those budgets:
+    ///
+    /// * `$E = mc^2$`, `$x^2$`, `$\hat{m}_t$` and `$\int_0^1$` fitted to *exactly* their ascent
+    ///   budget, whereupon `ceil` rounded the fractional baseline up past it and the composite
+    ///   rejected runs the fit had just accepted — every ascent-bound formula on the screen fell
+    ///   back to source while the descent-bound `$\frac{a}{b}$` and `$\sum_i$` beside them rendered.
+    /// * With that fixed, the ones overshooting by *under a pixel* asked for a shrink of about one
+    ///   percent, which is far too small to move a rounded-up baseline, so they spent every attempt
+    ///   crawling and still fell back.
+    ///
+    /// The budgets are the measured ones, to the subpixel, and that precision is the test. A row is
+    /// 45056 subpixels tall and its baseline sits at 30480 — 29.77 pixels, not 29 and not 30 — and
+    /// a *fractional* budget compared against a *rounded* ink height is what produced the crawl:
+    /// 29.766 over 30 asks for a 0.8% shrink, which cannot move a rounded baseline at all. Rounding
+    /// these numbers off in the fixture makes the old code pass, which is how this test read green
+    /// against a build the real window had already failed on.
+    #[test]
+    fn the_inline_fit_converges_for_tall_constructions_at_high_dpi() {
+        let engine = MathEngine::new();
+        let key = MathRenderKey {
+            dpi_milli: NonZeroU32::new(2000).expect("2x is non-zero"),
+            font_milli_pt: NonZeroU32::new(12_000).expect("12 pt is non-zero"),
+            foreground_rgb: [220, 220, 220],
+            mode: MathMode::Inline,
+        };
+        // Measured off a 192-DPI window: a 44px row whose ASCII baseline is 29.766px down it.
+        let ascent_budget = 30_480;
+        let descent_budget = 14_576;
+        assert_eq!(
+            ascent_budget + descent_budget,
+            44 * SUBPIXELS_PER_PX,
+            "the two halves must be the row, or the fixture is not a line box"
+        );
+        for source in [
+            "x",
+            "y",
+            "E = mc^2",
+            "x^2",
+            r"\rho",
+            r"\alpha+\beta",
+            r"\frac{a}{b}",
+            r"\sum_i",
+            r"\hat{m}_t",
+            r"\int_0^1",
+        ] {
+            let fitted =
+                render_inline_run_fitted(&engine, source, key, ascent_budget, descent_budget)
+                    .expect("the engine renders every one of these")
+                    .unwrap_or_else(|| {
+                        panic!("{source} found no size that sits on a 44px/29px/14px line box")
+                    });
+            let (ascent_px, descent_px) = inline_run_box(fitted.height_px, fitted.baseline_px);
+            assert!(
+                i64::from(ascent_px) * SUBPIXELS_PER_PX <= ascent_budget
+                    && i64::from(descent_px) * SUBPIXELS_PER_PX <= descent_budget,
+                "{source} was returned as fitted at ascent {ascent_px}px / descent {descent_px}px, \
+                 which the composite will reject"
+            );
+        }
+    }
+
+    /// PIN: a construction taller than the line box is shrunk onto the baseline, not abandoned.
+    ///
+    /// `\frac` is the case the handoff named. Measured honestly it puts about a third of its ink
+    /// below the baseline, where a line of text keeps barely a fifth of its height, so at its
+    /// natural size it cannot sit on the row — and the rule it used to meet was a straight
+    /// accept-or-reject, which meant it stayed source text. Shrinking it to the line box is the
+    /// inline sibling of the readable scaling display math does to fit its band.
+    ///
+    /// Both assertions are load-bearing: the block must exist *and* it must be inside the row it
+    /// claims. A fit that reported success while overflowing the row would draw the denominator
+    /// through the line beneath it, which is the failure the clip used to hide by cutting it off.
+    #[test]
+    fn a_tall_inline_construction_is_scaled_onto_the_line_box_instead_of_falling_back() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(
+                b"\x1b]133;A\x07PS> \x1b]133;B\x07show\x1b]133;C\x07\r\n\
+                  ratio $\\frac{a}{b}$ here\r\n",
+                started,
+            )
+            .unwrap();
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1,
+            "the fraction row must arm as a live candidate"
+        );
+        assert_eq!(complete_live_math_for_real(&mut session), 1);
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "a fraction must be typeset at a size that fits, not left as source: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        let cell_height_subpixels = 24 * SUBPIXELS_PER_PX;
+        assert!(
+            blocks[0].artifact.height_subpixels <= cell_height_subpixels,
+            "the fitted fraction must sit inside its row: {} subpixels of a {cell_height_subpixels} row",
+            blocks[0].artifact.height_subpixels
+        );
+        assert!(
+            blocks[0].artifact.baseline_subpixels <= 19 * SUBPIXELS_PER_PX,
+            "its ascent must sit above the row's own baseline: {}",
+            blocks[0].artifact.baseline_subpixels
+        );
+    }
+
+    /// PIN: the alternate screen is eligible on its own, with no OSC 133 anywhere.
+    ///
+    /// The bytes here are *identical* to the ineligible fixture above — same text, same absence of
+    /// markers — and differ only by the `?1049h` that hands the surface to a full-screen
+    /// application. That is the whole of the widened ruling in one comparison: eligibility on this
+    /// screen is structural, bought by the fact that a surface an application owns has no shell
+    /// prompt and no shell input line on it to protect.
+    ///
+    /// Driven end to end rather than stopped at the site value, because a site assertion is exactly
+    /// what let three stacked defects ship green on the command-output path. This is the headless
+    /// form of the Claude Code case: no shell integration, alternate screen, a lone `$…$`.
+    #[test]
+    fn an_inline_run_on_the_alternate_screen_arrives_on_screen_as_a_rendered_block() {
+        let started = Instant::now();
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        seat_inline_metrics(&mut session);
+        session
+            .feed_at(b"\x1b[?1049h energy $E = mc^2$ here\r\n", started)
+            .unwrap();
+        assert_eq!(
+            grid_site_of(&session, "energy"),
+            InlineMathSite::AltScreenContent,
+            "an application that owns the screen makes its content eligible without OSC 133"
+        );
+
+        assert_eq!(
+            session.advance_live_stability(started + LIVE_MATH_STABLE_INTERVAL),
+            1,
+            "an alternate-screen row whose only math is `$...$` must be armed as a live candidate"
+        );
+        assert_eq!(
+            complete_live_math_for_real(&mut session),
+            1,
+            "an armed alternate-screen inline row must resolve to an anchored occurrence"
+        );
+
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = session.viewport_frame(&mut projection).unwrap();
+        let blocks = rendered_inline_blocks(&frame);
+        assert_eq!(
+            blocks.len(),
+            1,
+            "one rendered inline block on the alternate screen, not zero: {:?}",
+            frame
+                .math_blocks
+                .iter()
+                .map(|block| (block.artifact.mode, block.display))
+                .collect::<Vec<_>>()
+        );
+        let text = frame_row_text(&frame, 0);
+        assert!(
+            !text.contains('$'),
+            "the rendered run's source delimiters must be cleared from the grid: {text:?}"
         );
     }
 

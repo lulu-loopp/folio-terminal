@@ -539,27 +539,54 @@ fn is_math_environment(environment: &str) -> bool {
     )
 }
 
-/// Where a logical line sits in the shell's command lifecycle, as reported by OSC 133.
+/// Where a logical line was printed, as far as the terminal's own bookkeeping can prove it.
 ///
 /// This is the *structural* half of the inline disambiguator (user ruling 2026-08-10, scheme A).
 /// It is deliberately not something this crate can work out for itself: bt-detect sees text and
 /// nothing else, and the question "was this line printed by a command, or typed at a prompt?" is
 /// answered by the terminal's semantic region bookkeeping in bt-term. Making it a parameter is
 /// what keeps the authority in the one place that actually holds it.
+///
+/// Two sites permit inline rendering and one forbids it. The legislative intent behind the
+/// original single-site rule was never "OSC 133 specifically" — it was **protect the shell's
+/// literal text**, the prompt a user typed at and the command line they typed. The alternate
+/// screen has neither: an application that has switched to it owns the whole surface, there is
+/// structurally no prompt and no input line anywhere on it, and so the thing gate A was built to
+/// protect is not present to be damaged. Extending eligibility there costs nothing the rule was
+/// buying and recovers the case users have already accepted for display math across many
+/// sessions (Claude Code renders in the alternate screen today).
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum InlineMathSite {
-    /// Between `133;C` and `133;D` — a line a command *printed*. The only site where a lone `$`
-    /// is allowed to mean mathematics.
+    /// Between `133;C` and `133;D` — a line a command *printed*.
     CommandOutput,
-    /// Anything else: the prompt (`A..B`), the typed command line (`B..C`), the region after
-    /// `133;D`, and — the case that carries the most weight — **every line on a screen that has
-    /// never emitted OSC 133 at all**.
+    /// The content area of the alternate screen, whose occupant owns every cell on it.
     ///
-    /// No shell integration therefore means no inline rendering, ever. That is the ruling's price
-    /// and it is worth naming: a `$…$` printed by a session without integration stays source text.
-    /// The alternative is guessing which half of the screen is output, and a terminal that guesses
-    /// wrong renders the user's literal text as mathematics.
+    /// Eligible for the structural reason above, and *only* structurally: nothing here relaxes a
+    /// single content gate. An alternate screen is where a user edits a shell script in `vim` and
+    /// reads a price table in a TUI, so it is at least as adversarial a site as command output —
+    /// the `$PATH`, `$1` and `$12 │ $34` that arrive on it are stopped by gate D and the
+    /// completeness rule, exactly as their command-output twins are.
+    AltScreenContent,
+    /// Anything else: the prompt (`A..B`), the typed command line (`B..C`), the region after
+    /// `133;D`, and — the case that carries the most weight — **every line on a primary screen
+    /// that has never emitted OSC 133 at all**.
+    ///
+    /// No shell integration therefore means no inline rendering on the primary screen, ever. That
+    /// is the ruling's price and it is worth naming: a `$…$` printed by an unintegrated session
+    /// stays source text. The alternative is guessing which half of the screen is output, and a
+    /// terminal that guesses wrong renders the user's literal text as mathematics.
     Ineligible,
+}
+
+impl InlineMathSite {
+    /// Is a lone `$` on this line allowed to be read as a delimiter at all?
+    ///
+    /// Gate A in one place, so that adding a site is a decision made here rather than a condition
+    /// drifting apart across the call sites that ask it.
+    #[must_use]
+    pub fn permits_inline(self) -> bool {
+        matches!(self, Self::CommandOutput | Self::AltScreenContent)
+    }
 }
 
 /// Conservatively detect one or more `$...$` runs on a single logical line.
@@ -592,7 +619,7 @@ pub enum InlineMathSite {
 /// convenience of inline rendering. Display `$$...$$` detection is unaffected: its paired
 /// whole-line delimiters carry orders of magnitude more signal than a lone `$`.
 pub fn detect_inline_math(text: &str, site: InlineMathSite) -> Vec<InlineMathRun> {
-    if site != InlineMathSite::CommandOutput {
+    if !site.permits_inline() {
         return Vec::new();
     }
     if inline_line_is_code_like(text) || text.len() > MAX_MATH_SOURCE_BYTES {
@@ -611,6 +638,9 @@ pub fn detect_inline_math(text: &str, site: InlineMathSite) -> Vec<InlineMathRun
             || open
                 .checked_sub(1)
                 .is_some_and(|before| text.as_bytes().get(before) == Some(&b'$'))
+            || open
+                .checked_sub(1)
+                .is_some_and(|before| byte_continues_an_identifier(text, before))
         {
             index += 1;
             continue;
@@ -619,6 +649,7 @@ pub fn detect_inline_math(text: &str, site: InlineMathSite) -> Vec<InlineMathRun
             let close = dollars[*candidate];
             !delimiter_is_escaped(text, close)
                 && text.as_bytes().get(close + 1) != Some(&b'$')
+                && !byte_continues_an_identifier(text, close + 1)
                 && close
                     .checked_sub(1)
                     .is_none_or(|before| text.as_bytes().get(before) != Some(&b'$'))
@@ -643,6 +674,31 @@ pub fn detect_inline_math(text: &str, site: InlineMathSite) -> Vec<InlineMathRun
         index = close_index + 1;
     }
     runs
+}
+
+/// Would the byte at `index` continue a shell identifier begun by an adjacent `$`?
+///
+/// This is the rule that tells `$a$b` from `$a$ b`, and it earns its place because the alt-screen
+/// corpus caught the former rendering `a` as mathematics — a defect that was never alt-screen's,
+/// since a `cat`-ed script printed to command output had always done the same. `$a$b` is one shell
+/// expansion followed by another; the middle `$` is the *sigil of the second variable*, not the
+/// closing delimiter of the first. Symmetrically an opening `$` glued to the end of a word
+/// (`dir$SUFFIX`) is a sigil embedded mid-token, not an opener.
+///
+/// Deliberately ASCII-only, and the raw byte test is what makes that exact: a UTF-8 continuation
+/// byte is never ASCII, so `能量$E$的值` — the ordinary Chinese habit of writing inline maths with
+/// no surrounding space — keeps both of its delimiters. A rule that asked `char::is_alphanumeric`
+/// would have cost that sentence its formula to defend against a shell syntax that cannot contain
+/// a Han character in the first place.
+///
+/// The honest cost, stated because it is real: `the $n$th term` no longer renders. Two texts that
+/// differ only in whether the letter after the closing `$` is a shell variable name or an English
+/// suffix cannot be separated by any amount of looking, and when a rule must fail it fails toward
+/// leaving the user's text alone.
+fn byte_continues_an_identifier(text: &str, index: usize) -> bool {
+    text.as_bytes()
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
 }
 
 fn inline_line_is_code_like(text: &str) -> bool {
@@ -2536,11 +2592,11 @@ struct LiveLogicalLine {
     id: TranscriptId,
     text: String,
     fragments: Vec<LiveLogicalFragment>,
-    /// The joined line's OSC 133 site. A soft-wrapped line is several physical rows scanned as one
-    /// string, and the disambiguator judges that string whole — so the line is command output only
-    /// when *every* fragment is. The seam is exactly where a region boundary lands (a `C` or `D`
-    /// mid-wrap), and a line straddling one is a line half of which the shell never claimed to have
-    /// printed; conservative there means Ineligible.
+    /// The joined line's site. A soft-wrapped line is several physical rows scanned as one string,
+    /// and the disambiguator judges that string whole — so the line carries a site only when every
+    /// fragment agrees on one, and is `Ineligible` the moment two disagree. The seam is exactly
+    /// where a region boundary lands (a `C` or `D` mid-wrap), and a line straddling one is a line
+    /// half of which nothing has claimed to have printed; conservative there means Ineligible.
     site: InlineMathSite,
 }
 
@@ -2556,7 +2612,7 @@ fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
                 id,
                 text: String::new(),
                 fragments: Vec::new(),
-                site: InlineMathSite::CommandOutput,
+                site: input.site,
             });
         }
         let Some(line) = logical.last_mut() else {
@@ -2569,7 +2625,13 @@ fn live_logical_lines(inputs: &[LiveDetectionInput]) -> Vec<LiveLogicalLine> {
             byte_start,
             byte_end: line.text.len(),
         });
-        if input.site != InlineMathSite::CommandOutput {
+        // Unanimity, not membership. Seeding from the first fragment and demoting on the first
+        // disagreement is what lets a wrapped line on the alternate screen stay eligible: every
+        // fragment of it is `AltScreenContent`, and a rule phrased as "all fragments are
+        // `CommandOutput`" would have made every wrapped line on that screen ineligible — which is
+        // to say it would have silently repealed the widening for exactly the screen the widening
+        // was for.
+        if input.site != line.site {
             line.site = InlineMathSite::Ineligible;
         }
     }
@@ -2817,6 +2879,55 @@ mod tests {
         (r"$\alpha+\beta$", InlineMathSite::Ineligible),
         ("echo $PATH", InlineMathSite::Ineligible),
         ("PS D:\\dev> echo $env:PATH", InlineMathSite::Ineligible),
+        // ── The alternate screen, added when the site ruling was widened (2026-08-10). ──
+        //
+        // These are the rows that pay for the widening. Gate A no longer stops anything here, so
+        // every one of them has to die on content alone, and they are chosen to be the two things
+        // a full-screen application most plausibly puts on screen that a lone `$` could be
+        // misread in: a shell script open in an editor, and a table of prices in a TUI.
+        //
+        // A shell script in `vim`, seen through the gutter that stops the line ever *starting*
+        // with `export`/`echo` and so denies gate D its cheapest catch.
+        (
+            "  12 PATH=$HOME/bin:$PATH",
+            InlineMathSite::AltScreenContent,
+        ),
+        ("  4 echo \"$1 of $2\"", InlineMathSite::AltScreenContent),
+        (
+            "  7 if [ $# -gt $1 ]; then",
+            InlineMathSite::AltScreenContent,
+        ),
+        (
+            "  15 rm -rf \"$BUILD_DIR\"/$TARGET",
+            InlineMathSite::AltScreenContent,
+        ),
+        (
+            "  9 for f in $src/*.sh; do",
+            InlineMathSite::AltScreenContent,
+        ),
+        ("  3 test $a$b", InlineMathSite::AltScreenContent),
+        ("  21 dst=$1; src=$2", InlineMathSite::AltScreenContent),
+        // A price table drawn with box characters, both loosely and tightly spaced.
+        (
+            "│ Pro plan   │ $29 │ $290 │",
+            InlineMathSite::AltScreenContent,
+        ),
+        ("│$29│$290│", InlineMathSite::AltScreenContent),
+        (
+            "│ Total      $19.99   $24.99 │",
+            InlineMathSite::AltScreenContent,
+        ),
+        ("Subtotal: $12+$8 = $20", InlineMathSite::AltScreenContent),
+        (
+            "  Basic  $5  Pro  $15  Max  $50",
+            InlineMathSite::AltScreenContent,
+        ),
+        // A debugger's register pane, the other place a bare `$` names a variable.
+        ("(gdb) print $rsp - $rbp", InlineMathSite::AltScreenContent),
+        ("$rsp-$rbp", InlineMathSite::AltScreenContent),
+        // Adjacent expansions, the shape that made `byte_continues_an_identifier` necessary.
+        ("  8 out=$dir$SUFFIX", InlineMathSite::AltScreenContent),
+        ("prefix$x$y suffix", InlineMathSite::CommandOutput),
     ];
 
     /// Genuine inline mathematics, which must be typeset when a command printed it.
@@ -2832,6 +2943,10 @@ mod tests {
         r"$\frac{a}{b}$",
         "能量 $E = mc^2$，并且 $a_1+b_1=c_1$。",
         r"the loss $\mathcal{L}(\theta)$ fell",
+        // No spaces around the delimiters, which is simply how the sentence is written in Chinese.
+        // `byte_continues_an_identifier` must stay ASCII-only for this line to survive it.
+        "能量$E$的值",
+        r"梯度$\nabla f$在此处为零",
     ];
 
     /// **Zero false positives on the corpus.** Not "few" — the ruling that re-enabled inline
@@ -2876,20 +2991,60 @@ mod tests {
         );
     }
 
+    /// The alternate screen typesets the same genuine mathematics command output does.
+    ///
+    /// This is the recovered half of the widened ruling and the reason it was made: a full-screen
+    /// application — Claude Code being the one in daily use here — emits no OSC 133 at all, so
+    /// under the original single-site rule every inline formula it printed stayed source text
+    /// while the display formulas beside it rendered. Stated against the same corpus as the
+    /// command-output test so the two sites cannot quietly diverge.
+    #[test]
+    fn the_inline_true_positive_corpus_is_typeset_on_the_alternate_screen() {
+        let mut missed = Vec::new();
+        for text in INLINE_TRUE_POSITIVE_CORPUS {
+            if detect_inline_math(text, InlineMathSite::AltScreenContent).is_empty() {
+                missed.push(*text);
+            }
+        }
+        assert!(
+            missed.is_empty(),
+            "{} of {} genuine formulas went undetected on the alternate screen: {missed:?}",
+            missed.len(),
+            INLINE_TRUE_POSITIVE_CORPUS.len()
+        );
+    }
+
     /// The measured, accepted cost of gate A, kept as an assertion rather than a sentence in a
     /// report so that it stays true.
     ///
-    /// Every line of genuine mathematics in the corpus goes undetected outside a command-output
-    /// region — that is the whole of scheme A's price, and it is a *complete* loss on that side,
-    /// not a partial one. A session without shell integration renders no inline formulas at all.
-    /// If a future change makes even one of these detect, the structural guarantee that buys the
-    /// zero above has been broken and this test is where it surfaces.
+    /// Every line of genuine mathematics in the corpus goes undetected at an ineligible site —
+    /// that is the whole of the ruling's price, and it is a *complete* loss on that side, not a
+    /// partial one. An unintegrated primary screen renders no inline formulas at all. If a future
+    /// change makes even one of these detect, the structural guarantee that buys the zero above
+    /// has been broken and this test is where it surfaces.
     #[test]
-    fn gate_a_costs_every_genuine_formula_printed_outside_a_command_output_region() {
+    fn gate_a_costs_every_genuine_formula_printed_at_an_ineligible_site() {
         for text in INLINE_TRUE_POSITIVE_CORPUS {
             assert!(
                 detect_inline_math(text, InlineMathSite::Ineligible).is_empty(),
-                "{text:?} must not be typeset without OSC 133 proof that a command printed it"
+                "{text:?} must not be typeset without proof of where it was printed"
+            );
+        }
+    }
+
+    /// Eligibility is a property of the site and nothing else — the two eligible sites must agree
+    /// on every line in both corpora, or one of them has grown a content rule of its own.
+    #[test]
+    fn the_two_eligible_sites_reach_identical_verdicts() {
+        let corpus = INLINE_FALSE_POSITIVE_CORPUS
+            .iter()
+            .map(|(text, _)| *text)
+            .chain(INLINE_TRUE_POSITIVE_CORPUS.iter().copied());
+        for text in corpus {
+            assert_eq!(
+                detect_inline_math(text, InlineMathSite::CommandOutput),
+                detect_inline_math(text, InlineMathSite::AltScreenContent),
+                "{text:?} is read differently in command output than on the alternate screen"
             );
         }
     }

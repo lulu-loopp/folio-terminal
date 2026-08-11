@@ -20,7 +20,7 @@ pub const MAX_RASTER_BYTES: usize = 64 * 1024 * 1024;
 
 const TYPST_TEMPLATE: &str = r#"
 #import "specs/mod.typ": mitex-scope as base-mitex-scope
-#set page(width: auto, height: auto, margin: (x: 0pt, y: if sys.inputs.display { sys.inputs.font_size * 1pt } else { 0pt }), fill: none)
+#set page(width: auto, height: auto, margin: (x: 0pt, y: sys.inputs.font_size * 1pt), fill: none)
 #set text(size: sys.inputs.font_size * 1pt, fill: rgb(sys.inputs.red, sys.inputs.green, sys.inputs.blue))
 #let mitex-scope = base-mitex-scope + (
   diff: math.partial,
@@ -175,8 +175,11 @@ impl MathEngine {
             return Err(MathRenderError::MissingCjkGlyph);
         }
         let svg = typst_svg::svg(page, &Default::default());
+        // The same number the template turned into `margin.y`, which is what makes the page's
+        // content box — and therefore its baseline — recoverable from the page frame alone.
+        let margin_pt = f64::from(key.font_milli_pt.get()) / 1000.0;
         let metrics = find_math_metrics(&page.frame)
-            .or_else(|| fallback_math_metrics(&page.frame))
+            .or_else(|| fallback_math_metrics(&page.frame, margin_pt))
             .ok_or(MathRenderError::InvalidDimensions)?;
         rasterize_svg(&svg, key, metrics, started.elapsed())
     }
@@ -260,13 +263,30 @@ fn find_math_metrics(frame: &Frame) -> Option<MathMetrics> {
     best.map(|(_, metrics)| metrics)
 }
 
+/// The baseline read off the page's own geometry, for the majority of formulas that expose no
+/// explicit baseline anywhere in their frame tree.
+///
 /// MiTeX custom-macro wrappers can clear a Typst frame's explicit baseline even though the
-/// rendered frame remains a valid math box. Treat Typst's documented implicit bottom baseline as
-/// the adapter baseline. This closes spike 03's nine same-shape h/d holes without guessing from
-/// the SVG ink bounds.
-fn fallback_math_metrics(frame: &Frame) -> Option<MathMetrics> {
+/// rendered frame remains a valid math box — and in practice most inline sources produce no group
+/// frame at all, only bare text items sitting directly on the page. So this path, not
+/// [`find_math_metrics`], is what actually measures `$x$`, `$y$` and `$\frac{a}{b}$`.
+///
+/// The page's *content box bottom* is the baseline, and that is structural rather than lucky:
+/// Typst's default text bottom-edge is `"baseline"`, so an auto-height page ends exactly on the
+/// baseline of its last line. Every main glyph of a one-line formula is laid down on that line —
+/// measured directly, `x`, `y`, `E`, `=`, `m` and `c` all sit on it to the hundredth of a point,
+/// while `\frac`'s denominator hangs a clear 8pt *below* it.
+///
+/// `margin_pt` is the vertical page margin this render asked for, and subtracting it is the whole
+/// of the fix. The old form returned `frame.baseline()` — the page frame's implicit
+/// bottom-of-frame, margin included — which was right only while the margin was zero and the page
+/// bottom therefore coincided with the baseline. That coincidence is exactly why inline could not
+/// be given the overshoot margin display already had: adding it moved the page bottom a full em
+/// below the baseline while the arithmetic went on calling it one, and every inline raster
+/// measured its baseline at the very bottom of its own ink, descenders and all.
+fn fallback_math_metrics(frame: &Frame, margin_pt: f64) -> Option<MathMetrics> {
     (!frame.is_empty()).then(|| MathMetrics {
-        baseline_from_page_top_pt: frame.baseline().to_pt(),
+        baseline_from_page_top_pt: frame.height().to_pt() - margin_pt,
     })
 }
 
@@ -331,7 +351,16 @@ fn rasterize_svg(
         return Err(MathRenderError::InvalidDimensions);
     }
     unpremultiply_srgb_rgba(&mut rgba);
-    let baseline_px = (metrics.baseline_from_page_top_pt as f32 * scale - content_top_px as f32)
+    // Typst reports the baseline in points; `scale` maps the SVG's own units to device pixels and
+    // those units are CSS pixels, not points — `tree.size()` comes back as the page's point height
+    // times 96/72. So a point becomes a device pixel through *both* factors, and using `scale`
+    // alone undercounted the baseline by 4/3 of itself. That error is why the old inline metric
+    // could only ever be described as coincidental: it placed the baseline a third of the way up
+    // from where it belonged, and went unnoticed because the zero-margin page had already clipped
+    // away every pixel below the baseline that could have shown the mistake.
+    let device_px_per_pt = scale * 96.0 / 72.0;
+    let baseline_px = (metrics.baseline_from_page_top_pt as f32 * device_px_per_pt
+        - content_top_px as f32)
         .clamp(0.0, content_height_px as f32);
     Ok(MathRaster {
         rgba,
@@ -829,10 +858,20 @@ mod display_page_margin {
         }
     }
 
-    /// Inline placement is baseline-anchored on measurements that only hold with the historical
-    /// zero-margin page, so inline rendering keeps `margin: 0pt` byte-for-byte.
+    /// PIN: an inline raster keeps every pixel it draws, above the baseline and below it.
+    ///
+    /// The handoff called the old inline metric "coincidental" and predicted a descender would be
+    /// found clipped the day inline rendering was switched on. Both halves were true, and the
+    /// measurement here is what makes them concrete: with `margin: 0pt` an inline page ran from the
+    /// cap height to the baseline and *nothing else existed*, so `x` and `y` rasterised to byte-for
+    /// -byte identical heights — the descender of the `y` was never drawn — and `\frac`'s
+    /// denominator, which sits a clear 8pt below the baseline, was cut off at it.
+    ///
+    /// The invariants, stated as physics rather than as numbers, are that two glyphs sitting on one
+    /// line share a baseline and differ only in how far their ink reaches from it, and that ink
+    /// which belongs below the baseline is present.
     #[test]
-    fn inline_rasters_keep_the_zero_margin_page() {
+    fn inline_rasters_keep_their_descenders_and_measure_a_true_baseline() {
         let engine = MathEngine::new();
         let key = MathRenderKey {
             dpi_milli: NonZeroU32::new(2000).unwrap(),
@@ -840,14 +879,48 @@ mod display_page_margin {
             foreground_rgb: [255, 255, 255],
             mode: MathMode::Inline,
         };
-        for (source, expected_ink_height, expected_baseline) in [("x", 39, 23.7), ("y", 39, 23.7)] {
+        let measure = |source: &str| {
             let raster = engine.render(source, key).unwrap();
-            assert_eq!(raster.content_height_px, expected_ink_height, "{source}");
-            assert!(
-                (raster.baseline_px - expected_baseline).abs() < 0.6,
-                "{source}: baseline {} drifted from the zero-margin measurement {expected_baseline}",
-                raster.baseline_px
-            );
-        }
+            (
+                raster.content_height_px,
+                raster.baseline_px,
+                raster.content_height_px as f32 - raster.baseline_px,
+            )
+        };
+
+        // Two letters typeset on one line. Same baseline to the pixel; the `y` reaches further down
+        // because it has a descender, and under the zero-margin page both measured 39/23.7 alike.
+        let (x_height, x_baseline, x_descent) = measure("x");
+        let (y_height, y_baseline, y_descent) = measure("y");
+        assert_eq!(x_height, 39);
+        assert_eq!(
+            y_height, 55,
+            "the `y`'s descender must be rasterised, not clipped"
+        );
+        assert!(
+            (x_baseline - y_baseline).abs() < 0.01,
+            "two glyphs on one line share a baseline: {x_baseline} vs {y_baseline}"
+        );
+        assert!(
+            y_descent > x_descent + 10.0,
+            "the descender must be measured *below* the baseline: {y_descent} vs {x_descent}"
+        );
+
+        // An expression with no descending part ends on its baseline, so essentially all of its ink
+        // is ascent. Anti-aliasing bleeds about a pixel past it and that is the whole tolerance.
+        let (_, _, flat_descent) = measure("E = mc^2");
+        assert!(
+            flat_descent < 2.0,
+            "`E = mc^2` has nothing below the baseline, so its descent is ink bleed: {flat_descent}"
+        );
+
+        // The construction the handoff named. A third of a fraction's ink is its denominator, and
+        // all of it belongs below the baseline.
+        let (frac_height, frac_baseline, frac_descent) = measure(r"\frac{a}{b}");
+        assert_eq!(frac_height, 91);
+        assert!(
+            frac_descent > 25.0 && frac_baseline > 25.0,
+            "a fraction straddles its baseline: ascent {frac_baseline}, descent {frac_descent}"
+        );
     }
 }

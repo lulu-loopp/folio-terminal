@@ -7316,6 +7316,71 @@ mod tests {
         }
     }
 
+    /// An inline composite carrying the given runs, in raster-pixel offsets within the image.
+    fn test_inline_placement(
+        runs: &[(u32, u32, u32)],
+        render_scale_milli: u32,
+    ) -> MathBlockPlacement {
+        let mut placement = test_math_placement("inline", 0, 24 * SUBPIXELS_PER_PX, 4);
+        placement.artifact.mode = MathMode::Inline;
+        placement.artifact.kind = bt_viewport::RgbaArtifactKind::Math;
+        placement.artifact.render_scale_milli = render_scale_milli;
+        placement.artifact.inline_runs = runs
+            .iter()
+            .map(|(run, x_px, width_px)| bt_viewport::InlineRunPlacement {
+                run: *run,
+                x_px: *x_px,
+                width_px: *width_px,
+            })
+            .collect();
+        placement
+    }
+
+    /// PIN (slice 4): the pointer resolves to one *run*, not to the line it sits on.
+    ///
+    /// An inline placement is a single composite covering a whole logical line, so the block
+    /// rectangle a hit test matches cannot by itself say which of two formulas was under the
+    /// cursor — and every interaction that follows is answered per run: which LaTeX the copy button
+    /// puts on the clipboard, which formula the toolbar is about. Copying already had its own pin;
+    /// the step *before* it, turning a pixel into a run index, had none, and a regression there
+    /// would silently hand every interaction to run 0.
+    #[test]
+    fn a_pointer_over_an_inline_composite_resolves_to_the_run_beneath_it() {
+        // Two runs with a gap of prose between them: cells 0..40 and 100..140 inside the image,
+        // drawn in a block whose left edge is at x = 10.
+        let placement = test_inline_placement(&[(0, 0, 40), (1, 100, 40)], 1000);
+        let block = [10.0, 0.0, 160.0, 24.0];
+        let run_at = |x: f32| inline_run_at(&placement, block, x);
+
+        assert_eq!(run_at(15.0), Some(0), "inside the first run");
+        assert_eq!(run_at(120.0), Some(1), "inside the second run");
+
+        // A point in the prose between two formulas is inside the block and belongs to neither.
+        // Nearest is the only non-arbitrary answer, and it must actually be nearest.
+        assert_eq!(run_at(70.0), Some(0), "the gap resolves to the nearer run");
+        assert_eq!(run_at(100.0), Some(1), "and to the other one on its side");
+        assert_eq!(run_at(0.0), Some(0), "left of everything is the first run");
+        assert_eq!(
+            run_at(500.0),
+            Some(1),
+            "right of everything is the last run"
+        );
+
+        // Run offsets live in raster-pixel space, so they must be scaled exactly as the block is —
+        // a stale raster presented at half scale puts its second run at half the offset. Without
+        // this the pointer would resolve against a geometry the user is not looking at.
+        let halved = test_inline_placement(&[(0, 0, 40), (1, 100, 40)], 500);
+        assert_eq!(
+            inline_run_at(&halved, block, 70.0),
+            Some(1),
+            "at half scale the second run covers 60..80, so 70 is inside it"
+        );
+
+        // Display math has no runs, and must not invent one.
+        let display = test_inline_placement(&[], 1000);
+        assert_eq!(inline_run_at(&display, block, 20.0), None);
+    }
+
     fn test_cell_anchors(count: usize) -> Vec<bt_viewport::CellAnchor> {
         (0..count)
             .map(|column| {
