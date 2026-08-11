@@ -65,7 +65,7 @@ use bt_render::{
     chrome_palette,
 };
 
-use crate::marks::{ChromeMark, ChromeSprite, Corner};
+use crate::marks::{ChromeMark, ChromeSprite, Corner, tree_disclosure};
 
 /// `.pane:not(.focused) .panehead .ticon { opacity: .5 }` (mock-up 1647).
 ///
@@ -1631,6 +1631,17 @@ pub enum ChromeTarget {
     /// 5837/5844): "the button is not the bar" has to be true at the hit test or
     /// it is not true anywhere.
     PaneClose(SeatId),
+    /// One row of one files column's tree (C30/C155).
+    ///
+    /// **By index and not by id.** The hit test's whole job is "which rectangle
+    /// is under the pointer", and the rectangles are laid out by position: a row
+    /// index is what the geometry produces and what the painter compares. The
+    /// id is one lookup away for whoever needs to *act*, and asking the hit test
+    /// to carry it would mean cloning a string on every pointer move.
+    FilesRow {
+        seat: SeatId,
+        index: usize,
+    },
     Settings,
     Minimize,
     Maximize,
@@ -3867,6 +3878,14 @@ static NO_LEAF_MARKS: BTreeMap<SeatId, ChromeMark> = BTreeMap::new();
 /// what every chrome test that predates the files state means by leaving it out.
 #[cfg(test)]
 static NO_FILES_NAMES: BTreeMap<SeatId, String> = BTreeMap::new();
+/// And once more for the rows: "no files column here has been walked".
+///
+/// A column with no entry draws no tree and no notice — which is what every
+/// chrome test that predates the tree means by leaving it out, and is also the
+/// honest picture for the one frame between a column being minted and its root
+/// being read.
+#[cfg(test)]
+static NO_FILES_TREES: BTreeMap<SeatId, FilesTreeContent> = BTreeMap::new();
 
 /// Every Terminal seat of `seats` running a PowerShell — the map a real tab of
 /// one profile hands in.
@@ -3926,6 +3945,7 @@ pub fn build_chrome_with_preview(
             terminal_names: &NO_TERMINAL_NAMES,
             leaf_marks: &all_powershell(seats),
             files_names: &NO_FILES_NAMES,
+            files_trees: &NO_FILES_TREES,
             preview_message,
             fit_overflow: None,
             profile_menu_open: false,
@@ -4197,6 +4217,14 @@ pub struct ChromeContent<'a> {
     /// in the painter would put the ruling in the renderer, where the *other*
     /// length would have to be re-derived to disagree with it.
     pub files_names: &'a BTreeMap<SeatId, String>,
+    /// C28-C43, per leaf: the rows each files column shows this frame.
+    ///
+    /// Walked above and handed down as values, for the reason
+    /// [`Self::files_names`] gives one line up and red line L1 gives in general:
+    /// the rows are content, this module owns rectangles, and a module that
+    /// could read a directory for itself would be a module that reads a
+    /// directory on the event loop.
+    pub files_trees: &'a BTreeMap<SeatId, FilesTreeContent>,
     pub preview_message: Option<&'a str>,
     /// What the L4 fit-what-fits strip could not show, when the window is in
     /// that state at all ([`fit_what_fits`]). `None` on every ordinary solve.
@@ -4390,6 +4418,7 @@ pub fn build_chrome_for_tabs(
         terminal_names,
         leaf_marks,
         files_names,
+        files_trees,
         preview_message,
         fit_overflow,
         profile_menu_open,
@@ -4708,6 +4737,30 @@ pub fn build_chrome_for_tabs(
                         },
                     ));
                 }
+                // C28-C43: a files column draws its rows into the body the floor
+                // quad above just laid down, and only falls through to a centred
+                // notice when the whole tree *is* one — an unrooted column, an
+                // empty root, a root that would not open. A notice about one
+                // folder deep in the tree is a row and stays a row.
+                let files_tree = (placement.kind == SeatKind::Files)
+                    .then(|| files_trees.get(&placement.id))
+                    .flatten();
+                let mut files_notice = None;
+                if let Some(tree) = files_tree {
+                    let body = [head_box[0], head_bottom, head_box[2], head_box[3]];
+                    match whole_tree_notice(&tree.rows) {
+                        Some(message) => files_notice = Some(message.to_owned()),
+                        None => push_files_tree(
+                            body,
+                            tree,
+                            pointer.hover,
+                            placement.id,
+                            scale,
+                            &palette,
+                            (&mut pane_quads, &mut pane_labels, &mut pane_sprites),
+                        ),
+                    }
+                }
                 let body_notice = match placement.kind {
                     SeatKind::Preview => preview_message,
                     // T227: the degradation has to be *visible*. A leaf whose
@@ -4718,12 +4771,7 @@ pub fn build_chrome_for_tabs(
                     // exists to forbid. So it says what it is, in its own body,
                     // in the same quiet ink an empty preview uses.
                     SeatKind::Placeholder => Some(PLACEHOLDER_SEAT_NOTICE),
-                    // P1 seats the column, states where it is rooted, and stops
-                    // there: the tree itself is P2's and its data plane is P3's.
-                    // The body says so rather than standing empty, because an
-                    // empty body and a broken one are the same picture — the
-                    // argument T227 already makes one line above.
-                    SeatKind::Files => Some(FILES_TREE_PENDING_NOTICE),
+                    SeatKind::Files => files_notice.as_deref(),
                     SeatKind::Terminal => None,
                 };
                 if let Some(message) = body_notice {
@@ -4988,7 +5036,16 @@ fn clip_pane_chrome(
         box_intersection(quad.rect, clip).map(|rect| ChromeQuad { rect, ..quad })
     }));
     labels.extend(pane_labels.drain(..).filter_map(|label| {
-        box_intersection(label.rect, clip).map(|clip| ChromeLabel {
+        // **A clip the label already carries is a narrowing, and narrowings
+        // compose.** For most labels there is none and the window is the box
+        // they are laid out in, which is what this always did. A label from a
+        // scrolling list inside the pane arrives having already said it may
+        // only be seen through the list's viewport — and replacing that with
+        // `rect ∩ clip` widens it back to the whole row, which is a row
+        // scrolled under the pane head being drawn straight across the caption
+        // (seen on the real window, files tree, 2026-08-11).
+        let window = label.clip.unwrap_or(label.rect);
+        box_intersection(window, clip).map(|clip| ChromeLabel {
             clip: Some(clip),
             ..label
         })
@@ -7154,13 +7211,446 @@ pub(crate) fn seat_caption<'a>(
 pub(crate) const PLACEHOLDER_SEAT_NOTICE: &str =
     "This pane was saved by a newer version of BetterTerminal";
 
-/// What a files column says in its own body until the tree grows into it.
+// ── the file tree's own numbers, `.files-tree` and `.frow` (mock-up 774-799) ──
+//
+// Logical pixels, scaled at use like every other constant here. They are the
+// mock-up's declarations one for one, and the two that look like one number are
+// deliberately two: `.files-tree { padding: 2px 4px 8px }` gives the *list* its
+// margins, and `.frow { padding: 0 6px }` gives a *row* its own — the second is
+// what the indent formula counts from, and folding them together would make a
+// depth-0 row start 10px in and every ruling about indent off by four.
+
+/// `.files-tree { padding: 2px 4px 8px }` — the list's left and right margin.
+pub const FILES_TREE_PADDING_X_LOGICAL_PX: f32 = 4.0;
+/// The same declaration's top.
+pub const FILES_TREE_PADDING_TOP_LOGICAL_PX: f32 = 2.0;
+/// The same declaration's bottom, which is larger so the last row does not sit
+/// against the pane's floor.
+pub const FILES_TREE_PADDING_BOTTOM_LOGICAL_PX: f32 = 8.0;
+/// `.frow { height: 24px }`.
+pub const FILES_ROW_HEIGHT_LOGICAL_PX: f32 = 24.0;
+/// `.frow { padding: 0 6px }` — and the `6` of C31's `6 + depth * 14`.
+pub const FILES_ROW_PADDING_X_LOGICAL_PX: f32 = 6.0;
+/// `.frow { gap: 6px }`, between triangle, icon and name.
+pub const FILES_ROW_GAP_LOGICAL_PX: f32 = 6.0;
+/// `.frow { border-radius: 5px }` — the hover and selection pill.
+pub const FILES_ROW_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// The `14` of C31: one level of depth, in pixels.
+pub const FILES_ROW_INDENT_LOGICAL_PX: f32 = 14.0;
+/// `.frow .tri { width: 10px; height: 10px }`.
+pub const FILES_ROW_TRI_LOGICAL_PX: f32 = 10.0;
+/// `.frow .fico { width: 15px; height: 15px }`.
+pub const FILES_ROW_ICON_LOGICAL_PX: f32 = 15.0;
+/// `.files-tree { font-size: 13px }`.
+pub const FILES_TREE_FONT_LOGICAL_PX: f32 = 13.0;
+/// `.frow .tri { transition: transform 120ms cubic-bezier(.2,0,0,1) }`.
+pub const FILES_ROW_TRI_TURN_MS: u64 = 120;
+
+/// What one files column is showing this frame.
 ///
-/// This slice gives the column a home, a width, a root and a place on disk; the
-/// rows themselves are the next one's. Said out loud for the same reason
-/// [`PLACEHOLDER_SEAT_NOTICE`] is: a pane that draws nothing is indistinguishable
-/// from a pane that is broken, and this one is neither.
-pub(crate) const FILES_TREE_PENDING_NOTICE: &str = "File tree coming soon";
+/// Owned rather than borrowed because the rows are *derived* — nothing upstream
+/// holds a `Vec<TreeRow>` for this to point at, and the walk that makes them
+/// would have to be kept alive by hand for the length of a frame to lend them
+/// out. They are only ever the visible rows, so this is tens of small values and
+/// not a directory.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct FilesTreeContent {
+    pub rows: Vec<crate::files::TreeRow>,
+    /// How far the list is scrolled, in physical pixels, before clamping.
+    ///
+    /// Clamped here rather than at the wheel, because the bound is
+    /// `content - viewport` and the viewport is a rectangle only the geometry
+    /// knows. A stored offset that outlived its rows is therefore harmless: it
+    /// is re-clamped every frame against the rows that actually exist.
+    pub scroll_px: f32,
+    /// The selected node's stable id, straight off `FilesLeafState`.
+    ///
+    /// C32: a selection is a fact about the tree and shows whether or not the
+    /// tree has the keyboard, so it is content and not a pointer state.
+    pub selected: Option<String>,
+    /// How far through its turn each directory row's triangle is: 0 shut, 1
+    /// open (C33).
+    ///
+    /// Sampled above and handed down as numbers, like every other animated value
+    /// that reaches this module — nothing in here knows what time it is. Rows
+    /// with no entry are not mid-turn and take their angle from their own state,
+    /// which is every row of a tree nobody has clicked in.
+    pub turns: BTreeMap<String, f32>,
+}
+
+/// Where each row of one files column lands.
+///
+/// One function answers this for the painter and for the hit test, which is the
+/// rule `hit_rail_chrome` already follows: a list that computes its rectangles
+/// twice is a list whose click lands on the row above the one you can see.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilesTreeGeometry {
+    /// The body rectangle the rows are clipped to.
+    pub viewport: [f32; 4],
+    /// Physical pixels of scroll actually applied, after clamping.
+    pub scroll_px: f32,
+    /// How far the content would extend if nothing clipped it.
+    pub content_height: f32,
+    /// The largest scroll that still shows content, never negative.
+    pub max_scroll: f32,
+    row_height: f32,
+    rows: usize,
+    padding_x: f32,
+    padding_top: f32,
+}
+
+impl FilesTreeGeometry {
+    /// The full-width box of one row, before clipping.
+    ///
+    /// Built at its true geometry even when it lies outside the viewport, so the
+    /// clip shows a cropped slice of a correct row rather than a compressed
+    /// whole one — the lesson `settings::clip_content` records having learnt.
+    pub fn row_rect(&self, index: usize) -> [f32; 4] {
+        let top =
+            self.viewport[1] + self.padding_top - self.scroll_px + self.row_height * index as f32;
+        [
+            self.viewport[0] + self.padding_x,
+            top,
+            self.viewport[2] - self.padding_x,
+            top + self.row_height,
+        ]
+    }
+
+    /// Which row a point is on, or `None` off the end of the list.
+    ///
+    /// The bound matters: without it every click in the empty space below the
+    /// last row would select a row that is not there, and with a short list that
+    /// is most of the pane.
+    pub fn row_at(&self, x: f32, y: f32) -> Option<usize> {
+        if x < self.viewport[0]
+            || x >= self.viewport[2]
+            || y < self.viewport[1]
+            || y >= self.viewport[3]
+        {
+            return None;
+        }
+        let offset = y - (self.viewport[1] + self.padding_top - self.scroll_px);
+        if offset < 0.0 {
+            return None;
+        }
+        let index = (offset / self.row_height) as usize;
+        (index < self.rows).then_some(index)
+    }
+}
+
+/// When the whole tree is a single sentence about itself, that sentence belongs
+/// in the middle of the body rather than on a row.
+///
+/// The distinction is between a state of the *column* — unrooted, empty, a root
+/// that would not open — and a state of one *folder* in it. The first is what
+/// the pane is; the second is a line in a list that has other lines. A tail row
+/// counting what the cap left out is never the first kind, even when the cap cut
+/// everything else away.
+fn whole_tree_notice(rows: &[crate::files::TreeRow]) -> Option<&str> {
+    use crate::files::{RowKind, RowNotice};
+    let [only] = rows else {
+        return None;
+    };
+    match only.kind {
+        RowKind::Notice(RowNotice::More(_)) => None,
+        RowKind::Notice(_) if only.key.is_empty() => Some(&only.name),
+        _ => None,
+    }
+}
+
+/// The files column whose tree a wheel notch belongs to, and how tall its body
+/// is.
+///
+/// Separate from [`hit_files_tree`] because a notch is owed to the *list*, not
+/// to a row: the empty space below the last row is still the scroller, and a
+/// wheel there has to move it. Returns the body height because the wheel's own
+/// page-sized step is a screenful of whatever it is over.
+pub fn files_body_at(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option<(SeatId, f32)> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Files
+            || !matches!(placement.presentation, Presentation::Full)
+        {
+            continue;
+        }
+        let Some(device) = placement.device_rect else {
+            continue;
+        };
+        let rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        let head = pane_head_geometry(rect, placement.kind, scale);
+        let body = [rect[0], head.head[3], rect[2], rect[3]];
+        if x >= body[0] && x < body[2] && y >= body[1] && y < body[3] {
+            return Some((placement.id, body[3] - body[1]));
+        }
+    }
+    None
+}
+
+/// Which files-tree row the pointer is on.
+///
+/// Its own entry in the hit-test chain rather than a branch inside
+/// [`hit_chrome`], for the reason `hit_rail_chrome` is its own: it needs
+/// something `hit_chrome` is not given — the rows and where they are scrolled to
+/// — and threading that through a function every caller uses would make every
+/// caller carry a tree it does not have. It answers only for the body, so the
+/// pane head's own controls still win by being asked first.
+pub fn hit_files_tree(
+    layout: &SeatLayout,
+    trees: &BTreeMap<SeatId, FilesTreeContent>,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Files
+            || !matches!(placement.presentation, Presentation::Full)
+        {
+            continue;
+        }
+        let Some(device) = placement.device_rect else {
+            continue;
+        };
+        let Some(tree) = trees.get(&placement.id) else {
+            continue;
+        };
+        // A column showing a single sentence about itself has no rows to hit.
+        if whole_tree_notice(&tree.rows).is_some() {
+            continue;
+        }
+        let rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        let head = pane_head_geometry(rect, placement.kind, scale);
+        let body = [rect[0], head.head[3], rect[2], rect[3]];
+        let geometry = files_tree_geometry(body, tree.rows.len(), tree.scroll_px, scale);
+        if let Some(index) = geometry.row_at(x, y) {
+            return Some(ChromeTarget::FilesRow {
+                seat: placement.id,
+                index,
+            });
+        }
+    }
+    None
+}
+
+/// Draw one files column's rows.
+///
+/// **This is the virtualization** (C29/L157), and it is the only one there is:
+/// the row list is already just the *open* nodes, and rows outside the viewport
+/// are skipped before anything is built for them. There is no second code path
+/// for large directories to fall into, because there is no size at which this
+/// one starts doing more work — a hundred-thousand-entry folder capped at 2000
+/// still only builds the two dozen rows the pane can show.
+#[allow(clippy::too_many_arguments)]
+fn push_files_tree(
+    body: [f32; 4],
+    tree: &FilesTreeContent,
+    hover: Option<ChromeTarget>,
+    seat: SeatId,
+    scale: f32,
+    palette: &bt_render::ChromePalette,
+    out: (
+        &mut Vec<ChromeQuad>,
+        &mut Vec<ChromeLabel>,
+        &mut Vec<ChromeSprite>,
+    ),
+) {
+    use crate::files::RowKind;
+    let (_quads, labels, sprites) = out;
+    let geometry = files_tree_geometry(body, tree.rows.len(), tree.scroll_px, scale);
+    let hovered = match hover {
+        Some(ChromeTarget::FilesRow { seat: on, index }) if on == seat => Some(index),
+        _ => None,
+    };
+    let radius = (FILES_ROW_RADIUS_LOGICAL_PX * scale).round().max(1.0) as u32;
+    let row_pad = FILES_ROW_PADDING_X_LOGICAL_PX * scale;
+    let indent = FILES_ROW_INDENT_LOGICAL_PX * scale;
+    let gap = FILES_ROW_GAP_LOGICAL_PX * scale;
+    let tri = (FILES_ROW_TRI_LOGICAL_PX * scale).round().max(1.0);
+    let icon = (FILES_ROW_ICON_LOGICAL_PX * scale).round().max(1.0);
+    let font = FILES_TREE_FONT_LOGICAL_PX * scale;
+    // A raster cannot be drawn half, so a glyph on a row that is half scrolled
+    // out is dropped rather than allowed to spill over the head — the rule
+    // `clip_pane_chrome` states for sprites, applied here because the clip that
+    // matters is the *list's* viewport and not the pane's.
+    let wholly_inside = |rect: [f32; 4]| rect[1] >= body[1] && rect[3] <= body[3];
+    let crop = |rect: [f32; 4]| [rect[0], rect[1].max(body[1]), rect[2], rect[3].min(body[3])];
+    for (index, row) in tree.rows.iter().enumerate() {
+        let rect = geometry.row_rect(index);
+        if rect[3] <= body[1] || rect[1] >= body[3] {
+            continue;
+        }
+        let selected = row.is_node() && tree.selected.as_deref() == Some(row.key.as_str());
+        let under_pointer = hovered == Some(index);
+        // C32: `.frow.sel` and `.frow:hover` carry equal specificity and the
+        // selected rule is written second, so a selected row under the pointer
+        // stays selected rather than flickering to the lighter fill.
+        if selected || under_pointer {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPill { radius_px: radius },
+                crop(rect),
+                if selected {
+                    palette.files_row_selected
+                } else {
+                    palette.files_row_hover
+                },
+            ));
+        }
+        let ink = if selected {
+            palette.files_row_text_selected
+        } else if under_pointer {
+            palette.files_row_text_hover
+        } else {
+            palette.files_row_text
+        };
+        let muted = if selected {
+            palette.files_row_muted_selected
+        } else if under_pointer {
+            palette.files_row_muted_hover
+        } else {
+            palette.files_row_muted
+        };
+        let content_left = rect[0] + row_pad + indent * row.depth as f32;
+        let name_left = content_left + tri + gap + icon + gap;
+        let middle = |size: f32| ((rect[1] + rect[3] - size) / 2.0).round();
+        match row.kind {
+            RowKind::Notice(_) => {
+                // A notice sits in the name column so the list still reads as a
+                // list, and in the body's own quiet ink so it is never mistaken
+                // for a file called "Loading…".
+                labels.push(ChromeLabel {
+                    text: row.name.clone(),
+                    rect: [name_left, rect[1], rect[2] - row_pad, rect[3]],
+                    font_size_px: font,
+                    color: palette.body_hint_text,
+                    align_right: false,
+                    align_center: false,
+                    letter_spacing_em: 0.0,
+                    weight: ChromeLabelWeight::Regular,
+                    tabular_numerals: false,
+                    clip: Some(crop([name_left, rect[1], rect[2] - row_pad, rect[3]])),
+                });
+                continue;
+            }
+            RowKind::Directory { open } => {
+                // C33: the triangle turns; the file rows below keep its slot.
+                let turn = tree
+                    .turns
+                    .get(&row.key)
+                    .copied()
+                    .unwrap_or_else(|| f32::from(u8::from(open)));
+                let tri_rect = [
+                    content_left,
+                    middle(tri),
+                    content_left + tri,
+                    middle(tri) + tri,
+                ];
+                if wholly_inside(tri_rect) {
+                    sprites.push(ChromeSprite::new(tree_disclosure(turn), tri_rect, muted));
+                }
+                let icon_left = content_left + tri + gap;
+                let icon_rect = [
+                    icon_left,
+                    middle(icon),
+                    icon_left + icon,
+                    middle(icon) + icon,
+                ];
+                if wholly_inside(icon_rect) {
+                    sprites.push(ChromeSprite::new(
+                        if open {
+                            ChromeMark::FolderOpen
+                        } else {
+                            ChromeMark::Folder
+                        },
+                        icon_rect,
+                        palette.accent,
+                    ));
+                }
+            }
+            RowKind::Cycle => {
+                // A folder that is its own ancestor keeps a shut triangle,
+                // because shut is what it is: it will not open, and an open one
+                // over no children would be the picture of a bug.
+                let icon_left = content_left + tri + gap;
+                let icon_rect = [
+                    icon_left,
+                    middle(icon),
+                    icon_left + icon,
+                    middle(icon) + icon,
+                ];
+                if wholly_inside(icon_rect) {
+                    sprites.push(ChromeSprite::new(
+                        ChromeMark::Folder,
+                        icon_rect,
+                        palette.files_row_muted,
+                    ));
+                }
+            }
+            RowKind::File => {
+                let icon_left = content_left + tri + gap;
+                let icon_rect = [
+                    icon_left,
+                    middle(icon),
+                    icon_left + icon,
+                    middle(icon) + icon,
+                ];
+                if wholly_inside(icon_rect) {
+                    sprites.push(ChromeSprite::new(ChromeMark::File, icon_rect, muted));
+                }
+            }
+        }
+        let name_rect = [name_left, rect[1], rect[2] - row_pad, rect[3]];
+        labels.push(ChromeLabel {
+            text: row.name.clone(),
+            rect: name_rect,
+            font_size_px: font,
+            color: ink,
+            align_right: false,
+            align_center: false,
+            letter_spacing_em: 0.0,
+            weight: ChromeLabelWeight::Regular,
+            tabular_numerals: false,
+            // `.fname { overflow: hidden }`, cropped rather than ellipsised —
+            // this codebase's standing answer, the same one a tab title and a
+            // pane title already take (`profiles.rs`, `peek_strip.rs`).
+            clip: Some(crop(name_rect)),
+        });
+    }
+}
+
+/// Lay the rows into the body, clamping the scroll to what there is to see.
+pub fn files_tree_geometry(
+    body: [f32; 4],
+    rows: usize,
+    scroll_px: f32,
+    scale: f32,
+) -> FilesTreeGeometry {
+    let row_height = (FILES_ROW_HEIGHT_LOGICAL_PX * scale).round().max(1.0);
+    let padding_x = (FILES_TREE_PADDING_X_LOGICAL_PX * scale).round();
+    let padding_top = (FILES_TREE_PADDING_TOP_LOGICAL_PX * scale).round();
+    let padding_bottom = (FILES_TREE_PADDING_BOTTOM_LOGICAL_PX * scale).round();
+    let content_height = padding_top + row_height * rows as f32 + padding_bottom;
+    let max_scroll = (content_height - (body[3] - body[1])).max(0.0);
+    FilesTreeGeometry {
+        viewport: body,
+        scroll_px: scroll_px.clamp(0.0, max_scroll),
+        content_height,
+        max_scroll,
+        row_height,
+        rows,
+        padding_x,
+        padding_top,
+    }
+}
 
 /// The tail line of the L4 strip: how many seats it had no row for.
 ///
@@ -9939,6 +10429,7 @@ mod tests {
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
+                    files_trees: &NO_FILES_TREES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -10144,6 +10635,7 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open,
@@ -10157,6 +10649,490 @@ mod tests {
 
     fn strip_titles(count: usize) -> Vec<String> {
         (0..count).map(|index| format!("tab {index}")).collect()
+    }
+
+    // ── C28-C43: the file tree's rows ──────────────────────────────────────
+
+    fn tree_row(
+        key: &str,
+        name: &str,
+        depth: usize,
+        kind: crate::files::RowKind,
+    ) -> crate::files::TreeRow {
+        crate::files::TreeRow {
+            key: key.to_owned(),
+            name: name.to_owned(),
+            depth,
+            kind,
+        }
+    }
+
+    /// The two channels a tree draws into, named so the tests below read as
+    /// questions about the picture rather than about tuple positions.
+    struct TreeChrome {
+        labels: Vec<ChromeLabel>,
+        sprites: Vec<ChromeSprite>,
+    }
+
+    /// A column beside a terminal, showing `rows`, with the chrome it produces.
+    fn files_chrome(
+        content: FilesTreeContent,
+        hover_row: Option<usize>,
+    ) -> (Seats, SeatLayout, SeatId, TreeChrome) {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
+        let column = seats.files().first().copied().expect("a files column");
+        // Built here rather than by the caller because the seat id is minted by
+        // the tree: a hover aimed at a guessed id is a hover at nothing, and it
+        // fails by drawing the resting picture rather than by saying so.
+        let hover = hover_row.map(|index| ChromeTarget::FilesRow {
+            seat: column,
+            index,
+        });
+        let mut trees = BTreeMap::new();
+        trees.insert(column, content);
+        let (_, labels, sprites) = build_chrome_for_tabs(
+            &seats,
+            &layout,
+            1.0,
+            ChromePointer {
+                hover,
+                ..ChromePointer::default()
+            },
+            ChromeContent {
+                tabs: &[],
+                active_tab: 0,
+                grabbed: None,
+                strip_preview: None,
+                tab_scroll: 0.0,
+                rail: RailState::default(),
+                rail_scroll: 0.0,
+                preview_title: None,
+                terminal_names: &NO_TERMINAL_NAMES,
+                leaf_marks: &NO_LEAF_MARKS,
+                files_names: &NO_FILES_NAMES,
+                files_trees: &trees,
+                preview_message: None,
+                fit_overflow: None,
+                profile_menu_open: false,
+                chevron_turn: 0.0,
+                pane_motion: PaneMotionFrame::default(),
+                resizing_cards: None,
+            },
+        )
+        .flattened();
+        (seats, layout, column, TreeChrome { labels, sprites })
+    }
+
+    fn three_row_tree() -> FilesTreeContent {
+        FilesTreeContent {
+            rows: vec![
+                tree_row(
+                    "/src",
+                    "src",
+                    0,
+                    crate::files::RowKind::Directory { open: true },
+                ),
+                tree_row("/src/main.rs", "main.rs", 1, crate::files::RowKind::File),
+                tree_row("/a.txt", "a.txt", 0, crate::files::RowKind::File),
+            ],
+            scroll_px: 0.0,
+            selected: None,
+            turns: BTreeMap::new(),
+        }
+    }
+
+    /// PIN — C31. The indent is `6 + depth * 14`, counted from the row's own box.
+    ///
+    /// The two paddings this formula spans are separate declarations
+    /// (`.files-tree`'s `4` and `.frow`'s `6`), and the way to get this wrong is
+    /// to fold them into one number — which shows up as every row of the tree
+    /// standing four pixels too far in and the depth step still looking right.
+    #[test]
+    fn a_row_is_indented_six_plus_fourteen_per_level_from_its_own_left_edge() {
+        let (_, _, _, chrome) = files_chrome(three_row_tree(), None);
+        let named = |text: &str| {
+            chrome
+                .labels
+                .iter()
+                .find(|label| label.text == text)
+                .unwrap_or_else(|| panic!("{text} is drawn"))
+                .clone()
+        };
+        let shallow = named("src");
+        let deep = named("main.rs");
+        assert_eq!(
+            deep.rect[0] - shallow.rect[0],
+            FILES_ROW_INDENT_LOGICAL_PX,
+            "one level of depth is one indent step and nothing else"
+        );
+        let sibling = named("a.txt");
+        assert_eq!(
+            sibling.rect[0], shallow.rect[0],
+            "two rows at the same depth start in the same column"
+        );
+    }
+
+    /// PIN — C33/C34. A directory row wears a triangle and a folder; a file row
+    /// keeps the triangle's slot empty and wears the file mark.
+    ///
+    /// `visibility: hidden` and not `display: none` is the whole of this: a file
+    /// with no triangle *slot* would put its name where a folder's icon is, and
+    /// the column would look like two lists interleaved.
+    #[test]
+    fn a_file_row_holds_the_triangles_place_without_drawing_one() {
+        let (_, _, _, chrome) = files_chrome(three_row_tree(), None);
+        let triangles = chrome
+            .sprites
+            .iter()
+            .filter(|sprite| matches!(sprite.mark, ChromeMark::TreeDisclosure { .. }))
+            .count();
+        assert_eq!(triangles, 1, "only the one directory row has a triangle");
+        let folders = chrome
+            .sprites
+            .iter()
+            .filter(|sprite| sprite.mark == ChromeMark::FolderOpen)
+            .count();
+        assert_eq!(folders, 1, "and it is open, so it wears the open folder");
+        let files = chrome
+            .sprites
+            .iter()
+            .filter(|sprite| sprite.mark == ChromeMark::File)
+            .count();
+        assert_eq!(files, 2, "both file rows wear the file mark");
+        // The slot is held: a file's name starts where a folder's name starts.
+        let folder_name = chrome
+            .labels
+            .iter()
+            .find(|label| label.text == "src")
+            .expect("the folder row is drawn");
+        let file_name = chrome
+            .labels
+            .iter()
+            .find(|label| label.text == "a.txt")
+            .expect("the file row is drawn");
+        assert_eq!(folder_name.rect[0], file_name.rect[0]);
+    }
+
+    /// PIN — C33. The triangle is turned, not swapped: a shut row and an open
+    /// row ask for the same glyph at two angles.
+    #[test]
+    fn the_disclosure_triangle_turns_between_shut_and_open() {
+        let shut = FilesTreeContent {
+            rows: vec![tree_row(
+                "/src",
+                "src",
+                0,
+                crate::files::RowKind::Directory { open: false },
+            )],
+            ..FilesTreeContent::default()
+        };
+        let open = FilesTreeContent {
+            rows: vec![tree_row(
+                "/src",
+                "src",
+                0,
+                crate::files::RowKind::Directory { open: true },
+            )],
+            ..FilesTreeContent::default()
+        };
+        let angle = |content: FilesTreeContent| {
+            let (_, _, _, chrome) = files_chrome(content, None);
+            chrome
+                .sprites
+                .iter()
+                .find_map(|sprite| match sprite.mark {
+                    ChromeMark::TreeDisclosure { turned_degrees } => Some(turned_degrees),
+                    _ => None,
+                })
+                .expect("a directory row has a triangle")
+        };
+        assert_eq!(angle(shut), 0);
+        assert_eq!(angle(open), crate::marks::TREE_DISCLOSURE_OPEN_DEGREES);
+    }
+
+    /// PIN — C32. Selection is a fact about the tree and outranks the pointer.
+    ///
+    /// `.frow.sel` and `.frow:hover` carry equal specificity and the selected
+    /// rule is written second, so a selected row under the pointer keeps the
+    /// selected fill. Reading it the other way makes the selection flicker away
+    /// exactly when you reach for it.
+    #[test]
+    fn a_selected_row_under_the_pointer_stays_selected() {
+        let mut content = three_row_tree();
+        content.selected = Some("/src".to_owned());
+        let (_, _, _, chrome) = files_chrome(content, Some(0));
+        let palette = chrome_palette();
+        let fills: Vec<[u8; 3]> = chrome
+            .sprites
+            .iter()
+            .filter(|sprite| matches!(sprite.mark, ChromeMark::ControlPill { .. }))
+            .map(|sprite| sprite.color)
+            .collect();
+        assert!(
+            fills.contains(&palette.files_row_selected),
+            "the selected row wears the selected fill, not the hover one: {fills:?}"
+        );
+        assert!(
+            !fills.contains(&palette.files_row_hover),
+            "and nothing wears the hover fill, because the one hovered row is \
+             the selected one: {fills:?}"
+        );
+    }
+
+    /// PIN — C32, the other half. A selection shows with no pointer anywhere
+    /// near it, because it is not a pointer state.
+    #[test]
+    fn a_selection_shows_with_the_pointer_elsewhere() {
+        let mut content = three_row_tree();
+        content.selected = Some("/a.txt".to_owned());
+        let (_, _, _, chrome) = files_chrome(content, None);
+        let palette = chrome_palette();
+        assert!(
+            chrome
+                .sprites
+                .iter()
+                .any(|sprite| sprite.color == palette.files_row_selected),
+            "the selected row is filled with no hover in the window at all"
+        );
+    }
+
+    /// PIN — the hover fill is reachable at all, so the test above is not
+    /// vacuous: an unselected row under the pointer wears it.
+    #[test]
+    fn an_unselected_row_under_the_pointer_wears_the_hover_fill() {
+        let (_, _, _, chrome) = files_chrome(three_row_tree(), Some(2));
+        let palette = chrome_palette();
+        assert!(
+            chrome
+                .sprites
+                .iter()
+                .any(|sprite| sprite.color == palette.files_row_hover)
+        );
+    }
+
+    /// PIN — C29/L157. The rows are virtualized from the first version: a tree
+    /// far taller than its pane builds only what the pane can show.
+    #[test]
+    fn a_tree_taller_than_its_pane_draws_only_the_rows_that_fit() {
+        let rows: Vec<crate::files::TreeRow> = (0..2_000)
+            .map(|index| {
+                tree_row(
+                    &format!("/f{index}"),
+                    &format!("file-{index}.txt"),
+                    0,
+                    crate::files::RowKind::File,
+                )
+            })
+            .collect();
+        let (_, _, _, chrome) = files_chrome(
+            FilesTreeContent {
+                rows,
+                ..FilesTreeContent::default()
+            },
+            None,
+        );
+        let names = chrome
+            .labels
+            .iter()
+            .filter(|label| label.text.starts_with("file-"))
+            .count();
+        assert!(
+            names > 0 && names < 60,
+            "a 600px pane shows tens of 24px rows, not two thousand: {names}"
+        );
+        assert!(
+            chrome.labels.iter().any(|label| label.text == "file-0.txt"),
+            "and it is the top of the list that is shown"
+        );
+    }
+
+    /// PIN — the geometry the painter uses is the geometry the hit test uses.
+    ///
+    /// Two derivations of one list is how a click lands on the row above the one
+    /// under the pointer, so this walks every drawn row's own centre back
+    /// through `hit_files_tree` and demands its index.
+    #[test]
+    fn every_row_is_hit_where_it_is_drawn() {
+        let content = three_row_tree();
+        let (_, layout, column, _) = files_chrome(content.clone(), None);
+        let mut trees = BTreeMap::new();
+        trees.insert(column, content.clone());
+        let rect = device_rect_of(&layout, column);
+        let head = pane_head_geometry(rect, SeatKind::Files, 1.0);
+        let body = [rect[0], head.head[3], rect[2], rect[3]];
+        let geometry = files_tree_geometry(body, content.rows.len(), 0.0, 1.0);
+        for index in 0..content.rows.len() {
+            let row = geometry.row_rect(index);
+            let centre = (
+                f64::from((row[0] + row[2]) / 2.0),
+                f64::from((row[1] + row[3]) / 2.0),
+            );
+            assert_eq!(
+                hit_files_tree(&layout, &trees, 1.0, centre.0, centre.1),
+                Some(ChromeTarget::FilesRow {
+                    seat: column,
+                    index
+                }),
+                "row {index} is hit at its own centre"
+            );
+        }
+    }
+
+    /// PIN — the empty space below the last row belongs to no row.
+    ///
+    /// Without the bound, a short list makes most of the pane a click on its
+    /// last row, which is the "I clicked nothing and something was selected"
+    /// report this guard exists for.
+    #[test]
+    fn the_space_below_the_last_row_is_nobodys() {
+        let content = three_row_tree();
+        let (_, layout, column, _) = files_chrome(content.clone(), None);
+        let mut trees = BTreeMap::new();
+        trees.insert(column, content);
+        let rect = device_rect_of(&layout, column);
+        assert_eq!(
+            hit_files_tree(
+                &layout,
+                &trees,
+                1.0,
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from(rect[3] - 2.0),
+            ),
+            None,
+            "the floor of a three-row tree is not the third row"
+        );
+    }
+
+    /// PIN — a wheel cannot scroll a list that fits, and cannot scroll one that
+    /// does not past its own end.
+    #[test]
+    fn the_scroll_is_clamped_to_what_there_is_to_see() {
+        let short = files_tree_geometry([0.0, 0.0, 240.0, 600.0], 3, 400.0, 1.0);
+        assert_eq!(short.max_scroll, 0.0);
+        assert_eq!(
+            short.scroll_px, 0.0,
+            "a list that fits does not move however hard it is pushed"
+        );
+        let long = files_tree_geometry([0.0, 0.0, 240.0, 600.0], 200, 100_000.0, 1.0);
+        assert!(long.max_scroll > 0.0);
+        assert_eq!(long.scroll_px, long.max_scroll);
+        assert_eq!(
+            long.content_height,
+            FILES_TREE_PADDING_TOP_LOGICAL_PX
+                + FILES_ROW_HEIGHT_LOGICAL_PX * 200.0
+                + FILES_TREE_PADDING_BOTTOM_LOGICAL_PX,
+            "the content is the rows plus the list's own two margins"
+        );
+    }
+
+    /// PIN — a scrolled tree draws the rows the scroll brought into view, and
+    /// the ones it pushed out do not paint over the head.
+    #[test]
+    fn scrolling_moves_the_rows_and_never_over_the_head() {
+        let rows: Vec<crate::files::TreeRow> = (0..200)
+            .map(|index| {
+                tree_row(
+                    &format!("/f{index}"),
+                    &format!("file-{index}.txt"),
+                    0,
+                    crate::files::RowKind::File,
+                )
+            })
+            .collect();
+        let scrolled = FilesTreeContent {
+            rows,
+            scroll_px: 480.0,
+            ..FilesTreeContent::default()
+        };
+        let (_, layout, column, chrome) = files_chrome(scrolled, None);
+        assert!(
+            !chrome.labels.iter().any(|label| label.text == "file-0.txt"),
+            "the first row has been scrolled away"
+        );
+        assert!(
+            chrome
+                .labels
+                .iter()
+                .any(|label| label.text == "file-20.txt"),
+            "and a row twenty down has been scrolled into view"
+        );
+        let rect = device_rect_of(&layout, column);
+        let head = pane_head_geometry(rect, SeatKind::Files, 1.0);
+        // Nothing may *straddle* the seam between the head and the body: the
+        // head's own mark sits wholly above it and every row's glyph wholly
+        // below, and a glyph that spans it is a row bleeding into the caption.
+        for sprite in &chrome.sprites {
+            assert!(
+                sprite.rect[3] <= head.head[3] || sprite.rect[1] >= head.head[3],
+                "a glyph straddles the seam between head and body: {sprite:?} \
+                 against a head ending at {}",
+                head.head[3]
+            );
+        }
+        // And the same for the names, which is the half a sprite-only check
+        // misses: a label is not dropped when it hangs out of the list, it is
+        // shown through a window, and the window has to be the list's.
+        for label in &chrome.labels {
+            if !label.text.starts_with("file-") {
+                continue;
+            }
+            let window = label.clip.unwrap_or(label.rect);
+            assert!(
+                window[1] >= head.head[3],
+                "a row's name is shown through a window that reaches up into \
+                 the head: {label:?} against a head ending at {}",
+                head.head[3]
+            );
+        }
+    }
+
+    /// PIN — a column whose whole tree is one sentence about itself says it in
+    /// the middle of the body, and a tail row never becomes that sentence.
+    #[test]
+    fn a_column_wide_state_is_centred_and_a_tail_row_is_not() {
+        use crate::files::{RowKind, RowNotice};
+        let (_, _, _, chrome) = files_chrome(
+            FilesTreeContent {
+                rows: vec![tree_row(
+                    "",
+                    "Empty folder",
+                    0,
+                    RowKind::Notice(RowNotice::Empty),
+                )],
+                ..FilesTreeContent::default()
+            },
+            None,
+        );
+        let notice = chrome
+            .labels
+            .iter()
+            .find(|label| label.text == "Empty folder")
+            .expect("the state is said");
+        assert!(notice.align_center, "a column-wide state is centred");
+
+        let (_, _, _, tail) = files_chrome(
+            FilesTreeContent {
+                rows: vec![tree_row(
+                    "",
+                    "7 more not shown",
+                    0,
+                    RowKind::Notice(RowNotice::More(7)),
+                )],
+                ..FilesTreeContent::default()
+            },
+            None,
+        );
+        let counted = tail
+            .labels
+            .iter()
+            .find(|label| label.text == "7 more not shown")
+            .expect("the tail row is drawn");
+        assert!(
+            !counted.align_center,
+            "what the cap left out is a row in the list, not the pane's state"
+        );
     }
 
     #[test]
@@ -12647,6 +13623,7 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -12834,6 +13811,7 @@ mod tests {
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
+                    files_trees: &NO_FILES_TREES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -12930,6 +13908,7 @@ mod tests {
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
+                    files_trees: &NO_FILES_TREES,
                     preview_message: None,
                     fit_overflow: None,
                     profile_menu_open: false,
@@ -13131,6 +14110,7 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &all_powershell(seats),
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -14717,6 +15697,7 @@ mod tests {
                 terminal_names,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow,
                 profile_menu_open: false,
@@ -14767,6 +15748,7 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -15545,6 +16527,7 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -15779,6 +16762,7 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -16022,6 +17006,7 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -16168,6 +17153,7 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,
@@ -17338,6 +18324,7 @@ mod tests {
                 terminal_names: &names,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
                 profile_menu_open: false,

@@ -84,6 +84,25 @@ pub enum ChromeMark {
     /// through [`ChromeMark::chevron`] rather than by hand, which is what
     /// applies the quantization.
     Chevron { turned_degrees: u16 },
+    /// `#i-folder-open` — a directory row that is open (C34).
+    ///
+    /// A second glyph rather than a state of [`Self::Folder`], because unlike
+    /// the chevron beside it this really is a second drawing: the mock-up's open
+    /// folder is a different silhouette with a different number of paths, and no
+    /// rotation of the closed one produces it.
+    FolderOpen,
+    /// `#i-tri` — the disclosure triangle at some angle through its turn (C33).
+    ///
+    /// An angle and not a boolean for the reason [`Self::Chevron`] gives at
+    /// length: `.frow .tri { transition: transform 120ms }` means every value
+    /// between the two ends is a frame someone can see. Quantized on the same
+    /// [`CHEVRON_TURN_QUANTUM_DEGREES`] so the two rotating glyphs cannot drift
+    /// into two different ideas of how fine an angle is worth a raster.
+    ///
+    /// Unlike the chevron it needs no raster bleed: the triangle's farthest
+    /// vertex is 3.33 units from the centre of a 10-unit box, so the swept
+    /// circle clears the edges at every angle.
+    TreeDisclosure { turned_degrees: u16 },
     /// `#p-pwsh` — the PowerShell profile mark, which carries its own colours.
     /// The mock-up is explicit that a mark's colour is its own and the active
     /// tab does not recolour it (`.pmark`, and the comment above it).
@@ -263,6 +282,9 @@ impl ChromeMark {
             Self::ProfileCmd => "p-cmd",
             Self::File => "i-file",
             Self::Folder => "i-folder",
+            Self::FolderOpen => "i-folder-open",
+            // One id for every angle, on `Self::Chevron`'s precedent above.
+            Self::TreeDisclosure { .. } => "i-tri",
             Self::Panel => "i-panel",
             Self::Pin { filled: false } => "i-pin",
             Self::Pin { filled: true } => "i-pinned",
@@ -380,6 +402,25 @@ pub const CHEVRON_TURN_QUANTUM_DEGREES: u16 = 5;
 /// How many distinct angles a whole turn can quantize to, both ends included —
 /// the upper bound on rasters one sweep can ask for.
 pub const CHEVRON_TURN_STEPS: u16 = 180 / CHEVRON_TURN_QUANTUM_DEGREES + 1;
+
+/// The centre of `#i-tri`'s ten-unit box, which CSS would have used by default.
+const TREE_DISCLOSURE_TURN_CENTRE_UNITS: f32 = 5.0;
+
+/// How far the disclosure triangle turns between shut and open: `rotate(90deg)`.
+pub const TREE_DISCLOSURE_OPEN_DEGREES: u16 = 90;
+
+/// The triangle at some fraction of its turn, quantized like the chevron.
+///
+/// `turn` is 0.0 shut, 1.0 open; values between are real frames of the 120ms
+/// transition rather than a rounding of the two ends.
+#[must_use]
+pub fn tree_disclosure(turn: f32) -> ChromeMark {
+    let degrees = f32::from(TREE_DISCLOSURE_OPEN_DEGREES) * turn.clamp(0.0, 1.0);
+    let step = (degrees / f32::from(CHEVRON_TURN_QUANTUM_DEGREES)).round() as u16;
+    ChromeMark::TreeDisclosure {
+        turned_degrees: step * CHEVRON_TURN_QUANTUM_DEGREES,
+    }
+}
 
 /// A mark, the physical box it fills, and the colour `currentColor` resolves to.
 ///
@@ -610,7 +651,9 @@ fn mark_key(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> String {
     }
     // The angle is the only thing that tells one frame of the turn from
     // another: one id, one box, one colour, and different pixels.
-    if let ChromeMark::Chevron { turned_degrees } = sprite.mark {
+    if let ChromeMark::Chevron { turned_degrees } | ChromeMark::TreeDisclosure { turned_degrees } =
+        sprite.mark
+    {
         let _ = write!(key, ":d{turned_degrees}");
     }
     let _ = write!(key, ":{width_px}x{height_px}");
@@ -794,6 +837,19 @@ fn svg_document(sprite: &ChromeSprite, width_px: u32, height_px: u32) -> Option<
                 ),
             )
         }
+        // The triangle turns inside its own box. No padded raster and no
+        // re-derived fit: at every angle the swept glyph clears the ten-unit
+        // box (see the variant's note), so the ordinary `viewBox` still holds
+        // and the transform is the CSS one term for term — `rotate(deg)` about
+        // a 10×10 box's default origin, which is its centre.
+        ChromeMark::TreeDisclosure { turned_degrees } => (
+            SYMBOL_VIEW_BOX[symbol_index(sprite.mark)].to_owned(),
+            format!(
+                r#"<g transform="rotate({turned_degrees} {centre} {centre})">{body}</g>"#,
+                centre = TREE_DISCLOSURE_TURN_CENTRE_UNITS,
+                body = SYMBOL_BODY[symbol_index(sprite.mark)],
+            ),
+        ),
         mark => (SYMBOL_VIEW_BOX[symbol_index(mark)].to_owned(), {
             SYMBOL_BODY[symbol_index(mark)].to_owned()
         }),
@@ -937,6 +993,8 @@ fn symbol_index(mark: ChromeMark) -> usize {
         ChromeMark::ProfilePowerShell => 5,
         ChromeMark::File => 6,
         ChromeMark::Folder => 7,
+        ChromeMark::FolderOpen => 15,
+        ChromeMark::TreeDisclosure { .. } => 16,
         ChromeMark::Panel => 8,
         ChromeMark::Chevron { .. } => 9,
         ChromeMark::Pin { filled: false } => 10,
@@ -957,7 +1015,7 @@ fn symbol_index(mark: ChromeMark) -> usize {
     }
 }
 
-const SYMBOL_VIEW_BOX: [&str; 15] = [
+const SYMBOL_VIEW_BOX: [&str; 17] = [
     "0 0 24 24",
     "0 0 10 10",
     "0 0 10 10",
@@ -973,11 +1031,17 @@ const SYMBOL_VIEW_BOX: [&str; 15] = [
     "0 0 16 16",
     "0 0 16 16",
     "0 0 16 16",
+    "0 0 16 16",
+    // `#i-tri` is the one glyph the mock-up draws in its own ten-unit box
+    // rather than the sixteen everything else uses, and it stays that way: the
+    // disclosure triangle is 10×10 on screen, so a 10-unit box is a one-to-one
+    // map and re-cutting it to 16 would round its edges differently.
+    "0 0 10 10",
 ];
 
 /// The `<symbol>` bodies, byte for byte from `design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
-const SYMBOL_BODY: [&str; 15] = [
+const SYMBOL_BODY: [&str; 17] = [
     // #i-gear
     r#"<path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>"#,
     // #i-min
@@ -1049,6 +1113,18 @@ const SYMBOL_BODY: [&str; 15] = [
         r##"<path d="M4.4 5.7L7.3 8l-2.9 2.3" fill="none" stroke="#CCCCCC" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>"##,
         r##"<path d="M8.5 10.9h3.2" stroke="#CCCCCC" stroke-width="1.35" stroke-linecap="round"/>"##,
     ),
+    // #i-folder-open — the same folder seen from the front: a translucent back
+    // plate still in the closed folder's silhouette, and a solid front plate
+    // skewed off it. The `.55` is the mock-up's own, and it is what makes an
+    // open folder read as *the same object* rather than a second icon.
+    concat!(
+        r##"<path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v1H4.3c-.5 0-.9.3-1 .8L1.6 12z" fill="currentColor" opacity=".55"/>"##,
+        r##"<path d="M3.3 7.4c.1-.5.5-.8 1-.8h10.3c.7 0 1.2.7 1 1.4l-1.2 4.3c-.1.5-.6.8-1.1.8H2.4c-.7 0-1.2-.6-1-1.3z" fill="currentColor"/>"##,
+    ),
+    // #i-tri — the disclosure triangle, pointing right at rest. It is turned
+    // rather than swapped for a second glyph, on the precedent `#i-chev` sets:
+    // the turn is the sentence, and two end frames are only its punctuation.
+    r##"<path d="M3.2 2.2L6.6 5 3.2 7.8z" fill="currentColor"/>"##,
 ];
 
 /// The active tab's closed outline, in physical pixels, clockwise from the

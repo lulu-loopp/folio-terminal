@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+mod files;
 mod input;
 mod marks;
 mod peek_strip;
@@ -121,6 +122,13 @@ const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
 enum AppEvent {
     PtyOutput,
     MathReady,
+    /// A directory the files worker was asked about has been read.
+    ///
+    /// Its own wake-up rather than a share of [`Self::MathReady`] because the
+    /// two lanes have nothing to say to each other: a directory landing must not
+    /// drag the decoration drain across every tab, and a formula landing must
+    /// not make the tree re-walk itself.
+    FilesReady,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -420,6 +428,34 @@ impl MathWorker {
     }
 }
 
+/// What a press on one node of a files tree does to that column's durable state.
+///
+/// Returns whether the press *opened* a directory, which is the one outcome that
+/// owes a fresh read — a fold is a statement about what you want to look at and
+/// costs the filesystem nothing.
+///
+/// Both kinds of node take the selection, which is what keeps the mouse and the
+/// keyboard telling one story about where you are. Pulled out of the runtime
+/// method around it because this is the whole of what a click *means*, and it is
+/// answerable without a window, a worker or a frame.
+fn press_files_node(state: &mut seats::FilesLeafState, key: &str, kind: files::RowKind) -> bool {
+    state.sel = Some(key.to_owned());
+    match kind {
+        files::RowKind::Directory { open: true } => {
+            state.open.remove(key);
+            false
+        }
+        files::RowKind::Directory { open: false } => {
+            state.open.insert(key.to_owned());
+            true
+        }
+        // A folder that resolves to one of its own ancestors takes the selection
+        // and nothing else: opening it would show you the place you are already
+        // standing, one level further in, for ever.
+        files::RowKind::Cycle | files::RowKind::File | files::RowKind::Notice(_) => false,
+    }
+}
+
 fn disable_math_worker_state(running: &mut bool, notice_pending: &mut bool) -> bool {
     if !*running {
         return false;
@@ -662,6 +698,17 @@ struct TabState {
     /// so an id-keyed table needs no remapping at all — the content follows the
     /// id, the id follows the seat, and only the seat changes rectangles.
     files: BTreeMap<SeatId, seats::FilesLeafState>,
+    /// What each files column currently *knows* — the directories it has read,
+    /// and where it is scrolled to.
+    ///
+    /// The transient half of the pair above, and separate for the reason that
+    /// doc gives for `files` being separate from `sessions`: the two have
+    /// different invariants and different lifetimes. `files` is total over the
+    /// Files seats and crosses the disk; this is partial (a column that has not
+    /// been looked at yet has no entry), holds no truth of its own, and is
+    /// rebuilt from the filesystem every run. Merging them would put a hundred
+    /// thousand cached names behind `files_state`, which every caller clones.
+    file_trees: BTreeMap<SeatId, files::DirCache>,
     /// Which leaf has the keyboard. Typing, pasting and IME all land here.
     ///
     /// **Always a Terminal seat in this build**, which is what lets `sessions`
@@ -749,6 +796,14 @@ struct Runtime {
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
+    /// The thread that reads directories, and whether it is still there.
+    ///
+    /// One for the window rather than one per column, exactly as `math_worker`
+    /// is one for the window: the address is on the request, so a second thread
+    /// would buy nothing but a second way to be out of order.
+    files_worker: files::FilesWorker,
+    files_worker_running: bool,
+    files_worker_notice_pending: bool,
     pending_frames: LatestFrameSlot,
     /// The size the child has actually been told about — never a size that has only been solved or
     /// queued. It is the same value as `grid` at rest, and the two are deliberately separate only
@@ -1475,6 +1530,44 @@ impl TabState {
     /// no files state" is an unrooted column, not a dead window.
     fn files_state(&self, seat: SeatId) -> seats::FilesLeafState {
         self.files.get(&seat).cloned().unwrap_or_default()
+    }
+
+    /// Walk every files column of this tab, asking nothing.
+    ///
+    /// The read-only half of `Runtime::files_trees`, and it exists because the
+    /// hit test is `&self` and must stay that way: a pointer moving over a pane
+    /// is not a reason to read a disk, and a hit test that could queue work
+    /// would queue it on every mouse move. The walk is the same one either way,
+    /// so the rows a click is measured against are the rows that were drawn.
+    ///
+    /// It lives on the tab rather than on the runtime because everything it
+    /// reads is the tab's — the columns, their state, their caches — which is
+    /// also what makes it answerable without a window.
+    fn files_tree_walk(&self) -> BTreeMap<SeatId, (seats::FilesTreeContent, Vec<String>)> {
+        let mut walked = BTreeMap::new();
+        for seat in self.seats.files() {
+            let state = self.files.get(&seat).cloned().unwrap_or_default();
+            let empty = files::DirCache::default();
+            let cache = self.file_trees.get(&seat).unwrap_or(&empty);
+            let view = files::tree_view(&state, cache);
+            walked.insert(
+                seat,
+                (
+                    seats::FilesTreeContent {
+                        rows: view.rows,
+                        scroll_px: cache.scroll_px,
+                        selected: state.sel,
+                        // Left empty here and filled by the caller that has a
+                        // clock: the walk is `&self` and an angle is a question
+                        // about *when*, which the hit test has no business
+                        // asking and no answer for.
+                        turns: BTreeMap::new(),
+                    },
+                    view.wanted,
+                ),
+            );
+        }
+        walked
     }
 
     /// The head's name for a files column: the last segment of its root.
@@ -6783,6 +6876,7 @@ fn assemble_tab_state(
         id,
         sessions,
         files,
+        file_trees: BTreeMap::new(),
         focused_leaf,
         pinned: seed.pinned,
         manual_name: seed.manual_name,
@@ -7032,6 +7126,14 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
                 displaced.is_none(),
                 "{now:?} was already showing a folder: the renumbering collided"
             );
+        }
+        // The directories it had already read travel with it, re-keyed the same
+        // way. Dropping them would be correct but visibly worse: a column that
+        // merely changed tabs would blink back to "Loading…" and re-read every
+        // open folder, which is the same "the pane is moving, not being rebuilt"
+        // argument the scrollback beside it wins on.
+        if let Some(cache) = source.file_trees.remove(was) {
+            target.file_trees.insert(*now, cache);
         }
     }
     if let Some((_, now)) = arrived.iter().find(|(was, _)| *was == source.focused_leaf) {
@@ -7433,6 +7535,7 @@ impl Runtime {
         }
         let pty_time = phase_started.elapsed();
         let math_worker = MathWorker::spawn(proxy.clone())?;
+        let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let mut runtime = Self {
             renderer,
             tabs,
@@ -7442,6 +7545,9 @@ impl Runtime {
             math_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
+            files_worker,
+            files_worker_running: true,
+            files_worker_notice_pending: false,
             pending_frames: LatestFrameSlot::default(),
             modifiers: ModifiersState::default(),
             math_context_menu,
@@ -8308,6 +8414,10 @@ impl Runtime {
         // B14, per leaf: every files pane head names its *own* root. Resolved
         // beside the terminal names for the same reason and by the same rule.
         let files_names = self.files_names();
+        // C28-C43, per leaf: the rows each files column shows this frame. Walked
+        // here, beside the names, because the walk needs the directory cache and
+        // `seats` holds neither content nor a filesystem (L1).
+        let files_trees = self.files_trees(now);
         let preview_message = match self.preview_image.as_ref() {
             Some(preview) => preview.message(),
             // An open pane with nothing chosen invites rather than sits mute.
@@ -8351,6 +8461,7 @@ impl Runtime {
                 terminal_names: &terminal_names,
                 leaf_marks: &leaf_marks,
                 files_names: &files_names,
+                files_trees: &files_trees,
                 preview_message: preview_message.as_deref(),
                 fit_overflow: self.seat_overflow,
                 profile_menu_open: self.profile_menu.is_open(),
@@ -10282,6 +10393,11 @@ impl Runtime {
         // root nobody chose for it.
         if kind == bt_layout::SeatKind::Files {
             self.files.remove(&seat);
+            // And what it had read. The cache is keyed on the same re-minted
+            // seat id, so leaving it behind is the same bug one line up in a
+            // more confusing shape: the next column would come up already
+            // showing somebody else's directories under its own root.
+            self.file_trees.remove(&seat);
         }
         debug_assert!(
             self.sessions_match_terminals(),
@@ -10901,6 +11017,17 @@ impl Runtime {
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
             terminal_frame.status_text = Some(notice.to_owned());
         }
+        // The same one-shot, for the same kind of loss. Asked second so that a
+        // window unlucky enough to lose both threads at once still says
+        // something rather than nothing — the formula notice wins this frame and
+        // this one keeps its flag for the next, because `take` only clears the
+        // one it actually read.
+        if terminal_frame.status_text.is_none()
+            && let Some(notice) =
+                files::take_files_worker_notice(&mut self.files_worker_notice_pending)
+        {
+            terminal_frame.status_text = Some(notice.to_owned());
+        }
         let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
             .context("reject non-rectangular frame before IME composition")?;
         if skip_unchanged
@@ -10958,6 +11085,234 @@ impl Runtime {
             &mut self.math_worker_running,
             &mut self.math_worker_notice_pending,
         )
+    }
+
+    fn disable_files_worker(&mut self) -> bool {
+        files::disable_files_worker_state(
+            &mut self.files_worker_running,
+            &mut self.files_worker_notice_pending,
+        )
+    }
+
+    /// Every files column of the active tab, walked into the rows it draws this
+    /// frame, with whatever the walk could not answer put to the worker.
+    ///
+    /// **Why the active tab only.** Laziness is the whole design (§7.1.3): a
+    /// column reads the directories it is showing and no others. A column in a
+    /// tab nobody is looking at is showing none, so it asks for none — and asks
+    /// the moment the tab is switched to, which is the same frame it first has a
+    /// rectangle to draw into.
+    ///
+    /// **Why asking happens here.** The walk is the only thing that knows what
+    /// is missing, because "missing" means *visibly* missing: an unopened folder
+    /// is not missing, it is folded. Deriving the request list anywhere else
+    /// would mean a second walk that could disagree with the one on screen.
+    fn files_trees(&mut self, now: Instant) -> BTreeMap<SeatId, seats::FilesTreeContent> {
+        let active = self.active_tab;
+        let tab_id = self.tabs[active].id;
+        let motion = self.motion;
+        let walked = self.files_tree_walk();
+        let mut views = BTreeMap::new();
+        let mut asks = Vec::new();
+        for (seat, (mut content, wanted)) in walked {
+            let root = self.tabs[active]
+                .files
+                .get(&seat)
+                .map(|state| state.root.clone())
+                .unwrap_or_default();
+            let cache = self.tabs[active].file_trees.entry(seat).or_default();
+            for key in wanted {
+                // Marked before the send so that the next walk — which may
+                // happen on this very frame, from the hit test — sees a question
+                // already asked rather than asking it a second time.
+                cache.mark_pending(&key);
+                asks.push(files::DirRequest {
+                    leaf: LeafId { tab: tab_id, seat },
+                    path: files::full_path(&root, &key),
+                    key,
+                });
+            }
+            // C33, sampled on this frame's own `now` beside the chevron's turn.
+            content.turns = content
+                .rows
+                .iter()
+                .filter_map(|row| match row.kind {
+                    files::RowKind::Directory { open } => Some((
+                        row.key.clone(),
+                        cache.row_turn(&row.key, open, now, motion).0,
+                    )),
+                    _ => None,
+                })
+                .collect();
+            views.insert(seat, content);
+        }
+        for ask in asks {
+            if !self.files_worker.request(ask) {
+                self.disable_files_worker();
+                break;
+            }
+        }
+        views
+    }
+
+    /// The rows as the hit test sees them: walked, never asked for.
+    fn files_tree_contents(&self) -> BTreeMap<SeatId, seats::FilesTreeContent> {
+        self.files_tree_walk()
+            .into_iter()
+            .map(|(seat, (content, _))| (seat, content))
+            .collect()
+    }
+
+    /// Ask for a folder again because it has just been opened.
+    ///
+    /// With no watcher yet (Q3 is deferred), unfolding a folder *is* the refresh
+    /// gesture, and it is the only one there is: the cache is kept across a fold
+    /// so that re-opening is instant, and re-asking is what keeps it from being
+    /// instant *and wrong*. The kept rows stay on screen until the new answer
+    /// lands, so a refresh never blinks.
+    fn refresh_files_dir(&mut self, seat: SeatId, key: &str) {
+        let active = self.active_tab;
+        let tab = &self.tabs[active];
+        let Some(state) = tab.files.get(&seat) else {
+            return;
+        };
+        let request = files::DirRequest {
+            leaf: LeafId { tab: tab.id, seat },
+            key: key.to_owned(),
+            path: files::full_path(&state.root, key),
+        };
+        if !self.files_worker.request(request) {
+            self.disable_files_worker();
+        }
+    }
+
+    /// Take every directory the worker has finished.
+    fn apply_files_results(&mut self) -> Result<()> {
+        let mut changed = false;
+        loop {
+            match self.files_worker.responses.try_recv() {
+                Ok(response) => {
+                    // A tab or a column that closed while its read was in flight
+                    // has nowhere to put the answer, and that is not a failure —
+                    // it is the cancellation, arriving as a dropped result.
+                    let Some(index) = self.tabs.iter().position(|tab| tab.id == response.leaf.tab)
+                    else {
+                        continue;
+                    };
+                    let tab = &mut self.tabs[index];
+                    if !tab.files.contains_key(&response.leaf.seat) {
+                        continue;
+                    }
+                    tab.file_trees
+                        .entry(response.leaf.seat)
+                        .or_default()
+                        .accept(&response.key, response.outcome);
+                    changed |= index == self.active_tab;
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    changed |= self.disable_files_worker();
+                    break;
+                }
+            }
+        }
+        if changed {
+            self.heal_files_selections();
+            if self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A press on one row of one files column (C155).
+    ///
+    /// **The rows are re-derived here rather than remembered from the frame the
+    /// pointer was over.** An index into a list is only meaningful beside the
+    /// list it indexes, and between the paint and the press a directory may have
+    /// landed and made the tree longer. Re-walking costs a walk over the visible
+    /// rows and removes the whole class of bug where a click lands on the row
+    /// above the one that was clicked.
+    ///
+    /// Both kinds of node take the selection, which is what keeps the mouse and
+    /// the keyboard telling one story about where you are; only a directory also
+    /// opens or shuts.
+    fn press_files_row(&mut self, seat: SeatId, index: usize) -> Result<()> {
+        use crate::files::RowKind;
+        let now = Instant::now();
+        let motion = self.motion;
+        let trees = self.files_trees(now);
+        let Some(row) = trees.get(&seat).and_then(|tree| tree.rows.get(index)) else {
+            return Ok(());
+        };
+        if !row.is_node() {
+            return Ok(());
+        }
+        let key = row.key.clone();
+        let kind = row.kind;
+        let active = self.active_tab;
+        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+            return Ok(());
+        };
+        let opening = press_files_node(state, &key, kind);
+        if matches!(kind, RowKind::Directory { .. }) {
+            // The triangle starts turning from wherever it actually is, so a
+            // double-click reverses mid-flight instead of snapping.
+            self.tabs[active]
+                .file_trees
+                .entry(seat)
+                .or_default()
+                .turn_row(&key, opening, now, motion);
+        }
+        if opening {
+            self.refresh_files_dir(seat, &key);
+        }
+        self.mark_session_dirty(now);
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// Wheel over a files column's body (C28's `overflow-y: auto`).
+    fn scroll_files_tree(
+        &mut self,
+        seat: SeatId,
+        body_height: f32,
+        delta: MouseScrollDelta,
+    ) -> Result<()> {
+        let travel = self.vertical_wheel_travel(delta, body_height);
+        let active = self.active_tab;
+        let cache = self.tabs[active].file_trees.entry(seat).or_default();
+        // Clamped to zero here and to the content's own height when the geometry
+        // is built: this side knows there is no scrolling backwards, and only
+        // that side knows how far forwards there is.
+        let scrolled = (cache.scroll_px - travel).max(0.0);
+        if scrolled == cache.scroll_px {
+            return Ok(());
+        }
+        cache.scroll_px = scrolled;
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// C35, applied only where a landed directory has proved a selection gone.
+    fn heal_files_selections(&mut self) {
+        let active = self.active_tab;
+        let tab = &mut self.tabs[active];
+        for seat in tab.seats.files() {
+            let Some(cache) = tab.file_trees.get(&seat) else {
+                continue;
+            };
+            let Some(state) = tab.files.get(&seat) else {
+                continue;
+            };
+            if files::selection_is_dead(state, cache) {
+                tab.files.entry(seat).and_modify(|state| state.sel = None);
+            }
+        }
     }
 
     fn apply_math_results(&mut self) -> Result<()> {
@@ -11482,8 +11837,22 @@ impl Runtime {
         // because it answers the same question — "when does this window next
         // need waking for an animation?" — and two answers to one question is
         // how one of them gets forgotten.
+        // C33, and the same argument once more: a disclosure triangle is still
+        // turning for 120ms after the click that started it, with the pointer
+        // already still and nothing else in the window moving. Under reduced
+        // motion `RevealTween` reports the target with no frames asked for, so
+        // this is never true and the window stays genuinely idle.
+        let files_turning = self.tabs[self.active_tab]
+            .file_trees
+            .values()
+            .any(|cache| cache.any_turning(now, motion));
         [
-            (tabs_moving || chevron_turning || dock_fading || cards_moving || rail_moving)
+            (tabs_moving
+                || chevron_turning
+                || dock_fading
+                || cards_moving
+                || rail_moving
+                || files_turning)
                 .then(|| now + STRIP_ANIMATION_FRAME),
             self.pane_motion.deadline(now, motion),
         ]
@@ -13172,6 +13541,19 @@ impl Runtime {
                 position.y,
             )
         })
+        // Last, and only for what the pane heads left over: a files column's
+        // head carries the same `×` and the same drag handle every other pane
+        // has, and the tree lives strictly below it. Asking the rows first would
+        // put a row where the close button is on any column scrolled far enough.
+        .or_else(|| {
+            seats::hit_files_tree(
+                &self.seat_layout,
+                &self.files_tree_contents(),
+                scale,
+                position.x,
+                position.y,
+            )
+        })
     }
 
     fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
@@ -14507,6 +14889,10 @@ impl Runtime {
                 self.tab_clicks.interrupt();
                 self.close_pane(seat)?;
             }
+            seats::ChromeTarget::FilesRow { seat, index } => {
+                self.tab_clicks.interrupt();
+                self.press_files_row(seat, index)?;
+            }
             seats::ChromeTarget::Tab(index) => self.press_tab(index, position)?,
             // J99: "`.close`/`.pin` 上的双击不算(那是两次按钮点击)". Neither
             // records a click, so neither can be half of a rename — and both
@@ -15183,10 +15569,25 @@ impl Runtime {
                 return self.scroll_tab_strip(delta);
             }
         }
+        // C28: `.files-tree { overflow-y: auto }` — a notch over a files column
+        // is the tree's, which is the same sentence the rail and the strip have
+        // just answered. It is asked before the pane router below because that
+        // router's answer for a files column is "nobody's", and until this slice
+        // gave the column rows that was the truth.
+        if let Some(position) = self.pointer_position
+            && let Some((seat, body_height)) = seats::files_body_at(
+                &self.seat_layout,
+                self.renderer.metrics().scale_factor as f32,
+                position.x,
+                position.y,
+            )
+        {
+            return self.scroll_files_tree(seat, body_height, delta);
+        }
         // A notch belongs to the pane it is over. With one terminal that is the
         // terminal or nothing, which is what this guard has always said; with a
         // fleet it is whichever terminal pane the pointer is in, and a notch
-        // over a files column or a preview is still nobody's.
+        // over a preview is still nobody's.
         //
         // Routing by the pointer rather than by focus is what the rest of the
         // desktop does, and it is the only reading that lets you read a build
@@ -16310,6 +16711,13 @@ impl ApplicationHandler<AppEvent> for BetterTerminalApp {
             AppEvent::MathReady => {
                 if let Some(runtime) = self.runtime.as_mut()
                     && let Err(error) = runtime.apply_math_results()
+                {
+                    self.fail(event_loop, error);
+                }
+            }
+            AppEvent::FilesReady => {
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = runtime.apply_files_results()
                 {
                     self.fail(event_loop, error);
                 }
@@ -27942,6 +28350,247 @@ mod tests {
             layout,
             overflow,
         )
+    }
+
+    // ── C36-C38 / L157-L167: the tree's state, lazily fed ──────────────────
+
+    fn dir_entry(name: &str, is_dir: bool) -> files::DirEntry {
+        files::DirEntry {
+            name: name.to_owned(),
+            is_dir,
+            is_symlink: false,
+        }
+    }
+
+    fn listed(entries: Vec<files::DirEntry>) -> files::DirOutcome {
+        files::DirOutcome::Listed(files::DirListing {
+            entries,
+            omitted: 0,
+            canonical: None,
+        })
+    }
+
+    /// A tab holding one files column, and that column's seat.
+    fn files_column(root: &str) -> (TabState, SeatId) {
+        let tab = tab_with_a_files_column(1, root);
+        let seat = tab.seats.files()[0];
+        (tab, seat)
+    }
+
+    /// PIN — L157/C38. A column asks for its root and for nothing else.
+    ///
+    /// The whole of laziness is here: an unopened folder is not "not loaded
+    /// yet", it is a folder nobody asked about, and a walk that put it on the
+    /// list would read the disk to draw rows that are not on screen.
+    #[test]
+    fn a_column_asks_for_its_root_and_then_only_for_what_is_opened() {
+        let (mut tab, seat) = files_column("D:\\work");
+        let wanted = |tab: &TabState| tab.files_tree_walk()[&seat].1.clone();
+        assert_eq!(
+            wanted(&tab),
+            vec![String::new()],
+            "an unread column asks for its root"
+        );
+
+        let cache = tab.file_trees.entry(seat).or_default();
+        cache.mark_pending("");
+        assert!(
+            wanted(&tab).is_empty(),
+            "and does not ask a second time while the first is outstanding"
+        );
+
+        tab.file_trees
+            .get_mut(&seat)
+            .expect("the cache exists")
+            .accept(
+                "",
+                listed(vec![dir_entry("src", true), dir_entry("a.txt", false)]),
+            );
+        assert!(
+            wanted(&tab).is_empty(),
+            "a folded folder is not a folder anybody is waiting for"
+        );
+        assert_eq!(
+            tab.files_tree_walk()[&seat]
+                .0
+                .rows
+                .iter()
+                .map(|row| row.key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/src", "/a.txt"]
+        );
+
+        tab.files
+            .get_mut(&seat)
+            .expect("the column has state")
+            .open
+            .insert("/src".to_owned());
+        assert_eq!(
+            wanted(&tab),
+            vec!["/src".to_owned()],
+            "opening it is what makes it a question"
+        );
+    }
+
+    /// PIN — C155/C36. A press writes the durable state, and the right half of
+    /// it: a directory opens and a file only selects.
+    #[test]
+    fn a_press_selects_and_only_a_directory_also_opens() {
+        let mut state = seats::FilesLeafState {
+            root: "D:\\work".to_owned(),
+            ..seats::FilesLeafState::default()
+        };
+
+        assert!(press_files_node(
+            &mut state,
+            "/src",
+            files::RowKind::Directory { open: false }
+        ));
+        assert_eq!(state.sel.as_deref(), Some("/src"));
+        assert!(state.open.contains("/src"));
+
+        assert!(!press_files_node(
+            &mut state,
+            "/src",
+            files::RowKind::Directory { open: true }
+        ));
+        assert!(!state.open.contains("/src"), "the second press folds it");
+        assert_eq!(state.sel.as_deref(), Some("/src"), "and it stays selected");
+
+        assert!(!press_files_node(
+            &mut state,
+            "/a.txt",
+            files::RowKind::File
+        ));
+        assert_eq!(state.sel.as_deref(), Some("/a.txt"));
+        assert!(
+            state.open.is_empty(),
+            "a file has nothing to open, and opening the tree at its path would \
+             be a folder that does not exist"
+        );
+
+        assert!(!press_files_node(
+            &mut state,
+            "/link",
+            files::RowKind::Cycle
+        ));
+        assert_eq!(state.sel.as_deref(), Some("/link"));
+        assert!(
+            state.open.is_empty(),
+            "a folder that is its own ancestor refuses to open"
+        );
+    }
+
+    /// PIN — M170/C36. What the tree writes is what reaches the disk.
+    ///
+    /// The root already had this pin; the expansion set and the selection did
+    /// not, because until this slice nothing could put anything in them. A press
+    /// is now the only way they are ever filled, so the round trip has to start
+    /// at a press and not at a hand-built struct.
+    #[test]
+    fn what_a_press_opened_and_selected_is_what_gets_written() {
+        let (mut tab, seat) = files_column("D:\\work");
+        {
+            let state = tab.files.get_mut(&seat).expect("the column has state");
+            press_files_node(state, "/src", files::RowKind::Directory { open: false });
+            press_files_node(state, "/src/main.rs", files::RowKind::File);
+        }
+        let saved = tab
+            .seats
+            .to_persisted(&|seat| tab.term_leaf(seat), &|seat| tab.files_state(seat));
+        let leaf = persisted_files_leaves(&saved)
+            .into_iter()
+            .next()
+            .expect("the tree has a files leaf")
+            .clone();
+        assert_eq!(leaf.root, "D:\\work");
+        assert_eq!(leaf.open, vec!["/src".to_owned()]);
+        assert_eq!(leaf.sel.as_deref(), Some("/src/main.rs"));
+
+        let (seats, _, _, files) = revive_plan(&saved_files_and_terminal(leaf));
+        let revived = seats.files()[0];
+        assert_eq!(
+            files[&revived].open.iter().cloned().collect::<Vec<_>>(),
+            vec!["/src".to_owned()],
+            "and comes back open at the same folder"
+        );
+        assert_eq!(files[&revived].sel.as_deref(), Some("/src/main.rs"));
+    }
+
+    /// PIN — a restored column comes back open and *re-reads*, rather than
+    /// coming back to rows it has no business believing.
+    ///
+    /// The expansion set crosses the disk; the directories do not. So the first
+    /// walk after a restore has to name every restored folder as a question,
+    /// which is what turns "I left it open here" into rows again.
+    #[test]
+    fn a_restored_expansion_comes_back_as_questions_and_not_as_rows() {
+        let (seats, _, _, files) =
+            revive_plan(&saved_files_and_terminal(bt_persist::FilesLeafV1 {
+                root: "D:\\work".to_owned(),
+                open: vec!["/src".to_owned()],
+                sel: Some("/src/main.rs".to_owned()),
+                width: 240,
+            }));
+        let terminals = seats.terminals();
+        let focused = terminals[0];
+        let sessions: BTreeMap<SeatId, LeafSession> = terminals
+            .iter()
+            .map(|s| (*s, leaf_saying("SHELL")))
+            .collect();
+        let (layout, overflow) = cross_solve(&seats);
+        let mut tab = assemble_tab_state(
+            TabId(1),
+            sessions,
+            files,
+            focused,
+            TabSeed::default(),
+            seats,
+            layout,
+            overflow,
+        );
+        let seat = tab.seats.files()[0];
+        assert_eq!(
+            tab.files_tree_walk()[&seat].1,
+            vec![String::new()],
+            "nothing is known yet, so the root is the only question there is"
+        );
+        assert_eq!(
+            tab.files_state(seat).sel.as_deref(),
+            Some("/src/main.rs"),
+            "and the restored selection is still there, unproven and unharmed"
+        );
+
+        tab.file_trees
+            .entry(seat)
+            .or_default()
+            .accept("", listed(vec![dir_entry("src", true)]));
+        assert_eq!(
+            tab.files_tree_walk()[&seat].1,
+            vec!["/src".to_owned()],
+            "once the root lands, the folder it was left open at is asked for"
+        );
+    }
+
+    /// PIN — closing a column forgets what it had read.
+    ///
+    /// Seat ids are re-minted from a counter, so a cache left behind is a cache
+    /// the *next* column inherits — showing somebody else's directories under
+    /// its own root.
+    #[test]
+    fn closing_a_column_drops_the_directories_it_had_read() {
+        let (mut tab, seat) = files_column("D:\\work");
+        tab.file_trees
+            .entry(seat)
+            .or_default()
+            .accept("", listed(vec![dir_entry("src", true)]));
+        assert!(tab.file_trees.contains_key(&seat));
+        tab.files.remove(&seat);
+        tab.file_trees.remove(&seat);
+        assert!(
+            tab.files_tree_walk().is_empty() || !tab.file_trees.contains_key(&seat),
+            "the cache goes with the state it belonged to"
+        );
     }
 
     /// **A3/A6 — one safe accessor, and the two tables stay the same shape as

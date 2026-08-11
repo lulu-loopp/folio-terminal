@@ -298,6 +298,39 @@ pub struct ChromePalette {
     pub tab_pin_state_on_hovered_tab: [u8; 3],
     /// Body state notices — an empty pane's invitation, "Loading …", a failure.
     pub body_hint_text: [u8; 3],
+    // ── the file tree's rows, mixed over the one ground a files body has ──
+    //
+    // A files pane's body is `--termbg` and nothing else (B15/U11), so unlike
+    // the tab's four grounds this list has exactly three: the bare body, a row
+    // under the pointer, and the selected row. Every translucent token the
+    // mock-up puts on a row is therefore pre-mixed three ways here rather than
+    // once, because `--ink2` over `#1B1B1B` and `--ink2` over the hover fill
+    // above it are different colours and only one of them is what a browser
+    // would have shown.
+    //
+    // Several are numerically fields that already exist — `files_row_selected`
+    // is `pane_close_pill`, `files_row_muted` is `pane_close_glyph`,
+    // `files_row_text_selected` is `pane_close_glyph_on_pill` — and they are
+    // named separately on exactly the precedent those three were themselves
+    // named on: two declarations, either of which could be re-struck without
+    // the other.
+    /// `.frow:hover { background: var(--hover) }` over `--termbg`.
+    pub files_row_hover: [u8; 3],
+    /// `.frow.sel { background: var(--active) }` over `--termbg`.
+    pub files_row_selected: [u8; 3],
+    /// `.frow { color: var(--ink2) }` over `--termbg`.
+    pub files_row_text: [u8; 3],
+    /// The same `--ink2`, standing on [`Self::files_row_hover`].
+    pub files_row_text_hover: [u8; 3],
+    /// `.frow.sel { color: var(--ink) }`, standing on
+    /// [`Self::files_row_selected`].
+    pub files_row_text_selected: [u8; 3],
+    /// `.tri` and `.fico.file`, both `--ink3`, over the bare body.
+    pub files_row_muted: [u8; 3],
+    /// The same `--ink3`, standing on [`Self::files_row_hover`].
+    pub files_row_muted_hover: [u8; 3],
+    /// The same `--ink3`, standing on [`Self::files_row_selected`].
+    pub files_row_muted_selected: [u8; 3],
     /// A divider at rest: one logical pixel of quiet separation.
     pub divider: [u8; 3],
     /// A divider under the pointer: "this edge is a thing you can touch".
@@ -642,6 +675,22 @@ pub const DARK_CHROME: ChromePalette = ChromePalette {
     tab_pin_state_on_active_tab: [0xe1, 0xe1, 0xe1],
     tab_pin_state_on_hovered_tab: [0xe4, 0xe4, 0xe4],
     body_hint_text: [0x75, 0x75, 0x75],
+    // The file tree's three grounds on `--termbg #1B1B1B`:
+    //   `--hover`  white .055 → 27 + 228×.055 = 39.5
+    //   `--active` white .09  → 27 + 228×.09  = 47.5
+    files_row_hover: [0x28, 0x28, 0x28],
+    files_row_selected: [0x30, 0x30, 0x30],
+    // `--ink2` (white .55) over each: 27 + 228×.55 = 152.4,
+    // 39.5 + 215.5×.55 = 158.0. And `--ink` (white .87) over the selected
+    // fill: 47.5 + 207.5×.87 = 228.0.
+    files_row_text: [0x98, 0x98, 0x98],
+    files_row_text_hover: [0x9e, 0x9e, 0x9e],
+    files_row_text_selected: [0xe4, 0xe4, 0xe4],
+    // `--ink3` (white .38) over the same three: 27 + 228×.38 = 113.6,
+    // 39.5 + 215.5×.38 = 121.4, 47.5 + 207.5×.38 = 126.4.
+    files_row_muted: [0x72, 0x72, 0x72],
+    files_row_muted_hover: [0x79, 0x79, 0x79],
+    files_row_muted_selected: [0x7e, 0x7e, 0x7e],
     divider: [0x35, 0x35, 0x35],
     divider_hover: [0x51, 0x51, 0x51],
     divider_active: [0x7a, 0x99, 0xff],
@@ -764,6 +813,23 @@ pub const LIGHT_CHROME: ChromePalette = ChromePalette {
     tab_pin_state_on_active_tab: [0x37, 0x35, 0x2f],
     tab_pin_state_on_hovered_tab: [0x37, 0x35, 0x2f],
     body_hint_text: [0xa5, 0xa4, 0xa1],
+    // The file tree's three grounds on `--termbg #FFFFFF`. The inks here are
+    // rgb(55,53,47), so each channel steps down by {200,202,208}×alpha:
+    //   `--hover`  .055 → (244.0, 243.9, 243.6)
+    //   `--active` .09  → (237.0, 236.8, 236.3)
+    files_row_hover: [0xf4, 0xf4, 0xf4],
+    files_row_selected: [0xed, 0xed, 0xec],
+    // `--ink2` (.65) over the bare body: 255 − {200,202,208}×.65 =
+    // (125.0, 123.7, 119.8); over the hover fill: (121.2, 119.8, 115.8).
+    // `--ink` is opaque, so on the selected row it is simply itself.
+    files_row_text: [0x7d, 0x7c, 0x78],
+    files_row_text_hover: [0x79, 0x78, 0x74],
+    files_row_text_selected: [0x37, 0x35, 0x2f],
+    // `--ink3` (.45) over the same three: (165.0, 164.1, 161.4),
+    // (159.0, 158.0, 155.1), (155.1, 154.1, 151.1).
+    files_row_muted: [0xa5, 0xa4, 0xa1],
+    files_row_muted_hover: [0x9f, 0x9e, 0x9b],
+    files_row_muted_selected: [0x9b, 0x9a, 0x97],
     divider: [0xe9, 0xe9, 0xe9],
     divider_hover: [0xc2, 0xc1, 0xbf],
     divider_active: [0x30, 0x59, 0xd8],
