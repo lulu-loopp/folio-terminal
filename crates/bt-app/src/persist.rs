@@ -203,7 +203,7 @@ impl SettingsStore {
 /// directory when the environment has no `APPDATA` — the same reasoning as the
 /// panic log's: a diagnostic that cannot be written is worse than one written
 /// somewhere less convenient.
-fn storage_dir() -> PathBuf {
+pub fn storage_dir() -> PathBuf {
     match std::env::var_os("APPDATA") {
         Some(appdata) => Path::new(&appdata).join("BetterTerminal"),
         None => std::env::temp_dir().join("BetterTerminal"),

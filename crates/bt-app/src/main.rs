@@ -21,8 +21,10 @@ mod restore;
 mod seats;
 mod seed;
 mod settings;
+mod shell_integration;
 mod shortcuts;
 mod tooltip;
+mod wsl;
 
 use anyhow::{Context, Result, anyhow, ensure};
 use bt_doc::{Bias, LayoutKey};
@@ -564,7 +566,6 @@ struct LeafSession {
     /// PowerShell over a running bash.
     profile: usize,
     session: DualPlaneSession,
-    shell_fallback_notice: Option<String>,
     projection: ViewportProjection,
     grid: GridSize,
     conpty_grid: GridSize,
@@ -701,9 +702,6 @@ struct Runtime {
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
-    /// One-shot startup notice from `PtySession::spawn_default` falling back to `powershell.exe`.
-    /// Shown on the first frame published, then discarded — see `shell_fallback_notice` at the
-    /// `spawn_default` call site.
     pending_frames: LatestFrameSlot,
     /// The size the child has actually been told about — never a size that has only been solved or
     /// queued. It is the same value as `grid` at rest, and the two are deliberately separate only
@@ -5971,8 +5969,10 @@ fn revive_plan(tab: &TabV1) -> (seats::Seats, TabSeed, BTreeMap<SeatId, LeafSeed
                     profile: profiles::index_of_id(&leaf.profile_id),
                     cwd: Some(leaf.cwd.as_str())
                         .filter(|cwd| !cwd.is_empty())
-                        .map(PathBuf::from)
-                        .filter(|cwd| cwd.is_dir()),
+                        .map(Path::new)
+                        .and_then(|cwd| {
+                            profiles::revived_cwd(profiles::index_of_id(&leaf.profile_id), cwd)
+                        }),
                 },
             )
         })
@@ -6141,41 +6141,43 @@ fn create_leaf_session(
                 chosen.id
             )
         });
-        // **Where it opens, when nothing has said.** A leaf with a directory of
-        // its own — inherited from the pane it was split off, revived from disk,
-        // carried across from the tab you were looking at — uses it and this
-        // whole branch is skipped. A leaf without one used to be handed `None`,
-        // which `bt-pty` resolves to *this process's* working directory: the
-        // folder BetterTerminal itself was launched from, which is the desktop's
-        // idea of "wherever", and for a shell started from an installed shortcut
-        // is `C:\WINDOWS\system32`. That is not a place anybody meant.
+        // **Where it opens.** A leaf with a directory of its own — inherited
+        // from the pane it was split off, revived from disk, translated across
+        // from the tab you were looking at — uses it; a leaf without one gets
+        // the profile's own starting directory. Either way the answer travels on
+        // the channel this profile's launcher listens on, which is the thing
+        // `profiles::spawn_place` exists to decide: a WSL leaf's directory is
+        // written in WSL's namespace and must be *said to the launcher*, not
+        // handed to `CreateProcess`, where it would fail the existence check and
+        // be silently replaced by this process's own folder.
         //
-        // The profile answers, in whichever of the two forms it can be told —
-        // see `profiles::StartingDir`. The arguments case is appended *after* the
-        // profile's own, because `wsl.exe --cd ~` is a launcher flag and the
-        // profile's list is what it launches with; there is no interleaving to
-        // get wrong while one of the two lists is empty for every profile.
-        let (cwd, extra) = match seed.cwd.clone() {
-            Some(cwd) => (Some(cwd), None),
-            None => match profiles::starting_place(seed.profile, &bt_pty::SystemShellEnvironment) {
-                profiles::StartingPlace::Directory(home) => (Some(home), None),
-                profiles::StartingPlace::Arguments(flags) => (None, Some(flags)),
-                profiles::StartingPlace::Unstated => (None, None),
-            },
-        };
-        let args: Vec<&str> = chosen
-            .args
-            .iter()
-            .copied()
-            .chain(extra.into_iter().flatten().copied())
-            .collect();
+        // A leaf that is handed nothing at all used to reach `bt-pty` as `None`,
+        // which resolves to this process's working directory: the folder
+        // BetterTerminal itself was launched from, which for a shell started
+        // from an installed shortcut is `C:\WINDOWS\system32`. That is not a
+        // place anybody meant.
+        let place = profiles::spawn_place(
+            seed.profile,
+            seed.cwd.clone(),
+            &bt_pty::SystemShellEnvironment,
+        );
+        // **And what makes it legible.** The profile's own arguments, the place,
+        // and — for the bash family — the init file that installs OSC 133 and
+        // OSC 7 into this one shell without touching anything the user owns.
+        let command = shell_integration::shell_command(
+            seed.profile,
+            &place.arguments,
+            shell_integration::script_path(),
+            wsl::facts(),
+        );
         Some(
             PtySession::spawn_shell_in(
                 program,
-                &args,
+                &command.arguments,
+                &command.environment,
                 pty_size(grid, PhysicalSize::new(body.width, body.height)),
                 wake,
-                cwd,
+                place.working_directory,
             )
             .with_context(|| format!("spawn the {} profile in ConPTY", chosen.title))?,
         )
@@ -6233,6 +6235,11 @@ fn create_leaf_session(
         font_rev: 1,
         theme_rev: theme_revision(),
     });
+    if let Some(notice) = &shell_fallback_notice {
+        session
+            .feed(fallback_banner(notice).as_bytes())
+            .context("write the shell fallback banner into the leaf's first line")?;
+    }
     if let Some(bytes) = probe_input {
         session
             .feed(bytes)
@@ -6243,7 +6250,6 @@ fn create_leaf_session(
         pty,
         profile,
         session,
-        shell_fallback_notice,
         projection,
         grid,
         conpty_grid: grid,
@@ -6807,6 +6813,10 @@ impl Runtime {
         // start. It is an environment read and four `is_file` calls, so moving it
         // ahead of the window costs the launch nothing measurable.
         let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        // Started here, read much later: `wsl.exe --list` and one `getent` in the
+        // distribution are around 200ms between them, which is 200ms of a window
+        // that does not exist yet rather than 200ms of a menu already clicked.
+        wsl::start(profile_programs.program(profiles::index_of_id("wsl")));
         let default_profile =
             profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
         let restored = restore_window_placement(event_loop, session_store.loaded());
@@ -7194,10 +7204,10 @@ impl Runtime {
         // session, which is also what `working_directory()` is asked of. A
         // profile taken from one pane and a directory from another would be the
         // exact mismatch the rule exists to prevent.
-        let cwd = new_tab_cwd(
+        let cwd = profiles::cwd_for_spawn(
             self.session_profile(),
-            self.session.working_directory(),
             profile,
+            self.session.working_directory(),
         );
         // A lone terminal is `Seats::lone_terminal`'s own seat id, so the map is
         // that one entry — or empty, when the shell you are looking at has never
@@ -7353,7 +7363,7 @@ impl Runtime {
             seats.terminal(),
             LeafSeed {
                 profile: profiles::index_of_id(&profile_id),
-                cwd: Some(PathBuf::from(&cwd)).filter(|cwd| cwd.is_dir()),
+                cwd: profiles::revived_cwd(profiles::index_of_id(&profile_id), Path::new(&cwd)),
             },
         )]);
         let (tab, _) = create_tab_state(
@@ -10224,9 +10234,6 @@ impl Runtime {
         }
         if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
             terminal_frame.status_text = Some(notice.to_owned());
-        }
-        if let Some(notice) = self.shell_fallback_notice.take() {
-            terminal_frame.status_text = Some(notice);
         }
         let composed = compose_preedit(&terminal_frame, self.preedit.as_ref())
             .context("reject non-rectangular frame before IME composition")?;
@@ -16144,38 +16151,6 @@ fn display_title(
 /// subtlety a copy would lose. `None` is the fourth layer, which is nobody's
 /// claim: the profile's own name is what a tab is called when no one has said
 /// anything about it, and it has no provenance to report.
-/// The folder a new tab opens in — I88, plus the one thing the mock-up cannot
-/// say.
-///
-/// "A new shell opens where the one you are looking at is standing" (mock-up
-/// 4010), and the address is that shell's own OSC 7 report, so a tab only ever
-/// inherits a directory some shell actually named — never a guess.
-///
-/// **Only from the same profile.** The mock-up's `newTab` inherits
-/// `focusedSession()?.cwd` unconditionally, while its own fixtures put a `pwsh`
-/// session in `C:\Users\Weiyi` and a `wsl` one in `~/src/bt-corpus` (3234 and
-/// 3241) — two path namespaces, with no conversion anywhere in the file. Carrying
-/// `C:\Users\Weiyi` into a WSL tab names nothing; carrying `/home/weiyi/src` into
-/// PowerShell names nothing either. The existing convention for a path we cannot
-/// vouch for is `docs/shell-integration.md` §34-35's — leave it undetected rather
-/// than guess one — so a cross-profile tab hands back `None` and starts at its own
-/// profile's starting directory instead of at a place that does not exist.
-///
-/// This is the **conservative** answer and it is deliberately temporary. The
-/// translation it stands in for (`\wsl$\<distro>\…` one way, `/mnt/<drive>/…`
-/// the other) is P5's, along with naming the distribution; when it lands, this
-/// test becomes "can the target profile express where you are standing", and
-/// inheritance comes back for every pair that can.
-fn new_tab_cwd(
-    focused_profile: usize,
-    focused_cwd: Option<&Path>,
-    target_profile: usize,
-) -> Option<PathBuf> {
-    (focused_profile == target_profile)
-        .then_some(focused_cwd)?
-        .map(Path::to_path_buf)
-}
-
 /// Every tippable box of the **tab surface** that is actually on screen, in
 /// innermost-first order.
 ///
@@ -16300,6 +16275,34 @@ fn tab_surface_tip_boxes(
     boxes
 }
 
+/// The first line of a pane whose profile's shell would not start —
+/// `M2-restart-shell-contract.md` §3's "首行可见降级横幅", and §5#3's ruling that
+/// the swap is *never* silent.
+///
+/// **Written into the pane rather than shown in the status line**, and that is
+/// the contract's own wording rather than a preference: §2 says a banner is
+/// "追加到转录/新 live 平面的内容，不是特殊事件" — content appended to the
+/// transcript, not an event with a channel of its own. Feeding it into the
+/// session before the shell has said anything makes it exactly that: it scrolls
+/// with the shell's output, it survives in the scrollback, it can be copied, and
+/// it is still there when you come back to a pane you left an hour ago. The
+/// status line it replaces could say none of those things — it was shown on one
+/// frame of one focused pane and then discarded, so a pane that fell back while
+/// you were looking at another tab announced it to nobody.
+///
+/// Dim rather than coloured: this is the terminal speaking in a space that
+/// belongs to the shell, and the one visual register that reads as an aside in
+/// every colour scheme — including the ones where red or yellow is the prompt's
+/// own colour — is reduced intensity. The `[BetterTerminal]` prefix is what
+/// keeps it from being read as the shell's own first line, which matters most in
+/// precisely the case that produces it: a shell the user did not ask for.
+///
+/// `\r\n` and not `\n`, because this is a terminal and the cursor is in column
+/// one only if something puts it there.
+fn fallback_banner(notice: &str) -> String {
+    format!("\x1b[2m[BetterTerminal] {notice}\x1b[0m\r\n")
+}
+
 /// `title="New tab (${defaultProfile().title})"` — mock-up 4367 and 4369.
 ///
 /// One function for the two buttons that wear it, because the mock-up writes the
@@ -16312,7 +16315,7 @@ fn tab_surface_tip_boxes(
 /// the *verb* first and qualifies it, so that a user who reads only the first two
 /// words has still read the truth.
 fn new_tab_tip(profile: usize) -> String {
-    format!("New tab ({})", profiles::PROFILES[profile].title)
+    format!("New tab ({})", profiles::title(profile))
 }
 
 fn resolve_title(
@@ -21826,61 +21829,44 @@ mod tests {
         }
     }
 
-    /// PIN — a new tab inherits where you are standing only when the shell it
-    /// starts can read that address.
+    /// PIN — a pane that got a shell nobody asked for says so, in the pane, in
+    /// its first line.
     ///
-    /// Red gate: inheriting unconditionally is what the mock-up does, and it is
-    /// the one thing its own fixtures prove it never tested — a `pwsh` session in
-    /// `C:\Users\Weiyi` and a `wsl` one in `~/src/bt-corpus`, two namespaces,
-    /// no conversion. `bt-pty` validates the directory before spawning, so the
-    /// visible symptom is not a crash but a WSL tab silently opening somewhere
-    /// other than where the `˅` menu implied, with no way to tell it happened.
-    ///
-    /// **This is the pre-P5 conservative state and is meant to be narrowed**:
-    /// once WSL's two path namespaces have a translation, the test stops being
-    /// "same profile" and becomes "can the target express this path".
+    /// `M2-restart-shell-contract.md` §3/§5#3: the swap to the fallback profile
+    /// is never silent. Red gate, and the thing it catches is the *channel*
+    /// rather than the words — the notice used to be handed to
+    /// `TerminalFrame::status_text`, which is drawn on one frame of the focused
+    /// pane and then dropped, so a pane that fell back while you were looking at
+    /// another tab announced it to nobody and a pane you scrolled away from
+    /// could never be asked again. Written into the session it is transcript:
+    /// still there an hour later, and copyable like anything else in the pane.
     #[test]
-    fn a_new_tab_inherits_a_folder_only_from_its_own_profile() {
-        let here = Path::new(r"D:\Developer\BetterTerminal");
-        let pwsh = profiles::index_of_id("pwsh");
-        let wsl = profiles::index_of_id("wsl");
-
-        assert_eq!(
-            new_tab_cwd(pwsh, Some(here), pwsh),
-            Some(here.to_path_buf()),
-            "I88 — the `+` opens where the shell you are looking at is standing"
+    fn a_pane_that_fell_back_to_another_shell_says_so_in_its_first_line() {
+        let notice = r"D:\App\Tool\Git\bin\bash.exe failed to start (os error 2); \
+             using powershell.exe instead";
+        let banner = fallback_banner(notice);
+        let mut session = DualPlaneSession::with_quotas_and_cell_height(
+            nonzero_u32(80),
+            nonzero_u32(6),
+            DEFAULT_STAGING_QUOTA,
+            M0_FROZEN_LINE_QUOTA,
+            std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
         );
-        assert_eq!(
-            new_tab_cwd(pwsh, Some(here), wsl),
-            None,
-            "a Windows path is not an address a WSL shell can be started at, so \
-             nothing is handed over and the profile's own starting directory wins"
+        session.feed(banner.as_bytes()).unwrap();
+        let visible = session.terminal().visible_text();
+        assert!(
+            visible[0].contains("[BetterTerminal]") && visible[0].contains("bash.exe"),
+            "the first line names the terminal and the shell that would not \
+             start, and is not mistakable for the shell's own output: {:?}",
+            visible[0]
         );
-        assert_eq!(
-            new_tab_cwd(wsl, Some(Path::new("/home/weiyi/src")), pwsh),
-            None,
-            "and the same in the other direction"
+        // And the cursor is left on the line beneath, so the shell's own first
+        // prompt does not print over it.
+        assert!(
+            visible[1].trim().is_empty(),
+            "the banner ends its own line: {:?}",
+            visible[1]
         );
-        assert_eq!(
-            new_tab_cwd(pwsh, None, pwsh),
-            None,
-            "a shell that never reported a folder hands over nothing, which is \
-             what it always did"
-        );
-        // Every same-profile pair inherits and every crossing pair does not —
-        // stated over the whole table so a fifth profile cannot arrive with the
-        // rule quietly applied to only four.
-        for from in 0..profiles::PROFILES.len() {
-            for to in 0..profiles::PROFILES.len() {
-                assert_eq!(
-                    new_tab_cwd(from, Some(here), to).is_some(),
-                    from == to,
-                    "{} -> {}",
-                    profiles::PROFILES[from].id,
-                    profiles::PROFILES[to].id
-                );
-            }
-        }
     }
 
     /// PIN — the tab surface's tips come off the surface that is **drawn**.
@@ -26604,7 +26590,6 @@ mod tests {
             // the pane they stand in for would have been started as.
             profile: profiles::FALLBACK_PROFILE,
             session,
-            shell_fallback_notice: None,
             projection,
             grid,
             conpty_grid: grid,

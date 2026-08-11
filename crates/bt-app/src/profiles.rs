@@ -31,7 +31,8 @@
 
 use std::{
     ffi::{OsStr, OsString},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf, Prefix},
+    sync::OnceLock,
     time::SystemTime,
 };
 
@@ -240,6 +241,12 @@ pub struct Profile {
     /// owed now is that the slot exists and is *read*, so that the editor is a
     /// screen over a working mechanism rather than a screen and a mechanism.
     pub starting_dir: StartingDir,
+    /// Which spelling of a path this profile's shell speaks — see
+    /// [`PathNamespace`]. What makes a directory inherited from another pane
+    /// either translatable or honestly refused.
+    pub paths: PathNamespace,
+    /// What this profile's title has to name before it is unambiguous here.
+    pub qualifier: Qualifier,
     /// Which shell-integration script this profile is served by, if any.
     pub integration: Integration,
 }
@@ -266,19 +273,27 @@ pub enum StartingDir {
     /// redirected profile lives elsewhere and the variable is the only thing that
     /// knows it.
     WindowsHome,
-    /// The shell's own `$HOME`, reached by *asking the launcher for it* — these
-    /// arguments, appended when there is no directory to hand over instead.
+    /// The place is named to the *launcher*, as this flag and one argument,
+    /// because the shell does not stand where the launcher does.
     ///
-    /// `wsl.exe --cd ~` is the whole of it, and it is the documented flag rather
-    /// than a trick: verified on this machine to answer `/home/weiyi` from a
-    /// process standing in `D:\`, where the same launcher with no flag answers
-    /// `/mnt/d`.
+    /// `wsl.exe --cd <place>` is the whole of it, and it is the documented flag
+    /// rather than a trick: verified on this machine to answer `/home/weiyi`
+    /// from a process standing in `D:\` when handed `~`, and `/mnt/d/Developer`
+    /// when handed `/mnt/d/Developer`, where the same launcher with no flag
+    /// answers `/mnt/d`.
     ///
-    /// Appended *instead of* a working directory and never beside one, because
-    /// `--cd` overrides the inherited directory: a profile that always passed it
-    /// could never be started anywhere else, which is exactly the inheritance P5
-    /// is going to want back once WSL's two path namespaces have a translation.
-    LauncherFlag(&'static [&'static str]),
+    /// Passed *instead of* a working directory and never beside one, because
+    /// `--cd` overrides the inherited directory anyway — and because the
+    /// directory this profile is given is written in its own namespace
+    /// ([`PathNamespace::Wsl`]), which is not a string `CreateProcess` could be
+    /// handed. That is the same fact stated twice: the launcher is the only
+    /// thing in the chain that speaks both.
+    LauncherFlag {
+        flag: &'static str,
+        /// What the flag is given when nothing has been inherited — the shell's
+        /// own `$HOME`, which has no Windows spelling to hand over instead.
+        home: &'static str,
+    },
 }
 
 /// How a profile's executable is located on the machine.
@@ -336,26 +351,36 @@ pub enum ProgramCandidate {
     },
 }
 
-/// Which shell-integration script a profile is served by.
+/// Which shell-integration script a profile is served by, and **how it gets
+/// there** — the two answers are not the same, and the difference is what the
+/// honest-capability matrix is made of.
 ///
-/// A slot rather than a mechanism. `scripts/shell-integration/betterterminal.ps1`
-/// is **opt-in and manual** — the user dot-sources it into their own `$PROFILE`
-/// and this product never injects it (`docs/shell-integration.md` §83-96) — so
-/// there is nothing here for spawn to do today, and this ticket adds nothing.
-/// What the field records is which profiles *have* a script at all, which is the
-/// question the honest-capability matrix (P7) and the bash/cmd injection tickets
-/// (P5/P6) both start from.
-///
-/// The three profiles without one are not degraded by a special case: a shell
-/// that never emits OSC 133 keeps the cursor/WRAPLINE heuristics, and one that
-/// never emits OSC 7 leaves the relative path undetected rather than guessing a
+/// The profile with no script is not degraded by a special case: a shell that
+/// never emits OSC 133 keeps the cursor/WRAPLINE heuristics, and one that never
+/// emits OSC 7 leaves the relative path undetected rather than guessing a
 /// directory. Both are the existing, already-implemented conventions
-/// (`docs/shell-integration.md` §34-35 and §111-115) — this ticket confirms they
+/// (`docs/shell-integration.md` §34-35 and §111-115) — this table confirms they
 /// hold for the new shells rather than inventing a second set for them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Integration {
     /// `betterterminal.ps1`, dot-sourced by the user into `$PROFILE`.
+    ///
+    /// **Opt-in and manual**: this product never injects it
+    /// (`docs/shell-integration.md` §83-96), because PowerShell's own startup
+    /// file is a single well-known path the user already owns and edits, and a
+    /// terminal that rewrote `$PROFILE` behind them would be editing their
+    /// shell. There is no argument to hand `pwsh` that would source a second
+    /// file *after* theirs, which is the position this integration must occupy.
     PowerShellOptIn,
+    /// `betterterminal.bash`, handed to the shell as its init file at spawn.
+    ///
+    /// Automatic, and the asymmetry with PowerShell is bash's own: `--init-file`
+    /// is a documented argument that names the startup file for this one
+    /// interactive shell, so the integration can be installed for a session
+    /// without touching anything on disk that belongs to the user. What that
+    /// argument costs is the startup chain it replaces, which the script itself
+    /// puts back — see `scripts/shell-integration/betterterminal.bash`.
+    BashInitFile,
     /// No script exists for this profile yet.
     None,
 }
@@ -370,21 +395,28 @@ pub const PROFILES: [Profile; 4] = [
         // means it rather than by the spawn path every profile goes through.
         args: &["-NoLogo"],
         starting_dir: StartingDir::WindowsHome,
+        paths: PathNamespace::Windows,
+        qualifier: Qualifier::None,
         integration: Integration::PowerShellOptIn,
     },
     Profile {
         id: "wsl",
-        // The mock-up writes `WSL · Ubuntu`, and this build writes `WSL`.
+        // The mock-up writes `WSL · Ubuntu`; this is the half of it that is a
+        // constant, and [`Qualifier::WslDistribution`] is the half that is a
+        // claim about this machine.
         //
-        // The qualifier after the `·` is a **discovery claim**, and this ticket
-        // does not discover: `wsl.exe` with no arguments starts whatever the
-        // user's *default* distribution is, which on this machine may be Ubuntu
-        // and on the next is Debian or Alpine. Printing "Ubuntu" over a command
-        // that will start Debian is the same failure as a greyed row that was
-        // hidden instead — chrome saying something it did not check. Naming the
-        // distribution needs `wsl.exe -l -q`'s answer, which is P5's, and the
-        // `·` qualifier arrives with it (and with it the mock-up's own rule at
-        // line 4013 that a session's name drops everything from the `·` on).
+        // The name after the `·` is a **discovery claim**: `wsl.exe` with no
+        // arguments starts whatever the user's *default* distribution is, which
+        // on one machine is Ubuntu and on the next is Debian or Alpine, so
+        // printing "Ubuntu" over a command that will start Debian would be
+        // chrome saying something it did not check. It is now checked —
+        // `crate::wsl` asks `wsl.exe --list --verbose` which one carries the
+        // `*` — and appended only when there is more than one installed and the
+        // bare title would therefore be an unanswered question.
+        //
+        // The constant stays the short form, which is also the mock-up's own
+        // rule at line 4013 that a session's name drops everything from the `·`
+        // on: a tab falling back to its profile's name is called `WSL`.
         title: "WSL",
         mark: ChromeMark::ProfileUbuntu,
         program: ProgramSource::FirstOf(&[ProgramCandidate::Under {
@@ -393,8 +425,13 @@ pub const PROFILES: [Profile; 4] = [
         }]),
         args: &[],
         // The one profile whose home is not a Windows directory.
-        starting_dir: StartingDir::LauncherFlag(&["--cd", "~"]),
-        integration: Integration::None,
+        starting_dir: StartingDir::LauncherFlag {
+            flag: "--cd",
+            home: "~",
+        },
+        paths: PathNamespace::Wsl,
+        qualifier: Qualifier::WslDistribution,
+        integration: Integration::BashInitFile,
     },
     Profile {
         id: "gitbash",
@@ -439,7 +476,16 @@ pub const PROFILES: [Profile; 4] = [
         // default, so the Windows home *is* this shell's home — one directory
         // under two spellings, unlike WSL's two directories.
         starting_dir: StartingDir::WindowsHome,
-        integration: Integration::None,
+        // **Windows, not MSYS.** Git Bash prints `/d/Developer` and its process
+        // is standing in `D:\Developer` — one directory, two spellings, and the
+        // Win32 one is the true one: it is what `CreateProcess` was handed, what
+        // Explorer opens, and what every other pane in this window speaks. The
+        // MSYS spelling is a third namespace that only this shell understands,
+        // and the script reports the Win32 one (`pwd -W`) precisely so that it
+        // never has to become one.
+        paths: PathNamespace::Windows,
+        qualifier: Qualifier::None,
+        integration: Integration::BashInitFile,
     },
     Profile {
         id: "cmd",
@@ -453,6 +499,8 @@ pub const PROFILES: [Profile; 4] = [
         // (`/c`, `/k`) would end the session rather than start one.
         args: &[],
         starting_dir: StartingDir::WindowsHome,
+        paths: PathNamespace::Windows,
+        qualifier: Qualifier::None,
         integration: Integration::None,
     },
 ];
@@ -549,27 +597,256 @@ pub fn index_of_id(id: &str) -> usize {
 /// and that the answer is about this computer rather than about the product.
 #[must_use]
 pub fn unavailable_tip(profile: usize) -> String {
-    format!("{} — not found on this machine", PROFILES[profile].title)
+    format!("{} — not found on this machine", title(profile))
 }
 
-/// How a profile is told where to start, once the machine has been asked.
+/// What, if anything, this profile's title has to name before it is unambiguous
+/// on the machine it is being read on.
 ///
-/// The two shapes of [`StartingDir`] resolved into the two things a spawn can
-/// actually do with them, plus the honest third answer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum StartingPlace {
-    /// Hand this over as the process's working directory.
-    Directory(PathBuf),
-    /// Append these to the profile's own arguments, and hand over no directory.
-    Arguments(&'static [&'static str]),
-    /// This machine cannot name the place. The shell starts where a process
-    /// started by this one starts, which is what every leaf did before this
-    /// field existed — an unchanged answer rather than a guessed one.
-    Unstated,
+/// A profile's [`Profile::title`] is a constant, and for three of the four that
+/// is the whole truth: `Command Prompt` names one program. `WSL` names a
+/// *launcher*, and which shell it launches is a fact about this machine — the
+/// mock-up writes `WSL · Ubuntu` (line 2598) and P1 shipped the bare `WSL`
+/// precisely because printing "Ubuntu" over a command that would start Debian is
+/// chrome saying something it did not check. This field is where the checking
+/// gets attached.
+///
+/// Its own field rather than keyed off [`PathNamespace::Wsl`], although today
+/// exactly one profile has each. The two would come apart the moment the profile
+/// editor (K86) lets somebody make a second WSL profile pinned to a *named*
+/// distribution: that profile's paths are still WSL's, and its title is already
+/// complete — qualifying it with the machine's *default* distribution would be a
+/// title that names the wrong one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Qualifier {
+    /// The constant title is the whole title.
+    None,
+    /// Append the distribution `wsl.exe` starts by default, when this machine
+    /// has more than one to choose between.
+    WslDistribution,
 }
 
-/// Where a leaf of `profile` opens when nothing else has said — the resolution
-/// of [`Profile::starting_dir`] against this machine.
+/// The title this machine spells `profile` by — the constant, plus whatever
+/// [`Qualifier`] it earns here.
+///
+/// Composed once and kept for the life of the process, which is what lets every
+/// reader keep the `&'static str` it already had: a menu row, a tooltip and a
+/// settings option all name a profile, they are scattered through layout code
+/// that has no other reason to know what WSL is, and threading a probe result
+/// down to each of them would put that knowledge in all of it.
+///
+/// Once is also correct rather than merely convenient. [`crate::wsl::facts`] is
+/// a statement about an installation, `ProfilePrograms` next to it is probed
+/// once for the same reason, and a title that changed between the frame a row
+/// was read on and the click aimed at it is a worse answer than a settled one.
+#[must_use]
+pub fn title(profile: usize) -> &'static str {
+    static TITLES: OnceLock<[String; PROFILES.len()]> = OnceLock::new();
+    &TITLES.get_or_init(|| {
+        let qualifier = crate::wsl::facts().title_qualifier();
+        std::array::from_fn(|index| compose_title(index, qualifier))
+    })[profile]
+}
+
+/// [`title`]'s rule, without the cache — `Profile.title`, then the qualifier
+/// this machine earned, joined the way the mock-up joins them.
+///
+/// ` · ` with spaces around it, which is the mock-up's own spelling and is also
+/// what makes the mock-up's *other* rule expressible: a session's name is
+/// everything before `" ·"` (line 4013), so a tab that falls back to its
+/// profile's name is called `WSL` and not `WSL · Ubuntu-24.04`. That rule needs
+/// no code here — the short form **is** the constant, and the only place the
+/// qualifier is added is the place a long name fits.
+fn compose_title(profile: usize, qualifier: Option<&str>) -> String {
+    match (PROFILES[profile].qualifier, qualifier) {
+        (Qualifier::WslDistribution, Some(distribution)) => {
+            format!("{} · {distribution}", PROFILES[profile].title)
+        }
+        _ => PROFILES[profile].title.to_owned(),
+    }
+}
+
+/// Which spelling of a filesystem path a profile's shell speaks.
+///
+/// Not a property of the *program* but of the world it stands in. Three of these
+/// profiles are Windows processes whose working directory is a Win32 directory,
+/// and they say so in drive letters. WSL's shell lives inside the distribution's
+/// own filesystem, where this machine's `D:\Developer` is `/mnt/d/Developer` and
+/// `/home/weiyi` is a place a drive letter cannot reach at all.
+///
+/// The field exists because a directory travelling between two panes is only
+/// meaningful with the namespace it was written in attached, and the pane
+/// already carries the one thing that knows it: its profile. Without this,
+/// `C:\Users\Weiyi` inherited into a WSL tab is a string that names nothing, and
+/// the pane opens in a place nobody chose while looking as though it worked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathNamespace {
+    /// `D:\Developer` — a Win32 path, drive-rooted.
+    Windows,
+    /// `/mnt/d/Developer`, `/home/weiyi` — the distribution's own filesystem.
+    Wsl,
+}
+
+/// `C:\Users\Weiyi` → `/mnt/c/Users/Weiyi`, or `None` when this path names
+/// nothing a WSL shell can stand in.
+///
+/// The drive map is WSL's own and it is a documented, stable mount rule rather
+/// than a convention we are inventing: every fixed drive appears under `/mnt/`
+/// at its lower-cased letter. Verified against the launcher itself on this
+/// machine — `wsl.exe --cd 'D:\Developer' -- pwd` answers `/mnt/d/Developer`,
+/// which is the same answer this function gives.
+///
+/// `None` for everything that is not drive-rooted, and each refusal is a real
+/// case rather than defensive noise:
+///
+/// * a UNC share (`\\server\share`, and the `\\wsl.localhost\…` spelling
+///   `wslpath -w` produces) is not mounted under `/mnt` at all;
+/// * a relative or drive-relative path (`src`, `C:src`) does not name a place
+///   without knowing where somebody was standing, and that somebody is not this
+///   process;
+/// * a `..` or `.` left in the path is a directory nobody has resolved, and
+///   resolving it here would be this module guessing at a filesystem it cannot
+///   see.
+///
+/// The parse goes through [`std::path::Component`] rather than through the
+/// string, so the shapes Windows actually has — including the verbatim
+/// `\\?\C:\…` spelling of a drive — are classified by the platform's own parser
+/// instead of by a prefix test that would read `\\?\C:\x` as a UNC share.
+#[must_use]
+pub fn windows_to_wsl(path: &Path) -> Option<PathBuf> {
+    let mut components = path.components();
+    let Component::Prefix(prefix) = components.next()? else {
+        return None;
+    };
+    let (Prefix::Disk(letter) | Prefix::VerbatimDisk(letter)) = prefix.kind() else {
+        return None;
+    };
+    if components.next() != Some(Component::RootDir) {
+        return None;
+    }
+    let mut translated = format!("/mnt/{}", char::from(letter).to_ascii_lowercase());
+    for component in components {
+        let Component::Normal(name) = component else {
+            return None;
+        };
+        translated.push('/');
+        translated.push_str(name.to_str()?);
+    }
+    Some(PathBuf::from(translated))
+}
+
+/// `/mnt/c/Users/Weiyi` → `C:\Users\Weiyi`, or `None` when Windows has no name
+/// for this place.
+///
+/// The inverse is **not total**, and that asymmetry is the whole reason a
+/// translation can fail. `/home/weiyi` is a directory inside the distribution's
+/// own root filesystem; the only Windows spelling of it is the
+/// `\\wsl.localhost\<distro>\home\weiyi` share, which is a network path to a
+/// service rather than a directory — it needs the distribution running, it is
+/// not what `cd` in that shell means, and it is precisely the authority a
+/// `file://` report is obliged to reject as remote. So the honest answer is that
+/// there is no answer, and the caller falls back to the target profile's own
+/// starting directory instead of opening somewhere plausible-looking.
+///
+/// `/mnt/cdrom` is not a drive: the segment after `/mnt/` has to be a single
+/// ASCII letter, because that is what makes it one of WSL's drive mounts rather
+/// than an ordinary directory somebody made.
+#[must_use]
+pub fn wsl_to_windows(path: &Path) -> Option<PathBuf> {
+    let (drive, tail) = match path.to_str()?.strip_prefix("/mnt/")?.split_once('/') {
+        Some((drive, tail)) => (drive, tail),
+        None => (path.to_str()?.strip_prefix("/mnt/")?, ""),
+    };
+    let &[letter] = drive.as_bytes() else {
+        return None;
+    };
+    if !letter.is_ascii_alphabetic() {
+        return None;
+    }
+    let mut translated = format!("{}:\\", char::from(letter).to_ascii_uppercase());
+    if !tail.is_empty() {
+        translated.push_str(&tail.replace('/', "\\"));
+    }
+    Some(PathBuf::from(translated))
+}
+
+/// Where `cwd` — a directory written in `from`'s namespace — is, said in `to`'s,
+/// or `None` when `to` has no name for it.
+#[must_use]
+pub fn translate_cwd(from: PathNamespace, to: PathNamespace, cwd: &Path) -> Option<PathBuf> {
+    match (from, to) {
+        (PathNamespace::Windows, PathNamespace::Windows)
+        | (PathNamespace::Wsl, PathNamespace::Wsl) => Some(cwd.to_path_buf()),
+        (PathNamespace::Windows, PathNamespace::Wsl) => windows_to_wsl(cwd),
+        (PathNamespace::Wsl, PathNamespace::Windows) => wsl_to_windows(cwd),
+    }
+}
+
+/// The directory a new leaf of `target` opens in when it is born beside a leaf
+/// of `source` that is standing in `cwd` — P4's replacement for "only from its
+/// own profile".
+///
+/// P3 answered this by refusing every crossing pair, which was the conservative
+/// stand-in stated as temporary at the time: two profiles' directories are
+/// written in two namespaces, and carrying one across unconverted names nothing.
+/// The test it enforced was *"is this the same profile"*; the test now is **"can
+/// the target say where you are standing"**, which is the question that was
+/// always being asked. Every pair that can, inherits — a PowerShell in
+/// `D:\Developer` opens a WSL tab in `/mnt/d/Developer`, and a WSL shell in
+/// `/mnt/d/Developer` opens a PowerShell in `D:\Developer` — and the pairs that
+/// cannot fall through to the target profile's own starting directory rather
+/// than to a guess (`docs/shell-integration.md` §34-35).
+#[must_use]
+pub fn cwd_for_spawn(source: usize, target: usize, cwd: Option<&Path>) -> Option<PathBuf> {
+    translate_cwd(PROFILES[source].paths, PROFILES[target].paths, cwd?)
+}
+
+/// Where a leaf is to be started, in the two forms a spawn can actually say it.
+///
+/// Both at once rather than an either/or, because they are not alternatives —
+/// they are the two channels a process launch has, and a profile uses whichever
+/// one its program listens on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpawnPlace {
+    /// Handed over as the child's working directory. `None` when this machine
+    /// cannot name the place — the shell then starts where a process started by
+    /// this one starts, which is what every leaf did before there was a starting
+    /// directory at all: an unchanged answer rather than a guessed one.
+    pub working_directory: Option<PathBuf>,
+    /// Appended to the profile's own arguments.
+    pub arguments: Vec<OsString>,
+}
+
+/// A directory a leaf of `profile` was saved standing in, if it is still a
+/// directory — the existence check that guards every revival, asked in the
+/// namespace the path is written in.
+///
+/// `is_dir()` is a Win32 question, and asking it of `/mnt/d/Developer` answers
+/// **no** on a machine where that directory is perfectly fine: nothing under
+/// `/mnt` exists as far as Windows is concerned, so an unguarded check would
+/// drop the directory of every WSL pane it ever restored, silently, and every
+/// revived WSL tab would come back at `~`. The check is therefore asked only
+/// where it can be answered, and a WSL directory is taken at its word — if it
+/// has since been deleted, `wsl.exe --cd` reports that itself, in the pane,
+/// which is an honest answer this side could not have produced anyway.
+#[must_use]
+pub fn revived_cwd(profile: usize, cwd: &Path) -> Option<PathBuf> {
+    match PROFILES[profile].paths {
+        PathNamespace::Windows => cwd.is_dir().then(|| cwd.to_path_buf()),
+        PathNamespace::Wsl => Some(cwd.to_path_buf()),
+    }
+}
+
+/// Where a leaf of `profile` opens, and how its launcher is told — the
+/// resolution of [`Profile::starting_dir`] and an inherited directory against
+/// this machine.
+///
+/// `inherited` is what [`cwd_for_spawn`] handed back, **already in this
+/// profile's own namespace**; this function only decides which channel it
+/// travels on. Both inputs meet here rather than at the call site because the
+/// channel is a property of the profile and the P3-era split — cwd through one
+/// path, the profile's home through another — is what let a WSL leaf's inherited
+/// directory be handed to `CreateProcess` as if it were a Windows path.
 ///
 /// Read at spawn rather than probed once like [`ProfilePrograms`], and the
 /// difference is the rate: availability is asked by the *paint*, four times a
@@ -578,13 +855,24 @@ pub enum StartingPlace {
 /// for a home directory that cannot then follow a `%USERPROFILE%` the user
 /// changed under us.
 #[must_use]
-pub fn starting_place(profile: usize, environment: &dyn ShellEnvironment) -> StartingPlace {
+pub fn spawn_place(
+    profile: usize,
+    inherited: Option<PathBuf>,
+    environment: &dyn ShellEnvironment,
+) -> SpawnPlace {
     match PROFILES[profile].starting_dir {
-        StartingDir::WindowsHome => environment
-            .var_os("USERPROFILE")
-            .map(PathBuf::from)
-            .map_or(StartingPlace::Unstated, StartingPlace::Directory),
-        StartingDir::LauncherFlag(arguments) => StartingPlace::Arguments(arguments),
+        StartingDir::WindowsHome => SpawnPlace {
+            working_directory: inherited
+                .or_else(|| environment.var_os("USERPROFILE").map(PathBuf::from)),
+            arguments: Vec::new(),
+        },
+        StartingDir::LauncherFlag { flag, home } => SpawnPlace {
+            working_directory: None,
+            arguments: vec![
+                OsString::from(flag),
+                inherited.map_or_else(|| OsString::from(home), PathBuf::into_os_string),
+            ],
+        },
     }
 }
 
@@ -661,8 +949,18 @@ impl ProfilePrograms {
             }
             ProgramCandidate::BesideOnPath { anchor, tail } => {
                 let found = search_path(environment, anchor)?;
-                // `<root>\cmd\git.exe` -> `<root>\cmd` -> `<root>` -> `<root>\bin\bash.exe`.
-                Some(found.parent()?.parent()?.join(tail))
+                // The anchor's install root is some ancestor of wherever PATH
+                // found it — `<root>\cmd\git.exe` in a plain shell, but
+                // `<root>\mingw64\bin\git.exe` when PATH was set up by Git Bash
+                // itself. Walking every ancestor and asking which one truly
+                // carries the tail answers both spellings; a fixed two-step
+                // climb answered only the first and greyed the profile out on
+                // the second.
+                found
+                    .ancestors()
+                    .skip(1)
+                    .map(|ancestor| ancestor.join(tail))
+                    .find(|candidate| environment.is_file(candidate))
             }
         }
     }
@@ -1085,7 +1383,7 @@ pub fn build(
             &Row {
                 rect: *item,
                 mark: profile.mark,
-                name: profile.title,
+                name: title(index),
                 // `margin-left: auto` puts the hint hard against the row's
                 // trailing padding, and it names a fact about the profile rather
                 // than the row's state — so it does not answer to hover.
@@ -1945,30 +2243,287 @@ mod tests {
         let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
         for profile in ["pwsh", "gitbash", "cmd"] {
             assert_eq!(
-                starting_place(index_of_id(profile), &machine),
-                StartingPlace::Directory(PathBuf::from(r"C:\Users\dev")),
+                spawn_place(index_of_id(profile), None, &machine),
+                SpawnPlace {
+                    working_directory: Some(PathBuf::from(r"C:\Users\dev")),
+                    arguments: Vec::new(),
+                },
                 "{profile} is a Windows process and takes a working directory"
             );
         }
         assert_eq!(
-            starting_place(index_of_id("wsl"), &machine),
-            StartingPlace::Arguments(&["--cd", "~"]),
+            spawn_place(index_of_id("wsl"), None, &machine),
+            SpawnPlace {
+                working_directory: None,
+                arguments: vec![OsString::from("--cd"), OsString::from("~")],
+            },
             "WSL's home has no Windows spelling, so it is asked for rather than handed over"
         );
         // The home is read from the variable and never composed, so a redirected
         // profile is followed rather than guessed at.
         assert_eq!(
-            starting_place(
+            spawn_place(
                 FALLBACK_PROFILE,
+                None,
                 &FakeMachine::default().with_var("USERPROFILE", r"\\server\redirected\dev")
-            ),
-            StartingPlace::Directory(PathBuf::from(r"\\server\redirected\dev")),
+            )
+            .working_directory,
+            Some(PathBuf::from(r"\\server\redirected\dev")),
         );
         assert_eq!(
-            starting_place(FALLBACK_PROFILE, &FakeMachine::default()),
-            StartingPlace::Unstated,
+            spawn_place(FALLBACK_PROFILE, None, &FakeMachine::default()),
+            SpawnPlace::default(),
             "a machine that cannot name its own home is told nothing, not a guess"
         );
+    }
+
+    /// PIN — an inherited directory travels on the channel its own profile
+    /// listens on, and never on the other one.
+    ///
+    /// Red gate, and it is the failure P4 would otherwise ship: hand a WSL leaf
+    /// its inherited `/mnt/d/Developer` as a *working directory* and it reaches
+    /// `CreateProcess` as a Windows path, where `bt-pty`'s own "does this
+    /// directory exist" check rejects it and silently substitutes this process's
+    /// folder — so the WSL tab opens in `/mnt/c/WINDOWS/system32` while the menu
+    /// row said it would open where you were standing. Nothing about that is
+    /// visible: it is a real directory, and the shell starts.
+    #[test]
+    fn an_inherited_directory_is_told_to_the_launcher_that_can_read_it() {
+        let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
+        assert_eq!(
+            spawn_place(
+                index_of_id("pwsh"),
+                Some(PathBuf::from(r"D:\Developer")),
+                &machine
+            ),
+            SpawnPlace {
+                working_directory: Some(PathBuf::from(r"D:\Developer")),
+                arguments: Vec::new(),
+            },
+            "a Windows process is simply started there"
+        );
+        assert_eq!(
+            spawn_place(
+                index_of_id("wsl"),
+                Some(PathBuf::from("/mnt/d/Developer")),
+                &machine
+            ),
+            SpawnPlace {
+                working_directory: None,
+                arguments: vec![OsString::from("--cd"), OsString::from("/mnt/d/Developer")],
+            },
+            "the launcher is told the place, in the namespace the shell reads"
+        );
+    }
+
+    /// PIN — the drive map, in both directions, including every shape that has
+    /// no answer.
+    ///
+    /// Red gate: a `to_string_lossy().replace('\\', "/")` translation passes the
+    /// happy row and takes `\\server\share\src` to `/mnt/\/server/share/src`,
+    /// `src` to `src`, and `/mnt/cdrom` to `C:` — three paths that name nothing,
+    /// handed to a shell as the place it should open in. Every `None` row here
+    /// is a path that a string-level translation would have accepted.
+    #[test]
+    fn the_drive_map_translates_what_it_can_and_refuses_the_rest() {
+        for (windows, wsl) in [
+            (r"C:\Users\Weiyi", "/mnt/c/Users/Weiyi"),
+            (
+                r"D:\Developer\BetterTerminal",
+                "/mnt/d/Developer/BetterTerminal",
+            ),
+            // The letter is lower-cased going out and upper-cased coming back:
+            // `/mnt/C` is not one of WSL's mounts, and `c:\` is not how Windows
+            // writes a drive.
+            (r"c:\src", "/mnt/c/src"),
+            (r"C:\", "/mnt/c"),
+            // A space needs no escaping in either spelling; it is a path, not a
+            // command line.
+            (r"D:\My Pictures", "/mnt/d/My Pictures"),
+        ] {
+            assert_eq!(
+                windows_to_wsl(Path::new(windows)).as_deref(),
+                Some(Path::new(wsl)),
+                "{windows} → WSL"
+            );
+        }
+        // Not symmetric as a pair of tables: the lower-cased drive and the
+        // forward slashes are canonical going out, so coming back is checked on
+        // its own inputs.
+        for (wsl, windows) in [
+            ("/mnt/c/Users/Weiyi", r"C:\Users\Weiyi"),
+            ("/mnt/d/Developer", r"D:\Developer"),
+            ("/mnt/c", r"C:\"),
+            ("/mnt/c/", r"C:\"),
+        ] {
+            assert_eq!(
+                wsl_to_windows(Path::new(wsl)).as_deref(),
+                Some(Path::new(windows)),
+                "{wsl} → Windows"
+            );
+        }
+        for unnameable in [
+            // The UNC shapes, including the one `wslpath -w` answers for a Linux
+            // home — a share, not a mount.
+            r"\\server\share\src",
+            r"\\wsl.localhost\Ubuntu-24.04\home\weiyi",
+            r"\\?\UNC\server\share",
+            // Not rooted: nobody said where from.
+            r"src\a",
+            r"C:src",
+            r"\rooted-but-driveless",
+            "",
+        ] {
+            assert_eq!(
+                windows_to_wsl(Path::new(unnameable)),
+                None,
+                "{unnameable:?} names no directory a WSL shell can stand in"
+            );
+        }
+        // The verbatim spelling of a drive is still a drive, and only the
+        // platform's own parser knows that — a `\\` prefix test reads it as a
+        // share.
+        assert_eq!(
+            windows_to_wsl(Path::new(r"\\?\C:\src")).as_deref(),
+            Some(Path::new("/mnt/c/src"))
+        );
+        for unnameable in [
+            // The distribution's own root filesystem. Windows can only reach it
+            // through the `\\wsl.localhost` share, which is a service and not a
+            // directory — the ruling is that this has no answer.
+            "/home/weiyi",
+            "/",
+            "/usr/local/bin",
+            // A directory somebody made under `/mnt`, which is not a drive.
+            "/mnt/cdrom/disc",
+            "/mnt/9/x",
+            "/mnt",
+            "/mnt/",
+            "relative/path",
+        ] {
+            assert_eq!(
+                wsl_to_windows(Path::new(unnameable)),
+                None,
+                "{unnameable:?} has no Windows spelling"
+            );
+        }
+    }
+
+    /// PIN — every pair of profiles, and what a new tab inherits across it.
+    ///
+    /// This is P3's `a_new_tab_inherits_a_folder_only_from_its_own_profile`
+    /// grown up: that test asserted `Some ⟺ from == to`, and it would now fail,
+    /// which is the point. The rule it enforced was a stand-in for this one.
+    ///
+    /// Red gate: translating only on the diagonal (P3's rule) leaves a WSL tab
+    /// opened from a PowerShell standing in `D:\Developer` at `~`, and the
+    /// mock-up's own promise — "a new shell opens where the one you are looking
+    /// at is standing" — quietly not kept for three quarters of the table.
+    #[test]
+    fn a_new_tab_inherits_a_folder_whenever_the_shell_it_starts_can_name_it() {
+        let windows = Path::new(r"D:\Developer\BetterTerminal");
+        let mounted = Path::new("/mnt/d/Developer/BetterTerminal");
+        let inside = Path::new("/home/weiyi/src");
+        for (source, profile) in PROFILES.iter().enumerate() {
+            for (target, other) in PROFILES.iter().enumerate() {
+                let (standing, expected) = match (profile.paths, other.paths) {
+                    (PathNamespace::Windows, PathNamespace::Windows) => (windows, Some(windows)),
+                    (PathNamespace::Windows, PathNamespace::Wsl) => (windows, Some(mounted)),
+                    (PathNamespace::Wsl, PathNamespace::Windows) => (mounted, Some(windows)),
+                    (PathNamespace::Wsl, PathNamespace::Wsl) => (mounted, Some(mounted)),
+                };
+                assert_eq!(
+                    cwd_for_spawn(source, target, Some(standing)).as_deref(),
+                    expected,
+                    "{} standing in {} opens {}",
+                    profile.id,
+                    standing.display(),
+                    other.id
+                );
+                // The one directory that cannot cross, from the one profile that
+                // can be standing in it.
+                if profile.paths == PathNamespace::Wsl {
+                    assert_eq!(
+                        cwd_for_spawn(source, target, Some(inside)).as_deref(),
+                        (other.paths == PathNamespace::Wsl).then_some(inside),
+                        "{} in a Linux home opens {}",
+                        profile.id,
+                        other.id
+                    );
+                }
+                // A shell that has never said where it is hands on nothing to
+                // say, whichever pair it is — the OSC 7 rule, unchanged.
+                assert_eq!(cwd_for_spawn(source, target, None), None);
+            }
+        }
+    }
+
+    /// PIN — a saved directory is checked for existence only where the check
+    /// can be answered.
+    ///
+    /// Red gate, and it is the silent kind: `is_dir()` is a Win32 question and
+    /// `/mnt/d/Developer` answers **no** to it on the very machine where that
+    /// directory is fine. An unguarded check therefore drops the directory of
+    /// every WSL pane it restores — every revived WSL tab comes back at `~`,
+    /// nothing is logged, and the session file that has the right answer in it
+    /// is overwritten with the wrong one on the next save.
+    #[test]
+    fn a_saved_directory_is_only_checked_for_existence_where_that_is_answerable() {
+        let real = std::env::temp_dir();
+        let gone = real.join("betterterminal-no-such-directory-here");
+        for id in ["pwsh", "gitbash", "cmd"] {
+            let profile = index_of_id(id);
+            assert_eq!(
+                revived_cwd(profile, &real).as_deref(),
+                Some(real.as_path()),
+                "{id} comes back where it was"
+            );
+            assert_eq!(
+                revived_cwd(profile, &gone),
+                None,
+                "{id} does not come back in a directory that is gone"
+            );
+        }
+        let wsl = index_of_id("wsl");
+        for inside in ["/home/weiyi/src", "/mnt/d/Developer"] {
+            assert_eq!(
+                revived_cwd(wsl, Path::new(inside)).as_deref(),
+                Some(Path::new(inside)),
+                "a WSL directory is taken at its word: Windows cannot see it to check"
+            );
+        }
+    }
+
+    /// PIN — the qualifier is appended to the constant, and only to the profile
+    /// whose title is incomplete without it.
+    ///
+    /// Red gate: qualifying every profile gives `PowerShell · Ubuntu-24.04`, and
+    /// qualifying none leaves the `˅` menu on a three-distribution machine
+    /// unable to say which of them `WSL` opens.
+    #[test]
+    fn only_the_profile_that_names_a_launcher_wears_the_machine_s_answer() {
+        for (index, profile) in PROFILES.iter().enumerate() {
+            assert_eq!(
+                compose_title(index, None),
+                profile.title,
+                "{} is its own title on a machine that answered nothing",
+                profile.id
+            );
+            let qualified = compose_title(index, Some("Ubuntu-24.04"));
+            match profile.qualifier {
+                Qualifier::WslDistribution => {
+                    assert_eq!(qualified, "WSL · Ubuntu-24.04");
+                    // The mock-up's own rule (line 4013): a session's name is
+                    // everything before `" ·"`, and it is the constant.
+                    assert_eq!(qualified.split(" ·").next(), Some(profile.title));
+                }
+                Qualifier::None => assert_eq!(
+                    qualified, profile.title,
+                    "{} names a program, not a launcher",
+                    profile.id
+                ),
+            }
+        }
     }
 
     /// PIN — a profile is available exactly when its program is on the machine,

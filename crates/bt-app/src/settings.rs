@@ -401,7 +401,9 @@ impl SettingsRow {
             }
             Self::TabLayout => TAB_LAYOUT_OPTIONS.get(index).copied().map(tab_layout_label),
             Self::Sidebar => SIDEBAR_OPTIONS.get(index).copied().map(sidebar_label),
-            Self::DefaultProfile => profiles::PROFILES.get(index).map(|profile| profile.title),
+            Self::DefaultProfile => {
+                (index < profiles::PROFILES.len()).then(|| profiles::title(index))
+            }
         }
     }
 

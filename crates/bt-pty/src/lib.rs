@@ -566,12 +566,22 @@ impl PtySession {
         Self::spawn_default_with(size, wake, working_directory, &SystemShellEnvironment)
     }
 
-    /// Start `program` with `args` as this terminal's interactive shell, in `working_directory`.
+    /// Start `program` with `args` as this terminal's interactive shell, in `working_directory`,
+    /// with `environment` layered over the terminal's own declarations.
     ///
     /// The entry point a **profile** spawns through: the caller has already decided which
-    /// executable this is and which flags it takes, because those are properties of the profile
-    /// the user picked and not of "the shell". `spawn_default_in` is the special case of this
-    /// where the caller wants the default-shell resolution order instead of a named program.
+    /// executable this is, which flags it takes and which variables it needs, because those are
+    /// properties of the profile the user picked and not of "the shell". `spawn_default_in` is the
+    /// special case of this where the caller wants the default-shell resolution order instead of a
+    /// named program.
+    ///
+    /// The arguments are `OsString` and not `&str` because a profile's arguments now include
+    /// **paths** — the init file a bash-family profile is handed — and a path is not text this
+    /// crate is entitled to require be UTF-8.
+    ///
+    /// `environment` is applied to the resolved program only. The `powershell.exe` retry below is a
+    /// *different profile* by the time it runs, and variables that were chosen for the shell that
+    /// would not start are not facts about the one that did.
     ///
     /// It keeps the same recoverable-failure contract as `spawn_default`: a program that will not
     /// start falls back once to `powershell.exe` and leaves a one-line notice
@@ -581,14 +591,23 @@ impl PtySession {
     /// identical, already-failed spawn.
     pub fn spawn_shell_in(
         program: impl Into<OsString>,
-        args: &[&str],
+        args: &[OsString],
+        environment: &[(OsString, OsString)],
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
         let program = program.into();
         let fall_back = !program_is_windows_powershell(&program);
-        Self::spawn_interactive(program, args, size, wake, working_directory, fall_back)
+        Self::spawn_interactive(
+            program,
+            args,
+            environment,
+            size,
+            wake,
+            working_directory,
+            fall_back,
+        )
     }
 
     /// The testable core of `spawn_default`: shell resolution goes through the injected
@@ -605,7 +624,11 @@ impl PtySession {
             resolved.program,
             // PowerShell's own flag, stated by the one entry point that knows it is starting a
             // PowerShell. Every other shell's arguments arrive through `spawn_shell_in`.
-            POWERSHELL_INTERACTIVE_ARGS,
+            &POWERSHELL_INTERACTIVE_ARGS
+                .iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>(),
+            &[],
             size,
             wake,
             working_directory,
@@ -621,7 +644,8 @@ impl PtySession {
     /// declarations, and what a fallback leaves behind for the window to say.
     fn spawn_interactive(
         program: OsString,
-        args: &[&str],
+        args: &[OsString],
+        environment: &[(OsString, OsString)],
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
@@ -636,11 +660,14 @@ impl PtySession {
             Some(directory) if directory.is_dir() => directory,
             _ => std::env::current_dir().map_err(PtyError::Io)?,
         };
-        let command = args
+        let command = environment
             .iter()
             .fold(
-                PtyCommand::interactive_shell(program.clone()),
-                |command, argument| command.arg(*argument),
+                args.iter().fold(
+                    PtyCommand::interactive_shell(program.clone()),
+                    |command, argument| command.arg(argument),
+                ),
+                |command, (key, value)| command.env(key, value),
             )
             .working_directory(working_directory.clone());
         match Self::spawn(command, size, wake.clone()) {

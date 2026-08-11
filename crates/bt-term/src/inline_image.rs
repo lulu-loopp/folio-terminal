@@ -885,7 +885,7 @@ fn is_uri_byte(byte: u8) -> bool {
 /// or `localhost` and nothing else — this machine's hostname is deliberately not consulted here.
 /// A trailing slash names a directory, which is never an image.
 pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
-    decode_file_uri(uri, None, TrailingSlash::Reject)
+    decode_file_uri(uri, None, TrailingSlash::Reject, Rooting::DriveOnly)
         .filter(|path| has_admissible_image_extension(path))
 }
 
@@ -906,8 +906,28 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// own name — the two spellings of "this host" that a file URI has. Anything else is a remote
 /// share (`file://server/share/a.png`), which no local read may follow. Callers that must not
 /// honour a hostname at all pass `None`.
+///
+/// **This one accepts a POSIX root as well as a drive letter**, and that is what an OSC 7 report
+/// from a shell running inside WSL looks like: `file:///home/weiyi/src`. The directory a shell is
+/// standing in is a fact about *that shell's* filesystem, and a Linux shell on this machine has no
+/// drive letter to offer — `wslpath -w` would answer `\\wsl.localhost\<distro>\home\weiyi`, a UNC
+/// whose authority this very function is obliged to reject as a remote share. Refusing the POSIX
+/// spelling therefore does not keep a foreign path out; it only makes the most common directory in
+/// WSL unnameable, so a WSL pane could never say where it is.
+///
+/// What the wider door does **not** do is make such a path resolvable as a Windows one. Everything
+/// downstream that joins a relative reference onto this directory asks `is_local_absolute_path`
+/// first (see [`resolve_relative_reference`]), which still means "drive-rooted"; a POSIX directory
+/// therefore leaves relative image text undetected, which is the standing rule for a directory this
+/// terminal cannot vouch for (`docs/shell-integration.md` §34-35) rather than a new exception. The
+/// image peek keeps the strict reading too — see [`file_uri_to_local_image_path`].
 pub fn file_uri_to_local_path(uri: &str, local_host: Option<&str>) -> Option<PathBuf> {
-    decode_file_uri(uri, local_host, TrailingSlash::Directory)
+    decode_file_uri(
+        uri,
+        local_host,
+        TrailingSlash::Directory,
+        Rooting::DriveOrPosixRoot,
+    )
 }
 
 /// Whether a trailing `/` is a directory's own slash or an empty final name.
@@ -917,10 +937,27 @@ enum TrailingSlash {
     Reject,
 }
 
+/// Which spellings of "absolute" a decoded URI is allowed to name.
+///
+/// Two, because the two callers are asking about two different things. A file URI printed into the
+/// flow is a **reference this terminal may open**, and opening happens through Windows, so it has
+/// to be drive-rooted or it is nothing. An OSC 7 report is a **statement about where the shell that
+/// sent it is standing**, and that shell may not be a Windows process at all — the same window can
+/// hold a `pwsh` in `D:\src` and a WSL `bash` in `/home/weiyi/src`, and only one of those two
+/// sentences can be spelled with a drive letter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Rooting {
+    /// `D:\…` and nothing else.
+    DriveOnly,
+    /// `D:\…`, or a POSIX absolute path (`/home/weiyi`, `/mnt/d/src`).
+    DriveOrPosixRoot,
+}
+
 fn decode_file_uri(
     uri: &str,
     local_host: Option<&str>,
     trailing_slash: TrailingSlash,
+    rooting: Rooting,
 ) -> Option<PathBuf> {
     let rest = uri
         .get(..7)
@@ -943,23 +980,31 @@ fn decode_file_uri(
     {
         segments.pop();
     }
-    let mut native = String::new();
+    let mut decoded_segments = Vec::with_capacity(segments.len());
     for segment in segments {
         let decoded = percent_decode(segment)?;
         if decoded.is_empty() {
             return None;
         }
-        if !native.is_empty() {
-            native.push('\\');
-        }
-        native.push_str(&decoded);
+        decoded_segments.push(decoded);
     }
+    let mut native = decoded_segments.join("\\");
     // `file:///D:/` names the drive root: the separator that makes it a root belongs to the path.
     if native.len() == 2 && native.ends_with(':') {
         native.push('\\');
     }
-    let path = PathBuf::from(native);
-    is_local_absolute_path(&path).then_some(path)
+    if is_local_absolute_path(Path::new(&native)) {
+        return Some(PathBuf::from(native));
+    }
+    // Not a drive letter. The same segments spell a POSIX absolute path, and whether that is a path
+    // at all is the caller's question — see [`Rooting`]. The separator is the one the shell that
+    // sent it uses: `\mnt\d\src` would name the same place to `std::path`, and would be read back
+    // by a person as a Windows path that has lost its drive.
+    if rooting == Rooting::DriveOnly {
+        return None;
+    }
+    let posix = format!("/{}", decoded_segments.join("/"));
+    (!posix.contains('\0')).then(|| PathBuf::from(posix))
 }
 
 /// This machine's name — the one authority a `file://` URI may carry besides none and `localhost`.
@@ -1910,7 +1955,6 @@ mod tests {
         for rejected in [
             "file://server/share/src",
             "file://MACHINE/D:/src",
-            "file:///notadrive/src",
             "file:///D://src",
             "file:///D:/a%zz",
             "file:///",
@@ -1926,6 +1970,46 @@ mod tests {
             None
         );
         assert_eq!(file_uri_to_local_image_path("file:///D:/a.png/"), None);
+    }
+
+    /// A shell that is not a Windows process still has a directory, and OSC 7 is the only way it
+    /// can say so — the WSL half of `docs/shell-integration.md`'s working-directory contract.
+    ///
+    /// Red before `Rooting::DriveOrPosixRoot`: every one of these decoded to a *relative* path
+    /// (`mnt\d\src`), failed `is_local_absolute_path`, and came back `None`, so a WSL pane could
+    /// report its folder on every prompt and still be a pane that has never said where it is.
+    #[test]
+    fn a_working_directory_may_be_posix_rooted_while_an_image_reference_may_not() {
+        for (uri, expected) in [
+            ("file:///home/weiyi/src", "/home/weiyi/src"),
+            (
+                "file:///mnt/d/Developer/BetterTerminal",
+                "/mnt/d/Developer/BetterTerminal",
+            ),
+            // The trailing-slash and percent-decoding rules are the decoder's, not the drive's.
+            ("file:///mnt/d/Developer/", "/mnt/d/Developer"),
+            ("file:///mnt/d/My%20Pictures", "/mnt/d/My Pictures"),
+            ("file:///%E5%9B%BE%20%E7%89%87", "/图 片"),
+        ] {
+            assert_eq!(
+                file_uri_to_local_path(uri, None),
+                Some(PathBuf::from(expected)),
+                "{uri:?}"
+            );
+        }
+        // Every other gate still stands in front of it. A POSIX root buys no authority, no interior
+        // empty segment and no broken escape.
+        for rejected in [
+            "file://server/home/weiyi",
+            "file:///home//weiyi",
+            "file:///home/%zz",
+        ] {
+            assert_eq!(file_uri_to_local_path(rejected, None), None, "{rejected:?}");
+        }
+        // **The image peek does not widen with it.** A reference is something this terminal opens,
+        // and it opens through Windows; `/mnt/d/a.png` is a path only the shell that printed it can
+        // resolve, so it is not a candidate here however plausible it looks.
+        assert_eq!(file_uri_to_local_image_path("file:///mnt/d/a.png"), None);
     }
 
     /// PIN (relative path ruling, 2026-08-03, as widened the same day): the relative scan reads
