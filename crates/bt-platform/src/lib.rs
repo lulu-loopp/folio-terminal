@@ -532,6 +532,147 @@ mod windows_impl {
         }
     }
 
+    /// Open one file the user picked out of a directory listing with its
+    /// registered default handler — and never run a program.
+    ///
+    /// **Why a second bridge rather than widening the first.** [`open_local_file`]
+    /// serves paths *scraped out of terminal text*, where the only defence
+    /// against a hostile line of output is that the syntax policy is narrow
+    /// enough to be immutable. A row of the files tree has the opposite
+    /// provenance: the user chose the root, this process enumerated the
+    /// directory, and the user pressed the row. Making the two share one
+    /// validator would mean either the tree can open nothing but pictures or
+    /// terminal output can open anything.
+    ///
+    /// **Why programs are refused.** Not as a hedge — as the product rule
+    /// `DESIGN.md` §7.1.3 already implies by making activation mean *open the
+    /// preview*: the tree is a way of looking at files, and the thing next to it
+    /// that runs programs is the terminal, where running one is a line you typed
+    /// and can see. A double click that silently starts an executable is a verb
+    /// this pane does not have, and the fact that the pane sits half an inch
+    /// from a shell prompt is exactly why it should not acquire it by accident.
+    pub fn open_local_path(hwnd: NonZeroIsize, path: &Path) -> Result<(), String> {
+        validate_openable_path(path)?;
+        if names_a_program(path, std::env::var("PATHEXT").unwrap_or_default().as_str()) {
+            return Err(PROGRAM_REFUSED.to_owned());
+        }
+        let hwnd = HWND(hwnd.get() as *mut c_void);
+        let mut operation = "open".encode_utf16().collect::<Vec<_>>();
+        operation.push(0);
+        let mut target = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        target.push(0);
+        // SAFETY: the path was enumerated by this process from a directory the
+        // user rooted a column at, both buffers stay live and NUL-terminated for
+        // this synchronous call, and parameters and working directory are null,
+        // so Windows never receives a command line to reparse.
+        let result = unsafe {
+            ShellExecuteW(
+                Some(hwnd),
+                PCWSTR(operation.as_ptr()),
+                PCWSTR(target.as_ptr()),
+                PCWSTR::null(),
+                PCWSTR::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        let code = result.0 as isize;
+        if code <= 32 {
+            Err(format!("ShellExecuteW failed with code {code}"))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// The refusal's own words, so the caller can tell "this window will not do
+    /// that" apart from "Windows could not".
+    pub const PROGRAM_REFUSED: &str = "the files tree does not run programs";
+
+    /// The extensions that are a program whatever this machine's `PATHEXT` says.
+    ///
+    /// `PATHEXT` is the system's own list of what a *command line* will execute
+    /// and it is read as well, but it is not the whole answer: a `.lnk` is not
+    /// on it and points at anything at all, a `.scr` is an executable wearing a
+    /// screensaver's name, and `.hta`, `.reg`, `.msi` and `.url` are each opened
+    /// by a handler whose whole job is to act. Reading both means the list grows
+    /// with a machine that has added to `PATHEXT` without shrinking on one that
+    /// has emptied it.
+    const ALWAYS_A_PROGRAM: &[&str] = &[
+        "appref-ms",
+        "bat",
+        "cmd",
+        "com",
+        "cpl",
+        "exe",
+        "hta",
+        "jar",
+        "js",
+        "jse",
+        "lnk",
+        "msc",
+        "msi",
+        "msp",
+        "ps1",
+        "pif",
+        "reg",
+        "scf",
+        "scr",
+        "url",
+        "vb",
+        "vbe",
+        "vbs",
+        "wsf",
+        "wsh",
+    ];
+
+    /// Whether opening this name would start something rather than show it.
+    ///
+    /// Split out and given `pathext` as an argument rather than reading the
+    /// environment itself, so the rule is answerable in a test on a machine
+    /// whose own `PATHEXT` is whatever it is.
+    fn names_a_program(path: &Path, pathext: &str) -> bool {
+        let Some(extension) = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+        else {
+            // No extension means no registered handler to speak of, and
+            // `ShellExecute` falls back to the "open with" chooser rather than
+            // to running anything. That is a dialog, not an execution.
+            return false;
+        };
+        ALWAYS_A_PROGRAM.contains(&extension.as_str())
+            || pathext.split(';').any(|entry| {
+                entry
+                    .trim()
+                    .trim_start_matches('.')
+                    .eq_ignore_ascii_case(&extension)
+            })
+    }
+
+    /// The shape gate the tree's own bridge keeps: absolute and nameable.
+    ///
+    /// Wider than [`validate_local_image_path`] in exactly one way — a UNC share
+    /// is allowed — because a files column may legitimately be rooted at
+    /// `\\server\share`, and a tree that can list a path it then refuses to open
+    /// is a tree that lies about what its rows are.
+    fn validate_openable_path(path: &Path) -> Result<(), String> {
+        let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        if units.contains(&0) {
+            return Err("path contains an embedded NUL".to_owned());
+        }
+        let text = path.as_os_str().to_string_lossy();
+        let bytes = text.as_bytes();
+        let drive_rooted = bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/');
+        let unc = text.starts_with(r"\\") && text.len() > 2;
+        if !drive_rooted && !unc {
+            return Err("path must be absolute".to_owned());
+        }
+        Ok(())
+    }
+
     fn validate_local_image_path(path: &Path) -> Result<(), String> {
         let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
         if units.contains(&0) {
@@ -1141,8 +1282,8 @@ mod windows_impl {
     #[cfg(test)]
     mod tests {
         use super::{
-            CLIPBOARD_OPEN_RETRY_DELAYS, DeferredMenuState, primary_language_id,
-            retry_open_clipboard, validate_local_image_path,
+            CLIPBOARD_OPEN_RETRY_DELAYS, DeferredMenuState, names_a_program, primary_language_id,
+            retry_open_clipboard, validate_local_image_path, validate_openable_path,
         };
         use std::path::Path;
 
@@ -1215,15 +1356,74 @@ mod windows_impl {
             assert!(validate_local_image_path(Path::new(r"C:\tmp\image.bmp")).is_err());
             assert!(validate_local_image_path(Path::new("C:\\tmp\\bad\0.png")).is_err());
         }
+
+        /// PIN — the tree's bridge opens documents and refuses programs, and the
+        /// refusal does not depend on this machine's `PATHEXT` being anything in
+        /// particular.
+        #[test]
+        fn the_tree_bridge_opens_what_it_can_show_and_never_what_it_would_run() {
+            let empty = "";
+            for document in [
+                r"C:\notes\readme.md",
+                r"C:\notes\report.pdf",
+                r"C:\notes\archive.zip",
+                r"C:\notes\NOEXTENSION",
+                r"C:\notes\photo.PNG",
+            ] {
+                assert!(
+                    !names_a_program(Path::new(document), empty),
+                    "{document} is something to look at"
+                );
+            }
+            for program in [
+                r"C:\bin\tool.exe",
+                r"C:\bin\TOOL.EXE",
+                r"C:\bin\run.bat",
+                r"C:\bin\install.msi",
+                r"C:\bin\shortcut.lnk",
+                r"C:\bin\saver.scr",
+                r"C:\bin\page.hta",
+                r"C:\bin\keys.reg",
+                r"C:\bin\script.ps1",
+            ] {
+                assert!(
+                    names_a_program(Path::new(program), empty),
+                    "{program} would run"
+                );
+            }
+        }
+
+        /// PIN — a machine that has taught its command line to execute a new
+        /// extension has taught this bridge to refuse it.
+        #[test]
+        fn a_machine_that_makes_something_executable_makes_it_refused_here() {
+            let path = Path::new(r"C:\bin\macro.xyz");
+            assert!(!names_a_program(path, ".EXE;.BAT"));
+            assert!(names_a_program(path, ".EXE;.XYZ"));
+            assert!(names_a_program(path, ".exe;.xyz"));
+            // An emptied `PATHEXT` cannot open the door the fixed list shuts.
+            assert!(names_a_program(Path::new(r"C:\bin\tool.exe"), ""));
+        }
+
+        /// A column may be rooted on a share, so its rows have to be openable —
+        /// which is the one way this gate is wider than the image bridge's.
+        #[test]
+        fn the_tree_bridge_takes_a_share_and_still_refuses_a_relative_name() {
+            assert!(validate_openable_path(Path::new(r"C:\notes\a.txt")).is_ok());
+            assert!(validate_openable_path(Path::new(r"\\server\share\a.txt")).is_ok());
+            assert!(validate_openable_path(Path::new(r"notes\a.txt")).is_err());
+            assert!(validate_openable_path(Path::new("C:\\notes\\bad\0.txt")).is_err());
+        }
     }
 }
 
 #[cfg(windows)]
 pub use windows_impl::{
-    CustomWindowFrame, ImeSystemCaret, MathContextMenu, client_area_animation_enabled,
-    clipboard_text, get_dpi_for_window, get_window_rect, get_work_area,
-    install_window_class_background, is_window_minimized, open_local_file, request_window_close,
-    set_clipboard_text, set_window_outer_rect, shell_execute, wheel_scroll_amount,
+    CustomWindowFrame, ImeSystemCaret, MathContextMenu, PROGRAM_REFUSED,
+    client_area_animation_enabled, clipboard_text, get_dpi_for_window, get_window_rect,
+    get_work_area, install_window_class_background, is_window_minimized, open_local_file,
+    open_local_path, request_window_close, set_clipboard_text, set_window_outer_rect,
+    shell_execute, wheel_scroll_amount,
 };
 
 #[cfg(test)]

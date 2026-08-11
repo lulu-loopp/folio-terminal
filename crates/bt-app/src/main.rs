@@ -116,6 +116,27 @@ const MULTI_CLICK_INTERVAL: Duration = Duration::from_millis(500);
 const HYPERLINK_HOVER_DELAY: Duration = Duration::from_millis(300);
 const MATH_WORKER_STOPPED_NOTICE: &str =
     "Formula rendering stopped; terminal input and output remain available";
+/// What the tree says when a row it will not open is activated.
+///
+/// **Short on purpose.** The status overlay is right-aligned into the pane's own
+/// width and keeps the *tail* of anything longer, so a sentence that does not
+/// fit loses its beginning — and the beginning is the half that says what
+/// happened. Measured against a files column beside one terminal in a 1030pt
+/// window, which leaves the shell about 37 columns: this is 36, and what a
+/// narrower pane drops (`The files tree`) still leaves a clause that reads.
+///
+/// The advice it might have added — that this is a terminal, and typing the
+/// name is how you run one — is left out for the same reason. It doubled the
+/// length to say something the prompt underneath is already saying.
+const FILES_PROGRAM_REFUSED_NOTICE: &str = "The files tree does not run programs";
+/// How long that answer stays on screen.
+///
+/// Long enough to be read once without being in the way, and the same order as
+/// the mock-up's own 1300ms click feedback. It expires against the frame clock
+/// rather than a timer: the cursor blink already brings a frame around twice a
+/// second, so the sentence leaves on its own without anything having to be
+/// scheduled to remove it.
+const FILES_NOTICE_DWELL: Duration = Duration::from_millis(2600);
 const PANIC_LOG_FILENAME: &str = "bt-app-panic.log";
 
 #[derive(Clone, Copy, Debug)]
@@ -454,6 +475,71 @@ fn press_files_node(state: &mut seats::FilesLeafState, key: &str, kind: files::R
         // standing, one level further in, for ever.
         files::RowKind::Cycle | files::RowKind::File | files::RowKind::Notice(_) => false,
     }
+}
+
+/// Point one column's durable state at another folder (E56).
+///
+/// Reports whether anything moved, which is what tells the caller whether a
+/// cache is owed dropping and a frame is owed drawing — and what makes choosing
+/// the folder you are already in cost nothing rather than silently throwing your
+/// expansion away.
+fn reroot_files_state(state: &mut seats::FilesLeafState, root: &str) -> bool {
+    if state.root == root {
+        return false;
+    }
+    state.root = root.to_owned();
+    // A `/src` left open under the old root is not the `/src` of the new one.
+    // Honouring it would unfold whatever happens to be called that, which is a
+    // tree opening itself at a folder you have never seen.
+    state.open.clear();
+    state.sel = None;
+    true
+}
+
+/// Where an activated files row goes.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RowActivation {
+    /// A picture: the preview seat this build already has.
+    Preview(PathBuf),
+    /// Everything else: whatever the system has registered for it.
+    DefaultApp(PathBuf),
+    /// A column with no root has no path to hand anyone.
+    Nowhere,
+}
+
+/// Which of the two doors a row's name opens (K156).
+///
+/// Pure, and asked of the *whole* path rather than of the row's name, because
+/// the answer has to be the same one the terminal gives: an image reference on a
+/// line and a row in the tree name the same file, and the two must not disagree
+/// about whether it is a picture. That is why the test is
+/// [`bt_term::has_admissible_image_extension`] — the detector's own list — and
+/// not a second copy of six extensions written here.
+fn files_row_activation(root: &str, key: &str) -> RowActivation {
+    if !files::root_is_addressable(root) {
+        return RowActivation::Nowhere;
+    }
+    let path = files::full_path(root, key);
+    if bt_term::has_admissible_image_extension(&path) {
+        RowActivation::Preview(path)
+    } else {
+        RowActivation::DefaultApp(path)
+    }
+}
+
+/// The files column a stored [`LeafId`] still names on the tab in front of you.
+///
+/// The whole of D47's self-healing, in one place and answerable without a
+/// window. A keyboard lent to a column has three ways of coming back that
+/// nothing bothers to announce — the tab was switched, the column was closed,
+/// the seat is not a files column any more — and answering them at the *read*
+/// rather than at each of the writes is what makes it impossible to miss one.
+fn files_keyboard_seat_of(owner: Option<LeafId>, tab: &TabState) -> Option<SeatId> {
+    let owner = owner?;
+    (owner.tab == tab.id
+        && tab.files.contains_key(&owner.seat)
+        && tab.seats.files().contains(&owner.seat))
+    .then_some(owner.seat)
 }
 
 fn disable_math_worker_state(running: &mut bool, notice_pending: &mut bool) -> bool {
@@ -1153,6 +1239,40 @@ struct Runtime {
     seat_viewport: LogicalRect,
     /// The strip's double-click history (J99).
     tab_clicks: TabClicks,
+    /// One files column's double-click history (K155).
+    files_row_clicks: FilesRowClicks,
+    /// Which files column has its root menu up (E53-E61).
+    root_menu: profiles::RootMenu,
+    /// How wide each files head's name was last *drawn* — see
+    /// [`Runtime::measure_files_names`] for why the hit test reads it from here
+    /// rather than measuring for itself.
+    files_name_widths: BTreeMap<SeatId, f32>,
+    /// A one-line answer the tree owes the user, shown on the next frame.
+    ///
+    /// A `String` and not a flag, unlike the two worker notices beside it, for a
+    /// reason those two do not have: they each have exactly one sentence to say
+    /// and say it once per run, while this one is said as often as it is earned.
+    files_notice: Option<(String, Instant)>,
+    /// The files column holding the keyboard, or `None` when a shell has it.
+    ///
+    /// **This is `InputOwner::FilesTree`** (`docs/DESIGN.md` §7.1.5, D47) — the
+    /// one member of that enum that had no body until now — and it is here
+    /// rather than beside `focused_leaf` because the two answer different
+    /// questions. `focused_leaf` is a `SeatId` that a tab promises always names
+    /// a live shell (a tab with no session for it is the crash I106 reports), so
+    /// pointing it at a files column is not a thing it can be asked to do. This
+    /// is the separate, window-level fact that the keyboard has been lent
+    /// *somewhere else* — while `focused_leaf` goes on naming the shell that
+    /// will get it back.
+    ///
+    /// A [`LeafId`] and not a bare seat, because a seat id is only unique inside
+    /// its tab: the same number names a different pane one tab over, and a
+    /// keyboard that followed the number would land in a column the user cannot
+    /// see. Reading it through [`Runtime::files_keyboard_seat`] is what turns it
+    /// back into a seat, and that accessor is where every way it can go stale —
+    /// the tab switched, the column was closed, the pane became something else —
+    /// is answered in one place.
+    files_focus: Option<LeafId>,
     /// The open tab-name editor, or `None` when nobody is renaming anything.
     ///
     /// On the runtime rather than on the tab, because it is a *window*-level
@@ -1562,6 +1682,10 @@ impl TabState {
                         // about *when*, which the hit test has no business
                         // asking and no answer for.
                         turns: BTreeMap::new(),
+                        // Left false and filled by the caller for the same
+                        // reason: which column holds the keyboard is a window's
+                        // fact, and a tab cannot answer it.
+                        focused: false,
                     },
                     view.wanted,
                 ),
@@ -2639,6 +2763,49 @@ impl TabClicks {
     /// breaks the chain — the `×`, the pin, a middle click, a press on another
     /// piece of chrome — because none of them is the first half of a double
     /// click on a tab (J99: "a double click on `.close` is two button presses").
+    fn interrupt(&mut self) {
+        self.last = None;
+    }
+}
+
+/// A files tree's own click counter — [`TabClicks`] for rows.
+///
+/// **Identity is the row's stable id and never its index**, which is the same
+/// choice `TabClicks` makes and here it is load-bearing twice over. A directory
+/// read can land between the two clicks of a double click and make the list
+/// longer above the row you are on, so the row you pressed twice is the row at
+/// two different indices; and a fold anywhere above it does the same thing
+/// faster. Pairing on the id is what makes "you clicked the same thing twice"
+/// mean what it says.
+///
+/// The seat is in the key for the reason a tab is in `TabClicks`': one click in
+/// each of two columns is two first clicks, however alike the two paths look.
+#[derive(Default)]
+struct FilesRowClicks {
+    last: Option<(SeatId, String, Instant)>,
+}
+
+impl FilesRowClicks {
+    fn register(&mut self, seat: SeatId, key: &str, now: Instant) -> TabClick {
+        let paired = self.last.as_ref().is_some_and(|(last_seat, last_key, at)| {
+            *last_seat == seat
+                && last_key == key
+                && now.saturating_duration_since(*at) <= MULTI_CLICK_INTERVAL
+        });
+        // A double click consumes its own history, exactly as the strip's does:
+        // without this a third press inside the window pairs with the second and
+        // opens the file twice.
+        self.last = (!paired).then(|| (seat, key.to_owned(), now));
+        if paired {
+            TabClick::Double
+        } else {
+            TabClick::Single
+        }
+    }
+
+    /// Forget the last click. Anything that is not a press on a row breaks the
+    /// chain — including a press on a *folder* row, which is why folding and
+    /// unfolding twice quickly can never come out as an activation.
     fn interrupt(&mut self) {
         self.last = None;
     }
@@ -7627,6 +7794,11 @@ impl Runtime {
             last_drawn_dock_reveal: None,
             seat_viewport,
             tab_clicks: TabClicks::default(),
+            files_row_clicks: FilesRowClicks::default(),
+            root_menu: profiles::RootMenu::default(),
+            files_name_widths: BTreeMap::new(),
+            files_notice: None,
+            files_focus: None,
             rename: None,
             rename_blink: CursorBlink::new(Instant::now()),
             settings_marks: marks::ChromeMarkRasters::default(),
@@ -8434,6 +8606,13 @@ impl Runtime {
         // hold one.
         let pane_transforms = self.pane_transforms(now);
         let resizing_cards = self.resizing_cards_frame(now);
+        // Measured into the runtime rather than into a local, because the hit
+        // test needs the very same numbers and cannot measure: it is `&self` by
+        // construction (a pointer moving is not a reason to touch a renderer).
+        // Storing them here, where the picture is built from them, is what makes
+        // "the button you can press is the button you can see" true by
+        // construction rather than by two functions agreeing.
+        self.files_name_widths = self.measure_files_names(&files_names);
         let chrome = seats::build_chrome_for_tabs(
             &self.seats,
             &self.seat_layout,
@@ -8461,6 +8640,8 @@ impl Runtime {
                 terminal_names: &terminal_names,
                 leaf_marks: &leaf_marks,
                 files_names: &files_names,
+                files_name_widths: &self.files_name_widths,
+                files_root_open: self.root_menu.seat(),
                 files_trees: &files_trees,
                 preview_message: preview_message.as_deref(),
                 fit_overflow: self.seat_overflow,
@@ -8527,6 +8708,19 @@ impl Runtime {
                 for (row, rect, text) in layout.tips(&self.profile_programs, self.recent.entries())
                 {
                     anchors.push(tooltip::TooltipAnchorId::ProfileRow(row), rect, text);
+                }
+            }
+            // The other popup, on the same terms: its rows show a folder's last
+            // segment, so the whole path has to be somewhere, and the tip is
+            // where every other cropped caption in this window puts it.
+            if let Some(layout) = self.root_menu_layout() {
+                let choices = self
+                    .root_menu
+                    .seat()
+                    .map(|seat| self.root_choices(seat))
+                    .unwrap_or_default();
+                for (row, rect, text) in layout.tips(&choices) {
+                    anchors.push(tooltip::TooltipAnchorId::RootRow(row), rect, text);
                 }
             }
             let strip = seats::tab_strip_geometry(
@@ -9352,6 +9546,25 @@ impl Runtime {
                     &mut measure,
                 )
             }
+        } else if let Some(layout) = self.root_menu_layout() {
+            // Beside the picker in the same `else if` chain, which is what makes
+            // the two mutually exclusive in the *picture* as well as in the
+            // state: E61's rule is that one popup is up at a time, and a chain
+            // cannot draw both however the flags are set.
+            let choices = self
+                .root_menu
+                .seat()
+                .map(|seat| self.root_choices(seat))
+                .unwrap_or_default();
+            let current = self
+                .root_menu
+                .seat()
+                .map(|seat| self.files_state(seat).root)
+                .unwrap_or_default();
+            let hover = self.root_menu.hover();
+            let renderer = &mut self.renderer;
+            let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+            profiles::root_menu_build(&layout, &choices, &current, hover, &mut measure)
         } else {
             Vec::new()
         });
@@ -10619,6 +10832,17 @@ impl Runtime {
             // let the next present assert a stale grid against the new pane.
             self.last_presented_frame = None;
         }
+        // **D40's rule, now that there is a second kind of thing to focus.**
+        // Pressing a pane is how you say "type here", and a files column is
+        // somewhere you can type — arrows and Enter are its whole vocabulary. So
+        // the press lends it the keyboard, and a press anywhere else takes the
+        // keyboard straight back to the shell that never stopped being
+        // `focused_leaf`. Nothing is consumed: this runs above the router, and
+        // the same press goes on to land on the row it was aimed at.
+        let files = self.tabs[self.active_tab].files.contains_key(&seat);
+        if self.set_files_keyboard(files.then_some(seat)) {
+            self.refresh_chrome();
+        }
         if !self.seats.set_focus(seat) {
             return Ok(());
         }
@@ -11014,7 +11238,27 @@ impl Runtime {
                 hovered_reference.as_ref().map(|(_, reference)| reference),
             );
         }
-        if let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending) {
+        // Asked first, because it answers a gesture the user has just made and
+        // is waiting on, while the two below announce a background loss that
+        // happened whenever it happened.
+        //
+        // **Held for a dwell rather than taken once.** The two notices below are
+        // one-shots and can afford to be: they report a thread that died, and a
+        // sentence about that is worth exactly one frame whenever it lands. This
+        // one is an *answer* — the user double-clicked something and this is what
+        // came back — and an answer that is gone before the next repaint is a
+        // gesture that looks like it did nothing at all. The mock-up's own
+        // click-feedback (B24) holds its word for 1300ms for the same reason.
+        if let Some((notice, shown_at)) = self.files_notice.clone() {
+            if Instant::now().saturating_duration_since(shown_at) < FILES_NOTICE_DWELL {
+                terminal_frame.status_text = Some(notice);
+            } else {
+                self.files_notice = None;
+            }
+        }
+        if terminal_frame.status_text.is_none()
+            && let Some(notice) = take_math_worker_notice(&mut self.math_worker_notice_pending)
+        {
             terminal_frame.status_text = Some(notice.to_owned());
         }
         // The same one-shot, for the same kind of loss. Asked second so that a
@@ -11111,10 +11355,12 @@ impl Runtime {
         let active = self.active_tab;
         let tab_id = self.tabs[active].id;
         let motion = self.motion;
+        let focused = self.files_keyboard_seat();
         let walked = self.files_tree_walk();
         let mut views = BTreeMap::new();
         let mut asks = Vec::new();
         for (seat, (mut content, wanted)) in walked {
+            content.focused = Some(seat) == focused;
             let root = self.tabs[active]
                 .files
                 .get(&seat)
@@ -11157,9 +11403,13 @@ impl Runtime {
 
     /// The rows as the hit test sees them: walked, never asked for.
     fn files_tree_contents(&self) -> BTreeMap<SeatId, seats::FilesTreeContent> {
+        let focused = self.files_keyboard_seat();
         self.files_tree_walk()
             .into_iter()
-            .map(|(seat, (content, _))| (seat, content))
+            .map(|(seat, (mut content, _))| {
+                content.focused = Some(seat) == focused;
+                (seat, content)
+            })
             .collect()
     }
 
@@ -11243,13 +11493,24 @@ impl Runtime {
         let motion = self.motion;
         let trees = self.files_trees(now);
         let Some(row) = trees.get(&seat).and_then(|tree| tree.rows.get(index)) else {
+            self.files_row_clicks.interrupt();
             return Ok(());
         };
         if !row.is_node() {
+            self.files_row_clicks.interrupt();
             return Ok(());
         }
         let key = row.key.clone();
         let kind = row.kind;
+        // K156: the second press on one file row opens it. A folder row is
+        // deliberately not counted — the mock-up's `dblclick` handler returns at
+        // once for `dir === "1"` (7847), so unfolding twice quickly is two
+        // folds, which is what it looks like, and nothing else.
+        let activating = matches!(kind, RowKind::File)
+            && self.files_row_clicks.register(seat, &key, now) == TabClick::Double;
+        if !matches!(kind, RowKind::File) {
+            self.files_row_clicks.interrupt();
+        }
         let active = self.active_tab;
         let Some(state) = self.tabs[active].files.get_mut(&seat) else {
             return Ok(());
@@ -11267,11 +11528,346 @@ impl Runtime {
         if opening {
             self.refresh_files_dir(seat, &key);
         }
+        if activating {
+            self.activate_files_row(seat, &key)?;
+        }
         self.mark_session_dirty(now);
         if self.refresh_chrome() {
             self.present_chrome_change()?;
         }
         Ok(())
+    }
+
+    /// How wide each files head's name is drawn (B15).
+    ///
+    /// Measured with the renderer's own font at the head's own size, because a
+    /// button that hugs its label has to be told how long the label is and this
+    /// is the only place in the window that can answer. The same numbers reach
+    /// the painter and [`seats::hit_files_root`], so the two cannot disagree
+    /// about where the button ends.
+    fn measure_files_names(&mut self, names: &BTreeMap<SeatId, String>) -> BTreeMap<SeatId, f32> {
+        let size =
+            bt_render::SEAT_TITLE_FONT_LOGICAL_PX * self.renderer.metrics().scale_factor as f32;
+        names
+            .iter()
+            .map(|(seat, name)| (*seat, self.renderer.measure_chrome_text(name, size)))
+            .collect()
+    }
+
+    /// The root menu's box this frame, or `None` when it is shut.
+    ///
+    /// **Laid out against the live head, every frame** (E59/E60). The menu
+    /// floats over the panes while its anchor lives inside one, and a pane that
+    /// moved — a divider dragged, a sibling closed, the window resized — leaves
+    /// a menu pointing at where its button used to be. Re-deriving it from the
+    /// current layout is the fix the mock-up arrived at after the same bug three
+    /// times, and it makes the second half free: an anchor that has gone folds
+    /// the menu instead of measuring a rectangle that is no longer anywhere.
+    fn root_menu_layout(&mut self) -> Option<profiles::RootMenuLayout> {
+        let seat = self.root_menu.seat()?;
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let names = self.files_names();
+        let widths = self.measure_files_names(&names);
+        let placement = self.seat_layout.rects.iter().find(|placement| {
+            placement.id == seat && placement.kind == bt_layout::SeatKind::Files
+        })?;
+        let device = placement.device_rect?;
+        let rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        let head = seats::pane_head_geometry(rect, placement.kind, scale);
+        let anchor =
+            seats::files_root_box(&head, scale, widths.get(&seat).copied().unwrap_or(0.0))?;
+        let choices = self.root_choices(seat);
+        if choices.is_empty() {
+            return None;
+        }
+        let (width, height) = self.renderer.presentation_geometry().swapchain_size;
+        let renderer = &mut self.renderer;
+        let mut measure = |text: &str, size: f32| renderer.measure_chrome_text(text, size);
+        Some(profiles::root_menu_layout(
+            anchor,
+            (width as f32, height as f32),
+            scale,
+            &choices,
+            &mut measure,
+        ))
+    }
+
+    /// The places this column could be pointed at (E54).
+    ///
+    /// The shells' folders are read here rather than in `profiles` because that
+    /// is where the sessions are: red line L1's argument, one layer up. Every
+    /// pane of the tab in front of you gets a say, not only the focused one —
+    /// "a terminal is here" is true of all of them, and the whole point of the
+    /// list is to name the places you are already standing.
+    fn root_choices(&self, seat: SeatId) -> Vec<profiles::RootChoice> {
+        let tab = &self.tabs[self.active_tab];
+        let cwds: Vec<String> = tab
+            .seats
+            .terminals()
+            .iter()
+            .filter_map(|seat| tab.sessions.get(seat))
+            .filter_map(|leaf| leaf.session.working_directory())
+            .map(|cwd| cwd.display().to_string())
+            .collect();
+        let home = profiles::home_directory(&bt_pty::SystemShellEnvironment)
+            .map(|home| home.display().to_string());
+        profiles::root_choices(&tab.files_state(seat).root, home.as_deref(), &cwds)
+    }
+
+    /// Point a column somewhere else (E56).
+    ///
+    /// **The expansion set and the selection go; the width stays.** They are
+    /// facts about a *place*, and this is a different place: a `/src` left open
+    /// under the old root is not the `/src` of the new one, and honouring it
+    /// would unfold whatever happened to be called that. The width is not about
+    /// the place at all — it is how much room you gave this column on your
+    /// screen — so it is the one thing that survives, which is also why it lives
+    /// on the seat rather than in the state being cleared here.
+    ///
+    /// The cache goes too, and it has to: it is keyed by root-relative id, so
+    /// every key in it would silently mean somewhere else the moment the root
+    /// moved. Dropping it is what turns the next walk into a fresh set of
+    /// questions.
+    fn reroot_files_column(&mut self, seat: SeatId, root: &str) -> Result<()> {
+        let active = self.active_tab;
+        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+            return Ok(());
+        };
+        if !reroot_files_state(state, root) {
+            return Ok(());
+        }
+        self.tabs[active].file_trees.remove(&seat);
+        self.mark_session_dirty(Instant::now());
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    /// The button on the head: open the menu here, or shut it if it is already
+    /// here (E57).
+    fn toggle_root_menu(&mut self, seat: SeatId) -> Result<()> {
+        // A popup opening closes whatever else was up, and it has to be the
+        // opener that does it: E61's judgement is that mutual exclusion cannot
+        // be left to a press falling through, because every opener stops its own
+        // press from travelling.
+        self.profile_menu.close();
+        self.root_menu.toggle(seat);
+        // Pressing the head is also how you say "type here", and the column is
+        // somewhere you can type — so the button lends the keyboard exactly as
+        // the tree below it does.
+        self.set_files_keyboard(Some(seat));
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
+    fn close_root_menu(&mut self) -> Result<bool> {
+        if !self.root_menu.close() {
+            return Ok(false);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// The files column holding the keyboard *right now*, or `None`.
+    ///
+    /// Every way the stored [`LeafId`] can go stale is answered here rather than
+    /// by writing `None` back from each of the places one of them happens: the
+    /// tab was switched, the column was closed, the pane it named became
+    /// something else. Reading it is therefore total and self-healing, and the
+    /// keyboard falls back to the shell the instant the column it was lent to
+    /// stops being on screen.
+    fn files_keyboard_seat(&self) -> Option<SeatId> {
+        files_keyboard_seat_of(self.files_focus, &self.tabs[self.active_tab])
+    }
+
+    /// Lend the keyboard to a column, or take it back for the shells.
+    ///
+    /// Returns whether anything changed, because the selection ring the tree
+    /// wears while it has the keyboard is drawn from this and a frame is owed
+    /// exactly when it moves.
+    fn set_files_keyboard(&mut self, seat: Option<SeatId>) -> bool {
+        let tab = self.tabs[self.active_tab].id;
+        let owner = seat.map(|seat| LeafId { tab, seat });
+        let changed = self.files_focus != owner;
+        self.files_focus = owner;
+        changed
+    }
+
+    /// Enter, Space or a double click on a file row (K156/D44).
+    ///
+    /// **Two doors, one gesture.** A picture goes to the preview seat this build
+    /// already has — the very machine a click on an image path in the terminal
+    /// drives, so a `.png` opens in the same place however you reached it —
+    /// and everything else goes to the handler the system has registered for
+    /// it. That split is an interim and is written down as one: `DESIGN.md`
+    /// §7.1.3 rules that activating *any* file opens the preview, with
+    /// "no preview" cards for what cannot be shown, and the preview block is
+    /// what will make the second door narrow to the files this window cannot
+    /// display itself.
+    ///
+    /// **The keyboard does not move.** §7.1.3 asks for browsing continuity in as
+    /// many words ("打开时键盘焦点不离开树"): opening a file is something you do
+    /// on the way past, and a tree that hands the keyboard away every time you
+    /// look at something can only be walked once.
+    fn activate_files_row(&mut self, seat: SeatId, key: &str) -> Result<()> {
+        let root = self.tabs[self.active_tab].files_state(seat).root;
+        match files_row_activation(&root, key) {
+            RowActivation::Preview(path) => self.open_preview_image(path),
+            RowActivation::DefaultApp(path) => {
+                self.open_local_path(&path);
+                Ok(())
+            }
+            RowActivation::Nowhere => Ok(()),
+        }
+    }
+
+    /// Hand one path to the system's default handler, and say so when the window
+    /// declines.
+    ///
+    /// The refusal is spoken rather than logged: a double click that does
+    /// nothing at all is indistinguishable from a double click that was not
+    /// registered, and "the files tree does not run programs" is a rule the user
+    /// is entitled to be told once, in the same one-line status the worker
+    /// notices use.
+    fn open_local_path(&mut self, path: &Path) {
+        let result = window_hwnd(&self.window).and_then(|hwnd| {
+            bt_platform::open_local_path(hwnd, path)
+                .map_err(|error| anyhow!(error))
+                .context("open an activated files row with its default handler")
+        });
+        if let Err(error) = result {
+            if format!("{error:#}").contains(bt_platform::PROGRAM_REFUSED) {
+                self.files_notice = Some((FILES_PROGRAM_REFUSED_NOTICE.to_owned(), Instant::now()));
+            }
+            eprintln!("recoverable files row open failure: {error:#}");
+        }
+    }
+
+    /// One key, with a files column holding the keyboard (D44/D47).
+    ///
+    /// Returns whether the key was the tree's at all. Everything that *is* the
+    /// tree's is consumed here whether or not it moved anything, which is D49
+    /// stated as code: with a column focused there is nothing to type into, and
+    /// a letter that fell through to the encoder would land in a shell the user
+    /// is not looking at.
+    fn files_tree_key(&mut self, seat: SeatId, event: &KeyEvent) -> Result<bool> {
+        let Some(command) = files::tree_command(&event.logical_key, self.modifiers) else {
+            // Still the tree's key: it owns the keyboard, so nothing here
+            // reaches a shell. It simply has nothing to do with this one.
+            return Ok(true);
+        };
+        if event.repeat && matches!(command, files::TreeCommand::Activate) {
+            // Holding Enter down on a file would open it once per repeat.
+            // Travel repeats happily; opening is a verb you mean once.
+            return Ok(true);
+        }
+        if command == files::TreeCommand::Release {
+            if self.set_files_keyboard(None) && self.refresh_chrome() {
+                self.present_chrome_change()?;
+            }
+            return Ok(true);
+        }
+        let now = Instant::now();
+        let motion = self.motion;
+        let rows = self
+            .files_trees(now)
+            .get(&seat)
+            .map(|tree| tree.rows.clone())
+            .unwrap_or_default();
+        let active = self.active_tab;
+        let Some(state) = self.tabs[active].files.get_mut(&seat) else {
+            return Ok(true);
+        };
+        let action = files::apply_tree_command(state, &rows, command);
+        let selected = match &action {
+            files::TreeAction::None | files::TreeAction::Release => None,
+            files::TreeAction::Select(key)
+            | files::TreeAction::Opened(key)
+            | files::TreeAction::Closed(key)
+            | files::TreeAction::Activate(key) => Some(key.clone()),
+        };
+        match &action {
+            files::TreeAction::Opened(key) | files::TreeAction::Closed(key) => {
+                let opened = matches!(action, files::TreeAction::Opened(_));
+                self.tabs[active]
+                    .file_trees
+                    .entry(seat)
+                    .or_default()
+                    .turn_row(key, opened, now, motion);
+                if opened {
+                    self.refresh_files_dir(seat, key);
+                }
+            }
+            files::TreeAction::Activate(key) => {
+                let key = key.clone();
+                self.activate_files_row(seat, &key)?;
+            }
+            files::TreeAction::None | files::TreeAction::Select(_) | files::TreeAction::Release => {
+            }
+        }
+        if let Some(key) = selected {
+            self.reveal_files_row(seat, &key);
+        }
+        if !matches!(action, files::TreeAction::None) {
+            self.mark_session_dirty(now);
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(true)
+    }
+
+    /// Scroll a column just far enough that the row it is standing on is on
+    /// screen.
+    ///
+    /// A browser does this for nothing — a focused element is scrolled into view
+    /// by the engine, which is why the mock-up's `filesTreeKey` never mentions
+    /// it. Here it is ours, and without it ↓ walks the selection off the bottom
+    /// edge and the tree looks like it stopped responding.
+    ///
+    /// Minimal travel and never re-centring: a row already in view moves
+    /// nothing, and a row just past an edge comes exactly to that edge. The
+    /// alternative — always putting the selection in the middle — makes every
+    /// keypress scroll the whole list, which is the same list moving under your
+    /// eyes for no reason.
+    fn reveal_files_row(&mut self, seat: SeatId, key: &str) {
+        let scale = self.renderer.metrics().scale_factor as f32;
+        let trees = self.files_tree_contents();
+        let Some(tree) = trees.get(&seat) else {
+            return;
+        };
+        let Some(index) = tree.rows.iter().position(|row| row.key == key) else {
+            return;
+        };
+        let Some(body) = seats::files_body_rect(&self.seat_layout, seat, scale) else {
+            return;
+        };
+        let geometry = seats::files_tree_geometry(body, tree.rows.len(), tree.scroll_px, scale);
+        let row = geometry.row_rect(index);
+        let above = geometry.viewport[1] - row[1];
+        let below = row[3] - geometry.viewport[3];
+        let travel = if above > 0.0 {
+            -above
+        } else if below > 0.0 {
+            below
+        } else {
+            return;
+        };
+        let cache = self.tabs[self.active_tab]
+            .file_trees
+            .entry(seat)
+            .or_default();
+        cache.scroll_px = (geometry.scroll_px + travel).max(0.0);
     }
 
     /// Wheel over a files column's body (C28's `overflow-y: auto`).
@@ -13235,6 +13831,21 @@ impl Runtime {
                 return Ok(());
             }
         }
+        // The root menu takes the pointer the same way and on the same terms.
+        if let Some(layout) = self.root_menu_layout() {
+            let over = profiles::root_menu_hit(&layout, position.x, position.y);
+            if self.root_menu.set_hover(over.flatten()) && self.refresh_overlay() {
+                self.present_chrome_change()?;
+            }
+            if over.is_some() {
+                let anchor = self
+                    .tooltip_anchor_at(position)
+                    .filter(|anchor| matches!(anchor, tooltip::TooltipAnchorId::RootRow(_)));
+                self.note_tooltip(anchor)?;
+                self.update_chrome_hover_target(None)?;
+                return Ok(());
+            }
+        }
         // A divider drag owns the pointer outright: while one is in flight the
         // terminal hears nothing, which is the same rule an in-progress
         // selection drag already lives by.
@@ -13532,6 +14143,18 @@ impl Runtime {
             ),
         }
         .or_else(|| seats::hit_window_chrome(width, scale, rail, position.x, position.y))
+        // Before the pane heads, because the root button lives *inside* one:
+        // B17's judgement that a single element can be both a drag handle and a
+        // button only holds if the button answers first.
+        .or_else(|| {
+            seats::hit_files_root(
+                &self.seat_layout,
+                &self.files_name_widths,
+                scale,
+                position.x,
+                position.y,
+            )
+        })
         .or_else(|| {
             seats::hit_chrome(
                 &self.seats,
@@ -14893,6 +15516,20 @@ impl Runtime {
                 self.tab_clicks.interrupt();
                 self.press_files_row(seat, index)?;
             }
+            seats::ChromeTarget::FilesRoot(seat) => {
+                self.tab_clicks.interrupt();
+                self.files_row_clicks.interrupt();
+                // The head is still armed as a drag handle underneath — B17: the
+                // press means "maybe I am about to move this pane", and the
+                // click that never travels means "change this folder". Arming
+                // costs the click nothing, and not arming would make the one
+                // pane in the window whose head cannot be grabbed by its name.
+                self.pane_press = Some(PanePress {
+                    seat,
+                    latch: DragLatch::new(position),
+                });
+                self.toggle_root_menu(seat)?;
+            }
             seats::ChromeTarget::Tab(index) => self.press_tab(index, position)?,
             // J99: "`.close`/`.pin` 上的双击不算(那是两次按钮点击)". Neither
             // records a click, so neither can be half of a rename — and both
@@ -15007,6 +15644,44 @@ impl Runtime {
                         )
                     {
                         self.close_profile_menu()?;
+                    }
+                }
+            }
+        }
+        // The root menu, on exactly the terms the picker above takes its press.
+        if let (Some(layout), Some(position)) = (self.root_menu_layout(), self.pointer_position) {
+            let choices = self
+                .root_menu
+                .seat()
+                .map(|seat| self.root_choices(seat))
+                .unwrap_or_default();
+            match profiles::root_menu_hit(&layout, position.x, position.y) {
+                Some(row) => {
+                    if state == ElementState::Pressed && button == MouseButton::Left {
+                        let seat = self.root_menu.seat();
+                        self.close_root_menu()?;
+                        if let (Some(seat), Some(profiles::RootMenuRow::Choice(index))) =
+                            (seat, row)
+                            && let Some(choice) = choices.get(index)
+                        {
+                            let path = choice.path.clone();
+                            self.reroot_files_column(seat, &path)?;
+                        }
+                    }
+                    return Ok(());
+                }
+                None => {
+                    // A press outside puts it away and then goes on to be the
+                    // press it always was — except on the button that opened it,
+                    // which toggles for itself and would otherwise be shut here
+                    // and re-opened one line later.
+                    if state == ElementState::Pressed
+                        && !matches!(
+                            self.chrome_target_at(position),
+                            Some(seats::ChromeTarget::FilesRoot(_))
+                        )
+                    {
+                        self.close_root_menu()?;
                     }
                 }
             }
@@ -15897,7 +16572,7 @@ impl Runtime {
         // it away. Everything else is still the terminal's.
         if matches!(event.logical_key, Key::Named(NamedKey::Escape))
             && !event.repeat
-            && self.close_profile_menu()?
+            && (self.close_profile_menu()? || self.close_root_menu()?)
         {
             return Ok(());
         }
@@ -16023,6 +16698,23 @@ impl Runtime {
         //
         // Esc has already been answered above, where it puts the picker away.
         if self.profile_menu.is_open() {
+            return Ok(());
+        }
+        // **`InputOwner::FilesTree`** (§7.1.5, D47) — the last layer above the
+        // encoder, and the one that finally gives that enum member a body.
+        //
+        // It sits *here*, under every popup and over the encoder, and the
+        // placement is the rule: a column holding the keyboard is not a modal,
+        // so the window's own chords, the copy and paste commands and a
+        // terminal's `Shift+PageUp` all keep working over the top of it — none
+        // of those is typing. What it stops is everything that *is* typing,
+        // which is the mock-up's `/* files pane focused: nothing to type into */`
+        // (6199) and the reason Esc is answered inside rather than encoded: with
+        // this owner, Esc is how you give the keyboard back, and it must never
+        // reach a child (§7.1.5's layering says so in as many words).
+        if let Some(seat) = self.files_keyboard_seat()
+            && self.files_tree_key(seat, event)?
+        {
             return Ok(());
         }
         let application_cursor_mode = self.session.application_cursor_mode();
@@ -28479,6 +29171,170 @@ mod tests {
             state.open.is_empty(),
             "a folder that is its own ancestor refuses to open"
         );
+    }
+
+    /// PIN — K156. A picture goes where a picture goes, and everything else
+    /// goes to the system.
+    ///
+    /// The image half is measured against the *terminal's* own list rather than
+    /// against a list written in the test, because the property being pinned is
+    /// that the two agree: a `.webp` clicked on a line of output and a `.webp`
+    /// double-clicked in the tree must land in the same pane.
+    #[test]
+    fn a_picture_opens_in_the_preview_and_everything_else_opens_where_windows_says() {
+        let root = r"C:\work";
+        for picture in ["/shot.png", "/a/b/SHOT.JPEG", "/icon.svg", "/anim.gif"] {
+            assert_eq!(
+                files_row_activation(root, picture),
+                RowActivation::Preview(files::full_path(root, picture)),
+                "{picture} is a picture"
+            );
+            assert!(bt_term::has_admissible_image_extension(&files::full_path(
+                root, picture
+            )));
+        }
+        for other in ["/notes.md", "/Cargo.toml", "/README", "/image.bmp"] {
+            assert_eq!(
+                files_row_activation(root, other),
+                RowActivation::DefaultApp(files::full_path(root, other)),
+                "{other} is not one this window can draw"
+            );
+        }
+        assert_eq!(
+            files_row_activation("", "/notes.md"),
+            RowActivation::Nowhere,
+            "a column that was never pointed anywhere has no path to open"
+        );
+        assert_eq!(
+            files_row_activation(root, "/notes.md"),
+            RowActivation::DefaultApp(PathBuf::from(root).join("notes.md")),
+            "L167: the id's slashes never reach the filesystem"
+        );
+    }
+
+    /// PIN — K155. The second press on one *file* row opens it, and nothing else
+    /// counts as half of that.
+    #[test]
+    fn two_presses_on_one_file_row_are_an_opening_and_a_folder_press_is_never_half_of_one() {
+        let now = Instant::now();
+        let (a, b) = (SeatId(1), SeatId(2));
+        let mut clicks = FilesRowClicks::default();
+        assert_eq!(clicks.register(a, "/notes.md", now), TabClick::Single);
+        assert_eq!(
+            clicks.register(a, "/notes.md", now + Duration::from_millis(90)),
+            TabClick::Double
+        );
+        // A double consumes its history: a third press starts a new pair rather
+        // than opening the file a second time.
+        assert_eq!(
+            clicks.register(a, "/notes.md", now + Duration::from_millis(120)),
+            TabClick::Single
+        );
+
+        // Two different rows are two first clicks, however close together.
+        let mut clicks = FilesRowClicks::default();
+        assert_eq!(clicks.register(a, "/one.md", now), TabClick::Single);
+        assert_eq!(clicks.register(a, "/two.md", now), TabClick::Single);
+
+        // Two columns are two first clicks, even on rows that read the same.
+        let mut clicks = FilesRowClicks::default();
+        assert_eq!(clicks.register(a, "/notes.md", now), TabClick::Single);
+        assert_eq!(clicks.register(b, "/notes.md", now), TabClick::Single);
+
+        // Slower than the system's own interval is two clicks, which is what
+        // "double click" means everywhere else in this window.
+        let mut clicks = FilesRowClicks::default();
+        assert_eq!(clicks.register(a, "/notes.md", now), TabClick::Single);
+        assert_eq!(
+            clicks.register(
+                a,
+                "/notes.md",
+                now + MULTI_CLICK_INTERVAL + Duration::from_millis(1)
+            ),
+            TabClick::Single
+        );
+
+        // A folder press between the two breaks the chain, which is how folding
+        // and unfolding quickly can never come out as an activation.
+        let mut clicks = FilesRowClicks::default();
+        assert_eq!(clicks.register(a, "/notes.md", now), TabClick::Single);
+        clicks.interrupt();
+        assert_eq!(
+            clicks.register(a, "/notes.md", now + Duration::from_millis(90)),
+            TabClick::Single
+        );
+    }
+
+    /// PIN — E56. Re-rooting keeps the width and drops everything that was
+    /// about the old place.
+    #[test]
+    fn a_column_pointed_somewhere_else_forgets_the_old_place_and_keeps_its_width() {
+        let (mut tab, seat) = files_column(r"C:\work");
+        let width = tab
+            .seats
+            .fixed_extent_of(seat)
+            .expect("a files column is a fixed column");
+        {
+            let state = tab.files.get_mut(&seat).expect("the column has state");
+            state.open.insert("/src".to_owned());
+            state.sel = Some("/src/main.rs".to_owned());
+            assert!(reroot_files_state(state, r"D:\other"));
+            assert_eq!(state.root, r"D:\other");
+            assert!(
+                state.open.is_empty(),
+                "an expansion is about a place, and this is a different place"
+            );
+            assert_eq!(state.sel, None);
+        }
+        assert_eq!(
+            tab.seats.fixed_extent_of(seat),
+            Some(width),
+            "how much room you gave the column is not a fact about the folder"
+        );
+
+        // Choosing the folder you are already in is not a way to lose your work.
+        let state = tab.files.get_mut(&seat).expect("the column has state");
+        state.open.insert("/a".to_owned());
+        assert!(!reroot_files_state(state, r"D:\other"));
+        assert!(state.open.contains("/a"));
+    }
+
+    /// PIN — D47. A keyboard lent to a column comes back by itself.
+    ///
+    /// Each of these is a way the lending goes stale silently, and each would
+    /// show as arrow keys moving a tree the user cannot see while the shell in
+    /// front of them ignored them.
+    #[test]
+    fn a_keyboard_lent_to_a_column_returns_when_the_column_stops_being_there() {
+        let mut tab = tab_with_a_files_column(1, r"C:\work");
+        let [column] = tab.seats.files()[..] else {
+            panic!("the tab holds one files column");
+        };
+        let here = LeafId {
+            tab: tab.id,
+            seat: column,
+        };
+
+        assert_eq!(files_keyboard_seat_of(Some(here), &tab), Some(column));
+        assert_eq!(files_keyboard_seat_of(None, &tab), None);
+
+        // The same seat number, one tab over, is a different pane.
+        let elsewhere = LeafId {
+            tab: TabId(tab.id.0 + 1),
+            seat: column,
+        };
+        assert_eq!(files_keyboard_seat_of(Some(elsewhere), &tab), None);
+
+        // A seat that is a terminal is not a tree, whatever was lent to it.
+        let shell = LeafId {
+            tab: tab.id,
+            seat: tab.focused_leaf,
+        };
+        assert_eq!(files_keyboard_seat_of(Some(shell), &tab), None);
+
+        // And a closed column takes the keyboard back with it.
+        tab.files.remove(&column);
+        assert_eq!(files_keyboard_seat_of(Some(here), &tab), None);
     }
 
     /// PIN — M170/C36. What the tree writes is what reaches the disk.

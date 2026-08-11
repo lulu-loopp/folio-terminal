@@ -515,6 +515,181 @@ pub fn selection_is_dead(state: &FilesLeafState, cache: &DirCache) -> bool {
     false
 }
 
+/// One keystroke of the tree's keyboard contract, with the keyboard already
+/// decided to be the tree's.
+///
+/// Decoded from a key *before* the column is consulted, so that the question
+/// "what does this key mean here" is answered once and in one place. The
+/// vocabulary is VS Code's tree (`DESIGN.md` §7.1.3) and nothing wider: a tree
+/// has one axis of travel, one axis of disclosure and one verb, and every other
+/// key that arrives while the tree holds the keyboard is a key the tree owns and
+/// does nothing with (D49) rather than one it passes along to a shell.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TreeCommand {
+    Up,
+    Down,
+    /// Fold, or step out to the parent row.
+    Left,
+    /// Unfold, or step in to the first child row.
+    Right,
+    Home,
+    End,
+    /// Enter or Space: a folder folds and unfolds, a file opens.
+    Activate,
+    /// Esc: hand the keyboard back to the terminal.
+    Release,
+}
+
+/// The keys the tree answers to, and only when they arrive unmodified.
+///
+/// A modifier makes a chord, and a chord is the window's business — the
+/// shortcut table has already had its say by the time a key reaches here, and
+/// `Shift+PageUp` is a request to scroll a terminal's history whatever pane is
+/// lit. What the tree claims is the bare navigation set, which is exactly the
+/// set no chord table contains.
+pub fn tree_command(
+    key: &winit::keyboard::Key,
+    modifiers: winit::keyboard::ModifiersState,
+) -> Option<TreeCommand> {
+    use winit::keyboard::{Key, NamedKey};
+    if !modifiers.is_empty() {
+        return None;
+    }
+    Some(match key {
+        Key::Named(NamedKey::ArrowUp) => TreeCommand::Up,
+        Key::Named(NamedKey::ArrowDown) => TreeCommand::Down,
+        Key::Named(NamedKey::ArrowLeft) => TreeCommand::Left,
+        Key::Named(NamedKey::ArrowRight) => TreeCommand::Right,
+        Key::Named(NamedKey::Home) => TreeCommand::Home,
+        Key::Named(NamedKey::End) => TreeCommand::End,
+        // Space arrives named rather than as a character, which is the one
+        // difference between this list and the mock-up's `case " "`.
+        Key::Named(NamedKey::Enter | NamedKey::Space) => TreeCommand::Activate,
+        Key::Named(NamedKey::Escape) => TreeCommand::Release,
+        _ => return None,
+    })
+}
+
+/// What a [`TreeCommand`] turned out to mean for one column.
+///
+/// Reported rather than performed for the reason `press_files_node` is: opening
+/// a folder owes a directory read, activating a file owes a window an
+/// application, and neither is answerable without the runtime — while *which* of
+/// them is owed is answerable with nothing but the rows.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TreeAction {
+    /// The tree owns the key and there was nothing for it to do.
+    None,
+    /// Only the selection moved.
+    Select(String),
+    /// A folder unfolded, and its rows are owed a read.
+    Opened(String),
+    Closed(String),
+    /// A file was opened.
+    Activate(String),
+    /// The keyboard goes back to the terminal.
+    Release,
+}
+
+/// The VS Code tree contract (D44), applied to one column's durable state.
+///
+/// **Notice rows are not travelled through.** "Loading…", a permission refusal
+/// and the tail row counting what a cap left out are sentences about the list,
+/// and a selection that can land on a sentence is a selection that can be asked
+/// to open one. [`TreeRow::is_node`] already draws that line for the mouse; this
+/// walks the same subset, which is what keeps ↑↓ and a click agreeing about
+/// what the row after this one is.
+///
+/// **Travel clamps and never wraps** (D45). A tree is a list with a top and a
+/// bottom, and an ↑ at the top that lands you at the bottom is a navigation you
+/// have to undo before you can trust where you are.
+pub fn apply_tree_command(
+    state: &mut FilesLeafState,
+    rows: &[TreeRow],
+    command: TreeCommand,
+) -> TreeAction {
+    if command == TreeCommand::Release {
+        return TreeAction::Release;
+    }
+    let nodes: Vec<&TreeRow> = rows.iter().filter(|row| row.is_node()).collect();
+    if nodes.is_empty() {
+        return TreeAction::None;
+    }
+    let at = state
+        .sel
+        .as_deref()
+        .and_then(|sel| nodes.iter().position(|row| row.key == sel));
+    let select = |state: &mut FilesLeafState, position: usize| {
+        let key = nodes[position.min(nodes.len() - 1)].key.clone();
+        state.sel = Some(key.clone());
+        TreeAction::Select(key)
+    };
+    // A column nobody has pointed at yet answers its first travelling key with
+    // its first row rather than its second. The mock-up's `if (i < 0) i = 0`
+    // then moves off that zero, so ↓ into a fresh tree lands on the *second*
+    // name — the row you can see being skipped by the key that means "go down
+    // one" is the kind of off-by-one that reads as a dropped keystroke.
+    let Some(at) = at else {
+        return match command {
+            TreeCommand::End => select(state, nodes.len() - 1),
+            TreeCommand::Activate => TreeAction::None,
+            _ => select(state, 0),
+        };
+    };
+    let row = nodes[at];
+    let key = row.key.clone();
+    match command {
+        TreeCommand::Up => select(state, at.saturating_sub(1)),
+        TreeCommand::Down => select(state, at + 1),
+        TreeCommand::Home => select(state, 0),
+        TreeCommand::End => select(state, nodes.len() - 1),
+        TreeCommand::Right => match row.kind {
+            RowKind::Directory { open: false } => {
+                state.open.insert(key.clone());
+                TreeAction::Opened(key)
+            }
+            _ => select(state, at + 1),
+        },
+        TreeCommand::Left => match row.kind {
+            RowKind::Directory { open: true } => {
+                state.open.remove(&key);
+                TreeAction::Closed(key)
+            }
+            // Out to the parent row — and a row whose parent *is* the root has
+            // none, because the root is the column's head and not a line in its
+            // list. Standing still is the honest answer there.
+            _ => match parent_key(&key)
+                .and_then(|parent| nodes.iter().position(|row| row.key == parent))
+            {
+                Some(parent) => select(state, parent),
+                None => TreeAction::None,
+            },
+        },
+        TreeCommand::Activate => match row.kind {
+            RowKind::Directory { open: true } => {
+                state.open.remove(&key);
+                TreeAction::Closed(key)
+            }
+            RowKind::Directory { open: false } => {
+                state.open.insert(key.clone());
+                TreeAction::Opened(key)
+            }
+            RowKind::File => TreeAction::Activate(key),
+            // A folder that resolves to one of its own ancestors has nothing to
+            // show that is not already on screen, exactly as under the mouse.
+            RowKind::Cycle | RowKind::Notice(_) => TreeAction::None,
+        },
+        TreeCommand::Release => TreeAction::Release,
+    }
+}
+
+/// The stable id of the directory a node sits in, or `None` when that is the
+/// root itself.
+pub fn parent_key(key: &str) -> Option<String> {
+    let cut = key.rfind('/')?;
+    (cut > 0).then(|| key[..cut].to_owned())
+}
+
 /// Folders first, then names, each group case-insensitively alphabetical (Q4).
 ///
 /// The tie-break on the raw name is not decoration: without it `README` and
@@ -1155,6 +1330,240 @@ mod tests {
             read_directory(&missing),
             DirOutcome::Failed(DirFault::NotFound)
         );
+    }
+
+    /// The tree used by the keyboard tests: a root of two folders and a file,
+    /// with the first folder open over one file of its own.
+    ///
+    /// ```text
+    /// /docs        (open)
+    ///   /docs/a.md
+    /// /src         (shut)
+    /// /read.me
+    /// ```
+    fn keyboard_rows() -> Vec<TreeRow> {
+        let mut cache = DirCache::default();
+        listed(
+            &mut cache,
+            "",
+            vec![
+                entry("docs", true),
+                entry("src", true),
+                entry("read.me", false),
+            ],
+        );
+        listed(&mut cache, "/docs", vec![entry("a.md", false)]);
+        tree_view(&state("/r", &["/docs"], None), &cache).rows
+    }
+
+    fn press(sel: Option<&str>, command: TreeCommand) -> (FilesLeafState, TreeAction) {
+        let mut column = state("/r", &["/docs"], sel);
+        let action = apply_tree_command(&mut column, &keyboard_rows(), command);
+        (column, action)
+    }
+
+    #[test]
+    fn up_and_down_walk_the_visible_rows_one_at_a_time() {
+        let rows = keyboard_rows();
+        assert_eq!(
+            rows.iter().map(|row| row.key.as_str()).collect::<Vec<_>>(),
+            vec!["/docs", "/docs/a.md", "/src", "/read.me"]
+        );
+        let (column, action) = press(Some("/docs"), TreeCommand::Down);
+        assert_eq!(action, TreeAction::Select("/docs/a.md".to_owned()));
+        assert_eq!(column.sel.as_deref(), Some("/docs/a.md"));
+        let (_, action) = press(Some("/src"), TreeCommand::Up);
+        assert_eq!(action, TreeAction::Select("/docs/a.md".to_owned()));
+    }
+
+    /// PIN — D45. Travel stops at the ends rather than coming out the other one.
+    #[test]
+    fn travel_stops_at_both_ends_instead_of_wrapping_round() {
+        let (column, _) = press(Some("/docs"), TreeCommand::Up);
+        assert_eq!(column.sel.as_deref(), Some("/docs"));
+        let (column, _) = press(Some("/read.me"), TreeCommand::Down);
+        assert_eq!(column.sel.as_deref(), Some("/read.me"));
+    }
+
+    #[test]
+    fn home_and_end_go_to_the_first_and_last_row_there_is() {
+        let (column, _) = press(Some("/src"), TreeCommand::Home);
+        assert_eq!(column.sel.as_deref(), Some("/docs"));
+        let (column, _) = press(Some("/src"), TreeCommand::End);
+        assert_eq!(column.sel.as_deref(), Some("/read.me"));
+    }
+
+    #[test]
+    fn right_unfolds_a_shut_folder_and_otherwise_steps_in() {
+        let (column, action) = press(Some("/src"), TreeCommand::Right);
+        assert_eq!(action, TreeAction::Opened("/src".to_owned()));
+        assert!(column.open.contains("/src"));
+        // Already open: the key means "in", and in is the next row.
+        let (column, action) = press(Some("/docs"), TreeCommand::Right);
+        assert_eq!(action, TreeAction::Select("/docs/a.md".to_owned()));
+        assert!(column.open.contains("/docs"), "stepping in folds nothing");
+        // A file has nothing to open, so the key still travels.
+        let (column, _) = press(Some("/docs/a.md"), TreeCommand::Right);
+        assert_eq!(column.sel.as_deref(), Some("/src"));
+    }
+
+    #[test]
+    fn left_folds_an_open_folder_and_otherwise_steps_out_to_the_parent() {
+        let (column, action) = press(Some("/docs"), TreeCommand::Left);
+        assert_eq!(action, TreeAction::Closed("/docs".to_owned()));
+        assert!(!column.open.contains("/docs"));
+        let (column, action) = press(Some("/docs/a.md"), TreeCommand::Left);
+        assert_eq!(action, TreeAction::Select("/docs".to_owned()));
+        assert!(column.open.contains("/docs"), "stepping out folds nothing");
+    }
+
+    /// PIN — a top-level row's parent is the root, and the root is the head
+    /// rather than a row. Stepping out of it must stand still, not travel to
+    /// whatever happens to be above.
+    #[test]
+    fn stepping_out_of_a_top_level_row_has_nowhere_to_go_and_stays() {
+        let (column, action) = press(Some("/src"), TreeCommand::Left);
+        assert_eq!(action, TreeAction::None);
+        assert_eq!(column.sel.as_deref(), Some("/src"));
+        assert_eq!(parent_key("/src"), None);
+        assert_eq!(parent_key("/docs/a.md"), Some("/docs".to_owned()));
+    }
+
+    #[test]
+    fn enter_folds_a_folder_and_opens_a_file() {
+        let (column, action) = press(Some("/docs"), TreeCommand::Activate);
+        assert_eq!(action, TreeAction::Closed("/docs".to_owned()));
+        assert!(!column.open.contains("/docs"));
+        let (_, action) = press(Some("/src"), TreeCommand::Activate);
+        assert_eq!(action, TreeAction::Opened("/src".to_owned()));
+        let (_, action) = press(Some("/read.me"), TreeCommand::Activate);
+        assert_eq!(action, TreeAction::Activate("/read.me".to_owned()));
+    }
+
+    /// PIN — a column nobody has selected in answers its first travelling key
+    /// with its *first* row.
+    ///
+    /// The mock-up's `if (i < 0) i = 0` followed by `select(i + 1)` lands on the
+    /// second row instead, which shows as the first press of ↓ doing nothing you
+    /// can see and the second one moving two.
+    #[test]
+    fn the_first_travelling_key_into_an_unselected_column_lands_on_its_first_row() {
+        let (column, action) = press(None, TreeCommand::Down);
+        assert_eq!(action, TreeAction::Select("/docs".to_owned()));
+        assert_eq!(column.sel.as_deref(), Some("/docs"));
+        let (column, _) = press(None, TreeCommand::Up);
+        assert_eq!(column.sel.as_deref(), Some("/docs"));
+        let (column, _) = press(None, TreeCommand::End);
+        assert_eq!(column.sel.as_deref(), Some("/read.me"));
+        // Nothing is selected, so there is nothing to open.
+        let (column, action) = press(None, TreeCommand::Activate);
+        assert_eq!(action, TreeAction::None);
+        assert_eq!(column.sel, None);
+    }
+
+    /// PIN — a sentence about the list is not a row you can stand on.
+    #[test]
+    fn travel_steps_over_the_rows_that_are_only_sentences() {
+        let mut cache = DirCache::default();
+        listed(
+            &mut cache,
+            "",
+            vec![entry("locked", true), entry("after.txt", false)],
+        );
+        cache.accept("/locked", DirOutcome::Failed(DirFault::PermissionDenied));
+        let rows = tree_view(&state("/r", &["/locked"], None), &cache).rows;
+        assert_eq!(rows.len(), 3, "the refusal has a row of its own");
+        assert!(!rows[1].is_node());
+
+        let mut column = state("/r", &["/locked"], Some("/locked"));
+        assert_eq!(
+            apply_tree_command(&mut column, &rows, TreeCommand::Down),
+            TreeAction::Select("/after.txt".to_owned()),
+            "the refusal is read, not selected"
+        );
+    }
+
+    #[test]
+    fn a_folder_that_eats_itself_refuses_the_keyboard_as_it_refuses_the_mouse() {
+        let mut cache = DirCache::default();
+        cache.accept(
+            "",
+            DirOutcome::Listed(DirListing {
+                entries: vec![entry("link", true)],
+                omitted: 0,
+                canonical: Some(PathBuf::from("/real")),
+            }),
+        );
+        cache.accept(
+            "/link",
+            DirOutcome::Listed(DirListing {
+                entries: vec![entry("link", true)],
+                omitted: 0,
+                canonical: Some(PathBuf::from("/real")),
+            }),
+        );
+        let rows = tree_view(&state("/r", &["/link", "/link/link"], None), &cache).rows;
+        assert_eq!(rows[0].kind, RowKind::Cycle);
+        let mut column = state("/r", &[], Some("/link"));
+        assert_eq!(
+            apply_tree_command(&mut column, &rows, TreeCommand::Activate),
+            TreeAction::None
+        );
+        assert!(column.open.is_empty());
+    }
+
+    #[test]
+    fn escape_is_the_one_key_that_gives_the_keyboard_back() {
+        let mut column = state("/r", &[], Some("/src"));
+        assert_eq!(
+            apply_tree_command(&mut column, &[], TreeCommand::Release),
+            TreeAction::Release,
+            "even an empty column can hand the keyboard back"
+        );
+        assert_eq!(
+            apply_tree_command(&mut column, &[], TreeCommand::Down),
+            TreeAction::None
+        );
+    }
+
+    /// PIN — the tree claims bare keys and never a chord.
+    ///
+    /// A modifier means the window's own vocabulary, and the shortcut table has
+    /// already been asked by the time a key reaches the tree. Claiming
+    /// `Ctrl+Home` here would take a terminal's jump-to-top away from it for as
+    /// long as a column had the keyboard.
+    #[test]
+    fn only_unmodified_keys_are_the_trees_and_the_rest_are_nobodys_here() {
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+        let none = ModifiersState::empty();
+        assert_eq!(
+            tree_command(&Key::Named(NamedKey::ArrowDown), none),
+            Some(TreeCommand::Down)
+        );
+        assert_eq!(
+            tree_command(&Key::Named(NamedKey::Space), none),
+            Some(TreeCommand::Activate)
+        );
+        assert_eq!(
+            tree_command(&Key::Named(NamedKey::Enter), none),
+            Some(TreeCommand::Activate)
+        );
+        assert_eq!(
+            tree_command(&Key::Named(NamedKey::Escape), none),
+            Some(TreeCommand::Release)
+        );
+        for modifiers in [
+            ModifiersState::CONTROL,
+            ModifiersState::SHIFT,
+            ModifiersState::ALT,
+        ] {
+            assert_eq!(
+                tree_command(&Key::Named(NamedKey::Home), modifiers),
+                None,
+                "a chord is the window's, not the tree's"
+            );
+        }
+        assert_eq!(tree_command(&Key::Character("a".into()), none), None);
     }
 
     #[test]

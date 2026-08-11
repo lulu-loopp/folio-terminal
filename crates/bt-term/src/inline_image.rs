@@ -353,7 +353,13 @@ fn is_local_absolute_path(path: &Path) -> bool {
     is_windows_drive_absolute(&text) && !text.contains('\0')
 }
 
-fn has_admissible_image_extension(path: &Path) -> bool {
+/// Whether a name is spelled like a picture this build can show.
+///
+/// Public because it is the *routing* question as well as the detection one: a
+/// files row being activated has to decide between the preview pane and the
+/// system's own handler, and deciding it against a second copy of this list is
+/// how a tree comes to send a `.webp` somewhere the terminal would not.
+pub fn has_admissible_image_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(|extension| {

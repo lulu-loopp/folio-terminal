@@ -1701,28 +1701,7 @@ pub fn build(
     }
 
     if let Some(band) = layout.section_label {
-        labels.push(ChromeLabel {
-            text: RECENT_SECTION_LABEL.to_owned(),
-            // The band's content box: padding stripped, so the 12.5px line box
-            // is centred in exactly its own height and the 3px above it and 5px
-            // below it stay the stylesheet's rather than the renderer's.
-            rect: [
-                band[0] + px(SECTION_LABEL_PADDING_X_LOGICAL_PX),
-                band[1] + px(SECTION_LABEL_PADDING_TOP_LOGICAL_PX),
-                band[2] - px(SECTION_LABEL_PADDING_X_LOGICAL_PX),
-                band[3] - px(SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX),
-            ],
-            font_size_px: px(SECTION_LABEL_FONT_LOGICAL_PX),
-            // `--ink3` over `--menu` — the same ink the row hints wear, because
-            // it is the same declaration on the same surface.
-            color: palette.menu_item_hint_text,
-            align_right: false,
-            align_center: false,
-            letter_spacing_em: SECTION_LABEL_TRACKING_EM,
-            weight: ChromeLabelWeight::SemiBold,
-            tabular_numerals: false,
-            clip: None,
-        });
+        labels.push(section_label(RECENT_SECTION_LABEL, band, scale, palette));
     }
 
     for (index, (row, entry)) in layout.recent.iter().zip(menu_rows(recent)).enumerate() {
@@ -1761,6 +1740,34 @@ pub fn build(
 /// recent-item"`, and `.recent-item` adds a width and nothing else. So they are
 /// drawn by one function rather than two that look alike, because the way two
 /// menu rows drift apart is that somebody fixes the ink on one of them.
+/// `.menu-label` / `.rm-label` — a heading over a list, in the one form both
+/// popups wear it.
+fn section_label(text: &str, band: [f32; 4], scale: f32, palette: ChromePalette) -> ChromeLabel {
+    let px = |value: f32| value * scale;
+    ChromeLabel {
+        text: text.to_owned(),
+        // The band's content box: padding stripped, so the 12.5px line box is
+        // centred in exactly its own height and the 3px above it and 5px below
+        // it stay the stylesheet's rather than the renderer's.
+        rect: [
+            band[0] + px(SECTION_LABEL_PADDING_X_LOGICAL_PX),
+            band[1] + px(SECTION_LABEL_PADDING_TOP_LOGICAL_PX),
+            band[2] - px(SECTION_LABEL_PADDING_X_LOGICAL_PX),
+            band[3] - px(SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX),
+        ],
+        font_size_px: px(SECTION_LABEL_FONT_LOGICAL_PX),
+        // `--ink3` over `--menu` — the same ink the row hints wear, because it
+        // is the same declaration on the same surface.
+        color: palette.menu_item_hint_text,
+        align_right: false,
+        align_center: false,
+        letter_spacing_em: SECTION_LABEL_TRACKING_EM,
+        weight: ChromeLabelWeight::SemiBold,
+        tabular_numerals: false,
+        clip: None,
+    }
+}
+
 struct Row<'a> {
     rect: [f32; 4],
     mark: ChromeMark,
@@ -1941,6 +1948,341 @@ fn cwd_leaf(path: &str) -> &str {
     if leaf.is_empty() { trimmed } else { leaf }
 }
 
+// ── `.root-menu` — where a files column is pointed (E53-E61) ───────────────
+//
+// **Why it lives in this file.** It is not a profile picker and it says so in
+// its own names; what it *is* is the same popup — the same float window, the
+// same 29.5px row, the same mark column, gap, ink and hover fill — hung off a
+// different button. `push_row`'s own comment gives the reason two lists that
+// look alike are drawn by one function: "the way two menu rows drift apart is
+// that somebody fixes the ink on one of them". A second module would mean a
+// second copy of fifteen numbers, and the first theme change would separate
+// them.
+
+/// Why a folder is being offered (mock-up 5049-5057).
+///
+/// The note is the menu's honesty: "a terminal is here" is the reason that path
+/// is on the list at all, and a list of bare paths would make the user guess
+/// which of them the app thinks is interesting.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RootNote {
+    Home,
+    /// One of this window's shells is standing in it.
+    Terminal,
+    /// The folder this column's root is in.
+    Parent,
+}
+
+impl RootNote {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Home => "home",
+            Self::Terminal => "a terminal is here",
+            Self::Parent => "parent",
+        }
+    }
+}
+
+/// One place the menu offers to point a column at.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RootChoice {
+    pub path: String,
+    pub note: RootNote,
+}
+
+/// The places worth offering, in the mock-up's own order (E54).
+///
+/// **Home, then wherever the shells are standing, then one level up.** The order
+/// is not alphabetical and is not most-recent-first: it runs from the most
+/// permanent address this machine has to the most local one, so the list reads
+/// the same on every window whatever the shells happen to be doing.
+///
+/// De-duplicated on the path and keeping the *first* note, so a home directory
+/// a terminal happens to be standing in is offered once and called home.
+#[must_use]
+pub fn root_choices(root: &str, home: Option<&str>, cwds: &[String]) -> Vec<RootChoice> {
+    let mut list: Vec<RootChoice> = Vec::new();
+    let mut add = |path: &str, note: RootNote| {
+        let path = path.trim();
+        if path.is_empty() || list.iter().any(|choice| choice.path == path) {
+            return;
+        }
+        list.push(RootChoice {
+            path: path.to_owned(),
+            note,
+        });
+    };
+    if let Some(home) = home {
+        add(home, RootNote::Home);
+    }
+    for cwd in cwds {
+        add(cwd, RootNote::Terminal);
+    }
+    // The parent of the root, which the mock-up computes by trimming trailing
+    // separators and then one segment. `Path::parent` is that, done by a
+    // component walk that knows what a drive prefix is — so `C:\` has no parent
+    // rather than an empty string, and a root already at the top of its drive
+    // simply does not offer the row.
+    if let Some(parent) = Path::new(root.trim_end_matches(['\\', '/']))
+        .parent()
+        .map(Path::to_string_lossy)
+        .filter(|parent| !parent.is_empty())
+    {
+        add(&parent, RootNote::Parent);
+    }
+    list
+}
+
+/// A row of the root menu.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RootMenuRow {
+    /// An index into the [`root_choices`] the menu was laid out from.
+    Choice(usize),
+}
+
+/// Which column's root menu is up, and which row the pointer is on.
+///
+/// The seat is *in* the state rather than beside it, which is what makes the
+/// menu single by construction: opening one on another column replaces this,
+/// and the chevron the old column was wearing re-derives from here on the very
+/// next frame rather than having to be un-flipped by hand (E57's whole bug).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RootMenu {
+    open: Option<bt_layout::SeatId>,
+    hover: Option<RootMenuRow>,
+}
+
+impl RootMenu {
+    pub fn seat(self) -> Option<bt_layout::SeatId> {
+        self.open
+    }
+
+    /// The button: open here, or shut if this very column already has it open.
+    pub fn toggle(&mut self, seat: bt_layout::SeatId) {
+        self.open = (self.open != Some(seat)).then_some(seat);
+        self.hover = None;
+    }
+
+    pub fn close(&mut self) -> bool {
+        let was_open = self.open.is_some();
+        self.open = None;
+        self.hover = None;
+        was_open
+    }
+
+    pub fn set_hover(&mut self, hover: Option<RootMenuRow>) -> bool {
+        let hover = self.open.and(hover);
+        let changed = self.hover != hover;
+        self.hover = hover;
+        changed
+    }
+
+    pub fn hover(self) -> Option<RootMenuRow> {
+        self.hover
+    }
+}
+
+/// Every rectangle the root menu draws and hit-tests.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RootMenuLayout {
+    scale: f32,
+    frame: [f32; 4],
+    label: [f32; 4],
+    items: Vec<[f32; 4]>,
+}
+
+impl RootMenuLayout {
+    /// Every row paired with the path it stands for, so a caption showing only
+    /// the last segment can hang the whole path off itself.
+    pub fn tips<'a>(
+        &'a self,
+        choices: &'a [RootChoice],
+    ) -> impl Iterator<Item = (RootMenuRow, [f32; 4], String)> + 'a {
+        self.items
+            .iter()
+            .zip(choices)
+            .enumerate()
+            .map(|(index, (rect, choice))| (RootMenuRow::Choice(index), *rect, choice.path.clone()))
+    }
+}
+
+/// The root menu hung under the head's root button.
+///
+/// `top = anchor.bottom + 4`, `left = clamp(anchor.left)` — mock-up 5169-5175,
+/// which is the same two lines [`layout`] uses for [`MenuSide::Below`], because
+/// it is the same gesture: a button on a horizontal surface with the window
+/// below it.
+#[must_use]
+pub fn root_menu_layout(
+    anchor: [f32; 4],
+    surface: (f32, f32),
+    scale: f32,
+    choices: &[RootChoice],
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> RootMenuLayout {
+    let px = |value: f32| value * scale;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let padding = px(MENU_PADDING_LOGICAL_PX);
+    let item_height = px(ITEM_HEIGHT_LOGICAL_PX).round();
+    let section_block = px(SECTION_LABEL_PADDING_TOP_LOGICAL_PX
+        + SECTION_LABEL_LINE_LOGICAL_PX
+        + SECTION_LABEL_PADDING_BOTTOM_LOGICAL_PX)
+    .round();
+
+    // The widest note any row could carry, reserved for every row — the same
+    // rule the profile menu's annotation follows and for the same reason: a
+    // menu that changed width because a shell moved would move under the
+    // pointer.
+    let note = [RootNote::Home, RootNote::Terminal, RootNote::Parent]
+        .into_iter()
+        .map(|note| measure(note.text(), px(HINT_FONT_LOGICAL_PX)))
+        .fold(0.0, f32::max);
+    let chrome = 2.0 * (border + padding) + 2.0 * px(ITEM_PADDING_X_LOGICAL_PX);
+    // Every row's name is a *directory* — arbitrary length, chosen by nobody
+    // here — so the widest one does not get to stretch the popup across the
+    // window. It is the same clamp `RECENT_ITEM_MAX_WIDTH_LOGICAL_PX` puts on
+    // the Recent rows, applied to the whole menu because here every row is one.
+    let content = choices
+        .iter()
+        .map(|choice| {
+            px(ITEM_ICON_COLUMN_LOGICAL_PX)
+                + px(ITEM_GAP_LOGICAL_PX)
+                + measure(&cwd_leaf_or_path(&choice.path), px(ITEM_FONT_LOGICAL_PX))
+                + px(ITEM_GAP_LOGICAL_PX)
+                + note
+        })
+        .fold(0.0, f32::max);
+    let width = (chrome + content)
+        .clamp(
+            px(MENU_MIN_WIDTH_LOGICAL_PX),
+            px(MENU_MIN_WIDTH_LOGICAL_PX + RECENT_ITEM_MAX_WIDTH_LOGICAL_PX),
+        )
+        .round();
+    let height =
+        (2.0 * (border + padding) + section_block + item_height * choices.len() as f32).round();
+
+    let (surface_width, _) = surface;
+    let edge = px(MENU_EDGE_MARGIN_LOGICAL_PX);
+    let left = anchor[0]
+        .min(surface_width - width - edge)
+        .max(edge)
+        .round();
+    let top = (anchor[3] + px(MENU_OFFSET_LOGICAL_PX)).round();
+    let frame = [left, top, left + width, top + height];
+
+    let content_left = frame[0] + border + padding;
+    let content_right = frame[2] - border - padding;
+    let mut cursor = frame[1] + border + padding;
+    let label = [content_left, cursor, content_right, cursor + section_block];
+    cursor += section_block;
+    let mut items = Vec::with_capacity(choices.len());
+    for _ in choices {
+        items.push([content_left, cursor, content_right, cursor + item_height]);
+        cursor += item_height;
+    }
+    RootMenuLayout {
+        scale,
+        frame,
+        label,
+        items,
+    }
+}
+
+/// What a point is over, with the same three answers [`hit`] gives and for the
+/// same reasons.
+#[must_use]
+pub fn root_menu_hit(layout: &RootMenuLayout, x: f64, y: f64) -> Option<Option<RootMenuRow>> {
+    let (x, y) = (x as f32, y as f32);
+    for (index, item) in layout.items.iter().enumerate() {
+        if contains(*item, x, y) {
+            return Some(Some(RootMenuRow::Choice(index)));
+        }
+    }
+    contains(layout.frame, x, y).then_some(None)
+}
+
+/// The last segment of a path, or the whole of it when there is no segment to
+/// take — a drive root is `C:\` and its "name" is itself.
+fn cwd_leaf_or_path(path: &str) -> String {
+    crate::cwd_leaf(Path::new(path)).unwrap_or_else(|| path.to_owned())
+}
+
+/// The root menu as one overlay layer.
+#[must_use]
+pub fn root_menu_build(
+    layout: &RootMenuLayout,
+    choices: &[RootChoice],
+    current: &str,
+    hover: Option<RootMenuRow>,
+    measure: &mut dyn FnMut(&str, f32) -> f32,
+) -> Vec<OverlayLayer> {
+    let palette = chrome_palette();
+    let scale = layout.scale;
+    let px = |value: f32| value * scale;
+    let alpha = |value: u8| f32::from(value) / 255.0;
+    let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut sprites = Vec::new();
+
+    push_float_window(
+        &mut quads,
+        layout.frame,
+        px(MENU_RADIUS_LOGICAL_PX),
+        border,
+        px(FLOAT_WINDOW_SHADOW_LOGICAL_PX),
+        palette.menu_surface,
+        palette.menu_shadow,
+        alpha(palette.menu_popup_shadow_inner_alpha),
+        alpha(palette.menu_popup_shadow_outer_alpha),
+        palette.menu_border,
+        alpha(palette.menu_border_alpha),
+    );
+    labels.push(section_label(
+        ROOT_SECTION_LABEL,
+        layout.label,
+        scale,
+        palette,
+    ));
+
+    for (index, (item, choice)) in layout.items.iter().zip(choices).enumerate() {
+        let note = choice.note.text().to_owned();
+        let width = measure(&note, px(HINT_FONT_LOGICAL_PX));
+        push_row(
+            &Row {
+                rect: *item,
+                // The folder a column is *already* rooted at is drawn open, and
+                // that is the tick's whole job done by the mark it already has:
+                // one glyph saying "you are here" beats a second column of
+                // empty space on every other row.
+                mark: if choice.path == current {
+                    ChromeMark::FolderOpen
+                } else {
+                    ChromeMark::Folder
+                },
+                name: &cwd_leaf_or_path(&choice.path),
+                hint: Some((note, width)),
+                hovered: hover == Some(RootMenuRow::Choice(index)),
+                available: true,
+            },
+            scale,
+            palette,
+            &mut quads,
+            &mut labels,
+            &mut sprites,
+        );
+    }
+    vec![OverlayLayer {
+        quads,
+        labels,
+        sprites,
+        ..Default::default()
+    }]
+}
+
+/// `.rm-label` — the heading over the list (mock-up 5138).
+const ROOT_SECTION_LABEL: &str = "OPEN FOLDER";
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
@@ -1979,6 +2321,196 @@ mod tests {
     /// a 180px menu.
     fn fake_measure(text: &str, font_px: f32) -> f32 {
         text.chars().count() as f32 * font_px * 0.6
+    }
+
+    // ── E53-E61: the root menu ─────────────────────────────────────────────
+
+    /// PIN — E54. The list runs from the most permanent address to the most
+    /// local, says why each place is on it, and names each place once.
+    #[test]
+    fn the_root_menu_offers_home_then_the_shells_then_one_level_up() {
+        let choices = root_choices(
+            r"C:\work\project",
+            Some(r"C:\Users\dev"),
+            &[r"D:\repos\api".to_owned(), r"C:\work".to_owned()],
+        );
+        assert_eq!(
+            choices,
+            vec![
+                RootChoice {
+                    path: r"C:\Users\dev".to_owned(),
+                    note: RootNote::Home
+                },
+                RootChoice {
+                    path: r"D:\repos\api".to_owned(),
+                    note: RootNote::Terminal
+                },
+                RootChoice {
+                    path: r"C:\work".to_owned(),
+                    note: RootNote::Terminal
+                },
+            ],
+            "the parent is already on the list as a terminal, and is not repeated"
+        );
+
+        // With no shell standing in it, the parent is offered as the parent.
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        assert_eq!(choices.len(), 2);
+        assert_eq!(choices[1].path, r"C:\work");
+        assert_eq!(choices[1].note, RootNote::Parent);
+    }
+
+    /// PIN — a home directory a shell happens to be standing in is offered once,
+    /// and called home.
+    #[test]
+    fn one_folder_is_one_row_however_many_reasons_it_has_to_be_there() {
+        let choices = root_choices(
+            r"C:\Users\dev\work",
+            Some(r"C:\Users\dev"),
+            &[r"C:\Users\dev".to_owned()],
+        );
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].note, RootNote::Home);
+    }
+
+    /// PIN — the top of a drive has no parent, and an unrooted column has no
+    /// list of its own to be at the top of.
+    #[test]
+    fn a_root_at_the_top_of_its_drive_offers_no_step_up() {
+        let choices = root_choices(r"C:\", None, &[]);
+        assert!(
+            choices.is_empty(),
+            "`C:\\` has no parent, and there is nothing else to offer: {choices:?}"
+        );
+        assert!(root_choices("", None, &[]).is_empty());
+        assert!(
+            root_choices(r"C:\work\", None, &[])
+                .iter()
+                .any(|choice| choice.path == r"C:\"),
+            "a trailing separator does not hide the folder above"
+        );
+    }
+
+    #[test]
+    fn the_menu_hangs_under_the_root_button_and_stays_inside_the_window() {
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let button = [40.0, 8.0, 140.0, 27.0];
+        let layout = root_menu_layout(button, (960.0, 600.0), 1.0, &choices, &mut fake_measure);
+        let frame = layout.frame;
+        assert_eq!(frame[1], button[3] + MENU_OFFSET_LOGICAL_PX);
+        assert_eq!(frame[0], button[0], "it shares the button's left edge");
+
+        // A button near the right edge pulls the menu back inside rather than
+        // hanging it off the window.
+        let far = [900.0, 8.0, 950.0, 27.0];
+        let clamped = root_menu_layout(far, (960.0, 600.0), 1.0, &choices, &mut fake_measure);
+        assert!(clamped.frame[2] <= 960.0 - MENU_EDGE_MARGIN_LOGICAL_PX);
+    }
+
+    /// PIN — the rows are what answer, the body is the menu's own, and outside is
+    /// nobody's. The same three answers the picker gives, because a press
+    /// outside a popup has to reach what it was aimed at.
+    #[test]
+    fn a_root_row_answers_the_press_and_the_body_swallows_it() {
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let layout = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &choices,
+            &mut fake_measure,
+        );
+        let frame = layout.frame;
+        let first = layout
+            .tips(&choices)
+            .next()
+            .expect("the menu has a first row");
+        let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        let (x, y) = middle(first.1);
+        assert_eq!(
+            root_menu_hit(&layout, f64::from(x), f64::from(y)),
+            Some(Some(RootMenuRow::Choice(0)))
+        );
+        assert_eq!(
+            root_menu_hit(
+                &layout,
+                f64::from(frame[0] + 1.0),
+                f64::from(frame[1] + 1.0)
+            ),
+            Some(None),
+            "the padding above the first row is the menu's own"
+        );
+        assert_eq!(
+            root_menu_hit(
+                &layout,
+                f64::from(frame[0] - 4.0),
+                f64::from(frame[1] - 4.0)
+            ),
+            None
+        );
+        assert_eq!(first.2, r"C:\Users\dev", "the tip says the whole path");
+    }
+
+    /// PIN — the folder the column is already rooted at is the one drawn open.
+    /// That mark is the menu's "you are here", and getting it from the *current
+    /// root* rather than from the hover is what keeps it from following the
+    /// pointer around.
+    #[test]
+    fn the_folder_a_column_is_already_in_is_the_one_drawn_open() {
+        let choices = root_choices(r"C:\work\project", Some(r"C:\Users\dev"), &[]);
+        let layout = root_menu_layout(
+            [40.0, 8.0, 140.0, 27.0],
+            (960.0, 600.0),
+            1.0,
+            &choices,
+            &mut fake_measure,
+        );
+        let open_marks = |current: &str| {
+            let layer = one_layer(root_menu_build(
+                &layout,
+                &choices,
+                current,
+                None,
+                &mut fake_measure,
+            ));
+            layer
+                .sprites
+                .iter()
+                .filter(|sprite| sprite.mark == ChromeMark::FolderOpen)
+                .count()
+        };
+        assert_eq!(open_marks(r"C:\Users\dev"), 1);
+        assert_eq!(
+            open_marks(r"C:\work\project"),
+            0,
+            "the column's own root is not one of the places it offers to go"
+        );
+    }
+
+    /// PIN — E57. The button toggles, and opening one column's menu is closing
+    /// every other column's.
+    #[test]
+    fn the_root_menu_belongs_to_one_column_at_a_time_and_its_button_shuts_it() {
+        let (a, b) = (bt_layout::SeatId(1), bt_layout::SeatId(2));
+        let mut menu = RootMenu::default();
+        assert!(menu.seat().is_none());
+        menu.toggle(a);
+        assert_eq!(menu.seat(), Some(a));
+        menu.toggle(b);
+        assert_eq!(menu.seat(), Some(b), "the second column takes it over");
+        menu.toggle(b);
+        assert!(menu.seat().is_none(), "and its own button shuts it");
+        assert!(!menu.close(), "there was nothing left to shut");
+
+        menu.toggle(a);
+        assert!(menu.set_hover(Some(RootMenuRow::Choice(1))));
+        assert_eq!(menu.hover(), Some(RootMenuRow::Choice(1)));
+        menu.close();
+        assert!(
+            !menu.set_hover(Some(RootMenuRow::Choice(1))),
+            "a shut menu has no row under the pointer"
+        );
+        assert_eq!(menu.hover(), None);
     }
 
     /// What the PowerShell 7 row is called, read from the table rather than

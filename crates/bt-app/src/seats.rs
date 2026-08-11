@@ -1642,6 +1642,15 @@ pub enum ChromeTarget {
         seat: SeatId,
         index: usize,
     },
+    /// `.files-root` — the head's root name, which is a button that opens the
+    /// menu of places this column could be pointed at instead (B15/E53).
+    ///
+    /// Its own target inside the head for exactly the reason [`Self::PaneClose`]
+    /// is: the head is a drag handle, and B17's judgement is that "one element
+    /// is both a handle and a button" holds because dragging takes six pixels of
+    /// travel and a bare click never has them. That is only true if the button
+    /// answers the hit test first.
+    FilesRoot(SeatId),
     Settings,
     Minimize,
     Maximize,
@@ -3878,6 +3887,14 @@ static NO_LEAF_MARKS: BTreeMap<SeatId, ChromeMark> = BTreeMap::new();
 /// what every chrome test that predates the files state means by leaving it out.
 #[cfg(test)]
 static NO_FILES_NAMES: BTreeMap<SeatId, String> = BTreeMap::new();
+/// And for the widths those names are drawn at: "nothing here has been
+/// measured".
+///
+/// A head with no measured width offers no root button, which is the honest
+/// reading rather than a fallback: the button is sized by its name (B15), and a
+/// name nobody has measured has no width for one to be built from.
+#[cfg(test)]
+static NO_FILES_NAME_WIDTHS: BTreeMap<SeatId, f32> = BTreeMap::new();
 /// And once more for the rows: "no files column here has been walked".
 ///
 /// A column with no entry draws no tree and no notice — which is what every
@@ -3945,6 +3962,8 @@ pub fn build_chrome_with_preview(
             terminal_names: &NO_TERMINAL_NAMES,
             leaf_marks: &all_powershell(seats),
             files_names: &NO_FILES_NAMES,
+            files_name_widths: &NO_FILES_NAME_WIDTHS,
+            files_root_open: None,
             files_trees: &NO_FILES_TREES,
             preview_message,
             fit_overflow: None,
@@ -4217,6 +4236,18 @@ pub struct ChromeContent<'a> {
     /// in the painter would put the ruling in the renderer, where the *other*
     /// length would have to be re-derived to disagree with it.
     pub files_names: &'a BTreeMap<SeatId, String>,
+    /// How wide each of those names is drawn, in physical pixels.
+    ///
+    /// Measured above with the renderer's own font, because that is the only
+    /// place a string has a width — and the root *button* is sized by its name
+    /// (B15), so without this the head could only offer a button as wide as the
+    /// head, which is the "long dark smear" the mock-up's comment rejects. The
+    /// same map answers the hit test, through [`hit_files_root`], so the button
+    /// you can press is the button you can see.
+    pub files_name_widths: &'a BTreeMap<SeatId, f32>,
+    /// Which files column has its root menu open, and how far its chevron has
+    /// turned (B16).
+    pub files_root_open: Option<SeatId>,
     /// C28-C43, per leaf: the rows each files column shows this frame.
     ///
     /// Walked above and handed down as values, for the reason
@@ -4418,6 +4449,8 @@ pub fn build_chrome_for_tabs(
         terminal_names,
         leaf_marks,
         files_names,
+        files_name_widths,
+        files_root_open,
         files_trees,
         preview_message,
         fit_overflow,
@@ -4659,6 +4692,61 @@ pub fn build_chrome_for_tabs(
                         PANE_MARK_UNFOCUSED_OPACITY
                     },
                 ));
+                // B15/B16 — a files head's name is a button, and the chevron
+                // beside it is the whole of what says so. The fill only appears
+                // under the pointer or while the menu it opens is up, so a head
+                // at rest is the same quiet line it was before the button
+                // existed.
+                let root_button = (placement.kind == SeatKind::Files)
+                    .then(|| {
+                        files_root_box(
+                            &head,
+                            scale,
+                            files_name_widths.get(&placement.id).copied().unwrap_or(0.0),
+                        )
+                    })
+                    .flatten();
+                if let Some(button) = root_button {
+                    let menu_open = files_root_open == Some(placement.id);
+                    if menu_open || pointer.hover == Some(ChromeTarget::FilesRoot(placement.id)) {
+                        pane_sprites.push(ChromeSprite::new(
+                            ChromeMark::ControlPill {
+                                radius_px: (FILES_ROOT_BUTTON_RADIUS_LOGICAL_PX * scale)
+                                    .round()
+                                    .max(1.0) as u32,
+                            },
+                            button,
+                            palette.pane_close_pill,
+                        ));
+                    }
+                    let chevron_width = (FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX * scale)
+                        .round()
+                        .max(1.0);
+                    let chevron_height = (FILES_ROOT_CHEVRON_HEIGHT_LOGICAL_PX * scale)
+                        .round()
+                        .max(1.0);
+                    let chevron_left =
+                        (button[2] - FILES_ROOT_BUTTON_INSET_LOGICAL_PX * scale - chevron_width)
+                            .round();
+                    let chevron_top = ((button[1] + button[3] - chevron_height) / 2.0).round();
+                    pane_sprites.push(
+                        ChromeSprite::new(
+                            // The menu being open flips it, which is the standard
+                            // "this dropdown is expanded" tell — and it is the
+                            // same rotating glyph the `˅` beside the `+` uses,
+                            // not a second arrow.
+                            ChromeMark::chevron(f32::from(u8::from(menu_open))),
+                            [
+                                chevron_left,
+                                chevron_top,
+                                chevron_left + chevron_width,
+                                chevron_top + chevron_height,
+                            ],
+                            palette.pane_title,
+                        )
+                        .with_opacity(FILES_ROOT_CHEVRON_OPACITY),
+                    );
+                }
                 pane_labels.push(ChromeLabel {
                     text: seat_caption(
                         placement.kind,
@@ -4667,7 +4755,23 @@ pub fn build_chrome_for_tabs(
                         files_name(placement.id),
                     )
                     .to_owned(),
-                    rect: head.title,
+                    // The name keeps its own box and the button is drawn around
+                    // it: the label starts where it always did, and what changed
+                    // is that it now has to stop before the chevron rather than
+                    // before the `×`.
+                    rect: match root_button {
+                        Some(button) => [
+                            head.title[0],
+                            head.title[1],
+                            (button[2]
+                                - FILES_ROOT_BUTTON_INSET_LOGICAL_PX * scale
+                                - (FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX * scale).round()
+                                - FILES_ROOT_BUTTON_GAP_LOGICAL_PX * scale)
+                                .max(head.title[0]),
+                            head.title[3],
+                        ],
+                        None => head.title,
+                    },
                     font_size_px: SEAT_TITLE_FONT_LOGICAL_PX * scale,
                     // `.pane.focused .panehead { color: var(--ink); font-weight: 500 }`
                     // (mock-up line 1644) — one declaration with two halves, and
@@ -7245,6 +7349,103 @@ pub const FILES_ROW_ICON_LOGICAL_PX: f32 = 15.0;
 pub const FILES_TREE_FONT_LOGICAL_PX: f32 = 13.0;
 /// `.frow .tri { transition: transform 120ms cubic-bezier(.2,0,0,1) }`.
 pub const FILES_ROW_TRI_TURN_MS: u64 = 120;
+/// `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px }` (C32).
+pub const FILES_ROW_FOCUS_RING_LOGICAL_PX: f32 = 1.5;
+/// `.files-root { padding: 2px 5px; margin: 0 -3px }` — the two together are the
+/// 2px the button's fill reaches past its own text (B15).
+pub const FILES_ROOT_BUTTON_INSET_LOGICAL_PX: f32 = 2.0;
+/// The button's box height: an 11px line in 2px of padding, top and bottom.
+pub const FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX: f32 = 19.0;
+/// `.files-root { border-radius: 5px }`.
+pub const FILES_ROOT_BUTTON_RADIUS_LOGICAL_PX: f32 = 5.0;
+/// `.files-root { gap: 4px }`, between the name and its chevron.
+pub const FILES_ROOT_BUTTON_GAP_LOGICAL_PX: f32 = 4.0;
+/// `.rootchev { width: 8px; height: 5px }`.
+pub const FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX: f32 = 8.0;
+pub const FILES_ROOT_CHEVRON_HEIGHT_LOGICAL_PX: f32 = 5.0;
+/// `.rootchev { opacity: .6 }` — quieter than the name it belongs to, because it
+/// is punctuation on the name rather than a control of its own.
+pub const FILES_ROOT_CHEVRON_OPACITY: f32 = 0.6;
+
+/// `.files-root` — the head's root name, as the button it is (B15).
+///
+/// **The button hugs its name.** `flex: 0 1 auto` and not `flex: 1`, and the
+/// mock-up says in a comment beside it why: a button that took the head's whole
+/// slack would light a 200-pixel bar on hover, which "read as a long dark
+/// smear". So the box is built from the *measured* name, which is why this takes
+/// a width rather than deriving one — nothing in this module can measure text,
+/// and a button sized by a guess is a button whose fill ends somewhere its
+/// letters do not.
+///
+/// `None` when the head has no room for it at all, on the same rule the `×`
+/// follows: half a control is worse than none.
+#[must_use]
+pub fn files_root_box(head: &PaneHeadGeometry, scale: f32, name_width: f32) -> Option<[f32; 4]> {
+    let inset = FILES_ROOT_BUTTON_INSET_LOGICAL_PX * scale;
+    let gap = FILES_ROOT_BUTTON_GAP_LOGICAL_PX * scale;
+    let chevron = (FILES_ROOT_CHEVRON_WIDTH_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let height = (FILES_ROOT_BUTTON_HEIGHT_LOGICAL_PX * scale)
+        .round()
+        .max(1.0);
+    let left = head.title[0] - inset;
+    let right = (head.title[0] + name_width + gap + chevron + inset).min(head.title[2]);
+    if right <= left + chevron {
+        return None;
+    }
+    let middle = (head.title[1] + head.content_bottom) / 2.0;
+    Some(pixel_snapped([
+        left,
+        (middle - height / 2.0).round(),
+        right,
+        (middle + height / 2.0).round(),
+    ]))
+}
+
+/// Which files column's root button the pointer is on.
+///
+/// Its own entry beside [`hit_files_tree`] and for the identical reason: it
+/// needs something [`hit_chrome`] is not given — how wide each head's name is
+/// drawn — and threading a measurement through the function every caller uses
+/// would make every caller carry a renderer it does not have.
+///
+/// Asked *before* `hit_chrome`, so the button wins over the drag handle it sits
+/// inside (B17: one element is both, and the smaller affordance answers first).
+/// The `×` is not at risk, because it never overlaps the title span the button
+/// is clamped to.
+#[must_use]
+pub fn hit_files_root(
+    layout: &SeatLayout,
+    name_widths: &BTreeMap<SeatId, f32>,
+    scale: f32,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
+    let (x, y) = (x as f32, y as f32);
+    for placement in &layout.rects {
+        if placement.kind != SeatKind::Files
+            || !matches!(placement.presentation, Presentation::Full)
+        {
+            continue;
+        }
+        let Some(device) = placement.device_rect else {
+            continue;
+        };
+        let rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        let head = pane_head_geometry(rect, placement.kind, scale);
+        let width = name_widths.get(&placement.id).copied().unwrap_or(0.0);
+        if files_root_box(&head, scale, width).is_some_and(|button| contains(button, x, y)) {
+            return Some(ChromeTarget::FilesRoot(placement.id));
+        }
+    }
+    None
+}
 
 /// What one files column is showing this frame.
 ///
@@ -7276,6 +7477,15 @@ pub struct FilesTreeContent {
     /// with no entry are not mid-turn and take their angle from their own state,
     /// which is every row of a tree nobody has clicked in.
     pub turns: BTreeMap<String, f32>,
+    /// Whether this column is the one holding the keyboard.
+    ///
+    /// C32 splits what a selection means in two, and both halves matter: the
+    /// selected row is filled **whether or not the tree has focus**, because
+    /// where you are standing is a fact about the tree and you are entitled to
+    /// see it from a terminal; and it wears an accent ring **only** while the
+    /// tree has focus, because that is the one thing the fill cannot say — which
+    /// of the two panes an arrow key is about to move.
+    pub focused: bool,
 }
 
 /// Where each row of one files column lands.
@@ -7373,22 +7583,38 @@ pub fn files_body_at(layout: &SeatLayout, scale: f32, x: f64, y: f64) -> Option<
         {
             continue;
         }
-        let Some(device) = placement.device_rect else {
+        let Some(body) = files_body_rect(layout, placement.id, scale) else {
             continue;
         };
-        let rect = [
-            device.left as f32,
-            device.top as f32,
-            device.right as f32,
-            device.bottom as f32,
-        ];
-        let head = pane_head_geometry(rect, placement.kind, scale);
-        let body = [rect[0], head.head[3], rect[2], rect[3]];
         if x >= body[0] && x < body[2] && y >= body[1] && y < body[3] {
             return Some((placement.id, body[3] - body[1]));
         }
     }
     None
+}
+
+/// The tree's own rectangle inside one named files column.
+///
+/// The third caller of the same subtraction the paint and the wheel already
+/// make, and the reason it is a function: the keyboard has to scroll a row into
+/// view without a pointer to find the column by, and a fourth copy of
+/// "the seat less its head" is a fourth chance for one of them to be off by the
+/// hairline.
+pub fn files_body_rect(layout: &SeatLayout, seat: SeatId, scale: f32) -> Option<[f32; 4]> {
+    let placement = layout.rects.iter().find(|placement| {
+        placement.id == seat
+            && placement.kind == SeatKind::Files
+            && matches!(placement.presentation, Presentation::Full)
+    })?;
+    let device = placement.device_rect?;
+    let rect = [
+        device.left as f32,
+        device.top as f32,
+        device.right as f32,
+        device.bottom as f32,
+    ];
+    let head = pane_head_geometry(rect, placement.kind, scale);
+    Some([rect[0], head.head[3], rect[2], rect[3]])
 }
 
 /// Which files-tree row the pointer is on.
@@ -7503,6 +7729,20 @@ fn push_files_tree(
                 } else {
                     palette.files_row_hover
                 },
+            ));
+        }
+        // `.files-tree:focus-visible .frow.sel { box-shadow: inset 0 0 0 1.5px
+        // var(--accent) }` — the ring is the whole of what tells you an arrow key
+        // belongs to this list rather than to the shell beside it, so it is drawn
+        // on the selection and only while the list has the keyboard.
+        if selected && tree.focused {
+            sprites.push(ChromeSprite::new(
+                ChromeMark::ControlPillRing {
+                    radius_px: radius,
+                    stroke_px: (FILES_ROW_FOCUS_RING_LOGICAL_PX * scale).round().max(1.0) as u32,
+                },
+                crop(rect),
+                palette.accent,
             ));
         }
         let ink = if selected {
@@ -10429,6 +10669,8 @@ mod tests {
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
+                    files_name_widths: &NO_FILES_NAME_WIDTHS,
+                    files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
                     fit_overflow: None,
@@ -10635,6 +10877,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
@@ -10712,6 +10956,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &trees,
                 preview_message: None,
                 fit_overflow: None,
@@ -10740,6 +10986,7 @@ mod tests {
             scroll_px: 0.0,
             selected: None,
             turns: BTreeMap::new(),
+            focused: false,
         }
     }
 
@@ -10879,6 +11126,174 @@ mod tests {
             "and nothing wears the hover fill, because the one hovered row is \
              the selected one: {fills:?}"
         );
+    }
+
+    /// PIN — B15. The root button hugs its name, and is pressed where it is
+    /// drawn.
+    ///
+    /// The mock-up's own comment is the assertion: `flex: 0 1 auto` and not
+    /// `flex: 1`, because a button that took the head's whole slack would light
+    /// a bar the width of the column on hover and "read as a long dark smear".
+    /// A short name has to leave most of the head alone.
+    #[test]
+    fn the_root_button_is_the_width_of_the_name_and_not_the_width_of_the_head() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
+        let column = seats.files().first().copied().expect("a files column");
+        let placement = layout
+            .rects
+            .iter()
+            .find(|placement| placement.id == column)
+            .expect("the column is placed");
+        let device = placement.device_rect.expect("the column has a rectangle");
+        let rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        let head = pane_head_geometry(rect, SeatKind::Files, 1.0);
+
+        let short = files_root_box(&head, 1.0, 30.0).expect("a named head has a button");
+        assert!(
+            short[2] < head.title[2] - 40.0,
+            "a 30px name must leave the rest of the head alone: {short:?} in {:?}",
+            head.title
+        );
+        assert!(
+            short[0] < head.title[0],
+            "the fill reaches past its letters"
+        );
+        assert!(
+            short[1] >= head.head[1] && short[3] <= head.head[3],
+            "and stays inside the head it sits in"
+        );
+
+        // A name longer than the head has stops at the head's own edge rather
+        // than growing under the `×`.
+        let long = files_root_box(&head, 1.0, 10_000.0).expect("a long name still has a button");
+        assert!(long[2] <= head.title[2]);
+
+        // The hit test reads the same box from the same measurement.
+        let mut widths = BTreeMap::new();
+        widths.insert(column, 30.0);
+        let middle = |rect: [f32; 4]| ((rect[0] + rect[2]) / 2.0, (rect[1] + rect[3]) / 2.0);
+        let (x, y) = middle(short);
+        assert_eq!(
+            hit_files_root(&layout, &widths, 1.0, f64::from(x), f64::from(y)),
+            Some(ChromeTarget::FilesRoot(column))
+        );
+        // Just past its right edge is the head again — the drag handle, not the
+        // button.
+        assert_eq!(
+            hit_files_root(
+                &layout,
+                &widths,
+                1.0,
+                f64::from(short[2] + 4.0),
+                f64::from(y)
+            ),
+            None
+        );
+        // A head nobody has measured offers no button at all, rather than one of
+        // some invented width.
+        assert_eq!(
+            hit_files_root(
+                &layout,
+                &NO_FILES_NAME_WIDTHS,
+                1.0,
+                f64::from(x),
+                f64::from(y)
+            ),
+            None
+        );
+    }
+
+    /// PIN — B17. The button wins over the drag handle it lives inside, and the
+    /// `×` still wins over the button.
+    #[test]
+    fn the_root_button_answers_before_the_handle_and_never_over_the_close() {
+        let seats = term_beside_files();
+        let metrics = seat_metrics(1_000);
+        let layout = solved(&seats, viewport_of(960, 600, 1_000), &metrics);
+        let column = seats.files().first().copied().expect("a files column");
+        let placement = layout
+            .rects
+            .iter()
+            .find(|placement| placement.id == column)
+            .expect("the column is placed");
+        let device = placement.device_rect.expect("the column has a rectangle");
+        let rect = [
+            device.left as f32,
+            device.top as f32,
+            device.right as f32,
+            device.bottom as f32,
+        ];
+        let head = pane_head_geometry(rect, SeatKind::Files, 1.0);
+        let close = head.close.expect("the head is wide enough for its ×");
+
+        // A name wide enough to want the whole head is still clamped clear of
+        // the close button, so the two boxes can never overlap.
+        let mut widths = BTreeMap::new();
+        widths.insert(column, 10_000.0);
+        let button = files_root_box(&head, 1.0, 10_000.0).expect("a button");
+        assert!(
+            button[2] <= close[0],
+            "the button stops before the ×: {button:?} vs {close:?}"
+        );
+        let (cx, cy) = ((close[0] + close[2]) / 2.0, (close[1] + close[3]) / 2.0);
+        assert_eq!(
+            hit_files_root(&layout, &widths, 1.0, f64::from(cx), f64::from(cy)),
+            None,
+            "the × is not the root button however long the name is"
+        );
+        assert_eq!(
+            hit_chrome(&seats, &layout, 1.0, f64::from(cx), f64::from(cy)),
+            Some(ChromeTarget::PaneClose(column))
+        );
+    }
+
+    /// PIN — C32's third half, and the whole of how the keyboard is visible.
+    ///
+    /// The fill says *where you are standing in this tree*; the accent ring says
+    /// *this tree is the one an arrow key belongs to*. Two panes can show a
+    /// selection at once and only one of them can have the keyboard, so a build
+    /// that drew the fill alone would leave the user pressing ↓ with no way to
+    /// know which list was about to move — and one that hid the fill without
+    /// focus would lose the standing place every time you clicked into a shell.
+    #[test]
+    fn only_the_column_holding_the_keyboard_rings_its_selected_row() {
+        let ring_of = |focused: bool| {
+            let mut content = three_row_tree();
+            content.selected = Some("/a.txt".to_owned());
+            content.focused = focused;
+            let (_, _, _, chrome) = files_chrome(content, None);
+            chrome.sprites.iter().find_map(|sprite| match sprite.mark {
+                ChromeMark::ControlPillRing { stroke_px, .. } => {
+                    Some((stroke_px, sprite.color, sprite.rect))
+                }
+                _ => None,
+            })
+        };
+        assert_eq!(
+            ring_of(false),
+            None,
+            "a column the keyboard has left shows its selection and claims nothing"
+        );
+        let (stroke_px, color, rect) = ring_of(true).expect("the focused column rings its row");
+        assert_eq!(color, chrome_palette().accent);
+        assert!(stroke_px >= 1, "a ring of no thickness is not drawn");
+
+        // The ring is the selected row's own box, so it lands on the selection
+        // and not merely somewhere in the list.
+        let mut content = three_row_tree();
+        content.selected = Some("/a.txt".to_owned());
+        content.focused = true;
+        let (_, layout, column, _) = files_chrome(content, None);
+        let body = files_body_rect(&layout, column, 1.0).expect("the column has a body");
+        let geometry = files_tree_geometry(body, 3, 0.0, 1.0);
+        assert_eq!(rect, geometry.row_rect(2), "the third row is `/a.txt`");
     }
 
     /// PIN — C32, the other half. A selection shows with no pointer anywhere
@@ -13623,6 +14038,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
@@ -13811,6 +14228,8 @@ mod tests {
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
+                    files_name_widths: &NO_FILES_NAME_WIDTHS,
+                    files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
                     fit_overflow: None,
@@ -13908,6 +14327,8 @@ mod tests {
                     terminal_names: &NO_TERMINAL_NAMES,
                     leaf_marks: &NO_LEAF_MARKS,
                     files_names: &NO_FILES_NAMES,
+                    files_name_widths: &NO_FILES_NAME_WIDTHS,
+                    files_root_open: None,
                     files_trees: &NO_FILES_TREES,
                     preview_message: None,
                     fit_overflow: None,
@@ -14110,6 +14531,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &all_powershell(seats),
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
@@ -15697,6 +16120,8 @@ mod tests {
                 terminal_names,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow,
@@ -15748,6 +16173,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
@@ -16527,6 +16954,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
@@ -16762,6 +17191,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
@@ -17006,6 +17437,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
@@ -17153,6 +17586,8 @@ mod tests {
                 terminal_names: &NO_TERMINAL_NAMES,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,
@@ -18324,6 +18759,8 @@ mod tests {
                 terminal_names: &names,
                 leaf_marks: &NO_LEAF_MARKS,
                 files_names: &NO_FILES_NAMES,
+                files_name_widths: &NO_FILES_NAME_WIDTHS,
+                files_root_open: None,
                 files_trees: &NO_FILES_TREES,
                 preview_message: None,
                 fit_overflow: None,

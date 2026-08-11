@@ -8,7 +8,12 @@
 # Usage:
 #   .\ui-probe.ps1 launch [-TraceDpi] [-WaitSeconds 15]   → prints PID + HWND; keeps app running
 #   .\ui-probe.ps1 type -Pid <pid> -Text "echo hi"        → focuses window, injects text (Unicode SendInput)
-#   .\ui-probe.ps1 key  -Pid <pid> -Name Enter|Backspace|Escape|Shift
+#   .\ui-probe.ps1 key  -Pid <pid> -Name Enter|Backspace|Escape|Shift|Tab|Space|Delete|Insert
+#                                        |Left|Up|Right|Down|Home|End|PageUp|PageDown
+#                                                      → the navigation cluster carries
+#                                                        KEYEVENTF_EXTENDEDKEY, without which
+#                                                        an arrow arrives as the numpad key
+#                                                        sharing its scancode
 #   .\ui-probe.ps1 chord -Pid <pid> -Mods cs -Key n      → Ctrl+Shift+N (c/s/a = ctrl/shift/alt)
 #   .\ui-probe.ps1 chord -Pid <pid> -Mods c -Name Tab    → Ctrl+Tab
 #   .\ui-probe.ps1 capture -Pid <pid> -Out shot.png [-Margin 400]  → DPI-aware capture; Margin grows the
@@ -174,6 +179,29 @@ public class Probe {
   }
   public const uint KEYEVENTF_UNICODE = 0x0004;
   public const uint KEYEVENTF_KEYUP = 0x0002;
+  public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+  /* The navigation cluster shares its scancodes with the numeric keypad, and the
+     only thing that tells the two apart is this flag. MapVirtualKeyW hands back
+     the NUMPAD scancode for VK_LEFT (0x4B = numpad 4), so an arrow sent without
+     it arrives as a keypad key — which is how "the arrow keys do nothing"
+     looks from inside an app that decodes scancodes, as winit does.
+
+     Added 2026-08-11, for the files tree's keyboard contract: it is the first
+     thing in this product whose whole surface IS the arrow keys. */
+  public static bool IsExtendedVk(ushort vk) {
+    switch (vk) {
+      case 0x21: case 0x22:            // PageUp / PageDown
+      case 0x23: case 0x24:            // End / Home
+      case 0x25: case 0x26:            // Left / Up
+      case 0x27: case 0x28:            // Right / Down
+      case 0x2D: case 0x2E:            // Insert / Delete
+      case 0x90:                       // NumLock
+      case 0xA3: case 0xA5:            // RightCtrl / RightAlt
+        return true;
+      default:
+        return false;
+    }
+  }
   [DllImport("user32.dll")] public static extern short VkKeyScanW(char c);
   [DllImport("user32.dll")] public static extern uint MapVirtualKeyW(uint code, uint mapType);
   /* Scancode-level typing: winit's keyboard pipeline reconstructs keys from the
@@ -204,8 +232,9 @@ public class Probe {
   }
   public static uint TapVk(ushort vk) {
     ushort sc = (ushort)MapVirtualKeyW(vk, 0);
-    var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = 0 };
-    var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = KEYEVENTF_KEYUP };
+    uint ext = IsExtendedVk(vk) ? KEYEVENTF_EXTENDEDKEY : 0;
+    var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = ext };
+    var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = ext | KEYEVENTF_KEYUP };
     return SendInput(2, new INPUT[] { down, up }, Marshal.SizeOf(typeof(INPUT)));
   }
   /* A modifier chord, at the same scancode level TypeText uses — hold the
@@ -224,8 +253,9 @@ public class Probe {
     if (ctrl)  { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = 0 }; seq.Add(m); }
     if (shift) { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = 0 }; seq.Add(m); }
     if (alt)   { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = 0 }; seq.Add(m); }
-    var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = 0 }; seq.Add(down);
-    var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = KEYEVENTF_KEYUP }; seq.Add(up);
+    uint ext = IsExtendedVk(vk) ? KEYEVENTF_EXTENDEDKEY : 0;
+    var down = new INPUT { type = 1 }; down.u.ki = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = ext }; seq.Add(down);
+    var up   = new INPUT { type = 1 }; up.u.ki   = new KEYBDINPUT { wVk = vk, wScan = sc, dwFlags = ext | KEYEVENTF_KEYUP }; seq.Add(up);
     if (alt)   { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x12, wScan = 0x38, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
     if (shift) { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x10, wScan = 0x2A, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
     if (ctrl)  { var m = new INPUT { type = 1 }; m.u.ki = new KEYBDINPUT { wVk = 0x11, wScan = 0x1D, dwFlags = KEYEVENTF_KEYUP }; seq.Add(m); }
@@ -297,6 +327,19 @@ public class Probe {
 
 [Probe]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) | Out-Null   # per-monitor v2: physical pixels everywhere
 
+# The keys that have names rather than printed characters, shared by `key` and
+# `chord` so the two can never know different halves of the keyboard. The
+# navigation cluster is here for the files tree's contract (↑↓←→, Home/End,
+# Enter/Space); `TapVk` and `Chord` add the extended-key flag for whichever of
+# these need it, so a caller never has to know which ones those are.
+$NAMED_KEYS = @{
+  Enter = 0x0D; Backspace = 0x08; Escape = 0x1B; Shift = 0x10; Tab = 0x09
+  Space = 0x20; Delete = 0x2E; Insert = 0x2D
+  Left = 0x25; Up = 0x26; Right = 0x27; Down = 0x28
+  Home = 0x24; End = 0x23; PageUp = 0x21; PageDown = 0x22
+  F9 = 0x78
+}
+
 function Get-AppWindow([int]$targetPid) {
   $p = Get-Process -Id $targetPid -ErrorAction Stop
   if ($p.MainWindowHandle -eq [IntPtr]::Zero) { throw "process $targetPid has no visible window (yet)" }
@@ -323,8 +366,8 @@ switch ($Cmd) {
   "key" {
     $h = Get-AppWindow $ProcId
     if (-not [Probe]::BringToFront($h)) { throw "REFUSED: target window did not take foreground — not sending keys blind" }
-    $vk = @{ Enter = 0x0D; Backspace = 0x08; Escape = 0x1B; Shift = 0x10 }[$Name]
-    if (-not $vk) { throw "unknown key: $Name" }
+    $vk = $NAMED_KEYS[$Name]
+    if (-not $vk) { throw "unknown key: $Name (known: $(($NAMED_KEYS.Keys | Sort-Object) -join ', '))" }
     $sent = [Probe]::TapVk([uint16]$vk)   # [ushort] accelerator only exists in PS 7; this runs on 5.1
     if ($sent -eq 0) { throw "SendInput accepted 0 events — $Name was not sent" }
     "sent $Name ($sent events accepted, foreground verified)"
@@ -336,9 +379,8 @@ switch ($Cmd) {
     $shift = $Mods -match "s"
     $alt   = $Mods -match "a"
     # A named key wins; otherwise the base key is the one printing $Key here.
-    $named = @{ Tab = 0x09; Enter = 0x0D; Escape = 0x1B; F9 = 0x78 }
-    if ($Name -and $named.ContainsKey($Name)) {
-      $vk = $named[$Name]
+    if ($Name -and $NAMED_KEYS.ContainsKey($Name)) {
+      $vk = $NAMED_KEYS[$Name]
     } elseif ($Key) {
       $vk = [Probe]::VkForChar([char]$Key)
       if (-not $vk) { throw "'$Key' is not typeable on the current layout" }

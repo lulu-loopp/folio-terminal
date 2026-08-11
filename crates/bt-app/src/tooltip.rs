@@ -85,6 +85,9 @@ pub enum TooltipAnchorId {
     /// reason that type exists at all: the picker shows two lists, and a number
     /// that could mean either names the wrong row silently.
     ProfileRow(crate::profiles::MenuRow),
+    /// A row of the open root menu, whose caption is only the last segment of
+    /// the folder it offers (E53) — so the tip is where the whole path is said.
+    RootRow(crate::profiles::RootMenuRow),
     Settings,
     /// `.panel-toggle` — the rail's fold-away button, which the vertical layout
     /// puts at the far left of the title bar.
